@@ -1,0 +1,18 @@
+node_modules/
+dist/
+.turbo/
+*.log
+.env
+.env.local
+coverage/
+.DS_Store
+
+# foundry
+contracts/out/
+contracts/cache/
+contracts/broadcast/*/31337/
+contracts/deployments/31337.json
+
+# local runtime
+.data/
+.claude/worktrees/

@@ -1,0 +1,50 @@
+name: bookrunner
+
+# Local infra. Ports are non-default to avoid clashing with other stacks on the host.
+#   Postgres + Timescale  127.0.0.1:54400
+#   Redis                 127.0.0.1:63790
+#   Anvil (chain 31337)   127.0.0.1:8547   (devnet stand-in for Robinhood Chain 4663)
+services:
+  postgres:
+    image: timescale/timescaledb:latest-pg17
+    environment:
+      POSTGRES_USER: bookrunner
+      POSTGRES_PASSWORD: bookrunner
+      POSTGRES_DB: bookrunner
+    ports:
+      - "127.0.0.1:54400:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bookrunner -d bookrunner"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:63790:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:latest
+    entrypoint: ["anvil"]
+    command:
+      - --host=0.0.0.0
+      - --port=8545
+      - --chain-id=31337
+      - --block-time=1
+      - --accounts=24
+      - --balance=1000000
+      - --code-size-limit=60000
+      - --mnemonic=test test test test test test test test test test test junk
+    ports:
+      - "127.0.0.1:8547:8545"
+
+volumes:
+  pgdata:

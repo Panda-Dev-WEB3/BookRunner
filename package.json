@@ -1,0 +1,30 @@
+{
+  "name": "bookrunner",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "services/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "forge": "bash scripts/forge.sh",
+    "contracts:build": "bash scripts/forge.sh build",
+    "contracts:test": "bash scripts/forge.sh test",
+    "abi": "bun scripts/gen-abi.ts",
+    "infra:up": "docker compose up -d",
+    "infra:down": "docker compose down",
+    "db:migrate": "bun run --cwd packages/db migrate",
+    "db:generate": "bun run --cwd packages/db generate",
+    "typecheck": "bun run --filter '*' typecheck",
+    "test": "bun test",
+    "lint:copy": "bun scripts/check-copy.ts",
+    "deploy:local": "bash scripts/deploy-local.sh",
+    "dev": "bun scripts/dev.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.2",
+    "bun": "1.4.2",
+    "typescript": "6.0.3"
+  }
+}
