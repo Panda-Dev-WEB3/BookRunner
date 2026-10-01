@@ -1,0 +1,39 @@
+{
+  "name": "@bookrunner/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./router": "./src/router.ts"
+  },
+  "scripts": {
+    "start": "bun src/index.ts",
+    "dev": "bun --watch src/index.ts",
+    "test": "bun test",
+    "typecheck": "tsc -p tsconfig.json",
+    "typecheck:router-dom": "tsc -p tsconfig.router-dom.json"
+  },
+  "dependencies": {
+    "@bookrunner/db": "workspace:*",
+    "@bookrunner/shared": "workspace:*",
+    "@hono/trpc-server": "0.4.2",
+    "@modelcontextprotocol/sdk": "1.31.0",
+    "@openzeppelin/merkle-tree": "1.0.8",
+    "@trpc/server": "11.19.0",
+    "bullmq": "6.3.11",
+    "drizzle-orm": "0.45.3",
+    "hono": "4.13.12",
+    "ioredis": "6.0.0",
+    "pino": "10.3.1",
+    "postgres": "3.4.9",
+    "superjson": "2.2.6",
+    "viem": "2.57.2",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@trpc/client": "11.19.0"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "//": "Checks that `import type { AppRouter } from \"@bookrunner/api/router\"` typechecks in a browser project (DOM lib, no Bun/Node types), as apps/web does.",
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": [],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "resolveJsonModule": true,
+    "esModuleInterop": true
+  },
+  "files": ["test/routerTypes.probe.ts"]
+}
