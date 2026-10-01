@@ -1,0 +1,258 @@
+// viem adapter for the waterfall: reads (book, router, adapter, config, registry) and KEEPER writes.
+import { type Deployment, type SplitResult, VENUE } from "@bookrunner/shared";
+import {
+  bookAbi,
+  bookrunnerConfigAbi,
+  markRegistryAbi,
+  orderlyAdapterAbi,
+  poolEngineAdapterAbi,
+  revenueRouterAbi,
+  underwritingVaultAbi,
+} from "@bookrunner/shared/abi";
+import { type Hex, type PublicClient, type TransactionReceipt, erc20Abi, isAddressEqual, parseEventLogs } from "viem";
+import { amountsToSplit } from "../domain/split";
+import { type BookRef, bookStateName } from "../kit/books";
+import { scanEvents } from "../kit/logs";
+import type { TxSender } from "../kit/tx";
+import type { DistributedLog, KeeperChain, KeeperSnapshot, SettlementChain, SettlementReceivedLog, SplitParams } from "../ports";
+import { type CandidateSource, pendingShares } from "./redemptions";
+
+export interface ChainAdapterOptions {
+  pc: PublicClient;
+  sender: TxSender;
+  deployment: Deployment;
+  candidates: CandidateSource;
+  /** eth_getLogs chunk size and lookback (0 = from deployment.startBlock). */
+  logChunk: bigint;
+  logLookback: bigint;
+}
+
+export class WaterfallChainAdapter implements SettlementChain, KeeperChain {
+  private markInterval: number | null = null;
+  private distributedCache = new Map<string, DistributedLog>();
+  private blockTs = new Map<bigint, Date>();
+
+  constructor(private readonly o: ChainAdapterOptions) {}
+
+  private get pc() {
+    return this.o.pc;
+  }
+
+  private async fromBlock(): Promise<bigint> {
+    const start = BigInt(this.o.deployment.startBlock ?? 0);
+    if (this.o.logLookback <= 0n) return start;
+    const head = await this.pc.getBlockNumber();
+    const lb = head > this.o.logLookback ? head - this.o.logLookback : 0n;
+    return lb > start ? lb : start;
+  }
+
+  private async tsOf(blockNumber: bigint): Promise<Date> {
+    const hit = this.blockTs.get(blockNumber);
+    if (hit) return hit;
+    const b = await this.pc.getBlock({ blockNumber });
+    const d = new Date(Number(b.timestamp) * 1000);
+    if (this.blockTs.size > 1000) this.blockTs.clear();
+    this.blockTs.set(blockNumber, d);
+    return d;
+  }
+
+  async getMarkInterval(): Promise<number> {
+    this.markInterval ??= Number(await this.pc.readContract({ address: this.o.deployment.contracts.config, abi: bookrunnerConfigAbi, functionName: "markInterval" }));
+    return this.markInterval;
+  }
+
+  // ---------------------------------------------------------------- SettlementChain
+  async bookState(ref: BookRef) {
+    return bookStateName(Number(await this.pc.readContract({ address: ref.components.book, abi: bookAbi, functionName: "state" })));
+  }
+
+  async findDistributed(ref: BookRef, period: number): Promise<DistributedLog | null> {
+    const k = `${ref.bookId}:${period}`;
+    const hit = this.distributedCache.get(k);
+    if (hit) return hit;
+    const head = await this.pc.getBlockNumber();
+    const logs = await scanEvents<{ bookId: bigint; period: bigint; amounts: readonly bigint[] }>(this.pc, {
+      address: ref.components.router,
+      abi: revenueRouterAbi,
+      eventName: "Distributed",
+      args: { bookId: BigInt(ref.bookId), period: BigInt(period) },
+      fromBlock: await this.fromBlock(),
+      toBlock: head,
+      chunk: this.o.logChunk,
+    });
+    const l = logs[0];
+    if (!l) return null;
+    const d: DistributedLog = {
+      bookId: ref.bookId,
+      period,
+      amounts: amountsToSplit(l.args.amounts),
+      txHash: l.transactionHash,
+      logIndex: l.logIndex,
+      blockNumber: l.blockNumber,
+      ts: await this.tsOf(l.blockNumber),
+    };
+    this.distributedCache.set(k, d);
+    return d;
+  }
+
+  async feesSwept(ref: BookRef, period: number): Promise<Hex | null> {
+    const head = await this.pc.getBlockNumber();
+    const logs = await scanEvents(this.pc, {
+      address: ref.components.adapter,
+      abi: orderlyAdapterAbi,
+      eventName: "FeesSwept",
+      args: { period: BigInt(period) },
+      fromBlock: await this.fromBlock(),
+      toBlock: head,
+      chunk: this.o.logChunk,
+    });
+    return logs[0]?.transactionHash ?? null;
+  }
+
+  async receivedInTx(ref: BookRef, txHash: Hex): Promise<SettlementReceivedLog[]> {
+    return this.receivedFrom(ref, await this.pc.getTransactionReceipt({ hash: txHash }));
+  }
+
+  async sweepEngineFees(ref: BookRef, period: number) {
+    if (ref.venue !== VENUE.POOL_ENGINE) throw new Error("sweepEngineFees on a non-engine book");
+    const out = await this.o.sender.send({
+      address: ref.components.adapter,
+      abi: poolEngineAdapterAbi,
+      functionName: "sweepFees",
+      args: [BigInt(period), 0n],
+      label: `sweepFees(book=${ref.bookId}, period=${period})`,
+      bookId: ref.bookId,
+    });
+    return { hash: out.hash, received: await this.receivedFrom(ref, out.receipt) };
+  }
+
+  private async receivedFrom(ref: BookRef, receipt: TransactionReceipt): Promise<SettlementReceivedLog[]> {
+    const logs = parseEventLogs({ abi: revenueRouterAbi, eventName: "SettlementReceived", logs: receipt.logs }).filter((l) => isAddressEqual(l.address, ref.components.router));
+    const ts = await this.tsOf(receipt.blockNumber);
+    return logs.map((l) => ({ source: Number(l.args.source), amount: l.args.amount, txHash: receipt.transactionHash, logIndex: l.logIndex, blockNumber: receipt.blockNumber, ts }));
+  }
+
+  async splitParams(ref: BookRef): Promise<SplitParams> {
+    const cfg = this.o.deployment.contracts.config;
+    const [pendingGross, expenseCapBps, carryBps, charter, seniorSupply, juniorSupply] = await Promise.all([
+      this.pc.readContract({ address: ref.components.router, abi: revenueRouterAbi, functionName: "pendingGross" }),
+      this.pc.readContract({ address: cfg, abi: bookrunnerConfigAbi, functionName: "expenseCapBps" }),
+      this.pc.readContract({ address: cfg, abi: bookrunnerConfigAbi, functionName: "carryBps" }),
+      this.pc.readContract({ address: ref.components.book, abi: bookAbi, functionName: "getCharter" }),
+      this.pc.readContract({ address: ref.components.senior, abi: erc20Abi, functionName: "totalSupply" }),
+      this.pc.readContract({ address: ref.components.junior, abi: erc20Abi, functionName: "totalSupply" }),
+    ]);
+    return {
+      pendingGross,
+      expenseCapBps: BigInt(expenseCapBps),
+      carryBps: BigInt(carryBps),
+      seniorHurdleBps: BigInt(charter.seniorHurdleBps),
+      seniorSupply,
+      juniorSupply,
+    };
+  }
+
+  async previewOnChain(ref: BookRef, gross: bigint, expenses: bigint): Promise<SplitResult | null> {
+    try {
+      const a = await this.pc.readContract({ address: ref.components.router, abi: revenueRouterAbi, functionName: "previewSplit", args: [gross, expenses] });
+      return { gross: a.gross, expenses: a.expenses, carry: a.carry, senior: a.senior, junior: a.junior };
+    } catch {
+      return null;
+    }
+  }
+
+  async distribute(ref: BookRef, period: number, expenses: bigint): Promise<{ hash: Hex; distributed: DistributedLog }> {
+    const out = await this.o.sender.send({
+      address: ref.components.router,
+      abi: revenueRouterAbi,
+      functionName: "distribute",
+      args: [BigInt(period), expenses],
+      label: `distribute(book=${ref.bookId}, period=${period})`,
+      bookId: ref.bookId,
+    });
+    const logs = parseEventLogs({ abi: revenueRouterAbi, eventName: "Distributed", logs: out.receipt.logs }).filter((l) => isAddressEqual(l.address, ref.components.router));
+    const l = logs[0];
+    if (!l) throw new Error(`distribute tx ${out.hash} emitted no Distributed event`);
+    const d: DistributedLog = {
+      bookId: ref.bookId,
+      period: Number(l.args.period),
+      amounts: amountsToSplit(l.args.amounts),
+      txHash: out.hash,
+      logIndex: l.logIndex,
+      blockNumber: out.receipt.blockNumber,
+      ts: await this.tsOf(out.receipt.blockNumber),
+    };
+    this.distributedCache.set(`${ref.bookId}:${period}`, d);
+    return { hash: out.hash, distributed: d };
+  }
+
+  // ---------------------------------------------------------------- KeeperChain
+  async snapshot(ref: BookRef): Promise<KeeperSnapshot> {
+    const { book, vault, adapter } = ref.components;
+    const block = await this.pc.getBlock();
+    const blockNumber = block.number;
+    const [state, subscriptionEnds, unfundedClaims, lastMarkId, lastMarkPeriodEnd, seniorPrice, juniorPrice, vaultIdle, inTransit, insuranceEquity, marginEquity, netExposure, markInterval] =
+      await Promise.all([
+        this.pc.readContract({ address: book, abi: bookAbi, functionName: "state", blockNumber }),
+        this.pc.readContract({ address: book, abi: bookAbi, functionName: "subscriptionEnds", blockNumber }),
+        this.pc.readContract({ address: book, abi: bookAbi, functionName: "unfundedClaims", blockNumber }),
+        this.pc.readContract({ address: book, abi: bookAbi, functionName: "lastMarkId", blockNumber }),
+        this.pc.readContract({ address: book, abi: bookAbi, functionName: "lastMarkPeriodEnd", blockNumber }),
+        this.pc.readContract({ address: book, abi: bookAbi, functionName: "sharePrice", args: [0], blockNumber }),
+        this.pc.readContract({ address: book, abi: bookAbi, functionName: "sharePrice", args: [1], blockNumber }),
+        this.pc.readContract({ address: vault, abi: underwritingVaultAbi, functionName: "idle", blockNumber }),
+        this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "inTransitUsd", blockNumber }),
+        this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "insuranceEquityUsd", blockNumber }),
+        this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "marginEquityUsd", blockNumber }),
+        this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "netExposureUsd", blockNumber }),
+        this.getMarkInterval(),
+      ]);
+    let lastMark: KeeperSnapshot["lastMark"] = null;
+    if (lastMarkId > 0n) {
+      const m = await this.pc.readContract({ address: this.o.deployment.contracts.markRegistry, abi: markRegistryAbi, functionName: "getMark", args: [lastMarkId], blockNumber });
+      lastMark = { markId: lastMarkId, applied: m.applied, deployedValueUsd: m.input.deployedValueUsd };
+    }
+    return {
+      state: bookStateName(Number(state)),
+      nowSec: Number(block.timestamp),
+      markInterval,
+      subscriptionEnds: Number(subscriptionEnds),
+      unfundedClaims,
+      vaultIdle,
+      inTransit,
+      insuranceEquity,
+      marginEquity,
+      netExposure,
+      sharePriceWad: { senior: seniorPrice, junior: juniorPrice },
+      lastMarkPeriodEnd: Number(lastMarkPeriodEnd),
+      lastMark,
+    };
+  }
+
+  async pendingRedemptions(ref: BookRef, afterIndex: bigint, upToIndex: bigint) {
+    const cands = await this.o.candidates.candidates(ref, afterIndex, upToIndex);
+    if (!cands.length) return { senior: 0n, junior: 0n };
+    return pendingShares(this.pc, ref, cands);
+  }
+
+  private async keeperSend(ref: BookRef, address: `0x${string}`, abi: typeof bookAbi | typeof underwritingVaultAbi, functionName: string, args: readonly unknown[], label: string) {
+    const out = await this.o.sender.send({ address, abi, functionName, args, label: `${label}(book=${ref.bookId})`, bookId: ref.bookId });
+    return out.hash;
+  }
+
+  closeWindow(ref: BookRef) {
+    return this.keeperSend(ref, ref.components.book, bookAbi, "closeWindow", [], "closeWindow");
+  }
+
+  fundClaims(ref: BookRef) {
+    return this.keeperSend(ref, ref.components.book, bookAbi, "fundClaims", [], "fundClaims");
+  }
+
+  recall(ref: BookRef, account: number, amount: bigint) {
+    return this.keeperSend(ref, ref.components.vault, underwritingVaultAbi, "recall", [account, amount], `recall[${account === 0 ? "IF" : "MM"},${amount}]`);
+  }
+
+  finalizeRetirement(ref: BookRef) {
+    return this.keeperSend(ref, ref.components.book, bookAbi, "finalizeRetirement", [], "finalizeRetirement");
+  }
+}
