@@ -74,6 +74,34 @@
         "zod": "4.6.5",
       },
     },
+    "services/mock-orderly": {
+      "name": "@bookrunner/mock-orderly",
+      "version": "0.1.0",
+      "dependencies": {
+        "@bookrunner/shared": "workspace:*",
+        "@noble/ed25519": "3.2.0",
+        "hono": "4.13.12",
+        "viem": "2.57.2",
+        "zod": "4.6.5",
+      },
+    },
+    "services/ops-venue": {
+      "name": "@bookrunner/ops-venue",
+      "version": "0.1.0",
+      "dependencies": {
+        "@bookrunner/db": "workspace:*",
+        "@bookrunner/shared": "workspace:*",
+        "@noble/ed25519": "3.2.0",
+        "bullmq": "6.3.11",
+        "drizzle-orm": "0.45.3",
+        "ioredis": "6.0.0",
+        "viem": "2.57.2",
+        "zod": "4.6.5",
+      },
+      "devDependencies": {
+        "@bookrunner/mock-orderly": "workspace:*",
+      },
+    },
     "services/oracle": {
       "name": "@bookrunner/oracle",
       "version": "0.1.0",
@@ -116,6 +144,10 @@
     "@bookrunner/db": ["@bookrunner/db@workspace:packages/db"],
 
     "@bookrunner/indexer": ["@bookrunner/indexer@workspace:services/indexer"],
+
+    "@bookrunner/mock-orderly": ["@bookrunner/mock-orderly@workspace:services/mock-orderly"],
+
+    "@bookrunner/ops-venue": ["@bookrunner/ops-venue@workspace:services/ops-venue"],
 
     "@bookrunner/oracle": ["@bookrunner/oracle@workspace:services/oracle"],
 

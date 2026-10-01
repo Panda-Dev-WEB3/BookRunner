@@ -1,0 +1,27 @@
+{
+  "name": "@bookrunner/mock-orderly",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./app": "./src/app.ts",
+    "./venue": "./src/venue.ts",
+    "./auth": "./src/auth.ts"
+  },
+  "scripts": {
+    "start": "bun src/main.ts",
+    "dev": "bun --watch src/main.ts",
+    "test": "bun test",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@bookrunner/shared": "workspace:*",
+    "@noble/ed25519": "3.2.0",
+    "hono": "4.13.12",
+    "viem": "2.57.2",
+    "zod": "4.6.5"
+  }
+}
