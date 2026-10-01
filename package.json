@@ -20,11 +20,14 @@
     "test": "bun test",
     "lint:copy": "bun scripts/check-copy.ts",
     "deploy:local": "bash scripts/deploy-local.sh",
-    "dev": "bun scripts/dev.ts"
+    "dev": "bun scripts/dev.ts",
+    "launch": "bun scripts/launch-devnet.ts",
+    "typecheck:scripts": "tsc -p scripts/tsconfig.json"
   },
   "devDependencies": {
     "@types/bun": "1.4.2",
     "bun": "1.4.2",
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "viem": "2.57.2"
   }
 }

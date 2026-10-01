@@ -52,17 +52,11 @@ add(svc("mark"));
 add(svc("api"));
 add(svc("web", "apps/web", "dev"));
 
-// one agent per book from the deployment file
 const depPath = resolve(ROOT, env.DEPLOYMENT_FILE);
-if (existsSync(depPath) && existsSync(resolve(ROOT, "services/bookrunner-agent/package.json"))) {
-  const dep = JSON.parse(readFileSync(depPath, "utf8")) as { books?: Array<{ bookId: number; name: string }> };
-  for (const b of dep.books ?? []) {
-    add({ name: `agent:${b.name}`, cwd: resolve(ROOT, "services/bookrunner-agent"), cmd: [BUN, "run", "start"], extraEnv: { BOOK_ID: String(b.bookId) } });
-  }
-  if (!noSim) add({ name: "trader-sim", cwd: resolve(ROOT, "services/bookrunner-agent"), cmd: [BUN, "src/trader-sim.ts"] });
-} else if (!existsSync(depPath)) {
-  console.warn(`[dev] ${env.DEPLOYMENT_FILE} not found — run \`bun run deploy:local\`; agents and trader-sim skipped`);
-}
+const agentDir = resolve(ROOT, "services/bookrunner-agent");
+const hasAgent = existsSync(resolve(agentDir, "package.json"));
+const noLaunch = args.includes("--no-launch");
+if (!existsSync(depPath)) console.warn(`[dev] ${env.DEPLOYMENT_FILE} not found — run \`bun run deploy:local\` first; agents start once books exist`);
 
 if (procs.length === 0) {
   console.error("[dev] nothing to run");
@@ -70,10 +64,11 @@ if (procs.length === 0) {
 }
 
 const running: Subprocess[] = [];
-const width = Math.max(...procs.map((p) => p.name.length));
-procs.forEach((p, i) => {
-  const color = COLORS[i % COLORS.length];
-  const prefix = `\x1b[${color}m${p.name.padEnd(width)}\x1b[0m │ `;
+let colorIdx = 0;
+const width = 14;
+function start(p: Proc) {
+  const color = COLORS[colorIdx++ % COLORS.length];
+  const prefix = `\x1b[${color}m${p.name.padEnd(width).slice(0, width)}\x1b[0m │ `;
   const child = Bun.spawn(p.cmd, { cwd: p.cwd, env: { ...env, ...p.extraEnv, FORCE_COLOR: "1" }, stdout: "pipe", stderr: "pipe" });
   running.push(child);
   const pump = async (stream: ReadableStream<Uint8Array>) => {
@@ -90,8 +85,42 @@ procs.forEach((p, i) => {
   void pump(child.stdout);
   void pump(child.stderr);
   void child.exited.then((code) => process.stdout.write(`${prefix}\x1b[2mexited with code ${code}\x1b[0m\n`));
-});
+  return child;
+}
+procs.forEach(start);
 console.log(`[dev] started ${procs.length} processes: ${procs.map((p) => p.name).join(", ")}`);
+
+// Agents: one per book in the deployment file, spawned as books appear (launch-devnet appends them).
+const agentsStarted = new Set<number>();
+let simStarted = false;
+let launchStarted = false;
+const wantAgents = only.length === 0 || only.includes("agent") || only.includes("trader-sim");
+function readBooks(): Array<{ bookId: number; name: string }> | null {
+  try {
+    return (JSON.parse(readFileSync(depPath, "utf8")) as { books?: Array<{ bookId: number; name: string }> }).books ?? [];
+  } catch {
+    return null;
+  }
+}
+setInterval(() => {
+  const books = readBooks();
+  if (books === null) return;
+  if (books.length === 0 && !launchStarted && !noLaunch && only.length === 0) {
+    launchStarted = true;
+    console.log("[dev] no books deployed yet — running scripts/launch-devnet.ts (NVDA, TSLA, RHX5)");
+    start({ name: "launch", cwd: ROOT, cmd: [BUN, "scripts/launch-devnet.ts"] });
+  }
+  if (!hasAgent || !wantAgents) return;
+  for (const b of books) {
+    if (agentsStarted.has(b.bookId)) continue;
+    agentsStarted.add(b.bookId);
+    start({ name: `agent:${b.name}`, cwd: agentDir, cmd: [BUN, "run", "start"], extraEnv: { BOOK_ID: String(b.bookId) } });
+  }
+  if (books.length > 0 && !simStarted && !noSim) {
+    simStarted = true;
+    start({ name: "trader-sim", cwd: agentDir, cmd: [BUN, "src/trader-sim.ts"] });
+  }
+}, 3000);
 
 const shutdown = () => {
   for (const c of running) c.kill("SIGTERM");
