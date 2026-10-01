@@ -229,8 +229,12 @@ export function settlesUpTo(periodEnd: bigint, markInterval: bigint): bigint {
   return periodEnd / markInterval;
 }
 
-/** Book NAV used on-chain at applyMark. */
+/**
+ * Book NAV used on-chain at applyMark (Waterfall.markedNavNet): max(idle + deployed - unfundedClaims, 0).
+ * Unfunded redemption claims are a liability of the whole book, not only of idle cash — netting them
+ * against idle alone would hand a phantom gain to remaining holders whenever idle < unfundedClaims.
+ */
 export function markedNav(vaultIdle: bigint, unfundedClaims: bigint, deployedValueUsd: bigint): bigint {
-  const cash = vaultIdle > unfundedClaims ? vaultIdle - unfundedClaims : 0n;
-  return cash + deployedValueUsd;
+  const gross = vaultIdle + deployedValueUsd;
+  return gross > unfundedClaims ? gross - unfundedClaims : 0n;
 }

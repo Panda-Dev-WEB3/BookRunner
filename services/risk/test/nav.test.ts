@@ -26,9 +26,9 @@ describe("computeLiveNav", () => {
     expect(r.drawdownBps).toBe(-200);
   });
 
-  test("unfunded claims beyond vault idle floor cash at zero (Book.markedNav)", () => {
+  test("unfunded claims are netted against the whole book, not just idle cash (Book.markedNavNet)", () => {
     const r = computeLiveNav({ ...base, vaultIdleUsd: usd(1_000), unfundedClaimsUsd: usd(3_000) });
-    expect(r.navUsd).toBe(usd(95_000));
+    expect(r.navUsd).toBe(usd(93_000)); // 1k idle + 95k deployed - 3k unfunded
   });
 
   test("no mark yet: perf index = high-water = 1e18 at window close, drawdown from live NAV", () => {

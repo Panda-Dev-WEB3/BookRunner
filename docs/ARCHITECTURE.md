@@ -188,7 +188,7 @@ Subscription --closeWindow ok--> Live --retire--> Retiring --finalizeRetirement-
   (refunds stay in tranche escrow for `claimAllocation`); `initialDeployment` → `vault.deployToVenue(IF)`
   then `vault.deployToVenue(MM)`; state Live; perfIndex = highWater = 1e18.
 - `applyMark(markId)` (anyone): mark must be for this book, not applied, newer than the last applied,
-  and `mark.flowNonce == flowNonce`. `nav = Waterfall.markedNav(vault.idle(), unfundedClaims,
+  and `mark.flowNonce == flowNonce`. `nav = Waterfall.markedNavNet(vault.idle(), unfundedClaims,
   deployedValueUsd)`. Run `applyMarkPnl` with `backstopAvailable = backstop.balance()`; if
   `backstopCovered > 0` call `backstop.cover(bookId, seniorImpairmentBeforeCover)` and use the
   amount actually received. If `drawdownKill(drawdownBps, mandate.killAtDrawdownBps)` and not

@@ -16,6 +16,11 @@ import {IBook} from "./interfaces/IBook.sol";
 import {IRevenueRouter} from "./interfaces/IRevenueRouter.sol";
 import {BRTypes} from "./interfaces/BRTypes.sol";
 
+/// @dev UnderwritingVault hook: adapter pushes returned USDC, vault bumps book.flowNonce.
+interface IVaultFlowNotify {
+    function notifyCapitalFlow() external;
+}
+
 /// @title OrderlyAdapter — a book's venue adapter for the Orderly "Perp Anything" builder path.
 /// @notice One ERC1967/UUPS proxy per Orderly book (upgrades only via `config.timelock()`).
 ///
@@ -152,6 +157,7 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     event MaxFeeSweepSet(uint256 previousCap, uint256 newCap);
     event NativeRescued(address indexed to, uint256 amount);
     event TokenRescued(address indexed token, address indexed to, uint256 amount);
+    event CapitalFlowNotifyFailed(address indexed vault);
 
     // ---------------------------------------------------------------------------------------------
     // Errors
@@ -326,6 +332,11 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
 
         emit SweptToVault(amount);
         if (principal != 0) emit InTransitCleared(principal, remaining);
+        // flowNonce++ so a mark valued with these funds still in transit can no longer be applied
+        // (defence in depth on top of the sweep window gate). Best-effort: never blocks a sweep.
+        try IVaultFlowNotify($.vault).notifyCapitalFlow() {} catch {
+            emit CapitalFlowNotifyFailed($.vault);
+        }
     }
 
     // ---------------------------------------------------------------------------------------------

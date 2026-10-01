@@ -912,6 +912,19 @@ export const orderlyAdapterAbi = [
   },
   {
     "type": "event",
+    "name": "CapitalFlowNotifyFailed",
+    "inputs": [
+      {
+        "name": "vault",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "DelegateSignerSet",
     "inputs": [
       {

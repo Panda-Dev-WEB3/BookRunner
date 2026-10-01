@@ -158,6 +158,15 @@ contract UnderwritingVault is IUnderwritingVault, Initializable, ReentrancyGuard
         IBook(book).onCapitalFlow();
     }
 
+    /// @notice Desk only: the desk already transferred `amount` USDC to this vault (ReturnToVault action);
+    ///         bumps the book's flowNonce like every other vault<->desk capital movement.
+    function notifyDeskReturn(uint256 amount) external nonReentrant {
+        if (msg.sender != desk) revert NotDesk();
+        if (amount == 0) revert ZeroAmount();
+        emit ReturnedFromDesk(amount);
+        IBook(book).onCapitalFlow();
+    }
+
     /// @notice Adapter or desk: reports that USDC was pushed to this vault (e.g. adapter.sweepToVault of
     ///         an async withdrawal, or a desk transfer), bumping the book's flowNonce so a mark that still
     ///         counts those funds as deployed / in transit cannot be applied.

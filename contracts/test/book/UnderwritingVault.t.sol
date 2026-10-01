@@ -158,6 +158,24 @@ contract UnderwritingVaultTest is BookFixture {
         assertEq(book.flowNonce(), n + 1);
     }
 
+    function test_notifyDeskReturn_pushStyle() public {
+        _recall(5000e6);
+        vm.prank(desk);
+        vault.fundDesk(2000e6);
+        vm.prank(eve);
+        vm.expectRevert(UnderwritingVault.NotDesk.selector);
+        vault.notifyDeskReturn(1);
+        vm.startPrank(desk);
+        vm.expectRevert(UnderwritingVault.ZeroAmount.selector);
+        vault.notifyDeskReturn(0);
+        usdc.transfer(address(vault), 2000e6); // desk pushes, then notifies (BookrunnerDesk ReturnToVault)
+        uint64 n = book.flowNonce();
+        vault.notifyDeskReturn(2000e6);
+        vm.stopPrank();
+        assertEq(vault.idle(), 5000e6);
+        assertEq(book.flowNonce(), n + 1);
+    }
+
     function test_notifyCapitalFlow_adapterOrDesk() public {
         vm.prank(eve);
         vm.expectRevert(UnderwritingVault.NotAuthorized.selector);
