@@ -1,0 +1,22 @@
+{
+  "name": "@bookrunner/bookrunner-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "bun src/index.ts",
+    "dev": "bun --watch src/index.ts",
+    "sim": "bun src/trader-sim.ts",
+    "test": "bun test",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@bookrunner/db": "workspace:*",
+    "@bookrunner/shared": "workspace:*",
+    "drizzle-orm": "0.45.3",
+    "ioredis": "6.0.0",
+    "viem": "2.57.2",
+    "zod": "4.6.5"
+  }
+}

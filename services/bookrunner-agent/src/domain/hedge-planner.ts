@@ -1,0 +1,300 @@
+// Hedge planner (pure). Keeps hedgeRatioBps (shared mandate.ts) inside [hedgeRatioMinBps,
+// hedgeRatioMaxBps] with desk legs, under the mandate rules the contracts enforce:
+//   - Spot Stock Tokens are long-only: a spot hedge only offsets a SHORT venue exposure. With long or
+//     flat venue exposure any held spot adds to the book's net long, so it is flattened and the
+//     quoting skew does the work (perp hedges on allow-listed venues behind a feature flag).
+//   - Buys need desk USDC: FundDesk first (vault -> desk) within the FundDesk cap
+//     (desk value after <= maxInventoryUsd * hedgeRatioMaxBps / 1e4). Never off-hours / reduce-only.
+//   - Post-trade holdings <= registry floatCapRaw per token (FloatCapExceeded on-chain).
+//   - Off-hours with noNewRiskOffHours (and reduce-only mode): a leg must reduce |exposure + hedge|.
+//   - Every planned spot leg is pre-checked with checkHedgeLeg() (same rule as MMMandate.checkHedge).
+// Index books hedge with the weighted basket of their component tokens.
+
+import { type Mandate, BPS, absBig, checkHedgeLeg, hedgeInBand, hedgeRatioBps, maxBig, minBig } from "@bookrunner/shared";
+import type { Address, Hex } from "viem";
+
+const E12 = 10n ** 12n;
+const WAD = 10n ** 18n;
+
+export interface HedgeComponent {
+  token: Address;
+  /** Allow-list asset id: tokenUnderlying(token). */
+  assetId: Hex;
+  /** Basket weight (single-token books: 10000). */
+  weightBps: number;
+  decimals: number;
+  /** Oracle price per share of the equity (WAD). */
+  priceWad: bigint;
+  /** Shares of the equity per whole token (WAD). */
+  multiplierWad: bigint;
+  balanceRaw: bigint;
+  floatCapRaw: bigint;
+  /** Allow-list proof for (assetId, venue). */
+  proof: Hex[];
+}
+
+/** normal: keep the band; reduce_only: only legs reducing |exposure + hedge|; flatten: sell everything; off: nothing. */
+export type HedgeMode = "normal" | "reduce_only" | "flatten" | "off";
+
+export interface HedgePlannerConfig {
+  minTradeUsd: bigint;
+  slippageBps: number;
+  /** Ratio to rebalance to once out of band; defaults to the band midpoint. Clamped into the band. */
+  targetRatioBps?: number;
+  perpEnabled: boolean;
+  /** When flattening, desk USDC above this is returned to the vault. */
+  returnDustUsd: bigint;
+}
+
+export interface HedgePlanInput {
+  mandate: Mandate;
+  netExposureUsd: bigint;
+  /** desk.hedgeNotionalUsd(): long spot inventory value. */
+  deskHedgeUsd: bigint;
+  /** Signed perp hedge notional on allow-listed venues (negative = short). 0 when disabled. */
+  perpHedgeUsd: bigint;
+  deskUsdcUsd: bigint;
+  /** desk.valueUsd(): USDC + token inventory. */
+  deskValueUsd: bigint;
+  components: HedgeComponent[];
+  offHours: boolean;
+  mode: HedgeMode;
+  /** A perp venue pair is present in the allow-list. */
+  perpAllowed: boolean;
+  /**
+   * Legs that ADD hedge are allowed (default true). False when the venue valuation behind
+   * adapter.netExposureUsd() is older than maxPriceAge * 4 (Orderly report lag): only reducing legs.
+   */
+  allowAddHedge?: boolean;
+}
+
+export type HedgeLeg =
+  | { kind: "fund_desk"; amountUsd: bigint }
+  | { kind: "buy"; token: Address; assetId: Hex; amountInUsd: bigint; expectedOutRaw: bigint; minAmountOutRaw: bigint; notionalUsd: bigint; proof: Hex[] }
+  | { kind: "sell"; token: Address; assetId: Hex; amountInRaw: bigint; minAmountOutUsd: bigint; notionalUsd: bigint; proof: Hex[] }
+  | { kind: "flatten"; token: Address; assetId: Hex; amountInRaw: bigint; minAmountOutUsd: bigint; notionalUsd: bigint }
+  | { kind: "return_to_vault"; amountUsd: bigint | "all" }
+  | { kind: "perp"; notionalUsd: bigint };
+
+export interface HedgePlan {
+  action: "none" | "buy" | "sell" | "flatten" | "perp";
+  reason: string;
+  ratioBefore: bigint | null;
+  ratioAfter: bigint | null;
+  targetHedgeUsd: bigint;
+  legs: HedgeLeg[];
+}
+
+/** USD (6dp) value of qtyRaw — mirrors StockTokenRegistry.valueUsd (multiplier applied once). */
+export function valueUsdOf(qtyRaw: bigint, priceWad: bigint, multiplierWad: bigint, decimals: number): bigint {
+  return (qtyRaw * multiplierWad * priceWad) / (10n ** BigInt(decimals) * WAD) / E12;
+}
+
+/** Inverse of valueUsdOf (floor): raw token quantity worth `usd`. */
+export function qtyForUsd(usd: bigint, priceWad: bigint, multiplierWad: bigint, decimals: number): bigint {
+  const denom = multiplierWad * priceWad;
+  if (denom === 0n) return 0n;
+  return (usd * E12 * 10n ** BigInt(decimals) * WAD) / denom;
+}
+
+const applyBps = (x: bigint, bps: bigint) => (x * bps) / BPS;
+
+function none(reason: string, ratioBefore: bigint | null, targetHedgeUsd: bigint): HedgePlan {
+  return { action: "none", reason, ratioBefore, ratioAfter: ratioBefore, targetHedgeUsd, legs: [] };
+}
+
+function flattenLegs(components: HedgeComponent[], slipBps: bigint, minLegUsd: bigint): HedgeLeg[] {
+  const legs: HedgeLeg[] = [];
+  for (const c of components) {
+    if (c.balanceRaw <= 0n) continue;
+    const value = valueUsdOf(c.balanceRaw, c.priceWad, c.multiplierWad, c.decimals);
+    if (value < minLegUsd) continue;
+    legs.push({
+      kind: "flatten",
+      token: c.token,
+      assetId: c.assetId,
+      amountInRaw: c.balanceRaw,
+      minAmountOutUsd: applyBps(value, BPS - slipBps),
+      notionalUsd: value,
+    });
+  }
+  return legs;
+}
+
+/** Spot hedge value actually held (sum over components) — used when desk notional is unavailable. */
+export function componentsValueUsd(components: HedgeComponent[]): bigint {
+  return components.reduce((s, c) => s + valueUsdOf(c.balanceRaw, c.priceWad, c.multiplierWad, c.decimals), 0n);
+}
+
+export function planHedge(inp: HedgePlanInput, cfg: HedgePlannerConfig): HedgePlan {
+  const m = inp.mandate;
+  const exp = inp.netExposureUsd;
+  const hedge = inp.deskHedgeUsd > 0n ? inp.deskHedgeUsd : 0n;
+  const absExp = absBig(exp);
+  const lo = BigInt(m.hedgeRatioMinBps);
+  const hi = BigInt(m.hedgeRatioMaxBps);
+  const targetBps = minBig(hi, maxBig(lo, cfg.targetRatioBps === undefined ? (lo + hi) / 2n : BigInt(Math.round(cfg.targetRatioBps))));
+  const slip = BigInt(Math.max(0, Math.min(5_000, Math.round(cfg.slippageBps))));
+  const ratioBefore = hedgeRatioBps(m, exp, hedge);
+  const minLegUsd = 1_000_000n; // 1 USD dust floor per leg
+  const reduceRule = inp.mode === "reduce_only" || (inp.offHours && m.noNewRiskOffHours);
+  const ruleMandate: Mandate = reduceRule ? { ...m, noNewRiskOffHours: true } : m;
+
+  if (inp.mode === "off") return none("DISABLED", ratioBefore, hedge);
+  if (inp.components.length === 0) return none("NO_HEDGE_UNIVERSE", ratioBefore, hedge);
+
+  if (inp.mode === "flatten") {
+    const legs = flattenLegs(inp.components, slip, minLegUsd);
+    const proceeds = legs.reduce((s, l) => s + (l.kind === "flatten" ? l.minAmountOutUsd : 0n), 0n);
+    if (inp.deskUsdcUsd + proceeds > cfg.returnDustUsd) legs.push({ kind: "return_to_vault", amountUsd: "all" });
+    if (legs.length === 0) return none("FLAT", ratioBefore, 0n);
+    return { action: "flatten", reason: "FLATTEN_ALL", ratioBefore, ratioAfter: hedgeRatioBps(m, exp, 0n), targetHedgeUsd: 0n, legs };
+  }
+
+  // ---------------------------------------------------------------- long / flat venue exposure
+  if (exp >= 0n) {
+    if (hedge >= cfg.minTradeUsd) {
+      // held spot only adds to the net long: flatten (always reduces |exposure + hedge|)
+      const legs = flattenLegs(inp.components, slip, minLegUsd);
+      if (legs.length > 0) {
+        return { action: "flatten", reason: "LONG_EXPOSURE_NO_SPOT_HEDGE", ratioBefore, ratioAfter: hedgeRatioBps(m, exp, 0n), targetHedgeUsd: 0n, legs };
+      }
+    }
+    if (ratioBefore !== null && cfg.perpEnabled && inp.perpAllowed) {
+      // offsetting short perp on an allow-listed venue (feature flag)
+      const desiredPerp = -applyBps(absExp, targetBps);
+      const perpRatio = hedgeRatioBps(m, exp, inp.perpHedgeUsd < 0n ? inp.perpHedgeUsd : 0n);
+      // hedgeRatioBps treats a negative hedge against long exposure as offsetting
+      if (!hedgeInBand(m, perpRatio)) {
+        const delta = desiredPerp - inp.perpHedgeUsd;
+        const before = absBig(exp + inp.perpHedgeUsd);
+        const after = absBig(exp + desiredPerp);
+        if (absBig(delta) >= cfg.minTradeUsd && (!reduceRule || after < before)) {
+          return { action: "perp", reason: "PERP_HEDGE_LONG_EXPOSURE", ratioBefore, ratioAfter: hedgeRatioBps(m, exp, desiredPerp), targetHedgeUsd: desiredPerp, legs: [{ kind: "perp", notionalUsd: delta }] };
+        }
+      }
+    }
+    return none(ratioBefore === null ? "BELOW_THRESHOLD" : "LONG_EXPOSURE_SKEW_ONLY", ratioBefore, 0n);
+  }
+
+  // ---------------------------------------------------------------- short venue exposure: spot offsets
+  const targetHedge = applyBps(absExp, targetBps);
+  let side: "buy" | "sell" | null = null;
+  if (ratioBefore !== null) {
+    if (ratioBefore < lo) side = "buy";
+    else if (ratioBefore > hi) side = "sell";
+    else return none("IN_BAND", ratioBefore, targetHedge);
+  } else {
+    // band not enforced below 5% of maxInventory: only trim a hedge above the band's upper bound
+    if (hedge > applyBps(absExp, hi) && hedge - targetHedge >= cfg.minTradeUsd) side = "sell";
+    else return none("BELOW_THRESHOLD", ratioBefore, targetHedge);
+  }
+
+  if (side === "buy") {
+    if (inp.allowAddHedge === false) return none("STALE_VENUE_VALUATION", ratioBefore, targetHedge);
+    return planBuy(inp, cfg, { exp, hedge, targetHedge, ratioBefore, slip, reduceRule, ruleMandate, minLegUsd });
+  }
+  return planSell(inp, cfg, { exp, hedge, absExp, targetHedge, ratioBefore, slip, reduceRule, ruleMandate, minLegUsd });
+}
+
+interface Ctx {
+  exp: bigint;
+  hedge: bigint;
+  targetHedge: bigint;
+  ratioBefore: bigint | null;
+  slip: bigint;
+  reduceRule: boolean;
+  ruleMandate: Mandate;
+  minLegUsd: bigint;
+}
+
+function planBuy(inp: HedgePlanInput, cfg: HedgePlannerConfig, c: Ctx): HedgePlan {
+  const m = inp.mandate;
+  const delta = c.targetHedge - c.hedge;
+  // FundDesk is an inventory move: never off-hours, never in reduce-only mode.
+  const canFund = inp.mode === "normal" && !(inp.offHours && m.noNewRiskOffHours);
+  const fundCap = applyBps(m.maxInventoryUsd, BigInt(m.hedgeRatioMaxBps));
+  const fundRoom = maxBig(0n, fundCap - inp.deskValueUsd);
+  const usdc = maxBig(0n, inp.deskUsdcUsd);
+  let fund = canFund && usdc < delta ? minBig(delta - usdc, fundRoom) : 0n;
+  const budget = usdc + fund;
+  const buyUsd = minBig(delta, budget);
+  if (buyUsd < cfg.minTradeUsd) return none(usdc + fundRoom < cfg.minTradeUsd || !canFund ? "NO_BUDGET" : "BELOW_MIN_TRADE", c.ratioBefore, c.targetHedge);
+
+  const legs: HedgeLeg[] = [];
+  let total = 0n;
+  const weightSum = inp.components.reduce((s, x) => s + BigInt(x.weightBps), 0n) || 1n;
+  for (const comp of inp.components) {
+    let notional = (buyUsd * BigInt(comp.weightBps)) / weightSum;
+    // float cap: bound the worst-case (slippage-favourable) fill by the remaining float
+    const remainingRaw = comp.floatCapRaw - comp.balanceRaw;
+    if (remainingRaw <= 0n) continue;
+    const maxNotional = applyBps(valueUsdOf(remainingRaw, comp.priceWad, comp.multiplierWad, comp.decimals), BPS * BPS / (BPS + c.slip));
+    if (notional > maxNotional) notional = maxNotional;
+    if (notional < c.minLegUsd) continue;
+    const expectedOutRaw = qtyForUsd(notional, comp.priceWad, comp.multiplierWad, comp.decimals);
+    if (expectedOutRaw <= 0n) continue;
+    legs.push({
+      kind: "buy",
+      token: comp.token,
+      assetId: comp.assetId,
+      amountInUsd: notional,
+      expectedOutRaw,
+      minAmountOutRaw: applyBps(expectedOutRaw, BPS - c.slip),
+      notionalUsd: notional,
+      proof: comp.proof,
+    });
+    total += notional;
+  }
+  if (total < cfg.minTradeUsd) return none("FLOAT_CAP", c.ratioBefore, c.targetHedge);
+
+  const after = c.hedge + total;
+  const check = checkHedgeLeg(c.ruleMandate, c.exp, c.hedge, after, c.reduceRule, 100);
+  if (!check.ok) return none(check.reason ?? "CHECK_FAILED", c.ratioBefore, c.targetHedge);
+
+  fund = maxBig(0n, minBig(fund, total - usdc));
+  if (fund > 0n) legs.unshift({ kind: "fund_desk", amountUsd: fund });
+  return { action: "buy", reason: "UNDER_HEDGED", ratioBefore: c.ratioBefore, ratioAfter: hedgeRatioBps(m, c.exp, after), targetHedgeUsd: c.targetHedge, legs };
+}
+
+function planSell(inp: HedgePlanInput, cfg: HedgePlannerConfig, c: Ctx & { absExp: bigint }): HedgePlan {
+  const m = inp.mandate;
+  // reduce-only: never sell past net-flat (selling below |exposure| would grow |exposure + hedge|)
+  const floor = c.reduceRule ? maxBig(c.targetHedge, minBig(c.hedge, c.absExp)) : c.targetHedge;
+  const delta = c.hedge - floor;
+  if (delta < cfg.minTradeUsd) return none("BELOW_MIN_TRADE", c.ratioBefore, c.targetHedge);
+
+  const values = inp.components.map((x) => valueUsdOf(x.balanceRaw, x.priceWad, x.multiplierWad, x.decimals));
+  const held = values.reduce((s, v) => s + v, 0n);
+  if (held <= 0n) return none("NO_HOLDINGS", c.ratioBefore, c.targetHedge);
+  const sellUsd = minBig(delta, held);
+
+  const legs: HedgeLeg[] = [];
+  let total = 0n;
+  inp.components.forEach((comp, i) => {
+    const v = values[i] ?? 0n;
+    if (v <= 0n) return;
+    // pro-rata to holdings value: keeps the basket composition
+    const share = (sellUsd * v) / held;
+    let amountInRaw = qtyForUsd(share, comp.priceWad, comp.multiplierWad, comp.decimals);
+    if (amountInRaw > comp.balanceRaw) amountInRaw = comp.balanceRaw;
+    const value = valueUsdOf(amountInRaw, comp.priceWad, comp.multiplierWad, comp.decimals);
+    if (value < c.minLegUsd) return;
+    legs.push({
+      kind: "sell",
+      token: comp.token,
+      assetId: comp.assetId,
+      amountInRaw,
+      minAmountOutUsd: applyBps(value, BPS - c.slip),
+      notionalUsd: value,
+      proof: comp.proof,
+    });
+    total += value;
+  });
+  if (total < cfg.minTradeUsd) return none("BELOW_MIN_TRADE", c.ratioBefore, c.targetHedge);
+
+  const after = c.hedge - total;
+  const check = checkHedgeLeg(c.ruleMandate, c.exp, c.hedge, after, c.reduceRule, 100);
+  if (!check.ok) return none(check.reason ?? "CHECK_FAILED", c.ratioBefore, c.targetHedge);
+  return { action: "sell", reason: "OVER_HEDGED", ratioBefore: c.ratioBefore, ratioAfter: hedgeRatioBps(m, c.exp, after), targetHedgeUsd: c.targetHedge, legs };
+}
