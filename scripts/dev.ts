@@ -4,6 +4,7 @@
 //   bun scripts/dev.ts api web         # only some
 //   bun scripts/dev.ts --no-sim        # without trader-sim
 //   bun scripts/dev.ts --network testnet   # Robinhood Chain testnet profile (.env.testnet)
+//   bun scripts/dev.ts --no-web            # without the vite dev server (a server serves the built web app)
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Subprocess } from "bun";
@@ -16,6 +17,7 @@ const network = (netIdx >= 0 ? args[netIdx + 1] : process.env.NETWORK) ?? "devne
 if (netIdx >= 0) args.splice(netIdx, 2);
 const only = args.filter((a) => !a.startsWith("--"));
 const noSim = args.includes("--no-sim");
+const noWeb = args.includes("--no-web");
 
 const env: Record<string, string> = { ...(process.env as Record<string, string>) };
 /** Loads KEY=VALUE lines; returns the keys it defined (null when the file is missing). */
@@ -101,8 +103,19 @@ interface Proc {
 }
 
 const COLORS = [36, 33, 35, 32, 34, 91, 92, 93, 94, 95, 96, 31];
+/** `bun <file>` scripts run directly (one process per service instead of a `bun run` wrapper + child). */
+function scriptCmd(dir: string, script: string): string[] {
+  try {
+    const s = (JSON.parse(readFileSync(resolve(ROOT, dir, "package.json"), "utf8")) as { scripts?: Record<string, string> }).scripts?.[script];
+    const m = s?.match(/^bun (\S+\.tsx?)$/);
+    if (m) return [BUN, m[1]!];
+  } catch {
+    // unreadable package.json: fall back to bun run
+  }
+  return [BUN, "run", script];
+}
 const svc = (name: string, dir = `services/${name}`, script = "start"): Proc | null =>
-  existsSync(resolve(ROOT, dir, "package.json")) ? { name, cwd: resolve(ROOT, dir), cmd: [BUN, "run", script] } : null;
+  existsSync(resolve(ROOT, dir, "package.json")) ? { name, cwd: resolve(ROOT, dir), cmd: scriptCmd(dir, script) } : null;
 
 const procs: Proc[] = [];
 const add = (p: Proc | null) => {
@@ -120,7 +133,7 @@ add(svc("receipts"));
 add(svc("waterfall"));
 add(svc("mark"));
 add(svc("api"));
-add(svc("web", "apps/web", network === "testnet" ? "dev:testnet" : "dev"));
+if (!noWeb) add(svc("web", "apps/web", network === "testnet" ? "dev:testnet" : "dev"));
 
 const depPath = resolve(ROOT, env.DEPLOYMENT_FILE);
 const agentDir = resolve(ROOT, "services/bookrunner-agent");
@@ -199,7 +212,7 @@ setInterval(() => {
   for (const b of books) {
     if (agentsStarted.has(b.bookId)) continue;
     agentsStarted.add(b.bookId);
-    start({ name: `agent:${b.name}`, cwd: agentDir, cmd: [BUN, "run", "start"], extraEnv: { BOOK_ID: String(b.bookId) } });
+    start({ name: `agent:${b.name}`, cwd: agentDir, cmd: scriptCmd("services/bookrunner-agent", "start"), extraEnv: { BOOK_ID: String(b.bookId) } });
   }
   if (books.length > 0 && !simStarted && !noSim) {
     simStarted = true;
