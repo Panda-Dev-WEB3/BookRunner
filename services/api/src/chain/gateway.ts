@@ -38,6 +38,8 @@ export interface BookChainState {
   seniorNav: bigint;
   juniorNav: bigint;
   lastMarkId: number;
+  /** Book.topUp(): the top-up round (open until it settles at a mark); null when the read failed. */
+  topUp?: { open: boolean; endsAt: number } | null;
 }
 
 export interface TrancheWalletState {

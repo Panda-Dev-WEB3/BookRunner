@@ -109,6 +109,7 @@ function world() {
         sharePrice: ([k]) => ((k as number) === 0 ? 10n ** 18n : 11n * 10n ** 17n),
         trancheNav: () => [70n, 30n],
         lastMarkId: () => 4n,
+        topUp: () => [true, 1_793_549_809n, 100_000_000_000n, 100_000_000_000n],
       },
     },
     [lc(BOOK.senior)]: tranche,
@@ -165,6 +166,7 @@ describe("ViemChainGateway (ABI round trip over EIP-1193)", () => {
       seniorNav: 70n,
       juniorNav: 30n,
       lastMarkId: 4,
+      topUp: { open: true, endsAt: 1_793_549_809 },
     });
     const w = await g.trancheWallet(BOOK.senior, ALICE, [9n, 3n, 9n]);
     expect(w).toMatchObject({ shares: 2_000_000n, committed: 7n, depositsOpen: true, claimableShares: 5n, claimableRefund: 6n, claimableAssets: 0n, navValue: 2_060_000n });

@@ -153,13 +153,14 @@ export class ViemChainGateway implements ChainGateway {
     return cached(this.kv, this.key("book", book.toLowerCase()), this.ttlSeconds, async () => {
       const abi = bookAbi;
       const r = this.client;
-      const [state, subscriptionEnds, sp, jp, navs, lastMarkId] = await Promise.all([
+      const [state, subscriptionEnds, sp, jp, navs, lastMarkId, topUp] = await Promise.all([
         r.readContract({ address: book, abi, functionName: "state" }),
         r.readContract({ address: book, abi, functionName: "subscriptionEnds" }),
         r.readContract({ address: book, abi, functionName: "sharePrice", args: [0] }),
         r.readContract({ address: book, abi, functionName: "sharePrice", args: [1] }),
         r.readContract({ address: book, abi, functionName: "trancheNav" }),
         r.readContract({ address: book, abi, functionName: "lastMarkId" }),
+        r.readContract({ address: book, abi, functionName: "topUp" }).catch(() => null),
       ]);
       return {
         state: Number(state),
@@ -169,6 +170,7 @@ export class ViemChainGateway implements ChainGateway {
         seniorNav: navs[0],
         juniorNav: navs[1],
         lastMarkId: Number(lastMarkId),
+        topUp: topUp ? { open: topUp[0], endsAt: Number(topUp[1]) } : null,
       };
     });
   }

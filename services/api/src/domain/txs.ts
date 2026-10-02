@@ -71,13 +71,20 @@ export function committeeVoteTx(chainId: number, committee: Address, charterId: 
   );
 }
 
-export function depositTx(chainId: number, tranche: Address, amountUsd: bigint, receiver: Address, label: string): PreparedTx {
-  return tx(
-    chainId,
-    tranche,
-    encodeFunctionData({ abi: trancheAbi, functionName: "deposit", args: [amountUsd, getAddress(receiver)] }),
-    `Commit ${trimUsd(amountUsd)} USDC to ${label} (allocated pro-rata at window close; any excess is refundable)`,
-  );
+/**
+ * When a commitment settles: at window close in a subscription window (round 0), or for a top-up
+ * round at the first mark whose period ends at or after the round end (Tranche.settleAtMark).
+ */
+export type DepositSettlement = { kind: "window" } | { kind: "topup"; settlesAt: number | null };
+
+const isoMinute = (sec: number) => `${new Date(sec * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+
+export function depositTx(chainId: number, tranche: Address, amountUsd: bigint, receiver: Address, label: string, settles: DepositSettlement = { kind: "window" }): PreparedTx {
+  const when =
+    settles.kind === "window"
+      ? "allocated pro-rata at window close; any excess is refundable"
+      : `accepted at the first mark at or after the round end${settles.settlesAt ? ` (${isoMinute(settles.settlesAt)})` : ""}, at that mark's share price; any excess is refundable then`;
+  return tx(chainId, tranche, encodeFunctionData({ abi: trancheAbi, functionName: "deposit", args: [amountUsd, getAddress(receiver)] }), `Commit ${trimUsd(amountUsd)} USDC to ${label} (${when})`);
 }
 
 export function requestRedeemTx(chainId: number, tranche: Address, shares: bigint, wallet: Address, label: string): PreparedTx {
@@ -114,7 +121,7 @@ export function claimCancelledRefundTx(chainId: number, tranche: Address, wallet
     chainId,
     tranche,
     encodeFunctionData({ abi: trancheAbi, functionName: "claimCancelledRefund", args: [getAddress(wallet)] }),
-    `Claim the full ${label} commitment back (book cancelled at window close)`,
+    `Claim the full ${label} commitment back (the round was cancelled)`,
   );
 }
 

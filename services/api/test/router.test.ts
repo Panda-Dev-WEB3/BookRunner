@@ -128,6 +128,30 @@ describe("tranche router", () => {
     expect(res.window.depositsOpen).toBe(true);
   });
 
+  test("subscribe in a Live top-up round: settles at the first mark at or after the round end, never 'window close'", async () => {
+    const w = makeWorld();
+    seedBook(w); // Live
+    const key = BOOK.book.toLowerCase();
+    const endsAt = NOW / 1000 + 30 * 86_400 + 1_009; // mid-period, like testnet's 16:16:49 round end
+    w.chain.books.set(key, { ...w.chain.books.get(key)!, topUp: { open: true, endsAt } });
+    w.chain.setWallet(BOOK.senior, ALICE, { depositsOpen: true, committed: 0n });
+    const res = await w.caller.tranche.subscribe({ bookId: 1, tranche: "senior", amountUsd: "100", wallet: ALICE });
+    const settles = Math.ceil(endsAt / 300) * 300; // fake markInterval 300 s
+    const text = [...res.warnings, ...res.txs.map((t) => t.description)].join(" ");
+    expect(text).not.toContain("window close");
+    expect(res.warnings.join(" ")).toContain(`first mark at or after the round end (${new Date(settles * 1000).toISOString()})`);
+    expect(res.txs.at(-1)!.description).toContain("accepted at the first mark at or after the round end (");
+    // a subscription window keeps its own wording
+    const sub = makeWorld();
+    seedBook(sub, { state: "Subscription", subscriptionEndsIn: 300 });
+    sub.chain.setWallet(BOOK.senior, ALICE, { depositsOpen: true, committed: 0n });
+    const s = await sub.caller.tranche.subscribe({ bookId: 1, tranche: "senior", amountUsd: "100", wallet: ALICE });
+    expect(s.txs.at(-1)!.description).toContain("allocated pro-rata at window close");
+    // the per-wallet cap is per round
+    w.chain.setWallet(BOOK.senior, ALICE, { depositsOpen: true, committed: 250_000_000_000n });
+    expect((await trpcErr(w.caller.tranche.subscribe({ bookId: 1, tranche: "senior", amountUsd: "1", wallet: ALICE }))).message).toContain("USDC per round");
+  });
+
   test("subscribe: window closed, paused, guardian pause, cap exceeded", async () => {
     const w = makeWorld();
     seedBook(w, { state: "Subscription", subscriptionEndsIn: -10 });

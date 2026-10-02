@@ -9,6 +9,7 @@ import type { ApiDeps } from "../deps";
 import { usdInput } from "../domain/charter";
 import { NOTICE_TEXT, bucketOf, redeemSchedule } from "../domain/redemption";
 import {
+  type DepositSettlement,
   type PreparedTx,
   approveUsdcTx,
   claimAllocationTx,
@@ -72,6 +73,12 @@ export const trancheRouter = router({
       ]);
       const state = chainBook ? (BOOK_STATE[chainBook.state] ?? b.state) : b.state;
       const endsAt = chainBook?.subscriptionEnds ?? (b.subscriptionEnds ? Math.floor(b.subscriptionEnds.getTime() / 1000) : null);
+      // A Live book takes deposits only in a top-up round, which settles at the first mark whose
+      // period ends at or after the round end (never at "window close").
+      const topUp = state === "Live" ? (chainBook?.topUp ?? null) : null;
+      const interval = state === "Live" ? await markInterval(deps) : null;
+      const settlesAt = topUp?.open && interval ? Math.ceil(topUp.endsAt / interval) * interval : null;
+      const settles: DepositSettlement = state === "Subscription" ? { kind: "window" } : { kind: "topup", settlesAt };
 
       if (params?.newBooksPaused) fail("PRECONDITION_FAILED", "New deposits are paused by the guardian (redemptions are unaffected)");
       const open = w ? w.depositsOpen : state === "Subscription" && endsAt !== null && now < endsAt;
@@ -91,7 +98,7 @@ export const trancheRouter = router({
       const sponsorExempt = !!charter && charter.sponsor.toLowerCase() === input.wallet.toLowerCase();
       if (capUsd > 0n && !sponsorExempt && committed + amount > capUsd) {
         const room = capUsd > committed ? capUsd - committed : 0n;
-        fail("PRECONDITION_FAILED", `Per-wallet cap is ${usdStr(capUsd)} USDC per window: already committed ${usdStr(committed)}, at most ${usdStr(room)} more`);
+        fail("PRECONDITION_FAILED", `Per-wallet cap is ${usdStr(capUsd)} USDC per round: already committed ${usdStr(committed)}, at most ${usdStr(room)} more`);
       }
 
       const usdc = await softChain(deps, "usdc.state", (g) => g.usdcState(input.wallet, tranche), null);
@@ -99,10 +106,14 @@ export const trancheRouter = router({
       if (!usdc || usdc.allowance < amount) {
         txs.push(approveUsdcTx(chain.chainId, chain.deployment.contracts.usdc, tranche, amount, `the ${cap(input.tranche)} tranche of book #${b.id}`));
       }
-      txs.push(depositTx(chain.chainId, tranche, amount, input.wallet, trancheLabel(b, input.tranche)));
+      txs.push(depositTx(chain.chainId, tranche, amount, input.wallet, trancheLabel(b, input.tranche), settles));
       if (usdc && usdc.balance < amount) warnings.push(`Wallet USDC balance ${usdStr(usdc.balance)} is below the amount`);
       if (input.tranche === "senior" && charter) {
-        warnings.push(`Senior allocation is capped at ${charter.seniorCapBps / 100}% of book capital; commitments above the cap are refunded pro-rata at window close`);
+        warnings.push(
+          settles.kind === "window"
+            ? `Senior allocation is capped at ${charter.seniorCapBps / 100}% of book capital; commitments above the cap are refunded pro-rata at window close`
+            : `Senior is capped at ${charter.seniorCapBps / 100}% of the book: the round is accepted at the first mark at or after the round end${settlesAt ? ` (${new Date(settlesAt * 1000).toISOString()})` : ""} at that mark's share price, and Senior above the cap room is refunded pro-rata then`,
+        );
       }
       if (!w) warnings.push("Chain state unavailable; window and cap checks used indexed data");
 
