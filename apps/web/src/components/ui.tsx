@@ -166,9 +166,10 @@ export function Panel(props: {
     <section id={props.id} className={cx("min-w-0 rounded-card border border-line bg-surface shadow-card", props.className)}>
       {(props.title || props.meta || props.actions) && (
         <header className="flex min-h-12 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-line px-4 py-2.5 sm:px-5">
-          <div className="flex min-w-0 items-center gap-2.5">
-            {props.title && <h2 className="truncate text-[14px] font-semibold text-ink">{props.title}</h2>}
-            {props.meta && <div className="num truncate text-[11.5px] text-muted">{props.meta}</div>}
+          {/* the title never truncates: when space runs out the meta wraps below it and truncates instead */}
+          <div className="flex min-w-0 flex-wrap items-baseline gap-x-2.5 gap-y-0.5">
+            {props.title && <h2 className="text-[14px] font-semibold text-ink">{props.title}</h2>}
+            {props.meta && <div className="num min-w-0 max-w-full truncate text-[11.5px] text-muted">{props.meta}</div>}
           </div>
           {props.actions && <div className="flex items-center gap-2">{props.actions}</div>}
         </header>
@@ -453,9 +454,10 @@ export function MeterBar(props: { meter: Meter; label: ReactNode; value: ReactNo
           <div key={k.label} className="absolute -inset-y-1 w-px bg-ink/60" style={{ left: `${k.at * 100}%` }} title={k.label} />
         ))}
       </div>
-      <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-muted">
-        <span className="truncate">{props.sub}</span>
-        {props.status}
+      {/* wraps rather than truncating: the limit itself ("max 50K", "band 50% to 120%") must stay readable */}
+      <div className="mt-1 flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 text-[11px] text-muted">
+        <span className="min-w-0 break-words">{props.sub}</span>
+        {props.status && <span className="shrink-0">{props.status}</span>}
       </div>
     </div>
   );
@@ -995,7 +997,7 @@ export function KV(props: { rows: Array<[ReactNode, ReactNode] | null | false>; 
         const [k, v] = r as [ReactNode, ReactNode];
         return (
           <div key={i} className="contents">
-            <dt className="truncate border-b border-line py-2 text-ink-2">{k}</dt>
+            <dt className="min-w-0 break-words border-b border-line py-2 text-ink-2">{k}</dt>
             <dd className="num border-b border-line py-2 text-right">{v}</dd>
           </div>
         );
