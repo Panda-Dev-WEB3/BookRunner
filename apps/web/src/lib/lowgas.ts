@@ -24,6 +24,19 @@ export function nextMarkAt(s: MarkScheduleLike | null | undefined): string {
   return `${new Date(s.nextPeriodEnd * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC`;
 }
 
+/**
+ * Period end of the mark that settles a redemption request eligible at `eligibleAtSec` (now for
+ * Senior, now + notice for Junior), as Tranche.requestRedeem files it: bucket ceil(eligibleAt / I),
+ * never an already-settled bucket (lastPeriodEnd / I or earlier). Not markSchedule.nextPeriodEnd,
+ * which while a mark is due is the closed period's end: a request filed then lands one period later.
+ */
+export function redeemSettlesAt(eligibleAtSec: number, s: { intervalSeconds: number; lastPeriodEnd?: number | null }): number {
+  const i = Math.max(1, Math.floor(s.intervalSeconds));
+  const bucket = Math.ceil(eligibleAtSec / i);
+  const lastSettled = s.lastPeriodEnd != null ? Math.floor(s.lastPeriodEnd / i) : -1;
+  return (bucket <= lastSettled ? lastSettled + 1 : bucket) * i;
+}
+
 /** "Daily marks" / "Hourly marks" / "Marks every 5 min". */
 export function cadenceTitle(cadence: string | null | undefined): string {
   if (!cadence) return "Marks";

@@ -218,7 +218,7 @@ function BookInvest({ book, now }: { book: BookDetail; now: number }) {
                 Invested
               </Badge>
             ) : undefined,
-            content: <WithdrawPanel book={book} ticker={ticker} addrs={addrs} wallet={me} position={position} onDepositTab={() => setTab("deposit")} />,
+            content: <WithdrawPanel book={book} ticker={ticker} addrs={addrs} wallet={me} position={position} now={now} onDepositTab={() => setTab("deposit")} />,
           },
         ]}
       />

@@ -10,6 +10,7 @@ import type { BookDetail, PositionOut } from "../../lib/api-types";
 import { USDC_DECIMALS, amountIssue, amountIssueText, formatAmountDisplay, formatAmountInput, parseAmount } from "../../lib/amount";
 import { CASH_WAIT_LINE, NOTICE_LINE } from "../../lib/copy";
 import { fmtDuration, fmtSharePrice, fmtUsd, fmtWhen, isoToSec, usdRaw } from "../../lib/format";
+import { redeemSettlesAt } from "../../lib/lowgas";
 import { invalidateWalletBalances } from "../../wallet/balances";
 import { TxRunner } from "../../wallet/TxRunner";
 import { WalletButton } from "../../wallet/WalletButton";
@@ -38,6 +39,8 @@ export function WithdrawPanel(props: {
   wallet: Address | null;
   position: { data: PositionOut | undefined; error: unknown; failureReason?: unknown; isLoading: boolean; refetch: () => unknown };
   onDepositTab: () => void;
+  /** Page clock (ms), for when a request sent now settles. */
+  now: number;
 }) {
   const error = useQueryError(props.position);
   // Keep the claim box (and its confirmation) on screen after a claim empties what was claimable.
@@ -187,7 +190,7 @@ function ClaimBox(props: { book: BookDetail; ticker: string; addrs: TrancheAddre
   );
 }
 
-function RedeemBox(props: { book: BookDetail; ticker: string; addrs: TrancheAddresses; wallet: Address | null; p: PositionOut }) {
+function RedeemBox(props: { book: BookDetail; ticker: string; addrs: TrancheAddresses; wallet: Address | null; p: PositionOut; now: number }) {
   const withShares = props.p.tranches.filter((t) => isPositive(t.shares));
   const [tranche, setTranche] = useState<TrancheId>(withShares[0]?.tranche ?? "senior");
   const [value, setValue] = useState("");
@@ -201,6 +204,7 @@ function RedeemBox(props: { book: BookDetail; ticker: string; addrs: TrancheAddr
   const raw = issue === null ? parseAmount(value, USDC_DECIMALS) : null;
   const est = raw !== null && pos ? sharesValue(raw, pos.sharePrice) : null;
   const notice = props.book.charter?.juniorNoticeSeconds ?? 0;
+  const nowSec = Math.floor(props.now / 1000);
   const eligibleSec = red.data ? red.data.eligibleAtUnix : null;
   const settlesSec = red.data ? isoToSec(red.data.settlesAtPeriodEnd) : null;
   const txs = useMemo(
@@ -290,8 +294,8 @@ function RedeemBox(props: { book: BookDetail; ticker: string; addrs: TrancheAddr
           <div className="font-semibold">When it settles</div>
           <p className="mt-1 text-ink-2">
             {tranche === "senior" || notice <= 0
-              ? `${TRANCHE_NAME[tranche]} has no notice period. A request settles at the next mark (${fmtWhen(props.book.markSchedule.nextPeriodEnd)}).`
-              : `Junior has a ${fmtDuration(notice)} notice period. A request becomes eligible ${fmtDuration(notice)} after you send it, then settles at the first mark after that.`}{" "}
+              ? `${TRANCHE_NAME[tranche]} has no notice period. A request sent now settles at the mark of ${fmtWhen(redeemSettlesAt(nowSec, props.book.markSchedule))}.`
+              : `Junior has a ${fmtDuration(notice)} notice period. A request becomes eligible ${fmtDuration(notice)} after you send it, then settles at the first mark after that (${fmtWhen(redeemSettlesAt(nowSec + notice, props.book.markSchedule))} for a request sent now).`}{" "}
             After it settles, collect the USDC here in a separate transaction. {CASH_WAIT_LINE}
           </p>
         </aside>
