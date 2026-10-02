@@ -68,6 +68,8 @@ async function pass(): Promise<void> {
 }
 
 if (import.meta.main) {
+  // a top-up in flight is a single transfer; stopping between passes is always safe
+  for (const sig of ["SIGTERM", "SIGINT"] as const) process.on(sig, () => process.exit(0));
   if (CHAIN_ID === 31337 || CHAIN_ID === 4663) {
     log("info", `gas keeper disabled on chain ${CHAIN_ID} (test chains only)`);
     process.exit(0);
