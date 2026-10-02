@@ -66,7 +66,7 @@ export function RiskNotice({ className, compact }: { className?: string; compact
 }
 
 export type FlowStep = "tranche" | "amount" | "review";
-const STEPS: Array<{ id: FlowStep; label: string }> = [
+export const FLOW_STEPS: ReadonlyArray<{ id: FlowStep; label: string }> = [
   { id: "tranche", label: "Choose a tranche" },
   { id: "amount", label: "Amount" },
   { id: "review", label: "Review and sign" },
@@ -74,10 +74,10 @@ const STEPS: Array<{ id: FlowStep; label: string }> = [
 
 /** Horizontal step trail for the deposit flow. Completed steps can be revisited. */
 export function StepTrail(props: { step: FlowStep; done?: boolean; onGo?: (s: FlowStep) => void; className?: string }) {
-  const at = STEPS.findIndex((s) => s.id === props.step);
+  const at = FLOW_STEPS.findIndex((s) => s.id === props.step);
   return (
     <ol className={cx("flex flex-wrap items-center gap-x-2 gap-y-2 text-[13px]", props.className)} aria-label="Deposit steps">
-      {STEPS.map((s, i) => {
+      {FLOW_STEPS.map((s, i) => {
         const state = props.done || i < at ? "done" : i === at ? "active" : "todo";
         const dot = (
           <span

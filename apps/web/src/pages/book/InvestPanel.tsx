@@ -7,7 +7,7 @@ import { useSearchParams } from "react-router";
 import { getAddress } from "viem";
 import { POLL, trpc } from "../../api/trpc";
 import { AmountStep, ReviewStep } from "../../components/invest/DepositFlow";
-import { type FlowStep, StepTrail, WindowBadge } from "../../components/invest/InvestBits";
+import { FLOW_STEPS, type FlowStep, StepTrail, WindowBadge } from "../../components/invest/InvestBits";
 import { killedDepositNote, windowSentence } from "../../components/invest/investCopy";
 import {
   type DepositWindow,
@@ -65,6 +65,7 @@ function BookInvest({ book, now }: { book: BookDetail; now: number }) {
   const [amount, setAmount] = useState("");
   const [round, setRound] = useState(0);
   const top = useRef<HTMLDivElement>(null);
+  const stepHeading = useRef<HTMLHeadingElement>(null);
   const shown = useRef(`${step}:${round}`);
 
   const w = useWallet();
@@ -108,7 +109,8 @@ function BookInvest({ book, now }: { book: BookDetail; now: number }) {
   const flags = position.data ? positionFlags(position.data.tranches) : null;
   const toCollect = !!flags && (flags.allocationToClaim || flags.redemptionToClaim);
 
-  // Bring the step into view when it changes (not on first render).
+  // Bring the step into view when it changes (not on first render), and move keyboard focus to it:
+  // the button that was pressed unmounts, which would otherwise drop focus to <body>.
   useEffect(() => {
     const at = `${step}:${round}`;
     if (shown.current === at) return;
@@ -117,6 +119,7 @@ function BookInvest({ book, now }: { book: BookDetail; now: number }) {
     if (!el) return;
     const r = el.getBoundingClientRect();
     if (r.top < 64 || r.top > window.innerHeight * 0.6) el.scrollIntoView({ block: "start", behavior: prefersReducedMotion() ? "auto" : "smooth" });
+    stepHeading.current?.focus({ preventScroll: true });
   }, [step, round]);
 
   const go = (s: FlowStep) => setStep(s);
@@ -144,6 +147,9 @@ function BookInvest({ book, now }: { book: BookDetail; now: number }) {
       )}
 
       <div ref={top} className="scroll-mt-24">
+        <h3 ref={stepHeading} tabIndex={-1} className="sr-only">
+          {`Step ${FLOW_STEPS.findIndex((s) => s.id === effectiveStep) + 1} of ${FLOW_STEPS.length}: ${FLOW_STEPS.find((s) => s.id === effectiveStep)?.label ?? ""}`}
+        </h3>
         <StepTrail step={effectiveStep} onGo={go} className="mb-5" />
         {effectiveStep === "tranche" && (
           <div className="space-y-4">
