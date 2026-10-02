@@ -185,10 +185,17 @@ describe("trader-sim pull helpers", () => {
   });
 
   test("a carried price past maxTradePriceAge is a stale-price rejection, not off-hours", () => {
-    expect(classifyTradeError("TradePriceTooOld", "")).toBe("stale_price");
-    expect(classifyTradeError("BadSigner", "")).toBe("stale_price");
+    // PoolEngine reverts StalePrice for a new-risk trade whose (carried) price is past maxTradePriceAge
+    expect(classifyTradeError("StalePrice", "", { carriedPrice: true })).toBe("stale_price");
+    // without a carried price, a stale stored price is the off-hours / oracle-down signal (close-only)
     expect(classifyTradeError("StalePrice", "")).toBe("off_hours");
-    expect(classifyTradeError("MaxNetExposure", "")).toBe("exposure_cap");
+    expect(classifyTradeError("StalePrice", "", { carriedPrice: false })).toBe("off_hours");
+    // the in-tx oracle update rejected the bundle itself
+    expect(classifyTradeError("BadSigner", "")).toBe("stale_price");
+    expect(classifyTradeError("FuturePrice", "", { carriedPrice: true })).toBe("stale_price");
+    // unrelated rejections keep their class whether or not a price was carried
+    expect(classifyTradeError("MaxNetExposure", "", { carriedPrice: true })).toBe("exposure_cap");
+    expect(classifyTradeError("ReduceOnly", "", { carriedPrice: true })).toBe("reduce_only");
   });
 });
 
@@ -202,6 +209,8 @@ describe("low-gas defaults (docs/LOW_GAS.md §4)", () => {
     expect(env.ENGINE_REFRESH_MS).toBe(900_000);
     expect(env.AGENT_PULL_PRICES).toBe("auto");
     expect(env.AGENT_PRICE_DATA_MAX_AGE_SECONDS).toBe(60);
+    expect(env.AGENT_PRICE_DATA_SKIP_IF_STORED_SECONDS).toBe(120);
+    expect(loadAgentEnv({ AGENT_PRICE_DATA_SKIP_IF_STORED_SECONDS: "0" }).AGENT_PRICE_DATA_SKIP_IF_STORED_SECONDS).toBe(0);
     expect(env.ORACLE_URL).toBeUndefined();
     expect(() => loadAgentEnv({ AGENT_PULL_PRICES: "maybe" })).toThrow(/AGENT_PULL_PRICES/);
   });

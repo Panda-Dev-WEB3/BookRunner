@@ -11,7 +11,7 @@ import { bookrunnerDeskAbi, mMMandateAbi, poolEngineAbi, underwritingVaultAbi } 
 import type { Abi, Account, Address, Chain, Hex, PublicClient, TransactionReceipt, Transport, WalletClient } from "viem";
 import { SerialLock, errMsg, revertName } from "../util";
 import { DESK_ACTION_NAME, type DeskAction } from "./desk-actions";
-import { ORACLE_ERRORS, deskPullAbi, mergeAbi } from "./lowgas-abi";
+import { ORACLE_ERRORS, mergeAbi } from "./lowgas-abi";
 import type { DeskPriceData } from "./pull-prices";
 import type { DeskExecutor } from "../venues/engine";
 
@@ -28,24 +28,20 @@ export const DESK_ABI_WITH_ERRORS = [
   ...underwritingVaultAbi.filter((x): x is VaultError => (x as { type: string }).type === "error"),
 ] as const;
 
-/** DESK_ABI_WITH_ERRORS + executeWithPrices + the AttestedOracle errors an in-tx update can revert with. */
-export const DESK_PULL_ABI: Abi = mergeAbi(DESK_ABI_WITH_ERRORS as unknown as Abi, deskPullAbi, ORACLE_ERRORS as unknown as Abi);
+/**
+ * DESK_ABI_WITH_ERRORS (the generated desk ABI carries execute + executeWithPrices) + the AttestedOracle
+ * errors an in-tx update can revert with.
+ */
+export const DESK_PULL_ABI: Abi = mergeAbi(DESK_ABI_WITH_ERRORS as unknown as Abi, ORACLE_ERRORS as unknown as Abi) as Abi;
 
 /**
- * Reverts that condemn the carried price data itself (signer rotated, malformed bundle), not the action:
- * the action is retried once as plain execute() against the stored prices. Mandate / staleness rejections
- * are never retried that way (that would act on an older price than the one just rejected).
+ * AttestedOracle.update reverts that condemn the carried price data itself, not the action: signer
+ * rotated / not registered (BadSigner), signer clock ahead of the chain (FuturePrice), a malformed entry
+ * (ZeroPrice, InsufficientSources) or bundle (LengthMismatch). The action is then retried once as plain
+ * execute() against the stored prices. Mandate / staleness rejections are never retried that way (that
+ * would act on an older price than the one just rejected).
  */
-export const PRICE_DATA_REJECTIONS: readonly string[] = [
-  "BadSigner",
-  "InvalidSigner",
-  "InvalidSignature",
-  "ECDSAInvalidSignature",
-  "ECDSAInvalidSignatureLength",
-  "ECDSAInvalidSignatureS",
-  "BadPriceData",
-  "LengthMismatch",
-];
+export const PRICE_DATA_REJECTIONS: readonly string[] = ["BadSigner", "FuturePrice", "ZeroPrice", "InsufficientSources", "LengthMismatch"];
 
 export function isPriceDataRejection(err: unknown): boolean {
   const name = revertName(err);

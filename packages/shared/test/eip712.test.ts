@@ -109,7 +109,7 @@ describe("signed venue reports", () => {
         [typehash, report.insuranceUsd, report.marginUsd, report.netExposureUsd, report.asOf],
       ),
     );
-    expect(hashStruct({ data: report as unknown as Record<string, unknown>, primaryType: "VenueReport", types: venueReportTypes })).toBe(expected);
+    expect(hashStruct({ data: report, primaryType: "VenueReport", types: venueReportTypes })).toBe(expected);
     expect(venueReportTypedData(46630, ADAPTER, report).domain).toEqual({ name: "Bookrunner OrderlyAdapter", version: "1", chainId: 46630, verifyingContract: ADAPTER });
   });
 

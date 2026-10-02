@@ -37,7 +37,15 @@ export class FakeChain implements OracleChain {
   stored = new Map<string, number>();
   pushes: Array<{ updates: PriceUpdate[]; sigs: Hex[] }> = [];
   failNext: Error | null = null;
+  /** the deployed AttestedOracle has update(bytes) (false = pre-low-gas contract) */
+  pullContract = true;
+  updateChecks = 0;
   private n = 0;
+
+  async supportsUpdate() {
+    this.updateChecks++;
+    return this.pullContract;
+  }
 
   async headTimestamp() {
     if (this.head === null) throw new Error("no chain");

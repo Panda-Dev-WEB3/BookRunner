@@ -5,22 +5,14 @@ pragma solidity ^0.8.24;
 // frozen interface signatures the agent calls (IBookrunnerDesk.execute, IPoolEngineAdapter views,
 // IPoolEngine state/config/positionOf/quotePrice/depositMargin/trade + Trade event, MockERC20) with
 // deliberately simplified semantics. Never deployed outside the private test anvil.
-// Low-gas entry points (docs/LOW_GAS.md §1, binding signatures): AttestedOracle.update(priceData) with a
-// real EIP-712 verifier (the shared encodePriceData / priceTypedData must decode + recover here),
-// BookrunnerDesk.executeWithPrices(Action, priceData), PoolEngine.trade(..., priceData) with the
-// maxTradePriceAge bound and liquidate(..., priceData). Semantics simplified, signatures exact.
+// Low-gas entry points (docs/LOW_GAS.md §1, binding signatures): BookrunnerDesk.executeWithPrices(Action,
+// priceData), PoolEngine.trade(..., priceData) with the maxTradePriceAge bound on new risk (reverting
+// StalePrice like the real engine) and liquidate(..., priceData). Both relay to the REAL AttestedOracle
+// (deployed by the IT from contracts/out) through IPullOracle, so the shared encodePriceData / the
+// oracle service's signatures are verified by the production contract. Semantics simplified, signatures exact.
 
-/// AttestedOracle pull surface: domain ("Bookrunner AttestedOracle", "1", chainid, this).
-contract FixtureOracle {
-    struct PriceUpdate {
-        bytes32 underlying;
-        uint256 priceWad;
-        uint64 publishedAt;
-        bool held;
-        uint32 sourceCount;
-        bytes32 sourcesHash;
-    }
-
+/// The AttestedOracle surface the fixtures consume (IAttestedOracle.update / latest).
+interface IPullOracle {
     struct PriceData {
         uint256 priceWad;
         uint64 publishedAt;
@@ -28,74 +20,8 @@ contract FixtureOracle {
         uint32 sourceCount;
     }
 
-    bytes32 public constant PRICE_TYPEHASH = keccak256(
-        "Price(bytes32 underlying,uint256 priceWad,uint64 publishedAt,bool held,uint32 sourceCount,bytes32 sourcesHash)"
-    );
-
-    error BadSigner(address recovered);
-    error StalePrice(bytes32 underlying, uint64 publishedAt);
-
-    address public immutable signer;
-    uint256 public constant MAX_PRICE_AGE = 300;
-    mapping(bytes32 => PriceData) internal _latest;
-
-    constructor(address signer_) {
-        signer = signer_;
-    }
-
-    function domainSeparator() public view returns (bytes32) {
-        return keccak256(
-            abi.encode(
-                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
-                keccak256("Bookrunner AttestedOracle"),
-                keccak256("1"),
-                block.chainid,
-                address(this)
-            )
-        );
-    }
-
-    /// Verifies every update (reverts BadSigner), stores the ones newer than stored, skips the rest.
-    function update(bytes calldata priceData) external {
-        (PriceUpdate[] memory us, bytes[] memory sigs) = abi.decode(priceData, (PriceUpdate[], bytes[]));
-        require(us.length == sigs.length, "length");
-        bytes32 ds = domainSeparator();
-        for (uint256 i; i < us.length; ++i) {
-            PriceUpdate memory u = us[i];
-            bytes32 structHash = keccak256(
-                abi.encode(PRICE_TYPEHASH, u.underlying, u.priceWad, u.publishedAt, u.held, u.sourceCount, u.sourcesHash)
-            );
-            address rec = _recover(keccak256(abi.encodePacked("\x19\x01", ds, structHash)), sigs[i]);
-            if (rec != signer) revert BadSigner(rec);
-            if (u.publishedAt <= _latest[u.underlying].publishedAt) continue;
-            _latest[u.underlying] = PriceData(u.priceWad, u.publishedAt, u.held, u.sourceCount);
-        }
-    }
-
-    function latest(bytes32 underlying) external view returns (PriceData memory) {
-        return _latest[underlying];
-    }
-
-    function priceOf(bytes32 underlying) external view returns (uint256 priceWad, bool held) {
-        PriceData memory d = _latest[underlying];
-        if (d.publishedAt == 0 || block.timestamp > uint256(d.publishedAt) + MAX_PRICE_AGE) {
-            revert StalePrice(underlying, d.publishedAt);
-        }
-        return (d.priceWad, d.held);
-    }
-
-    function _recover(bytes32 digest, bytes memory sig) internal pure returns (address) {
-        if (sig.length != 65) return address(0);
-        bytes32 r;
-        bytes32 s;
-        uint8 v;
-        assembly {
-            r := mload(add(sig, 0x20))
-            s := mload(add(sig, 0x40))
-            v := byte(0, mload(add(sig, 0x60)))
-        }
-        return ecrecover(digest, v, r, s);
-    }
+    function update(bytes calldata priceData) external;
+    function latest(bytes32 underlying) external view returns (PriceData memory);
 }
 
 contract FixtureUSDC {
@@ -160,7 +86,7 @@ contract FixtureEngine {
 
     error MaxNetExposure(uint256 attemptedUsd, uint256 maxUsd);
     error WorsePrice(uint256 fill, uint256 acceptable);
-    error TradePriceTooOld(uint64 publishedAt, uint256 maxAge);
+    error StalePrice(bytes32 underlying, uint64 publishedAt);
     error NoPosition(address trader);
     error NotLiquidatable(address trader);
 
@@ -170,7 +96,9 @@ contract FixtureEngine {
     MarketState internal st;
     mapping(address => Position) internal pos;
     /// pull-oracle mode (set by setOracle): trades / liquidations price from the oracle after the in-tx update
-    FixtureOracle public oracle;
+    IPullOracle public oracle;
+    uint64 internal pricePublishedAt;
+    /// BookrunnerConfig.maxTradePriceAge default: a trade adding risk needs a price at most this old
     uint256 public constant MAX_TRADE_PRICE_AGE = 15;
 
     constructor(FixtureUSDC usdc_) {
@@ -182,18 +110,23 @@ contract FixtureEngine {
         st.poolCashUsd = 100_000e6;
     }
 
-    function setOracle(FixtureOracle o, bytes32 underlying) external {
+    function setOracle(IPullOracle o, bytes32 underlying) external {
         oracle = o;
         cfg.underlying = underlying;
     }
 
-    /// pull: oracle.update(priceData) first (when non-empty); the price used must be recent (maxTradePriceAge)
+    /// pull: oracle.update(priceData) first (when non-empty), then price from the stored oracle value
     function _pullPrice(bytes calldata priceData) internal {
         if (address(oracle) == address(0)) return;
         if (priceData.length > 0) oracle.update(priceData);
-        FixtureOracle.PriceData memory d = oracle.latest(cfg.underlying);
-        if (uint256(d.publishedAt) + MAX_TRADE_PRICE_AGE < block.timestamp) revert TradePriceTooOld(d.publishedAt, MAX_TRADE_PRICE_AGE);
+        _storedPrice();
+    }
+
+    function _storedPrice() internal {
+        if (address(oracle) == address(0)) return;
+        IPullOracle.PriceData memory d = oracle.latest(cfg.underlying);
         priceWad = d.priceWad;
+        pricePublishedAt = d.publishedAt;
     }
 
     function trade(uint256 marketId, int256 sizeDelta, uint256 acceptablePriceWad, bytes calldata priceData)
@@ -210,6 +143,7 @@ contract FixtureEngine {
     }
 
     function liquidate(uint256 marketId, address trader) external returns (uint256) {
+        _storedPrice();
         return _liquidate(marketId, trader);
     }
 
@@ -268,20 +202,20 @@ contract FixtureEngine {
     }
 
     function trade(uint256 marketId, int256 sizeDelta, uint256 acceptablePriceWad) external returns (uint256 fill, uint256 fee) {
-        if (address(oracle) != address(0)) {
-            FixtureOracle.PriceData memory d = oracle.latest(cfg.underlying);
-            if (uint256(d.publishedAt) + MAX_TRADE_PRICE_AGE < block.timestamp) revert TradePriceTooOld(d.publishedAt, MAX_TRADE_PRICE_AGE);
-            priceWad = d.priceWad;
-        }
+        _storedPrice();
         return _trade(marketId, sizeDelta, acceptablePriceWad);
     }
 
     function _trade(uint256 marketId, int256 sizeDelta, uint256 acceptablePriceWad) internal returns (uint256 fill, uint256 fee) {
-        fill = quotePrice(marketId, sizeDelta);
-        if (sizeDelta > 0 ? fill > acceptablePriceWad : fill < acceptablePriceWad) revert WorsePrice(fill, acceptablePriceWad);
         Position storage p = pos[msg.sender];
         int256 newSize = p.size + sizeDelta;
         bool newRisk = _abs(newSize) > _abs(p.size);
+        // the latency-arbitrage bound (both trade entry points): new risk only on a recent price
+        if (address(oracle) != address(0) && newRisk && uint256(pricePublishedAt) + MAX_TRADE_PRICE_AGE < block.timestamp) {
+            revert StalePrice(cfg.underlying, pricePublishedAt);
+        }
+        fill = quotePrice(marketId, sizeDelta);
+        if (sizeDelta > 0 ? fill > acceptablePriceWad : fill < acceptablePriceWad) revert WorsePrice(fill, acceptablePriceWad);
         if (sizeDelta > 0) st.longSize += sizeDelta;
         else st.shortSize += sizeDelta;
         uint256 exposure = uint256(_abs(netExposureUsd(marketId)));
@@ -359,21 +293,47 @@ contract FixtureDesk {
     error QuoteWidthTooNarrow(uint16 widthBps, uint16 minBps);
     error SkewTooWide(int16 skewBps, int16 maxBps);
     error InventoryLimit(uint256 attemptedUsd, uint256 maxUsd);
+    error OffHoursNewRisk();
 
     FixtureAdapter public immutable adapter;
     address public immutable key;
     uint16 public constant MIN_WIDTH = 10;
     int16 public constant MAX_SKEW = 25;
     uint128 public constant MAX_INVENTORY = 75_000e6;
+    /// config.maxPriceAge: the mandate's off-hours rule (stored price held / older than this)
+    uint256 public constant MAX_PRICE_AGE = 300;
+    /// pull-oracle mode (set by setOracle): a SetQuote needs an in-hours stored price, like mandate.checkQuote
+    IPullOracle public oracle;
+    bytes32 public underlying;
 
     constructor(FixtureAdapter adapter_, address key_) {
         adapter = adapter_;
         key = key_;
     }
 
+    function setOracle(IPullOracle o, bytes32 underlying_) external {
+        oracle = o;
+        underlying = underlying_;
+    }
+
+    /// LOW_GAS.md §1: relays the signed bundle to the oracle, then exactly the execute path.
+    function executeWithPrices(Action calldata a, bytes calldata priceData) external returns (bytes memory) {
+        if (msg.sender != key) revert NotDeskKey(msg.sender);
+        if (priceData.length != 0) oracle.update(priceData);
+        return _execute(a);
+    }
+
     function execute(Action calldata a) external returns (bytes memory) {
         if (msg.sender != key) revert NotDeskKey(msg.sender);
+        return _execute(a);
+    }
+
+    function _execute(Action calldata a) internal returns (bytes memory) {
         if (a.kind == ActionKind.SetQuote) {
+            if (address(oracle) != address(0)) {
+                IPullOracle.PriceData memory d = oracle.latest(underlying);
+                if (d.held || d.publishedAt == 0 || uint256(d.publishedAt) + MAX_PRICE_AGE < block.timestamp) revert OffHoursNewRisk();
+            }
             (uint16 s, int16 k, uint128 m) = abi.decode(a.data, (uint16, int16, uint128));
             if (s < MIN_WIDTH) revert QuoteWidthTooNarrow(s, MIN_WIDTH);
             if (k > MAX_SKEW || k < -MAX_SKEW) revert SkewTooWide(k, MAX_SKEW);

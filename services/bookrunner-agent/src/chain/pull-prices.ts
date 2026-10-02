@@ -187,6 +187,11 @@ export class PullPrices {
     this.now = d.now ?? Date.now;
   }
 
+  /** The clock selections are aged against (unix seconds). */
+  nowSec(): number {
+    return this.now() / 1000;
+  }
+
   /** Every signed update currently obtainable (memoized for memoMs). */
   candidates(): Promise<SignedUpdate[]> {
     const now = this.now();
@@ -263,23 +268,45 @@ export interface DeskPriceData {
 }
 
 /**
- * Which prices a desk action needs: SetQuote only the book's (engine market + mandate.checkQuote off-hours);
- * ReturnToVault none (always allowed, no valuation); every other kind the book's plus every hedge
- * component's (mandate exposure / off-hours checks, desk valueUsd, engine-side recalls).
+ * Which prices a desk action needs (each carried entry costs a signature check + a storage write, so
+ * nothing more): ReturnToVault none (always allowed, no valuation); SetQuote, InventoryToVenue and
+ * InventoryToVault only the book's (mandate off-hours checks; the engine-side liquidity move needs a
+ * fresh market price with open interest); Hedge, Flatten and FundDesk the book's plus every hedge
+ * component's (mandate off-hours, registry valuations of the legs / desk.valueUsd).
  */
 export function deskWant(kind: DeskActionKind, bookPriceId: Hex, componentPriceIds: readonly Hex[]): Hex[] {
   if (kind === DESK_ACTION.ReturnToVault) return [];
-  if (kind === DESK_ACTION.SetQuote) return [bookPriceId];
+  if (!needsComponents(kind)) return [bookPriceId];
   return [bookPriceId, ...componentPriceIds];
 }
 
-export function deskPriceData(
-  prices: PullPrices,
-  o: { bookPriceId: Hex; componentPriceIds: () => Promise<readonly Hex[]>; maxAgeSec: number },
-): DeskPriceData {
+const needsComponents = (kind: DeskActionKind) => kind === DESK_ACTION.Hedge || kind === DESK_ACTION.Flatten || kind === DESK_ACTION.FundDesk;
+
+export interface DeskPriceDataOptions {
+  bookPriceId: Hex;
+  componentPriceIds: () => Promise<readonly Hex[]>;
+  /** signed prices older than this are not carried */
+  maxAgeSec: number;
+  /** the stored on-chain price of an underlying (AttestedOracle.latest) */
+  stored?: (priceId: Hex) => Promise<OraclePoint>;
+  /**
+   * Skip empty work (docs/LOW_GAS.md §4): an action that needs only the book price (SetQuote, inventory
+   * moves) carries nothing while the STORED book price is in-hours and younger than this — someone
+   * (a trader, the mark keeper) already landed it, and the mandate / engine judge on it. 0 = always carry.
+   * Swaps and FundDesk always carry (their oracle-slippage and valuation checks want the latest print).
+   */
+  storedFreshSec?: number;
+}
+
+export function deskPriceData(prices: PullPrices, o: DeskPriceDataOptions): DeskPriceData {
   return {
     async forAction(kind) {
-      const comps = kind === DESK_ACTION.SetQuote || kind === DESK_ACTION.ReturnToVault ? [] : await o.componentPriceIds();
+      if (kind === DESK_ACTION.ReturnToVault) return null;
+      if (!needsComponents(kind) && o.stored && (o.storedFreshSec ?? 0) > 0) {
+        const s = await o.stored(o.bookPriceId).catch(() => null);
+        if (s && !s.held && s.publishedAt > 0 && prices.nowSec() - s.publishedAt < (o.storedFreshSec ?? 0)) return null;
+      }
+      const comps = needsComponents(kind) ? await o.componentPriceIds() : [];
       return prices.priceData(deskWant(kind, o.bookPriceId, comps), o.maxAgeSec);
     },
   };

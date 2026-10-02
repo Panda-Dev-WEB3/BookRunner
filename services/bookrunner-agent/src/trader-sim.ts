@@ -32,7 +32,6 @@ import {
   DEFAULT_MAX_TRADE_PRICE_AGE_SEC,
   LIQUIDATE_WITH_PRICES_SIG,
   TRADE_WITH_PRICES_SIG,
-  configPullAbi,
   supportsFunction,
 } from "./chain/lowgas-abi";
 import { PullPrices, type SignedUpdate, httpBundleSource, pointOf, redisBundleSource, resolvePullMode, toPriceData } from "./chain/pull-prices";
@@ -131,6 +130,7 @@ async function engineLoop(
     await sleep(Math.max(nextDelayMs(rng, env.TRADER_SIM_TRADES_PER_MIN), backoffMs(failures)), signal);
     if (signal.aborted) break;
     let trader: EngineTrader | null = null;
+    let carried = false;
     try {
       const state = await chain.bookState();
       if (state !== lastState) log.info({ book: book.name, state }, "sim: book state");
@@ -179,6 +179,7 @@ async function engineLoop(
       const sizeDelta = action.kind === "close" ? -pos.size : sizeDeltaFor(action.notionalUsd, unitPx, action.side);
       if (sizeDelta === 0n) continue;
       const quote = await quoteAt(sizeDelta);
+      carried = !!priceData;
       const txHash = await trader.trade(marketId, sizeDelta, acceptablePriceWad(quote, sizeDelta, params.slippageBps), priceData);
       failures = 0;
       log.info(
@@ -195,7 +196,7 @@ async function engineLoop(
         "sim: engine trade",
       );
     } catch (err) {
-      const cls = classifyTradeError(revertName(err), errMsg(err));
+      const cls = classifyTradeError(revertName(err), errMsg(err), { carriedPrice: carried });
       if (trader && CLOSE_ONLY_CLASSES.includes(cls)) {
         closeOnlyUntil.set(trader.name, Date.now() + 60_000);
         log.info({ book: book.name, trader: trader.name, cls }, "sim: venue rejects new risk; trader closes only for 60s");
@@ -291,7 +292,7 @@ async function runSim(dep: Deployment, env: SimEnv, log: Logger, signal: AbortSi
       .then((v) => Number(v))
       .catch(() => 300),
     maxTradePriceAgeSec: await pub
-      .readContract({ address: chainCfg, abi: configPullAbi, functionName: "maxTradePriceAge" })
+      .readContract({ address: chainCfg, abi: bookrunnerConfigAbi, functionName: "maxTradePriceAge" })
       .then((v) => Number(v))
       .catch(() => DEFAULT_MAX_TRADE_PRICE_AGE_SEC),
   };

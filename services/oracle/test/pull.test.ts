@@ -2,7 +2,8 @@
 // signed bundle (Redis KEYS.oracleBundle + GET /prices/signed) that consumers carry as `priceData`.
 import { describe, expect, test } from "bun:test";
 import { KEYS, type OracleBundleMsg, SESSIONS_24X7, decodePriceData, encodeSessions, priceId } from "@bookrunner/shared";
-import type { Address } from "viem";
+import { type Address, type Hex, toFunctionSelector } from "viem";
+import { ORACLE_UPDATE_SELECTOR, ViemOracleChain, codeDispatches } from "../src/adapters/chain";
 import { RedisPricePublisher } from "../src/adapters/redis";
 import { loadOracleConfig } from "../src/config";
 import { buildUniverse } from "../src/domain/universe";
@@ -10,7 +11,7 @@ import { createApp } from "../src/http";
 import { buildBundle } from "../src/service";
 import type { OracleSettings } from "../src/service";
 import { recoverPriceSigner } from "../src/signing";
-import { FakeChain, ORACLE_ADDR, ScriptedSource, makeService } from "./fakes";
+import { FakeChain, ORACLE_ADDR, ScriptedSource, makeService, silentLog } from "./fakes";
 
 const T0 = Date.parse("2026-10-01T15:00:00Z");
 const ALWAYS = encodeSessions(SESSIONS_24X7);
@@ -166,6 +167,41 @@ describe("pull mode", () => {
     await expectSignedBy(b, other, h.parts.signerAccount.address);
   });
 
+  test("pull against a pre-low-gas AttestedOracle (no update(bytes)) keeps the heartbeat pushes", async () => {
+    const h = new Harness();
+    h.chain.pullContract = false;
+    await h.start();
+    await h.tick();
+    expect(h.chain.pushes).toHaveLength(1); // nobody could carry the bundle: the stored price must stay fresh
+    const health = h.svc.health();
+    expect(health.pushMode).toBe("pull");
+    expect(health.effectivePushMode).toBe("heartbeat");
+    expect(health.onchain.pushes).toBe(true);
+    expect(health.onchain.pullSupported).toBe(false);
+    expect(h.svc.signedBundle()?.priceIds).toEqual(["NVDA", "TSLA", "RHX2"]); // still published
+    // detected once per contract, not on every discovery refresh
+    await h.svc.setDeployment({ chainId: 31337, oracle: ORACLE_ADDR, chain: h.chain });
+    expect(h.chain.updateChecks).toBe(1);
+    // a redeploy with the pull contract switches to pull
+    h.chain.pullContract = true;
+    await h.svc.setDeployment({ chainId: 31337, oracle: "0x00000000000000000000000000000000000000cc", chain: h.chain });
+    expect(h.svc.effectivePushMode()).toBe("pull");
+    expect(h.chain.updateChecks).toBe(2);
+  });
+
+  test("pull with the pull contract never asks again and never pushes; heartbeat config never checks", async () => {
+    const h = new Harness();
+    await h.start();
+    await h.tick();
+    expect(h.svc.effectivePushMode()).toBe("pull");
+    expect(h.svc.health().onchain.pullSupported).toBe(true);
+    expect(h.chain.pushes).toHaveLength(0);
+    const hb = new Harness({ pushMode: "heartbeat" });
+    await hb.start();
+    expect(hb.chain.updateChecks).toBe(0);
+    expect(hb.svc.effectivePushMode()).toBe("heartbeat");
+  });
+
   test("heartbeat mode keeps today's pushes and publishes the bundle as well", async () => {
     const h = new Harness({ pushMode: "heartbeat" });
     await h.start();
@@ -173,6 +209,24 @@ describe("pull mode", () => {
     expect(h.chain.pushes).toHaveLength(1);
     expect(h.svc.signedBundle()?.priceIds).toEqual(["NVDA", "TSLA", "RHX2"]);
     expect(h.svc.health().onchain.pushes).toBe(true);
+  });
+});
+
+describe("pull-contract detection", () => {
+  test("codeDispatches finds the update(bytes) PUSH4 selector; ViemOracleChain reads the oracle's code", async () => {
+    expect(ORACLE_UPDATE_SELECTOR).toBe(toFunctionSelector("update(bytes)"));
+    expect(ORACLE_UPDATE_SELECTOR.startsWith("0x00")).toBe(false); // a full PUSH4 in the dispatcher
+    const pull = `0x608060405263${ORACLE_UPDATE_SELECTOR.slice(2)}14610010` as Hex;
+    expect(codeDispatches(pull, ORACLE_UPDATE_SELECTOR)).toBe(true);
+    expect(codeDispatches(pull.toUpperCase().replace("0X", "0x") as Hex, ORACLE_UPDATE_SELECTOR)).toBe(true);
+    expect(codeDispatches("0x6080604052631234567814", ORACLE_UPDATE_SELECTOR)).toBe(false);
+    expect(codeDispatches("0x", ORACLE_UPDATE_SELECTOR)).toBe(false);
+    expect(codeDispatches(undefined, ORACLE_UPDATE_SELECTOR)).toBe(false);
+    const pub = { getCode: async () => pull };
+    const chain = new ViemOracleChain(pub as never, {} as never, ORACLE_ADDR, 31337, silentLog);
+    expect(await chain.supportsUpdate()).toBe(true);
+    const legacy = new ViemOracleChain({ getCode: async () => "0x6080604052" } as never, {} as never, ORACLE_ADDR, 31337, silentLog);
+    expect(await legacy.supportsUpdate()).toBe(false);
   });
 });
 

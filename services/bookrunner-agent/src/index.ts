@@ -164,7 +164,13 @@ async function runOnce(ctx: BookContext, env: AgentEnv, baseLog: Logger, bus: Ag
     return componentIds;
   };
   const deskPrices = pull
-    ? deskPriceData(pullPrices, { bookPriceId: ctx.priceIdHex, componentPriceIds, maxAgeSec: env.AGENT_PRICE_DATA_MAX_AGE_SECONDS })
+    ? deskPriceData(pullPrices, {
+        bookPriceId: ctx.priceIdHex,
+        componentPriceIds,
+        maxAgeSec: env.AGENT_PRICE_DATA_MAX_AGE_SECONDS,
+        stored: (id) => ctx.chain.oracleLatest(id),
+        storedFreshSec: env.AGENT_PRICE_DATA_SKIP_IF_STORED_SECONDS,
+      })
     : null;
   log.info({ pull, mode: env.AGENT_PULL_PRICES, oracleUrl: env.ORACLE_URL ?? null }, pull ? "desk actions carry signed prices (executeWithPrices)" : "desk actions use stored prices (execute)");
 

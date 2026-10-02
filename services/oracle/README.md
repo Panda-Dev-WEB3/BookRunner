@@ -17,6 +17,9 @@ recorded in `oracle_prices` (history), and — in heartbeat mode only — sent t
   the transaction that needs them (`PoolEngine.trade/liquidate(..., priceData)`,
   `BookrunnerDesk.executeWithPrices(action, priceData)`, `MarkRegistry.commitAndApply(..., priceData, ...)`),
   which calls `AttestedOracle.update(priceData)` first. `oracle_prices` rows have `pushed_tx = null`.
+  Against a pre-low-gas AttestedOracle (its code has no `update(bytes)`; checked once per contract)
+  nobody could carry the bundle, so the service keeps the heartbeat pushes and warns
+  (`/health`: `effectivePushMode: "heartbeat"`, `onchain.pullSupported: false`) until the redeploy.
 - **`heartbeat`**: the pre-low-gas behaviour, for debugging: pushes on the policy above (receipt awaited,
   tx hash in `pushed_tx`). The sender is the `oracleSigner` account itself. `ORACLE_PUSH_DEVIATION_BPS`
   (default 10) must stay below the cheapest in-house round trip (spread + 2 × taker fee; RHX5: 10 + 2 × 6
@@ -37,6 +40,8 @@ AttestedOracle drops every signature of the old domain. The same JSON is served 
 bun run start        # idles (log + retry) until contracts/deployments/<chain>.json exists
 bun test             # unit tests, no infra
 BKRN_IT=1 DATABASE_URL=.../bkrn_oracle_it REDIS_URL=redis://127.0.0.1:63790/5 bun test test/integration.test.ts
+# pull mode against the production AttestedOracle on a private anvil (contracts/out from scripts/forge.sh build)
+BKRN_IT=1 ORACLE_IT_ANVIL_PORT=8622 bun test test/pull.chain.it.test.ts
 ```
 
 ## Semantics

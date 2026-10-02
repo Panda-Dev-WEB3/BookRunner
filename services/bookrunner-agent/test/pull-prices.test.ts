@@ -4,7 +4,7 @@ import { describe, expect, test } from "bun:test";
 import { KEYS, type OracleBundleMsg, type OraclePriceMsg, type PriceUpdate, decodePriceData, devAccount, encodePriceData, priceId, priceTypedData } from "@bookrunner/shared";
 import { type Address, type Hex, keccak256, toHex } from "viem";
 import type { OraclePoint } from "../src/chain/book-chain";
-import { DESK_ACTION } from "../src/chain/desk-actions";
+import { DESK_ACTION, type DeskActionKind } from "../src/chain/desk-actions";
 import {
   PullPrices,
   bundleUpdates,
@@ -187,11 +187,13 @@ describe("PullPrices provider", () => {
 });
 
 describe("desk action price data", () => {
-  test("SetQuote carries the book price only, ReturnToVault nothing, hedge legs book + components", () => {
+  test("SetQuote / inventory moves carry the book price only, ReturnToVault nothing, swaps + FundDesk book + components", () => {
     const comps = [NVDA, TSLA];
-    expect(deskWant(DESK_ACTION.SetQuote, RHX5, comps)).toEqual([RHX5]);
+    for (const k of [DESK_ACTION.SetQuote, DESK_ACTION.InventoryToVenue, DESK_ACTION.InventoryToVault]) {
+      expect(deskWant(k, RHX5, comps)).toEqual([RHX5]);
+    }
     expect(deskWant(DESK_ACTION.ReturnToVault, RHX5, comps)).toEqual([]);
-    for (const k of [DESK_ACTION.Hedge, DESK_ACTION.Flatten, DESK_ACTION.FundDesk, DESK_ACTION.InventoryToVenue, DESK_ACTION.InventoryToVault]) {
+    for (const k of [DESK_ACTION.Hedge, DESK_ACTION.Flatten, DESK_ACTION.FundDesk]) {
       expect(deskWant(k, RHX5, comps)).toEqual([RHX5, NVDA, TSLA]);
     }
   });
@@ -207,6 +209,9 @@ describe("desk action price data", () => {
     const h = decodePriceData((await d.forAction(DESK_ACTION.Hedge))!);
     expect(h.updates.map((u) => u.underlying)).toEqual([RHX5, NVDA, TSLA]);
     expect(compCalls).toBe(1);
+    const recall = decodePriceData((await d.forAction(DESK_ACTION.InventoryToVault))!);
+    expect(recall.updates.map((u) => u.underlying)).toEqual([RHX5]);
+    expect(compCalls).toBe(1);
     expect(await d.forAction(DESK_ACTION.ReturnToVault)).toBeNull();
     // too old for the bound -> nothing to carry -> plain execute
     const old = deskPriceData(new PullPrices({ sources: [{ name: "redis", get: async () => b }], domain: DOMAIN, now: () => 500_000 }), {
@@ -215,6 +220,56 @@ describe("desk action price data", () => {
       maxAgeSec: 60,
     });
     expect(await old.forAction(DESK_ACTION.SetQuote)).toBeNull();
+  });
+
+  test("skip empty work: book-price-only actions carry nothing while the stored price is fresh and in-hours", async () => {
+    const b = await bundle([upd(RHX5, 315, 1_000), upd(NVDA, 190, 1_000), upd(TSLA, 440, 1_000)]);
+    const p = new PullPrices({ sources: [{ name: "redis", get: async () => b }], domain: DOMAIN, memoMs: 0, now: () => 1_001_000 });
+    let stored: OraclePoint | Error = { priceWad: 1n, publishedAt: 900, held: false, sourceCount: 3 };
+    let storedCalls = 0;
+    const opts = {
+      bookPriceId: RHX5,
+      componentPriceIds: async () => [NVDA, TSLA] as const,
+      maxAgeSec: 60,
+      stored: async () => {
+        storedCalls++;
+        if (stored instanceof Error) throw stored;
+        return stored;
+      },
+      storedFreshSec: 120,
+    };
+    const d = deskPriceData(p, opts);
+    const carried = async (k: DeskActionKind) => {
+      const pd = await d.forAction(k);
+      return pd ? decodePriceData(pd).updates.map((u) => u.underlying) : null;
+    };
+    // stored 101 s old (< 120) and in-hours: SetQuote / inventory moves ride on it
+    expect(await carried(DESK_ACTION.SetQuote)).toBeNull();
+    expect(await carried(DESK_ACTION.InventoryToVenue)).toBeNull();
+    expect(await carried(DESK_ACTION.InventoryToVault)).toBeNull();
+    expect(storedCalls).toBe(3);
+    // swaps and FundDesk always carry the latest prints (oracle-slippage / valuation checks): no stored read
+    expect(await carried(DESK_ACTION.Hedge)).toEqual([RHX5, NVDA, TSLA]);
+    expect(await carried(DESK_ACTION.Flatten)).toEqual([RHX5, NVDA, TSLA]);
+    expect(await carried(DESK_ACTION.FundDesk)).toEqual([RHX5, NVDA, TSLA]);
+    expect(await carried(DESK_ACTION.ReturnToVault)).toBeNull();
+    expect(storedCalls).toBe(3);
+    // stored 151 s old -> carried
+    stored = { priceWad: 1n, publishedAt: 850, held: false, sourceCount: 3 };
+    expect(await carried(DESK_ACTION.SetQuote)).toEqual([RHX5]);
+    // stored fresh but held (session closed on-chain): the fresh print may reopen it -> carried
+    stored = { priceWad: 1n, publishedAt: 990, held: true, sourceCount: 3 };
+    expect(await carried(DESK_ACTION.SetQuote)).toEqual([RHX5]);
+    // never published / the read fails -> carried
+    stored = { priceWad: 0n, publishedAt: 0, held: false, sourceCount: 0 };
+    expect(await carried(DESK_ACTION.SetQuote)).toEqual([RHX5]);
+    stored = new Error("rpc down");
+    expect(await carried(DESK_ACTION.InventoryToVault)).toEqual([RHX5]);
+    // storedFreshSec 0 disables the skip (no stored read at all)
+    stored = { priceWad: 1n, publishedAt: 1_000, held: false, sourceCount: 3 };
+    const n = storedCalls;
+    expect(await deskPriceData(p, { ...opts, storedFreshSec: 0 }).forAction(DESK_ACTION.SetQuote)).not.toBeNull();
+    expect(storedCalls).toBe(n);
   });
 });
 

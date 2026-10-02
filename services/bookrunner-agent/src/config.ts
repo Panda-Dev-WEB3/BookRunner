@@ -68,6 +68,11 @@ export const agentEnvShape = {
   AGENT_PULL_PRICES: z.enum(["auto", "on", "off"]).default("auto"),
   /** Signed prices older than this are not carried (the desk then runs on the stored price). */
   AGENT_PRICE_DATA_MAX_AGE_SECONDS: num(60),
+  /**
+   * SetQuote / inventory moves carry no prices while the stored book price is in-hours and younger than
+   * this (someone else already landed it; well below config.maxPriceAge = 300 s). 0 = always carry.
+   */
+  AGENT_PRICE_DATA_SKIP_IF_STORED_SECONDS: num(120),
   /** Optional oracle service base URL (GET /prices/signed); Redis KEYS.oracleBundle is always read. */
   ORACLE_URL: z.string().optional(),
 

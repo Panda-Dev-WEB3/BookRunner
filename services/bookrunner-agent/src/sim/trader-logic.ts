@@ -131,11 +131,14 @@ export function acceptablePriceWad(quotePriceWad: bigint, sizeDelta: bigint, sli
 export type TradeErrorClass = "stale_price" | "off_hours" | "reduce_only" | "exposure_cap" | "margin" | "price" | "not_live" | "other";
 
 /** Classify a venue rejection (custom error name and/or message) so the sim can back off sensibly. */
-export function classifyTradeError(name: string | null, message: string): TradeErrorClass {
+export function classifyTradeError(name: string | null, message: string, o: { carriedPrice?: boolean } = {}): TradeErrorClass {
   const s = `${name ?? ""} ${message}`.toLowerCase();
-  // pull oracle: the carried price is older than maxTradePriceAge (or the signer rotated) — the next
-  // arrival carries a fresher bundle; not an off-hours signal
-  if (/tooold|too_old|tradepriceage|maxtradepriceage|pricetooold|oldprice|badsigner/.test(s)) return "stale_price";
+  // pull oracle: the in-tx AttestedOracle.update rejected the bundle (signer rotated, signer clock ahead
+  // of the chain) — the next arrival carries a fresher one; not an off-hours signal
+  if (/badsigner|futureprice/.test(s)) return "stale_price";
+  // a trade that carried its price and still got StalePrice: the carried print was past maxTradePriceAge
+  // when mined (PoolEngine reverts StalePrice for it) — retry with a fresher bundle, no close-only period
+  if (o.carriedPrice && /staleprice/.test(s)) return "stale_price";
   if (/stale|held|offhours|off_hours|off-hours|session/.test(s)) return "off_hours";
   if (/reduceonly|reduce_only|reduce-only|newrisk/.test(s)) return "reduce_only";
   if (/exposure|maxnet|inventory|capacity/.test(s)) return "exposure_cap";

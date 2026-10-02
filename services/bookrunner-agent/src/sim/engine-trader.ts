@@ -6,18 +6,14 @@
 // are serialized (one nonce stream per trader across markets).
 
 import type { Logger } from "@bookrunner/shared";
-import { attestedOracleAbi, mockERC20Abi, poolEngineAbi } from "@bookrunner/shared/abi";
+import { mockERC20Abi, poolEngineAbi } from "@bookrunner/shared/abi";
 import { type Abi, type Account, type Address, type Chain, type Hex, type PublicClient, type Transport, type WalletClient, maxUint256 } from "viem";
 import { RECEIPT_POLL_MS } from "../chain/desk-client";
-import { enginePullAbi, mergeAbi } from "../chain/lowgas-abi";
+import { ORACLE_ERRORS, mergeAbi } from "../chain/lowgas-abi";
 import { SerialLock } from "../util";
 
-/** PoolEngine ABI + the trade/liquidate priceData overloads + AttestedOracle errors (in-tx update). */
-export const ENGINE_PULL_ABI: Abi = mergeAbi(
-  poolEngineAbi as unknown as Abi,
-  enginePullAbi,
-  attestedOracleAbi.filter((x) => (x as { type: string }).type === "error") as unknown as Abi,
-);
+/** PoolEngine ABI (both trade / liquidate overloads) + the AttestedOracle errors of the in-tx update. */
+export const ENGINE_PULL_ABI: Abi = mergeAbi(poolEngineAbi as unknown as Abi, ORACLE_ERRORS as unknown as Abi) as Abi;
 
 export interface PoolView {
   reduceOnly: boolean;

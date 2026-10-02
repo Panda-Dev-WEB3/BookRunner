@@ -118,6 +118,8 @@ export class OracleService {
   private readonly skipSince = new Map<string, number>();
   private readonly venueInFlight = new Set<string>();
   private bundle: OracleBundleMsg | null = null;
+  /** the deployed AttestedOracle has update(bytes); false = pre-low-gas contract (pull falls back to pushes) */
+  private pullSupported: boolean | null = null;
 
   private signerActive: boolean | null = null;
   private chainReason = "deployment not loaded";
@@ -158,6 +160,7 @@ export class OracleService {
       this.landed.clear();
       this.latest.clear();
       this.bundle = null;
+      this.pullSupported = null;
       this.chainFailures = 0;
       this.chainBackoffUntil = 0;
     }
@@ -182,6 +185,15 @@ export class OracleService {
       this.signerActive = active;
       this.onchainMinSources = min;
       this.chainReason = active ? "ok" : "signer not registered on AttestedOracle";
+      if (this.pullSupported === null && this.deps.settings.pushMode === "pull" && chain.supportsUpdate) {
+        this.pullSupported = await chain.supportsUpdate();
+        if (!this.pullSupported) {
+          this.log.warn(
+            { oracle: chain.oracle },
+            "ORACLE_PUSH_MODE=pull but the deployed AttestedOracle has no update(bytes) (pre-low-gas deployment): keeping heartbeat pushes",
+          );
+        }
+      }
     } catch (e) {
       if (this.signerActive !== false || this.chainReason === "ok") this.log.warn({ err: errMsg(e) }, "AttestedOracle not readable; on-chain pushes paused");
       this.signerActive = false;
@@ -412,9 +424,18 @@ export class OracleService {
 
   // ------------------------------------------------------------------ on-chain push
 
+  /**
+   * The push mode in force: the configured one, except that pull mode against a pre-low-gas AttestedOracle
+   * (no update(bytes): no consumer can carry the bundle) keeps the heartbeat pushes.
+   */
+  effectivePushMode(): PushMode {
+    if (this.deps.settings.pushMode === "heartbeat") return "heartbeat";
+    return this.ctx?.chain && this.pullSupported === false ? "heartbeat" : "pull";
+  }
+
   /** Heartbeat mode only: pull mode never sends pushMany (the bundle rides in consumers' transactions). */
   private chainUsable(ctx: DeploymentContext, nowMs: number): ctx is DeploymentContext & { chain: OracleChain } {
-    return this.deps.settings.pushMode === "heartbeat" && !!ctx.chain && this.signerActive === true && nowMs >= this.chainBackoffUntil;
+    return this.effectivePushMode() === "heartbeat" && !!ctx.chain && this.signerActive === true && nowMs >= this.chainBackoffUntil;
   }
 
   private async pushCycle(ctx: DeploymentContext, due: OraclePriceMsg[], nowMs: number): Promise<void> {
@@ -497,7 +518,7 @@ export class OracleService {
    * bounds its age (maxTradePriceAge) and the spread covers the residual (docs/LOW_GAS.md §1).
    */
   publicPrice(priceId: string): PublicPriceMsg | null {
-    const landedOnly = this.deps.settings.pushMode === "heartbeat" && !!this.ctx?.chain;
+    const landedOnly = this.effectivePushMode() === "heartbeat" && !!this.ctx?.chain;
     const m = landedOnly ? this.landed.get(priceId) : this.latest.get(priceId);
     return m ? publicView(m) : null;
   }
@@ -524,11 +545,13 @@ export class OracleService {
       universe: this.universe.map((e) => ({ priceId: e.priceId, kind: e.kind, bookIds: e.bookIds, venueSymbols: e.venueSymbols, components: e.components })),
       lastTickAt: this.lastTickAt,
       pushMode: this.deps.settings.pushMode,
+      effectivePushMode: this.effectivePushMode(),
       bundle: this.bundle ? { publishedAt: this.bundle.publishedAt, priceIds: this.bundle.priceIds } : null,
       lastPush: this.lastPush,
       onchain: {
         enabled: !!ctx?.chain,
-        pushes: this.deps.settings.pushMode === "heartbeat" && !!ctx?.chain,
+        pushes: this.effectivePushMode() === "heartbeat" && !!ctx?.chain,
+        pullSupported: this.pullSupported,
         signerRegistered: this.signerActive,
         status: this.chainReason,
         minSources: Math.max(this.deps.settings.minSources, this.onchainMinSources ?? 0),
