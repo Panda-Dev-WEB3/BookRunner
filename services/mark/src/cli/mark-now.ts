@@ -52,20 +52,27 @@ async function run() {
     return;
   }
 
-  const redis = args.dryRun ? null : new Redis(cfg.REDIS_URL, { maxRetriesPerRequest: 2 });
-  redis?.on("error", () => {});
-  const ctx = await wireMark(cfg, log, deployment, pc, redis);
+  // signed prices / venue reports are read even on a dry run (that is what the mark values with)
+  const redis = new Redis(cfg.REDIS_URL, { maxRetriesPerRequest: 2 });
+  redis.on("error", () => {});
+  const ctx = await wireMark(cfg, log, deployment, pc, args.dryRun ? null : redis, redis);
   try {
     const periodEnd = args.period ?? periodEndAt(Number(head.timestamp), ctx.markInterval);
     const out = await ctx.pipeline.run({ bookId: args.bookId, periodEnd }, { dryRun: args.dryRun, allowIncompleteReceipts: args.allowIncompleteReceipts });
     if (out.status === "dry_run") {
       const c = out.computed;
-      console.log(JSON.stringify(toJsonSafe({ status: out.status, block: c.snapshot.blockNumber, input: c.input, pnl: c.pnl, receipts: c.receipts, crossChecks: c.nav }), null, 2));
+      const tx = {
+        priceData: c.tx.priceData,
+        prices: c.tx.prices.map((p) => p.priceId ?? p.underlying),
+        venueReport: c.tx.venueReport,
+        venueSource: c.snapshot.venue.source ?? "adapter",
+      };
+      console.log(JSON.stringify(toJsonSafe({ status: out.status, block: c.snapshot.blockNumber, input: c.input, pnl: c.pnl, receipts: c.receipts, crossChecks: c.nav, tx }), null, 2));
     } else console.log(JSON.stringify(toJsonSafe(out), null, 2));
     if (out.status === "unmarkable") process.exitCode = 2;
   } finally {
     await ctx.close();
-    await redis?.quit().catch(() => undefined);
+    await redis.quit().catch(() => undefined);
   }
 }
 

@@ -2,7 +2,7 @@
 // preview, and the Reporter in OPS_REPORT_MODE=signed (no report tx, hold rules unchanged).
 import { describe, expect, test } from "bun:test";
 import { ACCOUNT, devAccount } from "@bookrunner/shared";
-import { type Address, encodeAbiParameters, getAddress, type Hex, keccak256, parseAbiParameters, stringToHex, toFunctionSelector } from "viem";
+import { type Address, encodeAbiParameters, getAddress, type Hex, keccak256, parseAbiParameters, stringToHex, toFunctionSelector, zeroAddress } from "viem";
 import { codeHasSelector, REPORT_SIGNED_SELECTOR, selectorPush } from "../src/chain";
 import { loadOpsEnv } from "../src/config";
 import {
@@ -22,6 +22,7 @@ import {
   venueReportKey,
   venueReportRecentKey,
   venueReportSignatureValid,
+  verifyVenueReport,
 } from "../src/report712";
 import { handleVenueOpsJob } from "../src/worker/jobs";
 import { accountReportSigner, MemoryReportPublisher, RedisReportPublisher } from "../src/worker/reportSink";
@@ -96,8 +97,28 @@ describe("parseSignedVenueReport", () => {
     expect(parseSignedVenueReport({ ...json, asOf: 0 })).toBeNull();
     expect(parseSignedVenueReport({ ...json, adapter: "0x1234" })).toBeNull();
     expect(parseSignedVenueReport({ ...json, signature: "0xdead" })).toBeNull();
-    const { signer: _s, ...noSigner } = json;
-    expect(parseSignedVenueReport(noSigner)).toBeNull();
+    expect(parseSignedVenueReport({ ...json, signer: "0x1234" })).toBeNull();
+  });
+
+  test("published JSON is a superset of the shared VenueReportMsg (sig + ready-made venueReport)", async () => {
+    const s = await signed();
+    const json = toSignedVenueReportJson(s);
+    expect(json.sig).toBe(s.signature);
+    expect(json.venueReport).toBe(encodeVenueReport(s));
+    expect(decodeVenueReport(json.venueReport)).toEqual({ insuranceUsd: s.insuranceUsd, marginUsd: s.marginUsd, netExposureUsd: s.netExposureUsd, asOf: s.asOf, signature: s.signature });
+  });
+
+  test("a bare VenueReportMsg (no signer, `sig` only): the signer is recovered and bound", async () => {
+    const s = await signed();
+    const { signer: _s, signature: _sig, ...bare } = toSignedVenueReportJson(s);
+    const parsed = parseSignedVenueReport(bare);
+    expect(parsed?.signer).toBe(zeroAddress);
+    expect((await verifyVenueReport(parsed!))?.signer).toBe(OPS.address);
+    // a declared signer that the signature does not recover to is refused
+    expect(await verifyVenueReport({ ...parsed!, signer: devAccount("risk").address })).toBeNull();
+    // tampered values recover to some other address: the caller's OPS_VENUE role check rejects it
+    const tampered = await verifyVenueReport({ ...parsed!, insuranceUsd: parsed!.insuranceUsd + 1n });
+    expect(tampered?.signer).not.toBe(OPS.address);
   });
 });
 

@@ -6,7 +6,7 @@ import type { Address, Hex } from "viem";
 import type { RiskSettings } from "./config";
 import { runMonitorLoop } from "./loop";
 import { BookMonitor } from "./monitor";
-import type { BusPort, ChainPort, Clock, DbBookRow, DiscoveryPort, QueuePort, StorePort, VenueProvider } from "./ports";
+import type { BusPort, ChainPort, Clock, DbBookRow, DiscoveryPort, QueuePort, SignedFeedsPort, StorePort, VenueProvider } from "./ports";
 import type { BookRef } from "./types";
 import { type Sleep, abortableSleep, errMsg } from "./util/async";
 
@@ -32,6 +32,8 @@ export interface SupervisorDeps {
   loadDeployment(): Deployment | null;
   makeChain(dep: Deployment): ChainGateway;
   makeVenues(chain: ChainGateway): VenueProvider;
+  /** Signed prices + venue reports for this deployment (absent: on-chain state only). */
+  makeFeeds?(dep: Deployment): SignedFeedsPort;
 }
 
 interface Handle {
@@ -47,6 +49,7 @@ export class RiskSupervisor {
   private readonly refs = new Map<number, BookRef>();
   private gateway: ChainGateway | null = null;
   private venues: VenueProvider | null = null;
+  private feeds: SignedFeedsPort | null = null;
   private depKey: string | null = null;
   private missingSince: number | null = null;
   private readonly lastWarn = new Map<string, { msg: string; at: number }>();
@@ -101,6 +104,7 @@ export class RiskSupervisor {
       this.refs.clear();
       this.gateway = this.d.makeChain(dep);
       this.venues = this.d.makeVenues(this.gateway);
+      this.feeds = this.d.makeFeeds?.(dep) ?? null;
       this.depKey = key;
       this.d.log.info({ factory: dep.contracts.factory, startBlock: dep.startBlock }, "deployment loaded");
     }
@@ -162,6 +166,8 @@ export class RiskSupervisor {
       settings: this.d.settings,
       log: this.d.log,
       sleep: this.d.sleep,
+      chainId: this.d.chainId,
+      ...(this.feeds ? { feeds: this.feeds } : {}),
     });
     const ac = new AbortController();
     const done = runMonitorLoop(monitor, ac.signal, this.d.settings.intervalMs, () => this.d.clock.nowMs());

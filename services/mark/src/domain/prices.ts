@@ -123,7 +123,9 @@ export function parseOracleBundle(raw: unknown): SignedPrice[] {
     const o = x as Record<string, unknown>;
     if (typeof o.priceData === "string" && isHex(o.priceData)) {
       try {
-        out.push(...decodePriceData(o.priceData));
+        // OracleBundleMsg: priceIds[i] names priceData's i-th update
+        const ids = Array.isArray(o.priceIds) ? o.priceIds : [];
+        out.push(...decodePriceData(o.priceData).map((p, i) => (typeof ids[i] === "string" ? { ...p, priceId: ids[i] as string } : p)));
       } catch {
         /* malformed priceData */
       }
@@ -146,15 +148,26 @@ export function newestByUnderlying(prices: readonly SignedPrice[]): Map<string, 
   return m;
 }
 
+/** AttestedOracle accepts a price published at most this far after block.timestamp (FuturePrice). */
+export const ORACLE_FUTURE_TOLERANCE_SEC = 5n;
+
 /**
  * The signed price to value `underlying` with, when it is newer than what the chain stores (else null:
- * the stored on-chain price is at least as recent and is used). Prices published after the snapshot
- * block (+5 s, the oracle's acceptance window) are ignored — they could not be applied at that block.
+ * the stored on-chain price is at least as recent and is used). `refTs` is the valuation time:
+ * max(snapshot block timestamp, wall clock) — prices are exogenous, so a print newer than an idle chain's
+ * head is the better valuation, and the mark tx (a new block, ~now) can still store it. Prints dated
+ * further in the future than the oracle's acceptance window (+5 s) are ignored: no block would take them.
  */
-export function pickSignedPrice(prices: ReadonlyMap<string, SignedPrice> | undefined, underlying: Hex, onchainPublishedAt: bigint, blockTs: bigint): SignedPrice | null {
+export function pickSignedPrice(prices: ReadonlyMap<string, SignedPrice> | undefined, underlying: Hex, onchainPublishedAt: bigint, refTs: bigint): SignedPrice | null {
   const p = prices?.get(underlying.toLowerCase());
   if (!p) return null;
   if (p.publishedAt <= onchainPublishedAt) return null;
-  if (p.publishedAt > blockTs + 5n) return null;
+  if (p.publishedAt > refTs + ORACLE_FUTURE_TOLERANCE_SEC) return null;
   return p;
+}
+
+/** Valuation reference time for signed prices: the later of the snapshot block and the wall clock (seconds). */
+export function valuationRefTs(blockTs: bigint, nowMs: number): bigint {
+  const now = BigInt(Math.floor(nowMs / 1000));
+  return now > blockTs ? now : blockTs;
 }

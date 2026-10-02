@@ -33,6 +33,7 @@ import {
   recoverTransactionAddress,
   zeroHash,
 } from "viem";
+import { type SignedPrice, newestByUnderlying } from "../../mark/src/domain/prices";
 import { ACTION_FLATTEN, ViemChain } from "../src/adapters/chain";
 import { MANDATE, NVDA_TOKEN, T0, silentLog } from "./fakes";
 
@@ -137,10 +138,15 @@ function fakeProvider(reverts: ReadonlySet<string> = new Set()) {
         const { to, data } = p[0] as { to: Address; data: Hex };
         const abi = ABIS[to.toLowerCase()];
         if (!abi) throw new Error(`no contract at ${to}`);
-        const { functionName } = decodeFunctionData({ abi, data });
+        const { functionName, args } = decodeFunctionData({ abi, data });
         const key = `${to.toLowerCase()}:${functionName}`;
         if (reverts.has(key)) throw new Error(`execution reverted: ${key}`);
         if (key === `${C.usdc}:balanceOf`) return encodeFunctionResult({ abi: erc20Abi, functionName: "balanceOf", result: usd(500) });
+        if (key === `${C.stockRegistry}:valueUsdAt`) {
+          // registry formula for an 18-decimals token with multiplier 1: qty * price / 1e18 / 1e12
+          const [, qty, px] = args as readonly [Address, bigint, bigint];
+          return encodeFunctionResult({ abi, functionName, result: (qty * px) / 10n ** 30n } as never);
+        }
         if (!(key in RESULTS)) throw new Error(`unexpected call ${key}`);
         const out = RESULTS[key];
         return out === undefined ? "0x" : encodeFunctionResult({ abi, functionName, result: out } as never);
@@ -198,14 +204,74 @@ function fakeProvider(reverts: ReadonlySet<string> = new Set()) {
   return { request, sent };
 }
 
-function makeChain(reverts?: ReadonlySet<string>) {
+function makeChain(reverts?: ReadonlySet<string>, nowMs?: number) {
   const provider = fakeProvider(reverts);
   const transport = custom({ request: provider.request });
   const pub = createPublicClient({ chain: localChain, transport, pollingInterval: 5 });
   const wallet = createWalletClient({ chain: localChain, transport, account: devAccount("risk") });
   const dep = { chainId: 31337, startBlock: 0, contracts: C, stockTokens: {}, books: [] } as unknown as Deployment;
-  return { chain: new ViemChain(pub as never, wallet, dep, { txTimeoutMs: 5_000, killLogLookbackBlocks: 0, log: silentLog }), sent: provider.sent };
+  const o = { txTimeoutMs: 5_000, killLogLookbackBlocks: 0, log: silentLog, ...(nowMs !== undefined ? { now: () => nowMs } : {}) };
+  return { chain: new ViemChain(pub as never, wallet, dep, o), sent: provider.sent };
 }
+
+/** A signed print for the NVDA price id (the chain adapter does not verify signatures: the feeds do). */
+const print = (priceUsd: number, publishedAt: number, held = false): SignedPrice => ({
+  priceId: "NVDA",
+  underlying: priceId("NVDA").toLowerCase() as Hex,
+  priceWad: wad(priceUsd),
+  publishedAt: BigInt(publishedAt),
+  held,
+  sourceCount: 3,
+  sourcesHash: zeroHash,
+  signature: `0x${"11".repeat(65)}` as Hex,
+});
+const pricesOf = (...p: SignedPrice[]) => newestByUnderlying(p);
+
+describe("ViemChain reads with the oracle's signed prints (pull oracle, LOW_GAS §1)", () => {
+  test("a signed print newer than the stored price drives the oracle reading and the desk valuation", async () => {
+    const { chain } = makeChain(undefined, (T0 + 60) * 1000);
+    const o = await chain.observe(await chain.loadRef(1), pricesOf(print(200, T0 + 50)));
+    expect(o.oracle).toEqual({ priceWad: wad(200), publishedAt: T0 + 50, held: false, stale: false, source: "signed" });
+    // 10 NVDA at the signed 200 (registry.valueUsdAt) + 500 desk USDC; never the strict desk views
+    expect(o.desk).toEqual({ hedgeNotionalUsd: usd(2_000), valueUsd: usd(2_500), priceStale: false, signedPrices: true });
+  });
+
+  test("the strict desk views reverting (no update landed lately) changes nothing once prints are available", async () => {
+    const { chain } = makeChain(new Set([`${C.desk}:hedgeNotionalUsd`, `${C.desk}:valueUsd`, `${C.oracle}:isStale`]), (T0 + 60) * 1000);
+    const o = await chain.observe(await chain.loadRef(1), pricesOf(print(200, T0 + 50)));
+    expect(o.desk.valueUsd).toBe(usd(2_500));
+    expect(o.desk.priceStale).toBe(false);
+    expect(o.oracle?.source).toBe("signed");
+  });
+
+  test("a print not newer than the stored price is ignored; staleness is judged off-chain", async () => {
+    const { chain } = makeChain(undefined, (T0 + 1_000) * 1000);
+    const o = await chain.observe(await chain.loadRef(1), pricesOf(print(150, T0 - 5)));
+    expect(o.oracle?.source).toBe("chain");
+    expect(o.desk.hedgeNotionalUsd).toBe(usd(1_900)); // stored 190
+    expect(o.desk.priceStale).toBe(true); // stored print is 1000 s old > maxPriceAge 300
+    expect(o.desk.signedPrices).toBe(false);
+    // a held (session closed) signed print reads as off-hours, an old one as stale
+    const held = await chain.observe(await chain.loadRef(1), pricesOf(print(201, T0 + 990, true)));
+    expect(held.oracle).toMatchObject({ held: true, stale: false, source: "signed" });
+    const old = await chain.observe(await chain.loadRef(1), pricesOf(print(201, T0 + 600)));
+    expect(old.oracle).toMatchObject({ stale: true, source: "signed" });
+  });
+
+  test("engine book: the update-then-read eth_call failing keeps the stored-price pool views", async () => {
+    const { chain } = makeChain(undefined, (T0 + 60) * 1000);
+    const ref = { ...(await chain.loadRef(1)), venue: VENUE.POOL_ENGINE };
+    const o = await chain.observe(ref, pricesOf(print(200, T0 + 50)));
+    expect(o.adapter.netExposureUsd).toBe(usd(-20_000));
+    expect(o.adapter.source).toBeUndefined();
+  });
+
+  test("desk holdings for the flatten use the newest price", async () => {
+    const { chain } = makeChain(undefined, (T0 + 60) * 1000);
+    const h = await chain.deskHoldings(await chain.loadRef(1), pricesOf(print(210, T0 + 55)));
+    expect(h[0]).toMatchObject({ priceWad: wad(210), valueUsd: usd(2_100), publishedAt: T0 + 55, signed: true });
+  });
+});
 
 describe("ViemChain reads", () => {
   test("discovery: book ids, components, charter, oracle key", async () => {
@@ -257,7 +323,7 @@ describe("ViemChain reads", () => {
     expect(k?.by.toLowerCase()).toBe(A(0x99));
     const h = await chain.deskHoldings(ref);
     expect(h.map((x) => ({ ...x, token: x.token.toLowerCase() }))).toEqual([
-      { token: NVDA_TOKEN, qtyRaw: 10n * 10n ** 18n, valueUsd: usd(1_900), priceWad: wad(190), multiplierWad: wad(1), decimals: 18 },
+      { token: NVDA_TOKEN, qtyRaw: 10n * 10n ** 18n, valueUsd: usd(1_900), priceWad: wad(190), multiplierWad: wad(1), decimals: 18, publishedAt: T0 },
     ]);
   });
 });

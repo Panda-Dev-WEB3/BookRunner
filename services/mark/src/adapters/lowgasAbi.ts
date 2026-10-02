@@ -1,12 +1,7 @@
-// docs/LOW_GAS.md entry points the mark keeper calls. Kept as local fragments (binding signatures) so the
-// service works whether or not the regenerated ABIs (scripts/gen-abi.ts) already include them.
+// docs/LOW_GAS.md entry points the mark keeper uses beyond the generated ABIs (packages/shared/src/abi).
 import { parseAbi, toFunctionSelector } from "viem";
 
-export const markRegistryLowGasAbi = parseAbi([
-  "struct MarkInput { uint256 bookId; uint64 periodEnd; uint256 navUsd; uint256 deployedValueUsd; uint64 flowNonce; bytes32 inventoryRoot; bytes32 pnlJsonHash; bytes32 receiptsRoot; }",
-  "function commitAndApply(MarkInput m, bytes sig, bytes priceData, bytes venueReport) returns (uint256 markId)",
-]);
-
+/** MarkRegistry.commitAndApply selector (bytecode feature detection on registries that strip revert data). */
 export const COMMIT_AND_APPLY_SELECTOR = toFunctionSelector("commitAndApply((uint256,uint64,uint256,uint256,uint64,bytes32,bytes32,bytes32),bytes,bytes,bytes)");
 
 /**

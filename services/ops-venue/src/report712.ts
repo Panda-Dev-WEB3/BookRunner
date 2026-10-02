@@ -28,6 +28,7 @@ import {
   parseAbiParameters,
   recoverTypedDataAddress,
   stringToHex,
+  zeroAddress,
 } from "viem";
 
 export const VENUE_REPORT_DOMAIN_NAME = "Bookrunner OrderlyAdapter";
@@ -81,7 +82,11 @@ export function recoverVenueReportSigner(chainId: number, adapter: Address, r: V
   return recoverTypedDataAddress({ ...venueReportTypedData(chainId, adapter, r), signature });
 }
 
-/** A signed report as published (all integers as decimal strings; JSON-safe). */
+/**
+ * A signed report as published (all integers as raw 6dp decimal strings; JSON-safe). A superset of
+ * VenueReportMsg (packages/shared queues.ts, KEYS.venueReport): `sig` repeats `signature` and `venueReport`
+ * is the ready-made commitAndApply / reportSigned argument.
+ */
 export interface SignedVenueReportJson {
   v: 1;
   bookId: number;
@@ -93,6 +98,10 @@ export interface SignedVenueReportJson {
   asOf: number;
   signer: Address;
   signature: Hex;
+  /** = signature (VenueReportMsg field name) */
+  sig: Hex;
+  /** abi.encode(insuranceUsd, marginUsd, netExposureUsd, asOf, sig) */
+  venueReport: Hex;
   /** unix ms when ops-venue signed it */
   signedAt: number;
 }
@@ -119,6 +128,8 @@ export function toSignedVenueReportJson(r: SignedVenueReport): SignedVenueReport
     asOf: Number(r.asOf),
     signer: getAddress(r.signer),
     signature: r.signature,
+    sig: r.signature,
+    venueReport: encodeVenueReport(r),
     signedAt: r.signedAt,
   };
 }
@@ -169,8 +180,10 @@ export function parseSignedVenueReport(raw: unknown): SignedVenueReport | null {
   const chainId = bigOf(j.chainId);
   if (insuranceUsd === null || marginUsd === null || netExposureUsd === null || asOf === null || bookId === null || chainId === null) return null;
   if (typeof j.adapter !== "string" || !isAddress(j.adapter, { strict: false })) return null;
-  if (typeof j.signer !== "string" || !isAddress(j.signer, { strict: false })) return null;
-  if (typeof j.signature !== "string" || !isHex(j.signature) || j.signature.length < 132) return null;
+  const signature = j.signature ?? j.sig;
+  if (typeof signature !== "string" || !isHex(signature) || signature.length < 132) return null;
+  // the signer is recoverable from the signature; publishers that omit it get it filled in by the caller's check
+  if (j.signer !== undefined && (typeof j.signer !== "string" || !isAddress(j.signer, { strict: false }))) return null;
   const r: SignedVenueReport = {
     bookId: Number(bookId),
     chainId: Number(chainId),
@@ -179,8 +192,9 @@ export function parseSignedVenueReport(raw: unknown): SignedVenueReport | null {
     marginUsd,
     netExposureUsd,
     asOf,
-    signer: getAddress(j.signer),
-    signature: j.signature as Hex,
+    // no declared signer (a bare VenueReportMsg): zero until verifyVenueReport binds the recovered one
+    signer: typeof j.signer === "string" ? getAddress(j.signer) : zeroAddress,
+    signature: signature as Hex,
     signedAt: typeof j.signedAt === "number" && Number.isFinite(j.signedAt) ? j.signedAt : 0,
   };
   return reportInRange(r) ? r : null;
@@ -188,11 +202,20 @@ export function parseSignedVenueReport(raw: unknown): SignedVenueReport | null {
 
 /** Signature recovers to the address the report names (cheap integrity check; role checks are the caller's). */
 export async function venueReportSignatureValid(r: SignedVenueReport): Promise<boolean> {
+  return (await verifyVenueReport(r)) !== null;
+}
+
+/**
+ * The report with `signer` = the address its signature recovers to over the adapter's domain; null when the
+ * signature is malformed or recovers to another address than a declared signer. Role checks are the caller's.
+ */
+export async function verifyVenueReport(r: SignedVenueReport): Promise<SignedVenueReport | null> {
   try {
     const signer = await recoverVenueReportSigner(r.chainId, r.adapter, r, r.signature);
-    return signer.toLowerCase() === r.signer.toLowerCase();
+    if (r.signer !== zeroAddress && signer.toLowerCase() !== r.signer.toLowerCase()) return null;
+    return { ...r, signer };
   } catch {
-    return false;
+    return null;
   }
 }
 

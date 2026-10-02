@@ -22,14 +22,25 @@ import {
   underwritingVaultAbi,
 } from "@bookrunner/shared/abi";
 import { type BookRef, type TxSender, bookStateName, codeHasSelector, describeRevert, scanEvents } from "@bookrunner/waterfall";
-import { type Abi, type Address, type Hex, type PublicClient, createPublicClient, custom, erc20Abi, isAddressEqual, parseEventLogs } from "viem";
+import { type Abi, type Address, type Hex, type PublicClient, encodeFunctionData, erc20Abi, isAddressEqual, parseEventLogs, zeroHash } from "viem";
 import type { AdapterReportState } from "../../../ops-venue/src/report712";
-import { type SignedPrice, encodePriceData, pickSignedPrice } from "../domain/prices";
+import { type SignedPrice, encodePriceData, pickSignedPrice, valuationRefTs } from "../domain/prices";
 import type { DeskPosition, MarkSnapshot } from "../domain/types";
 import type { AtomicMarkResult, CommittedMark, MarkAppliedEvent, MarkChain, SimulationResult } from "../ports";
-import { COMMIT_AND_APPLY_SELECTOR, markRegistryLowGasAbi, oracleUpdateAsViewAbi } from "./lowgasAbi";
+import { COMMIT_AND_APPLY_SELECTOR } from "./lowgasAbi";
+import { readAfterPriceUpdate, unbatchedClient } from "./priceSim";
 
 const TICKER_RE = /^[A-Z0-9._-]{1,27}$/;
+const EMPTY_MARK: MarkInput = {
+  bookId: 0n,
+  periodEnd: 0n,
+  navUsd: 0n,
+  deployedValueUsd: 0n,
+  flowNonce: 0n,
+  inventoryRoot: zeroHash,
+  pnlJsonHash: zeroHash,
+  receiptsRoot: zeroHash,
+};
 const ERRORS_ABI = [...markRegistryAbi, ...bookAbi, ...attestedOracleAbi, ...orderlyAdapterAbi] as Abi;
 
 type EngineViews = { insuranceUsd: bigint; marginUsd: bigint; netExposureUsd: bigint; deployedValueUsd: bigint; poolCashUsd: bigint; poolEquityUsd: bigint };
@@ -47,9 +58,11 @@ export class MarkChainAdapter implements MarkChain {
     private readonly pc: PublicClient,
     private readonly sender: TxSender,
     private readonly deployment: Deployment,
+    /** wall clock (ms): the valuation reference time for signed prices is max(snapshot block, now) */
+    private readonly now: () => number = Date.now,
   ) {
     for (const [ticker, t] of Object.entries(deployment.stockTokens ?? {})) this.tickers.set(t.token.toLowerCase(), ticker);
-    this.raw = createPublicClient({ chain: pc.chain, transport: custom({ request: (args) => pc.request(args as never) }) }) as PublicClient;
+    this.raw = unbatchedClient(pc);
   }
 
   private get c() {
@@ -154,14 +167,31 @@ export class MarkChainAdapter implements MarkChain {
   // ------------------------------------------------------------------ commitAndApply (LOW_GAS §3)
 
   async supportsCommitAndApply(): Promise<boolean> {
-    this.atomic ??= await codeHasSelector(this.pc, this.c.markRegistry, COMMIT_AND_APPLY_SELECTOR);
+    this.atomic ??= await this.probeCommitAndApply();
     return this.atomic;
+  }
+
+  /**
+   * eth_call of commitAndApply with an empty mark: a registry that has the function reverts with its own
+   * error data (InvalidSignature for the empty signature); one deployed before it reverts with NO data (no
+   * selector match, no fallback). No revert data can also mean an RPC that strips it: then the
+   * registry's bytecode decides (its dispatcher pushes every external selector).
+   */
+  private async probeCommitAndApply(): Promise<boolean> {
+    const data = encodeFunctionData({ abi: markRegistryAbi, functionName: "commitAndApply", args: [EMPTY_MARK, "0x", "0x", "0x"] });
+    try {
+      await this.pc.call({ to: this.c.markRegistry, data });
+      return true;
+    } catch (err) {
+      if (describeRevert(err, ERRORS_ABI).selector) return true;
+      return codeHasSelector(this.pc, this.c.markRegistry, COMMIT_AND_APPLY_SELECTOR);
+    }
   }
 
   private atomicCall(ref: BookRef, input: MarkInput, signature: Hex, priceData: Hex, venueReport: Hex) {
     return {
       address: this.c.markRegistry,
-      abi: markRegistryLowGasAbi as Abi,
+      abi: markRegistryAbi,
       functionName: "commitAndApply",
       args: [input, signature, priceData, venueReport],
       label: `MarkRegistry.commitAndApply(book=${ref.bookId}, periodEnd=${input.periodEnd}, prices=${priceData !== "0x"}, venueReport=${venueReport !== "0x"})`,
@@ -220,6 +250,8 @@ export class MarkChainAdapter implements MarkChain {
       this.pc.readContract({ address: book, abi: bookAbi, functionName: "getCharter", ...b }),
     ]);
     const blockTs = block.timestamp;
+    // signed prices are exogenous: value at the newest one (an idle chain's head may lag the wall clock)
+    const refTs = valuationRefTs(blockTs, this.now());
     const used = new Map<string, SignedPrice>();
     const [vaultIdle, vaultIdleView, seniorSupply, juniorSupply, backstopBalance, mandateTerms, killed] = await Promise.all([
       this.pc.readContract({ address: usdc, abi: erc20Abi, functionName: "balanceOf", args: [vault], ...b }),
@@ -250,7 +282,7 @@ export class MarkChainAdapter implements MarkChain {
     } catch {
       underlyingPrice = null;
     }
-    const signedUnderlying = underlyingPriceId ? pickSignedPrice(prices, underlyingPriceId, onchainUnderlying?.publishedAt ?? 0n, blockTs) : null;
+    const signedUnderlying = underlyingPriceId ? pickSignedPrice(prices, underlyingPriceId, onchainUnderlying?.publishedAt ?? 0n, refTs) : null;
     if (signedUnderlying && underlyingPriceId) {
       underlyingPrice = { priceId: underlyingPriceId, priceWad: signedUnderlying.priceWad, publishedAt: Number(signedUnderlying.publishedAt), held: signedUnderlying.held };
     }
@@ -273,7 +305,7 @@ export class MarkChainAdapter implements MarkChain {
       poolEquityUsd = eq;
       // pool mark-to-market at the signed price (the engine views read the stored oracle price)
       if (signedUnderlying && underlyingPriceId) {
-        const v = await this.engineAtSignedPrice({ adapter, engine, marketId, priceId: underlyingPriceId, price: signedUnderlying, blockNumber });
+        const v = await this.engineAtSignedPrice({ adapter, engine, marketId, priceId: underlyingPriceId, price: signedUnderlying, blockNumber, blockTs });
         if (v) {
           ({ insuranceUsd, marginUsd, netExposureUsd, deployedValueUsd, poolCashUsd, poolEquityUsd } = v);
           source = "engine_signed_price";
@@ -299,7 +331,7 @@ export class MarkChainAdapter implements MarkChain {
     const maxPriceAge = BigInt(await this.maxPriceAge());
     const positions: DeskPosition[] = [];
     for (const token of held) {
-      const { position, signed } = await this.position(token, desk, blockNumber, blockTs, maxPriceAge, prices);
+      const { position, signed } = await this.position(token, desk, blockNumber, refTs, maxPriceAge, prices);
       positions.push(position);
       if (signed) used.set(signed.underlying.toLowerCase(), signed);
     }
@@ -362,49 +394,59 @@ export class MarkChainAdapter implements MarkChain {
 
   /**
    * Engine pool views after AttestedOracle.update(priceData) in the same eth_call (deployless Multicall3 at
-   * the snapshot block; nothing is sent). null when the oracle has no `update` (pre-low-gas), the update did
-   * not take, or the call fails: the caller keeps the stored-price views.
+   * the snapshot block; nothing is sent). A print dated after the snapshot block is applied with the call's
+   * block time overridden to its publishedAt (the oracle refuses prints > 5 s ahead of block.timestamp).
+   * null when the oracle has no `update` (pre-low-gas), the update did not take, the RPC refuses the
+   * override, or the call fails: the caller keeps the stored-price views.
    */
-  private async engineAtSignedPrice(o: { adapter: Address; engine: Address; marketId: bigint; priceId: Hex; price: SignedPrice; blockNumber: bigint }): Promise<EngineViews | null> {
-    try {
-      const res = await this.raw.multicall({
-        deployless: true,
-        allowFailure: true,
-        blockNumber: o.blockNumber,
-        contracts: [
-          { address: this.c.oracle, abi: oracleUpdateAsViewAbi, functionName: "update", args: [encodePriceData([o.price])] },
-          { address: this.c.oracle, abi: attestedOracleAbi, functionName: "latest", args: [o.priceId] },
-          { address: o.adapter, abi: poolEngineAdapterAbi, functionName: "insuranceEquityUsd" },
-          { address: o.adapter, abi: poolEngineAdapterAbi, functionName: "marginEquityUsd" },
-          { address: o.adapter, abi: poolEngineAdapterAbi, functionName: "netExposureUsd" },
-          { address: o.adapter, abi: poolEngineAdapterAbi, functionName: "deployedValueUsd" },
-          { address: o.engine, abi: poolEngineAbi, functionName: "state", args: [o.marketId] },
-          { address: o.engine, abi: poolEngineAbi, functionName: "poolEquityUsd", args: [o.marketId] },
-        ],
-      });
-      if (res.some((r) => r.status !== "success")) return null;
-      const latest = res[1].result as { publishedAt: bigint | number };
-      if (BigInt(latest.publishedAt) !== o.price.publishedAt) return null; // the update was skipped
-      const st = res[6].result as { poolCashUsd: bigint };
-      return {
-        insuranceUsd: res[2].result as bigint,
-        marginUsd: res[3].result as bigint,
-        netExposureUsd: res[4].result as bigint,
-        deployedValueUsd: res[5].result as bigint,
-        poolCashUsd: st.poolCashUsd,
-        poolEquityUsd: res[7].result as bigint,
-      };
-    } catch {
-      return null;
-    }
+  private async engineAtSignedPrice(o: {
+    adapter: Address;
+    engine: Address;
+    marketId: bigint;
+    priceId: Hex;
+    price: SignedPrice;
+    blockNumber: bigint;
+    blockTs: bigint;
+  }): Promise<EngineViews | null> {
+    const res = await readAfterPriceUpdate(this.raw, {
+      oracle: this.c.oracle,
+      priceData: encodePriceData([o.price]),
+      blockNumber: o.blockNumber,
+      ...(o.price.publishedAt > o.blockTs ? { time: o.price.publishedAt } : {}),
+      views: [
+        { address: this.c.oracle, abi: attestedOracleAbi, functionName: "latest", args: [o.priceId] },
+        { address: o.adapter, abi: poolEngineAdapterAbi, functionName: "insuranceEquityUsd" },
+        { address: o.adapter, abi: poolEngineAdapterAbi, functionName: "marginEquityUsd" },
+        { address: o.adapter, abi: poolEngineAdapterAbi, functionName: "netExposureUsd" },
+        { address: o.adapter, abi: poolEngineAdapterAbi, functionName: "deployedValueUsd" },
+        { address: o.engine, abi: poolEngineAbi, functionName: "state", args: [o.marketId] },
+        { address: o.engine, abi: poolEngineAbi, functionName: "poolEquityUsd", args: [o.marketId] },
+      ],
+    });
+    if (!res) return null;
+    const latest = res[0] as { publishedAt: bigint | number };
+    if (BigInt(latest.publishedAt) !== o.price.publishedAt) return null; // the update was skipped
+    const st = res[5] as { poolCashUsd: bigint };
+    return {
+      insuranceUsd: res[1] as bigint,
+      marginUsd: res[2] as bigint,
+      netExposureUsd: res[3] as bigint,
+      deployedValueUsd: res[4] as bigint,
+      poolCashUsd: st.poolCashUsd,
+      poolEquityUsd: res[6] as bigint,
+    };
   }
 
-  /** Stock Token position: signed price when newer than the stored one (valueUsdAt), else the registry valuation. */
+  /**
+   * Stock Token position valued through StockTokenRegistry.valueUsdAt (pure; the multiplier is applied there,
+   * exactly once) at the newest price: the signed one when newer than the stored on-chain one, else the
+   * stored one. Never through the strict valueUsd view (it reverts StalePrice when no update landed lately).
+   */
   private async position(
     token: Address,
     desk: Address,
     blockNumber: bigint,
-    blockTs: bigint,
+    refTs: bigint,
     maxPriceAge: bigint,
     prices?: ReadonlyMap<string, SignedPrice>,
   ): Promise<{ position: DeskPosition; signed: SignedPrice | null }> {
@@ -414,23 +456,11 @@ export class MarkChainAdapter implements MarkChain {
       this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "getToken", args: [token], ...b }),
     ]);
     const latest = await this.pc.readContract({ address: this.c.oracle, abi: attestedOracleAbi, functionName: "latest", args: [info.priceId], ...b });
-    const signed = pickSignedPrice(prices, info.priceId, BigInt(latest.publishedAt), blockTs);
-    let valueUsd: bigint;
-    let priceStale = false;
-    let priceWad = latest.priceWad;
-    if (signed) {
-      priceWad = signed.priceWad;
-      valueUsd = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "valueUsdAt", args: [token, qtyRaw, priceWad], ...b });
-      priceStale = blockTs > signed.publishedAt + maxPriceAge;
-    } else {
-      try {
-        valueUsd = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "valueUsd", args: [token, qtyRaw], ...b });
-      } catch {
-        // StalePrice: value at the last attested price (still via the registry: multiplier applied once there)
-        priceStale = true;
-        valueUsd = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "valueUsdAt", args: [token, qtyRaw, latest.priceWad], ...b });
-      }
-    }
+    const signed = pickSignedPrice(prices, info.priceId, BigInt(latest.publishedAt), refTs);
+    const priceWad = signed ? signed.priceWad : latest.priceWad;
+    const publishedAt = signed ? signed.publishedAt : BigInt(latest.publishedAt);
+    const valueUsd = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "valueUsdAt", args: [token, qtyRaw, priceWad], ...b });
+    const priceStale = publishedAt === 0n || refTs > publishedAt + maxPriceAge;
     return {
       position: {
         token,

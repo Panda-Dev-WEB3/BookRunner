@@ -6,7 +6,7 @@ import { KEYS, type Logger, priceTypedData } from "@bookrunner/shared";
 import { attestedOracleAbi, bookrunnerConfigAbi } from "@bookrunner/shared/abi";
 import type { BookRef } from "@bookrunner/waterfall";
 import { type Address, type Hex, type PublicClient, recoverTypedDataAddress } from "viem";
-import { type SignedVenueReport, VENUE_REPORT_RECENT_MAX, parseSignedVenueReport, venueReportKey, venueReportRecentKey, venueReportSignatureValid } from "../../../ops-venue/src/report712";
+import { type SignedVenueReport, VENUE_REPORT_RECENT_MAX, parseSignedVenueReport, venueReportKey, venueReportRecentKey, verifyVenueReport } from "../../../ops-venue/src/report712";
 import { ORACLE_BUNDLE_KEY, type SignedPrice, parseOracleBundle, parseSignedPrice } from "../domain/prices";
 import type { MarkFeeds } from "../ports";
 
@@ -84,12 +84,13 @@ export class RedisMarkFeeds implements MarkFeeds {
     const seen = new Set<string>();
     const out: SignedVenueReport[] = [];
     for (const raw of [latest, ...recent]) {
-      const r = raw ? parseSignedVenueReport(raw) : null;
-      if (!r || seen.has(r.signature)) continue;
-      seen.add(r.signature);
-      if (r.bookId !== ref.bookId || r.chainId !== this.verify.chainId || r.adapter.toLowerCase() !== ref.components.adapter.toLowerCase()) continue;
-      if (!(await venueReportSignatureValid(r)) || !(await this.verify.isOpsVenue(r.signer))) {
-        this.log.warn({ bookId: ref.bookId, asOf: Number(r.asOf), signer: r.signer }, "venue report with an invalid signature / non-OPS_VENUE signer ignored");
+      const parsed = raw ? parseSignedVenueReport(raw) : null;
+      if (!parsed || seen.has(parsed.signature)) continue;
+      seen.add(parsed.signature);
+      if (parsed.bookId !== ref.bookId || parsed.chainId !== this.verify.chainId || parsed.adapter.toLowerCase() !== ref.components.adapter.toLowerCase()) continue;
+      const r = await verifyVenueReport(parsed);
+      if (!r || !(await this.verify.isOpsVenue(r.signer))) {
+        this.log.warn({ bookId: ref.bookId, asOf: Number(parsed.asOf), signer: r?.signer ?? parsed.signer }, "venue report with an invalid signature / non-OPS_VENUE signer ignored");
         continue;
       }
       out.push(r);

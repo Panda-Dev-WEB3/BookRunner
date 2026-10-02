@@ -39,10 +39,12 @@ import {
   parseAbiParameters,
   zeroHash,
 } from "viem";
+import { readAfterPriceUpdate, unbatchedClient } from "../../../mark/src/adapters/priceSim";
+import { type SignedPrice, encodePriceData, pickSignedPrice } from "../../../mark/src/domain/prices";
 import type { FlattenOrder, Holding } from "../domain/flatten";
 import { stockValueUsd } from "../domain/flatten";
-import { oracleFromChain } from "../domain/oracle";
-import type { ChainPort, DiscoveryPort, KillLog } from "../ports";
+import { oracleFromChain, oracleFromSigned } from "../domain/oracle";
+import type { ChainPort, DiscoveryPort, KillLog, SignedPriceMap } from "../ports";
 import type { BookRef, ChainObservation, OracleReading } from "../types";
 import { Mutex, errMsg } from "../util/async";
 
@@ -55,12 +57,17 @@ export interface ViemChainOptions {
   txTimeoutMs: number;
   killLogLookbackBlocks: number;
   log: Logger;
+  /** wall clock (ms) for off-chain price staleness; default Date.now */
+  now?: () => number;
 }
 
 export class ViemChain implements ChainPort, DiscoveryPort {
   readonly riskAddress: Address;
   private readonly mutex = new Mutex();
   private maxPriceAge: { value: number; at: number } | null = null;
+  /** non-batching client for the update-then-read eth_call */
+  private readonly raw: PublicClient;
+  private readonly now: () => number;
 
   constructor(
     private readonly pub: PublicClient,
@@ -69,6 +76,8 @@ export class ViemChain implements ChainPort, DiscoveryPort {
     private readonly o: ViemChainOptions,
   ) {
     this.riskAddress = wallet.account.address;
+    this.raw = unbatchedClient(pub);
+    this.now = o.now ?? Date.now;
   }
 
   private get c() {
@@ -125,7 +134,7 @@ export class ViemChain implements ChainPort, DiscoveryPort {
 
   // ------------------------------------------------------------------ reads
 
-  async observe(ref: BookRef): Promise<ChainObservation> {
+  async observe(ref: BookRef, prices?: SignedPriceMap): Promise<ChainObservation> {
     const k = ref.components;
     const p = this.pub;
     const [
@@ -164,23 +173,38 @@ export class ViemChain implements ChainPort, DiscoveryPort {
       p.readContract({ address: k.book, abi: bookAbi, functionName: "perfIndex" }),
       p.readContract({ address: k.book, abi: bookAbi, functionName: "trancheNav" }),
     ]);
-    const [oracle, maxPriceAgeSec] = await Promise.all([this.readOracle(ref.priceId), this.readMaxPriceAge()]);
-    const desk =
-      hedgeNotionalUsd !== null && deskValueUsd !== null
-        ? { hedgeNotionalUsd, valueUsd: deskValueUsd, priceStale: false }
-        : await this.deskAtLastPrice(ref);
+    const [chainOracle, maxPriceAgeSec] = await Promise.all([this.readOracle(ref.priceId), this.readMaxPriceAge()]);
+    const nowSec = Math.floor(this.now() / 1000);
+    // pull oracle (LOW_GAS §1): the signed print supersedes an older stored price; staleness off-chain
+    const signedUnderlying = pickSignedPrice(prices, ref.priceId, BigInt(chainOracle?.publishedAt ?? 0), BigInt(nowSec));
+    const oracle = signedUnderlying ? oracleFromSigned(signedUnderlying, nowSec, maxPriceAgeSec) : chainOracle;
+    let desk: ChainObservation["desk"];
+    if (prices && prices.size > 0) desk = await this.deskAtNewestPrices(ref, prices, nowSec, maxPriceAgeSec);
+    else
+      desk =
+        hedgeNotionalUsd !== null && deskValueUsd !== null
+          ? { hedgeNotionalUsd, valueUsd: deskValueUsd, priceStale: false }
+          : await this.deskAtLastPrice(ref);
+    let adapter = { netExposureUsd, deployedValueUsd, insuranceEquityUsd };
+    let adapterSource: NonNullable<ChainObservation["adapter"]["source"]> = "onchain";
+    if (ref.venue === VENUE.POOL_ENGINE && signedUnderlying) {
+      const v = await this.engineAtSignedPrice(ref, signedUnderlying);
+      if (v) {
+        adapter = v;
+        adapterSource = "engine_signed_price";
+      }
+    }
     return {
       bookState: BOOK_STATE[state] ?? "Subscription",
       mandate: { ...mandate },
       killed,
       killReason,
       adapter: {
-        netExposureUsd,
-        deployedValueUsd,
-        insuranceEquityUsd,
+        ...adapter,
         inTransitUsd,
         valuationAt: Number(valuationAt),
         lastFlowAt: ref.venue === VENUE.ORDERLY ? await this.orderlyLastFlowAt(ref) : 0,
+        ...(adapterSource !== "onchain" ? { source: adapterSource } : {}),
       },
       desk,
       vaultIdleUsd,
@@ -192,6 +216,49 @@ export class ViemChain implements ChainPort, DiscoveryPort {
       oracle,
       maxPriceAgeSec,
     };
+  }
+
+  /**
+   * Desk valuation from the signed bundle (LOW_GAS §1): every held token through StockTokenRegistry.valueUsdAt
+   * at its newest price (the signed print when newer than the stored one), plus the desk's USDC. Never the
+   * strict desk views, which revert StalePrice whenever no update landed lately (a quiet pull-oracle market).
+   */
+  private async deskAtNewestPrices(ref: BookRef, prices: SignedPriceMap, nowSec: number, maxPriceAgeSec: number): Promise<ChainObservation["desk"]> {
+    const [holdings, usdc] = await Promise.all([
+      this.deskHoldings(ref, prices),
+      this.pub.readContract({ address: this.c.usdc, abi: erc20Abi, functionName: "balanceOf", args: [ref.components.desk] }),
+    ]);
+    const held = holdings.filter((h) => h.qtyRaw > 0n);
+    const hedge = held.reduce((sum, h) => sum + h.valueUsd, 0n);
+    const priceStale = held.some((h) => !h.publishedAt || nowSec - h.publishedAt > maxPriceAgeSec);
+    return { hedgeNotionalUsd: hedge, valueUsd: usdc + hedge, priceStale, signedPrices: held.some((h) => h.signed === true) };
+  }
+
+  /**
+   * In-house engine: the adapter's pool views after AttestedOracle.update(signed print) in ONE eth_call
+   * (nothing sent; services/mark/src/adapters/priceSim.ts). null keeps the stored-price views.
+   */
+  private async engineAtSignedPrice(ref: BookRef, p: SignedPrice): Promise<{ netExposureUsd: bigint; deployedValueUsd: bigint; insuranceEquityUsd: bigint } | null> {
+    const a = ref.components.adapter;
+    let blockTs: bigint | null = null;
+    try {
+      blockTs = (await this.pub.getBlock({ blockTag: "latest" })).timestamp;
+    } catch {
+      blockTs = null;
+    }
+    const res = await readAfterPriceUpdate(this.raw, {
+      oracle: this.c.oracle,
+      priceData: encodePriceData([p]),
+      ...(blockTs !== null && p.publishedAt > blockTs ? { time: p.publishedAt } : {}),
+      views: [
+        { address: this.c.oracle, abi: attestedOracleAbi, functionName: "latest", args: [ref.priceId] },
+        { address: a, abi: poolEngineAdapterAbi, functionName: "netExposureUsd" },
+        { address: a, abi: poolEngineAdapterAbi, functionName: "deployedValueUsd" },
+        { address: a, abi: poolEngineAdapterAbi, functionName: "insuranceEquityUsd" },
+      ],
+    });
+    if (!res || BigInt((res[0] as { publishedAt: bigint | number }).publishedAt) !== p.publishedAt) return null;
+    return { netExposureUsd: res[1] as bigint, deployedValueUsd: res[2] as bigint, insuranceEquityUsd: res[3] as bigint };
   }
 
   /**
@@ -263,9 +330,10 @@ export class ViemChain implements ChainPort, DiscoveryPort {
     };
   }
 
-  async deskHoldings(ref: BookRef): Promise<Holding[]> {
+  async deskHoldings(ref: BookRef, prices?: SignedPriceMap): Promise<Holding[]> {
     const desk = ref.components.desk;
     const tokens = await this.pub.readContract({ address: desk, abi: bookrunnerDeskAbi, functionName: "heldTokens" });
+    const nowSec = BigInt(Math.floor(this.now() / 1000));
     return Promise.all(
       tokens.map(async (token): Promise<Holding> => {
         const [qtyRaw, info] = await Promise.all([
@@ -273,11 +341,19 @@ export class ViemChain implements ChainPort, DiscoveryPort {
           this.pub.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "getToken", args: [token] }),
         ]);
         let priceWad = 0n;
+        let publishedAt = 0;
         try {
           const l = await this.pub.readContract({ address: this.c.oracle, abi: attestedOracleAbi, functionName: "latest", args: [info.priceId] });
           priceWad = l.priceWad;
+          publishedAt = Number(l.publishedAt);
         } catch (err) {
           this.o.log.warn({ token, err: errMsg(err) }, "no oracle price for desk token");
+        }
+        // pull oracle: the signed print when it is newer than the stored one
+        const signed = pickSignedPrice(prices, info.priceId, BigInt(publishedAt), nowSec);
+        if (signed) {
+          priceWad = signed.priceWad;
+          publishedAt = Number(signed.publishedAt);
         }
         let valueUsd = 0n;
         if (priceWad > 0n && qtyRaw > 0n) {
@@ -293,7 +369,7 @@ export class ViemChain implements ChainPort, DiscoveryPort {
             valueUsd = stockValueUsd(qtyRaw, info.multiplierWad, priceWad, info.decimals);
           }
         }
-        return { token, qtyRaw, valueUsd, priceWad, multiplierWad: info.multiplierWad, decimals: info.decimals };
+        return { token, qtyRaw, valueUsd, priceWad, multiplierWad: info.multiplierWad, decimals: info.decimals, publishedAt, ...(signed ? { signed: true } : {}) };
       }),
     );
   }
