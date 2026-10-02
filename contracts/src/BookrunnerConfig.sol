@@ -66,6 +66,8 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
     bytes32 public constant KEY_MAX_MARK_AGE = "maxMarkAge";
     bytes32 public constant KEY_MAX_PRICE_AGE = "maxPriceAge";
     bytes32 public constant KEY_COMMITTEE_WINDOW = "committeeWindow";
+    /// @notice LOW_GAS.md §1: max age of the price an engine trade adding risk may use (seconds).
+    bytes32 public constant KEY_MAX_TRADE_PRICE_AGE = "maxTradePriceAge";
 
     /// @notice Upper bound on the number of agent bond tiers (keeps `agentTierBond` O(1)-bounded).
     uint256 public constant MAX_TIERS = 16;
@@ -90,6 +92,7 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
     uint32 private _maxPriceAge;
     uint32 private _committeeWindow;
     bool private _newBooksPaused;
+    uint32 private _maxTradePriceAge; // packed with the params above (one slot with maxPriceAge)
     uint256 private _charterFeeUsd;
     uint256 private _sponsorBondBkrn;
     uint256 private _committeeBondBkrn;
@@ -139,6 +142,7 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
         _setParam(KEY_MAX_MARK_AGE, 21_600);
         _setParam(KEY_MAX_PRICE_AGE, 300);
         _setParam(KEY_COMMITTEE_WINDOW, 172_800);
+        _setParam(KEY_MAX_TRADE_PRICE_AGE, 15);
 
         _setVenueMinIf(BRTypes.VENUE_ORDERLY, 25_000e6); // VERIFY: Orderly minimum IF per symbol on RHC
         _setVenueMinIf(BRTypes.VENUE_POOL_ENGINE, 10_000e6);
@@ -173,8 +177,8 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
     }
 
     /// @notice Sets the numeric parameter `key` (one of the `KEY_*` parameter keys).
-    /// @dev Admin only. Range checks: bps <= 1e4; markInterval and maxPriceAge > 0; uint32 params fit
-    ///      uint32. Emits `ParamSet`.
+    /// @dev Admin only. Range checks: bps <= 1e4; markInterval, maxPriceAge and maxTradePriceAge > 0;
+    ///      uint32 params fit uint32. Emits `ParamSet`.
     function setParam(bytes32 key, uint256 value) external onlyRole(DEFAULT_ADMIN_ROLE) {
         _setParam(key, value);
     }
@@ -379,6 +383,16 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
         return _committeeWindow;
     }
 
+    /// @notice Pull-oracle latency-arbitrage bound (LOW_GAS.md §1): an engine trade that adds risk may only
+    ///         use a price with `publishedAt >= block.timestamp - maxTradePriceAge` (default 15 s,
+    ///         timelock-settable via `setParam("maxTradePriceAge", v)`, v > 0). Reductions and liquidations
+    ///         are not bound by it.
+    /// @dev Not part of IBookrunnerConfig (keeps existing config stand-ins compiling); consumers read it
+    ///      through `IBookrunnerConfigTradeAge` (PoolEngine.sol).
+    function maxTradePriceAge() external view returns (uint32) {
+        return _maxTradePriceAge;
+    }
+
     /// @inheritdoc IBookrunnerConfig
     function venueMinIfUsd(uint8 venue) external view returns (uint256) {
         return _venueMinIfUsd[venue];
@@ -462,6 +476,9 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
         } else if (key == KEY_COMMITTEE_WINDOW) {
             _checkMax(key, value, type(uint32).max);
             _committeeWindow = uint32(value);
+        } else if (key == KEY_MAX_TRADE_PRICE_AGE) {
+            _checkNonZeroU32(key, value);
+            _maxTradePriceAge = uint32(value);
         } else {
             revert UnknownKey(key);
         }

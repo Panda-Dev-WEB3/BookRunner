@@ -176,7 +176,10 @@ contract EngineReviewRegressionsTest is EngineBase {
 
     /// @dev New risk needs a price at most NEW_RISK_MAX_PRICE_AGE (60s) old even though maxPriceAge is 300s:
     ///      a stalled push cannot be farmed against the market. Reductions keep working.
+    ///      LOW_GAS.md §1 tightens trades further with config.maxTradePriceAge (default 15 s, covered by
+    ///      EngineLowGasTest); it is lifted above 60 s here so the NEW_RISK_MAX_PRICE_AGE cap is the one bound.
     function test_regression_newRiskNeedsRecentPrice() public {
+        cfg.setMaxTradePriceAge(120);
         _deposit(alice, mA, 5000e6);
         _trade(alice, mA, 10e18);
         uint64 at = oracle.latest(PID_A).publishedAt;

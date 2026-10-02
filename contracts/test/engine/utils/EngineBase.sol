@@ -78,6 +78,27 @@ abstract contract EngineBase is Test {
         _push(pid, price, false);
     }
 
+    /// @dev Pull-oracle bundle (LOW_GAS.md §1): abi.encode(PriceUpdate[], bytes[]) of one signed price.
+    function _priceData(bytes32 pid, uint256 price, uint64 publishedAt, bool held)
+        internal
+        view
+        returns (bytes memory)
+    {
+        return _priceDataBy(SIGNER_PK, pid, price, publishedAt, held);
+    }
+
+    function _priceDataBy(uint256 pk, bytes32 pid, uint256 price, uint64 publishedAt, bool held)
+        internal
+        view
+        returns (bytes memory)
+    {
+        IAttestedOracle.PriceUpdate[] memory us = new IAttestedOracle.PriceUpdate[](1);
+        bytes[] memory sigs = new bytes[](1);
+        us[0] = _update(pid, price, publishedAt, held, held ? 1 : 3);
+        sigs[0] = _sign(pk, us[0]);
+        return abi.encode(us, sigs);
+    }
+
     // ---------------------------------------------------------------- engine helpers
 
     function _defaultCfg(bytes32 pid, uint128 maxNet)

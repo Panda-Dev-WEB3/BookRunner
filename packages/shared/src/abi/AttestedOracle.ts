@@ -471,6 +471,19 @@ export const attestedOracleAbi = [
     "stateMutability": "nonpayable"
   },
   {
+    "type": "function",
+    "name": "update",
+    "inputs": [
+      {
+        "name": "priceData",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
     "type": "event",
     "name": "EIP712DomainChanged",
     "inputs": [],
