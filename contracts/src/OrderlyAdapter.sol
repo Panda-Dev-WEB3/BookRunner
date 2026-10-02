@@ -8,6 +8,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
 import {IOrderlyAdapter, IVenueAdapter} from "./interfaces/IVenueAdapter.sol";
 import {IOrderlyVault} from "./interfaces/external/IOrderlyVault.sol";
@@ -48,6 +50,13 @@ interface IVaultFlowNotify {
 ///           Swept      inTransit -> vault idle (mark-window gated, bumps `book.flowNonce`).
 ///         Reports must also already reflect every on-chain deposit (`asOf >= lastFlowAt` is enforced
 ///         here; ops-venue must additionally wait until the venue has credited `totalDepositedUsd`).
+///
+///         Signed reports (LOW_GAS §2): ops-venue signs the same snapshot off-chain as EIP-712
+///         `VenueReport(uint256 insuranceUsd,int256 marginUsd,int256 netExposureUsd,uint64 asOf)` under the
+///         domain ("Bookrunner OrderlyAdapter", "1", chainId, this proxy) and anyone relays it through
+///         `reportSigned` (typically MarkRegistry.commitAndApply inside the daily mark transaction). The
+///         signer must hold OPS_VENUE; acceptance rules are exactly those of `report`, so the strictly
+///         increasing `asOf` is the replay guard and the domain binds a report to one adapter on one chain.
 ///
 ///         Attribution of USDC sitting on the adapter is principal-first: up to `inTransitUsd` is returned
 ///         principal (vault-bound), then up to `pendingWithdrawUsd` is held for requested-but-unconfirmed
@@ -140,6 +149,14 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     uint64 public constant FEE_SWEEP_LOOKBACK_PERIODS = 2;
     uint256 private constant BPS = 10_000;
 
+    /// @inheritdoc IOrderlyAdapter
+    bytes32 public constant REPORT_TYPEHASH =
+        keccak256("VenueReport(uint256 insuranceUsd,int256 marginUsd,int256 netExposureUsd,uint64 asOf)");
+    bytes32 private constant EIP712_DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+    bytes32 private constant EIP712_NAME_HASH = keccak256("Bookrunner OrderlyAdapter");
+    bytes32 private constant EIP712_VERSION_HASH = keccak256("1");
+
     /// @dev keccak256(abi.encode(uint256(keccak256("bookrunner.storage.OrderlyAdapter")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 private constant STORAGE_LOCATION =
         0xbfdc54f9325019c58409789152d0f65a8a6ec89934e70c876f5b37182d3b8500;
@@ -171,6 +188,8 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     event WithdrawCancelled(uint256 indexed requestNonce, uint8 indexed account, uint256 amount);
     event WithdrawFailed(uint256 indexed requestNonce, uint8 indexed account, uint256 amount);
     event VenueReported(uint256 insuranceUsd, int256 marginUsd, int256 netExposureUsd, uint64 asOf);
+    /// @notice A `reportSigned` report signed by OPS_VENUE holder `signer` was accepted (relayed by `relayer`).
+    event VenueReportRelayed(address indexed signer, address indexed relayer, uint64 asOf);
     event InTransitCleared(uint256 principalReturned, uint256 inTransitRemaining);
     event FeesForwarded(uint256 amount, uint256 stillPending);
     event PendingFeesCancelled(uint256 amount, address indexed by);
@@ -191,6 +210,8 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     error NotFactory();
     error NotVault();
     error NotOpsVenue();
+    error InvalidReportSignature();
+    error NotOpsVenueSigner(address signer);
     error NotTimelock();
     error NotOpsVenueOrTimelock();
     error BookMismatch();
@@ -436,23 +457,77 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     ///      would silently undo it). Values are bounded to 128-bit ranges.
     function report(uint256 insuranceUsd, int256 marginUsd, int256 exposureUsd, uint64 asOf) external {
         _checkOpsVenue();
-        AdapterStorage storage $ = _s();
-        uint256 pending = $.pendingWithdrawUsd[BRTypes.ACCOUNT_IF] + $.pendingWithdrawUsd[BRTypes.ACCOUNT_MM];
-        if (pending != 0) revert WithdrawalPending(pending);
-        if (asOf > block.timestamp) revert ReportInFuture(asOf, uint64(block.timestamp));
-        if (asOf <= $.lastReportAsOf) revert StaleReport(asOf, $.lastReportAsOf);
-        if (asOf < $.lastFlowAt) revert ReportPredatesFlow(asOf, $.lastFlowAt);
-        if (
-            insuranceUsd > type(uint128).max || marginUsd > type(int128).max || marginUsd < type(int128).min
-                || exposureUsd > type(int128).max || exposureUsd < type(int128).min
-        ) revert ReportOutOfRange();
+        _storeReport(insuranceUsd, marginUsd, exposureUsd, asOf);
+    }
 
-        $.insuranceUsd = insuranceUsd;
-        $.marginUsd = marginUsd;
-        $.netExposureUsd = exposureUsd;
-        $.lastReportAsOf = asOf;
+    /// @inheritdoc IOrderlyAdapter
+    /// @dev Anyone relays; `sig` (65-byte, low-s ECDSA over `hashReport(...)`) must recover to an OPS_VENUE
+    ///      holder at relay time (a revoked key's reports stop verifying). Then exactly `report`'s rules:
+    ///      reverts `WithdrawalPending` while any withdrawal is Requested, `ReportInFuture`, `StaleReport`
+    ///      (asOf not strictly after the last report: the replay guard), `ReportPredatesFlow`,
+    ///      `ReportOutOfRange`. Emits `VenueReported` and `VenueReportRelayed(signer, msg.sender, asOf)`.
+    function reportSigned(
+        uint256 insuranceUsd,
+        int256 marginUsd,
+        int256 exposureUsd,
+        uint64 asOf,
+        bytes calldata sig
+    ) external {
+        (address signer, ECDSA.RecoverError err,) =
+            ECDSA.tryRecoverCalldata(hashReport(insuranceUsd, marginUsd, exposureUsd, asOf), sig);
+        if (err != ECDSA.RecoverError.NoError) revert InvalidReportSignature();
+        IBookrunnerConfig cfg = _s().config;
+        if (!cfg.hasRole(cfg.OPS_VENUE_ROLE(), signer)) revert NotOpsVenueSigner(signer);
+        _storeReport(insuranceUsd, marginUsd, exposureUsd, asOf);
+        emit VenueReportRelayed(signer, msg.sender, asOf);
+    }
 
-        emit VenueReported(insuranceUsd, marginUsd, exposureUsd, asOf);
+    /// @inheritdoc IOrderlyAdapter
+    function hashReport(uint256 insuranceUsd, int256 marginUsd, int256 exposureUsd, uint64 asOf)
+        public
+        view
+        returns (bytes32)
+    {
+        return MessageHashUtils.toTypedDataHash(
+            DOMAIN_SEPARATOR(),
+            keccak256(abi.encode(REPORT_TYPEHASH, insuranceUsd, marginUsd, exposureUsd, asOf))
+        );
+    }
+
+    /// @notice EIP-712 domain separator of this adapter proxy: ("Bookrunner OrderlyAdapter", "1",
+    ///         block.chainid, address(this)). Computed per call (proxy address, fork-safe chain id).
+    // solhint-disable-next-line func-name-mixedcase
+    function DOMAIN_SEPARATOR() public view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                EIP712_DOMAIN_TYPEHASH, EIP712_NAME_HASH, EIP712_VERSION_HASH, block.chainid, address(this)
+            )
+        );
+    }
+
+    /// @notice ERC-5267 domain description (name, version, chainId, verifyingContract).
+    function eip712Domain()
+        external
+        view
+        returns (
+            bytes1 fields,
+            string memory name,
+            string memory version,
+            uint256 chainId,
+            address verifyingContract,
+            bytes32 salt,
+            uint256[] memory extensions
+        )
+    {
+        return (
+            hex"0f",
+            "Bookrunner OrderlyAdapter",
+            "1",
+            block.chainid,
+            address(this),
+            bytes32(0),
+            new uint256[](0)
+        );
     }
 
     /// @inheritdoc IVenueAdapter
@@ -809,6 +884,27 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         $.tokenHash = DEFAULT_TOKEN_HASH;
         $.feePeriodFloor = uint64(block.timestamp - (block.timestamp % interval));
         _checkVenueToken($);
+    }
+
+    /// @dev Shared acceptance rules + effects of `report` and `reportSigned` (see `report`).
+    function _storeReport(uint256 insuranceUsd, int256 marginUsd, int256 exposureUsd, uint64 asOf) private {
+        AdapterStorage storage $ = _s();
+        uint256 pending = $.pendingWithdrawUsd[BRTypes.ACCOUNT_IF] + $.pendingWithdrawUsd[BRTypes.ACCOUNT_MM];
+        if (pending != 0) revert WithdrawalPending(pending);
+        if (asOf > block.timestamp) revert ReportInFuture(asOf, uint64(block.timestamp));
+        if (asOf <= $.lastReportAsOf) revert StaleReport(asOf, $.lastReportAsOf);
+        if (asOf < $.lastFlowAt) revert ReportPredatesFlow(asOf, $.lastFlowAt);
+        if (
+            insuranceUsd > type(uint128).max || marginUsd > type(int128).max || marginUsd < type(int128).min
+                || exposureUsd > type(int128).max || exposureUsd < type(int128).min
+        ) revert ReportOutOfRange();
+
+        $.insuranceUsd = insuranceUsd;
+        $.marginUsd = marginUsd;
+        $.netExposureUsd = exposureUsd;
+        $.lastReportAsOf = asOf;
+
+        emit VenueReported(insuranceUsd, marginUsd, exposureUsd, asOf);
     }
 
     function _accountId(uint8 account) private view returns (bytes32) {

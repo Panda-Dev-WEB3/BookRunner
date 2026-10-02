@@ -4,10 +4,18 @@ pragma solidity ^0.8.30;
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {BRTypes} from "./interfaces/BRTypes.sol";
-import {IMarkRegistry} from "./interfaces/IMarkRegistry.sol";
+import {IMarkRegistry, IMarkRegistryAtomic} from "./interfaces/IMarkRegistry.sol";
 import {IBookFactory} from "./interfaces/IBookFactory.sol";
 import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 import {IBook} from "./interfaces/IBook.sol";
+import {IOrderlyAdapter, IVenueAdapter} from "./interfaces/IVenueAdapter.sol";
+
+/// @dev AttestedOracle pull-update entry point (LOW_GAS §1): verifies and stores every signed update in
+///      `priceData` that is newer than the stored one (skips the rest), reverts on a bad signature.
+///      Local minimal interface so this contract does not depend on the frozen IAttestedOracle surface.
+interface IAttestedOracleUpdate {
+    function update(bytes calldata priceData) external;
+}
 
 /// @title MarkRegistry — signed, receipt-rooted period marks.
 /// @notice The mark service signs an EIP-712 `Mark` (domain "Bookrunner MarkRegistry" / "1"); anyone may
@@ -21,8 +29,13 @@ import {IBook} from "./interfaces/IBook.sol";
 ///         no longer equals `book.flowNonce()`, i.e. it can never be applied (Book.applyMark requires the
 ///         current nonce). A capital flow between commit and apply therefore cannot burn the period, while
 ///         an applicable mark can never be equivocated.
+///
+///         One mark transaction per book per period (LOW_GAS §3): `commitAndApply` lets the keeper land the
+///         period's signed oracle prices, the book's signed venue report (Orderly books), the mark commit and
+///         `Book.applyMark` atomically. Book is at its size limit, so the orchestration lives here; `commit`
+///         and `Book.applyMark` stay callable separately.
 /// @dev Typed data mirrored by `packages/shared/src/eip712.ts` (`markTypes`).
-contract MarkRegistry is IMarkRegistry, EIP712 {
+contract MarkRegistry is IMarkRegistryAtomic, EIP712 {
     /// @inheritdoc IMarkRegistry
     bytes32 public constant MARK_TYPEHASH = keccak256(
         "Mark(uint256 bookId,uint64 periodEnd,uint256 navUsd,uint256 deployedValueUsd,uint64 flowNonce,bytes32 inventoryRoot,bytes32 pnlJsonHash,bytes32 receiptsRoot)"
@@ -59,6 +72,11 @@ contract MarkRegistry is IMarkRegistry, EIP712 {
     event MarkSuperseded(
         uint256 indexed bookId, uint256 indexed oldMarkId, uint256 indexed newMarkId, uint64 periodEnd
     );
+    /// @notice `commitAndApply` did not relay a venue report for `bookId` because the adapter already holds
+    ///         one at least as new (`asOf <= valuationAt`), e.g. the same signed report was relayed first.
+    event VenueReportSkipped(
+        uint256 indexed bookId, address indexed adapter, uint64 asOf, uint64 valuationAt
+    );
 
     /// @param config_ BookrunnerConfig.
     constructor(address config_) EIP712("Bookrunner MarkRegistry", "1") {
@@ -93,33 +111,37 @@ contract MarkRegistry is IMarkRegistry, EIP712 {
 
     /// @inheritdoc IMarkRegistry
     function commit(BRTypes.MarkInput calldata m, bytes calldata sig) external returns (uint256 markId) {
-        (address signer, ECDSA.RecoverError err,) = ECDSA.tryRecoverCalldata(hashMark(m), sig);
-        if (err != ECDSA.RecoverError.NoError) revert InvalidSignature();
-        if (!config.hasRole(MARK_SIGNER_ROLE, signer)) revert NotMarkSigner(signer);
+        (markId,) = _commit(m, sig);
+    }
 
-        uint64 periodEnd = m.periodEnd;
-        uint32 interval = config.markInterval();
-        if (periodEnd % interval != 0) revert PeriodNotAligned(periodEnd, interval);
-        uint64 last = lastPeriodEnd[m.bookId];
-        uint256 superseded;
-        if (periodEnd < last || (periodEnd == last && (superseded = _staleLatest(m.bookId)) == 0)) {
-            revert PeriodNotAfterLast(periodEnd, last);
+    /// @inheritdoc IMarkRegistryAtomic
+    /// @dev Anyone. Steps run in order and the whole call reverts if any of them reverts:
+    ///        1. `IAttestedOracleUpdate(config.oracle()).update(priceData)` when `priceData` is non-empty
+    ///           (reverts `NotConfigured("oracle")` if no oracle is set);
+    ///        2. when `venueReport` is non-empty: decodes `(insuranceUsd, marginUsd, netExposureUsd, asOf, sig)`
+    ///           and calls `reportSigned` on `factory.componentsOf(m.bookId).adapter`, unless that adapter's
+    ///           `valuationAt() >= asOf` (the same or a newer report already landed, e.g. the published report
+    ///           relayed by someone else first): then the relay is skipped with `VenueReportSkipped`, so
+    ///           front-running the keeper with its own report cannot grief the mark. Every other rejection
+    ///           (signature, signer, withdrawal pending, report predating a flow, range) reverts the mark;
+    ///        3. `commit(m, sig)` with identical checks (incl. stale-mark replacement);
+    ///        4. `IBook(factory.bookOf(m.bookId)).applyMark(markId)` (state / order / flowNonce checks are the
+    ///           book's; a mark that cannot be applied therefore is not committed either).
+    function commitAndApply(
+        BRTypes.MarkInput calldata m,
+        bytes calldata sig,
+        bytes calldata priceData,
+        bytes calldata venueReport
+    ) external returns (uint256 markId) {
+        if (priceData.length != 0) {
+            address oracle = config.oracle();
+            if (oracle == address(0)) revert NotConfigured("oracle");
+            IAttestedOracleUpdate(oracle).update(priceData);
         }
-        if (periodEnd > block.timestamp) revert PeriodInFuture(periodEnd, block.timestamp);
-        uint32 maxAge = config.maxMarkAge();
-        if (block.timestamp - periodEnd > maxAge) revert MarkTooOld(periodEnd, block.timestamp, maxAge);
-        if (_factory().bookOf(m.bookId) == address(0)) revert UnknownBook(m.bookId);
-
-        markId = ++markCount;
-        BRTypes.Mark storage mk = _marks[markId];
-        mk.input = m;
-        mk.signer = signer;
-        mk.committedAt = uint64(block.timestamp);
-        latestMarkId[m.bookId] = markId;
-        lastPeriodEnd[m.bookId] = periodEnd;
-
-        if (superseded != 0) emit MarkSuperseded(m.bookId, superseded, markId, periodEnd);
-        _emitCommitted(markId, m, signer);
+        if (venueReport.length != 0) _relayVenueReport(m.bookId, venueReport);
+        address book;
+        (markId, book) = _commit(m, sig);
+        IBook(book).applyMark(markId);
     }
 
     /// @notice Whether a commit for `bookId`'s latest committed period would currently be accepted as a
@@ -144,6 +166,55 @@ contract MarkRegistry is IMarkRegistry, EIP712 {
         if (mk.applied) revert AlreadyApplied(markId);
         mk.applied = true;
         emit MarkApplied(markId, bookId);
+    }
+
+    /// @dev `commit` body: verifies and stores `m`; returns its id and the book address.
+    function _commit(BRTypes.MarkInput calldata m, bytes calldata sig)
+        private
+        returns (uint256 markId, address book)
+    {
+        (address signer, ECDSA.RecoverError err,) = ECDSA.tryRecoverCalldata(hashMark(m), sig);
+        if (err != ECDSA.RecoverError.NoError) revert InvalidSignature();
+        if (!config.hasRole(MARK_SIGNER_ROLE, signer)) revert NotMarkSigner(signer);
+
+        uint64 periodEnd = m.periodEnd;
+        uint32 interval = config.markInterval();
+        if (periodEnd % interval != 0) revert PeriodNotAligned(periodEnd, interval);
+        uint64 last = lastPeriodEnd[m.bookId];
+        uint256 superseded;
+        if (periodEnd < last || (periodEnd == last && (superseded = _staleLatest(m.bookId)) == 0)) {
+            revert PeriodNotAfterLast(periodEnd, last);
+        }
+        if (periodEnd > block.timestamp) revert PeriodInFuture(periodEnd, block.timestamp);
+        uint32 maxAge = config.maxMarkAge();
+        if (block.timestamp - periodEnd > maxAge) revert MarkTooOld(periodEnd, block.timestamp, maxAge);
+        book = _factory().bookOf(m.bookId);
+        if (book == address(0)) revert UnknownBook(m.bookId);
+
+        markId = ++markCount;
+        BRTypes.Mark storage mk = _marks[markId];
+        mk.input = m;
+        mk.signer = signer;
+        mk.committedAt = uint64(block.timestamp);
+        latestMarkId[m.bookId] = markId;
+        lastPeriodEnd[m.bookId] = periodEnd;
+
+        if (superseded != 0) emit MarkSuperseded(m.bookId, superseded, markId, periodEnd);
+        _emitCommitted(markId, m, signer);
+    }
+
+    /// @dev Step 2 of `commitAndApply`: relays the signed venue report to the book's adapter (see there).
+    function _relayVenueReport(uint256 bookId, bytes calldata venueReport) private {
+        address adapter = _factory().componentsOf(bookId).adapter;
+        if (adapter == address(0)) revert UnknownBook(bookId);
+        (uint256 insuranceUsd, int256 marginUsd, int256 exposureUsd, uint64 asOf, bytes memory reportSig) =
+            abi.decode(venueReport, (uint256, int256, int256, uint64, bytes));
+        uint64 valuationAt = IVenueAdapter(adapter).valuationAt();
+        if (asOf <= valuationAt) {
+            emit VenueReportSkipped(bookId, adapter, asOf, valuationAt);
+            return;
+        }
+        IOrderlyAdapter(adapter).reportSigned(insuranceUsd, marginUsd, exposureUsd, asOf, reportSig);
     }
 
     /// @dev The book's latest mark id if it exists, is unapplied and was computed against a flowNonce the

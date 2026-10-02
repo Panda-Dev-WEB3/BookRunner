@@ -41,6 +41,23 @@ interface IVenueAdapter {
 interface IOrderlyAdapter is IVenueAdapter {
     /// @notice OPS_VENUE: reported balances from the Orderly API (signed off-chain, stored on-chain).
     function report(uint256 insuranceUsd, int256 marginUsd, int256 netExposureUsd, uint64 asOf) external;
+    /// @notice Anyone may relay a venue report signed off-chain by an OPS_VENUE holder (LOW_GAS §2); same
+    ///         monotonic / WithdrawalPending / lastFlowAt rules as `report`. EIP-712 domain
+    ///         ("Bookrunner OrderlyAdapter", "1", chainId, adapter proxy), primary type `VenueReport`.
+    function reportSigned(
+        uint256 insuranceUsd,
+        int256 marginUsd,
+        int256 netExposureUsd,
+        uint64 asOf,
+        bytes calldata sig
+    ) external;
+    /// @notice keccak256("VenueReport(uint256 insuranceUsd,int256 marginUsd,int256 netExposureUsd,uint64 asOf)")
+    function REPORT_TYPEHASH() external view returns (bytes32);
+    /// @notice EIP-712 digest an OPS_VENUE key signs for `reportSigned`.
+    function hashReport(uint256 insuranceUsd, int256 marginUsd, int256 netExposureUsd, uint64 asOf)
+        external
+        view
+        returns (bytes32);
     /// @notice OPS_VENUE: marks an async withdrawal as executed on Orderly (funds now in flight to adapter).
     function confirmWithdraw(uint256 requestNonce) external;
     /// @notice Timelock: delegate signer EOA used by ops-venue for Orderly API (withdrawal) signatures.

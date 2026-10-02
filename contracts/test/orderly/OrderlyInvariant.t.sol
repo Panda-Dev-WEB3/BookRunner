@@ -39,6 +39,10 @@ contract OrderlyHandler is Test {
     address[] internal actors;
     address[] public strangers;
 
+    /// @dev OPS_VENUE key that signs venue reports off-chain (granted in the constructor) and a roleless key.
+    uint256 internal constant OPS_SIGNER_PK = 0x0B5;
+    uint256 internal constant FORGER_PK = 0xBAD;
+
     // ghosts
     uint256 public ghostFeesAuthorized;
     uint256 public ghostFeesCancelled;
@@ -85,6 +89,7 @@ contract OrderlyHandler is Test {
         actors.push(factory_);
         actors.push(orderlyOperator_);
         ghostMaxCapSeen = adapter_.maxFeeSweepPerPeriodUsd();
+        cfg_.grantRole(cfg_.OPS_VENUE_ROLE(), vm.addr(OPS_SIGNER_PK));
     }
 
     function strangerCount() external view returns (uint256) {
@@ -191,6 +196,25 @@ contract OrderlyHandler is Test {
         vm.prank(_pick(actorSeed, ops));
         try adapter.report(ins, margin, exposure, asOf) {
             ok["adapter.report"]++;
+        } catch {}
+    }
+
+    /// @dev LOW_GAS §2: an off-chain signed report relayed by a random caller. An even seed signs with the
+    ///      OPS_VENUE key, an odd one with a key that holds no role (must never land).
+    function reportSigned(uint256 actorSeed, uint256 ins, int256 margin, int256 exposure, uint256 back)
+        external
+    {
+        calls++;
+        ins = bound(ins, 0, 500_000e6);
+        margin = bound(margin, -100_000e6, 500_000e6);
+        exposure = bound(exposure, -500_000e6, 500_000e6);
+        uint64 asOf = uint64(block.timestamp - bound(back, 0, 30));
+        bool forged = actorSeed % 2 == 1;
+        (uint8 v, bytes32 r, bytes32 s) =
+            vm.sign(forged ? FORGER_PK : OPS_SIGNER_PK, adapter.hashReport(ins, margin, exposure, asOf));
+        vm.prank(_actor(actorSeed >> 1));
+        try adapter.reportSigned(ins, margin, exposure, asOf, abi.encodePacked(r, s, v)) {
+            ok[forged ? "adapter.reportSigned.forged" : "adapter.reportSigned"]++;
         } catch {}
     }
 
@@ -397,6 +421,7 @@ contract OrderlyInvariantTest is OrderlyFixture {
         assertEq(handler.ok("adapter.depositToVenue"), 0);
         assertEq(handler.ok("adapter.requestWithdraw"), 0);
         assertEq(handler.ok("adapter.initialize"), 0);
+        assertEq(handler.ok("adapter.reportSigned.forged"), 0, "report signed by a roleless key landed");
     }
 
     /// @notice Coverage log: shows the handler reaches the success paths, not only reverts.
@@ -412,6 +437,7 @@ contract OrderlyInvariantTest is OrderlyFixture {
         console2.log("fails ok", handler.ok("adapter.failWithdraw"));
         console2.log("sweepToVault >0", handler.ok("sweepToVault"));
         console2.log("reports ok", handler.ok("adapter.report"));
+        console2.log("signed reports ok", handler.ok("adapter.reportSigned"));
         console2.log("sweepFees ok", handler.ok("sweepFees"));
         console2.log("forwardPendingFees >0", handler.ok("forwardPendingFees"));
         console2.log("rescueToken ok", handler.ok("adapter.rescueToken"));
@@ -452,6 +478,13 @@ contract OrderlyRandomSequenceFuzzTest is OrderlyFixture {
         handler.warp(MARK_INTERVAL);
         handler.report(0, 25_000e6, 35_000e6, 0, 0);
         assertEq(handler.ok("adapter.report"), 1, "report");
+        handler.warp(1);
+        handler.reportSigned(0, 25_000e6, 35_000e6, 0, 0);
+        assertEq(handler.ok("adapter.reportSigned"), 1, "signed report");
+        handler.warp(1);
+        handler.reportSigned(1, 25_000e6, 99_000e6, 0, 0);
+        assertEq(handler.ok("adapter.reportSigned.forged"), 0, "forged report rejected");
+        assertEq(adapter.marginEquityUsd(), int256(35_000e6));
         handler.venueCredits(1, 500e6);
         handler.venuePays(1, 500e6);
         handler.sweepFees(0, 1, 300e6);
@@ -469,7 +502,7 @@ contract OrderlyRandomSequenceFuzzTest is OrderlyFixture {
     function testFuzz_randomCallersNeverMoveUsdcOutside(uint256[40] calldata seeds) public {
         for (uint256 i; i < seeds.length; i++) {
             uint256 s = seeds[i];
-            uint256 op = s % 22;
+            uint256 op = s % 23;
             uint256 x = uint256(keccak256(abi.encode(s, 1)));
             uint256 y = uint256(keccak256(abi.encode(s, 2)));
             if (op == 0) handler.deposit(x, y, s >> 8);
@@ -493,9 +526,11 @@ contract OrderlyRandomSequenceFuzzTest is OrderlyFixture {
             else if (op == 18) handler.donate(x, y);
             else if (op == 19) handler.warp(y);
             else if (op == 20) handler.applyMark();
+            else if (op == 21) handler.reportSigned(x, y, int256(s >> 16), -int256(s >> 20), s >> 4);
             else handler.setBookState(y);
         }
         assertEq(usdc.violations(), 0);
+        assertEq(handler.ok("adapter.reportSigned.forged"), 0);
         uint256 held = usdc.balanceOf(address(uwVault)) + usdc.balanceOf(address(adapter))
             + usdc.balanceOf(address(ov)) + usdc.balanceOf(address(router));
         assertEq(usdc.totalSupply(), held);
