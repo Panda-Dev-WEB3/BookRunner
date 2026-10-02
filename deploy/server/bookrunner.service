@@ -1,0 +1,37 @@
+# Bookrunner testnet stack: every service + one agent per book + trader-sim (scripts/dev.ts --network testnet),
+# without the vite dev server (nginx serves the built web app). Installed to /etc/systemd/system/.
+# Shared host: capped so memory pressure only ever slows / restarts Bookrunner, never the host's other services.
+[Unit]
+Description=Bookrunner testnet stack (services + agents)
+Documentation=https://github.com/Panda-Dev-WEB3/BookRunner/tree/main/deploy/server
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=bookrunner
+Group=bookrunner
+WorkingDirectory=/opt/bookrunner/app
+Environment=HOME=/opt/bookrunner
+# the browser origin of the web app (API CORS)
+Environment=WEB_ORIGIN=https://bookrunner.use-cert.com
+ExecStartPre=/usr/bin/docker compose -f deploy/server/docker-compose.yml up -d --wait
+ExecStart=/opt/bookrunner/app/node_modules/.bin/bun scripts/dev.ts --network testnet --no-web
+StandardOutput=append:/opt/bookrunner/app/.data/testnet/dev.log
+StandardError=append:/opt/bookrunner/app/.data/testnet/dev.log
+# dev.ts forwards SIGTERM to every child and exits; anything left gets SIGKILL after the timeout
+KillMode=mixed
+TimeoutStopSec=30
+Restart=always
+RestartSec=10
+MemoryHigh=1300M
+MemoryMax=1536M
+MemorySwapMax=2G
+OOMScoreAdjust=500
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+# Installed to /etc/logrotate.d/bookrunner. copytruncate: the service keeps its file handle (append:).
+/opt/bookrunner/app/.data/testnet/dev.log {
+    daily
+    rotate 7
+    maxsize 200M
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su bookrunner bookrunner
+}
