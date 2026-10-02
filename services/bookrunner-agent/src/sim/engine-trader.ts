@@ -1,12 +1,28 @@
 // One simulated trader account on the in-house PoolEngine: devnet USDC mint (MockERC20), approve,
-// depositMargin, trade with an acceptable price, close. Txs per account are serialized (one nonce
-// stream per trader across markets).
+// depositMargin, trade with an acceptable price, close, liquidate others. Pull oracle (docs/LOW_GAS.md
+// §1): with `pull`, trades and liquidations carry the freshest signed prices through the
+// trade(..., priceData) / liquidate(..., priceData) overloads (the trader pays the oracle update in its
+// own tx); without priceData (or on a legacy engine) the 3-arg trade / 2-arg liquidate. Txs per account
+// are serialized (one nonce stream per trader across markets).
 
 import type { Logger } from "@bookrunner/shared";
 import { mockERC20Abi, poolEngineAbi } from "@bookrunner/shared/abi";
-import { type Account, type Address, type Chain, type Hex, type PublicClient, type Transport, type WalletClient, maxUint256 } from "viem";
+import { type Abi, type Account, type Address, type Chain, type Hex, type PublicClient, type Transport, type WalletClient, maxUint256 } from "viem";
 import { RECEIPT_POLL_MS } from "../chain/desk-client";
+import { ORACLE_ERRORS, mergeAbi } from "../chain/lowgas-abi";
 import { SerialLock } from "../util";
+
+/** PoolEngine ABI (both trade / liquidate overloads) + the AttestedOracle errors of the in-tx update. */
+export const ENGINE_PULL_ABI: Abi = mergeAbi(poolEngineAbi as unknown as Abi, ORACLE_ERRORS as unknown as Abi) as Abi;
+
+export interface PoolView {
+  reduceOnly: boolean;
+  poolExposureUsd: bigint;
+  maxNetExposureUsd: bigint;
+  spreadBps: number;
+  skewBps: number;
+  maintenanceMarginBps: number;
+}
 
 export interface EnginePosition {
   size: bigint;
@@ -27,7 +43,17 @@ export class EngineTrader {
     private readonly log: Logger,
     private readonly timeoutMs: number,
     private readonly canMint: boolean,
+    /** the deployed engine has the priceData overloads (trade / liquidate) */
+    private readonly pull: { trade: boolean; liquidate: boolean } = { trade: false, liquidate: false },
   ) {}
+
+  get pullTrade(): boolean {
+    return this.pull.trade;
+  }
+
+  get pullLiquidate(): boolean {
+    return this.pull.liquidate;
+  }
 
   get address(): Address {
     return this.wallet.account.address;
@@ -46,14 +72,21 @@ export class EngineTrader {
     return { size: p.size, entryPriceWad: p.entryPriceWad, marginUsd: p.marginUsd };
   }
 
-  /** Pool-side gate inputs: reduce-only flag, current pool exposure and its cap (USD 6dp). */
-  async poolView(marketId: bigint): Promise<{ reduceOnly: boolean; poolExposureUsd: bigint; maxNetExposureUsd: bigint }> {
+  /** Pool-side gate inputs: reduce-only flag, current pool exposure and its cap (USD 6dp), quote params. */
+  async poolView(marketId: bigint): Promise<PoolView> {
     const [st, cfg, exp] = await Promise.all([
       this.pub.readContract({ address: this.engine, abi: poolEngineAbi, functionName: "state", args: [marketId] }),
       this.pub.readContract({ address: this.engine, abi: poolEngineAbi, functionName: "config", args: [marketId] }),
       this.pub.readContract({ address: this.engine, abi: poolEngineAbi, functionName: "netExposureUsd", args: [marketId] }),
     ]);
-    return { reduceOnly: st.reduceOnly, poolExposureUsd: exp, maxNetExposureUsd: cfg.maxNetExposureUsd };
+    return {
+      reduceOnly: st.reduceOnly,
+      poolExposureUsd: exp,
+      maxNetExposureUsd: cfg.maxNetExposureUsd,
+      spreadBps: Number(st.spreadBps),
+      skewBps: Number(st.skewBps),
+      maintenanceMarginBps: Number(cfg.maintenanceMarginBps),
+    };
   }
 
   quotePrice(marketId: bigint, sizeDelta: bigint): Promise<bigint> {
@@ -86,17 +119,45 @@ export class EngineTrader {
     });
   }
 
-  /** Simulate then send trade(marketId, sizeDelta, acceptablePriceWad). */
-  trade(marketId: bigint, sizeDelta: bigint, acceptablePriceWad: bigint): Promise<Hex> {
+  /**
+   * Simulate then send trade(marketId, sizeDelta, acceptablePriceWad[, priceData]): the priceData overload
+   * when prices are given and the engine has it, else the 3-arg trade on the stored price.
+   */
+  trade(marketId: bigint, sizeDelta: bigint, acceptablePriceWad: bigint, priceData: Hex | null = null): Promise<Hex> {
     return this.lock.run(async () => {
+      const withPrices = !!priceData && this.pull.trade;
       const { request } = await this.pub.simulateContract({
         account: this.wallet.account,
         address: this.engine,
-        abi: poolEngineAbi,
+        abi: ENGINE_PULL_ABI,
         functionName: "trade",
-        args: [marketId, sizeDelta, acceptablePriceWad],
+        args: withPrices ? [marketId, sizeDelta, acceptablePriceWad, priceData] : [marketId, sizeDelta, acceptablePriceWad],
       });
-      return this.send("trade", () => this.wallet.writeContract(request));
+      return this.send(withPrices ? "trade+prices" : "trade", () => this.wallet.writeContract(request as never));
+    });
+  }
+
+  /**
+   * Liquidate `trader` if the engine accepts it (simulated first; NotLiquidatable etc. -> null, no tx).
+   * Carries priceData through the liquidate(..., priceData) overload when available: the margin check
+   * runs at the fresh price.
+   */
+  liquidate(marketId: bigint, trader: Address, priceData: Hex | null = null): Promise<Hex | null> {
+    return this.lock.run(async () => {
+      const withPrices = !!priceData && this.pull.liquidate;
+      let request: unknown;
+      try {
+        ({ request } = await this.pub.simulateContract({
+          account: this.wallet.account,
+          address: this.engine,
+          abi: ENGINE_PULL_ABI,
+          functionName: "liquidate",
+          args: withPrices ? [marketId, trader, priceData] : [marketId, trader],
+        }));
+      } catch {
+        return null;
+      }
+      return this.send(withPrices ? "liquidate+prices" : "liquidate", () => this.wallet.writeContract(request as never));
     });
   }
 }

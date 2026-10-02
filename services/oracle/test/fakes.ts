@@ -2,7 +2,7 @@ import { type OraclePriceMsg, type PriceUpdate, createLogger, devAccount } from 
 import type { Address, Hex } from "viem";
 import type { OracleChain, PushResult } from "../src/adapters/chain";
 import type { PriceStore } from "../src/adapters/db";
-import type { PricePublisher } from "../src/adapters/redis";
+import type { BundlePublication, PricePublisher } from "../src/adapters/redis";
 import type { BuilderPriceClient } from "../src/adapters/venue";
 import type { PriceSource } from "../src/domain/types";
 import { OracleService, type OracleSettings } from "../src/service";
@@ -37,7 +37,15 @@ export class FakeChain implements OracleChain {
   stored = new Map<string, number>();
   pushes: Array<{ updates: PriceUpdate[]; sigs: Hex[] }> = [];
   failNext: Error | null = null;
+  /** the deployed AttestedOracle has update(bytes) (false = pre-low-gas contract) */
+  pullContract = true;
+  updateChecks = 0;
   private n = 0;
+
+  async supportsUpdate() {
+    this.updateChecks++;
+    return this.pullContract;
+  }
 
   async headTimestamp() {
     if (this.head === null) throw new Error("no chain");
@@ -72,13 +80,15 @@ export class FakeChain implements OracleChain {
 export class FakePublisher implements PricePublisher {
   published: OraclePriceMsg[] = [];
   last = new Map<string, OraclePriceMsg>();
+  bundles: BundlePublication[] = [];
   fail = false;
-  async publish(msgs: readonly OraclePriceMsg[]) {
+  async publish(msgs: readonly OraclePriceMsg[], bundle?: BundlePublication | null) {
     if (this.fail) throw new Error("redis down");
     for (const m of msgs) {
       this.published.push(m);
       this.last.set(m.priceId, m);
     }
+    if (bundle) this.bundles.push(bundle);
   }
   async loadLast(priceId: string) {
     return this.last.get(priceId) ?? null;
@@ -102,6 +112,7 @@ export class FakeVenue implements BuilderPriceClient {
   }
 }
 
+/** Heartbeat mode (the pre-low-gas push behaviour most tests pin); pull-mode tests override pushMode. */
 export const DEFAULT_SETTINGS: OracleSettings = {
   outlierBps: 150,
   minSources: 3,
@@ -111,6 +122,8 @@ export const DEFAULT_SETTINGS: OracleSettings = {
   pushDeviationBps: 25,
   sessionsMode: "24x7",
   venuePrices: true,
+  pushMode: "heartbeat",
+  bundleMaxAgeMs: 300_000,
 };
 
 export function makeService(p: {

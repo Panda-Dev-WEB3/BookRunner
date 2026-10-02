@@ -5,6 +5,24 @@ pragma solidity ^0.8.24;
 // frozen interface signatures the agent calls (IBookrunnerDesk.execute, IPoolEngineAdapter views,
 // IPoolEngine state/config/positionOf/quotePrice/depositMargin/trade + Trade event, MockERC20) with
 // deliberately simplified semantics. Never deployed outside the private test anvil.
+// Low-gas entry points (docs/LOW_GAS.md §1, binding signatures): BookrunnerDesk.executeWithPrices(Action,
+// priceData), PoolEngine.trade(..., priceData) with the maxTradePriceAge bound on new risk (reverting
+// StalePrice like the real engine) and liquidate(..., priceData). Both relay to the REAL AttestedOracle
+// (deployed by the IT from contracts/out) through IPullOracle, so the shared encodePriceData / the
+// oracle service's signatures are verified by the production contract. Semantics simplified, signatures exact.
+
+/// The AttestedOracle surface the fixtures consume (IAttestedOracle.update / latest).
+interface IPullOracle {
+    struct PriceData {
+        uint256 priceWad;
+        uint64 publishedAt;
+        bool held;
+        uint32 sourceCount;
+    }
+
+    function update(bytes calldata priceData) external;
+    function latest(bytes32 underlying) external view returns (PriceData memory);
+}
 
 contract FixtureUSDC {
     mapping(address => uint256) public balanceOf;
@@ -64,22 +82,83 @@ contract FixtureEngine {
     }
 
     event Trade(uint256 indexed marketId, address indexed trader, int256 sizeDelta, uint256 fillPriceWad, uint256 feeUsd, int256 realizedPnlUsd, int256 newSize);
+    event Liquidated(uint256 indexed marketId, address indexed trader, address indexed liquidator, int256 size, uint256 priceWad);
 
     error MaxNetExposure(uint256 attemptedUsd, uint256 maxUsd);
     error WorsePrice(uint256 fill, uint256 acceptable);
+    error StalePrice(bytes32 underlying, uint64 publishedAt);
+    error NoPosition(address trader);
+    error NotLiquidatable(address trader);
 
     FixtureUSDC public immutable usdc;
     uint256 public priceWad = 100e18;
     MarketConfig internal cfg;
     MarketState internal st;
     mapping(address => Position) internal pos;
+    /// pull-oracle mode (set by setOracle): trades / liquidations price from the oracle after the in-tx update
+    IPullOracle public oracle;
+    uint64 internal pricePublishedAt;
+    /// BookrunnerConfig.maxTradePriceAge default: a trade adding risk needs a price at most this old
+    uint256 public constant MAX_TRADE_PRICE_AGE = 15;
 
     constructor(FixtureUSDC usdc_) {
         usdc = usdc_;
         cfg.takerFeeBps = 5;
+        cfg.maintenanceMarginBps = 500;
         cfg.maxNetExposureUsd = 75_000e6;
         st.spreadBps = 10;
         st.poolCashUsd = 100_000e6;
+    }
+
+    function setOracle(IPullOracle o, bytes32 underlying) external {
+        oracle = o;
+        cfg.underlying = underlying;
+    }
+
+    /// pull: oracle.update(priceData) first (when non-empty), then price from the stored oracle value
+    function _pullPrice(bytes calldata priceData) internal {
+        if (address(oracle) == address(0)) return;
+        if (priceData.length > 0) oracle.update(priceData);
+        _storedPrice();
+    }
+
+    function _storedPrice() internal {
+        if (address(oracle) == address(0)) return;
+        IPullOracle.PriceData memory d = oracle.latest(cfg.underlying);
+        priceWad = d.priceWad;
+        pricePublishedAt = d.publishedAt;
+    }
+
+    function trade(uint256 marketId, int256 sizeDelta, uint256 acceptablePriceWad, bytes calldata priceData)
+        external
+        returns (uint256 fill, uint256 fee)
+    {
+        _pullPrice(priceData);
+        return _trade(marketId, sizeDelta, acceptablePriceWad);
+    }
+
+    function liquidate(uint256 marketId, address trader, bytes calldata priceData) external returns (uint256) {
+        _pullPrice(priceData);
+        return _liquidate(marketId, trader);
+    }
+
+    function liquidate(uint256 marketId, address trader) external returns (uint256) {
+        _storedPrice();
+        return _liquidate(marketId, trader);
+    }
+
+    function _liquidate(uint256 marketId, address trader) internal returns (uint256) {
+        Position storage p = pos[trader];
+        if (p.size == 0) revert NoPosition(trader);
+        int256 equity = int256(p.marginUsd) + (p.size * (int256(priceWad) - int256(p.entryPriceWad))) / 1e30;
+        uint256 required = (uint256(_abs(p.size)) * priceWad / 1e30) * cfg.maintenanceMarginBps / 10_000;
+        if (equity >= int256(required)) revert NotLiquidatable(trader);
+        if (p.size > 0) st.longSize -= p.size;
+        else st.shortSize -= p.size;
+        emit Liquidated(marketId, trader, msg.sender, p.size, priceWad);
+        p.size = 0;
+        p.marginUsd = equity > 0 ? uint256(equity) : 0;
+        return 0;
     }
 
     function setQuote(uint256, uint16 spreadBps, int16 skewBps, uint128 maxNetExposureUsd) external {
@@ -123,11 +202,20 @@ contract FixtureEngine {
     }
 
     function trade(uint256 marketId, int256 sizeDelta, uint256 acceptablePriceWad) external returns (uint256 fill, uint256 fee) {
-        fill = quotePrice(marketId, sizeDelta);
-        if (sizeDelta > 0 ? fill > acceptablePriceWad : fill < acceptablePriceWad) revert WorsePrice(fill, acceptablePriceWad);
+        _storedPrice();
+        return _trade(marketId, sizeDelta, acceptablePriceWad);
+    }
+
+    function _trade(uint256 marketId, int256 sizeDelta, uint256 acceptablePriceWad) internal returns (uint256 fill, uint256 fee) {
         Position storage p = pos[msg.sender];
         int256 newSize = p.size + sizeDelta;
         bool newRisk = _abs(newSize) > _abs(p.size);
+        // the latency-arbitrage bound (both trade entry points): new risk only on a recent price
+        if (address(oracle) != address(0) && newRisk && uint256(pricePublishedAt) + MAX_TRADE_PRICE_AGE < block.timestamp) {
+            revert StalePrice(cfg.underlying, pricePublishedAt);
+        }
+        fill = quotePrice(marketId, sizeDelta);
+        if (sizeDelta > 0 ? fill > acceptablePriceWad : fill < acceptablePriceWad) revert WorsePrice(fill, acceptablePriceWad);
         if (sizeDelta > 0) st.longSize += sizeDelta;
         else st.shortSize += sizeDelta;
         uint256 exposure = uint256(_abs(netExposureUsd(marketId)));
@@ -205,21 +293,47 @@ contract FixtureDesk {
     error QuoteWidthTooNarrow(uint16 widthBps, uint16 minBps);
     error SkewTooWide(int16 skewBps, int16 maxBps);
     error InventoryLimit(uint256 attemptedUsd, uint256 maxUsd);
+    error OffHoursNewRisk();
 
     FixtureAdapter public immutable adapter;
     address public immutable key;
     uint16 public constant MIN_WIDTH = 10;
     int16 public constant MAX_SKEW = 25;
     uint128 public constant MAX_INVENTORY = 75_000e6;
+    /// config.maxPriceAge: the mandate's off-hours rule (stored price held / older than this)
+    uint256 public constant MAX_PRICE_AGE = 300;
+    /// pull-oracle mode (set by setOracle): a SetQuote needs an in-hours stored price, like mandate.checkQuote
+    IPullOracle public oracle;
+    bytes32 public underlying;
 
     constructor(FixtureAdapter adapter_, address key_) {
         adapter = adapter_;
         key = key_;
     }
 
+    function setOracle(IPullOracle o, bytes32 underlying_) external {
+        oracle = o;
+        underlying = underlying_;
+    }
+
+    /// LOW_GAS.md §1: relays the signed bundle to the oracle, then exactly the execute path.
+    function executeWithPrices(Action calldata a, bytes calldata priceData) external returns (bytes memory) {
+        if (msg.sender != key) revert NotDeskKey(msg.sender);
+        if (priceData.length != 0) oracle.update(priceData);
+        return _execute(a);
+    }
+
     function execute(Action calldata a) external returns (bytes memory) {
         if (msg.sender != key) revert NotDeskKey(msg.sender);
+        return _execute(a);
+    }
+
+    function _execute(Action calldata a) internal returns (bytes memory) {
         if (a.kind == ActionKind.SetQuote) {
+            if (address(oracle) != address(0)) {
+                IPullOracle.PriceData memory d = oracle.latest(underlying);
+                if (d.held || d.publishedAt == 0 || uint256(d.publishedAt) + MAX_PRICE_AGE < block.timestamp) revert OffHoursNewRisk();
+            }
             (uint16 s, int16 k, uint128 m) = abi.decode(a.data, (uint16, int16, uint128));
             if (s < MIN_WIDTH) revert QuoteWidthTooNarrow(s, MIN_WIDTH);
             if (k > MAX_SKEW || k < -MAX_SKEW) revert SkewTooWide(k, MAX_SKEW);

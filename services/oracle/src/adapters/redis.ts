@@ -1,9 +1,17 @@
-// Redis publication: latest message under KEYS.oracleLast(priceId), fan-out on CHANNELS.oraclePrice.
-import { CHANNELS, KEYS, type Logger, type OraclePriceMsg } from "@bookrunner/shared";
+// Redis publication: latest message under KEYS.oracleLast(priceId), fan-out on CHANNELS.oraclePrice,
+// and the pull-oracle bundle under KEYS.oracleBundle (expires with the oracle: no stale bundle survives it).
+import { CHANNELS, KEYS, type Logger, type OracleBundleMsg, type OraclePriceMsg } from "@bookrunner/shared";
 import { Redis } from "ioredis";
 
+export interface BundlePublication {
+  msg: OracleBundleMsg;
+  /** key expiry: consumers fall back to their non-pull path once the oracle stops publishing */
+  ttlMs: number;
+}
+
 export interface PricePublisher {
-  publish(msgs: readonly OraclePriceMsg[]): Promise<void>;
+  /** One round trip: per-price keys + channels and (when given) the signed bundle. */
+  publish(msgs: readonly OraclePriceMsg[], bundle?: BundlePublication | null): Promise<void>;
   loadLast(priceId: string): Promise<OraclePriceMsg | null>;
 }
 
@@ -28,14 +36,15 @@ export function createRedis(url: string, log: Logger): Redis {
 export class RedisPricePublisher implements PricePublisher {
   constructor(private readonly redis: Redis) {}
 
-  async publish(msgs: readonly OraclePriceMsg[]): Promise<void> {
-    if (msgs.length === 0) return;
+  async publish(msgs: readonly OraclePriceMsg[], bundle?: BundlePublication | null): Promise<void> {
+    if (msgs.length === 0 && !bundle) return;
     const p = this.redis.pipeline();
     for (const m of msgs) {
       const json = JSON.stringify(m);
       p.set(KEYS.oracleLast(m.priceId), json);
       p.publish(CHANNELS.oraclePrice(m.priceId), json);
     }
+    if (bundle) p.set(KEYS.oracleBundle, JSON.stringify(bundle.msg), "PX", Math.max(1_000, Math.floor(bundle.ttlMs)));
     const res = await p.exec();
     const failed = res?.find(([err]) => err);
     if (failed?.[0]) throw failed[0];

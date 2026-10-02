@@ -63,11 +63,26 @@ export const agentEnvShape = {
   AGENT_QUOTE_SAMPLE_MS: num(1_000),
   AGENT_QUOTE_RECEIPT_MS: num(5_000),
 
-  // engine venue (desk SetQuote)
-  ENGINE_MIN_RESEND_MS: num(5_000),
-  ENGINE_REFRESH_MS: num(60_000),
-  ENGINE_SPREAD_THRESHOLD_BPS: num(2),
-  ENGINE_SKEW_THRESHOLD_BPS: num(2),
+  // pull oracle (docs/LOW_GAS.md §1): desk actions carry the freshest signed prices
+  /** auto: executeWithPrices when the deployed desk has it; on: always; off: plain execute (stored prices). */
+  AGENT_PULL_PRICES: z.enum(["auto", "on", "off"]).default("auto"),
+  /** Signed prices older than this are not carried (the desk then runs on the stored price). */
+  AGENT_PRICE_DATA_MAX_AGE_SECONDS: num(60),
+  /**
+   * SetQuote / inventory moves carry no prices while the stored book price is in-hours and younger than
+   * this (someone else already landed it; well below config.maxPriceAge = 300 s). 0 = always carry.
+   */
+  AGENT_PRICE_DATA_SKIP_IF_STORED_SECONDS: num(120),
+  /** Optional oracle service base URL (GET /prices/signed); Redis KEYS.oracleBundle is always read. */
+  ORACLE_URL: z.string().optional(),
+
+  // engine venue (desk SetQuote) — low-gas defaults (docs/LOW_GAS.md §4): re-quote only on a >= 5 bps
+  // spread/skew move or a >= 5% exposure-cap step, at most once a minute (urgent capacity cuts and
+  // out-of-mandate corrections are immediate), unchanged-but-different params refreshed every 15 min
+  ENGINE_MIN_RESEND_MS: num(60_000),
+  ENGINE_REFRESH_MS: num(900_000),
+  ENGINE_SPREAD_THRESHOLD_BPS: num(5),
+  ENGINE_SKEW_THRESHOLD_BPS: num(5),
   ENGINE_EXPOSURE_STEP_BPS: num(500),
   ENGINE_FAILURE_BACKOFF_MS: num(15_000),
   ENGINE_FILL_LOOKBACK_BLOCKS: num(600),
@@ -161,7 +176,11 @@ export function hedgeConfigFrom(env: AgentEnv): HedgePlannerConfig {
 
 export const simEnvShape = {
   TRADER_SIM_BOOKS: z.string().optional(), // comma-separated book ids (default: all launch books)
-  TRADER_SIM_TRADES_PER_MIN: num(6), // per book
+  /** per book; default 6 on the local devnet (31337), 1 elsewhere (docs/LOW_GAS.md §4: demo traffic) */
+  TRADER_SIM_TRADES_PER_MIN: z.coerce.number().positive().optional(),
+  /** auto: PoolEngine.trade/liquidate(..., priceData) when the deployed engine has them; on / off */
+  TRADER_SIM_PULL_PRICES: z.enum(["auto", "on", "off"]).default("auto"),
+  ORACLE_URL: z.string().optional(),
   TRADER_SIM_MIN_NOTIONAL_USD: num(200),
   TRADER_SIM_MAX_NOTIONAL_USD: num(3_000),
   TRADER_SIM_CLOSE_PROB: num(0.15),
@@ -177,7 +196,12 @@ export const simEnvShape = {
   TX_RECEIPT_TIMEOUT_MS: num(60_000),
 };
 
+export const DEVNET_SIM_TRADES_PER_MIN = 6;
+export const TESTNET_SIM_TRADES_PER_MIN = 1;
+
 export function loadSimEnv(source: Record<string, string | undefined> = process.env) {
-  return parseEnv(simEnvShape, source);
+  const env = parseEnv(simEnvShape, source);
+  const tradesPerMin = env.TRADER_SIM_TRADES_PER_MIN ?? (env.CHAIN_ID === 31337 ? DEVNET_SIM_TRADES_PER_MIN : TESTNET_SIM_TRADES_PER_MIN);
+  return { ...env, TRADER_SIM_TRADES_PER_MIN: tradesPerMin };
 }
 export type SimEnv = ReturnType<typeof loadSimEnv>;

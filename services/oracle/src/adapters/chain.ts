@@ -2,7 +2,7 @@
 // used by discovery (IBook.getCharter, StockTokenRegistry.getIndex / getToken).
 import type { Logger, PriceUpdate } from "@bookrunner/shared";
 import { attestedOracleAbi, bookAbi, stockTokenRegistryAbi } from "@bookrunner/shared/abi";
-import type { Account, Address, Chain, Hex, PublicClient, Transport, WalletClient } from "viem";
+import { type Account, type Address, type Chain, type Hex, type PublicClient, type Transport, type WalletClient, toFunctionSelector } from "viem";
 import type { ChainReader, CharterView } from "../discovery";
 
 export interface PushResult {
@@ -20,6 +20,21 @@ export interface OracleChain {
   /** stored publishedAt (unix s) for an oracle key; 0 when never pushed */
   latestPublishedAt(underlying: Hex): Promise<number>;
   pushMany(updates: readonly PriceUpdate[], sigs: readonly Hex[]): Promise<PushResult>;
+  /**
+   * Whether the deployed AttestedOracle has the pull entry point `update(bytes)` (docs/LOW_GAS.md §1).
+   * A pre-low-gas deployment does not, and neither do its consumers: pull mode then keeps heartbeat
+   * pushes so the stored price stays fresh. Optional (absent = assume the pull contract).
+   */
+  supportsUpdate?(): Promise<boolean>;
+}
+
+/** AttestedOracle.update(bytes) — the pull-oracle relay (docs/LOW_GAS.md §1). */
+export const ORACLE_UPDATE_SELECTOR = toFunctionSelector("update(bytes)");
+
+/** Whether runtime code dispatches `selector` (solc pushes every external selector as a PUSH4 constant). */
+export function codeDispatches(code: Hex | undefined, selector: Hex): boolean {
+  if (!code || code === "0x") return false;
+  return code.toLowerCase().includes(`63${selector.toLowerCase().replace(/^0x/, "")}`);
 }
 
 export class ViemOracleChain implements OracleChain {
@@ -48,6 +63,11 @@ export class ViemOracleChain implements OracleChain {
   async latestPublishedAt(underlying: Hex): Promise<number> {
     const d = await this.pub.readContract({ address: this.oracle, abi: attestedOracleAbi, functionName: "latest", args: [underlying] });
     return Number(d.publishedAt);
+  }
+
+  async supportsUpdate(): Promise<boolean> {
+    // AttestedOracle is deployed directly (non-upgradeable, no proxy): its own code is the dispatcher
+    return codeDispatches(await this.pub.getCode({ address: this.oracle }), ORACLE_UPDATE_SELECTOR);
   }
 
   async pushMany(updates: readonly PriceUpdate[], sigs: readonly Hex[]): Promise<PushResult> {

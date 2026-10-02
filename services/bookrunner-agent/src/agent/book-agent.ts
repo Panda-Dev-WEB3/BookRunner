@@ -28,6 +28,7 @@ import {
 } from "@bookrunner/shared";
 import type { AgentBus } from "../adapters/bus";
 import type { AgentStore, FillRow } from "../adapters/store";
+import { isSignature } from "../chain/pull-prices";
 import { resolveMode } from "../domain/mode";
 import { type AgentQuote, type QuotingConfig, buildQuote, finalCheck, quoteChanged } from "../domain/quoting";
 import { fillReceipt, quoteReceipt } from "../domain/receipts";
@@ -68,6 +69,13 @@ export interface BookAgentConfig {
   heartbeatTtlMs: number;
   quoteTtlMs: number;
   fillLookbackMs: number;
+  /**
+   * Pull oracle: the desk carries signed prices in every price-checked tx, so the mandate evaluates
+   * off-hours after the in-tx update. The on-chain `mandate.offHours()` view (stored price stale because
+   * nothing landed recently) then says nothing about the next tx and is ignored while the feed price is
+   * signed; held / stale / closed-session from the feed itself still apply.
+   */
+  pullPrices?: boolean;
 }
 
 export interface BookAgentDeps {
@@ -261,7 +269,8 @@ export class BookAgent {
 
   isOffHours(px: OraclePriceMsg | null, nowMs: number): boolean {
     if (!px) return true;
-    return px.held || nowMs / 1000 - px.publishedAt > this.cfg.maxPriceAgeSec || !isOpen(this.d.sessions, new Date(nowMs)) || this.chainOffHours;
+    const chainOff = this.chainOffHours && !(this.cfg.pullPrices && isSignature(px.signature));
+    return px.held || nowMs / 1000 - px.publishedAt > this.cfg.maxPriceAgeSec || !isOpen(this.d.sessions, new Date(nowMs)) || chainOff;
   }
 
   async refreshState(): Promise<void> {

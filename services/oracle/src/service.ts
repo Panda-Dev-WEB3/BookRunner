@@ -1,7 +1,8 @@
-// OracleService: per tick collect -> aggregate -> session hold -> sign -> publish (Redis, venue),
-// and on the push policy -> AttestedOracle.pushMany + oracle_prices rows. All I/O is injected so the
-// whole pipeline runs against fakes in tests.
-import type { Logger, OraclePriceMsg, PriceUpdate } from "@bookrunner/shared";
+// OracleService: per tick collect -> aggregate -> session hold -> sign -> publish (Redis per-price keys +
+// the pull bundle, venue), and on the push policy -> oracle_prices rows (+ AttestedOracle.pushMany in
+// heartbeat mode only; pull mode never pushes — consumers carry the signed bundle, docs/LOW_GAS.md §1).
+// All I/O is injected so the whole pipeline runs against fakes in tests.
+import { type Logger, type OracleBundleMsg, type OraclePriceMsg, type PriceUpdate, encodePriceData, priceUpdateFromMsg } from "@bookrunner/shared";
 import type { Address, Hex } from "viem";
 import type { OracleChain } from "./adapters/chain";
 import type { PriceStore } from "./adapters/db";
@@ -25,7 +26,13 @@ export interface OracleSettings {
   pushDeviationBps: number;
   sessionsMode: string | undefined;
   venuePrices: boolean;
+  /** pull: never push on a timer (consumers carry the bundle); heartbeat: pushMany on the push policy */
+  pushMode: PushMode;
+  /** price ids whose latest signed update is older than this are left out of the bundle */
+  bundleMaxAgeMs: number;
 }
+
+export type PushMode = "pull" | "heartbeat";
 
 export interface OracleServiceDeps {
   log: Logger;
@@ -66,13 +73,28 @@ const CHAIN_BACKOFF_MAX_MS = 60_000;
 const SKIP_WARN_AFTER_MS = 30_000;
 
 export function updateFromMsg(m: OraclePriceMsg): PriceUpdate {
+  return priceUpdateFromMsg(m);
+}
+
+/**
+ * Pure: the pull bundle — the latest signed update of every live price id (universe order). A key whose
+ * latest update is more than `maxAgeSec` older than `refSec` (its sources are failing) is left out; null
+ * when nothing is live. publishedAt = the newest update in the bundle.
+ */
+export function buildBundle(
+  latest: ReadonlyArray<OraclePriceMsg | undefined>,
+  domain: { chainId: number; oracle: Address },
+  refSec: number,
+  maxAgeSec: number,
+): OracleBundleMsg | null {
+  const live = latest.filter((m): m is OraclePriceMsg => !!m && m.signature.length > 2 && refSec - m.publishedAt <= maxAgeSec);
+  if (live.length === 0) return null;
   return {
-    underlying: m.underlying,
-    priceWad: BigInt(m.priceWad),
-    publishedAt: BigInt(m.publishedAt),
-    held: m.held,
-    sourceCount: m.sourceCount,
-    sourcesHash: m.sourcesHash,
+    priceData: encodePriceData(live.map(priceUpdateFromMsg), live.map((m) => m.signature)),
+    publishedAt: Math.max(...live.map((m) => m.publishedAt)),
+    chainId: domain.chainId,
+    oracle: domain.oracle,
+    priceIds: live.map((m) => m.priceId),
   };
 }
 
@@ -95,6 +117,9 @@ export class OracleService {
   private readonly onchainAt = new Map<string, number>();
   private readonly skipSince = new Map<string, number>();
   private readonly venueInFlight = new Set<string>();
+  private bundle: OracleBundleMsg | null = null;
+  /** the deployed AttestedOracle has update(bytes); false = pre-low-gas contract (pull falls back to pushes) */
+  private pullSupported: boolean | null = null;
 
   private signerActive: boolean | null = null;
   private chainReason = "deployment not loaded";
@@ -128,10 +153,14 @@ export class OracleService {
     const changed = !this.ctx || this.ctx.oracle.toLowerCase() !== ctx.oracle.toLowerCase() || this.ctx.chainId !== ctx.chainId;
     this.ctx = ctx;
     if (changed) {
-      // a different AttestedOracle: forget per-contract push state
+      // a different AttestedOracle: forget per-contract push state and the signatures bound to the old
+      // EIP-712 domain (they would never verify against the new contract)
       this.onchainAt.clear();
       this.pushed.clear();
       this.landed.clear();
+      this.latest.clear();
+      this.bundle = null;
+      this.pullSupported = null;
       this.chainFailures = 0;
       this.chainBackoffUntil = 0;
     }
@@ -156,6 +185,15 @@ export class OracleService {
       this.signerActive = active;
       this.onchainMinSources = min;
       this.chainReason = active ? "ok" : "signer not registered on AttestedOracle";
+      if (this.pullSupported === null && this.deps.settings.pushMode === "pull" && chain.supportsUpdate) {
+        this.pullSupported = await chain.supportsUpdate();
+        if (!this.pullSupported) {
+          this.log.warn(
+            { oracle: chain.oracle },
+            "ORACLE_PUSH_MODE=pull but the deployed AttestedOracle has no update(bytes) (pre-low-gas deployment): keeping heartbeat pushes",
+          );
+        }
+      }
     } catch (e) {
       if (this.signerActive !== false || this.chainReason === "ok") this.log.warn({ err: errMsg(e) }, "AttestedOracle not readable; on-chain pushes paused");
       this.signerActive = false;
@@ -258,7 +296,13 @@ export class OracleService {
       componentPrices.set(e.priceId, { price: msg.price, sourceCount: msg.sourceCount, ts: msg.publishedAt * 1000 });
     }
 
-    await this.publishRedis(msgs);
+    this.bundle = buildBundle(
+      this.universe.map((e) => this.latest.get(e.priceId)),
+      { chainId: ctx.chainId, oracle: ctx.oracle },
+      publishedAt,
+      s.bundleMaxAgeMs / 1000,
+    );
+    await this.publishRedis(msgs, this.bundle);
     this.pushVenue(msgs);
 
     const due = msgs.filter((m) => pushReason(this.pushed.get(m.priceId), m, nowMs, { intervalMs: s.pushIntervalMs, deviationBps: s.pushDeviationBps }) !== null);
@@ -336,10 +380,10 @@ export class OracleService {
     }
   }
 
-  private async publishRedis(msgs: OraclePriceMsg[]): Promise<void> {
-    if (!this.deps.publisher || msgs.length === 0) return;
+  private async publishRedis(msgs: OraclePriceMsg[], bundle: OracleBundleMsg | null): Promise<void> {
+    if (!this.deps.publisher || (msgs.length === 0 && !bundle)) return;
     try {
-      await this.deps.publisher.publish(msgs);
+      await this.deps.publisher.publish(msgs, bundle ? { msg: bundle, ttlMs: this.deps.settings.bundleMaxAgeMs } : null);
     } catch (e) {
       if (this.now() - this.lastRedisWarn > 30_000) {
         this.lastRedisWarn = this.now();
@@ -380,8 +424,18 @@ export class OracleService {
 
   // ------------------------------------------------------------------ on-chain push
 
+  /**
+   * The push mode in force: the configured one, except that pull mode against a pre-low-gas AttestedOracle
+   * (no update(bytes): no consumer can carry the bundle) keeps the heartbeat pushes.
+   */
+  effectivePushMode(): PushMode {
+    if (this.deps.settings.pushMode === "heartbeat") return "heartbeat";
+    return this.ctx?.chain && this.pullSupported === false ? "heartbeat" : "pull";
+  }
+
+  /** Heartbeat mode only: pull mode never sends pushMany (the bundle rides in consumers' transactions). */
   private chainUsable(ctx: DeploymentContext, nowMs: number): ctx is DeploymentContext & { chain: OracleChain } {
-    return !!ctx.chain && this.signerActive === true && nowMs >= this.chainBackoffUntil;
+    return this.effectivePushMode() === "heartbeat" && !!ctx.chain && this.signerActive === true && nowMs >= this.chainBackoffUntil;
   }
 
   private async pushCycle(ctx: DeploymentContext, due: OraclePriceMsg[], nowMs: number): Promise<void> {
@@ -457,14 +511,21 @@ export class OracleService {
   }
 
   /**
-   * Public view (HTTP): with on-chain pushes enabled, only updates that have already LANDED on-chain —
-   * never a fresher signed price the chain has not seen (a trader could otherwise trade at the stored
-   * price, relay the newer one and close: a risk-free sandwich of the in-house pool) — and never the
-   * signature. With on-chain pushes disabled (no on-chain consumer) the latest price, unsigned.
+   * Public view (HTTP /prices), never with the signature. Heartbeat mode with on-chain pushes: only
+   * updates that have already LANDED on-chain (there the pool trades at the stored price; a fresher signed
+   * one would let a trader trade stored, relay newer and close). Pull mode: the latest price — signed
+   * prices are public by design there (/prices/signed): every trade carries its own price, PoolEngine
+   * bounds its age (maxTradePriceAge) and the spread covers the residual (docs/LOW_GAS.md §1).
    */
   publicPrice(priceId: string): PublicPriceMsg | null {
-    const m = this.ctx?.chain ? this.landed.get(priceId) : this.latest.get(priceId);
+    const landedOnly = this.effectivePushMode() === "heartbeat" && !!this.ctx?.chain;
+    const m = landedOnly ? this.landed.get(priceId) : this.latest.get(priceId);
     return m ? publicView(m) : null;
+  }
+
+  /** The latest signed bundle (GET /prices/signed, Redis KEYS.oracleBundle); null before the first live tick. */
+  signedBundle(): OracleBundleMsg | null {
+    return this.ctx ? this.bundle : null;
   }
 
   publicPrices(): PublicPriceMsg[] {
@@ -483,9 +544,14 @@ export class OracleService {
       warnings: this.warnings,
       universe: this.universe.map((e) => ({ priceId: e.priceId, kind: e.kind, bookIds: e.bookIds, venueSymbols: e.venueSymbols, components: e.components })),
       lastTickAt: this.lastTickAt,
+      pushMode: this.deps.settings.pushMode,
+      effectivePushMode: this.effectivePushMode(),
+      bundle: this.bundle ? { publishedAt: this.bundle.publishedAt, priceIds: this.bundle.priceIds } : null,
       lastPush: this.lastPush,
       onchain: {
         enabled: !!ctx?.chain,
+        pushes: this.effectivePushMode() === "heartbeat" && !!ctx?.chain,
+        pullSupported: this.pullSupported,
         signerRegistered: this.signerActive,
         status: this.chainReason,
         minSources: Math.max(this.deps.settings.minSources, this.onchainMinSources ?? 0),

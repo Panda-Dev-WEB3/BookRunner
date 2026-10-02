@@ -106,6 +106,14 @@ suite("integration: postgres + redis adapters", () => {
     expect(JSON.parse(await got)).toEqual(msg);
     expect(await pub.loadLast(tag)).toEqual(msg);
     expect(await pub.loadLast(`${tag}-missing`)).toBeNull();
+    // pull bundle: set with an expiry so a stopped oracle leaves no stale bundle behind
+    const bundle = { priceData: "0x" as const, publishedAt: msg.publishedAt, chainId: 31337, oracle: "0x00000000000000000000000000000000000000aa" as const, priceIds: [tag] };
+    await pub.publish([], { msg: bundle, ttlMs: 30_000 });
+    expect(JSON.parse((await redis!.get(KEYS.oracleBundle))!)).toEqual(bundle);
+    const ttl = await redis!.pttl(KEYS.oracleBundle);
+    expect(ttl).toBeGreaterThan(0);
+    expect(ttl).toBeLessThanOrEqual(30_000);
+    await redis!.del(KEYS.oracleBundle);
     silentLog.info("redis ok");
   });
 });
