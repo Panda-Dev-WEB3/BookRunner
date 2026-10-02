@@ -3,6 +3,7 @@ import type { Hex } from "viem";
 import type { BookRef } from "../src/kit/books";
 import type {
   BookLookup,
+  BuybackChain,
   DistributedLog,
   KeeperChain,
   KeeperSnapshot,
@@ -63,6 +64,34 @@ export class FakeSettlementChain implements SettlementChain {
   }
   async receivedInTx(_ref: BookRef, txHash: Hex) {
     return this.receivedByTx.get(txHash) ?? [];
+  }
+  /** Orderly: FeesSwept amount per earmark tx (default: what the earmark tx itself forwarded). */
+  earmarked = new Map<Hex, bigint>();
+  /** Router SettlementReceived logs after each earmark (ops-venue's forwardPendingFees txs). */
+  forwardedAfter = new Map<Hex, SettlementReceivedLog[]>();
+  /** adapter.pendingFeesUsd (default 0: no earmark outstanding). */
+  pendingFees = 0n;
+  feeForwardingCalls = 0;
+  async feeForwarding(_ref: BookRef, txHash: Hex) {
+    this.feeForwardingCalls++;
+    const own = this.receivedByTx.get(txHash) ?? [];
+    const later = this.forwardedAfter.get(txHash) ?? [];
+    return { earmarked: this.earmarked.get(txHash) ?? own.reduce((a, r) => a + r.amount, 0n), received: [...own, ...later], pendingFees: this.pendingFees };
+  }
+  /** Earmark `amount` for (book, period) with no USDC on the adapter yet (FeesSwept forwards nothing). */
+  async earmark(ref: BookRef, period: number, amount: bigint): Promise<Hex> {
+    this.swept.add(`${ref.bookId}:${period}`);
+    const tx = (await this.feesSwept(ref, period)) as Hex;
+    this.earmarked.set(tx, amount);
+    this.pendingFees += amount;
+    return tx;
+  }
+  /** ops-venue's forwardPendingFees after the earmark `tx`: USDC -> router, SettlementReceived(VENUE_TAKER_SHARE). */
+  forward(earmarkTx: Hex, amount: bigint) {
+    const log: SettlementReceivedLog = { source: 0, amount, txHash: fakeHash(), logIndex: 2, blockNumber: 11n, ts: new Date() };
+    this.forwardedAfter.set(earmarkTx, [...(this.forwardedAfter.get(earmarkTx) ?? []), log]);
+    this.params.pendingGross += amount;
+    this.pendingFees -= amount;
   }
   async sweepEngineFees(ref: BookRef, period: number) {
     this.calls.push("sweepEngineFees");
@@ -129,6 +158,29 @@ export class FakeVenueOps implements VenueOps {
   }
   async sweepJobState() {
     return this.state;
+  }
+}
+
+export class FakeBuybackChain implements BuybackChain {
+  pending = 0n;
+  /** BKRN per USDC unit of the router quote (WAD), or null = the router has no quote. */
+  quoteWad: bigint | null = 20n * 10n ** 18n;
+  failQuote = false;
+  failExecute = false;
+  executed: Array<{ amountIn: bigint; minOut: bigint; poolFee: number }> = [];
+  async buybackPending() {
+    return this.pending;
+  }
+  async quoteBuyback(amountIn: bigint) {
+    if (this.failQuote) throw new Error("quote reverted");
+    return this.quoteWad === null ? null : (amountIn * this.quoteWad) / 10n ** 6n;
+  }
+  async executeBuyback(amountIn: bigint, minOut: bigint, poolFee: number) {
+    if (this.failExecute) throw new Error("execution reverted: InsufficientOutput");
+    this.executed.push({ amountIn, minOut, poolFee });
+    const bkrnOut = this.quoteWad === null ? minOut : (amountIn * this.quoteWad) / 10n ** 6n;
+    this.pending -= amountIn;
+    return { hash: fakeHash(), usdcIn: amountIn, bkrnOut };
   }
 }
 

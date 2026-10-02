@@ -33,6 +33,20 @@ export interface SplitParams {
   juniorSupply: bigint;
 }
 
+/**
+ * Orderly fee flow after an earmark: adapter.sweepFees(period, amount) (FeesSwept) only forwards what is
+ * already on the adapter; the venue payout lands later and ops-venue's forwardPendingFees carries it to
+ * the router (SettlementReceived in a later tx).
+ */
+export interface FeeForwarding {
+  /** FeesSwept amount of the earmark tx. */
+  earmarked: bigint;
+  /** The router's SettlementReceived logs after the earmark's FeesSwept log (its own forward included). */
+  received: SettlementReceivedLog[];
+  /** adapter.pendingFeesUsd(): earmarked fee flow not forwarded yet (all periods). */
+  pendingFees: bigint;
+}
+
 export interface SettlementChain {
   bookState(ref: BookRef): Promise<BookState>;
   /** Distributed(bookId, period) already emitted by the router (on-chain idempotency). */
@@ -41,6 +55,8 @@ export interface SettlementChain {
   feesSwept(ref: BookRef, period: number): Promise<Hex | null>;
   /** SettlementReceived logs of the book's router emitted by one transaction (e.g. ops-venue's sweep). */
   receivedInTx(ref: BookRef, txHash: Hex): Promise<SettlementReceivedLog[]>;
+  /** Orderly: how much of an earmark (FeesSwept tx) has reached the router so far. */
+  feeForwarding(ref: BookRef, earmarkTx: Hex): Promise<FeeForwarding>;
   /** PoolEngineAdapter.sweepFees(period, 0) (anyone may call). */
   sweepEngineFees(ref: BookRef, period: number): Promise<{ hash: Hex; received: SettlementReceivedLog[] }>;
   /** Engine fees accrued and not yet claimed (PoolEngine.state(marketId).feesAccruedUsd); null if unreadable. */
@@ -99,6 +115,16 @@ export interface KeeperChain {
   fundClaims(ref: BookRef): Promise<Hex>;
   recall(ref: BookRef, account: number, amount: bigint): Promise<Hex>;
   finalizeRetirement(ref: BookRef): Promise<Hex>;
+}
+
+/** Protocol-level BkrnFeeRouter reads + the KEEPER buyback write. */
+export interface BuybackChain {
+  /** BkrnFeeRouter.buybackPending (USDC 6dp). */
+  buybackPending(): Promise<bigint>;
+  /** BKRN out for `amountIn` USDC from the buyback router's own quote (MockSwapRouter.quote); null if it has none. */
+  quoteBuyback(amountIn: bigint): Promise<bigint | null>;
+  /** BkrnFeeRouter.executeBuyback(amountIn, minBkrnOut, poolFee) (KEEPER). */
+  executeBuyback(amountIn: bigint, minBkrnOut: bigint, poolFee: number): Promise<{ hash: Hex; usdcIn: bigint | null; bkrnOut: bigint | null }>;
 }
 
 export interface BookLookup {

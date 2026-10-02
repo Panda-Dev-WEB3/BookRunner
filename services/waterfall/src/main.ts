@@ -17,6 +17,7 @@ import { WaterfallChainAdapter } from "./adapters/chain";
 import { RedeemLogIndex, UnionCandidates } from "./adapters/redemptions";
 import { DbRedeemCandidates, PgSettlementStore } from "./adapters/store";
 import { BullVenueOps } from "./adapters/venue-ops";
+import { BuybackRunner } from "./buyback";
 import { loadWaterfallConfig } from "./config";
 import { GasMeter, expensesRequested } from "./domain/expenses";
 import { Cooldowns, distributes } from "./domain/keeper";
@@ -90,6 +91,7 @@ export async function main() {
     onDistributed: (bookId) => gas.reset(bookId),
     log,
     sweepWaitMs: cfg.WATERFALL_SWEEP_WAIT_SECONDS * 1000,
+    forwardWaitMs: cfg.WATERFALL_FEE_FORWARD_WAIT_SECONDS * 1000,
     pollMs: 2_000,
     signals: new RedisSettlementSignals(redis),
     distributeEmpty: cfg.WATERFALL_DISTRIBUTE_EMPTY,
@@ -101,7 +103,7 @@ export async function main() {
       const out = await runner.run(job.data, ac.signal);
       return { status: out.status, ...("txHash" in out ? { txHash: out.txHash } : {}), ...("reason" in out ? { reason: out.reason } : {}) };
     },
-    { connection, concurrency: cfg.WATERFALL_CONCURRENCY, lockDuration: (cfg.WATERFALL_SWEEP_WAIT_SECONDS + 180) * 1000 },
+    { connection, concurrency: cfg.WATERFALL_CONCURRENCY, lockDuration: (cfg.WATERFALL_SWEEP_WAIT_SECONDS + cfg.WATERFALL_FEE_FORWARD_WAIT_SECONDS + 180) * 1000 },
   );
   worker.on("failed", (job, err) => log.warn({ job: job?.id, attempts: job?.attemptsMade, err: err.message }, "settlement job failed"));
   worker.on("error", (err) => log.warn({ err: err.message }, "settlement worker error"));
@@ -121,6 +123,19 @@ export async function main() {
     recordDecision: async (bookId, payload) => {
       await insertReceipt(db, { bookId, kind: RECEIPT_KIND.DECISION, ts: new Date(), payload }, cfg.RECEIPTS_INTERVAL_SECONDS);
     },
+  });
+
+  const buyback = new BuybackRunner({
+    chain,
+    policy: {
+      thresholdUsd: cfg.WATERFALL_BUYBACK_THRESHOLD_USD,
+      slippageBps: BigInt(cfg.WATERFALL_BUYBACK_SLIPPAGE_BPS),
+      poolFee: cfg.WATERFALL_BUYBACK_POOL_FEE,
+      fallbackBkrnPerUsdcWad: cfg.WATERFALL_BUYBACK_BKRN_PER_USDC,
+    },
+    cooldowns: new Cooldowns(),
+    cooldownMs: cfg.WATERFALL_ACTION_COOLDOWN_SECONDS * 1000,
+    log,
   });
 
   const enqueued = new Map<number, number>();
@@ -156,6 +171,8 @@ export async function main() {
           log.warn({ bookId: ref.bookId, err: err instanceof Error ? err.message.split("\n")[0] : String(err) }, "book tick failed");
         }
       }
+      // protocol-level keeper duty (never throws: failures are logged and retried after the cooldown)
+      if (cfg.WATERFALL_KEEPER_ENABLED && cfg.WATERFALL_BUYBACK_ENABLED && !signal.aborted) await buyback.tick();
     },
   });
   cleanups.push(() => loop.stop());

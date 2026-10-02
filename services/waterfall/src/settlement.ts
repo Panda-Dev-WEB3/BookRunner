@@ -7,7 +7,11 @@
 // nothing and no engine fees accrued) — a zero distribution is an on-chain no-op. The decision is
 // recorded through SettlementSignals so the mark service marks the period at once instead of waiting
 // for a distribution that will not happen. Fee flow arriving later rolls into the next period.
-import { type DomainEventPayloads, type Logger, type SettlementJob, VENUE } from "@bookrunner/shared";
+//
+// Orderly: the FeesSwept earmark usually forwards nothing (the venue payout has not landed on the adapter
+// yet); ops-venue's forwardPendingFees carries the USDC to the router seconds later. The runner waits for
+// that forward (bounded, forwardWaitMs) so period P distributes P's own fees, not P-1's.
+import { type DomainEventPayloads, type Logger, REVENUE_SOURCE, type SettlementJob, VENUE } from "@bookrunner/shared";
 import type { Hex } from "viem";
 import { amountsToSplit, conserves, parityCheck, previewDistribution, splitMismatches, type SplitResult } from "./domain/split";
 import { distributes } from "./domain/keeper";
@@ -17,7 +21,7 @@ import { pollUntil, throwIfAborted } from "./kit/loop";
 import type { SettlementSignals } from "./kit/signals";
 import { describeRevert } from "./kit/tx";
 import type { BookRef } from "./kit/books";
-import type { BookLookup, DistributedLog, SettlementChain, SettlementStore, VenueOps } from "./ports";
+import type { BookLookup, DistributedLog, FeeForwarding, SettlementChain, SettlementStore, VenueOps } from "./ports";
 
 export type SettlementOutcome =
   | { status: "already"; source: "db" | "chain"; txHash: string }
@@ -37,6 +41,8 @@ export interface SettlementDeps {
   onDistributed?: (bookId: number, expensesCharged: bigint) => void;
   log: Logger;
   sweepWaitMs: number;
+  /** Orderly: max wait, after the earmark, for the earmarked fees to reach the router (default 0: no wait). */
+  forwardWaitMs?: number;
   pollMs: number;
   /** Where "nothing to distribute" decisions go (read by the mark scheduler). */
   signals?: SettlementSignals;
@@ -171,7 +177,42 @@ export class SettlementRunner {
       else if (done?.job === "completed") log.info("ops-venue completed sweep_fees without a sweep (no fee settlement this period)");
       else log.warn({ waitedMs: this.d.sweepWaitMs }, "no fee sweep within the wait; distributing what the router holds (late fee flow rolls into the next period)");
     }
-    if (tx) await this.recordReceived(ref, period, tx, log);
+    if (tx) await this.awaitForward(ref, period, tx, log, signal);
+  }
+
+  /**
+   * After the earmark: wait (bounded) until the earmarked fees are on the router, then record the
+   * SettlementReceived rows that carried them. Never blocks the mark beyond forwardWaitMs: what has not
+   * landed by then is distributed by a later period (distribute() takes the router's whole pendingGross).
+   */
+  private async awaitForward(ref: BookRef, period: number, tx: Hex, log: Logger, signal?: AbortSignal) {
+    let last: FeeForwarding | null = null;
+    const landed = await pollUntil<FeeForwarding>(
+      async () => {
+        try {
+          last = await this.d.chain.feeForwarding(ref, tx);
+        } catch (err) {
+          log.debug({ err: err instanceof Error ? err.message.split("\n")[0] : String(err), tx }, "could not read the earmark's forwarding state (retrying)");
+          return undefined;
+        }
+        return forwardLanded(last) ? last : undefined;
+      },
+      { timeoutMs: this.d.forwardWaitMs ?? 0, everyMs: this.d.pollMs, signal },
+    );
+    const f: FeeForwarding | null = landed ?? last;
+    if (!f) return this.recordReceived(ref, period, tx, log);
+    if (!landed) {
+      log.warn(
+        { earmarked: usd6(f.earmarked), forwarded: usd6(venueForwarded(f)), pendingFees: usd6(f.pendingFees), waitedMs: this.d.forwardWaitMs ?? 0 },
+        "earmarked fees not on the router within the wait; distributing what the router holds (the rest rolls into the next period)",
+      );
+    }
+    try {
+      await this.d.store.insertReceived(ref.bookId, period, f.received);
+      log.info({ tx, earmarked: usd6(f.earmarked), received: f.received.map((r) => usd6(r.amount)) }, "fee settlement swept");
+    } catch (err) {
+      log.warn({ err: err instanceof Error ? err.message : String(err), tx }, "could not record the sweep's SettlementReceived rows");
+    }
   }
 
   private async sweepEngine(ref: BookRef, period: number, log: Logger) {
@@ -200,6 +241,19 @@ export class SettlementRunner {
       log.warn({ err: err instanceof Error ? err.message : String(err), tx }, "could not record the sweep's SettlementReceived rows");
     }
   }
+}
+
+/** Venue fee flow (SRC_VENUE_TAKER_SHARE) that reached the router after the earmark. */
+export function venueForwarded(f: FeeForwarding): bigint {
+  return f.received.filter((r) => r.source === REVENUE_SOURCE.VENUE_TAKER_SHARE).reduce((a, r) => a + r.amount, 0n);
+}
+
+/**
+ * The earmark has landed when the router received at least the earmarked amount from the venue after it,
+ * or when the adapter holds no pending earmark at all (forwarded, or cancelled: nothing more will come).
+ */
+export function forwardLanded(f: FeeForwarding): boolean {
+  return f.pendingFees === 0n || venueForwarded(f) >= f.earmarked;
 }
 
 export function fmtSplit(s: SplitResult) {

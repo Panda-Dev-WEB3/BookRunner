@@ -1,22 +1,24 @@
 // viem adapter for the waterfall: reads (book, router, adapter, config, registry) and KEEPER writes.
 import { type Deployment, type SplitResult, VENUE } from "@bookrunner/shared";
 import {
+  bkrnFeeRouterAbi,
   bookAbi,
   bookrunnerConfigAbi,
   markRegistryAbi,
+  mockSwapRouterAbi,
   orderlyAdapterAbi,
   poolEngineAbi,
   poolEngineAdapterAbi,
   revenueRouterAbi,
   underwritingVaultAbi,
 } from "@bookrunner/shared/abi";
-import { type Hex, type PublicClient, type TransactionReceipt, erc20Abi, isAddressEqual, parseEventLogs } from "viem";
+import { type Address, type Hex, type PublicClient, type TransactionReceipt, erc20Abi, isAddressEqual, parseEventLogs, zeroAddress } from "viem";
 import { engineWithdrawableUsd } from "../domain/recall";
 import { amountsToSplit } from "../domain/split";
 import { type BookRef, bookStateName } from "../kit/books";
 import { scanEvents } from "../kit/logs";
 import type { TxSender } from "../kit/tx";
-import type { DistributedLog, KeeperChain, KeeperSnapshot, SettlementChain, SettlementReceivedLog, SplitParams } from "../ports";
+import type { BuybackChain, DistributedLog, FeeForwarding, KeeperChain, KeeperSnapshot, SettlementChain, SettlementReceivedLog, SplitParams } from "../ports";
 import { type CandidateSource, pendingShares } from "./redemptions";
 
 export interface ChainAdapterOptions {
@@ -29,10 +31,13 @@ export interface ChainAdapterOptions {
   logLookback: bigint;
 }
 
-export class WaterfallChainAdapter implements SettlementChain, KeeperChain {
+export class WaterfallChainAdapter implements SettlementChain, KeeperChain, BuybackChain {
   private markInterval: number | null = null;
+  private buybackTokens: { usdc: Address; bkrn: Address } | null = null;
   private distributedCache = new Map<string, DistributedLog>();
   private blockTs = new Map<bigint, Date>();
+  /** FeesSwept (amount, position) per earmark tx: immutable once mined. */
+  private earmarks = new Map<Hex, { amount: bigint; blockNumber: bigint; logIndex: number }>();
 
   constructor(private readonly o: ChainAdapterOptions) {}
 
@@ -113,6 +118,37 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain {
 
   async receivedInTx(ref: BookRef, txHash: Hex): Promise<SettlementReceivedLog[]> {
     return this.receivedFrom(ref, await this.pc.getTransactionReceipt({ hash: txHash }));
+  }
+
+  async feeForwarding(ref: BookRef, earmarkTx: Hex): Promise<FeeForwarding> {
+    let mark = this.earmarks.get(earmarkTx);
+    if (!mark) {
+      const receipt = await this.pc.getTransactionReceipt({ hash: earmarkTx });
+      const l = parseEventLogs({ abi: orderlyAdapterAbi, eventName: "FeesSwept", logs: receipt.logs }).find((x) => isAddressEqual(x.address, ref.components.adapter));
+      if (!l) throw new Error(`tx ${earmarkTx} emitted no FeesSwept on adapter ${ref.components.adapter}`);
+      mark = { amount: l.args.amount, blockNumber: receipt.blockNumber, logIndex: l.logIndex };
+      if (this.earmarks.size > 100) this.earmarks.clear();
+      this.earmarks.set(earmarkTx, mark);
+    }
+    const { blockNumber, logIndex } = mark;
+    const head = await this.pc.getBlockNumber();
+    const [logs, pendingFees] = await Promise.all([
+      scanEvents<{ bookId: bigint; source: number; amount: bigint }>(this.pc, {
+        address: ref.components.router,
+        abi: revenueRouterAbi,
+        eventName: "SettlementReceived",
+        fromBlock: blockNumber,
+        toBlock: head,
+        chunk: this.o.logChunk,
+      }),
+      this.pc.readContract({ address: ref.components.adapter, abi: orderlyAdapterAbi, functionName: "pendingFeesUsd" }),
+    ]);
+    const after = logs.filter((l) => l.blockNumber > blockNumber || l.logIndex > logIndex);
+    const received: SettlementReceivedLog[] = [];
+    for (const l of after) {
+      received.push({ source: Number(l.args.source), amount: l.args.amount, txHash: l.transactionHash, logIndex: l.logIndex, blockNumber: l.blockNumber, ts: await this.tsOf(l.blockNumber) });
+    }
+    return { earmarked: mark.amount, received, pendingFees };
   }
 
   async sweepEngineFees(ref: BookRef, period: number) {
@@ -295,5 +331,44 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain {
 
   finalizeRetirement(ref: BookRef) {
     return this.keeperSend(ref, ref.components.book, bookAbi, "finalizeRetirement", [], "finalizeRetirement");
+  }
+
+  // ---------------------------------------------------------------- BuybackChain
+  private get feeRouter() {
+    return this.o.deployment.contracts.feeRouter;
+  }
+
+  buybackPending() {
+    return this.pc.readContract({ address: this.feeRouter, abi: bkrnFeeRouterAbi, functionName: "buybackPending" });
+  }
+
+  async quoteBuyback(amountIn: bigint): Promise<bigint | null> {
+    const router = await this.pc.readContract({ address: this.feeRouter, abi: bkrnFeeRouterAbi, functionName: "buybackRouter" });
+    if (isAddressEqual(router, zeroAddress)) return null;
+    if (!this.buybackTokens) {
+      const [usdc, bkrn] = await Promise.all([
+        this.pc.readContract({ address: this.feeRouter, abi: bkrnFeeRouterAbi, functionName: "usdc" }),
+        this.pc.readContract({ address: this.feeRouter, abi: bkrnFeeRouterAbi, functionName: "bkrn" }),
+      ]);
+      this.buybackTokens = { usdc, bkrn };
+    }
+    try {
+      // MockSwapRouter (devnet/testnet) prices the swap itself; a real SwapRouter02 has no quote (-> null)
+      return await this.pc.readContract({ address: router, abi: mockSwapRouterAbi, functionName: "quote", args: [this.buybackTokens.usdc, this.buybackTokens.bkrn, amountIn] });
+    } catch {
+      return null;
+    }
+  }
+
+  async executeBuyback(amountIn: bigint, minBkrnOut: bigint, poolFee: number) {
+    const out = await this.o.sender.send({
+      address: this.feeRouter,
+      abi: bkrnFeeRouterAbi,
+      functionName: "executeBuyback",
+      args: [amountIn, minBkrnOut, poolFee],
+      label: `executeBuyback(${amountIn}, min=${minBkrnOut})`,
+    });
+    const l = parseEventLogs({ abi: bkrnFeeRouterAbi, eventName: "BuybackExecuted", logs: out.receipt.logs }).find((x) => isAddressEqual(x.address, this.feeRouter));
+    return { hash: out.hash, usdcIn: l?.args.usdcIn ?? null, bkrnOut: l?.args.bkrnOut ?? null };
   }
 }
