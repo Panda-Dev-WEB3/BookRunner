@@ -32,3 +32,23 @@ interface IMarkRegistry {
     );
     event MarkApplied(uint256 indexed markId, uint256 indexed bookId);
 }
+
+/// @title IMarkRegistryAtomic — LOW_GAS §3: one mark transaction per book per period (implemented by
+///        MarkRegistry; a separate interface so IMarkRegistry implementers stay unchanged).
+interface IMarkRegistryAtomic is IMarkRegistry {
+    /// @notice Atomic, callable by anyone (keeper):
+    ///           1. oracle.update(priceData)                    when priceData is non-empty
+    ///           2. IOrderlyAdapter(adapter).reportSigned(...)  when venueReport is non-empty (Orderly books)
+    ///           3. commit(m, sig)                              same checks as commit (incl. stale-mark replacement)
+    ///           4. IBook(factory.bookOf(m.bookId)).applyMark(markId)
+    ///         Reverts atomically if any step reverts.
+    /// @param priceData abi.encode(IAttestedOracle.PriceUpdate[], bytes[]) or empty.
+    /// @param venueReport abi.encode(uint256 insuranceUsd, int256 marginUsd, int256 netExposureUsd,
+    ///        uint64 asOf, bytes sig) or empty; adapter = factory.componentsOf(m.bookId).adapter.
+    function commitAndApply(
+        BRTypes.MarkInput calldata m,
+        bytes calldata sig,
+        bytes calldata priceData,
+        bytes calldata venueReport
+    ) external returns (uint256 markId);
+}
