@@ -6,14 +6,15 @@ import { useState } from "react";
 import { type Address, createTestClient, getAddress, http } from "viem";
 import { trpc } from "../api/trpc";
 import { cx } from "../components/ui";
-import { gasStatus } from "../lib/chainConfig";
+import { gasStatus, isTestKind } from "../lib/chainConfig";
 import { config } from "../lib/config";
 import { DEVNET_TOPUP_WEI, TRANCHE_ASSET_ABI, fmtEth } from "../lib/funds";
 import { invalidateWalletBalances } from "./balances";
 import { appChain, chainName, publicClient } from "./chains";
 import { useWallet } from "./WalletContext";
 
-export const isTestChain = config.chain.kind !== "mainnet";
+/** A known devnet or testnet build (fails closed for an unknown chain: see isTestKind). */
+export const isTestChain = isTestKind(config.chain.kind);
 
 /** Native balance of an address on the app chain (polled; undefined while unknown or unreachable). */
 export function useGasBalance(address: Address | null | undefined) {

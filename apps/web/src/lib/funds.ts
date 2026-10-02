@@ -59,5 +59,27 @@ export function fmtEth(wei: bigint | null | undefined, symbol = "ETH"): string {
 }
 
 /** anvil_setBalance amount for the devnet top-up (10 ETH) as a 0x quantity. */
+export type MintUnavailableReason = "mainnet" | "no-wallet" | "no-token" | "checking" | "not-mintable";
+
+/**
+ * Whether "Mint test USDC" can be offered, and why not (null: available). Test networks only, a
+ * connected wallet, the app's USDC known, and an eth_call of mint() that succeeded (so a real USDC
+ * deployment never gets the button).
+ */
+export function mintAvailability(i: {
+  testChain: boolean;
+  wallet: boolean;
+  usdc: string | null;
+  contractsLoading: boolean;
+  /** eth_call of mint(self, amount): undefined while pending. */
+  simulated: boolean | undefined;
+}): MintUnavailableReason | null {
+  if (!i.testChain) return "mainnet";
+  if (!i.wallet) return "no-wallet";
+  if (!i.usdc) return i.contractsLoading ? "checking" : "no-token";
+  if (i.simulated === undefined) return "checking";
+  return i.simulated ? null : "not-mintable";
+}
+
 export const DEVNET_TOPUP_WEI = 10n * 10n ** 18n;
 export const toQuantity = (v: bigint): Hex => `0x${v.toString(16)}` as Hex;

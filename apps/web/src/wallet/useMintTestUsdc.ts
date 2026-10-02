@@ -4,16 +4,16 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useState } from "react";
 import type { Address, Hex } from "viem";
-import { config } from "../lib/config";
-import { TEST_USDC_AMOUNT, mockMintData, mockMintTx } from "../lib/funds";
+import { type MintUnavailableReason, TEST_USDC_AMOUNT, mintAvailability, mockMintData, mockMintTx } from "../lib/funds";
 import { type TxItem, runSequential } from "../lib/txflow";
 import { invalidateWalletBalances } from "./balances";
 import { appChain, publicClient } from "./chains";
 import { useAppContracts } from "./contracts";
+import { isTestChain } from "./network";
 import { useWallet } from "./WalletContext";
 
 export type MintStatus = "idle" | "signing" | "pending" | "confirmed" | "failed";
-export type MintUnavailableReason = "mainnet" | "no-wallet" | "no-token" | "checking" | "not-mintable";
+export type { MintUnavailableReason };
 
 export interface MintTestUsdc {
   /** The button can be offered: test network, wallet connected, token mint is open. */
@@ -29,8 +29,6 @@ export interface MintTestUsdc {
   mint: () => Promise<boolean>;
   reset: () => void;
 }
-
-const isTestChain = config.chain.kind !== "mainnet";
 
 export function useMintTestUsdc(): MintTestUsdc {
   const w = useWallet();
@@ -51,28 +49,17 @@ export function useMintTestUsdc(): MintTestUsdc {
   });
   const [item, setItem] = useState<TxItem | null>(null);
 
-  const reason: MintUnavailableReason | null = !isTestChain
-    ? "mainnet"
-    : !me || !w.executor
-      ? "no-wallet"
-      : !usdc
-        ? c.isLoading
-          ? "checking"
-          : "no-token"
-        : sim.data === undefined
-          ? "checking"
-          : sim.data
-            ? null
-            : "not-mintable";
+  const reason = mintAvailability({ testChain: isTestChain, wallet: !!me && !!w.executor, usdc, contractsLoading: c.isLoading, simulated: sim.data });
 
   const mint = useCallback(async () => {
-    if (!w.executor || !me || !usdc) return false;
+    // never send a mint that is not offered (mainnet, unknown chain, a real USDC)
+    if (reason !== null || !w.executor || !me || !usdc) return false;
     const first: TxItem = { tx: mockMintTx(usdc, me, TEST_USDC_AMOUNT, appChain.id), status: "queued" };
     setItem(first);
     const r = await runSequential([first], w.executor, (items) => setItem(items[0] ?? null));
     void invalidateWalletBalances(qc);
     return r.ok;
-  }, [w.executor, me, usdc, qc]);
+  }, [reason, w.executor, me, usdc, qc]);
 
   const status: MintStatus = !item
     ? "idle"

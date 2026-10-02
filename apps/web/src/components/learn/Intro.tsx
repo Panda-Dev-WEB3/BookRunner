@@ -1,6 +1,7 @@
 // Opening and closing of the How it works page: the short version in three steps, and where to go next
 // (with the risk and testnet notice wherever money is involved).
 import { Link } from "react-router";
+import { isTestKind } from "../../lib/chainConfig";
 import { config } from "../../lib/config";
 import { IconArrowRight, IconBook } from "../icons";
 import { Term } from "../Term";
@@ -38,7 +39,7 @@ const SHORT_VERSION = [
 ];
 
 export function LearnIntro() {
-  const testnet = config.chain.kind !== "mainnet";
+  const testnet = isTestKind(config.chain.kind);
   return (
     <>
       <h2 className="eyebrow mb-3">The short version</h2>
@@ -90,7 +91,7 @@ export function LearnOutro() {
       </Card>
       <Callout tone="risk" className="mt-5" title="Funding a book can lose money">
         Junior absorbs losses first, and Senior can lose too once Junior and the backstop pool are used up. Nothing on this page is a forecast or advice.
-        {config.chain.kind !== "mainnet" ? " Bookrunner currently runs on a testnet, where tokens have no value." : ""}
+        {isTestKind(config.chain.kind) ? " Bookrunner currently runs on a testnet, where tokens have no value." : ""}
       </Callout>
     </div>
   );

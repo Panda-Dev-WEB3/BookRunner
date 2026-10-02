@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { decodeFunctionData } from "viem";
-import { CHAIN_PRESETS, DEVNET_CHAIN_ID, LOW_GAS_WEI, RHC_TESTNET_CHAIN_ID, chainLabel, explorerAddress, explorerTx, gasStatus, resolveChainConfig } from "../src/lib/chainConfig";
-import { MOCK_MINT_ABI, TEST_USDC_AMOUNT, fmtEth, mockMintTx, toQuantity } from "../src/lib/funds";
+import { CHAIN_PRESETS, DEVNET_CHAIN_ID, LOW_GAS_WEI, RHC_TESTNET_CHAIN_ID, chainLabel, explorerAddress, explorerTx, gasStatus, isTestKind, resolveChainConfig } from "../src/lib/chainConfig";
+import { MOCK_MINT_ABI, TEST_USDC_AMOUNT, fmtEth, mintAvailability, mockMintTx, toQuantity } from "../src/lib/funds";
 
 describe("resolveChainConfig", () => {
   test("defaults to the local devnet", () => {
@@ -28,6 +28,29 @@ describe("resolveChainConfig", () => {
     expect(c.explorerUrl).toBe("https://scan.example");
     expect(c.apiUrl).toBe("https://api.example");
     expect(c.usdcAddress).toBe("0x0000000000000000000000000000000000000001");
+  });
+  test("test-network features fail closed: only a known devnet or testnet is a test chain", () => {
+    expect(isTestKind("devnet")).toBe(true);
+    expect(isTestKind("testnet")).toBe(true);
+    expect(isTestKind("mainnet")).toBe(false);
+    // an unknown id (a real mainnet id that is not the 4663 preset, another chain) is NOT a test network
+    const custom = resolveChainConfig({ VITE_CHAIN_ID: "777" });
+    expect(custom.kind).toBe("custom");
+    expect(isTestKind(custom.kind)).toBe(false);
+    // unless the build declares it; a preset keeps its own kind
+    expect(resolveChainConfig({ VITE_CHAIN_ID: "777", VITE_CHAIN_KIND: "testnet" }).kind).toBe("testnet");
+    expect(resolveChainConfig({ VITE_CHAIN_ID: "777", VITE_CHAIN_KIND: "bogus" }).kind).toBe("custom");
+    expect(resolveChainConfig({ VITE_CHAIN_ID: "4663", VITE_CHAIN_KIND: "testnet" }).kind).toBe("mainnet");
+  });
+  test("mint availability: test networks only, a wallet, the token, and an open mint", () => {
+    const ok = { testChain: true, wallet: true, usdc: "0x01", contractsLoading: false, simulated: true };
+    expect(mintAvailability(ok)).toBeNull();
+    expect(mintAvailability({ ...ok, testChain: false })).toBe("mainnet"); // mainnet or an unknown (custom) chain
+    expect(mintAvailability({ ...ok, wallet: false })).toBe("no-wallet");
+    expect(mintAvailability({ ...ok, usdc: null })).toBe("no-token");
+    expect(mintAvailability({ ...ok, usdc: null, contractsLoading: true })).toBe("checking");
+    expect(mintAvailability({ ...ok, simulated: undefined })).toBe("checking");
+    expect(mintAvailability({ ...ok, simulated: false })).toBe("not-mintable"); // a real USDC: mint() reverts
   });
   test("unknown ids become a custom chain; bad ids fall back to devnet", () => {
     expect(resolveChainConfig({ VITE_CHAIN_ID: "777", VITE_CHAIN_NAME: "Lab" })).toMatchObject({ id: 777, name: "Lab", kind: "custom" });

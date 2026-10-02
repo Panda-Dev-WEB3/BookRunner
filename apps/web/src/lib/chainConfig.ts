@@ -61,10 +61,23 @@ type Env = Record<string, string | boolean | undefined>;
 const str = (v: string | boolean | undefined): string => (typeof v === "string" ? v.trim() : "");
 const noSlash = (s: string) => s.replace(/\/+$/, "");
 
-/** VITE_* env -> the app's chain + endpoints. Unknown chain ids become a "custom" chain. */
+/**
+ * Test-network features (the test-USDC mint, "test tokens have no value" copy, the faucet step)
+ * apply only to a known devnet or testnet. Fails closed: a "custom" chain is treated like mainnet
+ * unless the build says otherwise with VITE_CHAIN_KIND.
+ */
+export const isTestKind = (kind: ChainPreset["kind"]): boolean => kind === "devnet" || kind === "testnet";
+
+const KINDS: ReadonlyArray<ChainPreset["kind"]> = ["devnet", "testnet", "mainnet"];
+
+/**
+ * VITE_* env -> the app's chain + endpoints. Unknown chain ids become a "custom" chain, or the kind
+ * VITE_CHAIN_KIND names (devnet / testnet / mainnet); presets keep their own kind.
+ */
 export function resolveChainConfig(env: Env): AppChainConfig {
   const rawId = Number(str(env.VITE_CHAIN_ID) || DEVNET_CHAIN_ID);
   const id = Number.isInteger(rawId) && rawId > 0 ? rawId : DEVNET_CHAIN_ID;
+  const declared = str(env.VITE_CHAIN_KIND) as ChainPreset["kind"];
   const preset: ChainPreset = CHAIN_PRESETS[id] ?? {
     id,
     name: str(env.VITE_CHAIN_NAME) || `Chain ${id}`,
@@ -72,7 +85,7 @@ export function resolveChainConfig(env: Env): AppChainConfig {
     rpcUrl: "",
     explorerUrl: "",
     faucetUrl: "",
-    kind: "custom",
+    kind: KINDS.includes(declared) ? declared : "custom",
   };
   const usdc = str(env.VITE_USDC_ADDRESS);
   return {

@@ -3,7 +3,7 @@
 import { type Chain, createPublicClient, defineChain, http } from "viem";
 import { type CreateConnectorFn, createConfig, createStorage, injected } from "wagmi";
 import { walletConnect } from "./walletConnect";
-import { chainLabel } from "../lib/chainConfig";
+import { chainLabel, isTestKind } from "../lib/chainConfig";
 import { config } from "../lib/config";
 import { safeLocalStorage } from "../lib/safeStorage";
 
@@ -15,7 +15,7 @@ export const appChain: Chain = defineChain({
   nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
   rpcUrls: { default: { http: [c.rpcUrl] } },
   ...(c.explorerUrl ? { blockExplorers: { default: { name: `${c.name} explorer`, url: c.explorerUrl } } } : {}),
-  testnet: c.kind !== "mainnet",
+  testnet: isTestKind(c.kind),
 });
 
 /** Read-only client on the app chain (balances, simulations, devnet top-ups). */
