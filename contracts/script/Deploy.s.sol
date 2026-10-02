@@ -95,7 +95,7 @@ contract Deploy is Script {
         if (deployerKey == 0) deployerKey = vm.deriveKey(mnemonic, 0);
         uint32 markInterval = uint32(vm.envOr("MARK_INTERVAL_SECONDS", uint256(300)));
         _roles(deployerKey, mnemonic);
-        startBlock = block.number;
+        startBlock = block.number; // NB: parent-chain block on Arbitrum Orbit (RHC) — deploy-testnet.sh rewrites it from receipts
 
         tickers.push("NVDA");
         tickers.push("TSLA");

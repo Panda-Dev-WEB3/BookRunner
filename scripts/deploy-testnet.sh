@@ -45,6 +45,13 @@ echo "==> Deploy.s.sol -> testnet"
 DEV_MNEMONIC="$BKRN_TESTNET_MNEMONIC" NETWORK=testnet MARK_INTERVAL_SECONDS="${MARK_INTERVAL_SECONDS:-3600}" \
   bash scripts/forge.sh script script/Deploy.s.sol:Deploy --rpc-url "$FORGE_RPC" --broadcast --slow -q
 
+echo "==> startBlock from deploy receipts (on Arbitrum Orbit chains block.number is the PARENT chain's block)"
+node -e '
+const fs=require("fs");const r=JSON.parse(fs.readFileSync("contracts/broadcast/Deploy.s.sol/46630/run-latest.json","utf8"));
+const b=(r.receipts||[]).map(x=>parseInt(x.blockNumber,16)).filter(Boolean);if(!b.length)throw new Error("no receipts");
+const p="contracts/deployments/46630.json";const d=JSON.parse(fs.readFileSync(p,"utf8"));d.startBlock=Math.min(...b)-1;
+fs.writeFileSync(p,JSON.stringify(d,null,2)+"\n");console.log("    startBlock",d.startBlock);'
+
 echo "==> verify on-chain (a partial broadcast must never pass silently)"
 CFG=$(node -e 'console.log(require("./contracts/deployments/46630.json").contracts.config)')
 REG=$(node -e 'console.log(require("./contracts/deployments/46630.json").contracts.stockRegistry)')
