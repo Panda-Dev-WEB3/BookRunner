@@ -4,6 +4,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useMatches } from "react-router";
 import { useHealth } from "../api/hooks";
+import { navSection } from "../lib/navSection";
 import { config } from "../lib/config";
 import { LEGAL, STRAPLINE } from "../lib/copy";
 import { appChain, chainName } from "../wallet/chains";
@@ -35,8 +36,6 @@ export const PROTOCOL_NAV = [
   { to: "/risk", label: "Risk", hint: "Limit states and kill log" },
   { to: "/agents", label: "Agents", hint: "Desk keys and bonds" },
 ] as const;
-
-const PROTOCOL_PREFIXES = ["/books", "/charters", "/committee", "/risk", "/agents"];
 
 type Theme = "system" | "light" | "dark";
 
@@ -134,7 +133,7 @@ function ProtocolMenu() {
   const ref = useRef<HTMLDivElement>(null);
   const btn = useRef<HTMLButtonElement>(null);
   const menuId = useId();
-  const active = PROTOCOL_PREFIXES.some((p) => loc.pathname === p || loc.pathname.startsWith(`${p}/`));
+  const active = navSection(loc.pathname, loc.search, loc.hash) === "protocol";
 
   useEffect(() => setOpen(false), [loc.pathname]);
   useEffect(() => {
@@ -190,7 +189,14 @@ function ProtocolMenu() {
   );
 }
 
+/** NavLink's own match, plus Invest for a book page reached from Invest (lib/navSection). */
+function useInvestSection(): boolean {
+  const loc = useLocation();
+  return navSection(loc.pathname, loc.search, loc.hash) === "invest";
+}
+
 function MobileNav({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const investSection = useInvestSection();
   const item = ({ isActive }: { isActive: boolean }) =>
     cx("flex h-11 items-center rounded-control px-3 text-[15px] font-medium", isActive ? "bg-surface-2 text-ink" : "text-ink-2 hover:bg-surface-2/70 hover:text-ink");
   return (
@@ -199,7 +205,7 @@ function MobileNav({ open, onClose }: { open: boolean; onClose: () => void }) {
         <ul className="space-y-0.5">
           {PRIMARY_NAV.map((n) => (
             <li key={n.to}>
-              <NavLink to={n.to} end={"end" in n ? n.end : undefined} className={item} onClick={onClose}>
+              <NavLink to={n.to} end={"end" in n ? n.end : undefined} className={({ isActive }) => item({ isActive: isActive || (n.to === "/invest" && investSection) })} onClick={onClose}>
                 {n.label}
               </NavLink>
             </li>
@@ -210,7 +216,7 @@ function MobileNav({ open, onClose }: { open: boolean; onClose: () => void }) {
           <ul className="space-y-0.5">
             {PROTOCOL_NAV.map((n) => (
               <li key={n.to}>
-                <NavLink to={n.to} end={n.to === "/charters"} className={item} onClick={onClose}>
+                <NavLink to={n.to} end={n.to === "/charters"} className={({ isActive }) => item({ isActive: isActive && !investSection })} onClick={onClose}>
                   {n.label}
                 </NavLink>
               </li>
@@ -228,6 +234,7 @@ function MobileNav({ open, onClose }: { open: boolean; onClose: () => void }) {
 
 function Header() {
   const loc = useLocation();
+  const investSection = useInvestSection();
   const [drawer, setDrawer] = useState(false);
   useEffect(() => setDrawer(false), [loc.pathname]);
   return (
@@ -242,7 +249,7 @@ function Header() {
             <ul className="flex items-center gap-0.5">
               {PRIMARY_NAV.map((n) => (
                 <li key={n.to}>
-                  <NavLink to={n.to} end={"end" in n ? n.end : undefined} className={navLinkCls}>
+                  <NavLink to={n.to} end={"end" in n ? n.end : undefined} className={({ isActive }) => navLinkCls({ isActive: isActive || (n.to === "/invest" && investSection) })}>
                     {n.label}
                   </NavLink>
                 </li>
