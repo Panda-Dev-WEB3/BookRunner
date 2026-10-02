@@ -130,7 +130,7 @@ export function FileCharterPage() {
         <Field label="Book name" help="Shown on dashboards (optional)" htmlFor="f-name">
           <input id="f-name" className="field" value={form.name} onChange={(e) => set("name", e.currentTarget.value)} maxLength={80} />
         </Field>
-        <Field label="Sponsor" help="Pays the flat charter fee, locks the BKRN sponsor bond and keeps at least 10% of Junior" error={err("sponsor")} htmlFor="f-sponsor">
+        <Field label="Sponsor" help="Pays the flat charter fee, locks the BKRN sponsor bond and holds at least 10% of Junior when the subscription window closes" error={err("sponsor")} htmlFor="f-sponsor">
           <div className="flex gap-2">
             <input id="f-sponsor" className="field num" value={form.sponsor} onChange={(e) => set("sponsor", e.currentTarget.value.trim())} placeholder="0x…" aria-invalid={!!err("sponsor")} />
             {w.active && (

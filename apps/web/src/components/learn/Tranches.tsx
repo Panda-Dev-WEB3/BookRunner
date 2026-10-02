@@ -2,7 +2,7 @@
 // losses rise from the bottom, the backstop sits beside Senior) and the live split of the testnet books.
 import type { ReactNode } from "react";
 import { Link } from "react-router";
-import { TRANCHE_COPY } from "../../lib/copy";
+import { SPONSOR_SKIN_SHORT, TRANCHE_COPY } from "../../lib/copy";
 import { fmtUsd, tickerOf, usdRaw } from "../../lib/format";
 import { SERIES, SERIES_INK } from "../../lib/palette";
 import { cx } from "../cx";
@@ -54,7 +54,7 @@ const ROWS: Row[] = [
   {
     label: "Size",
     senior: "Capped at a share of book capital set in the charter.",
-    junior: "The rest of the book. The sponsor holds at least 10% of it.",
+    junior: `The rest of the book. The sponsor ${SPONSOR_SKIN_SHORT}; later top-ups can dilute that share.`,
   },
   {
     label: "Who it suits",

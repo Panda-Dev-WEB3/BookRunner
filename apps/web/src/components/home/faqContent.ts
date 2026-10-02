@@ -1,5 +1,6 @@
 // Home FAQ: plain-text answers (checked against docs/ARCHITECTURE.md and the product overview, and by
 // the copy rules in test/home.test.ts). The Faq component adds glossary terms and links per item.
+import { SPONSOR_SKIN_LINE } from "../../lib/copy";
 import type { GlossaryId } from "../../lib/glossary";
 
 export interface FaqItem {
@@ -55,7 +56,8 @@ export function faqItems(ctx: FaqContext): FaqItem[] {
       question: "Senior or Junior: what is the difference?",
       answer: [
         "Senior is paid first from fee flow, up to the hurdle share set in the book's charter, and takes losses last. Senior redemptions settle at NAV at the next mark.",
-        "Junior receives the rest of the fee flow and the inventory gains, and takes losses first. Junior redemptions settle at the first mark after a notice period. The sponsor always holds at least 10% of Junior.",
+        "Junior receives the rest of the fee flow and the inventory gains, and takes losses first. Junior redemptions settle at the first mark after a notice period.",
+        SPONSOR_SKIN_LINE,
       ],
       terms: ["senior", "junior", "redemptionNotice"],
     },

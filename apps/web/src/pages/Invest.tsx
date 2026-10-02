@@ -224,7 +224,7 @@ export function InvestPage() {
               <span className="text-[13px] text-ink-2">first loss, residual</span>
             </div>
             <p className="text-[14px] text-ink-2">
-              Junior keeps what is left of each distribution after Senior's share, and absorbs losses first. The sponsor holds at least 10% of Junior, so it shares the first losses too.
+              Junior keeps what is left of each distribution after Senior's share, and absorbs losses first. The sponsor holds at least 10% of Junior when the subscription window closes, so it shares the first losses too; later top-ups can dilute that share.
             </p>
           </Card>
           <Card padding="lg" as="section" aria-label="Fee flow pays down">

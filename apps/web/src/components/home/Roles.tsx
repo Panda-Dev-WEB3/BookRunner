@@ -27,7 +27,7 @@ const ROLES: Role[] = [
     body: (
       <>
         Charter a new market. File its terms, pay a flat USDC fee (refunded if rejected), lock a BKRN bond and hold at least 10% of its{" "}
-        <Term id="junior">Junior</Term> tranche.
+        <Term id="junior">Junior</Term> tranche when the subscription window closes.
       </>
     ),
     to: "/charters/new",

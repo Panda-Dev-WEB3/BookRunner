@@ -23,6 +23,14 @@ export const BACKSTOP_LINE = "Backstop up to the pool: covers Senior impairment 
 export const LIVE_VS_MARKED =
   "Marked values come from the signed mark committed on-chain each period. Live values are an intra-period estimate and are never used for subscriptions or redemptions.";
 export const FEE_FLOW_LINE = "Fee flow is the observed accrual over the mark period, distributed by the book's router.";
+/**
+ * Sponsor skin (Waterfall.allocateWindow enforces SPONSOR_MIN_JUNIOR_BPS only when the subscription
+ * window closes; later outflows only flag the sponsor, and top-ups mint Junior with no sponsor check).
+ */
+export const SPONSOR_SKIN_LINE =
+  "The sponsor is allocated first and holds at least 10% of Junior when the subscription window closes. If the sponsor later redeems or transfers below 10%, the committee may slash their bond. Later top-ups can dilute the sponsor's share.";
+/** The same rule in one clause, for tight spots (cards, list items, form help). */
+export const SPONSOR_SKIN_SHORT = "holds at least 10% of Junior when the subscription window closes";
 export const NOTICE_LINE = "Notice is not a gate: a redemption request is always accepted and settles at the first mark on or after its eligible time.";
 
 export const venueLabel = (v: string | null | undefined): string =>

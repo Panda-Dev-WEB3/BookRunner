@@ -2,6 +2,7 @@
 // Horizontal flow on wide screens (arrows between steps), a vertical list on phones.
 import type { ReactNode } from "react";
 import { Link } from "react-router";
+import { SPONSOR_SKIN_SHORT } from "../../lib/copy";
 import { cx } from "../cx";
 import { IconArrowRight } from "../icons";
 import { Section, Term } from "../ui";
@@ -44,7 +45,7 @@ const STEPS: Step[] = [
     body: (
       <>
         Allocators deposit USDC into the <Term id="senior">Senior</Term> or <Term id="junior">Junior</Term> tranche. The book funds the market's insurance fund first, then the
-        market-making inventory. The sponsor holds at least 10% of Junior.
+        market-making inventory. The sponsor {SPONSOR_SKIN_SHORT}; later top-ups can dilute that share.
       </>
     ),
   },

@@ -68,6 +68,9 @@ describe("glossary", () => {
   test("facts that must match the protocol docs", () => {
     expect(GLOSSARY.carry.short).toContain("10%");
     expect(GLOSSARY.sponsor.short).toContain("10%");
+    // SPONSOR_MIN_JUNIOR_BPS is enforced only at window close (Waterfall.allocateWindow); top-ups can dilute it.
+    expect(GLOSSARY.sponsor.short).toContain("when the subscription window closes");
+    expect(GLOSSARY.sponsor.long).toContain("Later top-ups can dilute");
     expect(GLOSSARY.senior.short).toContain("last loss, not no loss");
     expect(GLOSSARY.redemptionNotice.short).toContain("Notice is not a gate");
     expect(GLOSSARY.backstop.short).toContain("up to what the pool holds");

@@ -15,6 +15,10 @@ const RULES: Rule[] = [
     why: "A top-up round settles at the first mark whose period ends at or after the ROUND END (Tranche.settleAtMark), not at the next mark",
     pattern: /(deposit|round|escrow|allocat)[^.]*\bnext mark\b|\bnext mark\b[^.]*(deposit|round|escrow)|settle at the next mark's share price/i,
   },
+  {
+    why: "The sponsor's 10% of Junior is enforced only when the subscription window closes (Waterfall.allocateWindow); top-ups can dilute it",
+    pattern: /sponsor[^.]*\b(always|must) (hold|keep)|\bat least 10% of (its |the book's )?Junior( tranche)?(?![^.;]*\bwindow closes)/i,
+  },
 ];
 
 const { snippets } = appSnippets();

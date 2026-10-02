@@ -3,6 +3,7 @@
 // left in the round and a one-line risk statement each.
 import type { ReactNode } from "react";
 import type { BookDetail } from "../../lib/api-types";
+import { SPONSOR_SKIN_SHORT } from "../../lib/copy";
 import { fmtDuration, fmtSharePrice } from "../../lib/format";
 import { cadenceTitle } from "../../lib/lowgas";
 import { IconCheck } from "../icons";
@@ -81,7 +82,7 @@ export function TrancheChoice(props: TrancheChoiceProps) {
         split ? `${pctOfBps(split.junior)} of each distribution: what is left after Senior` : "Set in the charter",
       ],
       ["Loss order", "First: Junior absorbs losses before anyone else."],
-      ["Size limit", c ? `At least ${pctOfBps(10_000 - c.seniorCapBps)} of the book when deposits are accepted. The sponsor holds at least 10% of Junior.` : "Set in the charter"],
+      ["Size limit", c ? `At least ${pctOfBps(10_000 - c.seniorCapBps)} of the book when deposits are accepted. The sponsor ${SPONSOR_SKIN_SHORT}; later top-ups can dilute that share.` : "Set in the charter"],
       [
         <Term key="t" id="redemptionNotice">
           Withdrawals

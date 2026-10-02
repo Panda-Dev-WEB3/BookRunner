@@ -70,8 +70,8 @@ const entries: GlossaryEntry[] = [
   {
     id: "sponsor",
     term: "Sponsor",
-    short: "Whoever charters a book: a treasury, a fund or an agent fleet. The sponsor posts a BKRN bond and must hold at least 10% of the book's Junior tranche.",
-    long: "Holding Junior is the sponsor's skin in the book: they take the first losses alongside other Junior holders. If a sponsor abandons a live book, the committee may slash the bond.",
+    short: "Whoever charters a book: a treasury, a fund or an agent fleet. The sponsor posts a BKRN bond and holds at least 10% of the book's Junior tranche when the subscription window closes.",
+    long: "Holding Junior is the sponsor's skin in the book: they take the first losses alongside other Junior holders. The 10% is checked when the window closes; if the sponsor later redeems or transfers below 10% of a live book's Junior, the committee may slash their bond. Later top-ups can dilute the sponsor's share.",
     related: ["charter", "junior", "bkrn"],
   },
   {
@@ -105,7 +105,7 @@ const entries: GlossaryEntry[] = [
     id: "junior",
     term: "Junior tranche",
     short: "The first-loss tranche. It receives the residual fee flow after Senior's share, so it carries both the upside and the first losses.",
-    long: "Junior redemptions settle at NAV at the first mark after the notice period. The sponsor holds at least 10% of Junior.",
+    long: "Junior redemptions settle at NAV at the first mark after the notice period. The sponsor holds at least 10% of Junior when the subscription window closes; later top-ups can dilute that share.",
     related: ["senior", "redemptionNotice", "sponsor"],
   },
   {

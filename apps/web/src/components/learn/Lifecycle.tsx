@@ -1,6 +1,7 @@
 // 2. A book, end to end: an interactive lifecycle (charter -> committee -> subscription window -> live ->
 // marks -> top-ups and redemptions -> retire). Stages are tabs: click, or use the arrow keys.
 import { type KeyboardEvent, type ReactNode, useId, useRef, useState } from "react";
+import { SPONSOR_SKIN_SHORT } from "../../lib/copy";
 import type { GlossaryId } from "../../lib/glossary";
 import { cx } from "../cx";
 import { IconArrowRight } from "../icons";
@@ -47,7 +48,7 @@ const STAGES: Stage[] = [
     who: <Term id="allocator">Allocators</Term>,
     what: "Allocators deposit USDC into Senior or Junior while the window is open.",
     detail:
-      "At close, commitments are allocated pro-rata with a per-wallet cap. The sponsor is allocated first in Junior and always holds at least 10% of it; Senior is capped at a share of book capital. Anything over is refunded. If the window fails its checks, the book is cancelled and every deposit is refundable 1:1.",
+      "At close, commitments are allocated pro-rata with a per-wallet cap. The sponsor is allocated first in Junior and holds at least 10% of it when the window closes (later top-ups can dilute that share); Senior is capped at a share of book capital. Anything over is refunded. If the window fails its checks, the book is cancelled and every deposit is refundable 1:1.",
     when: (
       <>
         Length set in the charter. See <Term id="subscriptionWindow" />.
@@ -101,7 +102,7 @@ const STAGES: Stage[] = [
 ];
 
 const CAST: Array<{ id: GlossaryId; label: string; body: string }> = [
-  { id: "sponsor", label: "Sponsor", body: "Charters the market, posts a BKRN bond and holds at least 10% of Junior." },
+  { id: "sponsor", label: "Sponsor", body: `Charters the market, posts a BKRN bond and ${SPONSOR_SKIN_SHORT}.` },
   { id: "riskCommittee", label: "Risk Committee", body: "A model jury plus three bonded members; approves books 2-of-3." },
   { id: "allocator", label: "Allocators", body: "Fund the book in Senior or Junior and hold shares valued at NAV." },
   { id: "bookrunnerAgent", label: "Bookrunner agent", body: "Quotes and hedges the book, and can only take actions its mandate allows." },
