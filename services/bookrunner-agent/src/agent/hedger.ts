@@ -63,8 +63,11 @@ export interface HedgerDeps {
   log: Logger;
   now?: () => number;
   perp?: PerpHedger | null;
-  /** Orderly books (low-gas): relay the latest signed venue report before a risk-adding leg. */
-  beforeRiskAddingHedge?: () => Promise<void>;
+  /**
+   * Orderly books (low-gas): relay the latest signed venue report before every hedge leg — MMMandate
+   * band-checks buys and sells against the on-chain exposure, which otherwise only advances at marks.
+   */
+  beforeHedgeLeg?: () => Promise<void>;
   /**
    * Pull oracle: value the desk inventory from the snapshot (freshest signed prices) instead of the
    * on-chain desk views, which price at the stored oracle value and revert StalePrice once nothing
@@ -232,7 +235,7 @@ export class Hedger implements HedgeCycleRunner {
         case "buy": {
           const comp = byToken.get(leg.token.toLowerCase());
           if (!comp) throw new Error(`hedge: unknown component ${leg.token}`);
-          await this.d.beforeRiskAddingHedge?.();
+          await this.d.beforeHedgeLeg?.();
           const r = await this.d.runner.run(
             encodeHedge({ token: leg.token, buy: true, amountIn: leg.amountInUsd, minAmountOut: leg.minAmountOutRaw, poolFee: this.d.poolFee, proof: leg.proof }),
             "Hedge:buy",
@@ -251,6 +254,7 @@ export class Hedger implements HedgeCycleRunner {
             leg.kind === "sell" && allowed
               ? encodeHedge({ token: leg.token, buy: false, amountIn: leg.amountInRaw, minAmountOut: leg.minAmountOutUsd, poolFee: this.d.poolFee, proof: leg.proof })
               : encodeFlatten({ token: leg.token, amountIn: leg.amountInRaw, minAmountOut: leg.minAmountOutUsd, poolFee: this.d.poolFee });
+          await this.d.beforeHedgeLeg?.();
           const r = await this.d.runner.run(action, leg.kind === "sell" ? "Hedge:sell" : "Flatten");
           const ev = parseHedgeExecuted(r.receipt, leg.token);
           const out = ev?.amountOut ?? leg.minAmountOutUsd;

@@ -8,6 +8,7 @@ import { type HedgeChain, Hedger } from "../src/agent/hedger";
 import { PriceFeed } from "../src/agent/price-feed";
 import type { OraclePoint, StockTokenInfo } from "../src/chain/book-chain";
 import type { DeskRunner } from "../src/chain/desk-client";
+import { freshestVenueView } from "../src/chain/venue-report-relay";
 import { loadAgentEnv, loadSimEnv } from "../src/config";
 import { valueUsdOf } from "../src/domain/hedge-planner";
 import { buildHedgeUniverse, defaultAllowPairs } from "../src/domain/hedge-universe";
@@ -157,6 +158,81 @@ describe("Hedger desk valuation", () => {
     const { h, mandate } = hedger({ views: "throw" });
     const plan = await h.cycle({ mandate, mode: "normal", offHours: false, netExposureUsd: -usd(40_000), allowAddHedge: true });
     expect(plan.ratioBefore).toBe(expectedRatio);
+  });
+});
+
+describe("Orderly books: signed venue report between marks (regression: NVDA HEDGE_BAND kill on testnet)", () => {
+  // The on-chain adapter view only advances at marks (hourly); risk monitors the signed report every
+  // minute. Planning on the on-chain view let exposure drift to -10.7k against a 4k hedge with the hedger
+  // reporting IN_BAND, until risk killed the book.
+  test("plan from the signed report when it is newer than the on-chain valuation", () => {
+    const r = { asOf: 1_000n, netExposureUsd: -usd(10_663) };
+    expect(freshestVenueView(r, 400n, -usd(4_661))).toEqual({ exposureUsd: -usd(10_663), valuationAt: 1_000 });
+  });
+  test("fall back to the on-chain view when the report is not newer or missing", () => {
+    expect(freshestVenueView({ asOf: 400n, netExposureUsd: -usd(1) }, 400n, -usd(4_661))).toEqual({ exposureUsd: -usd(4_661), valuationAt: 400 });
+    expect(freshestVenueView(null, 400n, -usd(4_661))).toEqual({ exposureUsd: -usd(4_661), valuationAt: 400 });
+  });
+
+  const DESK = "0x00000000000000000000000000000000000000d1" as Address;
+  const NVDA = "0x00000000000000000000000000000000000000a1" as Address;
+  const PRICE_ID = ("0x" + "4e564441".padEnd(64, "0")) as Hex;
+  function hedger(balanceRaw: bigint, events: string[]) {
+    const chain: HedgeChain = {
+      deskHedgeUsd: async () => 0n,
+      deskValueUsd: async () => 0n,
+      deskUsdc: async () => usd(100_000),
+      tokenBalance: async () => balanceRaw,
+      getToken: async (token): Promise<StockTokenInfo> => ({ token, priceId: PRICE_ID, multiplierWad: wad(1), decimals: 18, active: true, floatCapRaw: 10n ** 30n }),
+      oracleLatest: async (): Promise<OraclePoint> => ({ priceWad: wad(190), publishedAt: 1, held: false, sourceCount: 3 }),
+      vaultDeployable: async () => usd(1_000_000),
+    };
+    const comps = [{ token: NVDA, weightBps: 10_000 }];
+    const mandate = nvdaMandate({ hedgeAllowRoot: hedgeAllowTree(defaultAllowPairs(comps)).root });
+    const runner: DeskRunner = {
+      key: DESK,
+      execute: async () => zeroHash,
+      run: async (_action, label) => {
+        events.push(String(label));
+        return { hash: zeroHash, receipt: { logs: [] } } as never;
+      },
+    };
+    const h = new Hedger({
+      bookId: 1,
+      desk: DESK,
+      chain,
+      runner,
+      store: new FakeStore(),
+      universe: buildHedgeUniverse(comps, mandate.hedgeAllowRoot),
+      cfg: { minTradeUsd: usd(250), slippageBps: 100, perpEnabled: false, returnDustUsd: usd(1) },
+      poolFee: 3000,
+      receiptsIntervalSec: 60,
+      log: silentLog,
+      offchainValuation: true,
+      beforeHedgeLeg: async () => {
+        events.push("relay");
+      },
+    });
+    return { h, mandate };
+  }
+  const hedgeLegs = (events: string[]) => events.filter((e) => e.startsWith("Hedge:") || e === "Flatten");
+
+  test("the signed report is relayed right before a buy leg", async () => {
+    const events: string[] = [];
+    const { h, mandate } = hedger(0n, events);
+    const plan = await h.cycle({ mandate, mode: "normal", offHours: false, netExposureUsd: -usd(10_000), allowAddHedge: true });
+    expect(plan.action).toBe("buy");
+    expect(hedgeLegs(events).length).toBeGreaterThan(0);
+    for (const [i, e] of events.entries()) if (e.startsWith("Hedge:")) expect(events[i - 1]).toBe("relay");
+  });
+
+  test("the signed report is relayed right before a sell leg too (the band check reads on-chain exposure)", async () => {
+    const events: string[] = [];
+    const { h, mandate } = hedger(200n * 10n ** 18n, events); // 38k hedge vs 10k exposure: over-hedged
+    const plan = await h.cycle({ mandate, mode: "normal", offHours: false, netExposureUsd: -usd(10_000), allowAddHedge: true });
+    expect(plan.action).toBe("sell");
+    expect(hedgeLegs(events).length).toBeGreaterThan(0);
+    for (const [i, e] of events.entries()) if (e.startsWith("Hedge:") || e === "Flatten") expect(events[i - 1]).toBe("relay");
   });
 });
 

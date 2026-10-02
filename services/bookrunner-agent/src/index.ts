@@ -208,6 +208,21 @@ async function runOnce(ctx: BookContext, env: AgentEnv, baseLog: Logger, bus: Ag
     venue = await createOrderlyVenue({ bookId: ctx.bookId, symbol: ctx.symbol, accountId, baseUrl: env.ORDERLY_BASE_URL, mode: env.ORDERLY_MODE, env: process.env }, log);
   }
 
+  // Orderly books (low-gas): the on-chain venue view only advances at marks, so plan from the latest signed
+  // report (what risk monitors) and relay it on-chain right before each hedge leg
+  const reportRelay =
+    !(venue instanceof EngineVenue) && ctx.deskAccount
+      ? makeVenueReportRelay({
+          redisUrl: env.REDIS_URL,
+          bookId: ctx.bookId,
+          chainId: env.CHAIN_ID,
+          adapter: ctx.chain.components.adapter,
+          pub: ctx.pub,
+          wallet: walletClientFor(env.CHAIN_ID, env.RPC_URL, ctx.deskAccount),
+          log: log.child({ part: "venue-report-relay" }),
+        })
+      : null;
+
   let hedger: Hedger | null = null;
   if (env.HEDGE_ENABLED && desk) {
     const pairs = env.HEDGE_ALLOW_PAIRS ? parseAllowPairs(env.HEDGE_ALLOW_PAIRS) : undefined;
@@ -239,18 +254,7 @@ async function runOnce(ctx: BookContext, env: AgentEnv, baseLog: Logger, bus: Ag
       receiptsIntervalSec: env.RECEIPTS_INTERVAL_SECONDS,
       log: log.child({ part: "hedge" }),
       perp: null, // HEDGE_PERP_ENABLED: perp venue client not wired in v1 (VERIFY venue integration)
-      ...(!(venue instanceof EngineVenue) && ctx.deskAccount
-        ? {
-            beforeRiskAddingHedge: makeVenueReportRelay({
-              redisUrl: env.REDIS_URL,
-              bookId: ctx.bookId,
-              adapter: ctx.chain.components.adapter,
-              pub: ctx.pub,
-              wallet: walletClientFor(env.CHAIN_ID, env.RPC_URL, ctx.deskAccount),
-              log: log.child({ part: "venue-report-relay" }),
-            }),
-          }
-        : {}),
+      ...(reportRelay ? { beforeHedgeLeg: () => reportRelay.relay() } : {}),
     });
   }
 
@@ -264,8 +268,8 @@ async function runOnce(ctx: BookContext, env: AgentEnv, baseLog: Logger, bus: Ag
         mandateOffHours: () => ctx.chain.mandateOffHours(),
         bookState: () => ctx.chain.bookState(),
         oracleFallback: async () => oracleMsgFromChain(ctx.priceIdStr, ctx.priceIdHex, await ctx.chain.oracleLatest(ctx.priceIdHex)),
-        venueExposureUsd: () => ctx.chain.adapterExposureUsd(),
-        venueValuationAt: () => ctx.chain.adapterValuationAt(),
+        venueExposureUsd: reportRelay ? async () => (await reportRelay.view()).exposureUsd : () => ctx.chain.adapterExposureUsd(),
+        venueValuationAt: reportRelay ? async () => (await reportRelay.view()).valuationAt : () => ctx.chain.adapterValuationAt(),
       },
       price,
       vol,

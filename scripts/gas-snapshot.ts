@@ -1,5 +1,7 @@
 // Gas actually paid per role key: snapshot ETH balance + nonce of every role key, diff later.
 //   bun scripts/gas-snapshot.ts save <file>      bun scripts/gas-snapshot.ts diff <file>
+// Testnet (bun auto-loads the devnet .env, so pass the network explicitly):
+//   CHAIN_ID=46630 RPC_URL=https://rpc.testnet.chain.robinhood.com bun --env-file=.env.testnet scripts/gas-snapshot.ts diff <file>
 import { readFileSync, writeFileSync } from "node:fs";
 import { createPublicClient, formatEther, http } from "viem";
 import { chainFor } from "../packages/shared/src/chains";
