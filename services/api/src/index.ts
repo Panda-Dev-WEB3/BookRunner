@@ -12,6 +12,7 @@ import type { ApiDeps } from "./deps";
 import { RedisKv } from "./kv";
 import { WebhookDispatcher } from "./webhooks/dispatcher";
 import { createWebhookQueue, createWebhookWorker } from "./webhooks/queue";
+import { dnsResolveHost, parseAllowHosts } from "./webhooks/target";
 
 export { createApp } from "./app";
 export type { ApiDeps } from "./deps";
@@ -59,6 +60,7 @@ export async function startApi(env: ApiConfig = loadApiConfig()) {
       receiptsIntervalSeconds: env.RECEIPTS_INTERVAL_SECONDS,
       maxPriceAgeSeconds: env.MAX_PRICE_AGE_SECONDS,
       adminToken: env.API_ADMIN_TOKEN,
+      webhookAllowHosts: [...parseAllowHosts(env.WEBHOOK_ALLOW_HOSTS)],
     },
     log,
     data,
@@ -73,6 +75,8 @@ export async function startApi(env: ApiConfig = loadApiConfig()) {
       webhooks: env.WEBHOOKS_ENABLED,
     }),
   };
+
+  if (!env.API_ADMIN_TOKEN) log.warn("API_ADMIN_TOKEN is unset: webhook management (/v1/webhooks) is disabled");
 
   // HTTP first: serving DB-backed reads never waits on Redis, the chain or the webhook pipeline.
   const app = createApp(deps, { origins: env.webOrigins });
@@ -90,7 +94,12 @@ export async function startApi(env: ApiConfig = loadApiConfig()) {
     subscriber.on("error", throttled(log, "redis (subscriber) connection error"));
 
     const { queue, enqueue } = createWebhookQueue(bullConn, env.WEBHOOK_BACKOFF_MS, undefined, log);
-    const worker = createWebhookWorker(workerConn, { store: webhooks, fetch, now: Date.now, timeoutMs: env.WEBHOOK_TIMEOUT_MS, log }, env.WEBHOOK_CONCURRENCY, log);
+    const worker = createWebhookWorker(
+      workerConn,
+      { store: webhooks, fetch, now: Date.now, timeoutMs: env.WEBHOOK_TIMEOUT_MS, log, allowHosts: parseAllowHosts(env.WEBHOOK_ALLOW_HOSTS), resolveHost: dnsResolveHost },
+      env.WEBHOOK_CONCURRENCY,
+      log,
+    );
     const dispatcher = new WebhookDispatcher({ store: webhooks, enqueue, log, now: Date.now });
     await dispatcher.start(subscriber);
     closers.push(

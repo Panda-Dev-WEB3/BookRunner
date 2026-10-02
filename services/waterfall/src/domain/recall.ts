@@ -1,7 +1,11 @@
 // Recall-before-mark planning (pure). Redemptions queued for the next mark are settled from vault idle;
-// whatever idle (+ withdrawals already in flight) cannot cover is recalled from the venue MM account
-// ahead of the mark (Orderly recalls are asynchronous, so this runs every keeper tick, early).
-// Retiring + flat books recall all remaining venue capital (IF + MM) for the final mark.
+// whatever idle (+ withdrawals already in flight: requested-but-unconfirmed AND confirmed-unswept)
+// cannot cover is recalled from the venue MM account ahead of the mark (Orderly recalls are
+// asynchronous, so this runs every keeper tick, early; an in-flight recall is never re-requested).
+// MM recalls are capped by what the venue will pay now (engine: PoolEngine.withdrawLiquidity limits).
+// Retiring + flat books recall all remaining venue capital (IF + MM) for the final mark, down to the
+// last unit: Book.finalizeRetirement needs a final mark with deployedValueUsd == 0 exactly, so the
+// wind-down ignores the minRecallUsd dust floor.
 import { ACCOUNT, BPS, type BookState, WAD, absBig } from "@bookrunner/shared";
 
 export interface RecallInput {
@@ -12,7 +16,12 @@ export interface RecallInput {
   sharePriceWad: { senior: bigint; junior: bigint };
   unfundedClaims: bigint;
   vaultIdle: bigint;
+  /** Confirmed withdrawals not yet swept to the vault. */
   inTransit: bigint;
+  /** Requested withdrawals the venue has not confirmed yet (Orderly pendingWithdrawUsd IF + MM). */
+  pendingWithdraw: bigint;
+  /** Engine: the most withdrawLiquidity accepts now; null = bounded by the MM margin only (Orderly). */
+  mmWithdrawable: bigint | null;
   insuranceEquity: bigint;
   marginEquity: bigint; // signed
   netExposure: bigint; // signed
@@ -43,20 +52,22 @@ export function dueAssets(shares: { senior: bigint; junior: bigint }, price: { s
 export function planRecall(i: RecallInput): RecallPlan {
   const due = dueAssets(i.dueShares, i.sharePriceWad);
   const need = due + (due * i.bufferBps) / BPS + i.unfundedClaims;
-  const available = i.vaultIdle + i.inTransit;
+  const inFlight = i.inTransit + i.pendingWithdraw;
+  const available = i.vaultIdle + inFlight;
   const shortfall = need > available ? need - available : 0n;
   const plan: RecallPlan = { dueAssets: due, need, available, shortfall, recalls: [], uncovered: 0n };
   if (i.state !== "Live" && i.state !== "Retiring") {
     plan.uncovered = shortfall;
     return plan;
   }
-  const mm = i.marginEquity > 0n ? i.marginEquity : 0n;
+  let mm = i.marginEquity > 0n ? i.marginEquity : 0n;
+  if (i.mmWithdrawable !== null && i.mmWithdrawable < mm) mm = i.mmWithdrawable > 0n ? i.mmWithdrawable : 0n;
 
   const flat = absBig(i.netExposure) <= i.flatThresholdUsd;
-  // Wind-down: once flat and nothing is in flight, recall everything still on the venue.
-  if (i.state === "Retiring" && i.recallAllWhenRetiring && flat && i.inTransit === 0n) {
-    if (mm >= i.minRecallUsd) plan.recalls.push({ account: ACCOUNT.MM, amount: mm, reason: "retire" });
-    if (i.insuranceEquity >= i.minRecallUsd) plan.recalls.push({ account: ACCOUNT.IF, amount: i.insuranceEquity, reason: "retire" });
+  // Wind-down: once flat and nothing is in flight, recall everything still on the venue (no dust floor).
+  if (i.state === "Retiring" && i.recallAllWhenRetiring && flat && inFlight === 0n) {
+    if (mm > 0n) plan.recalls.push({ account: ACCOUNT.MM, amount: mm, reason: "retire" });
+    if (i.insuranceEquity > 0n) plan.recalls.push({ account: ACCOUNT.IF, amount: i.insuranceEquity, reason: "retire" });
     const recalled = plan.recalls.reduce((s, r) => s + r.amount, 0n);
     plan.uncovered = shortfall > recalled ? shortfall - recalled : 0n;
     return plan;
@@ -70,4 +81,16 @@ export function planRecall(i: RecallInput): RecallPlan {
     plan.uncovered = 0n;
   }
   return plan;
+}
+
+/**
+ * PoolEngine.withdrawLiquidity succeeds only for amount <= poolCash with poolEquity - amount >=
+ * requiredPoolMargin. While traders hold positions a buffer (5% of the required margin + 1 USD)
+ * absorbs price / funding drift between the read and the mined tx; a flat pool needs none.
+ */
+export function engineWithdrawableUsd(poolCashUsd: bigint, poolEquityUsd: bigint, requiredPoolMarginUsd: bigint): bigint {
+  const buffer = requiredPoolMarginUsd > 0n ? requiredPoolMarginUsd / 20n + 1_000_000n : 0n;
+  const headroom = poolEquityUsd - requiredPoolMarginUsd - buffer;
+  if (headroom <= 0n) return 0n;
+  return poolCashUsd < headroom ? poolCashUsd : headroom;
 }

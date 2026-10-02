@@ -112,6 +112,8 @@ describe("recall planning", () => {
     unfundedClaims: 0n,
     vaultIdle: usd("1000"),
     inTransit: 0n,
+    pendingWithdraw: 0n,
+    mmWithdrawable: null,
     insuranceEquity: usd("25000"),
     marginEquity: usd("75000"),
     netExposure: usd("5000"),
@@ -168,6 +170,44 @@ describe("recall planning", () => {
     expect(planRecall({ ...base, state: "Retiring", netExposure: 0n, inTransit: 1n }).recalls).toEqual([]);
     // still exposed: only redemption-driven MM recalls
     expect(planRecall({ ...base, state: "Retiring" }).recalls).toEqual([]);
+  });
+
+  test("requested-but-unconfirmed withdrawals count as in flight: no re-recall every cooldown", () => {
+    // 20k due, idle 1k: the first tick recalls 19k of MM
+    const first = planRecall({ ...base, dueShares: { senior: usd("20000"), junior: 0n } });
+    expect(first.recalls).toEqual([{ account: ACCOUNT.MM, amount: usd("19000"), reason: "redemptions" }]);
+    // Orderly has not confirmed yet (pendingWithdrawUsd), the reporter already shows the lower margin
+    const again = planRecall({ ...base, dueShares: { senior: usd("20000"), junior: 0n }, pendingWithdraw: usd("19000"), marginEquity: usd("56000") });
+    expect(again.available).toBe(usd("20000"));
+    expect(again.recalls).toEqual([]);
+    // the Retiring recall-all waits for requested withdrawals too
+    expect(planRecall({ ...base, state: "Retiring", netExposure: 0n, pendingWithdraw: 1n }).recalls).toEqual([]);
+  });
+
+  test("engine MM recall capped at what withdrawLiquidity accepts (pool cash, required margin)", async () => {
+    // pool cash 100k, equity ~100,037, required 7,400 (traders net long 74k): 98k due, idle ~0
+    const { engineWithdrawableUsd } = await import("../src/domain/recall");
+    const withdrawable = usd("92266"); // equity - required - (5% of required + 1 USD) buffer
+    expect(engineWithdrawableUsd(usd("100000"), usd("100037"), usd("7400"))).toBe(withdrawable);
+    const p = planRecall({ ...base, vaultIdle: 0n, dueShares: { senior: usd("98000"), junior: 0n }, marginEquity: usd("100037"), mmWithdrawable: withdrawable });
+    expect(p.recalls).toEqual([{ account: ACCOUNT.MM, amount: withdrawable, reason: "redemptions" }]);
+    expect(p.uncovered).toBe(usd("98000") - withdrawable);
+    // nothing withdrawable -> no reverting recall
+    expect(planRecall({ ...base, vaultIdle: 0n, dueShares: { senior: usd("98000"), junior: 0n }, mmWithdrawable: 0n }).recalls).toEqual([]);
+    // a flat pool needs no buffer: the whole cash is withdrawable
+    expect(engineWithdrawableUsd(usd("50000"), usd("50000"), 0n)).toBe(usd("50000"));
+    expect(engineWithdrawableUsd(usd("50000"), usd("1000"), usd("1000"))).toBe(0n);
+  });
+
+  test("retiring + flat: sub-dollar venue residue is still recalled (final mark needs deployedValueUsd == 0)", () => {
+    const p = planRecall({ ...base, state: "Retiring", netExposure: 0n, marginEquity: usd("0.43"), insuranceEquity: usd("0.2") });
+    expect(p.recalls).toEqual([
+      { account: ACCOUNT.MM, amount: usd("0.43"), reason: "retire" },
+      { account: ACCOUNT.IF, amount: usd("0.2"), reason: "retire" },
+    ]);
+    // engine: capped by withdrawable
+    const e = planRecall({ ...base, state: "Retiring", netExposure: 0n, marginEquity: usd("500"), mmWithdrawable: usd("400"), insuranceEquity: 0n });
+    expect(e.recalls).toEqual([{ account: ACCOUNT.MM, amount: usd("400"), reason: "retire" }]);
   });
 
   test("non-live books never recall", () => {

@@ -200,3 +200,15 @@ describe("mark readiness", () => {
     expect(markReadiness({ ...base, nowSec: P + 3541 }).reason).toBe("too_old");
   });
 });
+
+describe("venue report freshness (Orderly)", () => {
+  test("stale only for Orderly books whose last report is older than the bound at the snapshot block", async () => {
+    const { venueReportAge } = await import("../src/domain/readiness");
+    expect(venueReportAge(0, P - 10, P + 30, 1200)).toEqual({ stale: false, ageSec: 40 });
+    expect(venueReportAge(0, P - 1171, P + 30, 1200)).toEqual({ stale: true, ageSec: 1201 });
+    expect(venueReportAge(0, 0, P + 30, 1200).stale).toBe(true); // never reported
+    expect(venueReportAge(0, P + 40, P + 30, 1200)).toEqual({ stale: false, ageSec: 0 }); // reported after the block
+    expect(venueReportAge(1, 0, P + 30, 1200).stale).toBe(false); // engine: valued live on-chain
+    expect(venueReportAge(0, 0, P + 30, 0).stale).toBe(false); // 0 disables
+  });
+});

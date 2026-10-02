@@ -19,6 +19,18 @@ export const markEnvShape = {
   MARK_SPOOL_DIR: z.string().default(join(tmpdir(), "bookrunner-mark-spool")),
   MARK_LOG_CHUNK_BLOCKS: z.coerce.bigint().positive().default(10_000n),
   MARK_LOG_LOOKBACK_BLOCKS: z.coerce.bigint().min(0n).default(0n),
+  /**
+   * Orderly books: refuse to commit (retry later) while the adapter's last ops-venue report
+   * (valuationAt) is older than this at the snapshot block. Default 1200 = 4 x maxPriceAge (300),
+   * the freshness MMMandate already requires of Orderly reports for hedge-adding legs. 0 disables.
+   */
+  MARK_MAX_VENUE_REPORT_AGE_SECONDS: z.coerce.number().int().min(0).default(1200),
+  /**
+   * Retiring books: desk token positions worth less than this (USD 6dp; default 1000 = 0.001 USD,
+   * the agent's Retiring flatten floor) are valued at 0 so the final mark can reach
+   * deployedValueUsd == 0. 0 disables.
+   */
+  MARK_RETIRE_TOKEN_DUST_USD: z.coerce.bigint().min(0n).default(1_000n),
 };
 
 export function loadMarkConfig(source: Record<string, string | undefined> = process.env) {

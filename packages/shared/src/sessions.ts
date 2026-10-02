@@ -6,7 +6,8 @@
 //   [8..15]    timezone id: 0 = UTC, 1 = America/New_York (DST-aware via Intl)
 //   [16..169]  7 x (open:11 bits, close:11 bits), Monday..Sunday, minutes of local day (0..1439)
 //              open == close -> closed all day; close < open -> session wraps past local midnight
-//              open = 0 & close = 1439 means open the whole day (the 1439th minute included)
+//              close = 1439 means open to the end of the local day (the 1439th minute included),
+//              so open = 0 & close = 1439 is the whole day
 //   [170..177] holiday calendar id: 0 = none, 1 = NYSE (dates in HOLIDAYS below)
 //   rest       reserved (zero)
 import { type Hex, numberToHex } from "viem";
@@ -111,7 +112,9 @@ function localParts(date: Date, tz: TimezoneId) {
 
 function inDay(d: DaySession, minute: number): boolean {
   if (d.open === d.close) return false;
-  if (d.open === 0 && d.close === 1439) return true;
+  // close = 1439 means "to the end of the local day": the 1439th minute is included, so a session
+  // ending at 23:59 hands over to the next day's 00:00 open without a one-minute gap (24x5 Sunday).
+  if (d.close === 1439 && d.close > d.open) return minute >= d.open;
   if (d.close > d.open) return minute >= d.open && minute < d.close;
   return minute >= d.open || minute < d.close; // wraps
 }

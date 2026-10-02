@@ -86,6 +86,7 @@ function juryPorts(ch: CharterChain): JuryPorts {
       const c = await ch.committee();
       return { members: c.members.filter((m) => !/^0x0{40}$/i.test(m)), committeeWindowSec: c.committeeWindowSec };
     },
+    tryFinalize: (id) => ch.tryFinalize(id),
   };
 }
 

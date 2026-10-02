@@ -89,4 +89,38 @@ describe("runJury", () => {
     expect(posted.state.posts).toHaveLength(0);
     expect((await runJury(404, fakePorts().ports, opts)).status).toBe("missing");
   });
+
+  test("approvals cast before the verdict: tryFinalize runs right after postJuryVerdict and decides the charter", async () => {
+    const { ports, state } = fakePorts();
+    // RiskCommittee: two bonded members approved while the jury was still running
+    const committee = { approvals: 2, posted: false, decided: false, finalizeCalls: 0 };
+    const post = ports.postVerdict;
+    ports.postVerdict = async (id, digest, rec) => {
+      const tx = await post(id, digest, rec);
+      committee.posted = true; // postJuryVerdict never finalizes by itself
+      return tx;
+    };
+    ports.tryFinalize = async () => {
+      committee.finalizeCalls++;
+      if (committee.decided || !committee.posted || committee.approvals < 2) return { finalized: false, tx: null };
+      committee.decided = true;
+      return { finalized: true, tx: `0x${"cd".repeat(32)}` as Hex };
+    };
+    const out = await runJury(4, ports, opts);
+    expect(out.status).toBe("posted");
+    expect(state.posts).toHaveLength(1);
+    expect(committee.finalizeCalls).toBe(1);
+    expect(committee.decided).toBe(true);
+    expect(out.status === "posted" && out.finalized).toBe(true);
+  });
+
+  test("a failing tryFinalize never fails the verdict (the committee upkeep sweep retries)", async () => {
+    const { ports } = fakePorts();
+    ports.tryFinalize = async () => {
+      throw new Error("rpc down");
+    };
+    const out = await runJury(4, ports, opts);
+    expect(out.status).toBe("posted");
+    expect(out.status === "posted" && out.finalized).toBeNull();
+  });
 });

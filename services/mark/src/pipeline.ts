@@ -5,14 +5,18 @@ import type { DomainEventPayloads, Logger, MarkInput, MarkPnl } from "@bookrunne
 import { type BookLookup, type BookRef, type DomainEventSink, describeRevert, sleep, usd6 } from "@bookrunner/waterfall";
 import type { Hex } from "viem";
 import { buildInventory } from "./domain/inventory";
-import { composeNav, navCrossChecks, type NavComposition } from "./domain/nav";
+import { RETIRE_TOKEN_DUST_USD, composeNav, navCrossChecks, type NavComposition, writeOffRetiringDust } from "./domain/nav";
 import { buildMarkPnl, pnlJsonHash } from "./domain/pnl";
 import { previewTranches, type TranchePreview } from "./domain/preview";
+import { venueReportAge } from "./domain/readiness";
 import type { MarkSnapshot } from "./domain/types";
 import type { MarkAppliedEvent, MarkChain, MarkRow, MarkSignerPort, MarkStore, ReceiptsRootPort } from "./ports";
 import type { MarkSpool } from "./spool";
 
 export class RetryableMarkError extends Error {}
+
+/** 4 x the default maxPriceAge (300s): MMMandate's freshness rule for Orderly reports. */
+export const DEFAULT_MAX_VENUE_REPORT_AGE_SEC = 1200;
 
 export interface MarkPipelineDeps {
   books: BookLookup;
@@ -27,6 +31,13 @@ export interface MarkPipelineDeps {
   confirmations: bigint;
   /** How long to wait for the period's last receipts window to close. */
   receiptsWaitMs: number;
+  /**
+   * Orderly books: max age (seconds, at the snapshot block) of the adapter's last venue report.
+   * Older -> RetryableMarkError, nothing committed. Default 1200; 0 disables.
+   */
+  maxVenueReportAgeSec?: number;
+  /** Retiring books: desk token positions worth less than this are valued at 0 (domain/nav.ts). */
+  retireTokenDustUsd?: bigint;
   spool?: MarkSpool;
   /** DB write retries after on-chain actions. */
   dbRetries?: number;
@@ -104,6 +115,18 @@ export class MarkPipeline {
       const c = await this.compute(ref, periodEnd, interval, opts);
       if (opts.dryRun) return { status: "dry_run", computed: c };
 
+      // never sign a NAV built on a stale venue valuation: a stalled reporter would otherwise
+      // keep committing pre-outage equity (redemptions at inflated prices, drawdown kill blind)
+      const maxAge = this.d.maxVenueReportAgeSec ?? DEFAULT_MAX_VENUE_REPORT_AGE_SEC;
+      const report = venueReportAge(ref.venue, c.snapshot.venue.valuationAt, c.snapshot.blockTimestamp, maxAge);
+      if (report.stale) {
+        log.error(
+          { valuationAt: c.snapshot.venue.valuationAt, blockTimestamp: c.snapshot.blockTimestamp, ageSec: report.ageSec, maxAgeSec: maxAge },
+          "venue report stale; refusing to commit the mark (retrying once ops-venue reports again)",
+        );
+        throw new RetryableMarkError(`venue report stale: valuationAt ${c.snapshot.venue.valuationAt} is ${report.ageSec}s old (max ${maxAge}s)`);
+      }
+
       if ((await this.d.chain.flowNonce(ref)) !== c.input.flowNonce) {
         log.info({ attempt }, "capital flow since snapshot; recomputing before commit");
         continue;
@@ -161,7 +184,14 @@ export class MarkPipeline {
     const log = this.d.log.child({ bookId: ref.bookId, periodEnd });
     const head = await this.d.chain.head();
     const block = head.blockNumber > this.d.confirmations ? head.blockNumber - this.d.confirmations : head.blockNumber;
-    const snapshot = await this.d.chain.snapshot(ref, block);
+    const raw = await this.d.chain.snapshot(ref, block);
+    const { snapshot, writtenOff } = writeOffRetiringDust(raw, this.d.retireTokenDustUsd ?? RETIRE_TOKEN_DUST_USD);
+    if (writtenOff.length) {
+      log.warn(
+        { positions: writtenOff.map((p) => ({ token: p.token, qtyRaw: p.qtyRaw.toString(), valueUsd: usd6(p.valueUsd) })) },
+        "Retiring: desk token dust below the flatten floor valued at 0 (finalizeRetirement needs deployedValueUsd == 0)",
+      );
+    }
     const nav = composeNav(snapshot);
     for (const w of navCrossChecks(snapshot, nav)) log.warn({ block: block.toString() }, `nav cross-check: ${w}`);
     const preview = previewTranches(snapshot, nav.navUsd);

@@ -135,6 +135,8 @@ export class FakeKeeperChain implements KeeperChain {
     unfundedClaims: 0n,
     vaultIdle: 1_000_000_000n,
     inTransit: 0n,
+    pendingWithdraw: 0n,
+    mmWithdrawable: null,
     insuranceEquity: 25_000_000_000n,
     marginEquity: 75_000_000_000n,
     netExposure: 0n,

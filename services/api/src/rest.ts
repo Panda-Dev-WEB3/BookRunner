@@ -38,7 +38,7 @@ export function restError(c: Context, e: unknown, deps: ApiDeps) {
   return c.json({ error: { code: "INTERNAL_SERVER_ERROR", message: "internal error" } }, 500);
 }
 
-export function restRoutes(deps: ApiDeps): Hono {
+export function restRoutes(deps: ApiDeps, opts: { origins?: readonly string[] } = {}): Hono {
   const r = new Hono();
   const run = async (c: Context, fn: (k: Caller) => Promise<unknown>, status: ContentfulStatusCode = 200) => {
     try {
@@ -109,7 +109,7 @@ export function restRoutes(deps: ApiDeps): Hono {
   r.get("/events", (c) => run(c, (k) => k.events.recent(raw(q(c)))));
 
   // webhooks management
-  r.route("/webhooks", webhookRoutes(deps));
+  r.route("/webhooks", webhookRoutes(deps, { origins: opts.origins }));
 
   return r;
 }

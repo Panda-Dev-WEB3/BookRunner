@@ -1,5 +1,6 @@
-// Serialised contract writes for one role account: simulate (eth_call) -> send -> wait for the
-// receipt. One in-flight tx per sender, so concurrent loops/workers never race on nonces.
+// Serialised contract writes for one role account: simulate (eth_call) -> estimate + buffer ->
+// send -> wait for the receipt. One in-flight tx per sender, so concurrent loops/workers never race
+// on nonces.
 import type { Logger } from "@bookrunner/shared";
 import {
   type Abi,
@@ -24,7 +25,7 @@ export interface ContractCall {
   args?: readonly unknown[];
   /** Short label for logs, e.g. "distribute(book=1, period=...)". */
   label: string;
-  /** Optional explicit gas limit (skips estimation). */
+  /** Optional explicit gas limit (skips estimation and the buffer). */
   gas?: bigint;
   /** Attributed book (gas accounting). */
   bookId?: number;
@@ -84,6 +85,14 @@ export function looksLikeAlready(info: RevertInfo): boolean {
   return /already|distributed|applied|swept|exists|not newer|done/i.test(`${info.errorName ?? ""} ${info.reason ?? ""} ${info.message}`);
 }
 
+/**
+ * Gas limit from an eth_estimateGas result: +30% + 30k. The estimate is a tight binary search at
+ * the estimation block; state written between estimation and mining (funding accrual, fee
+ * accounting, a first-touch SSTORE) and the 63/64 rule on nested calls make an unbuffered limit
+ * run the inner call out of gas.
+ */
+export const bufferedGas = (estimate: bigint): bigint => (estimate * 13n) / 10n + 30_000n;
+
 export type GasListener = (e: { label: string; bookId?: number; gasUsed: bigint; costWei: bigint; hash: Hex }) => void;
 
 export class TxSender {
@@ -122,12 +131,13 @@ export class TxSender {
     const run = async (): Promise<TxOutcome> => {
       const result = await this.simulate(call);
       const data = encodeFunctionData({ abi: call.abi, functionName: call.functionName, args: call.args ?? [] });
+      const gas = call.gas ?? bufferedGas(await this.pc.estimateGas({ account: this.wallet.account, to: call.address, data }));
       const hash = await this.wallet.sendTransaction({
         account: this.wallet.account,
         chain: this.wallet.chain,
         to: call.address,
         data,
-        ...(call.gas ? { gas: call.gas } : {}),
+        gas,
       });
       this.log.info({ tx: call.label, hash, from: this.address }, "tx sent");
       const receipt = await this.pc.waitForTransactionReceipt({

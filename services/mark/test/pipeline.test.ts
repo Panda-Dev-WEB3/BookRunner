@@ -108,6 +108,44 @@ describe("MarkPipeline", () => {
     expect((await pipeline.run({ bookId: 1, periodEnd: P }, { allowIncompleteReceipts: true })).status).toBe("applied");
   });
 
+  test("Orderly venue report older than the bound: retryable, nothing committed; commits once a fresh report lands", async () => {
+    const { chain, pipeline } = setup();
+    // snapshot block at P+30; the reporter stalled at P-1300 (1330s > default 1200s)
+    chain.snap = { ...chain.snap, venue: { ...chain.snap.venue, valuationAt: P - 1300 } };
+    await expect(pipeline.run({ bookId: 1, periodEnd: P })).rejects.toBeInstanceOf(RetryableMarkError);
+    await expect(pipeline.run({ bookId: 1, periodEnd: P })).rejects.toThrow("venue report stale");
+    expect(chain.commitCalls).toBe(0);
+    expect(chain.applyCalls).toBe(0);
+    // dry runs still compute (previews), they never commit
+    expect((await pipeline.run({ bookId: 1, periodEnd: P }, { dryRun: true })).status).toBe("dry_run");
+    // ops-venue reports again
+    chain.snap = { ...chain.snap, venue: { ...chain.snap.venue, valuationAt: P + 15 } };
+    expect((await pipeline.run({ bookId: 1, periodEnd: P })).status).toBe("applied");
+    expect(chain.commitCalls).toBe(1);
+  });
+
+  test("Retiring wind-down: token dust below the flatten floor does not block deployedValueUsd == 0", async () => {
+    const { chain, pipeline } = setup();
+    const s = chain.snap;
+    const dust = { ...s.desk.positions[0]!, qtyRaw: 2_000_000_000_000n, valueUsd: 380n }; // 0.00038 USD of NVDA
+    const flat = {
+      ...s,
+      venue: { ...s.venue, insuranceUsd: 0n, marginUsd: 0n, netExposureUsd: 0n, inTransitUsd: 0n, deployedValueUsd: 0n },
+      desk: { ...s.desk, usdc: 0n, positions: [dust], onchainValueUsd: 380n, hedgeNotionalUsd: 380n },
+    };
+    // Live: valued as is
+    chain.snap = flat;
+    expect((await pipeline.compute(ref(1), P, 300)).input.deployedValueUsd).toBe(380n);
+    // Retiring: written off, so the final mark carries deployedValueUsd == 0 and finalizeRetirement can run
+    chain.snap = { ...flat, book: { ...flat.book, state: "Retiring" } };
+    const out = await pipeline.run({ bookId: 1, periodEnd: P });
+    expect(out.status).toBe("applied");
+    expect(out.status === "applied" && out.input.deployedValueUsd).toBe(0n);
+    // anything above the floor (or desk USDC / venue capital) is never written off
+    chain.snap = { ...flat, book: { ...flat.book, state: "Retiring" }, desk: { ...flat.desk, positions: [{ ...dust, valueUsd: 1_000n }] } };
+    expect((await pipeline.compute(ref(1), P + 300, 300)).input.deployedValueUsd).toBe(1_000n);
+  });
+
   test("invalid period / unknown book", async () => {
     const { pipeline } = setup();
     expect((await pipeline.run({ bookId: 1, periodEnd: P + 1 })).status).toBe("unmarkable");
@@ -147,7 +185,7 @@ describe("spool serialisation", () => {
 });
 
 describe("MarkScheduler", () => {
-  function sched(over: { distributed?: boolean; inTransit?: bigint; pending?: bigint; now?: number } = {}) {
+  function sched(over: { distributed?: boolean; inTransit?: bigint; pendingWithdraw?: bigint; pending?: bigint; now?: number } = {}) {
     const enq: string[] = [];
     let now = over.now ?? P + 10;
     const s = new MarkScheduler({
@@ -161,6 +199,8 @@ describe("MarkScheduler", () => {
           unfundedClaims: 0n,
           vaultIdle: usd("100"),
           inTransit: over.inTransit ?? 0n,
+          pendingWithdraw: over.pendingWithdraw ?? 0n,
+          mmWithdrawable: null,
           insuranceEquity: 0n,
           marginEquity: 0n,
           netExposure: 0n,
@@ -201,6 +241,13 @@ describe("MarkScheduler", () => {
 
   test("waits for in-flight recalls when queued redemptions exceed idle", async () => {
     const { s, enq } = sched({ distributed: true, inTransit: usd("500"), pending: usd("400") });
+    const r = await s.tick();
+    expect(r[0]?.readiness).toEqual({ ready: false, reason: "waiting_liquidity" });
+    expect(enq).toEqual([]);
+  });
+
+  test("requested-but-unconfirmed recalls count as in flight (waits for liquidity)", async () => {
+    const { s, enq } = sched({ distributed: true, inTransit: 0n, pendingWithdraw: usd("500"), pending: usd("400") });
     const r = await s.tick();
     expect(r[0]?.readiness).toEqual({ ready: false, reason: "waiting_liquidity" });
     expect(enq).toEqual([]);

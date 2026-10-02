@@ -77,9 +77,11 @@ export class MarkScheduler {
     if (distributed) this.distributed.add(k);
 
     let short = false;
-    if (s.inTransit > 0n) {
+    // requested-but-unconfirmed recalls (Orderly) are in flight too: waiting for them can help
+    const inFlight = s.inTransit + s.pendingWithdraw;
+    if (inFlight > 0n) {
       const shares = await this.d.chain.pendingRedemptions(ref, settlesUpToIndex(s.lastMarkPeriodEnd, s.markInterval), settlesUpToIndex(periodEnd, s.markInterval));
-      short = liquidityShort(dueAssets(shares, s.sharePriceWad), s.unfundedClaims, s.vaultIdle, s.inTransit);
+      short = liquidityShort(dueAssets(shares, s.sharePriceWad), s.unfundedClaims, s.vaultIdle, inFlight);
     }
     const readiness = markReadiness({ ...base, distributed, liquidityShort: short });
     if (readiness.ready) {

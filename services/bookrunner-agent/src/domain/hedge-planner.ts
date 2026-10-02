@@ -5,6 +5,13 @@
 //     quoting skew does the work (perp hedges on allow-listed venues behind a feature flag).
 //   - Buys need desk USDC: FundDesk first (vault -> desk) within the FundDesk cap
 //     (desk value after <= maxInventoryUsd * hedgeRatioMaxBps / 1e4). Never off-hours / reduce-only.
+//   - FundDesk is also capped by vault.deployable() (UnderwritingVault.fundDesk reverts
+//     InsufficientIdle above it). closeWindow deploys the whole raise (IF + MM), so the vault is
+//     ~empty on a live book: the shortfall is first recalled from the MM account with a desk
+//     InventoryToVault leg. Engine recalls are synchronous (recall -> FundDesk -> buy in one plan,
+//     bounded by the engine's withdrawable pool cash); Orderly recalls are asynchronous (plan the
+//     recall alone, buy on a later cycle once the funds reach the vault; never re-recall while a
+//     withdrawal to the vault is in flight).
 //   - Post-trade holdings <= registry floatCapRaw per token (FloatCapExceeded on-chain).
 //   - Off-hours with noNewRiskOffHours (and reduce-only mode): a leg must reduce |exposure + hedge|.
 //   - Every planned spot leg is pre-checked with checkHedgeLeg() (same rule as MMMandate.checkHedge).
@@ -42,8 +49,21 @@ export interface HedgePlannerConfig {
   /** Ratio to rebalance to once out of band; defaults to the band midpoint. Clamped into the band. */
   targetRatioBps?: number;
   perpEnabled: boolean;
-  /** When flattening, desk USDC above this is returned to the vault. */
+  /**
+   * When flattening (Retiring), desk USDC above this is returned to the vault. Default 0: any
+   * residue blocks finalizeRetirement (the final mark must carry deployedValueUsd == 0).
+   */
   returnDustUsd: bigint;
+}
+
+/** What a desk InventoryToVault(MM) can bring to the vault right now. */
+export interface MmRecallInfo {
+  /** Max MM recall that should succeed now (engine: withdrawable pool cash; Orderly: free margin). */
+  recallableUsd: bigint;
+  /** Requested or confirmed withdrawals not yet in the vault (Orderly); 0 on the engine. */
+  inFlightUsd: bigint;
+  /** Engine: the recall settles in the same call, so FundDesk can follow in the same plan. */
+  sync: boolean;
 }
 
 export interface HedgePlanInput {
@@ -56,6 +76,10 @@ export interface HedgePlanInput {
   deskUsdcUsd: bigint;
   /** desk.valueUsd(): USDC + token inventory. */
   deskValueUsd: bigint;
+  /** vault.deployable(): the most FundDesk can move (InsufficientIdle above it). */
+  vaultDeployableUsd: bigint;
+  /** MM recall capacity; absent -> no recall is planned (NO_VAULT_IDLE). */
+  mmRecall?: MmRecallInfo;
   components: HedgeComponent[];
   offHours: boolean;
   mode: HedgeMode;
@@ -69,6 +93,7 @@ export interface HedgePlanInput {
 }
 
 export type HedgeLeg =
+  | { kind: "recall_mm"; amountUsd: bigint }
   | { kind: "fund_desk"; amountUsd: bigint }
   | { kind: "buy"; token: Address; assetId: Hex; amountInUsd: bigint; expectedOutRaw: bigint; minAmountOutRaw: bigint; notionalUsd: bigint; proof: Hex[] }
   | { kind: "sell"; token: Address; assetId: Hex; amountInRaw: bigint; minAmountOutUsd: bigint; notionalUsd: bigint; proof: Hex[] }
@@ -77,7 +102,7 @@ export type HedgeLeg =
   | { kind: "perp"; notionalUsd: bigint };
 
 export interface HedgePlan {
-  action: "none" | "buy" | "sell" | "flatten" | "perp";
+  action: "none" | "buy" | "sell" | "flatten" | "perp" | "recall";
   reason: string;
   ratioBefore: bigint | null;
   ratioAfter: bigint | null;
@@ -98,6 +123,14 @@ export function qtyForUsd(usd: bigint, priceWad: bigint, multiplierWad: bigint, 
 }
 
 const applyBps = (x: bigint, bps: bigint) => (x * bps) / BPS;
+
+/**
+ * Retiring (flatten mode) sells every token position worth at least this (USD 6dp = 0.001 USD):
+ * Book.finalizeRetirement needs a final mark with deployedValueUsd == 0, so the 1 USD per-leg dust
+ * floor does not apply. Below this a swap can round under the desk's maxSlippageBps check; the mark
+ * service values such residue at 0 for Retiring books (mark MARK_RETIRE_TOKEN_DUST_USD, same value).
+ */
+export const RETIRE_FLATTEN_MIN_USD = 1_000n;
 
 function none(reason: string, ratioBefore: bigint | null, targetHedgeUsd: bigint): HedgePlan {
   return { action: "none", reason, ratioBefore, ratioAfter: ratioBefore, targetHedgeUsd, legs: [] };
@@ -144,7 +177,7 @@ export function planHedge(inp: HedgePlanInput, cfg: HedgePlannerConfig): HedgePl
   if (inp.components.length === 0) return none("NO_HEDGE_UNIVERSE", ratioBefore, hedge);
 
   if (inp.mode === "flatten") {
-    const legs = flattenLegs(inp.components, slip, minLegUsd);
+    const legs = flattenLegs(inp.components, slip, RETIRE_FLATTEN_MIN_USD);
     const proceeds = legs.reduce((s, l) => s + (l.kind === "flatten" ? l.minAmountOutUsd : 0n), 0n);
     if (inp.deskUsdcUsd + proceeds > cfg.returnDustUsd) legs.push({ kind: "return_to_vault", amountUsd: "all" });
     if (legs.length === 0) return none("FLAT", ratioBefore, 0n);
@@ -216,10 +249,33 @@ function planBuy(inp: HedgePlanInput, cfg: HedgePlannerConfig, c: Ctx): HedgePla
   const fundCap = applyBps(m.maxInventoryUsd, BigInt(m.hedgeRatioMaxBps));
   const fundRoom = maxBig(0n, fundCap - inp.deskValueUsd);
   const usdc = maxBig(0n, inp.deskUsdcUsd);
-  let fund = canFund && usdc < delta ? minBig(delta - usdc, fundRoom) : 0n;
+  // what FundDesk should move under the mandate cap, before the vault's idle cash is considered
+  const want = canFund && usdc < delta ? minBig(delta - usdc, fundRoom) : 0n;
+  const idle = maxBig(0n, inp.vaultDeployableUsd);
+  let fund = minBig(want, idle);
+  let recall = 0n;
+  const rc = inp.mmRecall;
+  if (want > idle && rc) {
+    const shortfall = want - idle;
+    if (rc.sync) {
+      // engine: InventoryToVault settles in the call, FundDesk can use it in the same plan
+      recall = minBig(shortfall, maxBig(0n, rc.recallableUsd));
+      if (recall < c.minLegUsd) recall = 0n;
+      fund = minBig(want, idle + recall);
+    } else if (usdc + idle < cfg.minTradeUsd) {
+      // Orderly: the recall lands asynchronously; ask for it now and buy on a later cycle
+      if (rc.inFlightUsd > 0n) return none("RECALL_IN_FLIGHT", c.ratioBefore, c.targetHedge);
+      const amount = minBig(shortfall, maxBig(0n, rc.recallableUsd));
+      if (amount < cfg.minTradeUsd) return none("NO_VAULT_IDLE", c.ratioBefore, c.targetHedge);
+      return { action: "recall", reason: "NO_VAULT_IDLE_RECALL_MM", ratioBefore: c.ratioBefore, ratioAfter: c.ratioBefore, targetHedgeUsd: c.targetHedge, legs: [{ kind: "recall_mm", amountUsd: amount }] };
+    }
+  }
   const budget = usdc + fund;
   const buyUsd = minBig(delta, budget);
-  if (buyUsd < cfg.minTradeUsd) return none(usdc + fundRoom < cfg.minTradeUsd || !canFund ? "NO_BUDGET" : "BELOW_MIN_TRADE", c.ratioBefore, c.targetHedge);
+  if (buyUsd < cfg.minTradeUsd) {
+    if (!canFund || usdc + fundRoom < cfg.minTradeUsd) return none("NO_BUDGET", c.ratioBefore, c.targetHedge);
+    return none(want > idle + recall ? "NO_VAULT_IDLE" : "BELOW_MIN_TRADE", c.ratioBefore, c.targetHedge);
+  }
 
   const legs: HedgeLeg[] = [];
   let total = 0n;
@@ -253,7 +309,10 @@ function planBuy(inp: HedgePlanInput, cfg: HedgePlannerConfig, c: Ctx): HedgePla
   if (!check.ok) return none(check.reason ?? "CHECK_FAILED", c.ratioBefore, c.targetHedge);
 
   fund = maxBig(0n, minBig(fund, total - usdc));
+  // recall only what this FundDesk needs beyond the vault's idle cash
+  recall = maxBig(0n, minBig(recall, fund - idle));
   if (fund > 0n) legs.unshift({ kind: "fund_desk", amountUsd: fund });
+  if (recall > 0n) legs.unshift({ kind: "recall_mm", amountUsd: recall });
   return { action: "buy", reason: "UNDER_HEDGED", ratioBefore: c.ratioBefore, ratioAfter: hedgeRatioBps(m, c.exp, after), targetHedgeUsd: c.targetHedge, legs };
 }
 
@@ -297,4 +356,15 @@ function planSell(inp: HedgePlanInput, cfg: HedgePlannerConfig, c: Ctx & { absEx
   const check = checkHedgeLeg(c.ruleMandate, c.exp, c.hedge, after, c.reduceRule, 100);
   if (!check.ok) return none(check.reason ?? "CHECK_FAILED", c.ratioBefore, c.targetHedge);
   return { action: "sell", reason: "OVER_HEDGED", ratioBefore: c.ratioBefore, ratioAfter: hedgeRatioBps(m, c.exp, after), targetHedgeUsd: c.targetHedge, legs };
+}
+
+/**
+ * PoolEngine.withdrawLiquidity succeeds only for amount <= poolCash with poolEquity - amount >=
+ * requiredPoolMargin. While traders hold positions a buffer (5% of the required margin + 1 USD)
+ * absorbs price / funding drift between this read and the mined tx; a flat pool needs none.
+ */
+export function engineWithdrawableUsd(poolCashUsd: bigint, poolEquityUsd: bigint, requiredPoolMarginUsd: bigint): bigint {
+  const buffer = requiredPoolMarginUsd > 0n ? requiredPoolMarginUsd / 20n + 1_000_000n : 0n;
+  const headroom = poolEquityUsd - requiredPoolMarginUsd - buffer;
+  return headroom > 0n ? minBig(poolCashUsd, headroom) : 0n;
 }

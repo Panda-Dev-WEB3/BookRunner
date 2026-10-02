@@ -5,11 +5,13 @@ import {
   bookrunnerConfigAbi,
   markRegistryAbi,
   orderlyAdapterAbi,
+  poolEngineAbi,
   poolEngineAdapterAbi,
   revenueRouterAbi,
   underwritingVaultAbi,
 } from "@bookrunner/shared/abi";
 import { type Hex, type PublicClient, type TransactionReceipt, erc20Abi, isAddressEqual, parseEventLogs } from "viem";
+import { engineWithdrawableUsd } from "../domain/recall";
 import { amountsToSplit } from "../domain/split";
 import { type BookRef, bookStateName } from "../kit/books";
 import { scanEvents } from "../kit/logs";
@@ -207,6 +209,28 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain {
         this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "netExposureUsd", blockNumber }),
         this.getMarkInterval(),
       ]);
+    // Orderly: requested-but-unconfirmed withdrawals are still venue-side in inTransitUsd's eyes;
+    // the engine settles withdrawals synchronously but caps them (pool cash, required pool margin).
+    let pendingWithdraw = 0n;
+    let mmWithdrawable: bigint | null = null;
+    if (ref.venue === VENUE.POOL_ENGINE) {
+      const [engine, marketId] = await Promise.all([
+        this.pc.readContract({ address: adapter, abi: poolEngineAdapterAbi, functionName: "engine", blockNumber }),
+        this.pc.readContract({ address: adapter, abi: poolEngineAdapterAbi, functionName: "marketId", blockNumber }),
+      ]);
+      const [st, equity, required] = await Promise.all([
+        this.pc.readContract({ address: engine, abi: poolEngineAbi, functionName: "state", args: [marketId], blockNumber }),
+        this.pc.readContract({ address: engine, abi: poolEngineAbi, functionName: "poolEquityUsd", args: [marketId], blockNumber }),
+        this.pc.readContract({ address: engine, abi: poolEngineAbi, functionName: "requiredPoolMarginUsd", args: [marketId], blockNumber }),
+      ]);
+      mmWithdrawable = engineWithdrawableUsd(st.poolCashUsd, equity, required);
+    } else {
+      const [pIf, pMm] = await Promise.all([
+        this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "pendingWithdrawUsd", args: [0], blockNumber }),
+        this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "pendingWithdrawUsd", args: [1], blockNumber }),
+      ]);
+      pendingWithdraw = pIf + pMm;
+    }
     let lastMark: KeeperSnapshot["lastMark"] = null;
     if (lastMarkId > 0n) {
       const m = await this.pc.readContract({ address: this.o.deployment.contracts.markRegistry, abi: markRegistryAbi, functionName: "getMark", args: [lastMarkId], blockNumber });
@@ -220,6 +244,8 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain {
       unfundedClaims,
       vaultIdle,
       inTransit,
+      pendingWithdraw,
+      mmWithdrawable,
       insuranceEquity,
       marginEquity,
       netExposure,

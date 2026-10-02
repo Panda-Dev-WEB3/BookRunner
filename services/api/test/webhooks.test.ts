@@ -202,7 +202,8 @@ describe("delivery attempts", () => {
       requests.push({ url: String(url), method: init?.method ?? "GET", headers: new Headers(init?.headers), body: String(init?.body ?? "") });
       return responder();
     }) as unknown as typeof fetch;
-    return { store, requests, deps: { store, fetch: fetchImpl, now: () => NOW, timeoutMs: 1000, log: silentLog } };
+    const resolveHost = async (host: string) => (host === "rebound.example.test" ? ["169.254.169.254"] : ["93.184.216.34"]);
+    return { store, requests, deps: { store, fetch: fetchImpl, now: () => NOW, timeoutMs: 1000, log: silentLog, resolveHost } };
   }
 
   test("2xx -> delivered; signed POST body {id,type,createdAt,data}", async () => {
@@ -229,6 +230,20 @@ describe("delivery attempts", () => {
     expect(store.deliveries[0]).toMatchObject({ status: "failed", attempts: 8 });
   });
 
+  test("SSRF: a host that resolves to a non-public address is never POSTed to (checked at delivery)", async () => {
+    const { store, requests, deps } = deliveryWorld(() => new Response("ok", { status: 200 }));
+    store.subs[0]!.url = "https://rebound.example.test/hook"; // DNS re-pointed at cloud metadata after creation
+    const out = await deliverWebhook(deps, { subscriptionId: 1, eventId: 1 }, 1, 8);
+    expect(out.status).toBe("dropped");
+    expect(requests).toHaveLength(0);
+    expect(store.deliveries[0]).toMatchObject({ status: "failed" });
+    // a stored loopback URL (e.g. created before the policy) is blocked too, unless allow-listed
+    store.subs[0]!.url = "http://127.0.0.1:4420/x";
+    expect((await deliverWebhook(deps, { subscriptionId: 1, eventId: 1 }, 1, 8)).status).toBe("dropped");
+    expect((await deliverWebhook({ ...deps, allowHosts: new Set(["127.0.0.1"]) }, { subscriptionId: 1, eventId: 1 }, 1, 8)).status).toBe("delivered");
+    expect(requests).toHaveLength(1);
+  });
+
   test("network errors are retried; inactive subscriptions are dropped", async () => {
     const { store, deps } = deliveryWorld(() => {
       throw new TypeError("connection refused");
@@ -241,10 +256,14 @@ describe("delivery attempts", () => {
 });
 
 describe("webhooks REST CRUD", () => {
+  const TOKEN = "admin-token-for-tests";
+  const AUTH = { authorization: `Bearer ${TOKEN}` };
+
   test("create returns the secret once; list/get never expose it; patch, rotate, delete", async () => {
     const w = makeWorld();
+    w.deps.settings.adminToken = TOKEN;
     const app = createApp(w.deps, { origins: ["http://127.0.0.1:5180"] });
-    const json = (body: unknown) => ({ method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const json = (body: unknown) => ({ method: "POST", headers: { "content-type": "application/json", ...AUTH }, body: JSON.stringify(body) });
 
     const bad = await app.request("/v1/webhooks", json({ url: "ftp://x", eventTypes: ["book.live"] }));
     expect(bad.status).toBe(400);
@@ -255,29 +274,95 @@ describe("webhooks REST CRUD", () => {
     expect(c.secret).toMatch(/^whsec_/);
     expect(c.subscription).toMatchObject({ eventTypes: ["mark.committed"], bookId: 1, active: true });
 
-    const list = (await (await app.request("/v1/webhooks")).json()) as { items: unknown[] };
+    const list = (await (await app.request("/v1/webhooks", { headers: AUTH })).json()) as { items: unknown[] };
     expect(list.items).toHaveLength(1);
     expect(JSON.stringify(list)).not.toContain(c.secret);
-    const one = await (await app.request(`/v1/webhooks/${c.subscription.id}`)).text();
+    const one = await (await app.request(`/v1/webhooks/${c.subscription.id}`, { headers: AUTH })).text();
     expect(one).not.toContain(c.secret);
 
-    const patched = await app.request(`/v1/webhooks/${c.subscription.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ active: false }) });
+    const patched = await app.request(`/v1/webhooks/${c.subscription.id}`, { method: "PATCH", headers: { "content-type": "application/json", ...AUTH }, body: JSON.stringify({ active: false }) });
     expect(((await patched.json()) as { subscription: { active: boolean } }).subscription.active).toBe(false);
 
-    const rotated = (await (await app.request(`/v1/webhooks/${c.subscription.id}/rotate-secret`, { method: "POST" })).json()) as { secret: string };
+    const rotated = (await (await app.request(`/v1/webhooks/${c.subscription.id}/rotate-secret`, { method: "POST", headers: AUTH })).json()) as { secret: string };
     expect(rotated.secret).not.toBe(c.secret);
     expect(w.store.subs[0]!.secret).toBe(rotated.secret);
 
-    expect((await app.request(`/v1/webhooks/${c.subscription.id}`, { method: "DELETE" })).status).toBe(204);
-    expect((await app.request(`/v1/webhooks/${c.subscription.id}`, { method: "DELETE" })).status).toBe(404);
+    expect((await app.request(`/v1/webhooks/${c.subscription.id}`, { method: "DELETE", headers: AUTH })).status).toBe(204);
+    expect((await app.request(`/v1/webhooks/${c.subscription.id}`, { method: "DELETE", headers: AUTH })).status).toBe(404);
     expect(((await (await app.request("/v1/webhooks/event-types")).json()) as { items: string[] }).items).toEqual([...WEBHOOK_EVENTS]);
   });
 
-  test("admin token is enforced when configured", async () => {
+  test("admin token is required: management is disabled while API_ADMIN_TOKEN is unset", async () => {
     const w = makeWorld();
-    w.deps.settings.adminToken = "s3cret";
+    const open = createApp(w.deps, { origins: [] });
+    // unset token: nothing is open, not even list / rotate
+    expect((await open.request("/v1/webhooks")).status).toBe(403);
+    expect((await open.request("/v1/webhooks/1/rotate-secret", { method: "POST" })).status).toBe(403);
+    expect((await open.request("/v1/webhooks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: "https://hooks.example.test/a" }) })).status).toBe(403);
+    expect(w.store.subs).toHaveLength(0);
+    w.deps.settings.adminToken = "s3cret-s3cret-s3cret";
     const app = createApp(w.deps, { origins: [] });
     expect((await app.request("/v1/webhooks")).status).toBe(401);
-    expect((await app.request("/v1/webhooks", { headers: { authorization: "Bearer s3cret" } })).status).toBe(200);
+    expect((await app.request("/v1/webhooks", { headers: { authorization: "Bearer wrong" } })).status).toBe(401);
+    expect((await app.request("/v1/webhooks", { headers: { authorization: "Bearer s3cret-s3cret-s3cret" } })).status).toBe(200);
+    expect((await app.request("/v1/webhooks/event-types")).status).toBe(200);
+  });
+
+  test("cross-site browser POSTs are rejected (Origin / Sec-Fetch-Site / non-JSON body)", async () => {
+    const w = makeWorld();
+    w.deps.settings.adminToken = TOKEN;
+    w.store.subs.push(sub());
+    const app = createApp(w.deps, { origins: ["http://127.0.0.1:5180"] });
+    const before = w.store.subs[0]!.secret;
+    // a page on another origin (CORS only hides the response; the request would still run)
+    const evil = await app.request("/v1/webhooks/1/rotate-secret", { method: "POST", headers: { ...AUTH, origin: "https://evil.example" } });
+    expect(evil.status).toBe(403);
+    const site = await app.request("/v1/webhooks/1/rotate-secret", { method: "POST", headers: { ...AUTH, "sec-fetch-site": "cross-site" } });
+    expect(site.status).toBe(403);
+    expect(w.store.subs[0]!.secret).toBe(before);
+    // "simple" text/plain bodies are not parsed as JSON
+    const plain = await app.request("/v1/webhooks", { method: "POST", headers: { ...AUTH, "content-type": "text/plain" }, body: JSON.stringify({ url: "https://hooks.example.test/a" }) });
+    expect(plain.status).toBe(415);
+    expect(w.store.subs).toHaveLength(1);
+    // the dashboard origin is fine
+    const ok = await app.request("/v1/webhooks/1/rotate-secret", { method: "POST", headers: { ...AUTH, origin: "http://127.0.0.1:5180" } });
+    expect(ok.status).toBe(200);
+  });
+
+  test("SSRF: loopback / private / link-local / metadata / local names are refused at create and patch", async () => {
+    const w = makeWorld();
+    w.deps.settings.adminToken = TOKEN;
+    const app = createApp(w.deps, { origins: [] });
+    const create = (url: string) => app.request("/v1/webhooks", { method: "POST", headers: { "content-type": "application/json", ...AUTH }, body: JSON.stringify({ url }) });
+    for (const url of [
+      "http://127.0.0.1:4420/mock",
+      "http://169.254.169.254/latest/meta-data",
+      "http://10.0.0.7/",
+      "http://192.168.1.1/",
+      "http://172.20.0.2:5432/",
+      "http://[::1]:4400/",
+      "http://[fe80::1]/",
+      "http://[::ffff:127.0.0.1]/",
+      "http://localhost:4400/",
+      "http://api.localhost/",
+      "http://metadata.google.internal/",
+      "http://2130706433/", // 127.0.0.1 in decimal
+      "http://0x7f.1/",
+      "http://0.0.0.0:80/",
+      "http://user:pw@hooks.example.test/",
+      "ftp://hooks.example.test/",
+      "file:///etc/passwd",
+    ]) {
+      expect([url, (await create(url)).status]).toEqual([url, 400]);
+    }
+    expect(w.store.subs).toHaveLength(0);
+    expect((await create("https://hooks.example.test/a")).status).toBe(201);
+    const patch = await app.request("/v1/webhooks/1", { method: "PATCH", headers: { "content-type": "application/json", ...AUTH }, body: JSON.stringify({ url: "http://127.0.0.1:6379/" }) });
+    expect(patch.status).toBe(400);
+    // explicit dev allow-list
+    w.deps.settings.webhookAllowHosts = ["127.0.0.1"];
+    const dev = createApp(w.deps, { origins: [] });
+    const allowed = await dev.request("/v1/webhooks", { method: "POST", headers: { "content-type": "application/json", ...AUTH }, body: JSON.stringify({ url: "http://127.0.0.1:9999/hook" }) });
+    expect(allowed.status).toBe(201);
   });
 });

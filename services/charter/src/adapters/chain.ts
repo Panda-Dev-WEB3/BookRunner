@@ -1,5 +1,7 @@
 // Chain adapter for the charter service: reads for validation / rule checks / prepared txs, and the
-// single write this service makes: RiskCommittee.postJuryVerdict with the JURY role account.
+// writes this service makes with the JURY role account: RiskCommittee.postJuryVerdict, then the
+// permissionless RiskCommittee.tryFinalize (postJuryVerdict never finalizes by itself, so approvals
+// cast before the verdict would otherwise wait for a further vote that may never come).
 import {
   CHARTER_STATUS,
   type Charter,
@@ -25,6 +27,9 @@ import { charterFromJson } from "../domain/charterJson";
 import { type SponsorState, charterArg } from "../domain/prepare";
 import type { PriceFacts, RuleContext, StockTokenFacts, UnderlyingFacts } from "../domain/ruleChecks";
 import { type ReasonCode, type ValidationContext, reasonFromBytes32, staticValidationContext, validateCharter } from "../domain/validate";
+
+/** Gas limit from an eth_estimateGas result: +30% + 30k (state can move between estimate and mining). */
+export const bufferedGas = (estimate: bigint): bigint => (estimate * 13n) / 10n + 30_000n;
 
 export interface CharterRecordView {
   charterId: number;
@@ -140,19 +145,38 @@ export class CharterChain {
   async postJuryVerdict(charterId: number, digest: Hex, recommendApprove: boolean): Promise<Hex> {
     const account = roleAccount("jury", this.env);
     const wallet = walletClientFor(this.opts.chainId, this.opts.rpcUrl, account);
-    const { request } = await this.pub.simulateContract({
+    const call = {
       account,
       address: this.c.committee,
       abi: riskCommitteeAbi,
       functionName: "postJuryVerdict",
       args: [BigInt(charterId), digest, recommendApprove],
-    });
-    const hash = await wallet.writeContract(request);
+    } as const;
+    const { request } = await this.pub.simulateContract(call);
+    const hash = await wallet.writeContract({ ...request, gas: bufferedGas(await this.pub.estimateContractGas(call)) });
     this.opts.logger.info({ charterId, digest, recommendApprove, tx: hash }, "postJuryVerdict sent");
     const receipt = await this.pub.waitForTransactionReceipt({ hash });
     if (receipt.status !== "success") throw new Error(`postJuryVerdict reverted (tx ${hash})`);
     this.opts.logger.info({ charterId, tx: hash, block: Number(receipt.blockNumber) }, "postJuryVerdict confirmed");
     return hash;
+  }
+
+  /**
+   * RiskCommittee.tryFinalize(charterId): permissionless, returns false without reverting when the
+   * thresholds are not met. Simulated first; a tx is only sent when it would decide the charter.
+   */
+  async tryFinalize(charterId: number): Promise<{ finalized: boolean; tx: Hex | null }> {
+    const account = roleAccount("jury", this.env);
+    const call = { account, address: this.c.committee, abi: riskCommitteeAbi, functionName: "tryFinalize", args: [BigInt(charterId)] } as const;
+    const { request, result } = await this.pub.simulateContract(call);
+    if (!result) return { finalized: false, tx: null };
+    const wallet = walletClientFor(this.opts.chainId, this.opts.rpcUrl, account);
+    // MarketCharter.decide -> BookFactory.create deploys the whole book: the buffer matters here
+    const hash = await wallet.writeContract({ ...request, gas: bufferedGas(await this.pub.estimateContractGas(call)) });
+    const receipt = await this.pub.waitForTransactionReceipt({ hash });
+    if (receipt.status !== "success") throw new Error(`tryFinalize reverted (tx ${hash})`);
+    this.opts.logger.info({ charterId, tx: hash, block: Number(receipt.blockNumber) }, "committee decision finalized (tryFinalize)");
+    return { finalized: true, tx: hash };
   }
 
   // ------------------------------------------------------------ rule-check context

@@ -1,5 +1,7 @@
-// Committee upkeep: mirror RiskCommittee seats/bonds into the committee table and notify members as
-// the 48h committee window runs down (committee.deadline_approaching / committee.window_elapsed).
+// Committee upkeep: mirror RiskCommittee seats/bonds into the committee table, notify members as
+// the 48h committee window runs down (committee.deadline_approaching / committee.window_elapsed),
+// and sweep Filed charters with the permissionless RiskCommittee.tryFinalize (covers a verdict
+// posted after enough approvals, and approvals deferred while newBooksPaused).
 // Votes are indexed from RiskCommittee.Voted by the indexer.
 import type { Logger } from "@bookrunner/shared";
 import { type Address, zeroAddress } from "viem";
@@ -7,6 +9,8 @@ import type { EventBus } from "../adapters/events";
 
 export interface CommitteeChain {
   committee(): Promise<{ members: Address[]; bonded: boolean[]; committeeBondBkrn: bigint; committeeWindowSec: number }>;
+  /** Simulates tryFinalize and sends it only when it would decide the charter. */
+  tryFinalize?(charterId: number): Promise<{ finalized: boolean; tx: string | null }>;
 }
 
 export interface CommitteeStore {
@@ -42,7 +46,7 @@ export async function syncCommittee(p: {
   warnSec: number;
   now: Date;
   logger: Logger;
-}): Promise<{ seated: number; notices: number }> {
+}): Promise<{ seated: number; notices: number; finalized: number[] }> {
   const c = await p.chain.committee();
   const seated: string[] = [];
   for (const [i, member] of c.members.entries()) {
@@ -52,7 +56,23 @@ export async function syncCommittee(p: {
   }
   await p.store.unseatAllExcept(seated);
 
-  const notices = deadlineNotices(await p.store.filedCharters(), c.committeeWindowSec, p.warnSec, p.now);
+  const filed = await p.store.filedCharters();
+  const finalized: number[] = [];
+  if (p.chain.tryFinalize) {
+    for (const f of filed) {
+      try {
+        const r = await p.chain.tryFinalize(f.id);
+        if (r.finalized) {
+          finalized.push(f.id);
+          p.logger.info({ charterId: f.id, tx: r.tx }, "charter decided by the committee upkeep (tryFinalize)");
+        }
+      } catch (err) {
+        p.logger.warn({ charterId: f.id, err: (err as Error).message }, "tryFinalize failed; retrying next sync");
+      }
+    }
+  }
+
+  const notices = deadlineNotices(filed.filter((f) => !finalized.includes(f.id)), c.committeeWindowSec, p.warnSec, p.now);
   let sent = 0;
   for (const n of notices) {
     const fresh = await p.bus.emit({
@@ -69,5 +89,5 @@ export async function syncCommittee(p: {
     if (fresh) sent++;
   }
   if (sent) p.logger.info({ sent }, "committee notices emitted");
-  return { seated: seated.length, notices: sent };
+  return { seated: seated.length, notices: sent, finalized };
 }

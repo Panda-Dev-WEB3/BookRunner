@@ -77,6 +77,8 @@ export interface ChainGateway {
   bookState(book: Address): Promise<BookChainState>;
   trancheWallet(tranche: Address, wallet: Address, requestIds: bigint[]): Promise<TrancheWalletState>;
   mandateState(mandate: Address): Promise<MandateChainState>;
+  /** MMMandate.operatorConsent(operator, key) (uncached: the operator may have just consented). */
+  operatorConsent(mandate: Address, operator: Address, key: Address): Promise<boolean>;
 }
 
 /** Provides the gateway when the deployment file is present; null while it is missing. */

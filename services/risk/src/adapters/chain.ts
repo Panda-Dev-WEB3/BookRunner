@@ -1,6 +1,6 @@
 // viem adapter: book discovery, per-tick reads and RISK-role writes. Every write is simulated
-// first, sent from roleAccount("risk"), serialised through one mutex (single nonce stream) and
-// awaited to a successful receipt; tx hashes are logged.
+// first, sent from roleAccount("risk") with a buffered gas limit, serialised through one mutex
+// (single nonce stream) and awaited to a successful receipt; tx hashes are logged.
 import {
   ACCOUNT,
   BOOK_STATE,
@@ -144,14 +144,21 @@ export class ViemChain implements ChainPort, DiscoveryPort {
       p.readContract({ address: k.adapter, abi: poolEngineAdapterAbi, functionName: "insuranceEquityUsd" }),
       p.readContract({ address: k.adapter, abi: poolEngineAdapterAbi, functionName: "inTransitUsd" }),
       p.readContract({ address: k.adapter, abi: poolEngineAdapterAbi, functionName: "valuationAt" }),
-      p.readContract({ address: k.desk, abi: bookrunnerDeskAbi, functionName: "hedgeNotionalUsd" }),
-      p.readContract({ address: k.desk, abi: bookrunnerDeskAbi, functionName: "valueUsd" }),
+      // both revert StalePrice (registry.valueUsd -> oracle.priceOf) once a held token's price is
+      // older than maxPriceAge: caught here and re-valued at the last attested price below, so a
+      // degraded oracle never blinds the venue-exposure limits or the kill path
+      p.readContract({ address: k.desk, abi: bookrunnerDeskAbi, functionName: "hedgeNotionalUsd" }).catch(() => null),
+      p.readContract({ address: k.desk, abi: bookrunnerDeskAbi, functionName: "valueUsd" }).catch(() => null),
       p.readContract({ address: k.vault, abi: underwritingVaultAbi, functionName: "idle" }),
       p.readContract({ address: k.book, abi: bookAbi, functionName: "unfundedClaims" }),
       p.readContract({ address: k.book, abi: bookAbi, functionName: "perfIndex" }),
       p.readContract({ address: k.book, abi: bookAbi, functionName: "trancheNav" }),
     ]);
     const [oracle, maxPriceAgeSec] = await Promise.all([this.readOracle(ref.priceId), this.readMaxPriceAge()]);
+    const desk =
+      hedgeNotionalUsd !== null && deskValueUsd !== null
+        ? { hedgeNotionalUsd, valueUsd: deskValueUsd, priceStale: false }
+        : await this.deskAtLastPrice(ref);
     return {
       bookState: BOOK_STATE[state] ?? "Subscription",
       mandate: { ...mandate },
@@ -164,7 +171,7 @@ export class ViemChain implements ChainPort, DiscoveryPort {
         inTransitUsd,
         valuationAt: Number(valuationAt),
       },
-      desk: { hedgeNotionalUsd, valueUsd: deskValueUsd },
+      desk,
       vaultIdleUsd,
       unfundedClaimsUsd,
       seniorNavUsd: nav[0],
@@ -174,6 +181,24 @@ export class ViemChain implements ChainPort, DiscoveryPort {
       oracle,
       maxPriceAgeSec,
     };
+  }
+
+  /**
+   * Desk valuation when the on-chain views revert (stale price): every held token valued through
+   * the registry at its last attested price (valueUsdAt; multiplier applied exactly once there),
+   * plus the desk's USDC. Flagged priceStale so dashboards show the degraded valuation.
+   */
+  private async deskAtLastPrice(ref: BookRef): Promise<ChainObservation["desk"]> {
+    const [holdings, usdc] = await Promise.all([
+      this.deskHoldings(ref),
+      this.pub.readContract({ address: this.c.usdc, abi: erc20Abi, functionName: "balanceOf", args: [ref.components.desk] }),
+    ]);
+    const hedge = holdings.reduce((sum, h) => sum + h.valueUsd, 0n);
+    this.o.log.warn(
+      { bookId: ref.bookId, hedgeUsd: hedge.toString(), tokens: holdings.length },
+      "desk valuation reverted (stale oracle price); using the last attested prices",
+    );
+    return { hedgeNotionalUsd: hedge, valueUsd: usdc + hedge, priceStale: true };
   }
 
   private async readOracle(priceId: Hex): Promise<OracleReading | null> {
@@ -266,42 +291,45 @@ export class ViemChain implements ChainPort, DiscoveryPort {
 
   async setReduceOnly(ref: BookRef): Promise<Hex> {
     return this.submit(`adapter.setReduceOnly(book ${ref.bookId})`, async () => {
-      const { request } = await this.pub.simulateContract({
+      const call = {
         address: ref.components.adapter,
         abi: poolEngineAdapterAbi,
         functionName: "setReduceOnly",
         args: [true],
         account: this.wallet.account,
-      });
-      return this.wallet.writeContract(request);
+      } as const;
+      const { request } = await this.pub.simulateContract(call);
+      return this.wallet.writeContract({ ...request, gas: bufferedGas(await this.pub.estimateContractGas(call)) });
     });
   }
 
   async flatten(ref: BookRef, order: FlattenOrder, poolFee: number): Promise<Hex> {
     const data = encodeAbiParameters(FLATTEN_PARAMS, [order.token, order.amountIn, order.minAmountOut, poolFee, HEDGE_VENUES.UNIV3]);
     return this.submit(`desk.execute(Flatten ${order.token}, book ${ref.bookId})`, async () => {
-      const { request } = await this.pub.simulateContract({
+      const call = {
         address: ref.components.desk,
         abi: bookrunnerDeskAbi,
         functionName: "execute",
         args: [{ kind: ACTION_FLATTEN, data, proof: [] }],
         account: this.wallet.account,
-      });
-      return this.wallet.writeContract(request);
+      } as const;
+      const { request } = await this.pub.simulateContract(call);
+      return this.wallet.writeContract({ ...request, gas: bufferedGas(await this.pub.estimateContractGas(call)) });
     });
   }
 
   async mandateKill(ref: BookRef, reason: string): Promise<Hex> {
     const reasonBytes = strToBytes32(reason.slice(0, 32));
     return this.submit(`mandate.kill(${reason}, book ${ref.bookId})`, async () => {
-      const { request } = await this.pub.simulateContract({
+      const call = {
         address: ref.components.mandate,
         abi: mMMandateAbi,
         functionName: "kill",
         args: [reasonBytes],
         account: this.wallet.account,
-      });
-      return this.wallet.writeContract(request);
+      } as const;
+      const { request } = await this.pub.simulateContract(call);
+      return this.wallet.writeContract({ ...request, gas: bufferedGas(await this.pub.estimateContractGas(call)) });
     });
   }
 
@@ -316,6 +344,14 @@ export class ViemChain implements ChainPort, DiscoveryPort {
     });
   }
 }
+
+/**
+ * Gas limit from an eth_estimateGas result: +30% + 30k. Kill-path txs (mandate.kill revokes every
+ * key, desk Flatten swaps through the executor, adapter.setReduceOnly reaches the engine) are
+ * nested calls whose inner frames get only 63/64 of the remaining gas; a tight estimate made at a
+ * different state can OOG them exactly when they matter.
+ */
+export const bufferedGas = (estimate: bigint): bigint => (estimate * 13n) / 10n + 30_000n;
 
 function safeStr(b: Hex): string {
   try {

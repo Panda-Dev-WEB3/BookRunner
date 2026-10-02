@@ -1,8 +1,9 @@
 // Jury pipeline for one charter (ports injected; unit-tested with fakes):
 //   chain status Filed? -> verdict already posted? -> reuse stored unposted verdict or run
 //   rule checks + jurors -> verdict JSON -> CID -> store -> RiskCommittee.postJuryVerdict(digest)
-//   -> mark posted -> receipts DECISION leaf -> domain events (jury.verdict_posted,
-//   committee.review_requested).
+//   -> mark posted -> RiskCommittee.tryFinalize (approvals cast before the verdict are already
+//   sufficient: postJuryVerdict alone never finalizes) -> receipts DECISION leaf -> domain events
+//   (jury.verdict_posted, committee.review_requested).
 // Idempotent: the verdict is stored before posting, so a crash between store and post re-posts the
 // same digest instead of re-running the jury.
 import { type Charter, type CharterStatus, RECEIPT_KIND, payloadHash } from "@bookrunner/shared";
@@ -55,6 +56,8 @@ export interface JuryPorts {
   writeReceipt(r: ReceiptInput): Promise<void>;
   emit(e: PendingEvent): Promise<void>;
   committee(): Promise<{ members: Address[]; committeeWindowSec: number }>;
+  /** RiskCommittee.tryFinalize (best effort; the committee upkeep sweep retries). */
+  tryFinalize?(charterId: number): Promise<{ finalized: boolean; tx: Hex | null }>;
 }
 
 export type JurorSetup = { kind: "rules" } | { kind: "models"; call: JuryModelCall; models: string[] };
@@ -68,7 +71,17 @@ export interface JuryRunOptions {
 
 export type JuryOutcome =
   | { status: "missing" | "not_filed" | "already_posted"; charterId: number; detail?: string }
-  | { status: "posted"; charterId: number; cid: string; digest: Hex; recommendApprove: boolean; txHash: Hex; reused: boolean };
+  | {
+      status: "posted";
+      charterId: number;
+      cid: string;
+      digest: Hex;
+      recommendApprove: boolean;
+      txHash: Hex;
+      reused: boolean;
+      /** tryFinalize decided the charter right after the verdict (null: not attempted / failed). */
+      finalized?: boolean | null;
+    };
 
 export async function castVotes(charterId: number, charter: Charter, checks: ReturnType<typeof runRuleChecks>, o: JuryRunOptions): Promise<JurorVote[]> {
   if (o.jurors.kind === "rules") return ruleJury(charter, checks);
@@ -111,6 +124,15 @@ export async function runJury(charterId: number, ports: JuryPorts, o: JuryRunOpt
   const txHash = await ports.postVerdict(charterId, stored.digest, stored.recommendApprove);
   await ports.markPosted(charterId, stored.digest, txHash);
 
+  let finalized: boolean | null = null;
+  if (ports.tryFinalize) {
+    try {
+      finalized = (await ports.tryFinalize(charterId)).finalized;
+    } catch {
+      finalized = null; // committee upkeep sweeps Filed charters with tryFinalize every tick
+    }
+  }
+
   const now = o.now();
   await ports.writeReceipt({
     bookId: charterId,
@@ -147,5 +169,5 @@ export async function runJury(charterId: number, ports: JuryPorts, o: JuryRunOpt
       deadline: deadline ? new Date(deadline * 1000).toISOString() : null,
     },
   });
-  return { status: "posted", charterId, cid: stored.cid, digest: stored.digest, recommendApprove: stored.recommendApprove, txHash, reused };
+  return { status: "posted", charterId, cid: stored.cid, digest: stored.digest, recommendApprove: stored.recommendApprove, txHash, reused, finalized };
 }

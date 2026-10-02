@@ -342,6 +342,8 @@ export class FakeChain implements ChainGateway {
   books = new Map<string, BookChainState>();
   wallets = new Map<string, TrancheWalletState>(); // key: tranche|wallet (lowercase)
   mandates = new Map<string, MandateChainState>();
+  /** `${mandate}|${operator}|${key}` (lowercase) -> consent */
+  consents = new Set<string>();
   failAll = false;
 
   private guard() {
@@ -397,6 +399,10 @@ export class FakeChain implements ChainGateway {
     const m = this.mandates.get(mandate.toLowerCase());
     if (!m) throw new Error(`no mandate ${mandate}`);
     return m;
+  }
+  async operatorConsent(mandate: Address, operator: Address, key: Address) {
+    this.guard();
+    return this.consents.has(`${mandate}|${operator}|${key}`.toLowerCase());
   }
   setWallet(tranche: Address, wallet: Address, w: Partial<TrancheWalletState>) {
     this.wallets.set(`${tranche.toLowerCase()}|${wallet.toLowerCase()}`, { ...emptyWallet(), ...w });

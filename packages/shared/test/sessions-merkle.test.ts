@@ -24,6 +24,18 @@ describe("sessions", () => {
     expect(isOpen(SESSIONS_24X5, new Date("2026-10-02T23:30:00Z"))).toBe(true); // Fri 19:30 ET
     expect(isOpen(SESSIONS_24X5, new Date("2026-10-03T00:30:00Z"))).toBe(false); // Fri 20:30 ET
   });
+
+  test("24/5 has no gap at Sunday 23:59 ET (close = 1439 is inclusive)", () => {
+    expect(isOpen(SESSIONS_24X5, new Date("2026-10-05T03:58:30Z"))).toBe(true); // Sun 23:58:30 ET
+    expect(isOpen(SESSIONS_24X5, new Date("2026-10-05T03:59:30Z"))).toBe(true); // Sun 23:59:30 ET
+    expect(isOpen(SESSIONS_24X5, new Date("2026-10-05T04:00:30Z"))).toBe(true); // Mon 00:00:30 ET
+    // already-filed charters keep the same encoding: the fix lives in the codec, not the preset
+    const filed = decodeSessions(encodeSessions(SESSIONS_24X5));
+    expect(isOpen(filed, new Date("2026-10-05T03:59:30Z"))).toBe(true);
+    // a session that ends before 23:59 still has an exclusive close
+    expect(isOpen(SESSIONS_24X5, new Date("2026-10-03T00:00:30Z"))).toBe(false); // Fri 20:00:30 ET
+    expect(isOpen(SESSIONS_24X5, new Date("2026-10-02T23:59:30Z"))).toBe(true); // Fri 19:59:30 ET
+  });
 });
 
 describe("merkle", () => {

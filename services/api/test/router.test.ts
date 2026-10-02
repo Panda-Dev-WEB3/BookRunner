@@ -299,6 +299,32 @@ describe("agent router", () => {
     expect((await trpcErr(w.caller.agent.register({ bookId: 1, key: A(0x1), operator: OP, validUntil, inventoryTierUsd: "50000" }))).message).toContain("re-mandate");
   });
 
+  test("register: a third-party operator's consentKey tx comes first (registerKey reverts OperatorConsentMissing without it)", async () => {
+    const w = makeWorld();
+    seedBook(w);
+    w.chain.stake.set(OP.toLowerCase(), 30_000n * 10n ** 18n);
+    const validUntil = NOW / 1000 + 86_400;
+    const r = await w.caller.agent.register({ bookId: 1, key: KEY, operator: OP, validUntil, inventoryTierUsd: "50000" });
+    expect(r.txs).toHaveLength(2);
+    const consent = decodeFunctionData({ abi: mMMandateAbi, data: r.txs[0]!.data });
+    expect(consent.functionName).toBe("consentKey");
+    expect(consent.args).toEqual([KEY, true]);
+    expect(r.txs[0]!.to).toBe(BOOK.mandate);
+    expect(r.txs[0]!.signer).toBe(OP);
+    expect(decodeFunctionData({ abi: mMMandateAbi, data: r.txs[1]!.data }).functionName).toBe("registerKey");
+    expect(r.tx).toEqual(r.txs[1]!);
+    expect(r.consentRequired).toBe(true);
+    // consent already on-chain: only registerKey
+    w.chain.consents.add(`${BOOK.mandate}|${OP}|${KEY}`.toLowerCase());
+    const again = await w.caller.agent.register({ bookId: 1, key: KEY, operator: OP, validUntil, inventoryTierUsd: "50000" });
+    expect(again.txs.map((t) => decodeFunctionData({ abi: mMMandateAbi, data: t.data }).functionName)).toEqual(["registerKey"]);
+    // the sponsor bonding its own stake needs no consent
+    w.chain.stake.set(SPONSOR.toLowerCase(), 30_000n * 10n ** 18n);
+    const self = await w.caller.agent.register({ bookId: 1, key: A(0xbeef), operator: SPONSOR, validUntil, inventoryTierUsd: "50000" });
+    expect(self.txs).toHaveLength(1);
+    expect(self.consentRequired).toBe(false);
+  });
+
   test("revoke: prepared revokeKey with bytes32 reason", async () => {
     const w = makeWorld();
     seedBook(w);

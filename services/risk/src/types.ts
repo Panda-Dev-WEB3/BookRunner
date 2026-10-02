@@ -36,7 +36,8 @@ export interface ChainObservation {
     inTransitUsd: bigint;
     valuationAt: number;
   };
-  desk: { hedgeNotionalUsd: bigint; valueUsd: bigint };
+  /** priceStale: the desk views reverted (StalePrice) and holdings were valued at the last attested price. */
+  desk: { hedgeNotionalUsd: bigint; valueUsd: bigint; priceStale?: boolean };
   vaultIdleUsd: bigint;
   unfundedClaimsUsd: bigint;
   seniorNavUsd: bigint;
@@ -62,6 +63,8 @@ export interface BookObservation {
   netExposureUsd: bigint;
   exposureSource: ExposureSource;
   deskHedgeUsd: bigint;
+  /** desk valued at the last attested price because the on-chain views reverted StalePrice */
+  deskPriceStale?: boolean;
   nav: NavInputs;
   oracle: OracleReading;
   quote: QuoteObservation | null;
@@ -196,6 +199,8 @@ export interface RiskMeta {
   netExposureUsd: string;
   exposureSource: ExposureSource;
   deskHedgeUsd: string;
+  /** true while the desk is valued at the last attested price (on-chain valuation reverted StalePrice) */
+  deskPriceStale: boolean;
   liveNavUsd: string;
   drawdownBps: number;
   oracle: { priceId: string; price: number | null; publishedAt: number; held: boolean; stale: boolean; source: OracleReading["source"] };

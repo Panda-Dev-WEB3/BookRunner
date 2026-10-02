@@ -102,7 +102,7 @@ export const charterRouter = router({
       chainReason && chainReason !== zeroHash
         ? [{ code: bytes32ToStr(chainReason), field: null, message: REASON_TEXT[bytes32ToStr(chainReason)] ?? "Rejected by MarketCharter.validate", source: "chain" }]
         : [];
-    const serviceReply = deps.charterService ? await deps.charterService.validate(input as CharterDraftInput) : null;
+    const serviceReply = deps.charterService ? await deps.charterService.validate(input as CharterDraftInput, c) : null;
     const serviceIssues = serviceReply ?? [];
 
     const issues = mergeIssues([...conv.issues, ...local], chainIssues, serviceIssues);

@@ -12,6 +12,8 @@ export interface PreparedTx {
   value: "0";
   chainId: number;
   description: string;
+  /** Set when a multi-step flow needs a different wallet for this step (e.g. the operator's consentKey). */
+  signer?: Address;
 }
 
 const tx = (chainId: number, to: Address, data: Hex, description: string): PreparedTx => ({
@@ -134,6 +136,19 @@ export function registerKeyTx(
     }),
     `Register desk key ${getAddress(key)} for operator ${getAddress(operator)} at a ${trimUsd(inventoryTierUsd)} USD inventory tier`,
   );
+}
+
+/** MMMandate.consentKey(key, true), signed by the OPERATOR: registerKey reverts OperatorConsentMissing without it. */
+export function consentKeyTx(chainId: number, mandate: Address, key: Address, operator: Address): PreparedTx {
+  return {
+    ...tx(
+      chainId,
+      mandate,
+      encodeFunctionData({ abi: mMMandateAbi, functionName: "consentKey", args: [getAddress(key), true] }),
+      `Operator ${getAddress(operator)} consents to bond desk key ${getAddress(key)} (sign with the operator wallet, before the sponsor registers the key)`,
+    ),
+    signer: getAddress(operator),
+  };
 }
 
 export function revokeKeyTx(chainId: number, mandate: Address, key: Address, reason: string): PreparedTx {

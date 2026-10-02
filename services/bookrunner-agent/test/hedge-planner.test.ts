@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { BPS, absBig, checkHedgeLeg, hedgeInBand, hedgeRatioBps, usd, wad } from "@bookrunner/shared";
 import type { Address, Hex } from "viem";
-import { type HedgeComponent, type HedgeLeg, type HedgePlanInput, type HedgePlannerConfig, planHedge, qtyForUsd, valueUsdOf } from "../src/domain/hedge-planner";
+import { type HedgeComponent, type HedgeLeg, type HedgePlanInput, type HedgePlannerConfig, engineWithdrawableUsd, planHedge, qtyForUsd, valueUsdOf } from "../src/domain/hedge-planner";
 import { nvdaMandate } from "./helpers";
 
 const m = nvdaMandate(); // 50k max inventory, band 5000-12000 bps
@@ -37,6 +37,7 @@ function input(expUsd: number, hedgeUsd: number, over: Partial<HedgePlanInput> =
     perpHedgeUsd: 0n,
     deskUsdcUsd: usdc,
     deskValueUsd: usdc + held,
+    vaultDeployableUsd: usd(1_000_000),
     components,
     offHours: false,
     mode: "normal",
@@ -127,6 +128,52 @@ describe("planHedge decisions", () => {
     expect(planHedge(input(-40_000, 0, { deskUsdcUsd: 0n, deskValueUsd: usd(60_000) }), cfg).reason).toBe("NO_BUDGET");
   });
 
+  test("FundDesk never exceeds vault.deployable() (InsufficientIdle): no recall capacity -> NO_VAULT_IDLE", () => {
+    // live book: closeWindow deployed the whole raise, the vault holds ~1,069 USD of fee-flow dust
+    const p = planHedge(input(-40_000, 0, { deskUsdcUsd: 0n, vaultDeployableUsd: usd(1_069.836017) }), cfg);
+    expect(p.action).toBe("buy");
+    expect(p.legs[0]).toEqual({ kind: "fund_desk", amountUsd: usd(1_069.836017) });
+    expect(sum(p.legs, "buy")).toBe(usd(1_069.836017));
+    expect(planHedge(input(-40_000, 0, { deskUsdcUsd: 0n, vaultDeployableUsd: 0n }), cfg)).toMatchObject({ action: "none", reason: "NO_VAULT_IDLE", legs: [] });
+  });
+
+  test("engine book (sync recall): InventoryToVault(MM) the shortfall, then FundDesk, then buy - in one plan", () => {
+    const rc = { recallableUsd: usd(90_000), inFlightUsd: 0n, sync: true };
+    const p = planHedge(input(-40_000, 0, { deskUsdcUsd: 0n, vaultDeployableUsd: usd(1_000), mmRecall: rc }), cfg);
+    expect(p.action).toBe("buy");
+    expect(p.legs.map((l) => l.kind)).toEqual(["recall_mm", "fund_desk", "buy"]);
+    expect(p.legs[0]).toEqual({ kind: "recall_mm", amountUsd: usd(33_000) });
+    expect(p.legs[1]).toEqual({ kind: "fund_desk", amountUsd: usd(34_000) });
+    // recall bounded by the engine's withdrawable amount
+    const tight = planHedge(input(-40_000, 0, { deskUsdcUsd: 0n, vaultDeployableUsd: 0n, mmRecall: { ...rc, recallableUsd: usd(10_000) } }), cfg);
+    expect(tight.legs[0]).toEqual({ kind: "recall_mm", amountUsd: usd(10_000) });
+    expect(tight.legs[1]).toEqual({ kind: "fund_desk", amountUsd: usd(10_000) });
+    // nothing withdrawable -> no FundDesk that would revert
+    expect(planHedge(input(-40_000, 0, { deskUsdcUsd: 0n, vaultDeployableUsd: 0n, mmRecall: { ...rc, recallableUsd: 0n } }), cfg).reason).toBe("NO_VAULT_IDLE");
+    // enough idle: no recall leg
+    expect(planHedge(input(-40_000, 0, { deskUsdcUsd: 0n, vaultDeployableUsd: usd(50_000), mmRecall: rc }), cfg).legs.map((l) => l.kind)).toEqual(["fund_desk", "buy"]);
+  });
+
+  test("Orderly book (async recall): recall alone, wait while in flight, buy once the funds are idle", () => {
+    const rc = { recallableUsd: usd(60_000), inFlightUsd: 0n, sync: false };
+    const p = planHedge(input(-40_000, 0, { deskUsdcUsd: 0n, vaultDeployableUsd: usd(10), mmRecall: rc }), cfg);
+    expect(p).toMatchObject({ action: "recall", reason: "NO_VAULT_IDLE_RECALL_MM", legs: [{ kind: "recall_mm", amountUsd: usd(33_990) }] });
+    // the next cycles never re-recall while the withdrawal is in flight
+    expect(planHedge(input(-40_000, 0, { deskUsdcUsd: 0n, vaultDeployableUsd: usd(10), mmRecall: { ...rc, inFlightUsd: usd(33_990) } }), cfg)).toMatchObject({ action: "none", reason: "RECALL_IN_FLIGHT" });
+    // landed: FundDesk + buy from idle, no recall
+    const landed = planHedge(input(-40_000, 0, { deskUsdcUsd: 0n, vaultDeployableUsd: usd(34_000), mmRecall: rc }), cfg);
+    expect(landed.legs.map((l) => l.kind)).toEqual(["fund_desk", "buy"]);
+    // off-hours / reduce-only: FundDesk is blocked, so no recall either
+    expect(planHedge(input(-40_000, 0, { deskUsdcUsd: 0n, vaultDeployableUsd: 0n, mmRecall: rc, mode: "reduce_only" }), cfg).legs).toEqual([]);
+  });
+
+  test("engine withdrawable = min(pool cash, equity - required - buffer)", () => {
+    expect(engineWithdrawableUsd(usd(100_000), usd(100_037), usd(7_400))).toBe(usd(100_037) - usd(7_400) - usd(370) - usd(1));
+    expect(engineWithdrawableUsd(usd(50_000), usd(100_000), usd(1_000))).toBe(usd(50_000));
+    expect(engineWithdrawableUsd(usd(50_000), usd(1_000), usd(1_000))).toBe(0n);
+    expect(engineWithdrawableUsd(usd(50_000), -usd(10), 0n)).toBe(0n);
+  });
+
   test("float cap bounds the buy (worst-case fill within the remaining float)", () => {
     const c = comp(0);
     const capRaw = qtyForUsd(usd(5_000), c.priceWad, c.multiplierWad, c.decimals);
@@ -157,6 +204,18 @@ describe("planHedge decisions", () => {
     expect(p.legs.map((l) => l.kind)).toEqual(["flatten", "flatten", "return_to_vault"]);
     expect(planHedge(input(-40_000, 0, { components: [comp(0)], mode: "flatten", deskUsdcUsd: 0n }), cfg).reason).toBe("FLAT");
     expect(planHedge(input(-40_000, 0, { mode: "off" }), cfg).reason).toBe("DISABLED");
+  });
+
+  test("flatten mode (Retiring) sweeps sub-dollar residue: finalizeRetirement needs deployedValueUsd == 0", async () => {
+    const { hedgeConfigFrom, loadAgentEnv } = await import("../src/config");
+    const retireCfg = hedgeConfigFrom(loadAgentEnv({ BOOK_ID: "1" }));
+    expect(retireCfg.returnDustUsd).toBe(0n); // default: return every unit of desk USDC
+    // 0.20 USD of swap-rounding USDC left on the desk, no tokens
+    const usdcOnly = planHedge(input(-1_000, 0, { components: [comp(0)], mode: "flatten", deskUsdcUsd: usd(0.2) }), retireCfg);
+    expect(usdcOnly.legs).toEqual([{ kind: "return_to_vault", amountUsd: "all" }]);
+    // a token remainder worth 0.43 USD is flattened (below the 1 USD per-leg floor of normal mode)
+    const dust = planHedge(input(-1_000, 0, { components: [comp(0.43)], mode: "flatten", deskUsdcUsd: 0n }), retireCfg);
+    expect(dust.legs.map((l) => l.kind)).toEqual(["flatten", "return_to_vault"]);
   });
 
   test("reduce-only mode never sells past net-flat and never funds the desk", () => {

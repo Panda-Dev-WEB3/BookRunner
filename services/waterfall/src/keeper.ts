@@ -62,6 +62,8 @@ export class KeeperRunner {
         unfundedClaims: s.unfundedClaims,
         vaultIdle: s.vaultIdle,
         inTransit: s.inTransit,
+        pendingWithdraw: s.pendingWithdraw,
+        mmWithdrawable: s.mmWithdrawable,
         insuranceEquity: s.insuranceEquity,
         marginEquity: s.marginEquity,
         netExposure: s.netExposure,
@@ -71,7 +73,10 @@ export class KeeperRunner {
         recallAllWhenRetiring: this.d.cfg.recallAllWhenRetiring,
       });
       if (plan.uncovered > 0n) {
-        log.warn({ uncovered: usd6(plan.uncovered), due: usd6(plan.dueAssets), idle: usd6(s.vaultIdle), inTransit: usd6(s.inTransit) }, "redemption liquidity short after recall capacity; claims are funded as capital comes back to the vault");
+        log.warn(
+          { uncovered: usd6(plan.uncovered), due: usd6(plan.dueAssets), idle: usd6(s.vaultIdle), inTransit: usd6(s.inTransit), pendingWithdraw: usd6(s.pendingWithdraw), mmWithdrawable: s.mmWithdrawable === null ? null : usd6(s.mmWithdrawable) },
+          "redemption liquidity short after recall capacity; claims are funded as capital comes back to the vault",
+        );
       }
       for (const r of plan.recalls) {
         const key = `${ref.bookId}:recall:${r.account}`;
@@ -91,6 +96,7 @@ export class KeeperRunner {
             bufferBps: Number(this.d.cfg.bufferBps),
             vaultIdleUsd: usd6(s.vaultIdle),
             inTransitUsd: usd6(s.inTransit),
+            pendingWithdrawUsd: usd6(s.pendingWithdraw),
             unfundedClaimsUsd: usd6(s.unfundedClaims),
             txHash: action.tx,
           }).catch((err) => log.warn({ err }, "failed to record recall decision receipt"));

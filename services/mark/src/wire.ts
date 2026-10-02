@@ -63,6 +63,8 @@ export async function wireMark(cfg: MarkConfig, log: Logger, deployment: Deploym
     maxRetries: cfg.MARK_MAX_RETRIES,
     confirmations: cfg.MARK_CONFIRMATIONS,
     receiptsWaitMs: cfg.MARK_RECEIPTS_WAIT_SECONDS * 1000,
+    maxVenueReportAgeSec: cfg.MARK_MAX_VENUE_REPORT_AGE_SECONDS,
+    retireTokenDustUsd: cfg.MARK_RETIRE_TOKEN_DUST_USD,
     spool,
   });
   return { account, sender, db, close, books, markChain, readChain, store, events, spool, pipeline, markInterval };

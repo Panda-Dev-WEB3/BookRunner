@@ -50,7 +50,7 @@ export function createApp(deps: ApiDeps, opts: AppOptions) {
     }),
   );
 
-  app.route("/v1", restRoutes(deps));
+  app.route("/v1", restRoutes(deps, { origins: opts.origins }));
 
   app.all("/mcp", (c) => handleMcpRequest(deps, c.req.raw));
 

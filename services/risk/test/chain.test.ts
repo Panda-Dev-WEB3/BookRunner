@@ -50,6 +50,7 @@ const C = {
   router: A(0x601),
   desk: A(0x701),
   adapter: A(0x801),
+  usdc: A(0x900),
 };
 
 const ABIS: Record<string, Abi> = {
@@ -63,6 +64,7 @@ const ABIS: Record<string, Abi> = {
   [C.desk]: bookrunnerDeskAbi,
   [C.adapter]: [...poolEngineAdapterAbi, ...orderlyAdapterAbi] as Abi,
   [NVDA_TOKEN]: erc20Abi,
+  [C.usdc]: erc20Abi,
 };
 
 const components = { book: C.book, senior: C.senior, junior: C.junior, vault: C.vault, mandate: C.mandate, router: C.router, desk: C.desk, adapter: C.adapter };
@@ -118,7 +120,7 @@ const RESULTS: Record<string, unknown> = {
   [`${C.adapter}:setReduceOnly`]: undefined,
 };
 
-function fakeProvider() {
+function fakeProvider(reverts: ReadonlySet<string> = new Set()) {
   const sent: Hex[] = [];
   const killLog = {
     topics: encodeEventTopics({ abi: mMMandateAbi, eventName: "Kill", args: { by: A(0x99) } }),
@@ -137,6 +139,8 @@ function fakeProvider() {
         if (!abi) throw new Error(`no contract at ${to}`);
         const { functionName } = decodeFunctionData({ abi, data });
         const key = `${to.toLowerCase()}:${functionName}`;
+        if (reverts.has(key)) throw new Error(`execution reverted: ${key}`);
+        if (key === `${C.usdc}:balanceOf`) return encodeFunctionResult({ abi: erc20Abi, functionName: "balanceOf", result: usd(500) });
         if (!(key in RESULTS)) throw new Error(`unexpected call ${key}`);
         const out = RESULTS[key];
         return out === undefined ? "0x" : encodeFunctionResult({ abi, functionName, result: out } as never);
@@ -194,8 +198,8 @@ function fakeProvider() {
   return { request, sent };
 }
 
-function makeChain() {
-  const provider = fakeProvider();
+function makeChain(reverts?: ReadonlySet<string>) {
+  const provider = fakeProvider(reverts);
   const transport = custom({ request: provider.request });
   const pub = createPublicClient({ chain: localChain, transport, pollingInterval: 5 });
   const wallet = createWalletClient({ chain: localChain, transport, account: devAccount("risk") });
@@ -230,7 +234,18 @@ describe("ViemChain reads", () => {
     });
     expect(o.mandate).toEqual(MANDATE);
     expect(o.adapter).toEqual({ netExposureUsd: usd(-20_000), deployedValueUsd: usd(84_000), insuranceEquityUsd: usd(25_000), inTransitUsd: 0n, valuationAt: T0 });
-    expect(o.desk).toEqual({ hedgeNotionalUsd: usd(16_000), valueUsd: usd(16_000) });
+    expect(o.desk).toEqual({ hedgeNotionalUsd: usd(16_000), valueUsd: usd(16_000), priceStale: false });
+  });
+
+  test("observe() survives a desk valuation that reverts StalePrice: values holdings at the last attested price", async () => {
+    // BookrunnerDesk.valueUsd/hedgeNotionalUsd -> registry.valueUsd -> oracle.priceOf reverts StalePrice
+    const { chain } = makeChain(new Set([`${C.desk}:hedgeNotionalUsd`, `${C.desk}:valueUsd`]));
+    const o = await chain.observe(await chain.loadRef(1));
+    // 10 NVDA via registry.valueUsdAt(token, qty, latest.priceWad) = 1,900; desk USDC 500
+    expect(o.desk).toEqual({ hedgeNotionalUsd: usd(1_900), valueUsd: usd(2_400), priceStale: true });
+    // every other limit input is still observed, so venue-exposure limits and kills keep running
+    expect(o.adapter.netExposureUsd).toBe(usd(-20_000));
+    expect(o.mandate).toEqual(MANDATE);
   });
 
   test("latest Kill log and desk holdings (registry valuation)", async () => {
@@ -261,6 +276,8 @@ describe("ViemChain writes (RISK role)", () => {
     const call = decodeFunctionData({ abi: mMMandateAbi, data: tx.data as Hex });
     expect(call.functionName).toBe("kill");
     expect(call.args?.[0]).toBe(strToBytes32("INVENTORY"));
+    // buffered gas: eth_estimateGas 0x30000 (196,608) * 1.3 + 30k, never the raw estimate
+    expect(tx.gas).toBe(285_590n);
   });
 
   test("desk Flatten action encoding and adapter reduce-only", async () => {
@@ -284,7 +301,9 @@ describe("ViemChain writes (RISK role)", () => {
       action.data,
     );
     expect([token.toLowerCase(), amountIn, minOut, fee, venue]).toEqual([NVDA_TOKEN, 5n * 10n ** 18n, usd(940.5), 3000, strToBytes32("UNIV3")]);
+    expect(flat.gas).toBe(285_590n);
     const ro = parseTransaction(sent[1] as never);
+    expect(ro.gas).toBe(285_590n);
     expect(ro.to?.toLowerCase()).toBe(C.adapter);
     expect(decodeFunctionData({ abi: poolEngineAdapterAbi, data: ro.data as Hex })).toMatchObject({ functionName: "setReduceOnly", args: [true] });
   });

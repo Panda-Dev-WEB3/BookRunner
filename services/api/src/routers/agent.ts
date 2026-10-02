@@ -3,7 +3,7 @@ import { bytes32ToStr } from "@bookrunner/shared/bytes32";
 import { type Address, getAddress, toBytes, zeroHash } from "viem";
 import { z } from "zod";
 import { usdInput } from "../domain/charter";
-import { registerKeyTx, revokeKeyTx } from "../domain/txs";
+import { consentKeyTx, registerKeyTx, revokeKeyTx } from "../domain/txs";
 import { bkrnStr, dbUsdStr, iso, parseUsd, unixSec, usdStr } from "../format";
 import { fail, publicProcedure, requireChain, router, softChain } from "../trpc";
 import { bookIdInput, componentsView, loadBook, loadCharterOf, timeInput, walletInput } from "./common";
@@ -24,7 +24,11 @@ export interface AgentKeyView {
 }
 
 export const agentRouter = router({
-  /** Prepared MMMandate.registerKey for the sponsor; checks tier >= maxInventory and the operator bond. */
+  /**
+   * Prepared MMMandate.registerKey for the sponsor; checks tier >= maxInventory and the operator bond.
+   * A third-party operator (operator != sponsor) must first consentKey(key, true) from its own wallet
+   * (registerKey reverts OperatorConsentMissing otherwise): that tx is returned first, signer = operator.
+   */
   register: publicProcedure
     .input(
       z.object({
@@ -62,12 +66,26 @@ export const agentRouter = router({
       }
       const warnings: string[] = [];
       if (requiredBond === null || available === null) warnings.push("Operator bond could not be checked on-chain; registration reverts if the stake is short");
+      const sponsor = charter?.sponsor ?? null;
+      const selfOperated = sponsor !== null && sponsor.toLowerCase() === input.operator.toLowerCase();
+      let consent: boolean | null = selfOperated;
+      if (!selfOperated) consent = await softChain(deps, "mandate.operatorConsent", (g) => g.operatorConsent(mandateAddr, input.operator, input.key), null);
       const tx = registerKeyTx(chain.chainId, mandateAddr, input.key, input.operator, BigInt(validUntil), tier);
+      const txs = [tx];
+      if (consent !== true) {
+        txs.unshift(consentKeyTx(chain.chainId, mandateAddr, input.key, input.operator));
+        warnings.push(
+          consent === null
+            ? "Operator consent could not be checked on-chain; the operator signs consentKey first (harmless if already given), then the sponsor registers the key"
+            : "The operator has not consented to this key yet: the operator wallet signs step 1 (consentKey), then the sponsor signs registerKey",
+        );
+      }
       return {
         tx,
-        txs: [tx],
-        signer: charter?.sponsor ?? null,
+        txs,
+        signer: sponsor,
         signerRole: "sponsor" as const,
+        consentRequired: consent !== true,
         bookId: b.id,
         key: input.key,
         operator: input.operator,

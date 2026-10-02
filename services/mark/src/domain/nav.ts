@@ -2,8 +2,27 @@
 //   desk value       = desk USDC + sum(registry.valueUsd(token, qty))   (multiplier applied once, by the registry)
 //   deployedValueUsd = adapter.deployedValueUsd (IF + max(MM, 0) + in-transit) + desk value
 //   navUsd           = markedNav(vaultIdle, unfundedClaims, deployedValueUsd)  (shared waterfall.ts, as on-chain)
+//
+// Retiring dust rule [ext]: Book.finalizeRetirement needs a final mark with deployedValueUsd == 0
+// exactly. The wind-down recalls every venue unit (keeper) and returns every desk USDC unit and
+// flattens every token position worth >= 0.001 USD (agent). A token position worth less than that
+// cannot be sold within the desk's maxSlippageBps (the swap output rounds below the bound), so for
+// a Retiring book such positions are valued at 0 here (written off; at most 0.001 USD per held
+// token, which stays on the desk). Never applied to venue capital, desk USDC, or a Live book.
 import { markedNav } from "@bookrunner/shared";
-import type { MarkSnapshot } from "./types";
+import type { DeskPosition, MarkSnapshot } from "./types";
+
+/** Default per-position dust bound (USD 6dp): the agent's Retiring flatten floor (RETIRE_FLATTEN_MIN_USD). */
+export const RETIRE_TOKEN_DUST_USD = 1_000n;
+
+/** Retiring books: desk token positions worth less than `dustUsd` valued at 0 (see header). */
+export function writeOffRetiringDust<S extends Pick<MarkSnapshot, "book" | "desk">>(s: S, dustUsd: bigint): { snapshot: S; writtenOff: DeskPosition[] } {
+  if (s.book.state !== "Retiring" || dustUsd <= 0n) return { snapshot: s, writtenOff: [] };
+  const writtenOff = s.desk.positions.filter((p) => p.valueUsd > 0n && p.valueUsd < dustUsd);
+  if (writtenOff.length === 0) return { snapshot: s, writtenOff };
+  const positions = s.desk.positions.map((p) => (p.valueUsd > 0n && p.valueUsd < dustUsd ? { ...p, valueUsd: 0n } : p));
+  return { snapshot: { ...s, desk: { ...s.desk, positions } }, writtenOff };
+}
 
 export function deskHedgeValueUsd(desk: MarkSnapshot["desk"]): bigint {
   return desk.positions.reduce((s, p) => s + p.valueUsd, 0n);

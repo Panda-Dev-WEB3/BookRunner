@@ -75,7 +75,12 @@ export interface KeeperSnapshot {
   subscriptionEnds: number;
   unfundedClaims: bigint;
   vaultIdle: bigint;
+  /** Confirmed withdrawals not yet swept to the vault (adapter.inTransitUsd). */
   inTransit: bigint;
+  /** Requested, unconfirmed withdrawals (Orderly pendingWithdrawUsd IF + MM; 0 on the engine). */
+  pendingWithdraw: bigint;
+  /** Engine: PoolEngine.withdrawLiquidity limit now (see engineWithdrawableUsd); null on Orderly. */
+  mmWithdrawable: bigint | null;
   insuranceEquity: bigint;
   marginEquity: bigint;
   netExposure: bigint;

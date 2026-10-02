@@ -9,10 +9,15 @@ export const apiEnvShape = {
   WEB_ORIGIN: z.string().default("http://127.0.0.1:5180"),
   /** Optional charter service base URL (services/charter, port 4430). Local validation when unset. */
   CHARTER_URL: z.string().optional(),
-  /** VERIFY with services/charter: path of its draft validation endpoint. */
-  CHARTER_VALIDATE_PATH: z.string().default("/v1/charters/validate"),
-  /** Bearer token required for webhook management when set (open in dev when unset). */
+  /** services/charter draft validation endpoint (POST /charters/draft, services/charter/src/http/app.ts). */
+  CHARTER_VALIDATE_PATH: z.string().default("/charters/draft"),
+  /** Bearer token for webhook management (/v1/webhooks). Webhook management is disabled while unset. */
   API_ADMIN_TOKEN: z.string().optional(),
+  /**
+   * Explicit allow-list (comma separated host names / IP literals) of webhook targets exempt from the
+   * SSRF rules (loopback / private / link-local), e.g. "127.0.0.1,localhost" for a local receiver.
+   */
+  WEBHOOK_ALLOW_HOSTS: z.string().default(""),
   /** Webhook delivery tuning. */
   WEBHOOK_TIMEOUT_MS: z.coerce.number().int().min(100).default(10_000),
   WEBHOOK_BACKOFF_MS: z.coerce.number().int().min(10).default(5_000),

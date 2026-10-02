@@ -4,6 +4,7 @@ import type { Logger, WebhookJob } from "@bookrunner/shared";
 import type { WebhookStore } from "../data/types";
 import { isSuccessStatus, webhookBody } from "./policy";
 import { SIGNATURE_HEADER, signatureHeader } from "./signature";
+import { type ResolveHost, checkResolvedTarget, dnsResolveHost } from "./target";
 
 export interface DeliverDeps {
   store: WebhookStore;
@@ -11,6 +12,10 @@ export interface DeliverDeps {
   now: () => number; // unix ms
   timeoutMs: number;
   log: Logger;
+  /** WEBHOOK_ALLOW_HOSTS (exempt from the SSRF address rules). */
+  allowHosts?: ReadonlySet<string>;
+  /** DNS answers of a host (default node:dns); every answer must be a public address. */
+  resolveHost?: ResolveHost;
 }
 
 export type DeliveryOutcome =
@@ -35,6 +40,22 @@ export async function deliverWebhook(d: DeliverDeps, job: WebhookJob, attempt: n
   if (!sub || !sub.active) return drop("subscription inactive or deleted");
   const ev = await d.store.getEvent(eventId);
   if (!ev) return drop("event not found");
+
+  // SSRF guard, re-checked at delivery: the URL's host may have been re-pointed since creation
+  let target: Awaited<ReturnType<typeof checkResolvedTarget>>;
+  try {
+    target = await checkResolvedTarget(sub.url, d.allowHosts ?? new Set(), d.resolveHost ?? dnsResolveHost);
+  } catch (err) {
+    target = { ok: false, reason: `url host lookup failed: ${err instanceof Error ? err.message : String(err)}` };
+    if (attempt < maxAttempts) {
+      await d.store.updateDelivery(subscriptionId, eventId, { status: "pending", attempts: attempt, responseCode: null, lastError: target.reason.slice(0, 500), deliveredAt: null });
+      return { status: "retry", responseCode: null, error: target.reason };
+    }
+  }
+  if (!target.ok) {
+    d.log.warn({ subscriptionId, eventId, reason: target.reason }, "webhook destination blocked (non-public address)");
+    return drop(`blocked destination: ${target.reason}`);
+  }
 
   const body = JSON.stringify(webhookBody(ev));
   const t = Math.floor(d.now() / 1000);

@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { HttpCharterServiceClient, parseCharterServiceReply } from "../src/charterService";
+import { HttpCharterServiceClient, parseCharterServiceReply, toCharterServiceDraft } from "../src/charterService";
+import { apiEnvShape } from "../src/config";
+import { charterDraftSchema, draftToCharter } from "../src/domain/charter";
 import { parseLiveNav, parseOraclePrice, parseRiskState, usdFromLoose } from "../src/domain/live";
 import { NOTICE_TEXT, bucketOf, redeemSchedule } from "../src/domain/redemption";
 import { dbUsdStr, parseUsd, sharePriceStr, toDate, usdStr, wadStr } from "../src/format";
@@ -124,17 +126,36 @@ describe("charter service client", () => {
     expect(parseCharterServiceReply("x")).toBeNull();
   });
 
-  test("HTTP: posts the draft; unreachable -> null (local fallback)", async () => {
+  test("HTTP: posts the converted charter to /charters/draft; unreachable -> null (local fallback)", async () => {
     let seen: unknown = null;
-    const ok = new HttpCharterServiceClient("http://charter.test/", "/v1/charters/validate", silentLog, 500, (async (url: string | URL | Request, init?: RequestInit) => {
+    const charter = draftToCharter(charterDraftSchema.parse(sampleDraft())).charter;
+    const ok = new HttpCharterServiceClient("http://charter.test/", apiEnvShape.CHARTER_VALIDATE_PATH.parse(undefined), silentLog, 500, (async (url: string | URL | Request, init?: RequestInit) => {
       seen = { url: String(url), body: JSON.parse(String(init?.body)) };
-      return new Response(JSON.stringify({ reasons: [] }), { status: 200 });
+      return new Response(JSON.stringify({ ok: true, reasons: [] }), { status: 200 });
     }) as unknown as typeof fetch);
-    expect(await ok.validate(sampleDraft())).toEqual([]);
-    expect(seen).toMatchObject({ url: "http://charter.test/v1/charters/validate", body: { symbol: "PERP_NVDA_USDC" } });
+    expect(await ok.validate(sampleDraft(), charter)).toEqual([]);
+    expect(seen).toMatchObject({ url: "http://charter.test/charters/draft", body: { symbol: charter.symbol, subscriptionWindow: charter.subscriptionWindow } });
     const down = new HttpCharterServiceClient("http://charter.test", "/v", silentLog, 500, (async () => {
       throw new TypeError("fetch failed");
     }) as unknown as typeof fetch);
-    expect(await down.validate(sampleDraft())).toBeNull();
+    expect(await down.validate(sampleDraft(), charter)).toBeNull();
+  });
+
+  test("charter service rejections are never read as valid (400 invalid_draft, 200 reasons, 404 misconfig)", async () => {
+    const charter = draftToCharter(charterDraftSchema.parse(sampleDraft())).charter;
+    const reply = (status: number, body: unknown) =>
+      new HttpCharterServiceClient("http://charter.test", "/charters/draft", silentLog, 500, (async () => new Response(JSON.stringify(body), { status })) as unknown as typeof fetch);
+    const invalid = await reply(400, { error: "invalid_draft", issues: [{ path: "mandate.maxSkewBps", message: "Too big" }] }).validate(sampleDraft(), charter);
+    expect(invalid).toEqual([{ code: "INVALID_DRAFT", field: "mandate.maxSkewBps", message: "Too big", source: "charter-service" }]);
+    const rejected = await reply(200, { ok: false, reason: "BAD_BPS", reasons: ["BAD_BPS"] }).validate(sampleDraft(), charter);
+    expect(rejected?.map((i) => i.code)).toEqual(["BAD_BPS"]);
+    expect(await reply(404, { error: "not_found" }).validate(sampleDraft(), charter)).toBeNull();
+  });
+
+  test("the request body parses under services/charter's own draft schema", async () => {
+    const { parseCharterDraft } = await import("../../charter/src/domain/draft");
+    const charter = draftToCharter(charterDraftSchema.parse(sampleDraft())).charter;
+    const parsed = parseCharterDraft(JSON.parse(JSON.stringify(toCharterServiceDraft(charter))));
+    expect(parsed.charter).toEqual(charter);
   });
 });

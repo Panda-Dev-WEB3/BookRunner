@@ -1,7 +1,7 @@
 // Read-only chain adapter for one book: charter, mandate, kill/off-hours flags, book state, desk
 // balances, Stock Token registry and AttestedOracle views.
 
-import { ACCOUNT, BOOK_STATE, type BookComponents, type BookState, type Charter, type Deployment, type Mandate, type VenueId } from "@bookrunner/shared";
+import { ACCOUNT, BOOK_STATE, type BookComponents, type BookState, type Charter, type Deployment, type Mandate, VENUE, type VenueId } from "@bookrunner/shared";
 import {
   attestedOracleAbi,
   bookAbi,
@@ -10,10 +10,16 @@ import {
   mMMandateAbi,
   mockERC20Abi,
   orderlyAdapterAbi,
+  poolEngineAbi,
   poolEngineAdapterAbi,
   stockTokenRegistryAbi,
+  underwritingVaultAbi,
 } from "@bookrunner/shared/abi";
 import type { Address, Hex, PublicClient } from "viem";
+import { type MmRecallInfo, engineWithdrawableUsd } from "../domain/hedge-planner";
+
+/** Orderly free-margin estimate keeps 10% of |exposure| as initial margin (VERIFY Orderly IMR per symbol). */
+const ORDERLY_IM_RESERVE_BPS = 1_000n;
 
 export interface StockTokenInfo {
   token: Address;
@@ -141,6 +147,44 @@ export class BookChain {
   /** IVenueAdapter.valuationAt(): block time on-chain venues, last report on Orderly. */
   async adapterValuationAt(): Promise<number> {
     return Number(await this.pub.readContract({ address: this.components.adapter, abi: poolEngineAdapterAbi, functionName: "valuationAt" }));
+  }
+
+  /** UnderwritingVault.deployable(): idle USDC not reserved for unfunded claims (FundDesk bound). */
+  vaultDeployable(): Promise<bigint> {
+    return this.pub.readContract({ address: this.components.vault, abi: underwritingVaultAbi, functionName: "deployable" });
+  }
+
+  /**
+   * What a desk InventoryToVault(MM) can bring to the vault now. Engine: synchronous, bounded by
+   * PoolEngine.withdrawLiquidity (pool cash and required pool margin). Orderly: asynchronous
+   * (ops-venue executes it), bounded by the reported MM margin less an initial-margin reserve;
+   * requested + confirmed-unswept withdrawals count as in flight.
+   */
+  async mmRecall(): Promise<MmRecallInfo> {
+    const adapter = this.components.adapter;
+    const kind = await this.pub.readContract({ address: adapter, abi: poolEngineAdapterAbi, functionName: "venueKind" });
+    if (kind === VENUE.POOL_ENGINE) {
+      const [engine, marketId] = await Promise.all([
+        this.pub.readContract({ address: adapter, abi: poolEngineAdapterAbi, functionName: "engine" }),
+        this.pub.readContract({ address: adapter, abi: poolEngineAdapterAbi, functionName: "marketId" }),
+      ]);
+      const [st, equity, required] = await Promise.all([
+        this.pub.readContract({ address: engine, abi: poolEngineAbi, functionName: "state", args: [marketId] }),
+        this.pub.readContract({ address: engine, abi: poolEngineAbi, functionName: "poolEquityUsd", args: [marketId] }),
+        this.pub.readContract({ address: engine, abi: poolEngineAbi, functionName: "requiredPoolMarginUsd", args: [marketId] }),
+      ]);
+      return { sync: true, inFlightUsd: 0n, recallableUsd: engineWithdrawableUsd(st.poolCashUsd, equity, required) };
+    }
+    const [margin, exposure, inTransit, pendingIf, pendingMm] = await Promise.all([
+      this.pub.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "marginEquityUsd" }),
+      this.pub.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "netExposureUsd" }),
+      this.pub.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "inTransitUsd" }),
+      this.pub.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "pendingWithdrawUsd", args: [ACCOUNT.IF] }),
+      this.pub.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "pendingWithdrawUsd", args: [ACCOUNT.MM] }),
+    ]);
+    const absExposure = exposure < 0n ? -exposure : exposure;
+    const free = margin - (absExposure * ORDERLY_IM_RESERVE_BPS) / 10_000n;
+    return { sync: false, inFlightUsd: inTransit + pendingIf + pendingMm, recallableUsd: free > 0n ? free : 0n };
   }
 
   orderlyMmAccountId(): Promise<Hex> {

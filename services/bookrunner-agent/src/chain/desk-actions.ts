@@ -80,6 +80,11 @@ export function encodeFlatten(p: { token: Address; amountIn: bigint; minAmountOu
   };
 }
 
+/** InventoryToVault: vault.recall(account, amount) through the mandate (recalls are always allowed to an active key). */
+export function encodeInventoryToVault(account: number, amount: bigint): DeskAction {
+  return { kind: DESK_ACTION.InventoryToVault, data: encodeAbiParameters([{ type: "uint8" }, { type: "uint256" }], [account, amount]), proof: [] };
+}
+
 export function encodeFundDesk(amount: bigint): DeskAction {
   return { kind: DESK_ACTION.FundDesk, data: encodeAbiParameters([{ type: "uint256" }], [amount]), proof: [] };
 }

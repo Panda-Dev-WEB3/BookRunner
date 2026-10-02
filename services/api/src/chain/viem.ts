@@ -133,6 +133,10 @@ export class ViemChainGateway implements ChainGateway {
     return this.client.readContract({ address: this.c.staking, abi: bkrnStakingAbi, functionName: "availableOf", args: [account] });
   }
 
+  operatorConsent(mandate: Address, operator: Address, key: Address): Promise<boolean> {
+    return this.client.readContract({ address: mandate, abi: mMMandateAbi, functionName: "operatorConsent", args: [operator, key] });
+  }
+
   agentTierBond(inventoryUsd: bigint): Promise<bigint> {
     return this.client.readContract({ address: this.c.config, abi: bookrunnerConfigAbi, functionName: "agentTierBond", args: [inventoryUsd] });
   }

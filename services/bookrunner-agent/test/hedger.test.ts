@@ -6,7 +6,7 @@ import { type HedgeChain, Hedger } from "../src/agent/hedger";
 import type { OraclePoint, StockTokenInfo } from "../src/chain/book-chain";
 import { DESK_ACTION, type DeskAction } from "../src/chain/desk-actions";
 import type { DeskRunResult, DeskRunner } from "../src/chain/desk-client";
-import { planHedge, qtyForUsd } from "../src/domain/hedge-planner";
+import { type MmRecallInfo, planHedge, qtyForUsd } from "../src/domain/hedge-planner";
 import { buildHedgeUniverse, defaultAllowPairs } from "../src/domain/hedge-universe";
 import { FakeStore, nvdaMandate, silentLog } from "./helpers";
 
@@ -19,6 +19,14 @@ class FakeHedgeChain implements HedgeChain {
   hedge = 0n;
   balance = 0n;
   floatCap = 10n ** 30n;
+  vaultIdle = usd(1_000_000);
+  recall: MmRecallInfo | null = null;
+  async vaultDeployable() {
+    return this.vaultIdle;
+  }
+  async mmRecall() {
+    return this.recall;
+  }
   async deskHedgeUsd() {
     return this.hedge;
   }
@@ -66,7 +74,15 @@ class FakeRunner implements DeskRunner {
     const logs: Log[] = [];
     if (a.kind === DESK_ACTION.FundDesk) {
       const [amount] = decodeAbiParameters([{ type: "uint256" }], a.data);
+      // UnderwritingVault.fundDesk: amount > deployable() reverts InsufficientIdle
+      if (amount > this.chain.vaultIdle) throw new Error(`execute reverted: InsufficientIdle(${amount}, ${this.chain.vaultIdle})`);
+      this.chain.vaultIdle -= amount;
       this.chain.usdc += amount;
+    }
+    if (a.kind === DESK_ACTION.InventoryToVault) {
+      const [, amount] = decodeAbiParameters([{ type: "uint8" }, { type: "uint256" }], a.data);
+      if (this.chain.recall?.sync) this.chain.vaultIdle += amount; // engine: settles in the call
+      else if (this.chain.recall) this.chain.recall = { ...this.chain.recall, inFlightUsd: this.chain.recall.inFlightUsd + amount };
     }
     if (a.kind === DESK_ACTION.Hedge) {
       const [token, buy, amountIn] = decodeAbiParameters([{ type: "address" }, { type: "bool" }, { type: "uint256" }, { type: "uint256" }, { type: "uint24" }, { type: "bytes32" }], a.data);
@@ -149,6 +165,7 @@ describe("Hedger (executor)", () => {
         perpHedgeUsd: 0n,
         deskUsdcUsd: 0n,
         deskValueUsd: usd(30_000),
+        vaultDeployableUsd: 0n,
         components: [{ token: NVDA, assetId: PRICE_ID, weightBps: 10_000, decimals: 18, priceWad: wad(190), multiplierWad: wad(1), balanceRaw: qtyForUsd(usd(30_000), wad(190), wad(1), 18), floatCapRaw: 10n ** 30n, proof: [] }],
         offHours: false,
         mode: "normal",
@@ -158,6 +175,36 @@ describe("Hedger (executor)", () => {
       { minTradeUsd: usd(250), slippageBps: 100, perpEnabled: false, returnDustUsd: usd(1) },
     );
     expect(sell.action).toBe("sell");
+  });
+
+  test("live book with an empty vault (engine): recall MM margin, then FundDesk, then buy - FundDesk never reverts InsufficientIdle", async () => {
+    const { chain, runner, store, hedger, mandate } = setup();
+    chain.usdc = 0n;
+    chain.vaultIdle = usd(1_069.836017); // fee-flow dust only: closeWindow deployed IF + MM
+    chain.recall = { recallableUsd: usd(90_000), inFlightUsd: 0n, sync: true };
+    const plan = await hedger.cycle({ mandate, mode: "normal", offHours: false, netExposureUsd: -usd(40_000), allowAddHedge: true });
+    expect(plan.action).toBe("buy");
+    expect(runner.actions.map((a) => a.kind)).toEqual([DESK_ACTION.InventoryToVault, DESK_ACTION.FundDesk, DESK_ACTION.Hedge]);
+    const [account, recalled] = decodeAbiParameters([{ type: "uint8" }, { type: "uint256" }], runner.actions[0]!.data);
+    expect(account).toBe(1); // MM
+    expect(recalled).toBe(usd(34_000) - usd(1_069.836017));
+    expect(store.hedges.length).toBe(1);
+  });
+
+  test("live book with an empty vault (Orderly): recall once, wait while it is in flight, then hedge", async () => {
+    const { chain, runner, hedger, mandate } = setup();
+    chain.usdc = 0n;
+    chain.vaultIdle = 0n;
+    chain.recall = { recallableUsd: usd(60_000), inFlightUsd: 0n, sync: false };
+    const ctx = { mandate, mode: "normal" as const, offHours: false, netExposureUsd: -usd(40_000), allowAddHedge: true };
+    expect((await hedger.cycle(ctx)).action).toBe("recall");
+    expect((await hedger.cycle(ctx)).reason).toBe("RECALL_IN_FLIGHT");
+    expect(runner.actions.map((a) => a.kind)).toEqual([DESK_ACTION.InventoryToVault]);
+    // ops-venue paid the withdrawal and swept it to the vault
+    chain.vaultIdle = usd(34_000);
+    chain.recall = { ...chain.recall, inFlightUsd: 0n };
+    expect((await hedger.cycle(ctx)).action).toBe("buy");
+    expect(runner.actions.map((a) => a.kind)).toEqual([DESK_ACTION.InventoryToVault, DESK_ACTION.FundDesk, DESK_ACTION.Hedge]);
   });
 
   test("Retiring (flatten mode): Flatten holdings then ReturnToVault the desk USDC", async () => {

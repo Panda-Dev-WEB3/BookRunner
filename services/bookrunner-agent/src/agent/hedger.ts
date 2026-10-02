@@ -1,15 +1,16 @@
 // Hedge executor: snapshot desk + registry + oracle state, run the pure planner, execute the legs as
-// desk actions (FundDesk -> Hedge buys, Hedge sells, Flatten, ReturnToVault), persist hedges rows +
-// receipt leaves. A failed leg aborts the rest of the cycle; the next cycle re-plans from chain state.
+// desk actions (InventoryToVault(MM) -> FundDesk -> Hedge buys, Hedge sells, Flatten, ReturnToVault),
+// persist hedges rows + receipt leaves. A failed leg aborts the rest of the cycle; the next cycle
+// re-plans from chain state.
 
-import { HEDGE_VENUES, type Logger, type Mandate, bytes32ToStr } from "@bookrunner/shared";
+import { ACCOUNT, HEDGE_VENUES, type Logger, type Mandate, bytes32ToStr } from "@bookrunner/shared";
 import { bookrunnerDeskAbi } from "@bookrunner/shared/abi";
 import { type Address, type Hex, type TransactionReceipt, parseEventLogs } from "viem";
 import type { AgentStore } from "../adapters/store";
 import type { OraclePoint, StockTokenInfo } from "../chain/book-chain";
-import { encodeFlatten, encodeFundDesk, encodeHedge, encodeReturnToVault } from "../chain/desk-actions";
+import { encodeFlatten, encodeFundDesk, encodeHedge, encodeInventoryToVault, encodeReturnToVault } from "../chain/desk-actions";
 import type { DeskRunner } from "../chain/desk-client";
-import { type HedgeComponent, type HedgeMode, type HedgePlan, type HedgePlannerConfig, planHedge } from "../domain/hedge-planner";
+import { type HedgeComponent, type HedgeMode, type HedgePlan, type HedgePlannerConfig, type MmRecallInfo, planHedge } from "../domain/hedge-planner";
 import type { HedgeUniverse } from "../domain/hedge-universe";
 import { hedgeReceipt } from "../domain/receipts";
 import { errMsg } from "../util";
@@ -21,6 +22,10 @@ export interface HedgeChain {
   tokenBalance(token: Address, owner: Address): Promise<bigint>;
   getToken(token: Address): Promise<StockTokenInfo>;
   oracleLatest(priceId: Hex): Promise<OraclePoint>;
+  /** vault.deployable(): FundDesk reverts InsufficientIdle above it. */
+  vaultDeployable(): Promise<bigint>;
+  /** MM recall capacity for hedge funding (null/absent: never recall). */
+  mmRecall?(): Promise<MmRecallInfo | null>;
 }
 
 /** Offsetting perp legs on an allow-listed venue (feature flag HEDGE_PERP_ENABLED). */
@@ -96,11 +101,18 @@ export class Hedger implements HedgeCycleRunner {
   }
 
   async cycle(ctx: HedgeCycleContext): Promise<HedgePlan> {
-    const [hedge, value, usdc, comps] = await Promise.all([
+    const [hedge, value, usdc, comps, vaultDeployable, mmRecall] = await Promise.all([
       this.d.chain.deskHedgeUsd(),
       this.d.chain.deskValueUsd(),
       this.d.chain.deskUsdc(),
       this.snapshot(),
+      this.d.chain.vaultDeployable(),
+      this.d.chain.mmRecall
+        ? this.d.chain.mmRecall().catch((err) => {
+            this.d.log.warn({ err: errMsg(err) }, "hedge: MM recall capacity unavailable; no recall this cycle");
+            return null;
+          })
+        : Promise.resolve(null),
     ]);
     const perpUsd = this.d.cfg.perpEnabled && this.d.perp ? await this.d.perp.positionUsd() : 0n;
     const plan = planHedge(
@@ -111,6 +123,8 @@ export class Hedger implements HedgeCycleRunner {
         perpHedgeUsd: perpUsd,
         deskUsdcUsd: usdc,
         deskValueUsd: value,
+        vaultDeployableUsd: vaultDeployable,
+        ...(mmRecall ? { mmRecall } : {}),
         components: comps,
         offHours: ctx.offHours,
         mode: ctx.mode,
@@ -125,6 +139,7 @@ export class Hedger implements HedgeCycleRunner {
       mode: ctx.mode,
       exposureUsd: ctx.netExposureUsd.toString(),
       hedgeUsd: hedge.toString(),
+      vaultDeployableUsd: vaultDeployable.toString(),
       ratioBefore: plan.ratioBefore?.toString() ?? null,
       ratioAfter: plan.ratioAfter?.toString() ?? null,
       legs: plan.legs.map((l) => l.kind),
@@ -179,6 +194,10 @@ export class Hedger implements HedgeCycleRunner {
     const byToken = new Map(comps.map((c) => [c.token.toLowerCase(), c]));
     for (const leg of plan.legs) {
       switch (leg.kind) {
+        case "recall_mm": {
+          await this.d.runner.run(encodeInventoryToVault(ACCOUNT.MM, leg.amountUsd), "InventoryToVault:MM");
+          break;
+        }
         case "fund_desk": {
           await this.d.runner.run(encodeFundDesk(leg.amountUsd), "FundDesk");
           break;

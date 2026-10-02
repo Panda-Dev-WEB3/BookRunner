@@ -163,6 +163,7 @@ export class BookMonitor {
       netExposureUsd,
       exposureSource,
       deskHedgeUsd: c.desk.hedgeNotionalUsd,
+      deskPriceStale: c.desk.priceStale === true,
       nav: {
         vaultIdleUsd: c.vaultIdleUsd,
         unfundedClaimsUsd: c.unfundedClaimsUsd,
@@ -237,6 +238,7 @@ export class BookMonitor {
       netExposureUsd: usdStr(obs.netExposureUsd),
       exposureSource: obs.exposureSource,
       deskHedgeUsd: usdStr(obs.deskHedgeUsd),
+      deskPriceStale: obs.deskPriceStale === true,
       liveNavUsd: usdStr(ev.nav.navUsd),
       drawdownBps: ev.nav.drawdownBps,
       oracle: {

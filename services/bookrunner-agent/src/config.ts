@@ -80,7 +80,8 @@ export const agentEnvShape = {
   HEDGE_POOL_FEE: num(3_000), // VERIFY Stock Token pool fee tiers on RHC
   HEDGE_TARGET_RATIO_BPS: z.coerce.number().optional(),
   HEDGE_PERP_ENABLED: flag(false),
-  HEDGE_RETURN_DUST_USD: num(1),
+  /** Retiring: desk USDC above this is returned to the vault. 0 = all of it (finalizeRetirement needs 0 deployed). */
+  HEDGE_RETURN_DUST_USD: num(0),
   /** JSON [{asset, venue}] override of the allow-list pairs (bytes32 hex or ASCII venue names). */
   HEDGE_ALLOW_PAIRS: z.string().optional(),
 
