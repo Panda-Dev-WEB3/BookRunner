@@ -83,9 +83,9 @@ export function WithdrawPanel(props: {
         {p.source === "db" && <p className="mt-2 text-[12px] text-muted">Chain reads are unavailable right now; showing indexed data.</p>}
       </section>
 
-      {(flags.allocationToClaim || flags.redemptionToClaim || cancelled || claimUsed) && <ClaimBox {...props} p={p} cancelled={cancelled} onUsed={() => setClaimUsed(true)} />}
+      {(flags.allocationToClaim || flags.redemptionToClaim || cancelled || claimUsed) && <ClaimBox key={props.wallet ?? ""} {...props} p={p} cancelled={cancelled} onUsed={() => setClaimUsed(true)} />}
 
-      <RedeemBox {...props} p={p} />
+      <RedeemBox key={props.wallet ?? ""} {...props} p={p} />
 
       <RequestList p={p} />
     </div>

@@ -113,7 +113,10 @@ export function TxRunner(props: {
         )}
         {mismatch && (
           <div className="flex flex-wrap items-center gap-2 rounded-control bg-warn/15 px-2 py-1.5 text-[11.5px]">
-            <span>The active wallet is not the expected signer; the transaction would revert or act for another account.</span>
+            <span>
+              The active wallet is not the account these transactions were prepared for: they would revert or act for another account. Switch back to that account, or prepare them again from
+              this one.
+            </span>
             {suggested && (
               <button type="button" className="btn h-6 min-h-6 text-[11.5px]" onClick={() => w.selectDev(suggested)}>
                 Switch to {devEntry(suggested)?.label ?? suggested}
@@ -132,7 +135,7 @@ export function TxRunner(props: {
         {w.active && <GasWarning address={w.active.address} />}
         <div className="flex flex-wrap items-center gap-2">
           {w.active ? (
-            <button type="button" className="btn btn-primary" disabled={s.running || s.allConfirmed || wrongChainForDev || foreignChain !== null || !w.executor} onClick={run}>
+            <button type="button" className="btn btn-primary" disabled={s.running || s.allConfirmed || mismatch || wrongChainForDev || foreignChain !== null || !w.executor} onClick={run}>
               {s.running ? "Sending…" : s.allConfirmed ? "All confirmed" : lostReceipt ? "Check the transaction again" : s.failed ? "Retry from the failed step" : `Sign and send ${props.txs.length > 1 ? `${props.txs.length} transactions` : "transaction"}`}
             </button>
           ) : (

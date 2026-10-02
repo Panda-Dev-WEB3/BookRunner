@@ -88,6 +88,8 @@ export function StakePage() {
             />
           )}
           <StakeActions
+            // a review is built for one account (balance, allowance): switching accounts starts over
+            key={address ?? "none"}
             address={address}
             staking={p?.staking ?? protocol.contracts?.staking ?? null}
             bkrn={p?.bkrn ?? protocol.contracts?.bkrn ?? null}

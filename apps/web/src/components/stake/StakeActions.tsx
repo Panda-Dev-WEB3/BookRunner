@@ -105,7 +105,7 @@ export function StakeActions(props: StakeActionsProps) {
     if (!review || !kinds.includes(review.kind)) return null;
     return (
       <div className="space-y-3">
-        <TxRunner txs={review.txs} onConfirmed={onConfirmed} />
+        <TxRunner txs={review.txs} signer={props.address} onConfirmed={onConfirmed} />
         {review.done ? (
           <Callout
             tone="success"
