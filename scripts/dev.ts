@@ -133,6 +133,8 @@ add(svc("receipts"));
 add(svc("waterfall"));
 add(svc("mark"));
 add(svc("api"));
+// public test chains: refill the role keys' gas from the deployer (scripts/gas-keeper.ts)
+if (network === "testnet") add({ name: "gas-keeper", cwd: ROOT, cmd: [BUN, "scripts/gas-keeper.ts", "--loop"] });
 if (!noWeb) add(svc("web", "apps/web", network === "testnet" ? "dev:testnet" : "dev"));
 
 const depPath = resolve(ROOT, env.DEPLOYMENT_FILE);
@@ -223,7 +225,8 @@ setInterval(() => {
 const shutdown = () => {
   shuttingDown = true;
   for (const c of running) c.kill("SIGTERM");
-  setTimeout(() => process.exit(0), 1500);
+  // children finish an in-flight tx + bookkeeping first; systemd's TimeoutStopSec (30 s) is the hard stop
+  setTimeout(() => process.exit(0), 10_000);
 };
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

@@ -1,4 +1,5 @@
 # Installed to /etc/logrotate.d/bookrunner. copytruncate: the service keeps its file handle (append:).
+# Runs as root: systemd creates the log root-owned, so no `su` (the parent dir is bookrunner 0750).
 /opt/bookrunner/app/.data/testnet/dev.log {
     daily
     rotate 7
@@ -8,5 +9,4 @@
     missingok
     notifempty
     copytruncate
-    su bookrunner bookrunner
 }
