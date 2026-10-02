@@ -14,8 +14,8 @@ User=bookrunner
 Group=bookrunner
 WorkingDirectory=/opt/bookrunner/app
 Environment=HOME=/opt/bookrunner
-# the browser origin of the web app (API CORS)
-Environment=WEB_ORIGIN=https://bookrunner.use-cert.com
+# browser origins of the web app (API CORS): the real domain + the sslip.io name that resolves without DNS setup
+Environment=WEB_ORIGIN=https://bookrunner.use-cert.com,https://bookrunner.141-94-203-130.sslip.io
 ExecStartPre=/usr/bin/docker compose -f deploy/server/docker-compose.yml up -d --wait
 ExecStart=/opt/bookrunner/app/node_modules/.bin/bun scripts/dev.ts --network testnet --no-web
 StandardOutput=append:/opt/bookrunner/app/.data/testnet/dev.log

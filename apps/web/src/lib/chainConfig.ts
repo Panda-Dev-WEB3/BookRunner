@@ -94,9 +94,18 @@ export function resolveChainConfig(env: Env): AppChainConfig {
     rpcUrl: str(env.VITE_RPC_URL) || preset.rpcUrl,
     explorerUrl: noSlash(str(env.VITE_EXPLORER_URL) || preset.explorerUrl),
     faucetUrl: noSlash(str(env.VITE_FAUCET_URL) || preset.faucetUrl),
-    apiUrl: noSlash(str(env.VITE_API_URL) || "http://127.0.0.1:4400"),
+    apiUrl: resolveApiUrl(str(env.VITE_API_URL)),
     usdcAddress: /^0x[0-9a-fA-F]{40}$/.test(usdc) ? usdc : null,
   };
+}
+
+/**
+ * VITE_API_URL: an absolute URL, or "same-origin" when a reverse proxy serves the API next to the app
+ * (/trpc, /health) — the build then works under every host name pointing at that server.
+ */
+export function resolveApiUrl(v: string, origin: string | undefined = (globalThis as { location?: { origin?: string } }).location?.origin): string {
+  if (v === "same-origin") return noSlash(origin || "http://127.0.0.1:4400");
+  return noSlash(v || "http://127.0.0.1:4400");
 }
 
 /** Label for any chain id the app may see (wallet, API, prepared txs). */

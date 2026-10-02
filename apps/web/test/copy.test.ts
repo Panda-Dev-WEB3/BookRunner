@@ -72,10 +72,15 @@ describe("canonical copy", () => {
 });
 
 describe("the whole app", () => {
-  test("has no copy violations", () => {
-    const r = checkApp();
-    expect(r.files).toBeGreaterThan(40);
-    expect(r.snippets).toBeGreaterThan(500);
-    expect(r.violations).toEqual([]);
-  });
+  // parses every source file (~1 s alone, >5 s under a parallel full-suite run): not a 5 s default test
+  test(
+    "has no copy violations",
+    () => {
+      const r = checkApp();
+      expect(r.files).toBeGreaterThan(40);
+      expect(r.snippets).toBeGreaterThan(500);
+      expect(r.violations).toEqual([]);
+    },
+    30_000,
+  );
 });

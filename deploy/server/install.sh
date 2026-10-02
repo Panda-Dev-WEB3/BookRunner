@@ -11,7 +11,10 @@ id bookrunner >/dev/null 2>&1 || { echo "create the bookrunner user first (see R
 
 install -m 0644 "$HERE/bookrunner.service" /etc/systemd/system/bookrunner.service
 install -m 0644 "$HERE/logrotate-bookrunner" /etc/logrotate.d/bookrunner
-install -m 0644 "$HERE/nginx-bookrunner.conf" /etc/nginx/sites-available/bookrunner
+# never overwrite the site once certbot has added its TLS listeners to it (pass --nginx-site to force)
+if [ ! -e /etc/nginx/sites-available/bookrunner ] || [ "${1:-}" = "--nginx-site" ]; then
+  install -m 0644 "$HERE/nginx-bookrunner.conf" /etc/nginx/sites-available/bookrunner
+fi
 # certbot rewrites the enabled site in place; only (re)link when it is not there yet
 [ -e /etc/nginx/sites-enabled/bookrunner ] || ln -s /etc/nginx/sites-available/bookrunner /etc/nginx/sites-enabled/bookrunner
 install -d -o bookrunner -g bookrunner -m 0755 /var/www/bookrunner

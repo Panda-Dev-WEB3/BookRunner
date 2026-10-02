@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { decodeFunctionData } from "viem";
-import { CHAIN_PRESETS, DEVNET_CHAIN_ID, LOW_GAS_WEI, RHC_TESTNET_CHAIN_ID, chainLabel, explorerAddress, explorerTx, gasStatus, isTestKind, resolveChainConfig } from "../src/lib/chainConfig";
+import { CHAIN_PRESETS, DEVNET_CHAIN_ID, LOW_GAS_WEI, RHC_TESTNET_CHAIN_ID, chainLabel, explorerAddress, explorerTx, gasStatus, isTestKind, resolveApiUrl, resolveChainConfig } from "../src/lib/chainConfig";
 import { MOCK_MINT_ABI, TEST_USDC_AMOUNT, fmtEth, mintAvailability, mockMintTx, toQuantity } from "../src/lib/funds";
 
 describe("resolveChainConfig", () => {
@@ -92,5 +92,17 @@ describe("test funds", () => {
     expect(fmtEth(10n ** 12n)).toBe("<0.0001 ETH");
     expect(fmtEth(null)).toBe("—");
     expect(toQuantity(255n)).toBe("0xff");
+  });
+});
+
+describe("resolveApiUrl (server deploy behind a reverse proxy)", () => {
+  test("same-origin uses the page origin, so one build serves every host name", () => {
+    expect(resolveApiUrl("same-origin", "https://bookrunner.use-cert.com")).toBe("https://bookrunner.use-cert.com");
+    expect(resolveApiUrl("same-origin", "https://bookrunner.141-94-203-130.sslip.io/")).toBe("https://bookrunner.141-94-203-130.sslip.io");
+  });
+  test("an absolute URL is kept (trailing slash trimmed); unset falls back to the local API", () => {
+    expect(resolveApiUrl("https://api.example.org/")).toBe("https://api.example.org");
+    expect(resolveApiUrl("", undefined)).toBe("http://127.0.0.1:4400");
+    expect(resolveApiUrl("same-origin", undefined)).toBe("http://127.0.0.1:4400");
   });
 });

@@ -31,7 +31,9 @@ snapshot, ops keys, sagas), restore the `bookrunner_testnet` Postgres dump and t
 
 ```bash
 sudo bash deploy/server/update.sh                     # builds + publishes the web app, starts the stack
-sudo certbot --nginx -d bookrunner.use-cert.com       # once DNS points here: TLS + http->https redirect
+sudo certbot --nginx -d bookrunner.141-94-203-130.sslip.io   # works at once (sslip.io resolves to the IP)
+# once the A record bookrunner.use-cert.com -> 141.94.203.130 exists, add it to the same certificate:
+sudo certbot --nginx --expand -d bookrunner.141-94-203-130.sslip.io -d bookrunner.use-cert.com
 ```
 
 ## Operate

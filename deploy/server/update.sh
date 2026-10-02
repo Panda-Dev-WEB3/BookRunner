@@ -4,7 +4,8 @@
 #   sudo bash /opt/bookrunner/app/deploy/server/update.sh --web-only # rebuild + publish the web app only
 set -euo pipefail
 APP=/opt/bookrunner/app
-DOMAIN="${DOMAIN:-bookrunner.use-cert.com}"
+# same-origin: the app calls /trpc + /health on whatever host served it (nginx proxies them to the API)
+API_URL="${API_URL:-same-origin}"
 AS=(sudo -u bookrunner HOME=/opt/bookrunner)
 [ "$(id -u)" = 0 ] || { echo "run as root (sudo)"; exit 1; }
 cd "$APP"
@@ -14,8 +15,8 @@ cd "$APP"
 echo "==> at $("${AS[@]}" git log --oneline -1)"
 "${AS[@]}" node_modules/.bin/bun install --frozen-lockfile
 
-echo "==> web build (API at https://$DOMAIN)"
-( cd apps/web && "${AS[@]}" VITE_API_URL="https://$DOMAIN" ../../node_modules/.bin/bun run build:testnet >/dev/null )
+echo "==> web build (API: $API_URL)"
+( cd apps/web && "${AS[@]}" VITE_API_URL="$API_URL" ../../node_modules/.bin/bun run build:testnet >/dev/null )
 rsync -a --delete apps/web/dist/ /var/www/bookrunner/
 chown -R bookrunner:bookrunner /var/www/bookrunner
 
