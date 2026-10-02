@@ -64,7 +64,7 @@ const LIMITS: Limit[] = [
     id: "offhours",
     name: "Off-hours: reduce only",
     what: "When the stock market is closed and the price feed holds, the agent may only reduce risk. Quoting against a frozen price invites traders who know more.",
-    enforced: "Enforced by the engine and the mandate contract, and followed by the agent.",
+    enforced: "Enforced on-chain by the in-house engine, and by the mandate contract for hedges and inventory moves. On Orderly books, venue quoting follows it and is monitored by the risk service.",
     live: (m) => (m.noNewRiskOffHours ? "On" : "Off"),
   },
   {
