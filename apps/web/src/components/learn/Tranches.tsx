@@ -238,7 +238,7 @@ export function TranchesSection(props: { index: number }) {
         >
           <LiveSplit />
           <p className="mt-5 text-[12.5px] text-muted">
-            Senior is capped at a share of each book, so there is always Junior in front of it. The bigger the Junior slice, the larger the loss it can absorb
+            Senior is capped at a share of each book when deposits are accepted, so every book starts with Junior in front of it; large losses can still use Junior up. The bigger the Junior slice, the larger the loss it can absorb
             before Senior is touched.
           </p>
         </Card>

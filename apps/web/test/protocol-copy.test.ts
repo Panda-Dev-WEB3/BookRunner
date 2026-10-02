@@ -31,6 +31,10 @@ const RULES: Rule[] = [
     why: "Waterfall.splitDistribution pays Senior a fixed share and Junior the rest in the same transaction: Senior is not 'paid first' (expenses are)",
     pattern: /(?<!are )\bpaid first\b|\bbefore Junior\b|its share, first|goes to Senior first|pays Senior first/i,
   },
+  {
+    why: "The Senior cap is checked only when deposits are accepted (allocateWindow, _seniorTopUpRoom); losses can take Junior NAV to 0 (applyMarkPnl)",
+    pattern: /\balways (be )?(some )?Junior in front\b|there is always Junior/i,
+  },
 ];
 
 const { snippets } = appSnippets();
