@@ -14,7 +14,7 @@ export function MarksPanel(props: { bookId: number; selected: number | null; onS
   const q = useBookMarks(props.bookId);
   const [n, setN] = useState(PAGE);
   return (
-    <Panel title="Marks" meta="signed EIP-712, committed on-chain" actions={<ValueKind kind="marked" />} bodyClassName="p-3 sm:p-4">
+    <Panel title="Marks" meta="signed EIP-712, committed on-chain" actions={<ValueKind kind="marked" />}>
       <QueryView
         q={q}
         empty={(d) => d.items.length === 0}

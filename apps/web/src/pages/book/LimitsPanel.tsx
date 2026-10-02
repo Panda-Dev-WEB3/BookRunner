@@ -35,7 +35,7 @@ export function LimitsPanel(props: { bookId: number; limits: LimitsView | null; 
       ) : (
         <>
           {l.breaches.length > 0 && (
-            <ul className="mb-3 space-y-1 rounded-[2px] border border-critical/40 bg-critical/5 p-2 text-[12px]">
+            <ul className="mb-3 space-y-1 rounded-control border border-critical/40 bg-critical/5 p-2 text-[12px]">
               {l.breaches.map((b) => (
                 <li key={b} className="flex items-center gap-2">
                   <span className="size-1.5 rounded-[1px] bg-critical" aria-hidden />

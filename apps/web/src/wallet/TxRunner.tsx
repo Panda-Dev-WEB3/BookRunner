@@ -58,7 +58,7 @@ export function TxRunner(props: {
   if (props.txs.length === 0) return null;
 
   return (
-    <div className={cx("rounded-[3px] border border-line", props.className)}>
+    <div className={cx("rounded-card border border-line", props.className)}>
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-surface-2 px-3 py-2">
         <div className="eyebrow !text-ink">
           Prepared transaction{props.txs.length > 1 ? "s" : ""} · {s.done}/{s.total} confirmed
@@ -107,7 +107,7 @@ export function TxRunner(props: {
           </div>
         )}
         {mismatch && (
-          <div className="flex flex-wrap items-center gap-2 rounded-[2px] bg-warn/15 px-2 py-1.5 text-[11.5px]">
+          <div className="flex flex-wrap items-center gap-2 rounded-control bg-warn/15 px-2 py-1.5 text-[11.5px]">
             <span>The active wallet is not the expected signer; the transaction would revert or act for another account.</span>
             {suggested && (
               <button type="button" className="btn h-6 min-h-6 text-[11.5px]" onClick={() => w.selectDev(suggested)}>

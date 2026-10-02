@@ -34,7 +34,7 @@ function Verdict({ v }: { v: VerdictView }) {
       )}
       <div>
         <div className="eyebrow mb-1.5">Jurors</div>
-        <ul className="divide-y divide-line rounded-[2px] border border-line">
+        <ul className="divide-y divide-line rounded-control border border-line">
           {v.models.map((m, i) => (
             <li key={`${m.model}-${i}`} className="p-2.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -80,7 +80,7 @@ function Committee({ c }: { c: CharterDetail }) {
   return (
     <div className="space-y-3">
       <TallyBar {...c.tally} />
-      <ul className="divide-y divide-line rounded-[2px] border border-line">
+      <ul className="divide-y divide-line rounded-control border border-line">
         {c.committee.length === 0 && <li className="p-2.5 text-[12px] text-muted">No seated members indexed.</li>}
         {c.committee.map((m) => {
           const vote = c.votes.find((v) => v.member.toLowerCase() === m.member.toLowerCase());

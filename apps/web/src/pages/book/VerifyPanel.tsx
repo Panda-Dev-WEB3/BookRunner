@@ -15,12 +15,12 @@ import { appChain, publicClient } from "../../wallet/chains";
 
 function CheckList({ checks }: { checks: ProofCheck[] }) {
   return (
-    <ul className="divide-y divide-line rounded-[2px] border border-line">
+    <ul className="divide-y divide-line rounded-control border border-line">
       {checks.map((c) => (
         <li key={c.id} className="flex items-start gap-2 px-2.5 py-2">
           <span
             className={cx(
-              "mt-0.5 inline-flex size-4 shrink-0 items-center justify-center rounded-[2px] text-[10px] font-bold text-white",
+              "mt-0.5 inline-flex size-4 shrink-0 items-center justify-center rounded-[5px] text-[10px] font-bold text-white",
               c.state === "pass" ? "bg-good" : c.state === "fail" ? "bg-critical" : "bg-muted",
             )}
             aria-label={c.state}
@@ -133,7 +133,7 @@ function ReceiptCheck({ receiptId, committedRootFor }: { receiptId: number; comm
       <CheckList checks={checks} />
       <details>
         <summary className="cursor-pointer text-[12px] text-ink-2">Leaf, proofs and payload</summary>
-        <pre className="num mt-1 max-h-64 overflow-auto rounded-[2px] bg-surface-2 p-2 text-[10.5px] leading-4 whitespace-pre-wrap break-all">
+        <pre className="num mt-1 max-h-64 overflow-auto rounded-control bg-surface-2 p-2 text-[10.5px] leading-4 whitespace-pre-wrap break-all">
           {JSON.stringify({ leaf: p.leaf, hourlyProof: p.hourly.proof, period: p.period ? { leaf: p.period.leaf, proof: p.period.proof } : null, payload: p.payload }, null, 2)}
         </pre>
       </details>

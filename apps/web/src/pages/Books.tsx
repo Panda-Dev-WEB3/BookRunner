@@ -29,7 +29,7 @@ function totals(books: BookListItem[]) {
 
 function BookCard({ b, now }: { b: BookListItem; now: number }) {
   return (
-    <Link to={`/books/${b.bookId}`} className="block rounded-[3px] border border-line bg-surface p-3 hover:border-line-strong">
+    <Link to={`/books/${b.bookId}`} className="block rounded-card border border-line bg-surface shadow-card p-3 hover:border-line-strong">
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="text-[15px] font-semibold">{tickerOf(b.symbol)}</div>
@@ -74,15 +74,15 @@ export function BooksPage() {
         }
       />
       {t && (
-        <div className="mb-4 grid grid-cols-2 gap-x-4 gap-y-3 rounded-[3px] border border-line bg-surface p-3 sm:grid-cols-4 sm:p-4">
+        <div className="mb-4 grid grid-cols-2 gap-x-4 gap-y-3 rounded-card border border-line bg-surface shadow-card p-3 sm:grid-cols-4 sm:p-4">
           <Stat label="Books" value={q.data?.length ?? 0} sub={`${t.live} live · ${t.open} in subscription`} />
           <Stat label="Marked NAV" value={fmtUsd(t.nav, { symbol: true, compact: true })} sub="sum of last marks" kind="marked" />
           <Stat label="Limit alerts" value={t.alerts} sub="books in breach or killed" />
           <Stat label="Updated" value={q.dataUpdatedAt ? `${fmtAge(now - q.dataUpdatedAt)} ago` : DASH} sub={`polling every ${POLL.list / 1000}s`} />
         </div>
       )}
-      <Panel title="All books" meta={q.data ? `${q.data.length} book${q.data.length === 1 ? "" : "s"}` : undefined} bodyClassName="p-0 sm:p-0">
-        <div className="p-2 sm:p-4">
+      <Panel title="All books" meta={q.data ? `${q.data.length} book${q.data.length === 1 ? "" : "s"}` : undefined} bodyClassName="p-0">
+        <div className="p-2 sm:p-5">
           <QueryView
             q={q}
             empty={(d) => d.length === 0}

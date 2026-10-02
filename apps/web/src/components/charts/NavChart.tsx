@@ -40,7 +40,7 @@ function TooltipBody({ active, payload }: { active?: boolean; payload?: Readonly
   const r = payload?.[0]?.payload;
   if (!active || !r) return null;
   return (
-    <div className="min-w-[180px] rounded-[2px] border border-line-strong bg-surface px-2.5 py-2 text-[11.5px] shadow-sm">
+    <div className="min-w-[180px] rounded-control border border-line-strong bg-surface px-2.5 py-2 text-[11.5px] shadow-sm">
       <div className="mb-1 flex items-center justify-between gap-3">
         <span className="font-semibold">{r.kind === "live" ? "Live estimate" : `Mark #${r.markId}`}</span>
         <span className="num text-muted">{fmtDateTime(r.t)}</span>

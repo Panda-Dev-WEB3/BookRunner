@@ -1,7 +1,6 @@
 import { Link, createBrowserRouter, isRouteErrorResponse, useRouteError } from "react-router";
-import { Layout } from "./components/Layout";
-import { EmptyState, PageHeader, SkeletonRows } from "./components/ui";
-import { BooksPage } from "./pages/Books";
+import { Layout, type RouteHandle } from "./components/Layout";
+import { Container, EmptyState, PageHeader, SkeletonRows } from "./components/ui";
 
 function RouteError() {
   const err = useRouteError();
@@ -9,7 +8,7 @@ function RouteError() {
   const message = String((err as Error)?.message ?? err);
   const staleChunk = /dynamically imported module|Importing a module script failed|error loading dynamically/i.test(message);
   return (
-    <div className="mx-auto max-w-[1440px] px-4 py-8 md:px-6">
+    <Container className="py-10">
       <PageHeader eyebrow={notFound ? "404" : "Error"} title={notFound ? "Page not found" : staleChunk ? "A newer version is available" : "This view failed to render"} />
       <EmptyState
         title={notFound ? "There is no page at this address." : staleChunk ? "This page's code changed since it was opened." : "An unexpected error stopped this page."}
@@ -21,12 +20,12 @@ function RouteError() {
             </button>
           ) : (
             <Link className="btn" to="/">
-              Back to books
+              Back to home
             </Link>
           )
         }
       />
-    </div>
+    </Container>
   );
 }
 
@@ -37,14 +36,22 @@ function NotFound() {
       <EmptyState
         title="There is no page at this address."
         action={
-          <Link className="btn" to="/">
-            Back to books
-          </Link>
+          <div className="flex flex-wrap gap-2">
+            <Link className="btn btn-primary" to="/">
+              Back to home
+            </Link>
+            <Link className="btn" to="/books">
+              All books
+            </Link>
+          </div>
         }
       />
     </>
   );
 }
+
+/** Investor pages lay out their own full-width Sections. */
+const bleed: RouteHandle = { bleed: true };
 
 export const router = createBrowserRouter([
   {
@@ -52,13 +59,20 @@ export const router = createBrowserRouter([
     element: <Layout />,
     errorElement: <RouteError />,
     hydrateFallbackElement: (
-      <div className="mx-auto max-w-[1440px] px-4 py-8 md:px-6">
+      <Container className="py-8">
         <SkeletonRows rows={6} />
-      </div>
+      </Container>
     ),
     children: [
-      { index: true, element: <BooksPage /> },
-      // Route-level code splitting: charts, the Merkle verifier and the charter form load on demand.
+      // Route-level code splitting: every page loads on demand.
+      // Investor pages
+      { index: true, handle: bleed, lazy: async () => ({ Component: (await import("./pages/Home")).HomePage }) },
+      { path: "learn", handle: bleed, lazy: async () => ({ Component: (await import("./pages/Learn")).LearnPage }) },
+      { path: "invest", handle: bleed, lazy: async () => ({ Component: (await import("./pages/Invest")).InvestPage }) },
+      { path: "portfolio", handle: bleed, lazy: async () => ({ Component: (await import("./pages/Portfolio")).PortfolioPage }) },
+      { path: "stake", handle: bleed, lazy: async () => ({ Component: (await import("./pages/Stake")).StakePage }) },
+      // Protocol (operator) pages
+      { path: "books", lazy: async () => ({ Component: (await import("./pages/Books")).BooksPage }) },
       { path: "books/:bookId", lazy: async () => ({ Component: (await import("./pages/book/BookDetail")).BookDetailPage }) },
       { path: "charters", lazy: async () => ({ Component: (await import("./pages/Charters")).ChartersPage }) },
       { path: "charters/new", lazy: async () => ({ Component: (await import("./pages/FileCharter")).FileCharterPage }) },

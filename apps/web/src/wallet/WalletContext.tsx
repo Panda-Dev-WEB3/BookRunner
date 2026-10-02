@@ -4,7 +4,7 @@
 import type { DevRole } from "@bookrunner/shared/devkeys";
 import { type ReactNode, createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { type Address, type Hex, createPublicClient, createWalletClient, http } from "viem";
-import { useConnect, useConnection, useConnectors, useDisconnect } from "wagmi";
+import { type Connector, useConnect, useConnection, useConnectors, useDisconnect } from "wagmi";
 import { getConnection, sendTransaction, switchChain, waitForTransactionReceipt } from "wagmi/actions";
 import { useHealth } from "../api/hooks";
 import type { PreparedTx } from "../lib/api-types";
@@ -12,7 +12,7 @@ import { config } from "../lib/config";
 import { DEVNET_CHAIN_ID, devAccountFor, devAddress, devEntry, isDevRole } from "../lib/devwallet";
 import { errText } from "../lib/txflow";
 import type { TxExecutor } from "../lib/txflow";
-import { addChainParams, appChain, chainName, wagmiConfig } from "./chains";
+import { addChainParams, appChain, chainName, wagmiConfig, walletConnectEnabled } from "./chains";
 
 type Mode = "dev" | "injected" | null;
 
@@ -20,6 +20,10 @@ export interface ActiveWallet {
   kind: "dev" | "injected";
   address: Address;
   label: string;
+  /** Wallet icon (EIP-6963 data URI) when the wallet announces one. */
+  icon: string | null;
+  /** wagmi connector type ("injected", "walletConnect") or "dev". */
+  connectorType: string;
   devRole: DevRole | null;
   chainId: number | null;
 }
@@ -41,6 +45,11 @@ interface WalletCtx {
   networkError: string | null;
   selectDev(role: DevRole): void;
   connectInjected(): Promise<void>;
+  /** Connect a specific wagmi connector (an EIP-6963 wallet, the generic injected one, WalletConnect). Resolves true when connected. */
+  connectWith(connector: Connector): Promise<boolean>;
+  /** The WalletConnect option is configured (VITE_WALLETCONNECT_PROJECT_ID). */
+  walletConnectEnabled: boolean;
+  clearConnectError(): void;
   disconnect(): void;
   switchToAppChain(): Promise<boolean>;
   addAppChain(): Promise<boolean>;
@@ -144,7 +153,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const selectDev = useCallback((r: DevRole) => setSel({ mode: "dev", role: r }), []);
 
   // EIP-6963 discovered wallets first (named connectors), then the generic window.ethereum one.
-  const injectedConnector = connectors.find((c) => c.id !== "injected") ?? connectors[0];
+  const injectedConnector = connectors.find((c) => c.type === "injected" && c.id !== "injected") ?? connectors.find((c) => c.type === "injected");
   const [windowProvider, setWindowProvider] = useState(hasWindowEthereum);
   useEffect(() => {
     // Some wallets inject after load: MetaMask fires "ethereum#initialized"; re-check once more later.
@@ -156,7 +165,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       clearTimeout(t);
     };
   }, []);
-  const hasProvider = connectors.some((c) => c.id !== "injected") || windowProvider;
+  const hasProvider = connectors.some((c) => c.type === "injected" && c.id !== "injected") || windowProvider;
 
   const connectInjected = useCallback(async () => {
     setConnectError(null);
@@ -174,6 +183,27 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       setConnectError(errText(e));
     }
   }, [connect, injectedConnector, hasProvider]);
+
+  const connectWith = useCallback(
+    async (connector: Connector) => {
+      setConnectError(null);
+      try {
+        await connect.mutateAsync({ connector, chainId: appChain.id });
+        setSel((s) => ({ mode: "injected", role: s.role }));
+        return true;
+      } catch (e) {
+        if (getConnection(wagmiConfig).isConnected) {
+          setSel((s) => ({ mode: "injected", role: s.role }));
+          return true;
+        }
+        setConnectError(errText(e));
+        return false;
+      }
+    },
+    [connect],
+  );
+
+  const clearConnectError = useCallback(() => setConnectError(null), []);
 
   const disconnect = useCallback(() => {
     if (conn.isConnected) disc.mutate();
@@ -213,10 +243,18 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
   const active = useMemo<ActiveWallet | null>(() => {
     if (mode === "dev" && devAvailable && role && devAddr) {
-      return { kind: "dev", address: devAddr, label: devEntry(role)?.label ?? role, devRole: role, chainId: DEVNET_CHAIN_ID };
+      return { kind: "dev", address: devAddr, label: devEntry(role)?.label ?? role, icon: null, connectorType: "dev", devRole: role, chainId: DEVNET_CHAIN_ID };
     }
     if (mode !== "dev" && conn.isConnected && conn.address) {
-      return { kind: "injected", address: conn.address, label: conn.connector?.name ?? "Browser wallet", devRole: null, chainId: conn.chainId ?? null };
+      return {
+        kind: "injected",
+        address: conn.address,
+        label: conn.connector?.name ?? "Browser wallet",
+        icon: conn.connector?.icon ?? null,
+        connectorType: conn.connector?.type ?? "injected",
+        devRole: null,
+        chainId: conn.chainId ?? null,
+      };
     }
     return null;
   }, [mode, devAvailable, role, devAddr, conn.isConnected, conn.address, conn.connector, conn.chainId]);
@@ -240,6 +278,9 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     networkError,
     selectDev,
     connectInjected,
+    connectWith,
+    walletConnectEnabled,
+    clearConnectError,
     disconnect,
     switchToAppChain,
     addAppChain,

@@ -127,7 +127,7 @@ export function RiskPage() {
         title="Risk"
         sub="Limit states of every book, refreshed every few seconds by the risk service: inventory against the mandate, quote skew and width, hedge band and drawdown against the kill threshold."
       />
-      <div className="mb-4 grid grid-cols-3 gap-3 rounded-[3px] border border-line bg-surface p-3 sm:grid-cols-6 sm:p-4">
+      <div className="mb-4 grid grid-cols-3 gap-3 rounded-card border border-line bg-surface shadow-card p-3 sm:grid-cols-6 sm:p-4">
         {(["ok", "warn", "reduce_only", "breach", "killed", "unknown"] as const).map((s) => (
           <Stat key={s} label={LIMIT_STATES[s]?.label ?? s} value={counts[s] ?? 0} />
         ))}

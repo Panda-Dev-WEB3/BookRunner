@@ -7,6 +7,7 @@ import { createQueryClient, createTrpcClient, trpc } from "./api/trpc";
 import { router } from "./router";
 import "./styles.css";
 import { wagmiConfig } from "./wallet/chains";
+import { ConnectModalProvider } from "./wallet/ConnectModal";
 import { WalletProvider } from "./wallet/WalletContext";
 
 function Root() {
@@ -17,7 +18,9 @@ function Root() {
       <trpc.Provider client={trpcClient} queryClient={queryClient}>
         <QueryClientProvider client={queryClient}>
           <WalletProvider>
-            <RouterProvider router={router} />
+            <ConnectModalProvider>
+              <RouterProvider router={router} />
+            </ConnectModalProvider>
           </WalletProvider>
         </QueryClientProvider>
       </trpc.Provider>

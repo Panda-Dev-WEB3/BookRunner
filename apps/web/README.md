@@ -1,8 +1,9 @@
 # @bookrunner/web
 
-Book dashboards (ARCHITECTURE §5): Books, Book detail, Charters (+ "File a charter"), Committee, Risk,
-Agents. Vite 8 + React 19 + TanStack Query + tRPC client (types from `@bookrunner/api/router`, never
-bundled) + Tailwind 4 + viem / wagmi.
+Investor pages (Home `/`, Invest `/invest`, Portfolio `/portfolio`, Stake `/stake`, How it works
+`/learn`) and the operator dashboards under the Protocol menu (ARCHITECTURE §5): Books `/books`, Book
+detail, Charters (+ "File a charter"), Committee, Risk, Agents. Vite 8 + React 19 + TanStack Query +
+tRPC client (types from `@bookrunner/api/router`, never bundled) + Tailwind 4 + viem / wagmi.
 
 ## Run
 
@@ -12,7 +13,7 @@ bundled) + Tailwind 4 + viem / wagmi.
 | `bun run dev:testnet` | same, built for Robinhood Chain testnet (chain 46630, `.env.testnet`) |
 | `bun run build` / `bun run build:testnet` | production bundle in `dist/` |
 | `bun run start` | build, then serve `dist/` on :5180 |
-| `bun run test` | unit tests (formatters, chart transforms, waterfall / loss order, proofs, tx flow, copy rules) |
+| `bun run test` | unit tests (formatters, chart transforms, waterfall / loss order, proofs, tx flow, onboarding, amounts, glossary, copy rules) |
 | `bun run typecheck` | `tsc` for the browser app and the Bun-side tests / scripts |
 | `bun run lint:copy` | copy rules over JSX text and string literals of `src/` and `index.html` |
 
@@ -21,19 +22,36 @@ The API must allow the page's origin (`WEB_ORIGIN`, default `http://127.0.0.1:51
 ## Configuration (`VITE_*`, see `.env.example`)
 
 `VITE_CHAIN_ID` (default 31337), `VITE_RPC_URL`, `VITE_EXPLORER_URL`, `VITE_FAUCET_URL`, `VITE_API_URL`
-(default `http://127.0.0.1:4400`), optional `VITE_CHAIN_NAME`, `VITE_USDC_ADDRESS`. Chain 46630 defaults
-to the public Robinhood Chain testnet RPC, explorer and faucet.
+(default `http://127.0.0.1:4400`), optional `VITE_CHAIN_NAME`, `VITE_USDC_ADDRESS`, and
+`VITE_WALLETCONNECT_PROJECT_ID` (the WalletConnect option appears only when it is set). Chain 46630
+defaults to the public Robinhood Chain testnet RPC, explorer and faucet.
 
 ## Wallets
 
-- Browser wallet (wagmi injected / EIP-6963). Connecting asks the wallet to switch to the app chain
-  and adds it when missing; the wallet menu and every prepared-transaction list offer "switch" and
-  "add network" when the wallet sits on another chain.
-- Devnet only (build for 31337 and an API on 31337): the dev-wallet picker signs with the anvil test
-  accounts behind each role (`@bookrunner/shared/devkeys`).
-- Test networks: the wallet menu shows the gas balance (with the faucet when empty) and, when the
-  deployment's USDC is the open-mint mock, a "Get 10,000 test USDC" mint the wallet signs itself.
+- Connect dialog (`useConnectModal().open()`): browser wallets discovered through EIP-6963 (name and
+  icon), the generic injected wallet as a fallback, WalletConnect (QR code / mobile) only when
+  `VITE_WALLETCONNECT_PROJECT_ID` is set, and a short "new to wallets" explainer. Connecting asks the
+  wallet to switch to the app chain and adds it when missing; a site-wide banner offers the switch
+  whenever the wallet sits on another chain.
+- Account menu: address (copy, explorer), network, ETH / USDC / BKRN balances, the faucet when gas is
+  low and, on test networks whose USDC is the open-mint mock, "Mint 10,000 test USDC".
+- Devnet only (build for 31337 and an API on 31337): dev wallets sign with the anvil test accounts
+  behind each role (`@bookrunner/shared/devkeys`), listed in the connect dialog.
+- `src/wallet/walletConnect.js` re-exports wagmi's WalletConnect connector with a narrow
+  `walletConnect.d.ts`: the package's own types would pull @walletconnect's type graph (and a second
+  viem) into `tsc` and roughly double its memory.
 
 Prepared transactions from the API (`{to, data, value, chainId, description}`) are sent in order,
 each after the previous confirms, with pending / confirmed / failed states and retry from the failed
-step.
+step (`TxRunner`).
+
+## Design system
+
+Tokens live in `src/styles.css` (light and dark, system default with a `data-theme` override). Fixed
+series colours in every chart and diagram (`src/lib/palette.ts`): Senior blue, Junior amber, Backstop
+/ BKRN violet, fee flow green, losses red. Primitives are in `src/components/ui.tsx` (Container,
+Section, Card, Stat / StatGrid, Badge, TrancheBadge, Callout, Stepper, Tabs, Accordion, AmountInput,
+Modal, ...); inline glossary terms use `<Term id="...">` with definitions in `src/lib/glossary.ts`.
+`<SetupChecklist/>` walks a new wallet through connect, network, gas, test USDC and invest.
+Investor routes are full-bleed (`handle.bleed` in `src/router.tsx`): build them from `<Section>`
+blocks; every other route gets the page container from the layout.

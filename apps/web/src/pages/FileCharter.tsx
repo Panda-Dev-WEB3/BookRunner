@@ -218,7 +218,7 @@ export function FileCharterPage() {
                   type="button"
                   aria-pressed={on}
                   onClick={() => set("sessions", p.id)}
-                  className={cx("rounded-[3px] border p-2.5 text-left", on ? "border-accent bg-accent-soft" : "border-line hover:border-line-strong")}
+                  className={cx("rounded-card border p-2.5 text-left", on ? "border-accent bg-accent-soft" : "border-line hover:border-line-strong")}
                 >
                   <div className="flex items-center justify-between">
                     <span className="text-[13px] font-semibold">{p.label}</span>
@@ -242,7 +242,7 @@ export function FileCharterPage() {
         <Field label="MM inventory (USDC)" help={FIELD_HELP.mmInventoryUsd} error={err("mmInventoryUsd")} htmlFor="f-mm">
           <input id="f-mm" className="field num" inputMode="decimal" value={form.mmInventoryUsd} aria-invalid={!!err("mmInventoryUsd")} onChange={(e) => set("mmInventoryUsd", e.currentTarget.value.replace(/[^\d.]/g, ""))} />
         </Field>
-        <div className="rounded-[3px] border border-line bg-surface-2 p-3 md:col-span-2">
+        <div className="rounded-card border border-line bg-surface-2 p-3 md:col-span-2">
           <KV
             rows={[
               ["Maximum raise (IF + MM)", fmtUsd(String(raise), { symbol: true })],
@@ -284,7 +284,7 @@ export function FileCharterPage() {
             </label>
           </Field>
         </div>
-        <div className="rounded-[3px] border border-line p-3">
+        <div className="rounded-card border border-line p-3">
           <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,2fr)]">
             <Field label="Hedge band from (bps)" error={err("mandate.hedgeRatioMinBps")} htmlFor="m-lo">
               <input id="m-lo" className="field num" inputMode="numeric" value={m.hedgeRatioMinBps} onChange={(e) => setM("hedgeRatioMinBps", e.currentTarget.value.replace(/[^\d]/g, ""))} />
@@ -356,7 +356,7 @@ export function FileCharterPage() {
       <div className="space-y-5">
         <div className="grid gap-3 sm:grid-cols-2">
           {(["senior", "junior"] as const).map((t) => (
-            <div key={t} className={cx("rounded-[3px] border p-3", t === "senior" ? "border-senior/60" : "border-junior/60")}>
+            <div key={t} className={cx("rounded-card border p-3", t === "senior" ? "border-senior/60" : "border-junior/60")}>
               <div className="flex items-center gap-1.5">
                 <span className={cx("size-2 rounded-[1px]", t === "senior" ? "bg-senior" : "bg-junior")} aria-hidden />
                 <span className="text-[13px] font-semibold">{TRANCHE_COPY[t].name}</span>
@@ -382,7 +382,7 @@ export function FileCharterPage() {
             <DurationInput id="t-notice" seconds={form.juniorNoticeSeconds} onChange={(s) => set("juniorNoticeSeconds", s)} invalid={!!err("juniorNoticeSeconds")} />
           </Field>
         </div>
-        <div className="rounded-[3px] border border-line bg-surface-2 p-3 text-[12px] text-ink-2">
+        <div className="rounded-card border border-line bg-surface-2 p-3 text-[12px] text-ink-2">
           Fee flow each period: expenses (capped) are paid first, then protocol carry; of the remainder Senior takes {bpsPct(Number(form.seniorShareBps))} and Junior the residual. Losses at a mark: Junior
           first, then Senior, then the backstop up to the pool.
         </div>
@@ -415,7 +415,7 @@ export function FileCharterPage() {
           />
         </div>
         {errors.length > 0 ? (
-          <div className="rounded-[3px] border border-critical/40 bg-critical/5 p-3">
+          <div className="rounded-card border border-critical/40 bg-critical/5 p-3">
             <div className="text-[12.5px] font-semibold">Fix {errors.length} field{errors.length === 1 ? "" : "s"} before filing</div>
             <ul className="mt-1 space-y-0.5 text-[12px]">
               {errors.map((i) => (
@@ -447,7 +447,7 @@ export function FileCharterPage() {
               </span>
             </div>
             {file.data.issues.length > 0 && (
-              <ul className="space-y-1 rounded-[3px] border border-critical/40 bg-critical/5 p-3 text-[12px]">
+              <ul className="space-y-1 rounded-card border border-critical/40 bg-critical/5 p-3 text-[12px]">
                 {file.data.issues.map((i) => (
                   <li key={`${i.code}-${i.field}`}>
                     <span className="num font-medium">{i.code}</span> {i.message}{" "}
@@ -516,9 +516,9 @@ export function FileCharterPage() {
                 aria-current={on ? "step" : undefined}
                 className={cx("-mb-px inline-flex h-10 items-center gap-2 border-b-2 px-2 text-[12.5px] font-medium whitespace-nowrap", on ? "border-accent text-ink" : "border-transparent text-ink-2 hover:text-ink")}
               >
-                <span className={cx("num inline-flex size-5 items-center justify-center rounded-[2px] text-[11px]", on ? "bg-ink text-surface" : "bg-surface-3")}>{i + 1}</span>
+                <span className={cx("num inline-flex size-5 items-center justify-center rounded-[5px] text-[11px]", on ? "bg-ink text-surface" : "bg-surface-3")}>{i + 1}</span>
                 {s.label}
-                {n > 0 && <span className="num rounded-[2px] bg-critical/15 px-1 text-[10.5px] text-critical-ink">{n}</span>}
+                {n > 0 && <span className="num rounded-[4px] bg-critical/15 px-1 text-[10.5px] text-critical-ink">{n}</span>}
               </button>
             </li>
           );

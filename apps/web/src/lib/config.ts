@@ -2,7 +2,9 @@
 // `--mode testnet` (apps/web/.env.testnet) for Robinhood Chain testnet (46630).
 import { type AppChainConfig, explorerAddress, explorerTx, resolveChainConfig } from "./chainConfig";
 
-const resolved: AppChainConfig = resolveChainConfig(import.meta.env as Record<string, string | boolean | undefined>);
+const env = import.meta.env as Record<string, string | boolean | undefined>;
+const resolved: AppChainConfig = resolveChainConfig(env);
+const wcProjectId = typeof env.VITE_WALLETCONNECT_PROJECT_ID === "string" ? env.VITE_WALLETCONNECT_PROJECT_ID.trim() : "";
 
 export const config = {
   apiUrl: resolved.apiUrl,
@@ -14,6 +16,11 @@ export const config = {
   explorerUrl: resolved.explorerUrl,
   faucetUrl: resolved.faucetUrl,
   usdcAddress: resolved.usdcAddress,
+  /** WalletConnect Cloud project id (VITE_WALLETCONNECT_PROJECT_ID). Empty: the WalletConnect option is hidden. */
+  walletConnectProjectId: wcProjectId,
+  /** Public source repository and docs (footer, Learn page). */
+  repoUrl: "https://github.com/Panda-Dev-WEB3/BookRunner",
+  docsUrl: "https://github.com/Panda-Dev-WEB3/BookRunner/tree/main/docs",
 } as const;
 
 export const trpcUrl = `${config.apiUrl}/trpc`;

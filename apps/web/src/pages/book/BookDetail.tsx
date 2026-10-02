@@ -14,6 +14,7 @@ import { parseMarkStatement } from "../../lib/markStatement";
 import { ActivityPanel } from "./ActivityPanel";
 import { AllocatePanel } from "./AllocatePanel";
 import { DistributionPanel } from "./DistributionPanel";
+import { InvestPanel } from "./InvestPanel";
 import { LimitsPanel } from "./LimitsPanel";
 import { LossOrderPanel } from "./LossOrderPanel";
 import { MarkCadencePanel } from "./MarkCadencePanel";
@@ -30,7 +31,7 @@ function Kpis({ b, now }: { b: BookDetail; now: number }) {
   const delta = marked !== null && liveRaw !== null ? liveRaw - marked : null;
   const liveAge = ageMs(b.liveNav?.ts ?? null, now);
   return (
-    <div className="mb-4 grid grid-cols-2 gap-x-4 gap-y-4 rounded-[3px] border border-line bg-surface p-3 sm:p-4 lg:grid-cols-5">
+    <div className="mb-4 grid grid-cols-2 gap-x-4 gap-y-4 rounded-card border border-line bg-surface shadow-card p-3 sm:p-4 lg:grid-cols-5">
       <Stat
         label="NAV"
         kind="marked"
@@ -62,7 +63,7 @@ function Header({ b, now }: { b: BookDetail; now: number }) {
   return (
     <PageHeader
       eyebrow={
-        <Link to="/" className="hover:text-ink">
+        <Link to="/books" className="hover:text-ink">
           Books / #{b.bookId}
         </Link>
       }
@@ -114,7 +115,7 @@ export function BookDetailPage() {
       const f = describeError(error);
       return (
         <>
-          <PageHeader eyebrow={<Link to="/">Books / #{bookId}</Link>} title={f.kind === "not_found" ? "Book not found" : `Book #${bookId}`} />
+          <PageHeader eyebrow={<Link to="/books">Books / #{bookId}</Link>} title={f.kind === "not_found" ? "Book not found" : `Book #${bookId}`} />
           {f.kind === "not_found" ? (
             <EmptyState
               title={`There is no book #${bookId}`}
@@ -141,12 +142,13 @@ export function BookDetailPage() {
     <>
       <Header b={b} now={now} />
       {b.killed && (
-        <div className="mb-4 rounded-[3px] border border-critical bg-critical/8 p-3 text-[12.5px]" role="alert">
+        <div className="mb-4 rounded-card border border-critical bg-critical/8 p-3 text-[12.5px]" role="alert">
           <span className="font-semibold">Mandate killed.</span> Quoting stopped, venue key and desk keys revoked, reduce-only flattening within mandate. The risk committee may re-mandate the
           book. Redemption requests and claims are never blocked by a kill.
         </div>
       )}
       {q.error && <div className="mb-2 text-[11px] text-muted">Showing the last data received; {describeError(q.error).title.toLowerCase()}.</div>}
+      <InvestPanel book={b} now={now} />
       <Kpis b={b} now={now} />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
         <div className="min-w-0 space-y-4">

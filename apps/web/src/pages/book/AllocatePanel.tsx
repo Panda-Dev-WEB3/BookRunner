@@ -39,7 +39,7 @@ function Position({ bookId, wallet }: { bookId: number; wallet: string }) {
     <div className="space-y-3">
       <div className="grid grid-cols-2 gap-3">
         {p.tranches.map((t) => (
-          <div key={t.tranche} className="rounded-[2px] border border-line p-2.5">
+          <div key={t.tranche} className="rounded-control border border-line p-2.5">
             <div className="flex items-center gap-1.5">
               <span className={cx("size-2 rounded-[1px]", t.tranche === "senior" ? "bg-senior" : "bg-junior")} aria-hidden />
               <span className="eyebrow !text-ink">{t.tranche === "senior" ? "Senior" : "Junior"}</span>
@@ -142,7 +142,7 @@ export function AllocatePanel(props: { bookId: number; state: string; juniorNoti
                 onClick={() => (setTranche(t), reset())}
                 aria-pressed={tranche === t}
                 className={cx(
-                  "rounded-[3px] border p-2.5 text-left transition-colors",
+                  "rounded-card border p-2.5 text-left transition-colors",
                   tranche === t ? (t === "senior" ? "border-senior bg-senior/8" : "border-junior bg-junior/8") : "border-line hover:border-line-strong",
                 )}
               >

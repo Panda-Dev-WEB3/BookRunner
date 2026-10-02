@@ -42,7 +42,7 @@ export function MiniLine(props: {
 
   if (!geo) {
     return (
-      <div className="flex items-center justify-center rounded-[2px] border border-dashed border-line text-[11px] text-muted" style={{ height: h }}>
+      <div className="flex items-center justify-center rounded-control border border-dashed border-line text-[11px] text-muted" style={{ height: h }}>
         {props.emptyText ?? "No data yet"}
       </div>
     );
@@ -107,7 +107,7 @@ export function MiniLine(props: {
             aria-hidden
           />
           <div
-            className="pointer-events-none absolute -top-1 z-10 -translate-y-full rounded-[2px] border border-line-strong bg-surface px-1.5 py-1 text-[11px] whitespace-nowrap shadow-sm"
+            className="pointer-events-none absolute -top-1 z-10 -translate-y-full rounded-control border border-line-strong bg-surface px-1.5 py-1 text-[11px] whitespace-nowrap shadow-sm"
             style={{ left: `${Math.min(Math.max(hp.x, 18), 82)}%`, transform: "translate(-50%, -100%)" }}
           >
             <div className="num font-medium">{props.format(hp.v)}</div>

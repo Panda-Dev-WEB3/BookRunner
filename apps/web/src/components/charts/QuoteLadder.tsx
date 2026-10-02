@@ -9,7 +9,7 @@ function Level(props: { at: number; label: string; price: number; className: str
     <div className={cx("absolute inset-x-0", props.dim && "opacity-45")} style={{ top: `${props.at * 100}%` }}>
       <div className={cx("absolute inset-x-0 -translate-y-1/2 border-t-2", props.lineClass ?? "border-ink")} />
       <div className={cx("absolute -translate-y-1/2 px-1 text-[10.5px] font-semibold tracking-[0.06em] uppercase", props.className, props.side === "left" ? "left-1" : "right-1")}>
-        <span className="rounded-[2px] bg-surface px-1">
+        <span className="rounded-[4px] bg-surface px-1">
           {props.label} <span className="num font-medium tracking-normal">{fmtPrice(props.price)}</span>
         </span>
       </div>
@@ -24,7 +24,7 @@ export function QuoteLadder({ m, height = 232 }: { m: LadderModel; height?: numb
   const wTop = pos(m.mid + m.minWidthAbs / 2);
   const wBottom = pos(m.mid - m.minWidthAbs / 2);
   return (
-    <div className="relative overflow-hidden rounded-[2px] border border-line bg-surface-2" style={{ height }} role="img" aria-label={`Quote ladder: bid ${fmtPrice(m.bid)}, ask ${fmtPrice(m.ask)}, oracle ${fmtPrice(m.oracle)}`}>
+    <div className="relative overflow-hidden rounded-control border border-line bg-surface-2" style={{ height }} role="img" aria-label={`Quote ladder: bid ${fmtPrice(m.bid)}, ask ${fmtPrice(m.ask)}, oracle ${fmtPrice(m.oracle)}`}>
       {/* allowed mid band */}
       <div className="absolute inset-x-0 bg-good/10" style={{ top: `${bandTop * 100}%`, height: `${(bandBottom - bandTop) * 100}%` }} />
       <div className="absolute inset-x-0 border-t border-dashed border-good/70" style={{ top: `${bandTop * 100}%` }} />
@@ -46,7 +46,7 @@ export function QuoteLadder({ m, height = 232 }: { m: LadderModel; height?: numb
       <Level at={pos(m.bid)} label="Bid" price={m.bid} className="text-ink" side="right" dim={!m.sides.bid} />
       <div className="absolute left-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-accent ring-2 ring-surface" style={{ top: `${pos(m.mid) * 100}%` }} title={`Mid ${fmtPrice(m.mid)}`} />
       <div className="absolute left-1 -translate-y-1/2 text-[10.5px] font-semibold tracking-[0.06em] text-ink-2 uppercase" style={{ top: `${pos(m.oracle) * 100}%` }}>
-        <span className="rounded-[2px] bg-surface-2 px-1">
+        <span className="rounded-[4px] bg-surface-2 px-1">
           Oracle <span className="num font-medium tracking-normal">{fmtPrice(m.oracle)}</span>
         </span>
       </div>
