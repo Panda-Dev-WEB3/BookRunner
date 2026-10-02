@@ -112,7 +112,7 @@ function AllocatorCard() {
           Invest
           <IconArrowRight size={14} />
         </Link>
-        <Link to="/learn" className="btn">
+        <Link to="/learn#tranches" className="btn">
           Compare the tranches
         </Link>
       </div>
