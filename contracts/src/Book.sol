@@ -19,6 +19,11 @@ import {IBackstop} from "./interfaces/IBkrnFeeRouter.sol";
 import {Waterfall} from "./libraries/Waterfall.sol";
 import {IBookTrancheHooks, ITrancheBookHooks} from "./Tranche.sol";
 
+/// @dev MMMandate's reduce-only wind-down entry point (book only), not part of the frozen IMMMandate.
+interface IMMMandateRetiring {
+    function setRetiring() external;
+}
+
 /// @title Book — one book per approved charter (bookId == charterId). ERC1967 proxy, UUPS logic,
 ///        upgrades only via config.timelock(). Owns the waterfall accounting (S = Senior NAV,
 ///        J = Junior NAV) and the lifecycle Subscription -> Live -> Retiring -> Retired (or Cancelled).
@@ -447,7 +452,9 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
     }
 
     /// @notice Only MarketCharter (sponsor or committee route). Live -> Retiring: cancels an open top-up
-    ///         round and kills the mandate ("RETIRE": keys revoked, reduce-only) so quoting stops.
+    ///         round and puts the mandate into reduce-only wind-down (`setRetiring`: no new risk, keys stay
+    ///         active so the desk can flatten, return USDC and recall the venue toward finalizeRetirement).
+    ///         Never blocked by the mandate: a failing call emits MandateKillFailed(bookId, "RETIRE").
     function retire() external nonReentrant {
         BookStorage storage $ = _s();
         if (msg.sender != IBookrunnerConfig($.config).charter()) revert NotCharter();
@@ -460,7 +467,10 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
             ITrancheBookHooks($.components.senior).cancelRound();
             ITrancheBookHooks($.components.junior).cancelRound();
         }
-        _killMandate($, KILL_RETIRE);
+        try IMMMandateRetiring($.components.mandate).setRetiring() {}
+        catch {
+            emit MandateKillFailed($.bookId, KILL_RETIRE);
+        }
     }
 
     /// @notice Anyone once Retiring, after a mark applied while Retiring reported deployedValueUsd == 0
@@ -543,14 +553,16 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
         }
     }
 
-    /// @notice Only a tranche, Retired state: a redemption settled immediately at the final price.
-    function onRetiredRedeem(uint256 assetsOwed) external nonReentrant {
+    /// @notice Only a tranche, Retired state: a redemption of `sharesBurned` (already burned) settled
+    ///         immediately at the final price.
+    function onRetiredRedeem(uint256 assetsOwed, uint256 sharesBurned) external nonReentrant {
         BookStorage storage $ = _s();
         uint8 k;
         if (msg.sender == $.components.senior) k = S;
         else if (msg.sender == $.components.junior) k = J;
         else revert NotTranche();
         if ($.state != BRTypes.BookState.Retired) revert BadState($.state);
+        if (k == S) _scaleImpairment($, sharesBurned, IERC20(msg.sender).totalSupply() + sharesBurned);
         $.nav[k] -= assetsOwed;
         $.unfunded[k] += assetsOwed;
         emit RetiredRedemption($.bookId, k, assetsOwed);
@@ -634,8 +646,11 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
         uint256 upTo = Waterfall.settlesUpTo(sum.periodEnd, interval);
         bool topUpDue = $.topUpOpen && upTo * interval >= $.topUpEndsAt;
         // prices from the post-P&L NAVs, before any settlement
+        uint256 seniorSupply;
         for (uint8 k = 0; k < 2; k++) {
-            uint256 p = Waterfall.sharePriceWad($.nav[k], IERC20(_tranche($, k)).totalSupply());
+            uint256 supply = IERC20(_tranche($, k)).totalSupply();
+            if (k == S) seniorSupply = supply;
+            uint256 p = Waterfall.sharePriceWad($.nav[k], supply);
             $.price[k] = p;
             sum.priceWad[k] = p;
         }
@@ -643,7 +658,7 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
         _settleTranche($, sum, J, upTo, topUpDue ? $.topUpCapacity[J] : 0);
         uint256 seniorCap =
             topUpDue ? _seniorTopUpRoom($.nav[S], $.nav[J], $.charter.seniorCapBps, $.topUpCapacity[S]) : 0;
-        _settleTranche($, sum, S, upTo, seniorCap);
+        _scaleImpairment($, _settleTranche($, sum, S, upTo, seniorCap), seniorSupply);
 
         if (topUpDue) {
             $.topUpOpen = false;
@@ -651,10 +666,14 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
         }
     }
 
+    /// @return burned redemption shares burned (settled) at this mark.
     function _settleTranche(BookStorage storage $, MarkSummary memory sum, uint8 k, uint256 upTo, uint256 cap)
         internal
+        returns (uint256 burned)
     {
-        (, uint256 owed, uint256 acc,) =
+        uint256 owed;
+        uint256 acc;
+        (burned, owed, acc,) =
             ITranche(_tranche($, k)).settleAtMark(upTo, sum.priceWad[k], cap, $.components.vault);
         $.nav[k] = $.nav[k] - owed + acc;
         $.unfunded[k] += owed;
@@ -695,13 +714,26 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
     function _settleRetiredBacklog(BookStorage storage $) internal {
         uint256[2] memory owed;
         for (uint8 k = 0; k < 2; k++) {
-            (, owed[k],,) = ITranche(_tranche($, k))
-                .settleAtMark(RETIRED_SETTLE_INDEX, $.price[k], 0, $.components.vault);
+            address t = _tranche($, k);
+            uint256 supply = IERC20(t).totalSupply();
+            uint256 burned;
+            (burned, owed[k],,) = ITranche(t).settleAtMark(RETIRED_SETTLE_INDEX, $.price[k], 0, $.components.vault);
+            if (k == S) _scaleImpairment($, burned, supply);
             $.nav[k] -= owed[k];
             $.unfunded[k] += owed[k];
         }
         if (owed[S] > 0 || owed[J] > 0) emit RetiredBacklogSettled($.bookId, owed[S], owed[J]);
         _fundClaims($);
+    }
+
+    /// @dev Senior shares burned at a settlement (marks, Retired backlog / immediate redemptions) take their
+    ///      pro-rata part of the impairment with them: imp' = floor(imp * (supply - burned) / supply), i.e.
+    ///      0 once no Senior share is left. Restoration and backstop cover (the backstop is shared across
+    ///      books) then only ever restore the remaining shares' loss.
+    function _scaleImpairment(BookStorage storage $, uint256 burned, uint256 supplyBefore) internal {
+        uint256 imp = $.seniorImpairment;
+        if (burned == 0 || imp == 0) return;
+        $.seniorImpairment = Math.mulDiv(imp, supplyBefore - burned, supplyBefore);
     }
 
     function _setRetiredPrice(BookStorage storage $, uint8 k, bool bumpEpoch) internal {

@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { allocateWindow, applyMarkPnl, bucketIndex, initialDeployment, splitDistribution, walletAllocation } from "../src/waterfall";
+import {
+  SPONSOR_MIN_JUNIOR_BPS,
+  allocateWindow,
+  applyMarkPnl,
+  bucketIndex,
+  initialDeployment,
+  juniorWindowAllocation,
+  splitDistribution,
+  walletAllocation,
+} from "../src/waterfall";
 import { WAD, usd } from "../src/units";
 
 describe("allocateWindow", () => {
@@ -7,7 +16,7 @@ describe("allocateWindow", () => {
 
   test("undersubscribed: everything allocated", () => {
     const r = allocateWindow({ ...base, seniorCommitted: usd(40_000), juniorCommitted: usd(30_000), sponsorJuniorCommitted: usd(5_000) });
-    expect(r).toEqual({ ok: true, seniorAllocated: usd(40_000), juniorAllocated: usd(30_000) });
+    expect(r).toEqual({ ok: true, seniorAllocated: usd(40_000), juniorAllocated: usd(30_000), sponsorJuniorAllocated: usd(5_000) });
   });
 
   test("oversubscribed senior capped at 70% of raise and by junior ratio", () => {
@@ -20,13 +29,55 @@ describe("allocateWindow", () => {
 
   test("oversubscribed both: senior 70k, junior fills to raise", () => {
     const r = allocateWindow({ ...base, seniorCommitted: usd(200_000), juniorCommitted: usd(200_000), sponsorJuniorCommitted: usd(20_000) });
-    expect(r).toEqual({ ok: true, seniorAllocated: usd(70_000), juniorAllocated: usd(30_000) });
+    // sponsor 20k allocated first: Junior eligible = min(200k, 10 x 20k) = 200k, 30k of it allocated
+    expect(r).toEqual({ ok: true, seniorAllocated: usd(70_000), juniorAllocated: usd(30_000), sponsorJuniorAllocated: usd(20_000) });
   });
 
-  test("sponsor below 10% of junior cancels", () => {
-    const r = allocateWindow({ ...base, seniorCommitted: usd(10_000), juniorCommitted: usd(30_000), sponsorJuniorCommitted: usd(2_999) });
+  test("sponsor without a Junior commitment cancels (SPONSOR_SKIN)", () => {
+    const r = allocateWindow({ ...base, seniorCommitted: usd(10_000), juniorCommitted: usd(30_000), sponsorJuniorCommitted: 0n });
     expect(r.ok).toBe(false);
     expect(r.reason).toBe("SPONSOR_SKIN");
+    expect(r.sponsorJuniorAllocated).toBe(0n);
+  });
+
+  test("sponsor below 10% of committed junior: Junior capped at 10x the sponsor, not cancelled", () => {
+    const r = allocateWindow({ ...base, seniorCommitted: usd(10_000), juniorCommitted: usd(30_000), sponsorJuniorCommitted: usd(2_999) });
+    expect(r).toEqual({ ok: true, seniorAllocated: usd(10_000), juniorAllocated: usd(29_990), sponsorJuniorAllocated: usd(2_999) });
+  });
+
+  test("outsider over-committing junior in the last block cannot cancel the book", () => {
+    // sponsor 10k + carol 20k, then eve 91k: sponsor 10k / 121k < 10% of committed Junior
+    const r = allocateWindow({ ...base, seniorCommitted: usd(70_000), juniorCommitted: usd(121_000), sponsorJuniorCommitted: usd(10_000) });
+    expect(r).toEqual({ ok: true, seniorAllocated: usd(70_000), juniorAllocated: usd(30_000), sponsorJuniorAllocated: usd(10_000) });
+    // per wallet: sponsor first, the remaining 20k pro-rata over carol + eve; never over-pays
+    const sponsor = juniorWindowAllocation(usd(10_000), true, usd(121_000), usd(10_000), r.juniorAllocated);
+    const carol = juniorWindowAllocation(usd(20_000), false, usd(121_000), usd(10_000), r.juniorAllocated);
+    const eve = juniorWindowAllocation(usd(91_000), false, usd(121_000), usd(10_000), r.juniorAllocated);
+    expect(sponsor).toEqual({ shares: usd(10_000), refund: 0n });
+    expect(carol.shares).toBe((usd(20_000) * usd(20_000)) / usd(111_000));
+    expect(eve.shares).toBe((usd(91_000) * usd(20_000)) / usd(111_000));
+    const shares = sponsor.shares + carol.shares + eve.shares;
+    const refunds = sponsor.refund + carol.refund + eve.refund;
+    expect(shares <= r.juniorAllocated && shares + 2n >= r.juniorAllocated).toBe(true);
+    expect(refunds <= usd(121_000) - r.juniorAllocated).toBe(true);
+    expect(sponsor.shares * 10_000n >= r.juniorAllocated * SPONSOR_MIN_JUNIOR_BPS).toBe(true);
+  });
+
+  test("committed sponsor never fails the skin check and always holds >= 10% of allocated junior", () => {
+    for (const J of [usd(1), usd(30_000), usd(999_999), usd(10_000_000)]) {
+      for (const P of [1n, usd(1), J / 11n + 1n, J / 10n, J]) {
+        if (P > J || P === 0n) continue;
+        for (const S of [0n, usd(50_000), usd(1_000_000)]) {
+          const r = allocateWindow({ ...base, seniorCommitted: S, juniorCommitted: J, sponsorJuniorCommitted: P });
+          expect(r.reason).not.toBe("SPONSOR_SKIN");
+          if (r.ok) {
+            expect(r.juniorAllocated <= P * 10n).toBe(true);
+            expect(r.sponsorJuniorAllocated).toBe(P < r.juniorAllocated ? P : r.juniorAllocated);
+            expect(r.sponsorJuniorAllocated * 10_000n >= r.juniorAllocated * SPONSOR_MIN_JUNIOR_BPS).toBe(true);
+          }
+        }
+      }
+    }
   });
 
   test("cannot fund IF cancels", () => {
@@ -51,6 +102,29 @@ describe("allocateWindow", () => {
     }
     expect(shares <= alloc).toBe(true);
     expect(refunds <= total - alloc).toBe(true);
+  });
+
+  test("junior window allocation: sponsor first, others pro-rata, never over-pays", () => {
+    const others = [usd(1), usd(33_333.333333), usd(66_666.666667), usd(99_999)];
+    const nonSponsor = others.reduce((a, b) => a + b, 0n);
+    for (const P of [0n, usd(7), usd(25_000), usd(500_000)]) {
+      const total = nonSponsor + P;
+      for (const alloc of [0n, P / 2n, P, total / 3n, total]) {
+        const sp = juniorWindowAllocation(P, true, total, P, alloc);
+        expect(sp.shares).toBe(P < alloc ? P : alloc);
+        expect(sp.shares + sp.refund).toBe(P);
+        let shares = sp.shares;
+        let refunds = sp.refund;
+        for (const c of others) {
+          const w = juniorWindowAllocation(c, false, total, P, alloc);
+          expect(w.shares + w.refund <= c).toBe(true);
+          shares += w.shares;
+          refunds += w.refund;
+        }
+        expect(shares <= alloc && shares + BigInt(others.length) >= alloc).toBe(true);
+        expect(refunds <= total - alloc).toBe(true);
+      }
+    }
   });
 
   test("initial deployment: IF first", () => {

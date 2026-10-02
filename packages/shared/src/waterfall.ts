@@ -1,14 +1,18 @@
 // NORMATIVE waterfall math. contracts/src/libraries/Waterfall.sol MUST produce identical results
-// (parity vectors: packages/shared/test/waterfall.vectors.json, consumed by both bun test and forge test).
+// (parity vectors: contracts/test/vectors/waterfall.json from scripts/gen-vectors.ts, consumed by forge test).
 // All values are bigint in protocol units (USD 6dp, WAD prices, bps). Rounding: always floor; payouts
 // never exceed what is owed, dust stays in the book.
 
 import { BPS, WAD, minBig } from "./units";
 
-export const SPONSOR_MIN_JUNIOR_BPS = 1_000n; // sponsor must hold >= 10% of Junior at close
+export const SPONSOR_MIN_JUNIOR_BPS = 1_000n; // sponsor holds >= 10% of Junior at close (priority + cap)
 
 // ---------------------------------------------------------------------------------------------
-// 1. Window close: pro-rata allocation with senior cap and sponsor skin check.
+// 1. Window close: allocation with senior cap and sponsor priority in Junior.
+//    Sponsor priority: the sponsor's Junior commitment is allocated first and the Junior eligible for
+//    allocation is capped at 10x it (everyone else: at most 9x the sponsor, pro-rata, excess refunded),
+//    so the sponsor always holds >= 10% of allocated Junior and outside over-commitment can never cancel
+//    the book. Without a sponsor commitment nothing is capped and the window fails SPONSOR_SKIN.
 // ---------------------------------------------------------------------------------------------
 export interface WindowInput {
   ifTargetUsd: bigint;
@@ -26,13 +30,16 @@ export interface WindowResult {
   reason?: WindowFailure;
   seniorAllocated: bigint;
   juniorAllocated: bigint;
+  sponsorJuniorAllocated: bigint; // the sponsor's part of juniorAllocated (allocated first)
 }
 
 export function allocateWindow(i: WindowInput): WindowResult {
   const R = i.ifTargetUsd + i.mmInventoryUsd; // max raise
   const c = i.seniorCapBps;
   const S = i.seniorCommitted;
-  const J = i.juniorCommitted;
+  const P = i.sponsorJuniorCommitted;
+  // Junior eligible for allocation: capped at 10x the sponsor's commitment (uncapped without one)
+  const J = P === 0n ? i.juniorCommitted : minBig(i.juniorCommitted, (P * BPS) / SPONSOR_MIN_JUNIOR_BPS);
 
   const sa0 = minBig(S, (R * c) / BPS);
   let ja = minBig(J, R - sa0);
@@ -40,16 +47,17 @@ export function allocateWindow(i: WindowInput): WindowResult {
   const saCapByJunior = c >= BPS ? sa0 : (ja * c) / (BPS - c);
   const sa = minBig(sa0, saCapByJunior);
   ja = minBig(J, R - sa);
+  const sp = minBig(P, ja); // sponsor allocated first
 
   let reason: WindowFailure | undefined;
   if (ja === 0n) reason = "NO_JUNIOR";
-  // pro-rata scaling is uniform, so the sponsor's share of allocated Junior == share of committed Junior
-  else if (i.sponsorJuniorCommitted * BPS < J * SPONSOR_MIN_JUNIOR_BPS) reason = "SPONSOR_SKIN";
+  // only reachable without a sponsor commitment (priority + cap keep sp >= 10% of ja otherwise)
+  else if (sp * BPS < ja * SPONSOR_MIN_JUNIOR_BPS) reason = "SPONSOR_SKIN";
   else if (sa + ja < i.ifTargetUsd) reason = "IF_UNFUNDED";
 
   return reason
-    ? { ok: false, reason, seniorAllocated: 0n, juniorAllocated: 0n }
-    : { ok: true, seniorAllocated: sa, juniorAllocated: ja };
+    ? { ok: false, reason, seniorAllocated: 0n, juniorAllocated: 0n, sponsorJuniorAllocated: 0n }
+    : { ok: true, seniorAllocated: sa, juniorAllocated: ja, sponsorJuniorAllocated: sp };
 }
 
 /** Per-wallet settlement of a commitment: shares (1 share = 1 USDC unit at close) + refund. */
@@ -59,6 +67,24 @@ export function walletAllocation(commit: bigint, totalCommitted: bigint, totalAl
     shares: (commit * totalAllocated) / totalCommitted,
     refund: (commit * (totalCommitted - totalAllocated)) / totalCommitted,
   };
+}
+
+/**
+ * Per-wallet settlement of a Junior window commitment with sponsor priority: the sponsor receives
+ * min(sponsorCommitted, totalAllocated) shares first; every other wallet shares the rest pro-rata on the
+ * non-sponsor commitments. Domain: totalAllocated <= totalCommitted, sponsorCommitted <= totalCommitted
+ * and, for the sponsor, commit === sponsorCommitted. Senior and top-up rounds use plain pro-rata.
+ */
+export function juniorWindowAllocation(
+  commit: bigint,
+  isSponsor: boolean,
+  totalCommitted: bigint,
+  sponsorCommitted: bigint,
+  totalAllocated: bigint,
+) {
+  const sp = minBig(sponsorCommitted, totalAllocated);
+  if (isSponsor) return { shares: sp, refund: commit - sp };
+  return walletAllocation(commit, totalCommitted - sponsorCommitted, totalAllocated - sp);
 }
 
 /** Initial deployment at close: IF first, then MM inventory; remainder stays idle in the vault. */

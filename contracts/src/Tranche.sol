@@ -24,8 +24,9 @@ interface IBookTrancheHooks {
     function retiredPrice(uint8 kind) external view returns (uint256 priceWad, uint64 epoch);
     /// @notice Only the Junior tranche: the sponsor moved Junior shares out (redeem request or transfer).
     function onJuniorRedeemRequested(address owner) external;
-    /// @notice Only a tranche, Retired state: a redemption settled immediately for `assetsOwed`.
-    function onRetiredRedeem(uint256 assetsOwed) external;
+    /// @notice Only a tranche, Retired state: a redemption of `sharesBurned` (already burned) settled
+    ///         immediately for `assetsOwed`.
+    function onRetiredRedeem(uint256 assetsOwed, uint256 sharesBurned) external;
 }
 
 /// @title ITrancheBookHooks — Tranche functions (beyond ITranche) that its book calls / exposes.
@@ -131,6 +132,9 @@ contract Tranche is ITranche, ITrancheBookHooks, Initializable, ERC20Upgradeable
     mapping(uint256 round => Round) internal _rounds;
     mapping(address wallet => uint256) public walletRound;
     mapping(address wallet => uint256) public walletCommit;
+    /// @notice Junior: the sponsor's window (round 0) commitment, snapshotted at settleWindow. The sponsor
+    ///         is allocated first: min(sponsorWindowCommit, allocated) shares (Waterfall sponsor priority).
+    uint256 public sponsorWindowCommit;
 
     // ---- redemptions ----
     mapping(uint256 bucket => Bucket) internal _buckets;
@@ -263,12 +267,20 @@ contract Tranche is ITranche, ITrancheBookHooks, Initializable, ERC20Upgradeable
         revert AsyncFlow();
     }
 
+    /// @notice Settled, unclaimed allocation of `wallet`. Junior window: sponsor priority
+    ///         (Waterfall.juniorWindowAllocation); every other round / tranche: pro-rata.
     function claimableAllocation(address wallet) public view returns (uint256 shares, uint256 refund) {
         uint256 commit = walletCommit[wallet];
         if (commit == 0) return (0, 0);
-        Round storage rd = _rounds[walletRound[wallet]];
+        uint256 r = walletRound[wallet];
+        Round storage rd = _rounds[r];
         if (!rd.settled) return (0, 0);
         if (rd.cancelled) return (0, commit);
+        if (r == 0 && kind == BRTypes.JUNIOR) {
+            return Waterfall.juniorWindowAllocation(
+                commit, wallet == sponsor, rd.totalCommitted, sponsorWindowCommit, rd.accepted
+            );
+        }
         return Waterfall.roundAllocation(commit, rd.totalCommitted, rd.accepted, rd.sharesMinted);
     }
 
@@ -490,8 +502,9 @@ contract Tranche is ITranche, ITrancheBookHooks, Initializable, ERC20Upgradeable
     // Book hooks
     // =========================================================================================
 
-    /// @notice Only book, at window close: accepts `allocatedAssets` of round 0 (pro-rata), mints the
-    ///         same number of shares into escrow and moves the allocated USDC to `vault`.
+    /// @notice Only book, at window close: accepts `allocatedAssets` of round 0 (Senior pro-rata; Junior
+    ///         sponsor first, then pro-rata), mints the same number of shares into escrow and moves the
+    ///         allocated USDC to `vault`.
     function settleWindow(uint256 allocatedAssets, address vault) external onlyBook nonReentrant {
         if (currentRound != 0) revert RoundAlreadySettled();
         Round storage rd = _rounds[0];
@@ -499,6 +512,8 @@ contract Tranche is ITranche, ITrancheBookHooks, Initializable, ERC20Upgradeable
         if (allocatedAssets > rd.totalCommitted) {
             revert AllocationExceedsCommitted(allocatedAssets, rd.totalCommitted);
         }
+        // every wallet is still in round 0, so this is the sponsor's window commitment (== committedOf)
+        if (kind == BRTypes.JUNIOR) sponsorWindowCommit = walletCommit[sponsor];
         rd.settled = true;
         rd.accepted = allocatedAssets;
         rd.sharesMinted = allocatedAssets;
@@ -646,7 +661,7 @@ contract Tranche is ITranche, ITrancheBookHooks, Initializable, ERC20Upgradeable
         _pushControllerBucket(controller, b);
         emit RedeemRequest(controller, owner, b, msg.sender, shares);
         emit BucketSettled(b, shares, owed, p);
-        IBookTrancheHooks(book).onRetiredRedeem(owed);
+        IBookTrancheHooks(book).onRetiredRedeem(owed, shares);
     }
 
     function _pushControllerBucket(address controller, uint256 b) internal {

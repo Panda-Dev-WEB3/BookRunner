@@ -3,15 +3,18 @@
 //   bun scripts/gen-vectors.ts  -> contracts/test/vectors/waterfall.json
 // Rows are arrays of decimal strings (forge: vm.parseJsonUintArray(json, ".window[i]")).
 //   window: [ifTarget, mmInventory, seniorCapBps, seniorCommitted, juniorCommitted, sponsorJuniorCommitted,
-//            ok(0|1), reason(0 ok|1 NO_JUNIOR|2 SPONSOR_SKIN|3 IF_UNFUNDED), seniorAllocated, juniorAllocated]
+//            ok(0|1), reason(0 ok|1 NO_JUNIOR|2 SPONSOR_SKIN|3 IF_UNFUNDED), seniorAllocated, juniorAllocated,
+//            sponsorJuniorAllocated]
 //   split:  [gross, expensesRequested, expenseCapBps, carryBps, seniorHurdleBps, seniorSupply, juniorSupply,
 //            expenses, carry, senior, junior]
 //   mark:   [S, J, seniorImpairment, perfIndex, highWater, nav, juniorSupply, backstopAvailable,
 //            S', J', seniorImpairment', perfIndex', highWater', backstopCovered, |drawdownBps|]
+//   wallet: [commit, isSponsor(0|1), totalCommitted, sponsorCommitted, totalAllocated, shares, refund]
+//            (juniorWindowAllocation: Junior window settlement with sponsor priority)
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { WAD } from "../packages/shared/src/units";
-import { allocateWindow, applyMarkPnl, splitDistribution } from "../packages/shared/src/waterfall";
+import { WAD, minBig } from "../packages/shared/src/units";
+import { allocateWindow, applyMarkPnl, juniorWindowAllocation, splitDistribution } from "../packages/shared/src/waterfall";
 
 let seed = 0x5eed_b00cn;
 function rnd(max: bigint): bigint {
@@ -32,6 +35,7 @@ const N = 256;
 const window: string[][] = [];
 const split: string[][] = [];
 const mark: string[][] = [];
+const wallet: string[][] = [];
 
 for (let i = 0; i < N; i++) {
   const ifTargetUsd = amt();
@@ -41,7 +45,7 @@ for (let i = 0; i < N; i++) {
   const juniorCommitted = amt();
   const sponsorJuniorCommitted = rnd(1n) === 0n ? (juniorCommitted * pick([0n, 999n, 1000n, 1001n, 10_000n])) / 10_000n : rnd(juniorCommitted);
   const r = allocateWindow({ ifTargetUsd, mmInventoryUsd, seniorCapBps, seniorCommitted, juniorCommitted, sponsorJuniorCommitted });
-  window.push([ifTargetUsd, mmInventoryUsd, seniorCapBps, seniorCommitted, juniorCommitted, sponsorJuniorCommitted, r.ok ? 1n : 0n, BigInt(r.reason ? REASON[r.reason] : 0), r.seniorAllocated, r.juniorAllocated].map(String));
+  window.push([ifTargetUsd, mmInventoryUsd, seniorCapBps, seniorCommitted, juniorCommitted, sponsorJuniorCommitted, r.ok ? 1n : 0n, BigInt(r.reason ? REASON[r.reason] : 0), r.seniorAllocated, r.juniorAllocated, r.sponsorJuniorAllocated].map(String));
 }
 
 for (let i = 0; i < N; i++) {
@@ -70,7 +74,20 @@ for (let i = 0; i < N; i++) {
   mark.push([S, J, imp, perfIndex, highWater, nav, juniorSupply, backstopAvailable, m.seniorNav, m.juniorNav, m.seniorImpairment, m.perfIndex, m.highWater, m.backstopCovered, -m.drawdownBps].map(String));
 }
 
+// Junior window wallet settlement (generated last so the rows above keep their inputs). Domain as on
+// chain: sponsorCommitted <= totalCommitted, totalAllocated <= totalCommitted, the sponsor's commit equals
+// sponsorCommitted and any other wallet's commit is part of the non-sponsor commitments.
+for (let i = 0; i < N; i++) {
+  const totalCommitted = amt();
+  const sponsorCommitted = pick([0n, totalCommitted, totalCommitted / 10n, totalCommitted / 11n, rnd(totalCommitted)]);
+  const totalAllocated = pick([totalCommitted, 0n, sponsorCommitted, minBig(totalCommitted, sponsorCommitted * 10n), rnd(totalCommitted)]);
+  const isSponsor = rnd(2n) === 0n && sponsorCommitted > 0n;
+  const commit = isSponsor ? sponsorCommitted : rnd(totalCommitted - sponsorCommitted);
+  const w = juniorWindowAllocation(commit, isSponsor, totalCommitted, sponsorCommitted, totalAllocated);
+  wallet.push([commit, isSponsor ? 1n : 0n, totalCommitted, sponsorCommitted, totalAllocated, w.shares, w.refund].map(String));
+}
+
 const out = resolve(import.meta.dir, "../contracts/test/vectors");
 mkdirSync(out, { recursive: true });
-writeFileSync(resolve(out, "waterfall.json"), `${JSON.stringify({ count: N, window, split, mark }, null, 1)}\n`);
-console.log(`wrote ${N} window / split / mark vectors to contracts/test/vectors/waterfall.json`);
+writeFileSync(resolve(out, "waterfall.json"), `${JSON.stringify({ count: N, window, split, mark, wallet }, null, 1)}\n`);
+console.log(`wrote ${N} window / split / mark / wallet vectors to contracts/test/vectors/waterfall.json`);

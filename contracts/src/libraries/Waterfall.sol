@@ -15,7 +15,7 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 library Waterfall {
     uint256 internal constant BPS = 10_000;
     uint256 internal constant WAD = 1e18;
-    /// @dev Sponsor must hold >= 10% of Junior at close of window.
+    /// @dev Sponsor must hold >= 10% of Junior at close of window (enforced by sponsor priority + cap).
     uint256 internal constant SPONSOR_MIN_JUNIOR_BPS = 1000;
 
     /// @dev allocateWindow reason codes (match scripts/gen-vectors.ts).
@@ -42,16 +42,23 @@ library Waterfall {
         uint8 reason; // REASON_*
         uint256 seniorAllocated;
         uint256 juniorAllocated;
+        uint256 sponsorJuniorAllocated; // the sponsor's part of juniorAllocated (allocated first)
     }
 
-    /// @notice Pro-rata window allocation with the senior cap and the sponsor skin check.
-    /// @dev `seniorCapBps > BPS` is outside the charter-validated domain (MarketCharter rejects it as
-    ///      BAD_BPS); it is clamped to BPS so the function can never underflow on such input.
+    /// @notice Window allocation with the senior cap and sponsor priority in Junior.
+    /// @dev Sponsor priority: the sponsor's Junior commitment is allocated first and the Junior eligible
+    ///      for allocation is capped at 10x it (everyone else: at most 9x the sponsor, pro-rata, the
+    ///      excess refunded), so the sponsor always holds >= 10% of allocated Junior and outside
+    ///      over-commitment can never cancel the book. Without a sponsor commitment nothing is capped and
+    ///      the window fails SPONSOR_SKIN. `seniorCapBps > BPS` is outside the charter-validated domain
+    ///      (MarketCharter rejects it as BAD_BPS); it is clamped to BPS so the function can never
+    ///      underflow on such input.
     function allocateWindow(WindowInput memory i) internal pure returns (WindowResult memory r) {
         uint256 maxRaise = i.ifTargetUsd + i.mmInventoryUsd;
         uint256 c = i.seniorCapBps > BPS ? BPS : i.seniorCapBps;
         uint256 s = i.seniorCommitted;
-        uint256 j = i.juniorCommitted;
+        uint256 p = i.sponsorJuniorCommitted;
+        uint256 j = p == 0 ? i.juniorCommitted : Math.min(i.juniorCommitted, (p * BPS) / SPONSOR_MIN_JUNIOR_BPS);
 
         uint256 sa0 = Math.min(s, (maxRaise * c) / BPS);
         uint256 ja = Math.min(j, maxRaise - sa0);
@@ -59,21 +66,44 @@ library Waterfall {
         uint256 saCapByJunior = c >= BPS ? sa0 : (ja * c) / (BPS - c);
         uint256 sa = Math.min(sa0, saCapByJunior);
         ja = Math.min(j, maxRaise - sa);
+        uint256 sp = Math.min(p, ja);
 
         uint8 reason = REASON_OK;
         if (ja == 0) {
             reason = REASON_NO_JUNIOR;
-        } else if (i.sponsorJuniorCommitted * BPS < j * SPONSOR_MIN_JUNIOR_BPS) {
-            // pro-rata scaling is uniform: sponsor share of allocated Junior == share of committed Junior
+        } else if (sp * BPS < ja * SPONSOR_MIN_JUNIOR_BPS) {
+            // only reachable without a sponsor commitment (priority + cap keep sp >= 10% of ja otherwise)
             reason = REASON_SPONSOR_SKIN;
         } else if (sa + ja < i.ifTargetUsd) {
             reason = REASON_IF_UNFUNDED;
         }
 
         if (reason != REASON_OK) {
-            return WindowResult({ok: false, reason: reason, seniorAllocated: 0, juniorAllocated: 0});
+            return WindowResult({
+                ok: false, reason: reason, seniorAllocated: 0, juniorAllocated: 0, sponsorJuniorAllocated: 0
+            });
         }
-        return WindowResult({ok: true, reason: REASON_OK, seniorAllocated: sa, juniorAllocated: ja});
+        return WindowResult({
+            ok: true, reason: REASON_OK, seniorAllocated: sa, juniorAllocated: ja, sponsorJuniorAllocated: sp
+        });
+    }
+
+    /// @notice Per-wallet settlement of a Junior window commitment with sponsor priority: the sponsor
+    ///         receives min(sponsorCommitted, totalAllocated) shares first; every other wallet shares the
+    ///         rest pro-rata on the non-sponsor commitments (walletAllocation). 1 share = 1 USDC unit.
+    /// @dev Requires totalAllocated <= totalCommitted, sponsorCommitted <= totalCommitted and, for the
+    ///      sponsor, commit == sponsorCommitted (reverts on underflow otherwise). Sums never exceed the
+    ///      allocation / refund totals, since totalAllocated - sp <= totalCommitted - sponsorCommitted.
+    function juniorWindowAllocation(
+        uint256 commit,
+        bool isSponsor,
+        uint256 totalCommitted,
+        uint256 sponsorCommitted,
+        uint256 totalAllocated
+    ) internal pure returns (uint256 shares, uint256 refund) {
+        uint256 sp = Math.min(sponsorCommitted, totalAllocated);
+        if (isSponsor) return (sp, commit - sp);
+        return walletAllocation(commit, totalCommitted - sponsorCommitted, totalAllocated - sp);
     }
 
     /// @notice Per-wallet settlement of a window commitment (1 share = 1 USDC unit at close).

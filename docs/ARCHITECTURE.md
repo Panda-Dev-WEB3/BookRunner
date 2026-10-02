@@ -182,7 +182,15 @@ Subscription --closeWindow ok--> Live --retire--> Retiring --finalizeRetirement-
 ```
 
 - `closeWindow()` (anyone, `now >= subscriptionEnds`): reads both tranches' committed totals and the
-  sponsor's Junior commitment → `Waterfall.allocateWindow`. On failure → Cancelled, emit
+  sponsor's Junior commitment `P` → `Waterfall.allocateWindow`. **Sponsor priority [ext]** (closes
+  the last-block over-commit griefing): the Junior eligible for allocation is
+  `min(juniorCommitted, 10·P)` (uncapped when `P == 0`); Senior cap and raise limit apply to it as
+  before; the sponsor is allocated first (`sponsorJuniorAllocated = min(P, juniorAllocated)`) and
+  every other Junior wallet shares `juniorAllocated − sponsorJuniorAllocated` pro-rata on the
+  non-sponsor commitments, the excess refunded. The sponsor therefore always holds ≥ 10% of
+  allocated Junior, and outside over-commitment is refunded instead of cancelling the book.
+  `SPONSOR_SKIN` remains only for a window where the sponsor committed no Junior while Junior can be
+  allocated. On failure → Cancelled, emit
   `BookCancelled(reason)` (tranches `markCancelled`). On success: `S = seniorAllocated`,
   `J = juniorAllocated`; tranches `settleWindow(allocated, vault)` move allocated USDC to the vault
   (refunds stay in tranche escrow for `claimAllocation`); `initialDeployment` → `vault.deployToVenue(IF)`
@@ -198,10 +206,20 @@ Subscription --closeWindow ok--> Live --retire--> Retiring --finalizeRetirement-
   `assetsOwed`, fund owed assets from vault idle to the tranche escrow (remainder → `unfundedClaims`);
   increase S/J by top-up accepted (cash moved escrow → vault). `registry.markApplied(markId)`.
   In **Retired** state redemption requests settle immediately at the final price.
+- **Senior impairment follows the outstanding shares [ext]**: whenever Senior shares are burned at a
+  settlement (redemption buckets at a mark, the Retired backlog, Retired immediate redemptions) the
+  impairment is scaled pro-rata, `imp' = floor(imp · (supply − burned) / supply)` (0 once no Senior
+  share is left). Holders who redeemed at the impaired price took their loss with them, so gain
+  restoration and backstop cover (shared across books) only ever restore the remaining shares.
+  Book-side only: `applyMarkPnl` and its TS mirror are unchanged.
 - `creditDistribution` (only router): `S += senior; J += junior`.
 - `onCapitalFlow()` (only vault): `flowNonce++`.
-- `retire()` (only MarketCharter): Live → Retiring; calls `mandate.kill("RETIRE")`-equivalent
-  reduce-only flag (quoting stops) — use a distinct `mandate.setRetiring()` if preferred **[ext]**.
+- `retire()` (only MarketCharter): Live → Retiring; cancels an open top-up round and calls
+  `mandate.setRetiring()` **[ext]** — reduce-only wind-down, NOT a kill: desk keys stay active so the
+  agent can flatten hedges, `ReturnToVault` desk USDC and recall the venue (no venue deploys, desk
+  funding, hedge growth or risk-adding quotes). Best effort: a failing call emits
+  `MandateKillFailed(bookId, "RETIRE")` and never blocks retirement. The drawdown kill at marks still
+  applies while Retiring.
 - `finalizeRetirement()`: Retiring and the last applied mark had `deployedValueUsd == 0` → Retired;
   `charter.onRetired(bookId)`.
 - Sponsor skin: when the sponsor requests a Junior redemption that leaves them below 10% of Junior
@@ -219,8 +237,10 @@ Subscription --closeWindow ok--> Live --retire--> Retiring --finalizeRetirement-
   `charter.perWalletCapUsd` (0 = none; sponsor exempt); `DepositsClosed` outside a round or while
   paused or when `config.newBooksPaused()`.
 - Window settlement: shares are minted to the tranche itself (escrow) in total = allocated; each
-  wallet `claimAllocation(wallet)` → `walletAllocation(commit, totalCommitted, allocated)` shares
-  transferred + refund USDC. Top-up rounds settle at the next mark: accepted = min(committed,
+  wallet `claimAllocation(wallet)` → Senior: `walletAllocation(commit, totalCommitted, allocated)`;
+  Junior: `juniorWindowAllocation(commit, wallet == sponsor, totalCommitted, sponsorWindowCommit,
+  allocated)` (sponsor first, then pro-rata; `sponsorWindowCommit` snapshotted at `settleWindow`)
+  shares transferred + refund USDC. Top-up rounds settle at the next mark: accepted = min(committed,
   capacity, senior-cap constraint for Senior), shares minted at that mark's price.
 - Redemptions: `requestRedeem(shares, controller, owner)` transfers shares from owner (msg.sender
   must be owner or have allowance/operator) into escrow; bucket = `bucketIndex(eligibleAt,
@@ -397,7 +417,8 @@ NAV + backstop cover after every applyMark, modulo credited flows); mandate boun
    members vote (2-of-3) → `decide` → `BookFactory.create` → window opens (`subscriptionEnds = now +
    subscriptionWindow`).
 2. **Subscription**: allocators `tranche.deposit` (Senior/Junior) → after `subscriptionEnds`
-   anyone `book.closeWindow()` (keeper does) → allocation pro-rata → sponsor ≥ 10% Junior check →
+   anyone `book.closeWindow()` (keeper does) → allocation pro-rata (Junior: sponsor first, capped at
+   10× the sponsor) → sponsor Junior commitment check →
    IF + MM deployed → ops-venue creates the symbol (Orderly) / engine market is live.
 3. **Quote/hedge**: agent streams quotes within mandate (Avellaneda-Stoikov with inventory skew,
    clamped to mandate); hedge planner keeps the ratio in band via desk `Hedge` actions (long spot
@@ -411,7 +432,8 @@ NAV + backstop cover after every applyMark, modulo credited flows); mandate boun
    redemptions exceed vault idle → mark service computes NAV, inventory root, receipts root, PnL
    JSON → signs + `MarkRegistry.commit` → `book.applyMark` → tranche NAVs update, redemptions
    honoured → `mark.committed` / `distribution.paid` webhooks.
-6. **Wind-down**: `retire(bookId)` → agent stops quoting, flattens hedges → keeper recalls IF + MM
+6. **Wind-down**: `retire(bookId)` → `mandate.setRetiring()` (keys stay, reduce-only) → agent stops
+   quoting, flattens hedges and returns desk USDC (`ReturnToVault`) → keeper recalls IF + MM
    (venue rules) → final mark with `deployedValueUsd == 0` → `finalizeRetirement` → full redemption.
 
 ---

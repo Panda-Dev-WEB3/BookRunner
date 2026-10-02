@@ -49,8 +49,98 @@ contract WaterfallTest is Test {
         assertGe(r.seniorAllocated + r.juniorAllocated, ifTarget, "IF funded");
         // senior <= cap of final capital (floor rounding of the cap formula)
         assertLe(r.seniorAllocated * BPS, (r.seniorAllocated + r.juniorAllocated) * capBps + BPS);
-        // sponsor skin
-        assertGe(spC * BPS, jC * Waterfall.SPONSOR_MIN_JUNIOR_BPS);
+        // sponsor priority: allocated first, Junior capped at 10x the sponsor => skin always held
+        assertEq(r.sponsorJuniorAllocated, spC < r.juniorAllocated ? spC : r.juniorAllocated);
+        assertLe(r.juniorAllocated, spC * 10, "Junior <= 10x sponsor");
+        assertGe(r.sponsorJuniorAllocated * BPS, r.juniorAllocated * Waterfall.SPONSOR_MIN_JUNIOR_BPS);
+    }
+
+    /// @dev A sponsor with a Junior commitment never fails SPONSOR_SKIN, however much others commit.
+    function testFuzz_allocateWindow_committedSponsorNeverSkinCancels(uint256 jC, uint256 spC, uint256 sC)
+        public
+        pure
+    {
+        jC = bound(jC, 1, MAX_USD);
+        spC = bound(spC, 1, jC);
+        sC = bound(sC, 0, MAX_USD);
+        Waterfall.WindowResult memory r = Waterfall.allocateWindow(
+            Waterfall.WindowInput({
+                ifTargetUsd: 25_000e6,
+                mmInventoryUsd: 75_000e6,
+                seniorCapBps: 7000,
+                seniorCommitted: sC,
+                juniorCommitted: jC,
+                sponsorJuniorCommitted: spC
+            })
+        );
+        assertTrue(r.reason != Waterfall.REASON_SPONSOR_SKIN);
+    }
+
+    function test_allocateWindow_noSponsorCommitment_skinFails() public pure {
+        Waterfall.WindowResult memory r = Waterfall.allocateWindow(
+            Waterfall.WindowInput({
+                ifTargetUsd: 25_000e6,
+                mmInventoryUsd: 75_000e6,
+                seniorCapBps: 7000,
+                seniorCommitted: 50_000e6,
+                juniorCommitted: 30_000e6,
+                sponsorJuniorCommitted: 0
+            })
+        );
+        assertFalse(r.ok);
+        assertEq(r.reason, Waterfall.REASON_SPONSOR_SKIN);
+        assertEq(r.sponsorJuniorAllocated, 0);
+    }
+
+    function test_allocateWindow_outsiderOverCommit_cappedNotCancelled() public pure {
+        // sponsor 10k, others 111k committed: Junior eligible 100k, raise room 30k
+        Waterfall.WindowResult memory r = Waterfall.allocateWindow(
+            Waterfall.WindowInput({
+                ifTargetUsd: 25_000e6,
+                mmInventoryUsd: 75_000e6,
+                seniorCapBps: 7000,
+                seniorCommitted: 70_000e6,
+                juniorCommitted: 121_000e6,
+                sponsorJuniorCommitted: 10_000e6
+            })
+        );
+        assertTrue(r.ok);
+        assertEq(r.seniorAllocated, 70_000e6);
+        assertEq(r.juniorAllocated, 30_000e6);
+        assertEq(r.sponsorJuniorAllocated, 10_000e6);
+    }
+
+    function testFuzz_juniorWindowAllocation_sumsBounded(
+        uint256 sp,
+        uint256 c1,
+        uint256 c2,
+        uint256 c3,
+        uint256 alloc
+    ) public pure {
+        uint256[4] memory c =
+            [bound(sp, 0, MAX_USD), bound(c1, 0, MAX_USD), bound(c2, 0, MAX_USD), bound(c3, 0, MAX_USD)];
+        uint256 total = c[0] + c[1] + c[2] + c[3];
+        alloc = bound(alloc, 0, total);
+        uint256 shares;
+        uint256 refunds;
+        for (uint256 i = 0; i < 4; i++) {
+            (uint256 s, uint256 r) = Waterfall.juniorWindowAllocation(c[i], i == 0, total, c[0], alloc);
+            assertLe(s + r, c[i], "never more than committed");
+            if (i == 0) {
+                assertEq(s, c[0] < alloc ? c[0] : alloc, "sponsor first");
+                assertEq(s + r, c[0]);
+            } else if (c[0] == 0) {
+                // without a sponsor commitment it is plain pro-rata
+                (uint256 w, uint256 x) = Waterfall.walletAllocation(c[i], total, alloc);
+                assertEq(s, w);
+                assertEq(r, x);
+            }
+            shares += s;
+            refunds += r;
+        }
+        assertLe(shares, alloc, "shares <= allocated");
+        assertGe(shares + 3, alloc, "dust <= 1 per pro-rata wallet");
+        assertLe(refunds, total - alloc, "refunds <= unallocated");
     }
 
     function test_allocateWindow_capAboveBpsClamped() public pure {

@@ -299,6 +299,23 @@ contract MockMandate {
         killed = false;
         killReason = 0;
     }
+
+    bool public retiring;
+    uint256 public retiringCount;
+    bool public revertSetRetiring;
+
+    function setRevertSetRetiring(bool r) external {
+        revertSetRetiring = r;
+    }
+
+    /// @dev Mirrors MMMandate.setRetiring: book only, idempotent, keys untouched (no kill).
+    function setRetiring() external {
+        require(!revertSetRetiring, "MockMandate: setRetiring");
+        require(msg.sender == book, "MockMandate: not book");
+        if (retiring) return;
+        retiring = true;
+        retiringCount++;
+    }
 }
 
 /// @notice IBackstop mock with failure modes.
@@ -367,6 +384,16 @@ contract MockCharter {
     function onRetired(uint256 bookId) external {
         require(msg.sender == bookOf[bookId], "MockCharter: not book");
         retired[bookId] = true;
+    }
+}
+
+/// @notice Minimal BookrunnerDesk stand-in for a real MMMandate (key mirroring only); etched at the desk
+///         address in tests that register desk keys.
+contract DeskKeySyncStub {
+    mapping(address => uint64) public keyValidUntil;
+
+    function syncKey(address key, uint64 validUntil) external {
+        keyValidUntil[key] = validUntil;
     }
 }
 

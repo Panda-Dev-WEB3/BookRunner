@@ -218,9 +218,13 @@ contract BookTest is BookFixture {
         assertEq(refund, 50_000e6);
         assertEq(senior.balanceOf(alice), 50_000e6);
         assertEq(usdc.balanceOf(alice) - aliceBefore, 50_000e6);
-        (shares, refund) = junior.claimAllocation(carol);
+        // Junior: the sponsor's 20k is allocated first, carol gets the remaining 10k of the 30k
+        (shares, refund) = junior.claimAllocation(sponsor);
         assertEq(shares, 20_000e6);
-        assertEq(refund, 20_000e6);
+        assertEq(refund, 0);
+        (shares, refund) = junior.claimAllocation(carol);
+        assertEq(shares, 10_000e6);
+        assertEq(refund, 30_000e6);
         // second claim is a no-op
         (shares, refund) = junior.claimAllocation(carol);
         assertEq(shares + refund, 0);
@@ -272,19 +276,36 @@ contract BookTest is BookFixture {
 
     function test_closeWindow_cancel_sponsorSkin() public {
         _deposit(senior, alice, 50_000e6);
-        _deposit(junior, sponsor, 2999e6);
-        _deposit(junior, carol, 27_001e6); // sponsor 9.997% < 10%
+        _deposit(senior, sponsor, 5000e6); // Senior does not count toward the skin
+        _deposit(junior, carol, 30_000e6); // the sponsor committed no Junior
         _expectCancel("SPONSOR_SKIN");
         // claimAllocation also refunds in full on a cancelled book (anyone may push)
         vm.prank(eve);
         (uint256 shares, uint256 refund) = junior.claimAllocation(carol);
         assertEq(shares, 0);
-        assertEq(refund, 27_001e6);
-        assertEq(usdc.balanceOf(carol), 27_001e6);
-        assertEq(junior.claimCancelledRefund(sponsor), 2999e6);
+        assertEq(refund, 30_000e6);
+        assertEq(usdc.balanceOf(carol), 30_000e6);
+        assertEq(senior.claimCancelledRefund(sponsor), 5000e6);
         assertEq(senior.claimCancelledRefund(alice), 50_000e6);
         assertEq(usdc.balanceOf(address(junior)), 0);
         assertEq(usdc.balanceOf(address(senior)), 0);
+    }
+
+    function test_closeWindow_sponsorBelow10pctCommitted_cappedNotCancelled() public {
+        _deposit(senior, alice, 50_000e6);
+        _deposit(junior, sponsor, 2999e6);
+        _deposit(junior, carol, 27_001e6); // sponsor 9.997% of committed Junior
+        vm.warp(book.subscriptionEnds());
+        book.closeWindow();
+        assertEq(uint8(book.state()), uint8(BRTypes.BookState.Live));
+        (, uint256 j) = book.trancheNav();
+        assertEq(j, 29_990e6); // Junior capped at 10x the sponsor; carol's 10 USDC excess is refunded
+        (uint256 shares, uint256 refund) = junior.claimAllocation(carol);
+        assertEq(shares, 26_991e6);
+        assertEq(refund, 10e6);
+        (shares, refund) = junior.claimAllocation(sponsor);
+        assertEq(shares, 2999e6);
+        assertEq(refund, 0);
     }
 
     function test_closeWindow_sponsorExactly10pct_ok() public {
@@ -743,10 +764,10 @@ contract BookTest is BookFixture {
         vm.expectRevert(Book.NotTranche.selector);
         book.onJuniorRedeemRequested(sponsor);
         vm.expectRevert(Book.NotTranche.selector);
-        book.onRetiredRedeem(1);
+        book.onRetiredRedeem(1, 1);
         vm.prank(address(senior));
         vm.expectRevert(abi.encodeWithSelector(Book.BadState.selector, BRTypes.BookState.Subscription));
-        book.onRetiredRedeem(1);
+        book.onRetiredRedeem(1, 1);
     }
 
     // =========================================================================================
@@ -952,8 +973,9 @@ contract BookTest is BookFixture {
         emit IBook.Retiring(BOOK_ID);
         charterC.retire(BOOK_ID);
         assertEq(uint8(book.state()), uint8(BRTypes.BookState.Retiring));
-        assertTrue(mandate.killed());
-        assertEq(mandate.killReason(), bytes32("RETIRE"));
+        // reduce-only wind-down: keys stay so the desk can flatten (no kill)
+        assertTrue(mandate.retiring());
+        assertFalse(mandate.killed());
         vm.expectRevert(abi.encodeWithSelector(Book.BadState.selector, BRTypes.BookState.Retiring));
         charterC.retire(BOOK_ID);
     }
