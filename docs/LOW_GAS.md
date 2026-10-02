@@ -58,15 +58,20 @@ function reportSigned(uint256 insuranceUsd, int256 marginUsd, int256 netExposure
 ## 3. One mark transaction per book per period
 
 ```solidity
-// Book
-/// Atomic: oracle.update(priceData) -> adapter.reportSigned(venueReport) when non-empty (Orderly books)
-/// -> MarkRegistry.commit(m, sig) -> applyMark(markId). Callable by anyone (keeper).
-function markWithSignature(BRTypes.MarkInput calldata m, bytes calldata sig, bytes calldata priceData, bytes calldata venueReport) external;
+// MarkRegistry (Book is at its 24 KB size limit, so the orchestration lives here; Book is unchanged)
+/// Atomic, callable by anyone (keeper):
+///   1. oracle.update(priceData)                       when priceData is non-empty
+///   2. IOrderlyAdapter(adapter).reportSigned(...)     when venueReport is non-empty (Orderly books)
+///   3. commit(m, sig)                                 same checks as commit (incl. stale-mark replacement)
+///   4. IBook(factory.bookOf(m.bookId)).applyMark(markId)
+/// Returns the markId. Reverts atomically if any step reverts (the keeper retries next tick).
+function commitAndApply(BRTypes.MarkInput calldata m, bytes calldata sig, bytes calldata priceData, bytes calldata venueReport)
+    external returns (uint256 markId);
 ```
 
 - `venueReport = abi.encode(uint256 insuranceUsd, int256 marginUsd, int256 netExposureUsd, uint64 asOf, bytes sig)`.
-- MarkRegistry gains `commitFor(m, sig)` callable only by the book (or reuse `commit` — implementation
-  choice, documented); stale-nonce replacement rules from the review fix still apply.
+- The adapter is `IBookFactory(config.factory()).componentsOf(m.bookId).adapter`.
+- `commit` + `Book.applyMark` stay callable separately (backwards compatible).
 - Cadence: `markInterval` = 86 400 (daily, per spec) for mainnet; testnet profile default 86 400 with
   `MARK_INTERVAL_SECONDS` override (hourly costs ~0.0002 ETH/day for 3 books in this mode).
 - The waterfall's sweep + distribute run in the same keeper pass, **skipped when there is no fee flow**
