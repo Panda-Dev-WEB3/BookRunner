@@ -21,6 +21,8 @@ export const CHANNELS = {
 
 export const KEYS = {
   oracleLast: (priceId: string) => `bkrn:oracle:last:${priceId}`, // JSON OraclePriceMsg
+  oracleBundle: "bkrn:oracle:bundle", // JSON OracleBundleMsg (pull oracle: latest signed priceData, every tick)
+  venueReport: (bookId: number | bigint) => `bkrn:venue:report:${bookId}`, // JSON VenueReportMsg (ops-venue, signed)
   riskState: (bookId: number | bigint) => `bkrn:risk:state:${bookId}`, // JSON LimitsSnapshot + meta
   agentHeartbeat: (bookId: number | bigint) => `bkrn:agent:hb:${bookId}`, // unix ms
   agentQuote: (bookId: number | bigint) => `bkrn:agent:quote:${bookId}`, // JSON QuoteMsg (latest)
@@ -38,6 +40,37 @@ export interface OraclePriceMsg {
   sources: Array<{ name: string; price: number; ts: number }>;
   sourcesHash: `0x${string}`;
   signature: `0x${string}`;
+}
+
+/**
+ * Pull oracle bundle (docs/LOW_GAS.md §1): the latest signed update of every live price id, ready to be
+ * carried as the `priceData` argument of a consumer transaction. Published every oracle tick to
+ * KEYS.oracleBundle (expires when the oracle stops) and served by the oracle at GET /prices/signed.
+ */
+export interface OracleBundleMsg {
+  /** abi.encode(PriceUpdate[], bytes[]) — see encodePriceData / decodePriceData */
+  priceData: `0x${string}`;
+  /** unix seconds: the newest publishedAt in the bundle (each update keeps its own publishedAt) */
+  publishedAt: number;
+  /** EIP-712 domain the signatures are bound to */
+  chainId: number;
+  oracle: `0x${string}`;
+  /** price ids in priceData order */
+  priceIds: string[];
+}
+
+/** Signed venue report (docs/LOW_GAS.md §2) as published by ops-venue under KEYS.venueReport(bookId). */
+export interface VenueReportMsg {
+  bookId: number;
+  chainId: number;
+  adapter: `0x${string}`;
+  insuranceUsd: string; // decimal USD 6dp
+  marginUsd: string; // decimal USD 6dp, signed
+  netExposureUsd: string; // decimal USD 6dp, signed
+  asOf: number; // unix seconds
+  sig: `0x${string}`; // EIP-712 VenueReport signature by an OPS_VENUE holder
+  /** abi.encode(insuranceUsd, marginUsd, netExposureUsd, asOf, sig) — the commitAndApply venueReport argument */
+  venueReport: `0x${string}`;
 }
 
 export interface QuoteMsg {

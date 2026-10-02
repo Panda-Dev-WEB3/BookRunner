@@ -17,9 +17,20 @@ export const oracleEnvShape = {
   ORACLE_PORT: z.coerce.number().int().positive().default(4410),
   /** HTTP bind address. Loopback by default: the API is an internal health / debug surface. */
   ORACLE_HOST: z.string().min(1).default("127.0.0.1"),
-  /** Aggregation / Redis publication cadence. */
+  /** Aggregation / Redis publication cadence (signed prices + the pull bundle). */
   ORACLE_TICK_MS: z.coerce.number().int().positive().default(1000),
-  /** On-chain AttestedOracle.pushMany cadence per price id. */
+  /**
+   * pull (default, docs/LOW_GAS.md §1): never push on a timer — every tick publishes the signed bundle
+   * (Redis KEYS.oracleBundle, GET /prices/signed) and consumers carry it in their own transaction.
+   * heartbeat: the pre-low-gas behaviour (AttestedOracle.pushMany on the push policy), for debugging.
+   */
+  ORACLE_PUSH_MODE: z.enum(["pull", "heartbeat"]).default("pull"),
+  /** A price id whose latest signed update is older than this (sources failing) is left out of the bundle. */
+  ORACLE_BUNDLE_MAX_AGE_MS: z.coerce.number().int().positive().default(300_000),
+  /**
+   * Heartbeat mode: on-chain AttestedOracle.pushMany cadence per price id. Both modes: cadence of the
+   * oracle_prices history rows.
+   */
   ORACLE_PUSH_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
   /**
    * Immediate push when |price - last pushed| exceeds this (bps). Keep it below the cheapest in-house

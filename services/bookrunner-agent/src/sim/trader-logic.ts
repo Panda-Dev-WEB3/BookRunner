@@ -86,17 +86,56 @@ export function sizeDeltaFor(notionalUsd: number, priceUsd: number, side: "buy" 
   return side === "buy" ? size : -size;
 }
 
+/**
+ * PoolEngine._fillPrice at an oracle price the chain has not stored yet (pull mode: the trade carries it):
+ * buy = ceil(p * (2e4 + spread + 2*skew) / 2e4), sell = floor(p * (2e4 - spread + 2*skew) / 2e4).
+ */
+export function engineFillPriceWad(priceWad: bigint, spreadBps: number, skewBps: number, sizeDelta: bigint): bigint {
+  const den = 20_000n;
+  const spread = BigInt(Math.max(0, Math.round(spreadBps)));
+  const skew2 = 2n * BigInt(Math.round(skewBps));
+  if (sizeDelta > 0n) {
+    const f = den + spread + skew2;
+    return f <= 0n ? 0n : (priceWad * f + den - 1n) / den;
+  }
+  const g = den - spread + skew2;
+  return g <= 0n ? 0n : (priceWad * g) / den;
+}
+
+/**
+ * Cheap pre-filter for the liquidation sweep (only candidates are simulated on-chain): trader equity at
+ * `priceWad` (margin + unrealised PnL, funding ignored) below the maintenance requirement plus a buffer.
+ * Units: size 1e18, prices WAD, USD 6dp.
+ */
+export function nearLiquidation(
+  pos: { size: bigint; entryPriceWad: bigint; marginUsd: bigint },
+  priceWad: bigint,
+  maintenanceMarginBps: number,
+  bufferBps = 2_000,
+): boolean {
+  if (pos.size === 0n || priceWad <= 0n) return false;
+  const SCALE = 10n ** 30n; // 1e18 size * 1e18 price -> 1e6 USD
+  const pnl = (pos.size * (priceWad - pos.entryPriceWad)) / SCALE;
+  const equity = pos.marginUsd + pnl;
+  const absSize = pos.size < 0n ? -pos.size : pos.size;
+  const required = (absSize * priceWad * BigInt(Math.max(0, Math.round(maintenanceMarginBps)))) / SCALE / 10_000n;
+  return equity * 10_000n < required * (10_000n + BigInt(Math.max(0, Math.round(bufferBps))));
+}
+
 /** Worst acceptable fill: buys may pay up to +slippage, sells accept down to -slippage. */
 export function acceptablePriceWad(quotePriceWad: bigint, sizeDelta: bigint, slippageBps: number): bigint {
   const slip = BigInt(Math.max(0, Math.round(slippageBps)));
   return sizeDelta > 0n ? (quotePriceWad * (10_000n + slip)) / 10_000n : (quotePriceWad * (10_000n - slip)) / 10_000n;
 }
 
-export type TradeErrorClass = "off_hours" | "reduce_only" | "exposure_cap" | "margin" | "price" | "not_live" | "other";
+export type TradeErrorClass = "stale_price" | "off_hours" | "reduce_only" | "exposure_cap" | "margin" | "price" | "not_live" | "other";
 
 /** Classify a venue rejection (custom error name and/or message) so the sim can back off sensibly. */
 export function classifyTradeError(name: string | null, message: string): TradeErrorClass {
   const s = `${name ?? ""} ${message}`.toLowerCase();
+  // pull oracle: the carried price is older than maxTradePriceAge (or the signer rotated) — the next
+  // arrival carries a fresher bundle; not an off-hours signal
+  if (/tooold|too_old|tradepriceage|maxtradepriceage|pricetooold|oldprice|badsigner/.test(s)) return "stale_price";
   if (/stale|held|offhours|off_hours|off-hours|session/.test(s)) return "off_hours";
   if (/reduceonly|reduce_only|reduce-only|newrisk/.test(s)) return "reduce_only";
   if (/exposure|maxnet|inventory|capacity/.test(s)) return "exposure_cap";

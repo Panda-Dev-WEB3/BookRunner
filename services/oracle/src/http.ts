@@ -1,11 +1,13 @@
-// HTTP surface (Hono): /health, /prices, /prices/:priceId, /attestation.
-// Prices are served only once they have landed on-chain and never with their EIP-712 signature: a signed
-// update the chain has not seen yet would let a trader trade at the stored price, relay the newer one and
-// close in one transaction (AttestedOracle also restricts relaying to signers / KEEPER / timelock).
+// HTTP surface (Hono): /health, /prices, /prices/signed, /prices/:priceId, /attestation.
+// /prices[/:priceId] never carry the EIP-712 signature; in heartbeat mode they serve only what has landed
+// on-chain (a fresher signed update would let a trader trade at the stored price, relay the newer one and
+// close). /prices/signed is the pull-oracle bundle (docs/LOW_GAS.md §1): abi.encode(PriceUpdate[], bytes[])
+// of every live price id, the `priceData` consumers carry in their own transaction — public by design, the
+// latency arbitrage is bounded on-chain by PoolEngine's maxTradePriceAge.
 import { Hono } from "hono";
 import type { OracleService } from "./service";
 
-export type OracleView = Pick<OracleService, "health" | "publicPrices" | "publicPrice" | "signerInfo">;
+export type OracleView = Pick<OracleService, "health" | "publicPrices" | "publicPrice" | "signerInfo" | "signedBundle">;
 
 export const ATTESTATION_NOTE =
   "VERIFY: devnet signs with a plain key. Production runs the aggregator inside a TEE; the quote is " +
@@ -21,6 +23,14 @@ export function createApp(svc: OracleView): Hono {
   });
 
   app.get("/prices", (c) => c.json({ prices: svc.publicPrices() }));
+
+  // registered before /prices/:priceId ("signed" is not a price id)
+  app.get("/prices/signed", (c) => {
+    const b = svc.signedBundle();
+    if (!b) return c.json({ error: "no signed bundle yet" }, 503);
+    c.header("Cache-Control", "no-store");
+    return c.json(b);
+  });
 
   app.get("/prices/:priceId", (c) => {
     const m = svc.publicPrice(c.req.param("priceId"));
@@ -50,8 +60,9 @@ export function serveOptions(cfg: { ORACLE_HOST: string; ORACLE_PORT: number }, 
 }
 
 /**
- * Round-trip cost below which a move the chain has not seen yet cannot be arbitraged against an in-house
- * pool (RHX5: spread 10 bps + 2 x 6 bps taker fee = 22 bps). Pushes on a smaller deviation keep the stored
- * price within it; the service warns when ORACLE_PUSH_DEVIATION_BPS is above this.
+ * Heartbeat mode: round-trip cost below which a move the chain has not seen yet cannot be arbitraged
+ * against an in-house pool (RHX5: spread 10 bps + 2 x 6 bps taker fee = 22 bps). Pushes on a smaller
+ * deviation keep the stored price within it; the service warns when ORACLE_PUSH_DEVIATION_BPS is above
+ * this (pull mode: not applicable, trades carry their own price).
  */
 export const MAX_SAFE_PUSH_DEVIATION_BPS = 10;

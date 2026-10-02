@@ -1,5 +1,6 @@
-// Oracle service entry: attested multi-source prices -> AttestedOracle.pushMany + Redis + oracle_prices,
-// builder prices to the venue, HTTP on ORACLE_PORT (default 4410).
+// Oracle service entry: attested multi-source prices -> Redis (per price + the signed pull bundle) +
+// oracle_prices (+ AttestedOracle.pushMany in ORACLE_PUSH_MODE=heartbeat only), builder prices to the
+// venue, HTTP on ORACLE_PORT (default 4410).
 import { createDb } from "@bookrunner/db";
 import { createLogger, roleAccount } from "@bookrunner/shared";
 import type { LocalAccount } from "viem";
@@ -50,6 +51,8 @@ const service = new OracleService({
     pushDeviationBps: cfg.ORACLE_PUSH_DEVIATION_BPS,
     sessionsMode: cfg.SESSIONS_MODE,
     venuePrices: cfg.ORACLE_VENUE_PRICES,
+    pushMode: cfg.ORACLE_PUSH_MODE,
+    bundleMaxAgeMs: cfg.ORACLE_BUNDLE_MAX_AGE_MS,
   },
 });
 
@@ -61,10 +64,18 @@ const loops = [
 
 const server = Bun.serve(serveOptions(cfg, createApp(service).fetch));
 log.info(
-  { host: cfg.ORACLE_HOST, port: server.port, signer: account.address, chainId: cfg.CHAIN_ID, sessionsMode: cfg.SESSIONS_MODE, orderlyMode: cfg.ORDERLY_MODE },
-  "oracle service started",
+  {
+    host: cfg.ORACLE_HOST,
+    port: server.port,
+    signer: account.address,
+    chainId: cfg.CHAIN_ID,
+    pushMode: cfg.ORACLE_PUSH_MODE,
+    sessionsMode: cfg.SESSIONS_MODE,
+    orderlyMode: cfg.ORDERLY_MODE,
+  },
+  cfg.ORACLE_PUSH_MODE === "pull" ? "oracle service started (pull: no timer pushes, signed bundle in Redis + /prices/signed)" : "oracle service started (heartbeat pushes)",
 );
-if (cfg.ORACLE_PUSH_DEVIATION_BPS > MAX_SAFE_PUSH_DEVIATION_BPS) {
+if (cfg.ORACLE_PUSH_MODE === "heartbeat" && cfg.ORACLE_PUSH_DEVIATION_BPS > MAX_SAFE_PUSH_DEVIATION_BPS) {
   log.warn(
     { pushDeviationBps: cfg.ORACLE_PUSH_DEVIATION_BPS, maxSafeBps: MAX_SAFE_PUSH_DEVIATION_BPS },
     "ORACLE_PUSH_DEVIATION_BPS exceeds the cheapest in-house round trip: on-chain prices may lag by an arbitrageable move",

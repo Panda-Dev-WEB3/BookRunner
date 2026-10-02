@@ -10,7 +10,7 @@ import type { AgentStore } from "../adapters/store";
 import type { OraclePoint, StockTokenInfo } from "../chain/book-chain";
 import { encodeFlatten, encodeFundDesk, encodeHedge, encodeInventoryToVault, encodeReturnToVault } from "../chain/desk-actions";
 import type { DeskRunner } from "../chain/desk-client";
-import { type HedgeComponent, type HedgeMode, type HedgePlan, type HedgePlannerConfig, type MmRecallInfo, planHedge } from "../domain/hedge-planner";
+import { type HedgeComponent, type HedgeMode, type HedgePlan, type HedgePlannerConfig, type MmRecallInfo, componentsValueUsd, planHedge } from "../domain/hedge-planner";
 import type { HedgeUniverse } from "../domain/hedge-universe";
 import { hedgeReceipt } from "../domain/receipts";
 import { errMsg } from "../util";
@@ -63,6 +63,12 @@ export interface HedgerDeps {
   log: Logger;
   now?: () => number;
   perp?: PerpHedger | null;
+  /**
+   * Pull oracle: value the desk inventory from the snapshot (freshest signed prices) instead of the
+   * on-chain desk views, which price at the stored oracle value and revert StalePrice once nothing
+   * landed for maxPriceAge. Chain mode still falls back to it when a view reverts.
+   */
+  offchainValuation?: boolean;
 }
 
 export function parseHedgeExecuted(receipt: Pick<TransactionReceipt, "logs">, token: Address) {
@@ -74,6 +80,7 @@ export function parseHedgeExecuted(receipt: Pick<TransactionReceipt, "logs">, to
 export class Hedger implements HedgeCycleRunner {
   private lastReason = "";
   private warnedAllowList = false;
+  private warnedValuation = false;
   private readonly now: () => number;
 
   constructor(private readonly d: HedgerDeps) {
@@ -100,10 +107,27 @@ export class Hedger implements HedgeCycleRunner {
     );
   }
 
+  /** desk hedge notional + total value (USD 6dp): on-chain views, or the snapshot valued off-chain. */
+  private async valuation(usdc: bigint, comps: HedgeComponent[]): Promise<{ hedge: bigint; value: bigint }> {
+    const offchain = () => {
+      const hedge = componentsValueUsd(comps);
+      return { hedge, value: usdc + hedge };
+    };
+    if (this.d.offchainValuation) return offchain();
+    try {
+      const [hedge, value] = await Promise.all([this.d.chain.deskHedgeUsd(), this.d.chain.deskValueUsd()]);
+      return { hedge, value };
+    } catch (err) {
+      if (!this.warnedValuation) {
+        this.d.log.warn({ err: errMsg(err) }, "hedge: desk valuation views unavailable (stale stored price?); valuing the snapshot off-chain");
+        this.warnedValuation = true;
+      }
+      return offchain();
+    }
+  }
+
   async cycle(ctx: HedgeCycleContext): Promise<HedgePlan> {
-    const [hedge, value, usdc, comps, vaultDeployable, mmRecall] = await Promise.all([
-      this.d.chain.deskHedgeUsd(),
-      this.d.chain.deskValueUsd(),
+    const [usdc, comps, vaultDeployable, mmRecall] = await Promise.all([
       this.d.chain.deskUsdc(),
       this.snapshot(),
       this.d.chain.vaultDeployable(),
@@ -114,6 +138,7 @@ export class Hedger implements HedgeCycleRunner {
           })
         : Promise.resolve(null),
     ]);
+    const { hedge, value } = await this.valuation(usdc, comps);
     const perpUsd = this.d.cfg.perpEnabled && this.d.perp ? await this.d.perp.positionUsd() : 0n;
     const plan = planHedge(
       {

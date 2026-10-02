@@ -29,16 +29,18 @@ import { privateKeyToAccount } from "viem/accounts";
 import { type AgentBus, RedisBus } from "./adapters/bus";
 import { DbStore } from "./adapters/store";
 import { BookAgent } from "./agent/book-agent";
-import { Hedger } from "./agent/hedger";
+import { type HedgeChain, Hedger } from "./agent/hedger";
 import { PriceFeed, oracleMsgFromChain, parseOracleMsg } from "./agent/price-feed";
 import { BookChain } from "./chain/book-chain";
 import { DeskClient } from "./chain/desk-client";
 import { ViemEngineChain } from "./chain/engine-chain";
+import { EXECUTE_WITH_PRICES_SIG, supportsFunction } from "./chain/lowgas-abi";
+import { PullPrices, deskPriceData, freshestOracleLatest, httpBundleSource, redisBundleSource, resolvePullMode } from "./chain/pull-prices";
 import { type AgentEnv, engineVenueConfigFrom, hedgeConfigFrom, loadAgentEnv, quotingConfigFrom, sizingConfigFrom, volConfigFrom } from "./config";
 import { type UniverseComponent, buildHedgeUniverse, parseAllowPairs } from "./domain/hedge-universe";
 import { RuleBasedSizing } from "./domain/sizing";
 import { EwmaVolatility } from "./domain/volatility";
-import { errMsg, sleep } from "./util";
+import { SerialLock, errMsg, sleep } from "./util";
 import { EngineVenue } from "./venues/engine";
 import { createOrderlyVenue } from "./venues/orderly";
 
@@ -138,9 +140,37 @@ async function runOnce(ctx: BookContext, env: AgentEnv, baseLog: Logger, bus: Ag
   const price = new PriceFeed(ctx.priceIdStr, vol);
   price.ingest(await bus.getJson<OraclePriceMsg>(KEYS.oracleLast(ctx.priceIdStr)).catch(() => null));
 
+  // pull oracle (docs/LOW_GAS.md §1): the freshest signed prices ride in every price-checked desk tx
+  let comps: UniverseComponent[] = [];
+  try {
+    comps = await hedgeComponents(ctx, charter.underlying);
+  } catch (err) {
+    if (env.HEDGE_ENABLED && ctx.deskAccount && ctx.deskKeyActive) throw err; // the hedger needs them: setup retries
+    log.warn({ err: errMsg(err) }, "hedge components unreadable; desk actions carry the book price only");
+  }
+  const pullPrices = new PullPrices({
+    sources: [redisBundleSource((k) => bus.getJson(k)), ...(env.ORACLE_URL ? [httpBundleSource(env.ORACLE_URL)] : [])],
+    stream: () => [price.latest()],
+    domain: { chainId: env.CHAIN_ID, oracle: ctx.deployment.contracts.oracle },
+    log,
+  });
+  const pull = await resolvePullMode(env.AGENT_PULL_PRICES, () => supportsFunction(ctx.pub, ctx.chain.components.desk, EXECUTE_WITH_PRICES_SIG));
+  let componentIds: Promise<Hex[]> | null = null;
+  const componentPriceIds = () => {
+    componentIds ??= Promise.all(comps.map((c) => ctx.chain.getToken(c.token).then((t) => t.priceId))).catch((err: unknown) => {
+      componentIds = null; // retry on the next action
+      throw err;
+    });
+    return componentIds;
+  };
+  const deskPrices = pull
+    ? deskPriceData(pullPrices, { bookPriceId: ctx.priceIdHex, componentPriceIds, maxAgeSec: env.AGENT_PRICE_DATA_MAX_AGE_SECONDS })
+    : null;
+  log.info({ pull, mode: env.AGENT_PULL_PRICES, oracleUrl: env.ORACLE_URL ?? null }, pull ? "desk actions carry signed prices (executeWithPrices)" : "desk actions use stored prices (execute)");
+
   const desk =
     ctx.deskAccount && ctx.deskKeyActive
-      ? new DeskClient(ctx.pub, walletClientFor(env.CHAIN_ID, env.RPC_URL, ctx.deskAccount), ctx.chain.components.desk, log, env.TX_RECEIPT_TIMEOUT_MS)
+      ? new DeskClient(ctx.pub, walletClientFor(env.CHAIN_ID, env.RPC_URL, ctx.deskAccount), ctx.chain.components.desk, log, env.TX_RECEIPT_TIMEOUT_MS, new SerialLock(), deskPrices)
       : null;
   if (!ctx.deskKeyActive) log.warn({ key: ctx.deskAccount?.address ?? null }, "desk session key not active on the mandate: on-chain legs disabled");
 
@@ -173,14 +203,27 @@ async function runOnce(ctx: BookContext, env: AgentEnv, baseLog: Logger, bus: Ag
 
   let hedger: Hedger | null = null;
   if (env.HEDGE_ENABLED && desk) {
-    const comps = await hedgeComponents(ctx, charter.underlying);
     const pairs = env.HEDGE_ALLOW_PAIRS ? parseAllowPairs(env.HEDGE_ALLOW_PAIRS) : undefined;
     const universe = buildHedgeUniverse(comps, mandate.hedgeAllowRoot, pairs);
     log.info({ components: comps.length, root: universe.root, rootMatches: universe.rootMatches, perpAllowed: universe.perpAllowed }, "hedge universe");
+    // pull: plan on the freshest signed prices (what the carried update makes the mandate check against)
+    const hedgeChain: HedgeChain = pull
+      ? {
+          deskHedgeUsd: () => ctx.chain.deskHedgeUsd(),
+          deskValueUsd: () => ctx.chain.deskValueUsd(),
+          deskUsdc: () => ctx.chain.deskUsdc(),
+          tokenBalance: (t, o) => ctx.chain.tokenBalance(t, o),
+          getToken: (t) => ctx.chain.getToken(t),
+          vaultDeployable: () => ctx.chain.vaultDeployable(),
+          mmRecall: () => ctx.chain.mmRecall(),
+          oracleLatest: freshestOracleLatest(pullPrices, (id) => ctx.chain.oracleLatest(id), env.AGENT_PRICE_DATA_MAX_AGE_SECONDS),
+        }
+      : ctx.chain;
     hedger = new Hedger({
       bookId: ctx.bookId,
       desk: ctx.chain.components.desk,
-      chain: ctx.chain,
+      chain: hedgeChain,
+      offchainValuation: pull,
       runner: desk,
       store,
       universe,
@@ -233,6 +276,7 @@ async function runOnce(ctx: BookContext, env: AgentEnv, baseLog: Logger, bus: Ag
       heartbeatTtlMs: env.AGENT_HEARTBEAT_TTL_MS,
       quoteTtlMs: Math.max(5_000, env.AGENT_QUOTE_INTERVAL_MS * 10),
       fillLookbackMs: 15 * 60_000,
+      pullPrices: pull,
     },
   );
   holder.agent = agent;
