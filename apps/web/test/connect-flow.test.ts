@@ -4,9 +4,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { defineChain, http, numberToHex } from "viem";
 import { createConfig, createStorage, injected } from "wagmi";
-import { connect, getConnection } from "wagmi/actions";
+import { connect, disconnect, getConnection, getConnections } from "wagmi/actions";
 import { memoryStorage } from "../src/lib/safeStorage";
-import { connectWallet } from "../src/wallet/connectFlow";
+import { connectWallet, disconnectAll } from "../src/wallet/connectFlow";
 
 const APP = 46630;
 const app = defineChain({ id: APP, name: "Robinhood Chain Testnet", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: ["http://127.0.0.1:1"] } } });
@@ -141,5 +141,59 @@ describe("connectWallet", () => {
     expect(r.ok).toBe(false);
     expect(r.error).not.toBeNull();
     expect(getConnection(config).isConnected).toBe(false);
+  });
+});
+
+const B = "0x000000000000000000000000000000000000bEEF";
+
+/** Two EIP-6963-style wallets, each its own injected connector. */
+function setupTwo(a: ReturnType<typeof fakeWallet>, b: ReturnType<typeof fakeWallet>) {
+  g.window = { walletA: a, walletB: b };
+  const target = (id: string, key: "walletA" | "walletB") => ({ id, name: id, provider: (w?: unknown) => (w as Record<string, never> | undefined)?.[key] });
+  const config = createConfig({
+    chains: [app],
+    connectors: [injected({ shimDisconnect: true, target: target("Wallet A", "walletA") }), injected({ shimDisconnect: true, target: target("Wallet B", "walletB") })],
+    multiInjectedProviderDiscovery: false,
+    storage: createStorage({ storage: memoryStorage() }),
+    transports: { [APP]: http() },
+  });
+  const [ca, cb] = config.connectors;
+  if (!ca || !cb) throw new Error("no connectors");
+  return { config, ca, cb };
+}
+
+describe("two wallets: Change, then Disconnect", () => {
+  test("old flow: wagmi's disconnect() drops only the current wallet and switches over to the first (the bug)", async () => {
+    const { config, ca, cb } = setupTwo(fakeWallet({ chainId: APP, account: A }), fakeWallet({ chainId: APP, account: B }));
+    await connect(config, { connector: ca });
+    await connect(config, { connector: cb });
+    expect(getConnection(config).address).toBe(B);
+    await disconnect(config);
+    expect(getConnection(config)).toMatchObject({ isConnected: true, address: A });
+  });
+
+  test("connectWallet keeps one connection, and disconnectAll leaves none", async () => {
+    const { config, ca, cb } = setupTwo(fakeWallet({ chainId: APP, account: A }), fakeWallet({ chainId: APP, account: B }));
+    expect((await connectWallet(config, ca, target)).ok).toBe(true);
+    expect((await connectWallet(config, cb, target)).ok).toBe(true); // 'Change' to the second wallet
+    expect(getConnections(config).map((c) => c.connector.uid)).toEqual([cb.uid]);
+    expect(getConnection(config).address).toBe(B);
+    await disconnectAll(config);
+    expect(getConnections(config)).toEqual([]);
+    expect(getConnection(config).isConnected).toBe(false);
+  });
+
+  test("a decline in the second wallet is a failure, even while the first stays connected", async () => {
+    const { config, ca, cb } = setupTwo(fakeWallet({ chainId: APP, account: A }), fakeWallet({ chainId: APP, account: B, decline: { connect: true } }));
+    await connectWallet(config, ca, target);
+    const r = await connectWallet(config, cb, target);
+    expect(r.ok).toBe(false);
+    expect(getConnection(config).address).toBe(A);
+  });
+
+  test("asking for the wallet that is already current is a success", async () => {
+    const { config, ca } = setupTwo(fakeWallet({ chainId: APP, account: A }), fakeWallet({ chainId: APP, account: B }));
+    await connectWallet(config, ca, target);
+    expect(await connectWallet(config, ca, target)).toEqual({ ok: true, error: null, switchError: null });
   });
 });

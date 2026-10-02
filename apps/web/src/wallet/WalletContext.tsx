@@ -4,7 +4,7 @@
 import type { DevRole } from "@bookrunner/shared/devkeys";
 import { type ReactNode, createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { type Address, type Hex, createPublicClient, createWalletClient, http } from "viem";
-import { type Connector, useConnection, useConnectors, useDisconnect } from "wagmi";
+import { type Connector, useConnection, useConnectors } from "wagmi";
 import { getConnection, sendTransaction, switchChain, waitForTransactionReceipt } from "wagmi/actions";
 import { useHealth } from "../api/hooks";
 import type { PreparedTx } from "../lib/api-types";
@@ -14,7 +14,7 @@ import { errText } from "../lib/txflow";
 import type { TxExecutor } from "../lib/txflow";
 import { revertReason } from "../lib/revert";
 import { addChainParams, appChain, chainName, publicClient, wagmiConfig, walletConnectEnabled } from "./chains";
-import { connectWallet } from "./connectFlow";
+import { connectWallet, disconnectAll } from "./connectFlow";
 
 type Mode = "dev" | "injected" | null;
 
@@ -144,7 +144,6 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const devAvailable = config.chainId === DEVNET_CHAIN_ID && (apiChainId === null || apiChainId === DEVNET_CHAIN_ID);
   const conn = useConnection();
   const connectors = useConnectors();
-  const disc = useDisconnect();
   const [{ mode, role }, setSel] = useState(readStored);
   const [devAddr, setDevAddr] = useState<Address | null>(null);
   const [deriving, setDeriving] = useState(false);
@@ -205,10 +204,11 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
   const clearConnectError = useCallback(() => setConnectError(null), []);
 
+  // Every connection, not only the current one (wagmi would switch over to the next wallet).
   const disconnect = useCallback(() => {
-    if (conn.isConnected) disc.mutate();
+    void disconnectAll(wagmiConfig);
     setSel((s) => ({ mode: null, role: s.role }));
-  }, [conn.isConnected, disc]);
+  }, []);
 
   const switchToAppChain = useCallback(async () => {
     setNetworkError(null);
