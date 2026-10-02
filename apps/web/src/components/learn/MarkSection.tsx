@@ -9,6 +9,7 @@ import { cx } from "../cx";
 import { IconArrowRight, IconCheck } from "../icons";
 import { Term } from "../Term";
 import { Card, ErrorState, Hash, KV, SkeletonRows, ValueKind } from "../ui";
+import { MarkCadenceText } from "../ProtocolTerms";
 import { Figure, LearnSection, Prose } from "./parts";
 import { useShowcaseBook } from "./useLearnData";
 
@@ -146,7 +147,7 @@ export function MarkSection(props: { index: number }) {
         <div className="space-y-4">
           <Prose>
             <p>
-              Once per period, hourly on testnet and daily on mainnet, the mark service values the book, writes a statement of its NAV, inventory and P&L, and
+              Once per period (<MarkCadenceText />), the mark service values the book, writes a statement of its NAV, inventory and P&L, and
               signs it. One transaction commits the statement on-chain and applies it: share prices move, any loss is booked in order and queued redemptions
               settle.
             </p>
@@ -170,7 +171,7 @@ export function MarkSection(props: { index: number }) {
             </span>
           </div>
         </div>
-        <Figure caption={cadence ? `${cadenceTitle(cadence)} on this network.` : "Hourly on testnet, daily on mainnet."} label="Receipts and the mark">
+        <Figure caption={cadence ? `${cadenceTitle(cadence)} on this network.` : "Each network sets its mark interval."} label="Receipts and the mark">
           <MerkleDiagram />
         </Figure>
       </div>

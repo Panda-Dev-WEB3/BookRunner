@@ -19,9 +19,14 @@ export interface FaqContext {
   testnet: boolean;
   chainName: string;
   chainId: number;
+  /** The protocol carry as configured on-chain ("10%"); the launch default while unknown. */
+  carryPct?: string;
+  /** The books' mark cadence ("hourly"), null while unknown. */
+  cadence?: string | null;
 }
 
 export function faqItems(ctx: FaqContext): FaqItem[] {
+  const carry = ctx.carryPct ?? "10%";
   return [
     {
       id: "perp",
@@ -37,7 +42,7 @@ export function faqItems(ctx: FaqContext): FaqItem[] {
       question: "Where does the money come from?",
       answer: [
         "From the market's fee flow. On Orderly books it is the builder share of taker fees; on the in-house engine it is the taker fees. Spread capture and the insurance fund's half of liquidation fees show up in NAV at each mark instead.",
-        "Each period the waterfall pays expenses first, then the 10% protocol carry, then splits the rest: Senior's fixed hurdle share and the remainder to Junior, in the same transaction. Gains or losses on the market-making inventory, spread capture included, move NAV at each mark; a gain first restores any Senior shortfall, then goes to Junior.",
+        `Each period the waterfall pays expenses first, then the ${carry} protocol carry, then splits the rest: Senior's fixed hurdle share and the remainder to Junior, in the same transaction. Gains or losses on the market-making inventory, spread capture included, move NAV at each mark; a gain first restores any Senior shortfall, then goes to Junior.`,
         "Fee flow is shown as the observed accrual over each mark period, never as a rate. Past periods say nothing about the next one.",
       ],
       terms: ["feeFlow", "waterfall", "hurdle", "carry"],
@@ -65,7 +70,7 @@ export function faqItems(ctx: FaqContext): FaqItem[] {
       id: "nav",
       question: "How often is NAV updated?",
       answer: [
-        "Once per mark period: hourly on testnet, daily on mainnet. A mark is the book's signed statement of NAV, inventory and P&L, committed on-chain in one transaction per book.",
+        `Once per mark period (${ctx.cadence ? `${ctx.cadence} on ${ctx.chainName}` : "daily by default; each network sets its interval"}). A mark is the book's signed statement of NAV, inventory and P&L, committed on-chain in one transaction per book.`,
         "Each mark carries a receipts root, so anyone can check that a quote, fill or hedge belongs to the signed statement. Between marks the app may show a live estimate, clearly labelled; deposits and redemptions always settle at a marked NAV.",
       ],
       terms: ["mark", "nav", "merkleReceipt"],

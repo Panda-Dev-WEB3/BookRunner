@@ -9,6 +9,7 @@ import { SERIES } from "../../lib/palette";
 import { cx } from "../cx";
 import { Term } from "../ui";
 import { isTestChain } from "../../wallet/network";
+import { CarryPct } from "../ProtocolTerms";
 import { bkrnNum } from "./stakeLogic";
 import type { StakingProtocol } from "./useStaking";
 
@@ -97,7 +98,7 @@ export function CarryFlow({ data }: { data: StakingProtocol | undefined }) {
           step="2 · Carry"
           title={
             <>
-              10% <Term id="carry">protocol carry</Term>
+              <CarryPct /> <Term id="carry">protocol carry</Term>
             </>
           }
           body="Taken in the waterfall before Senior. There is no fee on capital."

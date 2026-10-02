@@ -7,6 +7,7 @@ import { cx } from "../cx";
 import { IconArrowRight } from "../icons";
 import { Term } from "../Term";
 import { Badge, Card } from "../ui";
+import { MarkCadenceText } from "../ProtocolTerms";
 import { LearnSection } from "./parts";
 
 interface Stage {
@@ -40,7 +41,7 @@ const STAGES: Stage[] = [
     who: <Term id="riskCommittee" />,
     what: "A model jury reviews the charter and publishes its verdict. Then three bonded committee members vote.",
     detail: "Two approvals pass it, or three if the jury advised against. Approval deploys the book's contracts; rejection refunds the fee and unlocks the bond.",
-    when: "Decided within 48 hours.",
+    when: "Within the committee window (48 hours by default). A charter left undecided expires, and its fee is refunded and its bond unlocked.",
   },
   {
     id: "subscription",
@@ -74,7 +75,11 @@ const STAGES: Stage[] = [
       </>
     ),
     detail: "Applying the mark moves share prices, books any loss in order (Junior, then Senior, then the backstop) and settles queued redemptions.",
-    when: "Hourly on testnet, daily on mainnet.",
+    when: (
+      <>
+        Once per mark period: <MarkCadenceText />.
+      </>
+    ),
     cycle: true,
   },
   {

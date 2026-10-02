@@ -8,6 +8,7 @@ import { IconArrowRight } from "../icons";
 import { Term } from "../Term";
 import { Card, Stat, StatGrid } from "../ui";
 import { isTestChain } from "../../wallet/network";
+import { CarryPct } from "../ProtocolTerms";
 import { Figure, FlowArrow, FlowNode, LearnSection, Prose } from "./parts";
 import { useStakingStats } from "./useLearnData";
 
@@ -48,7 +49,7 @@ export function BkrnSection(props: { index: number }) {
             <FlowNode series="fee" title="Fee flow of every book">
               After expenses, the protocol takes its carry before Senior.
             </FlowNode>
-            <FlowArrow vertical label="10%" />
+            <FlowArrow vertical label={<CarryPct />} />
             <FlowNode series="bkrn" title={<Term id="carry">Protocol carry</Term>}>
               Split in half by the fee router.
             </FlowNode>

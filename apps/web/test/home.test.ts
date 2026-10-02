@@ -183,6 +183,17 @@ describe("FAQ", () => {
     });
   }
 
+  test("carry and mark cadence come from the chain (timelock-settable), with the launch defaults as fallback", () => {
+    const text = (ctx: Parameters<typeof faqItems>[0]) => faqItems(ctx).flatMap((f) => f.answer).join(" ");
+    const live = text({ ...contexts[0]!, carryPct: "12.5%", cadence: "hourly" });
+    expect(live).toContain("the 12.5% protocol carry");
+    expect(live).toContain("Once per mark period (hourly on Robinhood Chain Testnet)");
+    expect(live).not.toContain("hourly on testnet, daily on mainnet");
+    const fallback = text(contexts[1]!);
+    expect(fallback).toContain("the 10% protocol carry");
+    expect(fallback).toContain("daily by default");
+  });
+
   test("covers the questions a newcomer asks first", () => {
     const ids = faqItems(contexts[0]!).map((f) => f.id);
     for (const id of ["perp", "money", "lose", "nav", "withdraw", "testnet", "agent", "bkrn"]) expect(ids).toContain(id);

@@ -9,6 +9,7 @@ import { cx } from "../cx";
 import { Term } from "../Term";
 import { Callout, Card, ErrorState, SkeletonRows, TrancheBadge, ValueKind } from "../ui";
 import { Figure, LearnSection } from "./parts";
+import { appChain } from "../../wallet/chains";
 import { share } from "./sim";
 import { markedBooks, useLiveBooks } from "./useLearnData";
 
@@ -231,7 +232,7 @@ export function TranchesSection(props: { index: number }) {
           <TrancheStack />
         </Figure>
         <Card
-          title="Live split on testnet"
+          title={`Live split on ${appChain.name}`}
           description="Marked Senior and Junior NAV of each book, from its latest signed mark."
           actions={<ValueKind kind="marked" />}
         >

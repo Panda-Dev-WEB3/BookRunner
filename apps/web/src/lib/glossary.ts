@@ -118,14 +118,14 @@ const entries: GlossaryEntry[] = [
   {
     id: "carry",
     term: "Protocol carry",
-    short: "The protocol's cut: 10% of each book's fee flow after expenses, taken before Senior. Half buys BKRN for stakers, half goes to the backstop pool.",
+    short: "The protocol's cut of each book's fee flow after expenses: 10% by default, set on-chain by governance, and taken before Senior and Junior share the rest. Half buys BKRN for stakers, half goes to the backstop pool.",
     long: "There is no management fee on capital. Expenses (oracle and keeper gas) are capped on-chain before carry is taken.",
     related: ["waterfall", "backstop", "staking"],
   },
   {
     id: "waterfall",
     term: "Waterfall",
-    short: "The order money moves in. Fee flow runs down: expenses, then the 10% carry, then a fixed split between Senior's hurdle share and the Junior residual. Losses run up: Junior first, then Senior, then the backstop up to the pool.",
+    short: "The order money moves in. Fee flow runs down: expenses, then the protocol carry (10% by default), then a fixed split between Senior's hurdle share and the Junior residual. Losses run up: Junior first, then Senior, then the backstop up to the pool.",
     related: ["carry", "hurdle", "backstop"],
   },
   {
@@ -151,7 +151,7 @@ const entries: GlossaryEntry[] = [
     id: "mark",
     term: "Mark",
     short: "The book's signed statement for one period: NAV, inventory and P&L, committed on-chain with a receipts root. Applying a mark updates share prices and settles queued redemptions.",
-    long: "One mark transaction per book per period: hourly on testnet, daily on mainnet. Between marks the app may show a live estimate, clearly labelled, which is never used for deposits or redemptions.",
+    long: "One mark transaction per book per period, at the interval each network sets (daily by default; book pages show the live schedule). Between marks the app may show a live estimate, clearly labelled, which is never used for deposits or redemptions.",
     related: ["nav", "merkleReceipt"],
   },
   {

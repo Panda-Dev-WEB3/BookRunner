@@ -5,6 +5,7 @@ import { config } from "../../lib/config";
 import { fmtDuration } from "../../lib/format";
 import { termAnchor } from "../../lib/glossary";
 import { isTestChain } from "../../wallet/network";
+import { CarryPct } from "../ProtocolTerms";
 import { Accordion, type AccordionItem, Term } from "../ui";
 
 export function StakeFaq({ cooldownSec }: { cooldownSec: number | null }) {
@@ -31,7 +32,7 @@ export function StakeFaq({ cooldownSec }: { cooldownSec: number | null }) {
       title: "Where does the BKRN I can claim come from?",
       content: (
         <p>
-          Each book pays 10% of its fee flow, after expenses, as <Term id="carry">protocol carry</Term>. The fee router sends half to the USDC backstop pool. A keeper swaps the other half for BKRN on
+          Each book pays <CarryPct /> of its fee flow, after expenses, as <Term id="carry">protocol carry</Term>. The fee router sends half to the USDC backstop pool. A keeper swaps the other half for BKRN on
           the market and hands it to the staking contract, which shares it across all staked BKRN at that moment, in proportion to each stake. Your part waits in the contract until you claim it.
         </p>
       ),

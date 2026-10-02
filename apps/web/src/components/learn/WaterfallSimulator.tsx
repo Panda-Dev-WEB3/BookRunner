@@ -11,13 +11,13 @@ import { useBackstopBalance } from "../../wallet/backstop";
 import { cx } from "../cx";
 import { Term } from "../Term";
 import { Badge, Callout, Card, Segmented, ValueKind } from "../ui";
+import { CarryPct, useProtocolTerms } from "../ProtocolTerms";
 import { LearnSection } from "./parts";
 import {
   DEFAULT_SIM,
   type FeeOutcome,
   LAUNCH_TERMS,
   type LossOutcome,
-  PROTOCOL_DEFAULTS,
   type SimInput,
   type SimMode,
   feeSentence,
@@ -195,7 +195,7 @@ function BeforeAfter(props: { rows: Array<{ label: ReactNode; before: bigint; af
 }
 
 // ------------------------------------------------------------------ results
-function FeeResult({ o, hurdleBps }: { o: FeeOutcome; hurdleBps: number }) {
+function FeeResult({ o, hurdleBps, carryBps, expenseCapBps }: { o: FeeOutcome; hurdleBps: number; carryBps: number; expenseCapBps: number }) {
   const segs: Seg[] = [
     { key: "expenses", neutral: true, amount: o.expenses, label: "Expenses" },
     { key: "buyback", series: "bkrn", amount: o.carryToBuyback, label: "Carry: buys BKRN" },
@@ -243,8 +243,8 @@ function FeeResult({ o, hurdleBps }: { o: FeeOutcome; hurdleBps: number }) {
           badge={o.expensesCapped ? <Badge tone="warn" size="sm">Capped</Badge> : undefined}
           note={
             o.expensesCapped
-              ? `${USDC(o.expensesRequested)} was asked for, but expenses are capped at ${pctText(PROTOCOL_DEFAULTS.expenseCapBps)} of fee flow (${USDC(o.expenseCap)}).`
-              : `Oracle and keeper costs, capped at ${pctText(PROTOCOL_DEFAULTS.expenseCapBps)} of fee flow. ${USDC(o.net)} is left.`
+              ? `${USDC(o.expensesRequested)} was asked for, but expenses are capped at ${pctText(expenseCapBps)} of fee flow (${USDC(o.expenseCap)}).`
+              : `Oracle and keeper costs, capped at ${pctText(expenseCapBps)} of fee flow. ${USDC(o.net)} is left.`
           }
         />
         <Step
@@ -255,7 +255,7 @@ function FeeResult({ o, hurdleBps }: { o: FeeOutcome; hurdleBps: number }) {
           to={o.net}
           scale={o.gross}
           seg={{ key: "carry", series: "bkrn", amount: o.carry, label: "" }}
-          note={`${pctText(PROTOCOL_DEFAULTS.carryBps)} of what is left after expenses. ${USDC(o.carryToBuyback)} buys BKRN for stakers and ${USDC(o.carryToBackstop)} goes to the backstop pool.`}
+          note={`${pctText(carryBps)} of what is left after expenses. ${USDC(o.carryToBuyback)} buys BKRN for stakers and ${USDC(o.carryToBackstop)} goes to the backstop pool.`}
         />
         <Step
           n={4}
@@ -415,7 +415,9 @@ export function WaterfallSimulator() {
 
   const presetValue = preset.kind === "book" || preset.kind === "loading" ? String(preset.bookId) : "example";
   const options = [{ value: "example", label: "Round numbers" }, ...books.map((b) => ({ value: String(b.bookId), label: tickerOf(b.symbol), title: `Start from the ${tickerOf(b.symbol)} book's marked NAV and charter terms` }))];
-  const fees = simulateFees(input);
+  // carry and the expense cap as configured on-chain now (launch defaults until read)
+  const terms = useProtocolTerms();
+  const fees = simulateFees({ ...input, carryBps: terms.carryBps, expenseCapBps: terms.expenseCapBps });
   const loss = simulateLoss(input);
   const poolRaw = pool.data ?? null;
   const seniorOverCap = input.seniorBps > LAUNCH_TERMS.seniorCapBps;
@@ -518,7 +520,7 @@ export function WaterfallSimulator() {
                 step={5}
                 format={(v) => `${whole(v)} USDC`}
                 onChange={(v) => set({ expensesUsd: v })}
-                help={`Oracle and keeper gas. Never more than ${pctText(PROTOCOL_DEFAULTS.expenseCapBps)} of the fee flow is paid.`}
+                help={`Oracle and keeper gas. Never more than ${pctText(terms.expenseCapBps)} of the fee flow is paid.`}
               />
               <SimField
                 id={`${id}-hurdle`}
@@ -589,7 +591,7 @@ export function WaterfallSimulator() {
         <p className="mb-5 text-[16px] leading-relaxed font-medium text-ink sm:text-[17px]" aria-live="polite">
           {mode === "fees" ? feeSentence(fees) : lossSentence(loss)}
         </p>
-        {mode === "fees" ? <FeeResult o={fees} hurdleBps={input.hurdleBps} /> : <LossResult o={loss} />}
+        {mode === "fees" ? <FeeResult o={fees} hurdleBps={input.hurdleBps} carryBps={terms.carryBps} expenseCapBps={terms.expenseCapBps} /> : <LossResult o={loss} />}
         <p className="mt-5 text-[12px] leading-relaxed text-muted">
           {mode === "fees"
             ? "Fee flow is credited to the tranches when the book's router distributes it. Gains in the book's own trading are booked at the mark instead: they first restore any Senior shortfall, then go to Junior."
@@ -610,7 +612,7 @@ export function SimulatorSection(props: { index: number }) {
       title="Waterfall simulator"
       lead={
         <>
-          Move the sliders to see where each dollar goes. Fee flow runs <em>down</em> the <Term id="waterfall">waterfall</Term>: expenses, then the 10% carry,
+          Move the sliders to see where each dollar goes. Fee flow runs <em>down</em> the <Term id="waterfall">waterfall</Term>: expenses, then the <CarryPct /> carry,
           then a fixed split between Senior's share and Junior. Losses run <em>up</em> it: Junior, then Senior, then the backstop up to the pool.
         </>
       }

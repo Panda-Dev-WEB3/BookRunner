@@ -3,6 +3,7 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router";
 import { SPONSOR_SKIN_SHORT } from "../../lib/copy";
+import { CarryPct } from "../ProtocolTerms";
 import { cx } from "../cx";
 import { IconArrowRight } from "../icons";
 import { Section, Term } from "../ui";
@@ -66,7 +67,7 @@ const STEPS: Step[] = [
     art: <WaterfallArt />,
     body: (
       <>
-        Fee flow pays expenses and the 10% <Term id="carry">carry</Term>, then splits the rest between Senior and Junior in fixed shares: the <Term id="waterfall">waterfall</Term>. Each period a signed{" "}
+        Fee flow pays expenses and the <CarryPct /> <Term id="carry">carry</Term>, then splits the rest between Senior and Junior in fixed shares: the <Term id="waterfall">waterfall</Term>. Each period a signed{" "}
         <Term id="mark">mark</Term> commits NAV on-chain with receipts anyone can verify.
       </>
     ),
