@@ -143,6 +143,12 @@ contract BookrunnerConfigTest is Test {
         for (uint256 i; i < keys.length; ++i) {
             address value = address(uint160(0x1000 + i));
             assertTrue(config.isAddressKey(keys[i]));
+            if (keys[i] == "timelock") {
+                // the timelock must hold DEFAULT_ADMIN_ROLE (timelock() follows the admin role)
+                bytes32 adminRole = config.DEFAULT_ADMIN_ROLE();
+                vm.prank(admin);
+                config.grantRole(adminRole, value);
+            }
             vm.expectEmit(true, false, false, true, address(config));
             emit IBookrunnerConfig.AddressSet(keys[i], value);
             vm.prank(admin);

@@ -1391,6 +1391,17 @@ export const bookrunnerConfigAbi = [
   },
   {
     "type": "error",
+    "name": "TimelockNotAdmin",
+    "inputs": [
+      {
+        "name": "timelock",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "TooManyTiers",
     "inputs": [
       {

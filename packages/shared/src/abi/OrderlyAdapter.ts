@@ -61,6 +61,19 @@ export const orderlyAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "FEE_SWEEP_LOOKBACK_PERIODS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "UPGRADE_INTERFACE_VERSION",
     "inputs": [],
     "outputs": [
@@ -228,6 +241,30 @@ export const orderlyAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "depositNativeFee",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "uint8",
+        "internalType": "uint8"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "depositToVenue",
     "inputs": [
       {
@@ -317,6 +354,19 @@ export const orderlyAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "heldForPendingWithdrawalsUsd",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "inTransitUsd",
     "inputs": [],
     "outputs": [
@@ -367,6 +417,19 @@ export const orderlyAdapterAbi = [
   {
     "type": "function",
     "name": "lastFlowAt",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "lastSweptPeriod",
     "inputs": [],
     "outputs": [
       {
@@ -656,7 +719,7 @@ export const orderlyAdapterAbi = [
     "inputs": [],
     "outputs": [
       {
-        "name": "",
+        "name": "amount",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -1503,6 +1566,38 @@ export const orderlyAdapterAbi = [
   },
   {
     "type": "error",
+    "name": "PeriodNotAfterLastSwept",
+    "inputs": [
+      {
+        "name": "period",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "lastSweptPeriod",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "PeriodTooOld",
+    "inputs": [
+      {
+        "name": "period",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "oldestAccepted",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "ReentrancyGuardReentrantCall",
     "inputs": []
   },
@@ -1704,6 +1799,17 @@ export const orderlyAdapterAbi = [
       },
       {
         "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "WithdrawalPending",
+    "inputs": [
+      {
+        "name": "pendingUsd",
         "type": "uint256",
         "internalType": "uint256"
       }

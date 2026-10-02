@@ -108,6 +108,7 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
     error TooManyTiers(uint256 count, uint256 max);
     error TiersNotAscending(uint256 index);
     error NotAdminOrGuardian(address caller);
+    error TimelockNotAdmin(address timelock);
 
     /// @notice Minimum insurance-fund size for `venue` changed.
     event VenueMinIfSet(uint8 indexed venue, uint256 amountUsd);
@@ -119,7 +120,9 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
     // ---------------------------------------------------------------------------------------------
 
     /// @param admin Holder of `DEFAULT_ADMIN_ROLE` (the TimelockController, or the deployer until handover).
-    ///              Also recorded as the initial `timelock()` address.
+    ///              Also recorded as the initial `timelock()` address. Handover: grant
+    ///              `DEFAULT_ADMIN_ROLE` to the TimelockController, `setAddress("timelock", controller)`,
+    ///              then renounce the deployer's roles (`timelock()` follows the admin role, see there).
     /// @dev Initialises the mainnet defaults of ARCHITECTURE §2.1. Devnet overrides are applied by the
     ///      deploy script through `setParams`.
     constructor(address admin) {
@@ -229,9 +232,9 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
     // Views — addresses
     // ---------------------------------------------------------------------------------------------
 
-    /// @notice Generic address lookup by key (zero when unset).
+    /// @notice Generic address lookup by key (zero when unset). `timelock` resolves as `timelock()`.
     function addressOf(bytes32 key) external view returns (address) {
-        return _addresses[key];
+        return key == KEY_TIMELOCK ? _timelock() : _addresses[key];
     }
 
     /// @inheritdoc IBookrunnerConfig
@@ -310,8 +313,11 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
     }
 
     /// @inheritdoc IBookrunnerConfig
+    /// @dev The recorded timelock only while it still holds `DEFAULT_ADMIN_ROLE`, else address(0): every
+    ///      48h-gated power (`msg.sender == config.timelock()`) follows the admin role and fails closed if
+    ///      the role is moved/renounced without repointing the timelock (no stale holder keeps it).
     function timelock() external view returns (address) {
-        return _addresses[KEY_TIMELOCK];
+        return _timelock();
     }
 
     /// @inheritdoc IBookrunnerConfig
@@ -421,8 +427,14 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
     function _setAddress(bytes32 key, address value) private {
         if (!isAddressKey(key)) revert UnknownKey(key);
         if (value == address(0)) revert ZeroAddress();
+        if (key == KEY_TIMELOCK && !hasRole(DEFAULT_ADMIN_ROLE, value)) revert TimelockNotAdmin(value);
         _addresses[key] = value;
         emit AddressSet(key, value);
+    }
+
+    function _timelock() private view returns (address t) {
+        t = _addresses[KEY_TIMELOCK];
+        if (!hasRole(DEFAULT_ADMIN_ROLE, t)) t = address(0);
     }
 
     function _setParam(bytes32 key, uint256 value) private {

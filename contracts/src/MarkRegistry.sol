@@ -7,6 +7,7 @@ import {BRTypes} from "./interfaces/BRTypes.sol";
 import {IMarkRegistry} from "./interfaces/IMarkRegistry.sol";
 import {IBookFactory} from "./interfaces/IBookFactory.sol";
 import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
+import {IBook} from "./interfaces/IBook.sol";
 
 /// @title MarkRegistry — signed, receipt-rooted period marks.
 /// @notice The mark service signs an EIP-712 `Mark` (domain "Bookrunner MarkRegistry" / "1"); anyone may
@@ -14,6 +15,12 @@ import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 ///         is aligned to `config.markInterval()`, strictly after the book's previous committed period,
 ///         not in the future and no older than `config.maxMarkAge()`, for a book registered by the
 ///         factory. Mark ids are global and start at 1. Only the mark's book may flag it applied.
+///
+///         Stale-mark replacement: a commit for the SAME period as the book's latest mark is accepted
+///         (superseding it as `latestMarkId`) only while that latest mark is unapplied and its `flowNonce`
+///         no longer equals `book.flowNonce()`, i.e. it can never be applied (Book.applyMark requires the
+///         current nonce). A capital flow between commit and apply therefore cannot burn the period, while
+///         an applicable mark can never be equivocated.
 /// @dev Typed data mirrored by `packages/shared/src/eip712.ts` (`markTypes`).
 contract MarkRegistry is IMarkRegistry, EIP712 {
     /// @inheritdoc IMarkRegistry
@@ -47,6 +54,11 @@ contract MarkRegistry is IMarkRegistry, EIP712 {
     error UnknownMark(uint256 markId);
     error NotBook(uint256 markId, address caller);
     error AlreadyApplied(uint256 markId);
+
+    /// @notice `newMarkId` replaced the stale, unapplied `oldMarkId` for the same `periodEnd` of `bookId`.
+    event MarkSuperseded(
+        uint256 indexed bookId, uint256 indexed oldMarkId, uint256 indexed newMarkId, uint64 periodEnd
+    );
 
     /// @param config_ BookrunnerConfig.
     constructor(address config_) EIP712("Bookrunner MarkRegistry", "1") {
@@ -89,7 +101,10 @@ contract MarkRegistry is IMarkRegistry, EIP712 {
         uint32 interval = config.markInterval();
         if (periodEnd % interval != 0) revert PeriodNotAligned(periodEnd, interval);
         uint64 last = lastPeriodEnd[m.bookId];
-        if (periodEnd <= last) revert PeriodNotAfterLast(periodEnd, last);
+        uint256 superseded;
+        if (periodEnd < last || (periodEnd == last && (superseded = _staleLatest(m.bookId)) == 0)) {
+            revert PeriodNotAfterLast(periodEnd, last);
+        }
         if (periodEnd > block.timestamp) revert PeriodInFuture(periodEnd, block.timestamp);
         uint32 maxAge = config.maxMarkAge();
         if (block.timestamp - periodEnd > maxAge) revert MarkTooOld(periodEnd, block.timestamp, maxAge);
@@ -103,7 +118,14 @@ contract MarkRegistry is IMarkRegistry, EIP712 {
         latestMarkId[m.bookId] = markId;
         lastPeriodEnd[m.bookId] = periodEnd;
 
+        if (superseded != 0) emit MarkSuperseded(m.bookId, superseded, markId, periodEnd);
         _emitCommitted(markId, m, signer);
+    }
+
+    /// @notice Whether a commit for `bookId`'s latest committed period would currently be accepted as a
+    ///         replacement (latest mark unapplied and its flowNonce != book.flowNonce()).
+    function latestMarkReplaceable(uint256 bookId) external view returns (bool) {
+        return _staleLatest(bookId) != 0;
     }
 
     /// @inheritdoc IMarkRegistry
@@ -122,6 +144,17 @@ contract MarkRegistry is IMarkRegistry, EIP712 {
         if (mk.applied) revert AlreadyApplied(markId);
         mk.applied = true;
         emit MarkApplied(markId, bookId);
+    }
+
+    /// @dev The book's latest mark id if it exists, is unapplied and was computed against a flowNonce the
+    ///      book has moved past (so it can never be applied); 0 otherwise.
+    function _staleLatest(uint256 bookId) private view returns (uint256 id) {
+        id = latestMarkId[bookId];
+        if (id == 0) return 0;
+        BRTypes.Mark storage prev = _marks[id];
+        if (prev.applied) return 0;
+        address book = _factory().bookOf(bookId);
+        if (book == address(0) || prev.input.flowNonce == IBook(book).flowNonce()) return 0;
     }
 
     function _factory() private view returns (IBookFactory) {

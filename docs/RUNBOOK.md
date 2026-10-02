@@ -29,8 +29,13 @@ Preconditions (all must be checked off in `docs/VERIFY.md` with sources):
 Deployment (fresh deployer, multisig admin, unlinked from other studio deployers):
 
 1. Deploy with `Deploy.s.sol` using `--rpc-url $RHC_RPC_URL` and a hardware/multisig-controlled
-   deployer; set the TimelockController min delay to 48h; transfer every admin role to the timelock
-   and the timelock proposer/executor roles to the multisig; renounce the deployer.
+   deployer; set the TimelockController min delay to 48h; grant `DEFAULT_ADMIN_ROLE` on
+   BookrunnerConfig to the TimelockController, call `config.setAddress("timelock", <controller>)`
+   (it must already hold the admin role), transfer every other admin role to the timelock and the
+   timelock proposer/executor roles to the multisig; renounce the deployer. Assert afterwards that
+   `config.timelock() == <controller>` and the deployer holds no role (`timelock()` resolves to
+   `address(0)` — every upgrade/timelock power fails closed — if the recorded address lost the admin
+   role).
 2. Grant roles: MARK_SIGNER, RISK, OPS_VENUE, JURY, KEEPER to service keys held in a secret manager
    (never the test mnemonic; `devkeys.ts` refuses non-local chains without explicit keys).
 3. Register oracle signer(s) with the attestation hash; register Stock Tokens and indices with

@@ -115,7 +115,9 @@ Router, Desk. All initializers use OZ `Initializable` and are locked on the impl
 
 AccessControl registry implementing `IBookrunnerConfig`. `DEFAULT_ADMIN_ROLE` = timelock. Role ids
 are `keccak256("MARK_SIGNER")` etc. Setters (admin only) for every address/param, emitting
-`AddressSet`/`ParamSet`. `setNewBooksPaused(bool)` callable by admin or GUARDIAN.
+`AddressSet`/`ParamSet`. `timelock()` returns the recorded address only while it holds
+`DEFAULT_ADMIN_ROLE` (else `address(0)`, fail-closed), and `setAddress("timelock", t)` requires `t`
+to hold it, so every timelock-gated power follows the admin role across the handover. `setNewBooksPaused(bool)` callable by admin or GUARDIAN.
 `agentTierBond(inventoryUsd)`: step function over sorted tiers `[(inventoryUsdThreshold, bond)]`;
 returns 0 below the entry tier. Defaults (mainnet): carryBps 1000, expenseCapBps 2000, charterFee
 5,000 USDC, sponsorBond 100,000 BKRN, committeeBond 250,000 BKRN, markInterval 86400, maxMarkAge
@@ -152,7 +154,10 @@ venueMinIf[PoolEngine] 10,000 USDC, tiers: entry 50k USD → 0, ≥50k → 25k B
 `MARK_SIGNER`; `periodEnd % markInterval == 0`; `periodEnd > lastPeriodEnd[bookId]`;
 `periodEnd <= block.timestamp`; `block.timestamp - periodEnd <= maxMarkAge`; book exists
 (`factory.bookOf(bookId) != 0`). Mark ids are global, start at 1. `markApplied` only callable by
-`factory.bookOf(mark.bookId)`.
+`factory.bookOf(mark.bookId)`. **[ext]** Stale-mark replacement: `periodEnd == lastPeriodEnd[bookId]`
+is also accepted (new mark becomes `latestMarkId`, emits `MarkSuperseded`) while the latest mark is
+unapplied and its `flowNonce != book.flowNonce()` (it can never be applied), so a capital flow between
+commit and apply never burns the period; `latestMarkReplaceable(bookId)` previews it.
 
 ### 2.4 RevenueRouter [A-core]
 
@@ -390,6 +395,15 @@ are oracle keys published by the oracle service as the weighted index level.
   amount)` (OPS_VENUE): once per period, `amount <= maxFeeSweepPerPeriodUsd` (default 2% of
   `ifTargetUsd + mmInventoryUsd` per period, settable by timelock) → RevenueRouter
   (`SRC_VENUE_TAKER_SHARE`). `setDelegateSigner` (timelock) → `IOrderlyVault.delegateSigner`.
+  **[ext] Withdrawal/report protocol** (each USDC counted once in any payout/confirm order):
+  Requested = still venue-side; a payout landing before `confirmWithdraw` is *held* on the adapter
+  (never swept as unattributed nor forwarded as fees); `report` reverts `WithdrawalPending` while any
+  request is Requested; ops-venue confirms as soon as the venue has debited the account (before the
+  payout), cancels requests the venue will not execute, and reports raw venue equity (net of executed
+  withdrawals) only once the venue has credited every on-chain deposit (`asOf >= lastFlowAt`, which
+  deposit/confirm/cancel/fail set). Only principal sweeps notify the vault (`flowNonce++`).
+  `sweepFees` labels are monotonic and at most `FEE_SWEEP_LOOKBACK_PERIODS` (2) intervals old; the
+  earmark must precede the fee payment to the adapter.
 - `MockOrderlyVault`: implements `IOrderlyVault` on devnet; ledger of deposits per accountId;
   `operatorWithdraw(accountId, to, amount)` callable by an operator (ops-venue) to simulate Orderly
   paying a withdrawal; `creditFees(accountId, amount)` for simulated builder fee settlement (USDC

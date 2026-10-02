@@ -37,15 +37,30 @@ interface IVaultFlowNotify {
 ///           confirmed (executed on Orderly) withdrawals not yet swept into the vault. Requested but
 ///           unconfirmed withdrawals are still venue-side and are counted there (never twice).
 ///
+///         Withdrawal / report protocol (each USDC unit is counted exactly once, in any order of venue
+///         payout vs `confirmWithdraw`):
+///           Requested  counted venue-side. `report` reverts (`WithdrawalPending`) while any request is
+///                      Requested, so no venue snapshot taken after the venue debit can overwrite the
+///                      venue-side figure before the confirmation books that debit on-chain. A payout that
+///                      lands before confirmation is HELD on the adapter (neither swept nor forwarded).
+///           Confirmed  moved venue-side -> inTransit (ops-venue confirms as soon as the venue has debited
+///                      the account). Reports are raw venue equity, i.e. net of executed withdrawals.
+///           Swept      inTransit -> vault idle (mark-window gated, bumps `book.flowNonce`).
+///         Reports must also already reflect every on-chain deposit (`asOf >= lastFlowAt` is enforced
+///         here; ops-venue must additionally wait until the venue has credited `totalDepositedUsd`).
+///
 ///         Attribution of USDC sitting on the adapter is principal-first: up to `inTransitUsd` is returned
-///         principal (vault-bound), then up to `pendingFeesUsd` is fee flow (router-bound), anything else is
-///         unattributed (vault-bound). Fee forwarding therefore never consumes principal.
+///         principal (vault-bound), then up to `pendingWithdrawUsd` is held for requested-but-unconfirmed
+///         withdrawals (stays here), then up to `pendingFeesUsd` is fee flow (router-bound), anything else
+///         is unattributed (vault-bound). Fee forwarding therefore never consumes principal.
 ///
 ///         Mark-window gate [ext]: while the book is Live/Retiring, `sweepToVault` may not move returned
 ///         principal once a mark period has ended until that period's mark is applied. A mark carries a
 ///         snapshot of `deployedValueUsd` (which includes in-transit principal) while `Book.applyMark`
-///         reads `vault.idle()` live, and a sweep does not bump `book.flowNonce`; without the gate a
-///         sweep between the mark snapshot and its application would count the same USDC twice.
+///         reads `vault.idle()` live; without the gate a sweep between the mark snapshot and its
+///         application would count the same USDC twice. Only principal sweeps notify the vault (flowNonce
+///         bump); unattributed USDC was never part of `deployedValueUsd`, so sweeping it is a plain gain that
+///         a mark counts once through `vault.idle()` and must not invalidate a committed mark.
 ///
 /// @dev VERIFY (see docs/VERIFY.md): Orderly validates `accountId == keccak256(abi.encode(receiver,
 ///      brokerHash))` on deposit, i.e. ONE account per (address, broker). The devnet derivation used here
@@ -109,6 +124,8 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         uint256[2] totalDepositedUsd;
         uint256 totalReturnedUsd;
         uint256 totalFeesForwardedUsd;
+        // appended (v2): latest fee period label accepted by `sweepFees` (monotonic)
+        uint64 lastSweptPeriod;
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -117,6 +134,10 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
 
     /// @notice Default per-period fee sweep cap: 2% of (ifTargetUsd + mmInventoryUsd).
     uint256 public constant DEFAULT_FEE_SWEEP_CAP_BPS = 200;
+    /// @notice `sweepFees` accepts a period label at most this many mark intervals before the current
+    ///         period start (ops-venue plans only the latest completed periods; older settlements carry
+    ///         forward cumulatively), so at most (1 + lookback) caps can be earmarked in a burst.
+    uint64 public constant FEE_SWEEP_LOOKBACK_PERIODS = 2;
     uint256 private constant BPS = 10_000;
 
     /// @dev keccak256(abi.encode(uint256(keccak256("bookrunner.storage.OrderlyAdapter")) - 1)) & ~bytes32(uint256(0xff))
@@ -190,6 +211,9 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     error PeriodInFuture(uint64 period);
     error PeriodBeforeBook(uint64 period, uint64 feePeriodFloor);
     error PeriodAlreadySwept(uint64 period);
+    error PeriodNotAfterLastSwept(uint64 period, uint64 lastSweptPeriod);
+    error PeriodTooOld(uint64 period, uint64 oldestAccepted);
+    error WithdrawalPending(uint256 pendingUsd);
     error FeeSweepAboveCap(uint256 amount, uint256 cap);
     error ExceedsPendingFees(uint256 amount, uint256 pending);
     error SweepBlockedUntilMark(uint64 periodEnd, uint64 lastAppliedPeriodEnd);
@@ -290,7 +314,9 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
 
     /// @inheritdoc IVenueAdapter
     /// @dev Only the book's vault. Asynchronous: records request `nonce` for ops-venue, which executes it
-    ///      on Orderly (receiver = this adapter) and then calls `confirmWithdraw(nonce)`.
+    ///      on Orderly (receiver = this adapter) and calls `confirmWithdraw(nonce)` as soon as the venue has
+    ///      debited the account (before or after the payout lands — USDC landing first is held here).
+    ///      Venue reports are rejected until the request is confirmed or cancelled.
     function requestWithdraw(uint8 account, uint256 amount) external {
         AdapterStorage storage $ = _s();
         if (msg.sender != $.vault) revert NotVault();
@@ -312,15 +338,15 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     }
 
     /// @inheritdoc IVenueAdapter
-    /// @dev Anyone. Sends returned principal plus unattributed USDC to the vault, keeping USDC attributed to
-    ///      pending fee sweeps for the router. Returns 0 (no-op) when there is nothing to sweep. Reverts with
+    /// @dev Anyone. Sends returned principal plus unattributed USDC to the vault, keeping USDC held for
+    ///      requested-but-unconfirmed withdrawals on the adapter and USDC attributed to pending fee sweeps
+    ///      for the router. Returns 0 (no-op) when there is nothing to sweep. Reverts with
     ///      `SweepBlockedUntilMark` if principal would move while the current period's mark is unapplied.
+    ///      Only a principal sweep notifies the vault (book.flowNonce++).
     function sweepToVault() external nonReentrant returns (uint256 amount) {
         AdapterStorage storage $ = _s();
-        uint256 balance = $.usdc.balanceOf(address(this));
-        uint256 principal = Math.min(balance, $.inTransitUsd);
-        uint256 feeReserved = Math.min($.pendingFeesUsd, balance - principal);
-        amount = balance - feeReserved;
+        uint256 principal;
+        (amount, principal) = _sweepable($);
         if (amount == 0) return 0;
         if (principal != 0) _checkSweepOpen($);
 
@@ -331,11 +357,16 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         $.usdc.safeTransfer($.vault, amount);
 
         emit SweptToVault(amount);
-        if (principal != 0) emit InTransitCleared(principal, remaining);
-        // flowNonce++ so a mark valued with these funds still in transit can no longer be applied
-        // (defence in depth on top of the sweep window gate). Best-effort: never blocks a sweep.
-        try IVaultFlowNotify($.vault).notifyCapitalFlow() {} catch {
-            emit CapitalFlowNotifyFailed($.vault);
+        if (principal != 0) {
+            emit InTransitCleared(principal, remaining);
+            // flowNonce++ so a mark valued with these funds still in transit can no longer be applied
+            // (defence in depth on top of the sweep window gate). Best-effort: never blocks a sweep.
+            // Unattributed USDC (donations, cancelled earmarks) never bumps the nonce: it was never in
+            // deployedValueUsd, so a mark counts it once via vault.idle() and stays applicable.
+            try IVaultFlowNotify($.vault).notifyCapitalFlow() {}
+            catch {
+                emit CapitalFlowNotifyFailed($.vault);
+            }
         }
     }
 
@@ -344,7 +375,8 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     // ---------------------------------------------------------------------------------------------
 
     /// @inheritdoc IOrderlyAdapter
-    /// @dev OPS_VENUE. Requested -> Confirmed: moves the amount from venue-side to in-transit.
+    /// @dev OPS_VENUE. Requested -> Confirmed: moves the amount from venue-side to in-transit. Call it as
+    ///      soon as the venue has debited the account; USDC that already landed (held) becomes principal.
     function confirmWithdraw(uint256 requestNonce) external {
         _checkOpsVenue();
         _confirm(requestNonce, 0);
@@ -360,7 +392,10 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     }
 
     /// @notice OPS_VENUE. Requested -> Cancelled for a request the venue cannot execute (e.g. IF locked
-    ///         while the symbol is listed). Nothing moves; the requester may recall again later.
+    ///         while the symbol is listed). Nothing moves; the requester may recall again later. Never
+    ///         cancel a request the venue executed (debited or paid): confirm it (and `failWithdraw` if the
+    ///         venue later returns the funds). Sets `lastFlowAt`, so a venue snapshot taken while the
+    ///         request was outstanding can no longer be reported.
     /// @param requestNonce The request to cancel.
     function cancelWithdraw(uint256 requestNonce) external {
         _checkOpsVenue();
@@ -370,6 +405,7 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         r.status = WithdrawStatus.Cancelled;
         uint256 amount = r.amount;
         $.pendingWithdrawUsd[r.account] -= amount;
+        $.lastFlowAt = uint64(block.timestamp);
         emit WithdrawCancelled(requestNonce, r.account, amount);
     }
 
@@ -392,12 +428,17 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     }
 
     /// @inheritdoc IOrderlyAdapter
-    /// @dev OPS_VENUE. Overwrites the venue-side balances. `asOf` must be strictly increasing, not in the
-    ///      future, and not older than the last on-chain flow (a snapshot taken before a deposit/confirmation
+    /// @dev OPS_VENUE. Overwrites the venue-side balances with raw venue equity (net of every withdrawal the
+    ///      venue executed, gross of nothing). Reverts `WithdrawalPending` while any withdrawal is Requested
+    ///      (the venue debits on request, the adapter on confirmation: a snapshot in between would debit
+    ///      the same amount twice). `asOf` must be strictly increasing, not in the future, and not older
+    ///      than the last on-chain flow (a snapshot taken before a deposit/confirmation/cancellation/failure
     ///      would silently undo it). Values are bounded to 128-bit ranges.
     function report(uint256 insuranceUsd, int256 marginUsd, int256 exposureUsd, uint64 asOf) external {
         _checkOpsVenue();
         AdapterStorage storage $ = _s();
+        uint256 pending = $.pendingWithdrawUsd[BRTypes.ACCOUNT_IF] + $.pendingWithdrawUsd[BRTypes.ACCOUNT_MM];
+        if (pending != 0) revert WithdrawalPending(pending);
         if (asOf > block.timestamp) revert ReportInFuture(asOf, uint64(block.timestamp));
         if (asOf <= $.lastReportAsOf) revert StaleReport(asOf, $.lastReportAsOf);
         if (asOf < $.lastFlowAt) revert ReportPredatesFlow(asOf, $.lastFlowAt);
@@ -416,12 +457,16 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
 
     /// @inheritdoc IVenueAdapter
     /// @dev OPS_VENUE, once per period. `period` is a mark-period label: a multiple of
-    ///      `config.markInterval()`, `<= block.timestamp`, and after the period in which the adapter was
-    ///      initialized. `amount <= maxFeeSweepPerPeriodUsd`. The amount is earmarked as pending fee flow and
-    ///      as much as is available (USDC on the adapter beyond in-transit principal) is forwarded to the
-    ///      RevenueRouter now (`notifySettlement(SRC_VENUE_TAKER_SHARE, swept)`); the rest is forwarded by
+    ///      `config.markInterval()`, `<= block.timestamp`, after the period in which the adapter was
+    ///      initialized, strictly after the last swept label (monotonic) and at most
+    ///      `FEE_SWEEP_LOOKBACK_PERIODS` intervals before the current period start (no backfill of old
+    ///      labels: the per-period cap bounds the sweep rate). `amount <= maxFeeSweepPerPeriodUsd`. The
+    ///      amount is earmarked as pending fee flow and as much as is available (USDC on the adapter beyond
+    ///      in-transit principal and held withdrawals) is forwarded to the RevenueRouter now
+    ///      (`notifySettlement(SRC_VENUE_TAKER_SHARE, swept)`); the rest is forwarded by
     ///      `forwardPendingFees` once the venue's fee withdrawal lands. Emits FeesSwept(period, amount).
-    ///      Recommended ops order: sweepFees (earmark) -> Orderly fee withdrawal -> forwardPendingFees.
+    ///      Required ops order: sweepFees (earmark) -> fee payment to the adapter -> forwardPendingFees
+    ///      (unearmarked USDC on the adapter is vault-bound and anyone may sweep it).
     /// @return swept USDC forwarded to the router in this call.
     function sweepFees(uint64 period, uint256 amount) external nonReentrant returns (uint256 swept) {
         _checkOpsVenue();
@@ -433,10 +478,15 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         if (period > block.timestamp) revert PeriodInFuture(period);
         if (period <= $.feePeriodFloor) revert PeriodBeforeBook(period, $.feePeriodFloor);
         if ($.feeSweptForPeriod[period] != 0) revert PeriodAlreadySwept(period);
+        uint64 last = $.lastSweptPeriod;
+        if (period <= last) revert PeriodNotAfterLastSwept(period, last);
+        uint64 oldest = _oldestFeePeriod(interval);
+        if (period < oldest) revert PeriodTooOld(period, oldest);
         uint256 cap = $.maxFeeSweepPerPeriodUsd;
         if (amount > cap) revert FeeSweepAboveCap(amount, cap);
 
         $.feeSweptForPeriod[period] = amount;
+        $.lastSweptPeriod = period;
         $.pendingFeesUsd += amount;
         emit FeesSwept(period, amount);
 
@@ -444,7 +494,7 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     }
 
     /// @notice Anyone. Forwards pending fee flow that has landed on the adapter (USDC beyond in-transit
-    ///         principal) to the book's RevenueRouter.
+    ///         principal and USDC held for requested-but-unconfirmed withdrawals) to the book's RevenueRouter.
     /// @return amount USDC forwarded.
     function forwardPendingFees() external nonReentrant returns (uint256 amount) {
         amount = _forwardFees(_s());
@@ -538,6 +588,25 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     function accountId(uint8 account) external view returns (bytes32) {
         _checkAccount(account);
         return _accountId(account);
+    }
+
+    /// @notice Native (ETH) fee the venue charges for depositing `amount` into `account` now
+    ///         (`IOrderlyVault.getDepositFee`). `depositToVenue` pays it from this contract's balance and
+    ///         reverts `InsufficientNativeForFee` without it (e.g. at `Book.closeWindow`): ops must keep
+    ///         `address(adapter).balance >= depositNativeFee(...)` funded before deploys.
+    function depositNativeFee(uint8 account, uint256 amount) external view returns (uint256) {
+        _checkAccount(account);
+        AdapterStorage storage $ = _s();
+        return $.orderlyVault
+            .getDepositFee(
+                address(this),
+                IOrderlyVault.VaultDepositFE({
+                    accountId: _accountId(account),
+                    brokerHash: $.brokerHash,
+                    tokenHash: $.tokenHash,
+                    tokenAmount: SafeCast.toUint128(amount)
+                })
+            );
     }
 
     /// @inheritdoc IOrderlyAdapter
@@ -639,7 +708,8 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         return _s().requests[requestNonce];
     }
 
-    /// @notice Requested but not yet confirmed withdrawals for `account` (still venue-side).
+    /// @notice Requested but not yet confirmed withdrawals for `account` (still venue-side). While the sum
+    ///         over both accounts is non-zero, `report` reverts and landed USDC up to it is held.
     function pendingWithdrawUsd(uint8 account) external view returns (uint256) {
         _checkAccount(account);
         return _s().pendingWithdrawUsd[account];
@@ -658,6 +728,11 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     /// @notice Fee periods must be strictly greater than this (aligned start of the initialization period).
     function feePeriodFloor() external view returns (uint64) {
         return _s().feePeriodFloor;
+    }
+
+    /// @notice Latest period label accepted by `sweepFees` (0 = none); the next must be strictly greater.
+    function lastSweptPeriod() external view returns (uint64) {
+        return _s().lastSweptPeriod;
     }
 
     /// @notice Cumulative deposits into `account`.
@@ -682,18 +757,22 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     }
 
     /// @notice Preview of the next `sweepToVault` amount (ignores the mark-window gate).
-    function sweepableToVault() external view returns (uint256) {
+    function sweepableToVault() external view returns (uint256 amount) {
+        (amount,) = _sweepable(_s());
+    }
+
+    /// @notice USDC on the adapter held for requested-but-unconfirmed withdrawals (a venue payout that
+    ///         landed before `confirmWithdraw`): neither swept nor forwarded until confirmed.
+    function heldForPendingWithdrawalsUsd() external view returns (uint256) {
         AdapterStorage storage $ = _s();
         uint256 balance = $.usdc.balanceOf(address(this));
-        uint256 principal = Math.min(balance, $.inTransitUsd);
-        return balance - Math.min($.pendingFeesUsd, balance - principal);
+        return balance - Math.min(balance, $.inTransitUsd) - _freeBalance($, balance);
     }
 
     /// @notice Preview of the next `forwardPendingFees` amount.
     function forwardableFees() external view returns (uint256) {
         AdapterStorage storage $ = _s();
-        uint256 balance = $.usdc.balanceOf(address(this));
-        return Math.min($.pendingFeesUsd, balance - Math.min(balance, $.inTransitUsd));
+        return Math.min($.pendingFeesUsd, _freeBalance($, $.usdc.balanceOf(address(this))));
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -755,11 +834,37 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         emit WithdrawConfirmed(requestNonce, account, amount, venueFee);
     }
 
+    /// @dev Principal-first attribution of the adapter's USDC balance:
+    ///        principal = min(balance, inTransit)                  -> vault (mark-window gated)
+    ///        held      = min(balance - principal, pendingWithdraw) -> stays (payout landed before confirm)
+    ///        fees      = min(pendingFees, free)                    -> router
+    ///        free - fees                                           -> vault (unattributed)
+    ///      where free = balance - principal - held.
+    function _sweepable(AdapterStorage storage $) private view returns (uint256 amount, uint256 principal) {
+        uint256 balance = $.usdc.balanceOf(address(this));
+        principal = Math.min(balance, $.inTransitUsd);
+        uint256 free = _freeBalance($, balance);
+        amount = principal + free - Math.min($.pendingFeesUsd, free);
+    }
+
+    /// @dev USDC on the adapter beyond in-transit principal and USDC held for Requested withdrawals.
+    function _freeBalance(AdapterStorage storage $, uint256 balance) private view returns (uint256) {
+        uint256 reserved = $.inTransitUsd + $.pendingWithdrawUsd[BRTypes.ACCOUNT_IF]
+            + $.pendingWithdrawUsd[BRTypes.ACCOUNT_MM];
+        return balance - Math.min(balance, reserved);
+    }
+
+    /// @dev Oldest fee period label `sweepFees` accepts now (saturating at 0).
+    function _oldestFeePeriod(uint32 interval) private view returns (uint64) {
+        uint256 start = block.timestamp - (block.timestamp % interval);
+        uint256 back = uint256(FEE_SWEEP_LOOKBACK_PERIODS) * interval;
+        return start > back ? uint64(start - back) : 0;
+    }
+
     function _forwardFees(AdapterStorage storage $) private returns (uint256 amount) {
         uint256 pending = $.pendingFeesUsd;
         if (pending == 0) return 0;
-        uint256 balance = $.usdc.balanceOf(address(this));
-        amount = Math.min(pending, balance - Math.min(balance, $.inTransitUsd));
+        amount = Math.min(pending, _freeBalance($, $.usdc.balanceOf(address(this))));
         if (amount == 0) return 0;
 
         $.pendingFeesUsd = pending - amount;

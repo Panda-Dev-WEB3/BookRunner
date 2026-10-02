@@ -143,6 +143,12 @@ contract OrderlyMockUWVault {
         adapter.requestWithdraw(account, amount);
         bookRef.onCapitalFlow();
     }
+
+    /// @dev As UnderwritingVault.notifyCapitalFlow: the adapter reports USDC pushed here -> flowNonce++.
+    function notifyCapitalFlow() external {
+        require(msg.sender == address(adapter), "only adapter");
+        bookRef.onCapitalFlow();
+    }
 }
 
 /// @notice Minimal RevenueRouter: push-style notifySettlement (balance must have grown by >= amount).

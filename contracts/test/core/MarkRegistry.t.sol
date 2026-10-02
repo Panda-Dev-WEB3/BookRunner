@@ -18,6 +18,8 @@ contract MarkRegistryTest is CoreFixture {
         config.setParam("markInterval", INTERVAL);
         config.setParam("maxMarkAge", MAX_AGE);
         vm.stopPrank();
+        // marks built by `_mark` carry flowNonce 3: keep them applicable (a stale latest mark is replaceable)
+        book.setFlowNonce(3);
     }
 
     function _period() internal view returns (uint64) {

@@ -68,11 +68,17 @@ contract CoreMockBook {
     uint256 public creditedSenior;
     uint256 public creditedJunior;
     uint256 public creditCalls;
+    /// @notice Book capital-flow nonce (MarkRegistry reads it to decide whether a mark is stale).
+    uint64 public flowNonce;
 
     error NotRouter();
 
     function setComponents(BRTypes.BookComponents memory c) external {
         _c = c;
+    }
+
+    function setFlowNonce(uint64 n) external {
+        flowNonce = n;
     }
 
     function setVault(address vault) external {
