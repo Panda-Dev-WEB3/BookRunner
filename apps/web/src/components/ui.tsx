@@ -790,7 +790,8 @@ export function QueryView<T>(props: {
 // ------------------------------------------------------------------ tables
 export function Table(props: { children: ReactNode; className?: string; minWidth?: number }) {
   return (
-    <div className="scroll-x -mx-4 sm:-mx-5">
+    // relative: absolutely positioned children (sr-only copy announcements) stay clipped by the scroller
+    <div className="scroll-x relative -mx-4 sm:-mx-5">
       <table className={cx("w-full text-[12.5px]", props.className)} style={{ minWidth: props.minWidth }}>
         {props.children}
       </table>
