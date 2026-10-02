@@ -73,7 +73,7 @@ export function faqItems(ctx: FaqContext): FaqItem[] {
       question: "How do I deposit?",
       answer: [
         "Live books take deposits during a top-up round that the sponsor opens, with a capacity for each tranche. Your wallet asks you to approve USDC, then to deposit it; nothing moves without your signature.",
-        "Deposits wait in escrow until the round closes. At the first mark after that, they are accepted at that mark's share price, up to the capacity. If a round is oversubscribed, every deposit is filled pro-rata and the rest is refunded.",
+        "Deposits wait in escrow until the round ends and cannot be cancelled before it settles. At the first mark after the round end, they are accepted at that mark's share price, up to the capacity. If a round is oversubscribed, every deposit is filled pro-rata and the rest is refunded; if the book retires first, the round is cancelled and every deposit is refunded in full.",
       ],
       terms: ["topUpRound", "sharePrice"],
       links: [{ to: "/invest", label: "Compare the books" }],

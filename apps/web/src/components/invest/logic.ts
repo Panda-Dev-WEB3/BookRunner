@@ -394,7 +394,9 @@ export function promptText(tx: { to: string; data: string; description: string }
     }
     case "deposit": {
       const [assets] = decoded.args;
-      const when = ctx.settlesText ? ` It waits there until the round settles (${ctx.settlesText}).` : " It waits there until the round settles.";
+      const when = ctx.settlesText
+        ? ` It waits there until the round settles (${ctx.settlesText}) and cannot be cancelled before then.`
+        : " It waits there until the round settles and cannot be cancelled before then.";
       return `Deposit ${usdc(assets)} into ${trancheOf(to, ctx)}.${when}`;
     }
     case "requestRedeem": {

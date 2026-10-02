@@ -60,11 +60,21 @@ export function InvestPage() {
       ),
     },
     {
+      id: "cancel",
+      title: "Can I cancel a deposit?",
+      content: (
+        <p>
+          No. A deposit cannot be cancelled or withdrawn before its round settles at the first <Term id="mark">mark</Term> after the round ends; rounds cannot be closed early, so the USDC stays in
+          escrow until then. Withdrawals apply to shares after settlement. If the book retires first, the round is cancelled and every deposit is refunded in full.
+        </p>
+      ),
+    },
+    {
       id: "withdraw",
       title: "Can I withdraw at any time?",
       content: (
         <p>
-          You can ask at any time, and the request is always accepted: <Term id="redemptionNotice">notice is not a gate</Term>. Senior settles at the next mark. Junior settles at the first mark
+          Once you hold shares, you can ask at any time, and the request is always accepted: <Term id="redemptionNotice">notice is not a gate</Term>. Senior settles at the next mark. Junior settles at the first mark
           after its notice period, which each book sets in its charter. You receive the share price of the mark that settles your request, which can be higher or lower than today's.
         </p>
       ),

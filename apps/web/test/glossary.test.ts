@@ -74,6 +74,8 @@ describe("glossary", () => {
     // Book.topUp() capacity is the round total; Tranche.settleAtMark settles at the first mark on or after endsAt.
     expect(GLOSSARY.topUpRound.short).toContain("until the first mark after the round ends");
     expect(GLOSSARY.topUpRound.short).toContain("fixed capacity");
+    // Tranche has no cancel or withdraw path for a commitment: only settlement or a cancelled round.
+    expect(GLOSSARY.topUpRound.long).toContain("cannot be cancelled or withdrawn before the round settles");
     expect(GLOSSARY.bkrn.long).toContain("never a revenue claim");
   });
 });

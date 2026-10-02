@@ -259,8 +259,8 @@ describe("plain-language wallet prompts", () => {
     expect(promptText(approve, ctx)).toBe("Allow NVDA Senior to move up to 500.00 USDC from your wallet. This only sets a spending limit: no USDC moves yet.");
   });
   test("deposit says when the round settles", () => {
-    expect(promptText(deposit, ctx)).toBe("Deposit 500.00 USDC into NVDA Senior. It waits there until the round settles (1 Nov 2026, 17:00 UTC).");
-    expect(promptText(deposit, { ...ctx, settlesText: null })).toBe("Deposit 500.00 USDC into NVDA Senior. It waits there until the round settles.");
+    expect(promptText(deposit, ctx)).toBe("Deposit 500.00 USDC into NVDA Senior. It waits there until the round settles (1 Nov 2026, 17:00 UTC) and cannot be cancelled before then.");
+    expect(promptText(deposit, { ...ctx, settlesText: null })).toBe("Deposit 500.00 USDC into NVDA Senior. It waits there until the round settles and cannot be cancelled before then.");
   });
   test("withdrawal request and claims", () => {
     expect(promptText(redeem, ctx)).toContain("Ask to withdraw 12.00 NVDA Junior shares");

@@ -216,7 +216,7 @@ const entries: GlossaryEntry[] = [
     id: "topUpRound",
     term: "Top-up round",
     short: "A deposit window the sponsor opens on a live book, with a fixed capacity per tranche. Deposits wait in escrow until the first mark after the round ends, then are accepted at that mark's share price, up to the capacity.",
-    long: "If a tranche is oversubscribed, every deposit is filled pro-rata and the rest is refunded. Senior may accept less than its capacity, so that it stays within the charter's cap on Senior's share of the book.",
+    long: "A deposit cannot be cancelled or withdrawn before the round settles, and a round cannot be closed early; if the book retires first, the round is cancelled and every deposit is refunded in full. If a tranche is oversubscribed, every deposit is filled pro-rata and the rest is refunded. Senior may accept less than its capacity, so that it stays within the charter's cap on Senior's share of the book.",
     related: ["subscriptionWindow", "mark"],
   },
   {

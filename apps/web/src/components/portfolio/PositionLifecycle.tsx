@@ -18,7 +18,7 @@ const STEPS: Step[] = [
     title: "Deposit USDC",
     body: (
       <>
-        Into the Senior or Junior <Term id="tranche">tranche</Term> of a book, while a <Term id="topUpRound">top-up round</Term> or a subscription window is open. The USDC waits in escrow.
+        Into the Senior or Junior <Term id="tranche">tranche</Term> of a book, while a <Term id="topUpRound">top-up round</Term> or a subscription window is open. The USDC waits in escrow and cannot be cancelled before the round settles.
       </>
     ),
     icon: <IconCoin size={18} />,

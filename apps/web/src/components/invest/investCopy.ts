@@ -44,7 +44,7 @@ export const INVEST_STEPS = [
   {
     n: 3,
     title: "Deposit and sign",
-    body: "Your USDC waits in escrow until the round ends. The first mark after the round end turns it into shares at that mark's price.",
+    body: "Your USDC waits in escrow until the round ends, and cannot be cancelled before then. The first mark after the round end turns it into shares at that mark's price.",
   },
 ] as const;
 
@@ -57,7 +57,7 @@ export function windowSentence(w: DepositWindow, timeZone?: string): string {
     case "open":
       return w.kind === "subscription"
         ? `The subscription window is open until ${when(w.endsAt)}. When it closes, commitments are allocated pro-rata and shares start at 1.00 USDC each.`
-        : `A top-up round is open until ${when(w.endsAt)}. Deposits wait in escrow and are turned into shares at the first mark after the round ends (${when(w.settlesAt)}), at that mark's share price.`;
+        : `A top-up round is open until ${when(w.endsAt)}. Deposits wait in escrow, cannot be cancelled, and are turned into shares at the first mark after the round ends (${when(w.settlesAt)}), at that mark's share price.`;
     case "settling":
       return w.kind === "subscription"
         ? `The subscription window closed at ${when(w.endsAt)}. Commitments are allocated as soon as the window is closed on-chain.`
@@ -88,6 +88,19 @@ export function settlesClause(w: DepositWindow, timeZone?: string): string | nul
   return w.kind === "subscription"
     ? `when the subscription window closes (${fmtWhen(w.settlesAt, timeZone)})`
     : `at the first mark after the round ends (${fmtWhen(w.settlesAt, timeZone)})`;
+}
+
+/**
+ * A commitment is locked until its round settles: Tranche.sol has no cancel or withdraw path for a
+ * walletCommit. The only ways out are settlement (claimAllocation) or a round cancelled by
+ * Book.retire() / a failed window (claimCancelledRefund, 1:1).
+ */
+export function noCancelLine(w: DepositWindow, timeZone?: string): string {
+  const subscription = w.status !== "closed" && w.status !== "loading" && w.kind === "subscription";
+  const at = w.status === "open" || w.status === "settling" || w.status === "paused" ? ` (${fmtWhen(w.settlesAt, timeZone)})` : "";
+  return subscription
+    ? `A commitment cannot be cancelled or withdrawn before the window closes${at}. Withdrawals apply to shares once they are allocated. If the book is cancelled at the end of the window, every commitment is refunded in full.`
+    : `A deposit cannot be cancelled or withdrawn before the round settles${at}. Withdrawals apply to shares after settlement. If the book retires first, the round is cancelled and the deposit is refunded in full.`;
 }
 
 /** The deposit sentence of the "mandate is killed" callout (empty when deposits are not open). */

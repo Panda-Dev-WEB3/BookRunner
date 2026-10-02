@@ -21,6 +21,7 @@ import { IconArrowRight } from "../icons";
 import { SetupChecklist } from "../SetupChecklist";
 import { AmountInput, Callout, ErrorState, ExternalLink, Spinner, Stepper, type StepperStep, Term } from "../ui";
 import { InfoList, RiskNotice, TrancheSwatch } from "./InvestBits";
+import { noCancelLine } from "./investCopy";
 import { type DepositWindow, type RoundRoom, TRANCHE_NAME, type TrancheId, checkDeposit, indicativeShares, pctOfBps, seniorRoomPerJunior, walletRoom, withPlainPrompts } from "./logic";
 import { type TrancheAddresses, invalidateInvestReads, useWalletRoom } from "./useInvestChain";
 
@@ -228,7 +229,14 @@ export function ReviewStep(props: DepositContext & { amount: string; onBack: () 
               <TrancheSwatch t={t} className="self-center" />
               {props.ticker} {name}
             </span>
-            . {sharesLine} You can request a <Term id="redemptionNotice">withdrawal</Term> later;{" "}
+            . {sharesLine}
+          </p>
+          <p className="mt-2 rounded-control bg-warn/10 px-3 py-2 text-[13.5px] text-ink">
+            <span className="font-semibold">Locked until settlement. </span>
+            {noCancelLine(win)}
+          </p>
+          <p className="mt-2 text-[13.5px] text-ink-2">
+            Once you hold shares, you can request a <Term id="redemptionNotice">withdrawal</Term> at any time;{" "}
             {t === "junior" && (props.book.charter?.juniorNoticeSeconds ?? 0) > 0
               ? `it is paid after the ${fmtDuration(props.book.charter?.juniorNoticeSeconds ?? 0)} notice period, at the first mark after that.`
               : "Senior has no notice period, so it is paid at the next mark after you ask."}
@@ -240,6 +248,7 @@ export function ReviewStep(props: DepositContext & { amount: string; onBack: () 
               ["Amount", amountText],
               endsAt !== null && [subscription ? "Window closes" : "Round ends", fmtWhen(endsAt)],
               settlesAt !== null && !subscription && [<Term key="k" id="mark">Shares issued</Term>, `At the mark of ${fmtWhen(settlesAt)}`],
+              ["Cancel before it settles", "Not possible"],
               est !== null && !subscription && ["Shares (estimate)", `about ${formatAmountDisplay(est, USDC_DECIMALS)} at ${fmtSharePrice(t === "senior" ? props.book.seniorSharePrice : props.book.juniorSharePrice, 6)}`],
               ["Withdrawals", t === "senior" ? "No notice, next mark" : `${fmtDuration(props.book.charter?.juniorNoticeSeconds ?? 0)} notice, then the next mark`],
               me && ["From wallet", shortHex(me, 6, 4)],
@@ -314,12 +323,17 @@ function DepositDone(
   const tranche = props.tranche === "senior" ? props.addrs.senior : props.addrs.junior;
   const steps: StepperStep[] = props.subscription
     ? [
-        { id: "committed", status: "done", title: "USDC committed", description: "It waits in the tranche's escrow until the window closes." },
+        { id: "committed", status: "done", title: "USDC committed", description: "It waits in the tranche's escrow until the window closes, and cannot be cancelled before then." },
         { id: "close", status: "active", title: `Window closes · ${fmtWhen(props.endsAt)}`, description: "Commitments are allocated pro-rata (the sponsor first in Junior); any excess is refunded." },
         { id: "claim", status: "todo", title: "Collect your shares", description: "Shares start at 1.00 USDC each. Collect them, and any refund, from the Withdraw tab." },
       ]
     : [
-        { id: "committed", status: "done", title: "USDC committed", description: "It waits in the tranche's escrow until the round settles." },
+        {
+          id: "committed",
+          status: "done",
+          title: "USDC committed",
+          description: "It waits in the tranche's escrow until the round settles, and cannot be cancelled or withdrawn before then. If the book retires first, the round is cancelled and the deposit is refunded in full.",
+        },
         { id: "end", status: "active", title: `Round ends · ${fmtWhen(props.endsAt)}`, description: "Other allocators can still deposit until then." },
         {
           id: "mark",
