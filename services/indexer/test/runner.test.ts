@@ -59,11 +59,11 @@ describe("decoding", () => {
     expect(r.ok && r.log.args).toEqual({ bookId: 4n, finalNav: 123n });
   });
 
-  test("ERC-20 Transfer on a tranche is a tolerated extra; unknown topics and bad data are skips", () => {
+  test("ERC-20 Transfer on a tranche decodes (implementation ABI) and is ignored by handlers; bad data is a skip", () => {
     const transfer = { ...makeLog(trancheAbi, "OperatorSet", { controller: ADDR.wallet, operator: ADDR.key, approved: true }, { address: ADDR.senior, block: 1, logIndex: 0, tx: 1 }) };
     transfer.topics = ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef", transfer.topics[1]!, transfer.topics[2]!];
     const r1 = decodeLog(transfer, "senior", 1);
-    expect(!r1.ok && r1.skip.reason).toBe("known_extra");
+    expect(r1.ok && r1.log.eventName).toBe("Transfer");
     const bad = { ...makeLog(bookAbi, "Retired", { bookId: 4n, finalNav: 1n }, { address: ADDR.book, block: 1, logIndex: 0, tx: 1 }), data: "0x01" as const };
     const r2 = decodeLog(bad, "book", 4);
     expect(!r2.ok && r2.skip.reason).toBe("bad_data");
@@ -80,7 +80,7 @@ describe("indexer runner", () => {
     if (first?.status !== "indexed") return;
     expect(first.from).toBe(1n);
     expect(first.to).toBe(8n);
-    expect(first.skipped).toBe(2); // ERC-20 Transfer + Mystery topic
+    expect(first.skipped).toBe(1); // Mystery topic (tranche ERC-20 Transfer now decodes and is ignored)
     expect(await store.getCursor(CURSORS.protocol)).toBe(8);
     expect(await store.getCursor(CURSORS.books)).toBe(8);
 
@@ -186,7 +186,7 @@ describe("indexer runner", () => {
     await expect(indexer.step()).rejects.toThrow("reverted");
     const r = await indexer.step(); // isolated mode
     expect(r.status === "indexed" && r.isolated).toBe(true);
-    expect(r.status === "indexed" && r.skipped).toBe(3); // 2 decode skips + the poison log
+    expect(r.status === "indexed" && r.skipped).toBe(2); // Mystery topic + the poison log
     expect(await store.getCursor(CURSORS.protocol)).toBe(8);
     expect(store.s.books[1]?.state).toBe("Live"); // everything else applied
     expect(store.s.charters[1]).toBeUndefined();

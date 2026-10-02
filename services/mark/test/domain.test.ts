@@ -32,10 +32,11 @@ describe("NAV composition", () => {
     expect(navCrossChecks(s, nav)).toEqual([]);
   });
 
-  test("unfunded claims reduce cash, never below zero", () => {
+  test("unfunded claims are a liability of the whole book (markedNavNet), NAV never below zero", () => {
     expect(composeNav(snapshot({ unfundedClaims: usd("500") })).navUsd).toBe(usd("110100"));
-    // claims exceed idle: cash floors at 0, deployed value still counts
-    expect(composeNav(snapshot({ unfundedClaims: usd("9000") })).navUsd).toBe(usd("108600"));
+    // claims exceed idle: the excess is netted against deployed value too (2k idle + 108.6k deployed - 9k)
+    expect(composeNav(snapshot({ unfundedClaims: usd("9000") })).navUsd).toBe(usd("101600"));
+    expect(composeNav(snapshot({ unfundedClaims: usd("200000") })).navUsd).toBe(0n);
   });
 
   test("multiplier applied once: valuation comes from registry.valueUsd, never re-multiplied", () => {
