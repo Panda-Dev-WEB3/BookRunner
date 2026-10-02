@@ -364,17 +364,50 @@ export function Layout() {
       window.scrollTo({ top: 0 });
       return;
     }
-    // #anchors (e.g. /learn#term-senior): the target may render after a lazy route loads, so retry briefly
+    // #anchors (e.g. /learn#term-senior): the target may render after a lazy route loads, so retry
+    // briefly. Content above it can still grow once its queries settle (e.g. /stake#where-it-comes-from
+    // on a phone), so keep the target aligned for a short while unless the person scrolls first.
     const id = decodeURIComponent(loc.hash.slice(1));
     let tries = 0;
     let t: ReturnType<typeof setTimeout> | undefined;
+    let stop: ReturnType<typeof setTimeout> | undefined;
+    let keep: ReturnType<typeof setInterval> | undefined;
+    let moved = false;
+    const onMove = () => {
+      moved = true;
+      release();
+    };
+    const userEvents = ["wheel", "touchmove", "keydown", "pointerdown"] as const;
+    function release() {
+      clearInterval(keep);
+      keep = undefined;
+      for (const e of userEvents) window.removeEventListener(e, onMove);
+    }
+    // re-scroll when the target drifted from its scroll-margin line (content above it, or a banner
+    // above <main>, grew after the jump)
+    const align = () => {
+      const el = document.getElementById(id);
+      if (!el || moved) return;
+      const want = Number.parseFloat(getComputedStyle(el).scrollMarginTop) || 0;
+      if (Math.abs(el.getBoundingClientRect().top - want) > 4) el.scrollIntoView({ block: "start" });
+    };
     const go = () => {
       const el = document.getElementById(id);
-      if (el) el.scrollIntoView({ block: "start" });
-      else if (tries++ < 20) t = setTimeout(go, 100);
+      if (!el) {
+        if (tries++ < 20) t = setTimeout(go, 100);
+        return;
+      }
+      el.scrollIntoView({ block: "start" });
+      for (const e of userEvents) window.addEventListener(e, onMove, { passive: true });
+      keep = setInterval(align, 150);
+      stop = setTimeout(release, 4_000);
     };
     go();
-    return () => clearTimeout(t);
+    return () => {
+      clearTimeout(t);
+      clearTimeout(stop);
+      release();
+    };
   }, [loc.pathname, loc.hash]);
   return (
     <div className="flex min-h-dvh flex-col">
