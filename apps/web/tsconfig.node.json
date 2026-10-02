@@ -1,0 +1,8 @@
+{
+  "//": "Bun-side code: unit tests of the pure helpers in src/lib, the copy checker and vite.config.ts.",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["bun"]
+  },
+  "include": ["test/**/*.ts", "scripts/**/*.ts", "vite.config.ts"]
+}

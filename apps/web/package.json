@@ -1,0 +1,43 @@
+{
+  "name": "@bookrunner/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "vite build && vite preview --host 127.0.0.1 --port 5180 --strictPort",
+    "dev": "vite --host 127.0.0.1 --port 5180 --strictPort",
+    "dev:testnet": "vite --mode testnet --host 127.0.0.1 --port 5180 --strictPort",
+    "build": "vite build",
+    "build:testnet": "vite build --mode testnet",
+    "preview": "vite preview --host 127.0.0.1 --port 5180 --strictPort",
+    "test": "bun test",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.node.json",
+    "lint:copy": "bun scripts/check-copy.ts"
+  },
+  "dependencies": {
+    "@bookrunner/shared": "workspace:*",
+    "@openzeppelin/merkle-tree": "1.0.8",
+    "@tanstack/react-query": "5.104.0",
+    "@trpc/client": "11.19.0",
+    "@trpc/react-query": "11.19.0",
+    "@trpc/server": "11.19.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "react-router": "8.4.0",
+    "recharts": "3.10.1",
+    "superjson": "2.2.6",
+    "viem": "2.57.2",
+    "wagmi": "3.7.7"
+  },
+  "devDependencies": {
+    "@bookrunner/api": "workspace:*",
+    "@tailwindcss/vite": "4.3.3",
+    "@types/bun": "1.4.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.1",
+    "tailwindcss": "4.3.3",
+    "typescript": "6.0.3",
+    "vite": "8.3.2"
+  }
+}
