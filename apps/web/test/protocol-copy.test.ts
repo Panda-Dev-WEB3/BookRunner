@@ -19,6 +19,10 @@ const RULES: Rule[] = [
     why: "The sponsor's 10% of Junior is enforced only when the subscription window closes (Waterfall.allocateWindow); top-ups can dilute it",
     pattern: /sponsor[^.]*\b(always|must) (hold|keep)|\bat least 10% of (its |the book's )?Junior( tranche)?(?![^.;]*\bwindow closes)/i,
   },
+  {
+    why: "A mark only settles a redemption; the USDC moves in a separate claim, which waits while the book's cash is on the venue (Tranche._ensureLiquidity)",
+    pattern: /\b(are|is|be|get|gets) paid (at|after)\b|\bpaid at the (next|first) mark|\byours to claim\b|\bwhen you are paid\b/i,
+  },
 ];
 
 const { snippets } = appSnippets();

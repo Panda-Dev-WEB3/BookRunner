@@ -61,7 +61,12 @@ const STEPS: Step[] = [
   },
   {
     title: "Claim your USDC",
-    body: <>Once a mark settles the request at its share price, the USDC is yours to claim. Claims are never blocked by a pause or a kill.</>,
+    body: (
+      <>
+        Once a mark settles the request at its share price, you collect the USDC in a separate transaction. If the book's cash is still on the venue, collecting waits until the keeper
+        brings it back. Claims are never blocked by a pause or a kill.
+      </>
+    ),
     icon: <IconCheck size={18} />,
     shownAs: "Ready to claim",
   },

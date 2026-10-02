@@ -402,7 +402,7 @@ export function promptText(tx: { to: string; data: string; description: string }
     case "requestRedeem": {
       const [n] = decoded.args;
       const when = ctx.eligibleText ? ` at the first mark on or after ${ctx.eligibleText}` : " at the first mark after the notice period";
-      return `Ask to withdraw ${shares(n)} ${trancheOf(to, ctx)} shares. They wait in the withdrawal queue and are paid${when}, at that mark's share price.`;
+      return `Ask to withdraw ${shares(n)} ${trancheOf(to, ctx)} shares. They wait in the withdrawal queue and settle${when}, at that mark's share price; you then collect the USDC in a separate transaction.`;
     }
     case "claimAllocation":
       return `Collect your ${trancheOf(to, ctx)} shares from the settled round, plus any USDC refund.`;

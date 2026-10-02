@@ -63,7 +63,7 @@ export function TrancheChoice(props: TrancheChoiceProps) {
         <Term key="t" id="redemptionNotice">
           Withdrawals
         </Term>,
-        `No notice period: paid at the next mark (${cadence})`,
+        `No notice period: settles at the next mark (${cadence}), then you collect the USDC`,
       ],
       [
         <Term key="t" id="sharePrice">
@@ -87,7 +87,7 @@ export function TrancheChoice(props: TrancheChoiceProps) {
         <Term key="t" id="redemptionNotice">
           Withdrawals
         </Term>,
-        notice && notice !== "none" ? `${notice} notice, then paid at the next mark (${cadence})` : `Paid at the next mark (${cadence})`,
+        notice && notice !== "none" ? `${notice} notice, then settles at the next mark (${cadence}); you then collect the USDC` : `Settles at the next mark (${cadence}); you then collect the USDC`,
       ],
       [
         <Term key="t" id="sharePrice">

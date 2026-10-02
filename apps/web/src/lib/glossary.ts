@@ -223,7 +223,7 @@ const entries: GlossaryEntry[] = [
     id: "redemptionNotice",
     term: "Redemption notice",
     short: "The wait before a Junior redemption settles, set in the charter. Notice is not a gate: a request is always accepted and settles at NAV at the first mark on or after its eligible time.",
-    long: "Senior has no notice period: a Senior request settles at the next mark. Claims are never blocked by a pause or a kill.",
+    long: "Senior has no notice period: a Senior request settles at the next mark. Settling fixes the USDC owed; you then collect it in a separate transaction, which waits if the book's cash is still on the venue. Claims are never blocked by a pause or a kill.",
     related: ["junior", "mark"],
   },
   {

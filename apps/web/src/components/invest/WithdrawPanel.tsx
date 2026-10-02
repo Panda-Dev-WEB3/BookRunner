@@ -8,7 +8,7 @@ import { useQueryError } from "../../api/hooks";
 import { trpc } from "../../api/trpc";
 import type { BookDetail, PositionOut } from "../../lib/api-types";
 import { USDC_DECIMALS, amountIssue, amountIssueText, formatAmountDisplay, parseAmount } from "../../lib/amount";
-import { NOTICE_LINE } from "../../lib/copy";
+import { CASH_WAIT_LINE, NOTICE_LINE } from "../../lib/copy";
 import { fmtDuration, fmtSharePrice, fmtUsd, fmtWhen, isoToSec, usdRaw } from "../../lib/format";
 import { invalidateWalletBalances } from "../../wallet/balances";
 import { TxRunner } from "../../wallet/TxRunner";
@@ -154,7 +154,7 @@ function ClaimBox(props: { book: BookDetail; ticker: string; addrs: TrancheAddre
       <p className="mt-1 text-[13px] text-ink-2">
         {props.cancelled
           ? "This book was cancelled at the end of its subscription window, so every commitment can be taken back in full."
-          : "A round or a withdrawal has settled. Collecting sends the shares, any refund and any withdrawn USDC to your wallet. Claims are never blocked by a pause or a kill."}
+          : `A round or a withdrawal has settled. Collecting is a separate transaction that sends the shares, any refund and any withdrawn USDC to your wallet. ${CASH_WAIT_LINE} Claims are never blocked by a pause or a kill.`}
       </p>
       {done ? (
         <Callout tone="success" compact className="mt-3" title="Collected">
@@ -286,13 +286,13 @@ function RedeemBox(props: { book: BookDetail; ticker: string; addrs: TrancheAddr
           )}
           {red.error && <ErrorState compact error={red.error} />}
         </div>
-        <aside className="min-w-0 rounded-card border border-line bg-surface-2/60 p-4 text-[13px]" aria-label="When you are paid">
-          <div className="font-semibold">When you are paid</div>
+        <aside className="min-w-0 rounded-card border border-line bg-surface-2/60 p-4 text-[13px]" aria-label="When it settles">
+          <div className="font-semibold">When it settles</div>
           <p className="mt-1 text-ink-2">
             {tranche === "senior" || notice <= 0
               ? `${TRANCHE_NAME[tranche]} has no notice period. A request settles at the next mark (${fmtWhen(props.book.markSchedule.nextPeriodEnd)}).`
               : `Junior has a ${fmtDuration(notice)} notice period. A request becomes eligible ${fmtDuration(notice)} after you send it, then settles at the first mark after that.`}{" "}
-            After it settles, collect the USDC here.
+            After it settles, collect the USDC here in a separate transaction. {CASH_WAIT_LINE}
           </p>
         </aside>
       </div>

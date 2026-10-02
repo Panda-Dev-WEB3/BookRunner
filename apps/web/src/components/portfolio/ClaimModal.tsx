@@ -5,6 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import type { Address } from "viem";
 import { trpc } from "../../api/trpc";
+import { CASH_WAIT_LINE } from "../../lib/copy";
 import { usdRaw } from "../../lib/format";
 import { TxRunner } from "../../wallet/TxRunner";
 import { Callout, ErrorState, KV, Modal, SkeletonRows } from "../ui";
@@ -66,7 +67,7 @@ export function ClaimModal(props: { open: boolean; onClose: () => void; bookId: 
               void refreshAfterTx(qc, utils);
             }}
           />
-          {claim.data.txs.length > 0 && <p className="text-[12px] text-muted">Claims are never blocked by a pause or a kill. Gas is paid in ETH from this wallet.</p>}
+          {claim.data.txs.length > 0 && <p className="text-[12px] text-muted">Claims are never blocked by a pause or a kill. {CASH_WAIT_LINE} Gas is paid in ETH from this wallet.</p>}
         </div>
       ) : null}
     </Modal>

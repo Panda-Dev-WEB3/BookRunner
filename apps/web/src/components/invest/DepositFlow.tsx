@@ -238,8 +238,8 @@ export function ReviewStep(props: DepositContext & { amount: string; onBack: () 
           <p className="mt-2 text-[13.5px] text-ink-2">
             Once you hold shares, you can request a <Term id="redemptionNotice">withdrawal</Term> at any time;{" "}
             {t === "junior" && (props.book.charter?.juniorNoticeSeconds ?? 0) > 0
-              ? `it is paid after the ${fmtDuration(props.book.charter?.juniorNoticeSeconds ?? 0)} notice period, at the first mark after that.`
-              : "Senior has no notice period, so it is paid at the next mark after you ask."}
+              ? `it settles after the ${fmtDuration(props.book.charter?.juniorNoticeSeconds ?? 0)} notice period, at the first mark after that, and you then collect the USDC in a separate transaction.`
+              : "Senior has no notice period, so it settles at the next mark after you ask; you then collect the USDC in a separate transaction."}
           </p>
           <InfoList
             className="mt-4"

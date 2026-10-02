@@ -265,6 +265,9 @@ describe("plain-language wallet prompts", () => {
   test("withdrawal request and claims", () => {
     expect(promptText(redeem, ctx)).toContain("Ask to withdraw 12.00 NVDA Junior shares");
     expect(promptText(redeem, ctx)).toContain("2 Oct 2026, 18:15 UTC");
+    // a mark only settles the request: collecting the USDC is a separate claim
+    expect(promptText(redeem, ctx)).toContain("settle at the first mark on or after");
+    expect(promptText(redeem, ctx)).toContain("collect the USDC in a separate transaction");
     expect(promptText(tx(junior, encodeFunctionData({ abi, functionName: "claimAllocation", args: [me] })), ctx)).toBe(
       "Collect your NVDA Junior shares from the settled round, plus any USDC refund.",
     );

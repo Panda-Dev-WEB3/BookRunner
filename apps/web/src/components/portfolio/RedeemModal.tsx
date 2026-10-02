@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import type { Address } from "viem";
 import { trpc } from "../../api/trpc";
 import { USDC_DECIMALS, amountIssue, formatAmountInput, parseAmount } from "../../lib/amount";
-import { NOTICE_LINE } from "../../lib/copy";
+import { COLLECT_LINE, NOTICE_LINE } from "../../lib/copy";
 import { fmtDuration, fmtSharePrice, fmtWhen, isoToSec, usdRaw } from "../../lib/format";
 import { TxRunner } from "../../wallet/TxRunner";
 import { Term } from "../Term";
@@ -55,8 +55,8 @@ export function RedeemModal(props: { open: boolean; onClose: () => void; bookId:
       }
       description={
         holding.tranche === "senior"
-          ? "Senior requests settle at the next mark, at that mark's share price. There is no notice period."
-          : `Junior requests wait out the book's notice period${notice ? ` (${fmtDuration(notice)})` : ""}, then settle at the first mark after it, at that mark's share price.`
+          ? `Senior requests settle at the next mark, at that mark's share price. There is no notice period. ${COLLECT_LINE}`
+          : `Junior requests wait out the book's notice period${notice ? ` (${fmtDuration(notice)})` : ""}, then settle at the first mark after it, at that mark's share price. ${COLLECT_LINE}`
       }
       size="md"
     >

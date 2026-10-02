@@ -75,7 +75,8 @@ export function InvestPage() {
       content: (
         <p>
           Once you hold shares, you can ask at any time, and the request is always accepted: <Term id="redemptionNotice">notice is not a gate</Term>. Senior settles at the next mark. Junior settles at the first mark
-          after its notice period, which each book sets in its charter. You receive the share price of the mark that settles your request, which can be higher or lower than today's.
+          after its notice period, which each book sets in its charter. You receive the share price of the mark that settles your request, which can be higher or lower than today's. Settling fixes what you are owed; you then collect the USDC in a separate
+          transaction, which waits if the book's cash is still on the venue.
         </p>
       ),
     },
