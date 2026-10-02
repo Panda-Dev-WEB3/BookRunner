@@ -74,6 +74,9 @@ describe("glossary", () => {
     expect(GLOSSARY.senior.short).toContain("last loss, not no loss");
     expect(GLOSSARY.redemptionNotice.short).toContain("Notice is not a gate");
     expect(GLOSSARY.backstop.short).toContain("up to what the pool holds");
+    // PoolEngine: only taker fees accrue to feesAccruedUsd; spread capture and the IF half of liquidation fees move NAV.
+    expect(GLOSSARY.feeFlow.short).not.toContain("spread capture");
+    expect(GLOSSARY.feeFlow.long).toContain("show up in NAV at each mark");
     // Book.topUp() capacity is the round total; Tranche.settleAtMark settles at the first mark on or after endsAt.
     expect(GLOSSARY.topUpRound.short).toContain("until the first mark after the round ends");
     expect(GLOSSARY.topUpRound.short).toContain("fixed capacity");

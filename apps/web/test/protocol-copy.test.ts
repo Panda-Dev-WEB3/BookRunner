@@ -23,6 +23,10 @@ const RULES: Rule[] = [
     why: "A mark only settles a redemption; the USDC moves in a separate claim, which waits while the book's cash is on the venue (Tranche._ensureLiquidity)",
     pattern: /\b(are|is|be|get|gets) paid (at|after)\b|\bpaid at the (next|first) mark|\byours to claim\b|\bwhen you are paid\b/i,
   },
+  {
+    why: "PoolEngine accrues only taker fees to feesAccruedUsd (the router's fee flow); spread capture and the IF half of liquidation fees reach the book through NAV",
+    pattern: /taker fees, liquidation fees|liquidation fees and spread capture/i,
+  },
 ];
 
 const { snippets } = appSnippets();

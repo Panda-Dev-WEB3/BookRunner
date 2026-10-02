@@ -130,8 +130,8 @@ const entries: GlossaryEntry[] = [
   {
     id: "feeFlow",
     term: "Fee flow",
-    short: "What a book earns from its market: the builder share of taker fees on Orderly books, or taker fees, liquidation fees and spread capture on the in-house engine.",
-    long: "Bookrunner shows fee flow as the observed accrual over each mark period. It is never quoted as a rate, and past fee flow says nothing about the next period.",
+    short: "What a book's router distributes from its market: the builder share of taker fees on Orderly books, or the taker fees on the in-house engine.",
+    long: "Spread capture and the insurance fund's half of liquidation fees are not fee flow: they show up in NAV at each mark, where gains first restore any Senior shortfall, then go to Junior. Bookrunner shows fee flow as the observed accrual over each mark period. It is never quoted as a rate, and past fee flow says nothing about the next period.",
     related: ["waterfall", "mark"],
   },
   {

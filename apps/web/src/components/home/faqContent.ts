@@ -36,8 +36,8 @@ export function faqItems(ctx: FaqContext): FaqItem[] {
       id: "money",
       question: "Where does the money come from?",
       answer: [
-        "From the market's fee flow. On Orderly books it is the builder share of taker fees; on the in-house engine it is taker fees, liquidation fees and spread capture.",
-        "Each period the waterfall pays expenses first, then the 10% protocol carry, then Senior's hurdle share, then the rest to Junior. Gains or losses on the market-making inventory move NAV at each mark; a gain first restores any Senior shortfall, then goes to Junior.",
+        "From the market's fee flow. On Orderly books it is the builder share of taker fees; on the in-house engine it is the taker fees. Spread capture and the insurance fund's half of liquidation fees show up in NAV at each mark instead.",
+        "Each period the waterfall pays expenses first, then the 10% protocol carry, then Senior's hurdle share, then the rest to Junior. Gains or losses on the market-making inventory, spread capture included, move NAV at each mark; a gain first restores any Senior shortfall, then goes to Junior.",
         "Fee flow is shown as the observed accrual over each mark period, never as a rate. Past periods say nothing about the next one.",
       ],
       terms: ["feeFlow", "waterfall", "hurdle", "carry"],
