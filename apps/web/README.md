@@ -30,9 +30,10 @@ defaults to the public Robinhood Chain testnet RPC, explorer and faucet.
 
 - Connect dialog (`useConnectModal().open()`): browser wallets discovered through EIP-6963 (name and
   icon), the generic injected wallet as a fallback, WalletConnect (QR code / mobile) only when
-  `VITE_WALLETCONNECT_PROJECT_ID` is set, and a short "new to wallets" explainer. Connecting asks the
-  wallet to switch to the app chain and adds it when missing; a site-wide banner offers the switch
-  whenever the wallet sits on another chain.
+  `VITE_WALLETCONNECT_PROJECT_ID` is set, and a short "new to wallets" explainer. Connecting first
+  connects, then asks the wallet to switch to the app chain (adding it when missing) as a separate
+  step (`src/wallet/connectFlow.ts`): declining leaves the wallet connected on its own chain, and a
+  site-wide banner offers the switch whenever the wallet sits on another chain.
 - Account menu: address (copy, explorer), network, ETH / USDC / BKRN balances, the faucet when gas is
   low and, on test networks whose USDC is the open-mint mock, "Mint 10,000 test USDC".
 - Devnet only (build for 31337 and an API on 31337): dev wallets sign with the anvil test accounts

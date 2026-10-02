@@ -4,7 +4,7 @@
 import type { DevRole } from "@bookrunner/shared/devkeys";
 import { type ReactNode, createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { type Address, type Hex, createPublicClient, createWalletClient, http } from "viem";
-import { type Connector, useConnect, useConnection, useConnectors, useDisconnect } from "wagmi";
+import { type Connector, useConnection, useConnectors, useDisconnect } from "wagmi";
 import { getConnection, sendTransaction, switchChain, waitForTransactionReceipt } from "wagmi/actions";
 import { useHealth } from "../api/hooks";
 import type { PreparedTx } from "../lib/api-types";
@@ -13,6 +13,7 @@ import { DEVNET_CHAIN_ID, devAccountFor, devAddress, devEntry, isDevRole } from 
 import { errText } from "../lib/txflow";
 import type { TxExecutor } from "../lib/txflow";
 import { addChainParams, appChain, chainName, wagmiConfig, walletConnectEnabled } from "./chains";
+import { connectWallet } from "./connectFlow";
 
 type Mode = "dev" | "injected" | null;
 
@@ -44,7 +45,6 @@ interface WalletCtx {
   switching: boolean;
   networkError: string | null;
   selectDev(role: DevRole): void;
-  connectInjected(): Promise<void>;
   /** Connect a specific wagmi connector (an EIP-6963 wallet, the generic injected one, WalletConnect). Resolves true when connected. */
   connectWith(connector: Connector): Promise<boolean>;
   /** The WalletConnect option is configured (VITE_WALLETCONNECT_PROJECT_ID). */
@@ -125,12 +125,12 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const devAvailable = config.chainId === DEVNET_CHAIN_ID && (apiChainId === null || apiChainId === DEVNET_CHAIN_ID);
   const conn = useConnection();
   const connectors = useConnectors();
-  const connect = useConnect();
   const disc = useDisconnect();
   const [{ mode, role }, setSel] = useState(readStored);
   const [devAddr, setDevAddr] = useState<Address | null>(null);
   const [deriving, setDeriving] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState(false);
   const [switching, setSwitching] = useState(false);
   const [networkError, setNetworkError] = useState<string | null>(null);
 
@@ -167,41 +167,22 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   }, []);
   const hasProvider = connectors.some((c) => c.type === "injected" && c.id !== "injected") || windowProvider;
 
-  const connectInjected = useCallback(async () => {
+  // Connect first, then ask for the app chain as a separate step (wallet/connectFlow.ts): a declined
+  // network prompt leaves a connected wallet on the wrong network, never a "did not connect" error.
+  const connectWith = useCallback(async (connector: Connector) => {
     setConnectError(null);
-    const connector = injectedConnector;
-    if (!connector || !hasProvider) {
-      setConnectError("No browser wallet found. Install one, or use a dev wallet on the local devnet.");
-      return;
-    }
+    setNetworkError(null);
+    setConnecting(true);
     try {
-      await connect.mutateAsync({ connector, chainId: appChain.id });
-      setSel((s) => ({ mode: "injected", role: s.role }));
-    } catch (e) {
-      // Connected but the wallet refused to switch: keep the connection, the network helper offers the switch.
-      if (getConnection(wagmiConfig).isConnected) setSel((s) => ({ mode: "injected", role: s.role }));
-      setConnectError(errText(e));
+      const r = await connectWallet(wagmiConfig, connector, { chainId: appChain.id, addChain: addChainParams() });
+      if (r.ok) setSel((s) => ({ mode: "injected", role: s.role }));
+      else setConnectError(errText(r.error));
+      if (r.switchError) setNetworkError(errText(r.switchError));
+      return r.ok;
+    } finally {
+      setConnecting(false);
     }
-  }, [connect, injectedConnector, hasProvider]);
-
-  const connectWith = useCallback(
-    async (connector: Connector) => {
-      setConnectError(null);
-      try {
-        await connect.mutateAsync({ connector, chainId: appChain.id });
-        setSel((s) => ({ mode: "injected", role: s.role }));
-        return true;
-      } catch (e) {
-        if (getConnection(wagmiConfig).isConnected) {
-          setSel((s) => ({ mode: "injected", role: s.role }));
-          return true;
-        }
-        setConnectError(errText(e));
-        return false;
-      }
-    },
-    [connect],
-  );
+  }, []);
 
   const clearConnectError = useCallback(() => setConnectError(null), []);
 
@@ -270,14 +251,13 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     devRole: role,
     deriving,
     injectedAvailable: hasProvider,
-    connecting: connect.isPending,
+    connecting,
     connectError,
     apiChainId,
     wrongNetwork: active?.kind === "injected" && active.chainId !== null && active.chainId !== appChain.id,
     switching,
     networkError,
     selectDev,
-    connectInjected,
     connectWith,
     walletConnectEnabled,
     clearConnectError,
