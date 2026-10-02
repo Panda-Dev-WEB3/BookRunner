@@ -1,13 +1,13 @@
-// Portfolio (/portfolio). Owned by the Portfolio page agent: positions, redemptions, claims.
-import { PortfolioPlaceholder } from "../components/portfolio/PortfolioPlaceholder";
-import { SetupChecklist } from "../components/SetupChecklist";
-import { Section } from "../components/ui";
+// Portfolio (/portfolio): the connected wallet's Senior and Junior shares in every book at the latest
+// marks, deposits waiting for a mark, redemption requests, claims, BKRN staking and recent activity.
+// Without a wallet: what the page shows and the setup checklist.
+import { ConnectPrompt } from "../components/portfolio/ConnectPrompt";
+import { PortfolioDashboard } from "../components/portfolio/PortfolioDashboard";
+import { useWallet } from "../wallet/WalletContext";
 
 export function PortfolioPage() {
-  return (
-    <Section headingAs="h1" headerSize="md" eyebrow="Portfolio" title="Your portfolio" bodyClassName="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
-      <PortfolioPlaceholder />
-      <SetupChecklist whenReady="hide" />
-    </Section>
-  );
+  const w = useWallet();
+  const address = w.active?.address ?? null;
+  // keyed by address: switching wallets resets dialogs and in-flight claims
+  return address ? <PortfolioDashboard key={address} wallet={address} /> : <ConnectPrompt />;
 }
