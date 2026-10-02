@@ -64,6 +64,7 @@ export interface FeeSaga {
   stage: FeeStage;
   withdrawId?: string;
   creditTx?: Hex;
+  withdrawTx?: Hex; // mock: builder account -> ops EOA
   payTx?: Hex;
   sweepTx?: Hex;
   logIndex?: number;

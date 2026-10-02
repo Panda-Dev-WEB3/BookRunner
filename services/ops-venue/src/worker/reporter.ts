@@ -13,7 +13,9 @@ export class Reporter {
     const st = sagas.get();
     const k = book.adapter.toLowerCase();
     const lastRaw = st.lastAsOf[k];
-    const r = computeReport(ifAcct, mmAcct, book.symbol, this.ctx.now(), lastRaw ? BigInt(lastRaw) : null);
+    // asOf must not exceed block.timestamp of the simulation block (latest): clamp the wall clock to the head.
+    const headMs = Number(await chain.headTimestamp()) * 1000;
+    const r = computeReport(ifAcct, mmAcct, book.symbol, Math.min(this.ctx.now(), headMs), lastRaw ? BigInt(lastRaw) : null);
     if (!r) return null;
     // first report: compare against the charter's planned deployment (IF target + MM inventory)
     const guard = (st.reportGuard[k] ??= { value: (book.ifTargetUsd + book.mmInventoryUsd).toString(), at: 0, suspect: 0 });

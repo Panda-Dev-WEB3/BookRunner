@@ -10,6 +10,11 @@ import { errMsg, Mutex } from "./util";
 export const mockVaultExtraAbi = parseAbi([
   "function operatorWithdraw(bytes32 accountId, address to, uint256 amount)",
   "function creditFees(bytes32 accountId, uint256 amount)",
+  "function accountOwner(bytes32 accountId) view returns (address)",
+  "function tokenHash() view returns (bytes32)",
+  "function totalLedger() view returns (uint256)",
+  "struct VaultDepositFE { bytes32 accountId; bytes32 brokerHash; bytes32 tokenHash; uint128 tokenAmount; }",
+  "function deposit(VaultDepositFE data) payable",
 ]);
 const LEDGER_VIEW_CANDIDATES = ["balanceOf", "balances", "ledger", "accountBalance"] as const;
 const ledgerViewAbi = (name: string) => parseAbi([`function ${name}(bytes32 accountId) view returns (uint256)`]) as Abi;
@@ -69,6 +74,8 @@ export interface ChainPort {
   vaultCreditFees(accountId: Hex, amount: bigint): Promise<Hex>;
   vaultOperatorWithdraw(accountId: Hex, to: Address, amount: bigint): Promise<Hex>;
   usdcTransfer(to: Address, amount: bigint): Promise<Hex>;
+  headTimestamp(): Promise<bigint>;
+  ensureMockAccount(accountId: Hex, brokerFrom: Address): Promise<void>;
 }
 
 export class ViemChain implements ChainPort {
@@ -283,8 +290,38 @@ export class ViemChain implements ChainPort {
     return null;
   }
 
+  /** Chain head timestamp (unix seconds). Report asOf must be <= block.timestamp of the simulation block. */
+  async headTimestamp(): Promise<bigint> {
+    return (await this.pc.getBlock({ blockTag: "latest" })).timestamp;
+  }
+
+  /**
+   * Devnet mock only: makes `accountId` exist in MockOrderlyVault (a 1-unit deposit by the ops EOA, which
+   * becomes the account owner — mirroring the builder admin account on Orderly) so fee credits and
+   * owner-only withdrawals work. No-op when the account already exists.
+   */
+  async ensureMockAccount(accountId: Hex, brokerFrom: Address): Promise<void> {
+    const vault = this.dep.contracts.orderlyVault;
+    const owner = (await this.pc.readContract({ address: vault, abi: mockVaultExtraAbi, functionName: "accountOwner", args: [accountId] })) as Address;
+    if (owner && !/^0x0{40}$/i.test(owner)) return;
+    const brokerHash = (await this.pc.readContract({ address: brokerFrom, abi: orderlyAdapterAbi, functionName: "brokerHash" })) as Hex;
+    const tokenHash = (await this.pc.readContract({ address: vault, abi: mockVaultExtraAbi, functionName: "tokenHash" })) as Hex;
+    await this.send("usdc.mint", { address: this.usdc, abi: mockERC20Abi, functionName: "mint", args: [this.account.address, 1n] });
+    await this.send("usdc.approve", { address: this.usdc, abi: mockERC20Abi, functionName: "approve", args: [vault, 1n] });
+    await this.send("mockVault.deposit", { address: vault, abi: mockVaultExtraAbi, functionName: "deposit", args: [{ accountId, brokerHash, tokenHash, tokenAmount: 1n }] });
+    this.log.info({ accountId, owner: this.account.address }, "mock vault account registered");
+  }
+
   async vaultCreditFees(accountId: Hex, amount: bigint): Promise<Hex> {
-    return (await this.send("mockVault.creditFees", { address: this.dep.contracts.orderlyVault, abi: mockVaultExtraAbi, functionName: "creditFees", args: [accountId, amount] })).txHash;
+    // MockOrderlyVault credits only unallocated USDC: mint the shortfall first (devnet mock USDC, open mint).
+    const vault = this.dep.contracts.orderlyVault;
+    const [bal, ledger] = await Promise.all([
+      this.pc.readContract({ address: this.usdc, abi: mockERC20Abi, functionName: "balanceOf", args: [vault] }) as Promise<bigint>,
+      this.pc.readContract({ address: vault, abi: mockVaultExtraAbi, functionName: "totalLedger" }) as Promise<bigint>,
+    ]);
+    const free = bal > ledger ? bal - ledger : 0n;
+    if (amount > free) await this.send("usdc.mint", { address: this.usdc, abi: mockERC20Abi, functionName: "mint", args: [vault, amount - free] });
+    return (await this.send("mockVault.creditFees", { address: vault, abi: mockVaultExtraAbi, functionName: "creditFees", args: [accountId, amount] })).txHash;
   }
 
   async vaultOperatorWithdraw(accountId: Hex, to: Address, amount: bigint): Promise<Hex> {

@@ -143,8 +143,9 @@ export class FeeSweeper {
     const amount = BigInt(s.amount);
     const now = this.ctx.now();
     if (s.stage === "planned") {
-      // mock: Orderly pays straight to the adapter; live: to the builder EOA, then an ERC20 transfer (VERIFY)
-      const to = settings.mode === "mock" ? book.adapter : chain.opsAddress;
+      // Both modes: the builder fee share is withdrawn from the builder admin account to the ops EOA (the
+      // account owner — Orderly only pays an account's own address), then forwarded to the adapter (VERIFY).
+      const to = chain.opsAddress;
       const r = await builder.requestWithdraw({ accountId: settings.builderAccountId, amountUsd: amount, to, nonce: `fee-${book.bookId}-${s.period}` });
       return advanceFee(s, "requested", { withdrawId: r.withdrawId }, now);
     }
@@ -157,14 +158,23 @@ export class FeeSweeper {
         return advanceFee(s, "paid", { payTx }, now);
       }
       if (rec?.status === "COMPLETED" && rec.txHash) return advanceFee(s, "paid", { payTx: rec.txHash as `0x${string}` }, now);
+      // mock: materialise the venue's builder settlement on MockOrderlyVault (credit the builder admin
+      // account), pay it to its owner (ops EOA) as Orderly would, then forward to the adapter.
       let cur = s;
+      const builderId = settings.builderAccountId as `0x${string}`;
       if (!cur.creditTx) {
-        const creditTx = await chain.vaultCreditFees(settings.builderAccountId as `0x${string}`, amount);
+        await chain.ensureMockAccount(builderId, book.adapter);
+        const creditTx = await chain.vaultCreditFees(builderId, amount);
         cur = { ...cur, creditTx, updatedAt: now };
         this.save(cur);
       }
+      if (!cur.withdrawTx) {
+        const withdrawTx = await chain.vaultOperatorWithdraw(builderId, chain.opsAddress, amount);
+        cur = { ...cur, withdrawTx, updatedAt: now };
+        this.save(cur);
+      }
       if (!cur.payTx) {
-        const payTx = await chain.vaultOperatorWithdraw(settings.builderAccountId as `0x${string}`, book.adapter, amount);
+        const payTx = await chain.usdcTransfer(book.adapter, amount);
         cur = { ...cur, payTx, updatedAt: now };
         this.save(cur);
       }

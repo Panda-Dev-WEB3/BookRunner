@@ -175,6 +175,17 @@ export class FakeChain implements ChainPort {
     this.balances.set(to.toLowerCase(), (this.balances.get(to.toLowerCase()) ?? 0n) + amount);
     return h;
   }
+  /** far-future head so tests' injected clock wins the min(now, head) clamp */
+  headTs = 1n << 40n;
+  async headTimestamp() {
+    return this.headTs;
+  }
+  mockAccounts = new Set<string>();
+  async ensureMockAccount(accountId: Hex) {
+    if (this.mockAccounts.has(accountId.toLowerCase())) return;
+    this.mockAccounts.add(accountId.toLowerCase());
+    this.tx("ensureMockAccount", [accountId]);
+  }
 }
 
 export class MemoryStore implements OpsStore {
