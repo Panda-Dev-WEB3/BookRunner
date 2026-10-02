@@ -26,7 +26,7 @@
   --accent-hover: #115e59;
   --accent-ink: #ffffff;
   --accent-soft: rgba(15, 118, 110, 0.1);
-  --accent-text: #0f766e;
+  --accent-text: #0d6b63; /* 4.5:1+ on --accent-soft over --bg (AA for 12-13.5px badge text) */
   --senior: #3b82f6;
   --senior-ink: #1d4ed8;
   --junior: #c26a04;
@@ -34,11 +34,11 @@
   --backstop: #7e22ce;
   --backstop-ink: #6b21a8;
   --fee: #3fa565;
-  --fee-ink: #15803d;
+  --fee-ink: #166534; /* AA on its own 12-14% tint, not only on white */
   --loss: #a51d2a;
   --loss-ink: #a51d2a;
   --good: #16a34a;
-  --good-ink: #15803d;
+  --good-ink: #166534;
   --warn: #f59e0b;
   --warn-ink: #8a4b06;
   --serious: #ea580c;
