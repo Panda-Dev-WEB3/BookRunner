@@ -14,6 +14,8 @@ import { stakeSetupDone } from "../components/stake/stakeLogic";
 import { useStakePosition, useStakingProtocol } from "../components/stake/useStaking";
 import { SetupChecklist } from "../components/SetupChecklist";
 import { Callout, Section, Term } from "../components/ui";
+import { buybackWhere } from "../lib/copy";
+import { isTestChain } from "../wallet/network";
 import { useOnboarding } from "../wallet/useOnboarding";
 import { useWallet } from "../wallet/WalletContext";
 
@@ -103,7 +105,7 @@ export function StakePage() {
         className="scroll-mt-20"
         eyebrow="Buybacks"
         title="Where stakers' BKRN comes from"
-        lead="Nothing stakers receive comes from book capital. They share BKRN that the protocol buys on the market with half of its carry. The other half goes to the backstop pool."
+        lead={`Nothing stakers receive comes from book capital. They share BKRN that the protocol buys ${buybackWhere(isTestChain)}, with half of its carry. The other half goes to the backstop pool.`}
       >
         <CarryFlow data={p} />
       </Section>

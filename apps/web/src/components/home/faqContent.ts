@@ -1,6 +1,6 @@
 // Home FAQ: plain-text answers (checked against docs/ARCHITECTURE.md and the product overview, and by
 // the copy rules in test/home.test.ts). The Faq component adds glossary terms and links per item.
-import { SPONSOR_SKIN_LINE } from "../../lib/copy";
+import { SPONSOR_SKIN_LINE, TESTNET_MOCKS_LINE } from "../../lib/copy";
 import type { GlossaryId } from "../../lib/glossary";
 
 export interface FaqItem {
@@ -97,6 +97,7 @@ export function faqItems(ctx: FaqContext): FaqItem[] {
           answer: [
             `A practice network where tokens have no value. Bookrunner runs its books on ${ctx.chainName} (chain ${ctx.chainId}) so you can try every step for free.`,
             "Gas ETH comes from the public faucet, and the test USDC has an open mint you can use from your wallet. Test balances never turn into real money, and nothing here is an offer.",
+            TESTNET_MOCKS_LINE,
           ],
           terms: ["testnet", "gas", "usdc"],
         }

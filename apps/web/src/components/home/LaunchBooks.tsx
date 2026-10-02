@@ -12,6 +12,7 @@ import { fmtSharePrice, fmtUsd, usdRaw } from "../../lib/format";
 import { ageOf } from "../../lib/lowgas";
 import { bookState, limitState } from "../../lib/limits";
 import { SERIES_CLASS } from "../../lib/palette";
+import { isTestChain } from "../../wallet/network";
 import { type TopUpRound, isTopUpOpen, useTopUpRounds } from "../../wallet/topUp";
 import { cx } from "../cx";
 import { IconArrowRight } from "../icons";
@@ -108,7 +109,7 @@ function BookCard({ b, deposit, committed, now }: { b: BookListItem; deposit: De
           capBps,
         })
       : null;
-  const m = marketInfo(b.symbol);
+  const m = marketInfo(b.symbol, isTestChain);
   const split = trancheSplit(usdRaw(b.seniorNavUsd) ?? 0n, usdRaw(b.juniorNavUsd) ?? 0n);
   const limits = limitState(b.limits?.state);
   return (
@@ -135,7 +136,7 @@ function BookCard({ b, deposit, committed, now }: { b: BookListItem; deposit: De
           <Badge tone="neutral" size="sm">
             {venueLabel(b.venue)}
           </Badge>
-          <span>{venueDetail(b.venue)}</span>
+          <span>{venueDetail(b.venue, isTestChain)}</span>
         </div>
       </div>
 

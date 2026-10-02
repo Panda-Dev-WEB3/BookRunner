@@ -11,6 +11,7 @@ import { DASH, ageMs, fmtAge, fmtBps, fmtDuration, fmtSharePrice, fmtUsd, ticker
 import { bookState, limitState } from "../../lib/limits";
 import { cadenceTitle, markCadenceLine, nextMarkLabel } from "../../lib/lowgas";
 import { parseMarkStatement } from "../../lib/markStatement";
+import { isTestChain } from "../../wallet/network";
 import { ActivityPanel } from "./ActivityPanel";
 import { DistributionPanel } from "./DistributionPanel";
 import { InvestPanel } from "./InvestPanel";
@@ -77,7 +78,7 @@ function Header({ b, now }: { b: BookDetail; now: number }) {
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <StateChip meta={bookState(b.state)} />
         <StateChip meta={limitState(b.limits?.state)} solid={b.limits?.state === "killed"} />
-        <Chip tone="neutral" title={venueDetail(b.venue)}>
+        <Chip tone="neutral" title={venueDetail(b.venue, isTestChain)}>
           {venueLabel(b.venue)}
         </Chip>
         <Chip tone={b.agent.alive ? "good" : "neutral"} title={AGENTS_LINE}>

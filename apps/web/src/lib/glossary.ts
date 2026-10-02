@@ -57,7 +57,7 @@ const entries: GlossaryEntry[] = [
     id: "book",
     term: "Book",
     short: "One perp market's underwriting pool. Allocators fund it in two tranches; it pays for that market's insurance fund and market-making inventory and earns the market's fee flow.",
-    long: "Each book has its own NAV, mandate, marks and contracts. Bookrunner launched with three books on testnet: NVDA and TSLA (listed on Orderly's public contracts) and RHX5, a five-stock index on the in-house engine.",
+    long: "Each book has its own NAV, mandate, marks and contracts. The three launch books are NVDA and TSLA on an Orderly venue and RHX5, a five-stock index on the in-house engine. On testnet the Orderly venue is a protocol-owned simulator of Orderly's vault.",
     related: ["charter", "tranche", "mandate"],
   },
   {
@@ -195,7 +195,7 @@ const entries: GlossaryEntry[] = [
     id: "bkrn",
     term: "BKRN",
     short: "Bookrunner's token, with a fixed supply of 1 billion and no minting after launch. Sponsors, committee members and larger agent operators stake it as a bond.",
-    long: "Access and bonding, never a revenue claim. Half of the protocol carry buys BKRN on the market, which is then distributed through the staking contract.",
+    long: "Access and bonding, never a revenue claim. Half of the protocol carry buys BKRN through a swap router (on testnet, a protocol-owned mock at a fixed price), which is then distributed through the staking contract.",
     related: ["staking", "carry"],
   },
   {
@@ -230,7 +230,7 @@ const entries: GlossaryEntry[] = [
     id: "stockToken",
     term: "Stock Token",
     short: "A token on Robinhood Chain that tracks a listed stock. Books hedge with Stock Tokens; they are long-only, so they can only offset a short position.",
-    long: "Stock Tokens and stock-perp books are not offered to US persons.",
+    long: "Stock Tokens and stock-perp books are not offered to US persons. On testnet the books hedge with protocol-owned mock Stock Tokens priced from the signed oracle.",
     related: ["hedgeBand", "perp"],
   },
   {

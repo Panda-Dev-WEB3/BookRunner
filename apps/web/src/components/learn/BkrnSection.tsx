@@ -7,6 +7,7 @@ import { useBackstopBalance } from "../../wallet/backstop";
 import { IconArrowRight } from "../icons";
 import { Term } from "../Term";
 import { Card, Stat, StatGrid } from "../ui";
+import { isTestChain } from "../../wallet/network";
 import { Figure, FlowArrow, FlowNode, LearnSection, Prose } from "./parts";
 import { useStakingStats } from "./useLearnData";
 
@@ -54,7 +55,7 @@ export function BkrnSection(props: { index: number }) {
             <div className="mt-1 grid gap-3 sm:grid-cols-2">
               <div className="flex flex-col items-stretch">
                 <FlowArrow vertical label="50%" series="bkrn" />
-                <FlowNode series="bkrn" title="Buys BKRN on the market">
+                <FlowNode series="bkrn" title={isTestChain ? "Buys BKRN (test network: a fixed-price mock router)" : "Buys BKRN on the market"}>
                   The bought BKRN goes to the <Term id="staking">staking</Term> contract, which distributes it to stakers.
                 </FlowNode>
               </div>

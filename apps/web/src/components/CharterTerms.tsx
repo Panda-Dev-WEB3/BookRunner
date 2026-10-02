@@ -4,6 +4,7 @@ import type { CharterView, MandateView } from "../lib/api-types";
 import { FIELD_HELP, SESSION_PRESETS } from "../lib/charterForm";
 import { venueDetail, venueLabel } from "../lib/copy";
 import { bpsPct, fmtBps, fmtDuration, fmtUsd, shortHex } from "../lib/format";
+import { isTestChain } from "../wallet/network";
 import { Hash } from "./ui";
 
 function Row({ k, v, help }: { k: string; v: ReactNode; help?: string }) {
@@ -42,7 +43,7 @@ export function CharterTerms({ c, explain = false, stacked = false }: { c: Chart
       <div>
         <div className="eyebrow mb-1">Market</div>
         <Row k="Underlying" v={c.ticker ?? (c.underlyingToken ? shortHex(c.underlyingToken) : shortHex(c.underlying))} help={c.underlyingKind === "index" ? "Registered index" : "Stock Token"} />
-        <Row k="Venue" v={venueLabel(c.venue)} help={venueDetail(c.venue)} />
+        <Row k="Venue" v={venueLabel(c.venue)} help={venueDetail(c.venue, isTestChain)} />
         <Row k="Venue symbol" v={c.symbol || "—"} />
         <Row k="Oracle" v={c.oracle === "attested" ? "Attested multi-source" : c.oracle === "chainlink" ? "Equity feed reader" : "Unknown"} help={h("oracle")} />
         <Row k="Sessions" v={preset?.label ?? "Custom"} help={preset?.detail} />

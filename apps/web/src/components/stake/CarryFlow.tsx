@@ -3,10 +3,12 @@
 // HTML nodes with inline SVG connectors so it reflows from one column (phones) to one row (lg+).
 // Live lifetime totals from BkrnFeeRouter and Backstop sit under each node.
 import type { ReactNode } from "react";
+import { buybackWhere } from "../../lib/copy";
 import { fmtUsd } from "../../lib/format";
 import { SERIES } from "../../lib/palette";
 import { cx } from "../cx";
 import { Term } from "../ui";
+import { isTestChain } from "../../wallet/network";
 import { bkrnNum } from "./stakeLogic";
 import type { StakingProtocol } from "./useStaking";
 
@@ -123,7 +125,7 @@ export function CarryFlow({ data }: { data: StakingProtocol | undefined }) {
               tone="bkrn"
               step="4b · Buyback"
               title="BKRN shared with stakers"
-              body="A keeper swaps the USDC for BKRN on the market. The staking contract shares it in proportion to stake."
+              body={`A keeper swaps the USDC for BKRN ${buybackWhere(isTestChain)}. The staking contract shares it in proportion to stake.`}
               figureLabel={noBuyback ? "Shared so far: none yet" : "Shared with stakers, all time"}
               figure={data?.distributedBkrn == null ? "—" : `${bkrnNum(data.distributedBkrn)} BKRN`}
             />
@@ -131,7 +133,7 @@ export function CarryFlow({ data }: { data: StakingProtocol | undefined }) {
         </li>
       </ol>
       <figcaption className="mt-4 text-[12.5px] text-ink-2">
-        Live totals from the fee router and backstop contracts. The buyback amount depends on fee flow, the market price of BKRN and when a keeper runs the swap. It has no fixed rate and can be
+        Live totals from the fee router and backstop contracts. The buyback amount depends on fee flow, {isTestChain ? "the mock router's fixed price" : "the market price of BKRN"} and when a keeper runs the swap. It has no fixed rate and can be
         zero for long stretches.
         {noBuyback && data?.buybackPendingUsd != null && data.buybackPendingUsd > 0n && ` On this network no buyback has run yet, and ${fmtUsd(data.buybackPendingUsd)} USDC of carry is waiting for the first one.`}
       </figcaption>

@@ -8,6 +8,7 @@ import { AGENTS_LINE, LIVE_VS_MARKED, STRAPLINE, venueDetail, venueLabel } from 
 import { DASH, ageMs, fmtAge, fmtSharePrice, fmtUsd, tickerOf, usdRaw } from "../lib/format";
 import { bookState, limitState } from "../lib/limits";
 import { markCadenceLine, nextMarkAt, nextMarkLabel } from "../lib/lowgas";
+import { isTestChain } from "../wallet/network";
 
 const isMarkable = (b: BookListItem) => b.state === "Live" || b.state === "Retiring";
 
@@ -148,7 +149,7 @@ export function BooksPage() {
                             </Link>
                             {b.name && b.name.toUpperCase() !== tickerOf(b.symbol) && <div className="max-w-[260px] truncate text-[11px] text-ink-2">{b.name}</div>}
                           </Td>
-                          <Td title={venueDetail(b.venue)}>{venueLabel(b.venue)}</Td>
+                          <Td title={venueDetail(b.venue, isTestChain)}>{venueLabel(b.venue)}</Td>
                           <Td>
                             <StateChip meta={bookState(b.state)} />
                           </Td>

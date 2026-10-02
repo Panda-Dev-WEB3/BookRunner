@@ -42,5 +42,23 @@ export const NOTICE_LINE = "Notice is not a gate: a redemption request is always
 export const venueLabel = (v: string | null | undefined): string =>
   v === "pool_engine" ? "In-house engine" : v === "orderly" ? "Orderly" : "Unknown venue";
 
-export const venueDetail = (v: string | null | undefined): string =>
-  v === "pool_engine" ? "Pool-vs-trader engine with an attested oracle and off-hours regime" : v === "orderly" ? "Listed on Orderly's public contracts" : "";
+/**
+ * One line on the venue. On a test network the Orderly vault is a protocol-owned simulator
+ * (MockOrderlyVault, contracts/script/Deploy.s.sol), so "listed on Orderly's public contracts" is
+ * only said on mainnet.
+ */
+export const venueDetail = (v: string | null | undefined, testnet = false): string =>
+  v === "pool_engine"
+    ? "Pool-vs-trader engine with an attested oracle and off-hours regime"
+    : v === "orderly"
+      ? testnet
+        ? "Orderly-style venue (testnet simulator): a protocol-owned mock of Orderly's vault"
+        : "Listed on Orderly's public contracts"
+      : "";
+
+/** What the test network stands in for (Deploy.s.sol: protocol-owned mocks on devnet and testnet). */
+export const TESTNET_MOCKS_LINE =
+  "On this test network the Orderly vault, the Stock Tokens and the BKRN buyback router are protocol-owned mocks: Stock Tokens trade at the signed oracle price and buybacks at a fixed price.";
+
+/** Where the carry's BKRN is bought: a fixed-price mock router on test networks, the market on mainnet. */
+export const buybackWhere = (testnet: boolean): string => (testnet ? "through the test network's mock swap router, at a fixed price" : "on the market");

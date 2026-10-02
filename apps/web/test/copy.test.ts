@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { checkCopy } from "@bookrunner/shared/copy";
 import { checkSnippets, extractCopy, extractHtmlCopy } from "../scripts/copy-extract";
 import { checkApp } from "../scripts/check-copy";
-import { AGENTS_LINE, BACKSTOP_LINE, FEE_FLOW_LINE, LEGAL, LIVE_VS_MARKED, NOTICE_LINE, STRAPLINE, TAGLINE, TRANCHE_COPY, venueDetail } from "../src/lib/copy";
+import { AGENTS_LINE, BACKSTOP_LINE, FEE_FLOW_LINE, LEGAL, LIVE_VS_MARKED, NOTICE_LINE, STRAPLINE, TAGLINE, TESTNET_MOCKS_LINE, TRANCHE_COPY, buybackWhere, venueDetail } from "../src/lib/copy";
 
 describe("extractCopy", () => {
   test("finds JSX text, attributes shown to readers, literals and template text", () => {
@@ -47,6 +47,16 @@ describe("canonical copy", () => {
   test("every canonical line passes the shared rules", () => {
     const lines = [TAGLINE, STRAPLINE, LEGAL, AGENTS_LINE, BACKSTOP_LINE, LIVE_VS_MARKED, FEE_FLOW_LINE, NOTICE_LINE, TRANCHE_COPY.senior.line, TRANCHE_COPY.junior.line, venueDetail("orderly"), venueDetail("pool_engine")];
     for (const l of lines) expect(checkCopy(l)).toEqual([]);
+  });
+  test("test networks never present protocol-owned mocks as real integrations (Deploy.s.sol)", () => {
+    expect(venueDetail("orderly")).toBe("Listed on Orderly's public contracts");
+    expect(venueDetail("orderly", true)).not.toContain("public contracts");
+    expect(venueDetail("orderly", true)).toContain("testnet simulator");
+    expect(venueDetail("pool_engine", true)).toBe(venueDetail("pool_engine"));
+    expect(buybackWhere(false)).toBe("on the market");
+    expect(buybackWhere(true)).toContain("mock swap router");
+    expect(TESTNET_MOCKS_LINE).toContain("Stock Tokens");
+    for (const l of [venueDetail("orderly", true), buybackWhere(true), TESTNET_MOCKS_LINE]) expect(checkCopy(l)).toEqual([]);
   });
   test("tranches are described by seniority and loss order; footer is exact", () => {
     expect(TRANCHE_COPY.senior.line).toContain("last loss in the waterfall");

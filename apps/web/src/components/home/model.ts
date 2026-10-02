@@ -130,11 +130,14 @@ const KNOWN_MARKETS: Record<string, Omit<MarketInfo, "ticker">> = {
   },
 };
 
-/** What a book's market is, for a newcomer. Unknown symbols get a neutral description. */
-export function marketInfo(symbol: string): MarketInfo {
+/**
+ * What a book's market is, for a newcomer. Unknown symbols get a neutral description. On a test
+ * network the Stock Tokens are protocol-owned mocks priced from the signed oracle (Deploy.s.sol).
+ */
+export function marketInfo(symbol: string, testnet = false): MarketInfo {
   const ticker = tickerOf(symbol);
   const known = KNOWN_MARKETS[ticker];
-  if (known) return { ticker, ...known };
+  if (known) return { ticker, ...known, blurb: testnet && known.kind !== "other" ? `${known.blurb} On this test network, Stock Tokens are protocol-owned mocks priced from the signed oracle.` : known.blurb };
   return { ticker, name: `${ticker} perp`, kind: "other", blurb: "A perp market chartered through Bookrunner and approved by the Risk Committee." };
 }
 

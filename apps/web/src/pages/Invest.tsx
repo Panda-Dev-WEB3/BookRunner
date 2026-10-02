@@ -16,9 +16,11 @@ import { FeeFlowDiagram, LossOrderDiagram } from "../components/invest/Waterfall
 import { IconArrowRight } from "../components/icons";
 import { SetupChecklist } from "../components/SetupChecklist";
 import { Accordion, Card, EmptyState, ErrorState, Section, Skeleton, Term, TrancheBadge, cx } from "../components/ui";
+import { TESTNET_MOCKS_LINE } from "../lib/copy";
 import { termAnchor } from "../lib/glossary";
 import { cadenceTitle } from "../lib/lowgas";
 import { appChain } from "../wallet/chains";
+import { isTestChain } from "../wallet/network";
 import { useTopUpRounds } from "../wallet/topUp";
 import { useOnboarding } from "../wallet/useOnboarding";
 import { useWallet } from "../wallet/WalletContext";
@@ -102,16 +104,20 @@ export function InvestPage() {
         </p>
       ),
     },
-    {
-      id: "testnet",
-      title: "Why a test network?",
-      content: (
-        <p>
-          Bookrunner runs on <Term id="testnet">Robinhood Chain Testnet</Term> today. Test ETH and test USDC have no value, so you can try every step, from connecting a wallet to collecting
-          shares, without risking anything.
-        </p>
-      ),
-    },
+    ...(isTestChain
+      ? [
+          {
+            id: "testnet",
+            title: "Why a test network?",
+            content: (
+              <p>
+                Bookrunner runs on <Term id="testnet">{appChain.name}</Term> today. Test ETH and test USDC have no value, so you can try every step, from connecting a wallet to
+                collecting shares, without risking anything. {TESTNET_MOCKS_LINE}
+              </p>
+            ),
+          },
+        ]
+      : []),
   ];
 
   return (

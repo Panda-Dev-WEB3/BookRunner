@@ -84,6 +84,12 @@ describe("marketInfo", () => {
     expect(idx.components).toEqual(["NVDA", "TSLA", "AAPL", "MSFT", "AMZN"]);
   });
 
+  test("on a test network the Stock Tokens are named as mocks", () => {
+    expect(marketInfo("PERP_NVDA_USDC").blurb).not.toContain("mock");
+    expect(marketInfo("PERP_NVDA_USDC", true).blurb).toContain("protocol-owned mocks priced from the signed oracle");
+    expect(marketInfo("PERP_AAPL_USDC", true).blurb).not.toContain("mock");
+  });
+
   test("falls back for unknown markets, and every description passes the copy rules", () => {
     const m = marketInfo("PERP_AAPL_USDC");
     expect(m).toMatchObject({ ticker: "AAPL", kind: "other", name: "AAPL perp" });
@@ -181,5 +187,7 @@ describe("FAQ", () => {
     const ids = faqItems(contexts[0]!).map((f) => f.id);
     for (const id of ["perp", "money", "lose", "nav", "withdraw", "testnet", "agent", "bkrn"]) expect(ids).toContain(id);
     expect(faqItems(contexts[1]!).map((f) => f.id)).not.toContain("testnet");
+    // the test network says which integrations are protocol-owned mocks
+    expect(faqItems(contexts[0]!).find((f) => f.id === "testnet")?.answer.join(" ")).toContain("protocol-owned mocks");
   });
 });
