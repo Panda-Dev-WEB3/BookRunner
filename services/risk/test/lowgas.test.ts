@@ -149,6 +149,19 @@ describe("BookMonitor: signed prices (LOW_GAS §1)", () => {
     expect(riskState(w)?.meta.signedPrices).toBe(1);
   });
 
+  test("feeds down + a stored price old by design (quiet pull-oracle market): the oracle's newer message wins, no false off-hours", async () => {
+    const w = makeWorld({ obs: chainObs({ oracle: { priceWad: wad(190), publishedAt: T0 - 3_600, held: false, stale: true, source: "chain" } }) });
+    w.bus.kv.set("oracle:NVDA", JSON.stringify({ priceId: "NVDA", priceWad: wad(191).toString(), price: 191, publishedAt: T0 - 2, held: false }));
+    const r = await monitorFor(w, new StaticFeeds([], [], "redis down")).tick();
+    expect(r.snapshot.offHours).toBe(false);
+    expect(riskState(w)?.meta.oracle).toMatchObject({ source: "redis", stale: false, price: 191 });
+    // an older message never replaces the chain reading
+    const w2 = makeWorld({ obs: chainObs({ oracle: { priceWad: wad(190), publishedAt: T0 - 600, held: false, stale: true, source: "chain" } }) });
+    w2.bus.kv.set("oracle:NVDA", JSON.stringify({ priceId: "NVDA", priceWad: wad(189).toString(), price: 189, publishedAt: T0 - 900, held: false }));
+    await monitorFor(w2, undefined).tick();
+    expect(riskState(w2)?.meta.oracle).toMatchObject({ source: "chain", stale: true });
+  });
+
   test("no feeds configured: observe is called without prints (pre-low-gas)", async () => {
     const w = makeWorld();
     const seen: Array<SignedPriceMap | undefined> = [];

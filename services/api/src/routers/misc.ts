@@ -1,9 +1,10 @@
-// risk.state, settlements.list, receipts.root/proof, oracle.prices, events.recent
+// risk.state, settlements.list, receipts.root/proof, oracle.prices + oracle.signed, events.recent
 import { KEYS } from "@bookrunner/shared/queues";
 import { z } from "zod";
 import type { MarkRow, OraclePriceRow, ReceiptRootRow } from "../data/types";
 import type { ApiDeps } from "../deps";
 import { limitsRowToView, type OraclePriceView, parseOraclePrice, parseRiskState } from "../domain/live";
+import { ORACLE_BUNDLE_KEY, signedBundleView } from "../domain/lowgas";
 import { buildReceiptProof, hourlyTree, periodBounds, receiptsRootOf } from "../domain/receipts";
 import { dbUsdStr, unixSec } from "../format";
 import { parseJson } from "../kv";
@@ -167,6 +168,20 @@ export const oracleRouter = router({
       }
       return { asOf: new Date(now).toISOString(), maxPriceAgeSeconds: maxAge, prices: [...live.values()].sort((a, b) => a.priceId.localeCompare(b.priceId)) };
     }),
+
+  /**
+   * The oracle service's latest SIGNED bundle (pull oracle, docs/LOW_GAS.md §1): the prices consumers carry
+   * as `priceData` in their own tx, with each print's age. Mirrors the oracle's GET /prices/signed.
+   */
+  signed: publicProcedure.query(async ({ ctx: { deps } }) => {
+    const now = deps.now();
+    const [bundleRaw, keys] = await Promise.all([deps.kv.get(ORACLE_BUNDLE_KEY), deps.kv.scan(KEYS.oracleLast("*"), 500)]);
+    const messages = keys.length ? (await deps.kv.mget(keys)).map((r) => parseJson(r)) : [];
+    const gw = deps.chain();
+    const view = await signedBundleView(parseJson(bundleRaw), messages, now, { chainId: deps.settings.chainId, oracle: gw?.deployment.contracts.oracle ?? null });
+    const maxAge = await softChain(deps, "config.maxPriceAge", async (g) => (await g.params()).maxPriceAge, deps.settings.maxPriceAgeSeconds);
+    return { ...view, maxPriceAgeSeconds: maxAge, prices: view.prices.map((p) => ({ ...p, stale: p.ageSeconds > maxAge })) };
+  }),
 });
 
 export const eventsRouter = router({

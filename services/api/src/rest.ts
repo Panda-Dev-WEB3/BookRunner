@@ -70,6 +70,8 @@ export function restRoutes(deps: ApiDeps, opts: { origins?: readonly string[] } 
   r.get("/books/:id/marks", (c) => run(c, (k) => k.book.marks(raw({ ...q(c), bookId: id(c) }))));
   r.get("/books/:id/risk", (c) => run(c, (k) => k.risk.state(raw({ bookId: id(c) }))));
   r.get("/books/:id/settlements", (c) => run(c, (k) => k.settlements.list(raw({ ...q(c), bookId: id(c) }))));
+  // ops-venue's latest signed venue report (LOW_GAS §2; relayed in the book's mark tx)
+  r.get("/books/:id/venue-report", (c) => run(c, (k) => k.book.venueReport(raw({ bookId: id(c) }))));
 
   // tranches
   r.post("/books/:id/tranches/:tranche/subscribe", async (c) => {
@@ -106,6 +108,8 @@ export function restRoutes(deps: ApiDeps, opts: { origins?: readonly string[] } 
     const ids = c.req.query("priceIds") ?? c.req.query("ids");
     return run(c, (k) => k.oracle.prices(raw(ids ? { priceIds: ids.split(",").map((s) => s.trim()).filter(Boolean) } : {})));
   });
+  // the oracle's latest signed bundle (pull oracle, LOW_GAS §1): the `priceData` a consumer tx carries
+  r.get("/oracle/signed", (c) => run(c, (k) => k.oracle.signed()));
   r.get("/events", (c) => run(c, (k) => k.events.recent(raw(q(c)))));
 
   // webhooks management

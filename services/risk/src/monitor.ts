@@ -189,9 +189,12 @@ export class BookMonitor {
     }
 
     let oracle = c.oracle;
-    if (!oracle) {
+    // pull oracle: a stored on-chain price is old between trades by design; without a verified signed
+    // print (feeds down) the oracle's latest message is the better reading when it is newer
+    if (!oracle || (oracle.source === "chain" && oracle.stale)) {
       const msg = await this.soft("oracleLast", () => this.d.bus.oracleLast(ref.priceIdStr), null);
-      oracle = oracleFromRedis(msg, nowSec, c.maxPriceAgeSec);
+      const fromRedis = oracleFromRedis(msg, nowSec, c.maxPriceAgeSec);
+      if (!oracle || fromRedis.publishedAt > oracle.publishedAt) oracle = fromRedis;
     }
     const quote = await this.soft("latestQuote", () => this.d.bus.latestQuote(ref.bookId), null);
 

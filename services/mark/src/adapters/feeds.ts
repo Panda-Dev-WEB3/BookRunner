@@ -34,7 +34,12 @@ export function chainVerifier(pc: PublicClient, c: { config: Address; oracle: Ad
   const cached = async (k: string, load: () => Promise<boolean>) => {
     const hit = cache.get(k);
     if (hit && Date.now() - hit.at < ROLE_TTL_MS) return hit.ok;
-    const ok = await load().catch(() => false);
+    let ok: boolean;
+    try {
+      ok = await load();
+    } catch {
+      return false; // RPC blip: not cached, the next read asks again
+    }
     cache.set(k, { ok, at: Date.now() });
     return ok;
   };

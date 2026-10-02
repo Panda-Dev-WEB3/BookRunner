@@ -50,18 +50,24 @@ if (network === "testnet") {
     DEPLOYMENT_FILE: "contracts/deployments/46630.json",
     DATABASE_URL: "postgres://bookrunner:bookrunner@127.0.0.1:54400/bookrunner_testnet",
     REDIS_URL: "redis://127.0.0.1:63790/1",
-    // LOW-GAS profile (~0.004 ETH/day for 3 books at 0.01 gwei). MARK_INTERVAL must equal the on-chain
-    // markInterval set at deploy (scripts/deploy-testnet.sh uses the same 3600).
+    // LOW-GAS profile (docs/LOW_GAS.md: one commitAndApply tx per book per period, no oracle / report
+    // loops). MARK_INTERVAL must equal the on-chain markInterval set at deploy (scripts/deploy-testnet.sh
+    // uses the same 3600; mainnet is daily = 86400) — the cadence is decided at deploy time.
     MARK_INTERVAL_SECONDS: "3600",
     RECEIPTS_INTERVAL_SECONDS: "300",
     SESSIONS_MODE: "24x7",
     ORDERLY_MODE: "mock",
-    // oracle: heartbeat below the on-chain maxPriceAge (300 s) + deviation pushes only
+    // docs/LOW_GAS.md: pull oracle — no timer pushes; consumers carry the signed bundle (Redis / GET
+    // /prices/signed) in their own tx. The two push settings below only apply with ORACLE_PUSH_MODE=heartbeat.
+    ORACLE_PUSH_MODE: "pull",
     ORACLE_PUSH_INTERVAL_MS: "180000",
     ORACLE_PUSH_DEVIATION_BPS: "50",
     ORACLE_TICK_MS: "2000",
     RISK_INTERVAL_MS: "5000",
-    OPS_REPORT_INTERVAL_MS: "300000",
+    // signed venue reports (EIP-712, Redis bkrn:venue:report:<bookId>), relayed inside the mark's
+    // commitAndApply tx: no report txs, so a short interval costs no gas and keeps risk + marks fresh
+    OPS_REPORT_MODE: "signed",
+    OPS_REPORT_INTERVAL_MS: "60000",
     OPS_LOG_POLL_MS: "5000",
     // in-house quote: re-send at most once a minute, only on meaningful changes
     ENGINE_MIN_RESEND_MS: "60000",

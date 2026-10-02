@@ -1,6 +1,8 @@
 // Signed venue reports (docs/LOW_GAS.md §2): typed data, encoding, parsing, the on-chain acceptance
 // preview, and the Reporter in OPS_REPORT_MODE=signed (no report tx, hold rules unchanged).
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { ACCOUNT, devAccount } from "@bookrunner/shared";
 import { type Address, encodeAbiParameters, getAddress, type Hex, keccak256, parseAbiParameters, stringToHex, toFunctionSelector, zeroAddress } from "viem";
 import { codeHasSelector, REPORT_SIGNED_SELECTOR, selectorPush } from "../src/chain";
@@ -330,6 +332,14 @@ describe("config", () => {
     expect(loadOpsEnv({}).OPS_REPORT_MODE).toBe("signed");
     expect(loadOpsEnv({ OPS_REPORT_MODE: "onchain" }).OPS_REPORT_MODE).toBe("onchain");
     expect(() => loadOpsEnv({ OPS_REPORT_MODE: "both" })).toThrow(/OPS_REPORT_MODE/);
+  });
+
+  test("the testnet dev profile runs the low-gas modes (signed reports, pull oracle) and keeps its mark interval", () => {
+    const src = readFileSync(resolve(import.meta.dir, "../../../scripts/dev.ts"), "utf8");
+    const profile = src.slice(src.indexOf('if (network === "testnet")'), src.indexOf("loadEnvFile(\".env\", false)"));
+    expect(profile).toContain('OPS_REPORT_MODE: "signed"');
+    expect(profile).toContain('ORACLE_PUSH_MODE: "pull"');
+    expect(profile).toContain('MARK_INTERVAL_SECONDS: "3600"');
   });
 });
 
