@@ -1,10 +1,11 @@
 // The one chain this build targets (shared/chains.ts reads process.env at import, so it is not used
 // in the browser). Devnet 31337 by default; Robinhood Chain testnet 46630 with VITE_CHAIN_ID=46630.
 import { type Chain, createPublicClient, defineChain, http } from "viem";
-import { type CreateConnectorFn, createConfig, injected } from "wagmi";
+import { type CreateConnectorFn, createConfig, createStorage, injected } from "wagmi";
 import { walletConnect } from "./walletConnect";
 import { chainLabel } from "../lib/chainConfig";
 import { config } from "../lib/config";
+import { safeLocalStorage } from "../lib/safeStorage";
 
 const c = config.chain;
 
@@ -43,6 +44,9 @@ function connectors(): CreateConnectorFn[] {
 
 export const wagmiConfig = createConfig({
   chains: [appChain],
+  // wagmi's default storage reads window.localStorage unguarded; blocked site data would throw here,
+  // at module load, before React mounts.
+  storage: createStorage({ storage: safeLocalStorage() }),
   connectors: connectors(),
   multiInjectedProviderDiscovery: true,
   transports: { [appChain.id]: http(c.rpcUrl) },
