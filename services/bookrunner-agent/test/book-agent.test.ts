@@ -293,4 +293,28 @@ describe("BookAgent fills and hedging", () => {
     await agent.hedgeTick();
     expect(hedger!.calls.length).toBe(2);
   });
+
+  test("stop() during a hedge cycle: the cycle sees the abort, run() returns once it finishes, nothing new starts", async () => {
+    const { agent, hedger, venue } = setup({ hedger: true });
+    let release!: () => void;
+    const inFlight = new Promise<void>((r) => (release = r));
+    let entered!: () => void;
+    const started = new Promise<void>((r) => (entered = r));
+    hedger!.cycle = async (ctx) => {
+      hedger!.calls.push(ctx);
+      entered();
+      await inFlight; // a desk tx waiting for its receipt
+      return { action: "none", reason: "TEST", ratioBefore: null, ratioAfter: null, targetHedgeUsd: 0n, legs: [] };
+    };
+    const running = agent.run();
+    await started;
+    agent.stop();
+    expect(hedger!.calls[0]!.signal?.aborted).toBe(true);
+    const quotesAtStop = venue.replaced.length;
+    release();
+    expect(await running).toEqual({ halted: false, reason: "SHUTDOWN" });
+    expect(hedger!.calls.length).toBe(1);
+    expect(venue.replaced.length).toBe(quotesAtStop);
+    expect(venue.cancels).toBe(1); // shutdown cancel-all
+  });
 });

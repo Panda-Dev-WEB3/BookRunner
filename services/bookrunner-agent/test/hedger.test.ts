@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { RECEIPT_KIND, hedgeAllowTree, usd, wad } from "@bookrunner/shared";
 import { bookrunnerDeskAbi } from "@bookrunner/shared/abi";
 import { type Address, type Hex, type Log, type TransactionReceipt, decodeAbiParameters, encodeAbiParameters, encodeEventTopics } from "viem";
-import { type HedgeChain, Hedger } from "../src/agent/hedger";
+import { type HedgeChain, Hedger, type HedgerDeps } from "../src/agent/hedger";
 import type { OraclePoint, StockTokenInfo } from "../src/chain/book-chain";
 import { DESK_ACTION, type DeskAction } from "../src/chain/desk-actions";
 import type { DeskRunResult, DeskRunner } from "../src/chain/desk-client";
@@ -93,7 +93,7 @@ class FakeRunner implements DeskRunner {
   }
 }
 
-function setup(rootOverride?: Hex) {
+function setup(rootOverride?: Hex, over: Partial<HedgerDeps> = {}) {
   const chain = new FakeHedgeChain();
   const runner = new FakeRunner(chain);
   const store = new FakeStore();
@@ -112,6 +112,7 @@ function setup(rootOverride?: Hex) {
     receiptsIntervalSec: 60,
     log: silentLog,
     now: () => 1_760_000_000_000,
+    ...over,
   });
   return { chain, runner, store, hedger, mandate };
 }
@@ -216,5 +217,71 @@ describe("Hedger (executor)", () => {
     expect(runner.actions.map((a) => a.kind)).toEqual([DESK_ACTION.Flatten, DESK_ACTION.ReturnToVault]);
     const [ret] = decodeAbiParameters([{ type: "uint256" }], runner.actions[1]!.data);
     expect(ret).toBe(usd(700));
+  });
+});
+
+describe("Hedger hysteresis + shutdown", () => {
+  const HOLD = { minTradeUsd: usd(250), slippageBps: 100, perpEnabled: false, returnDustUsd: usd(1), reverseHoldMs: 600_000 };
+
+  test("reversal hold: a flatten right after a buy waits for the hold, then executes", async () => {
+    let now = 1_760_000_000_000;
+    const { chain, runner, hedger, mandate } = setup(undefined, { cfg: HOLD, now: () => now });
+    expect((await hedger.cycle({ mandate, mode: "normal", offHours: false, netExposureUsd: -usd(40_000), allowAddHedge: true })).action).toBe("buy");
+    expect(hedger.lastTradeInfo).toEqual({ side: "buy", atMs: now });
+    chain.balance = qtyForUsd(usd(34_000), wad(190), wad(1), 18);
+    chain.hedge = usd(34_000);
+    const long = { mandate, mode: "normal" as const, offHours: false, netExposureUsd: usd(1_000), allowAddHedge: true };
+    now += 60_000;
+    expect((await hedger.cycle(long)).reason).toBe("REVERSAL_HOLD");
+    expect(runner.actions.length).toBe(1);
+    now += 540_000;
+    expect((await hedger.cycle(long)).action).toBe("flatten");
+    expect(runner.actions.map((a) => a.kind)).toEqual([DESK_ACTION.Hedge, DESK_ACTION.Flatten]);
+    expect(hedger.lastTradeInfo?.side).toBe("sell");
+  });
+
+  test("the hold survives a restart: seeded from the last persisted hedge row", async () => {
+    const now = 1_760_000_000_000;
+    const { chain, runner, store, hedger, mandate } = setup(undefined, { cfg: HOLD });
+    Object.assign(store, { lastHedge: async () => ({ ts: now - 60_000, buy: true }) });
+    chain.balance = qtyForUsd(usd(10_000), wad(190), wad(1), 18);
+    chain.hedge = usd(10_000);
+    expect((await hedger.cycle({ mandate, mode: "normal", offHours: false, netExposureUsd: usd(1_000), allowAddHedge: true })).reason).toBe("REVERSAL_HOLD");
+    expect(runner.actions.length).toBe(0);
+  });
+
+  test("shutdown: no new leg starts once stopping; the leg in flight completes and is recorded", async () => {
+    // engine recall plan (InventoryToVault -> FundDesk -> buy): stop lands during the first leg
+    const a = setup();
+    a.chain.usdc = 0n;
+    a.chain.vaultIdle = 0n;
+    a.chain.recall = { recallableUsd: usd(90_000), inFlightUsd: 0n, sync: true };
+    const ctl = new AbortController();
+    const run = a.runner.run.bind(a.runner);
+    a.runner.run = async (action) => {
+      const r = await run(action);
+      ctl.abort();
+      return r;
+    };
+    await a.hedger.cycle({ mandate: a.mandate, mode: "normal", offHours: false, netExposureUsd: -usd(40_000), allowAddHedge: true, signal: ctl.signal });
+    expect(a.runner.actions.map((x) => x.kind)).toEqual([DESK_ACTION.InventoryToVault]);
+
+    // stop lands during the Hedge buy: its receipt is parsed and the hedge row persisted
+    const b = setup();
+    const ctl2 = new AbortController();
+    const run2 = b.runner.run.bind(b.runner);
+    b.runner.run = async (action) => {
+      ctl2.abort();
+      return run2(action);
+    };
+    await b.hedger.cycle({ mandate: b.mandate, mode: "normal", offHours: false, netExposureUsd: -usd(40_000), allowAddHedge: true, signal: ctl2.signal });
+    expect(b.runner.actions.map((x) => x.kind)).toEqual([DESK_ACTION.Hedge]);
+    expect(b.store.hedges.length).toBe(1);
+
+    // already stopping when the cycle starts: plan computed, nothing sent
+    const c = setup();
+    const plan = await c.hedger.cycle({ mandate: c.mandate, mode: "normal", offHours: false, netExposureUsd: -usd(40_000), allowAddHedge: true, signal: AbortSignal.abort() });
+    expect(plan.reason).toBe("SHUTDOWN");
+    expect(c.runner.actions.length).toBe(0);
   });
 });

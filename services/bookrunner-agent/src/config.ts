@@ -91,6 +91,13 @@ export const agentEnvShape = {
   // hedging
   HEDGE_ENABLED: flag(true),
   HEDGE_MIN_TRADE_USD: num(250),
+  /** Per-leg floor (USD): basket legs below it are skipped (each leg is a desk tx). Retiring sweeps dust regardless. */
+  HEDGE_MIN_LEG_USD: num(50),
+  /**
+   * Reversal hold: a trade opposite to the last one (sell after buy, buy after sell) waits this long
+   * unless the ratio is out of an enforced band (always fixed immediately). 0 = off.
+   */
+  HEDGE_REVERSE_HOLD_MS: num(600_000),
   HEDGE_SLIPPAGE_BPS: num(100),
   HEDGE_POOL_FEE: num(3_000), // VERIFY Stock Token pool fee tiers on RHC
   HEDGE_TARGET_RATIO_BPS: z.coerce.number().optional(),
@@ -101,6 +108,11 @@ export const agentEnvShape = {
   HEDGE_ALLOW_PAIRS: z.string().optional(),
 
   TX_RECEIPT_TIMEOUT_MS: num(60_000),
+  /**
+   * SIGINT/SIGTERM: no new quote / hedge leg starts; a desk tx in flight gets this long to confirm and
+   * be recorded (plus the shutdown quote freeze) before the process exits 0 anyway.
+   */
+  AGENT_SHUTDOWN_GRACE_MS: num(8_000),
 };
 
 /**
@@ -167,6 +179,8 @@ export function engineVenueConfigFrom(env: AgentEnv): EngineVenueConfig {
 export function hedgeConfigFrom(env: AgentEnv): HedgePlannerConfig {
   return {
     minTradeUsd: usd(env.HEDGE_MIN_TRADE_USD),
+    minLegUsd: usd(env.HEDGE_MIN_LEG_USD),
+    reverseHoldMs: env.HEDGE_REVERSE_HOLD_MS,
     slippageBps: env.HEDGE_SLIPPAGE_BPS,
     ...(env.HEDGE_TARGET_RATIO_BPS === undefined ? {} : { targetRatioBps: env.HEDGE_TARGET_RATIO_BPS }),
     perpEnabled: env.HEDGE_PERP_ENABLED,

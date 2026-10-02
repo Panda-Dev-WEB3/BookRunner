@@ -1,7 +1,9 @@
 // bookrunner-agent: one process per book (BOOK_ID). Boots from the deployment file (idles with retry
 // while it is missing), builds the venue (EngineVenue for in-house books, ops-venue's OrderlyVenue or
 // the mock fallback for Orderly books), the hedger and the BookAgent loops, and handles kill/halt,
-// resume after a remandate, and graceful shutdown on SIGINT/SIGTERM.
+// resume after a remandate, and graceful shutdown on SIGINT/SIGTERM: no new quote / hedge leg starts,
+// a desk tx in flight confirms and is recorded, quotes are cancelled, then the process exits 0 — within
+// AGENT_SHUTDOWN_GRACE_MS (scripts/dev.ts force-exits its children shortly after).
 
 import { createDb } from "@bookrunner/db";
 import {
@@ -133,7 +135,15 @@ interface Holder {
   agent: BookAgent | null;
 }
 
-async function runOnce(ctx: BookContext, env: AgentEnv, baseLog: Logger, bus: AgentBus, store: DbStore, holder: Holder): Promise<{ halted: boolean; reason: string }> {
+async function runOnce(
+  ctx: BookContext,
+  env: AgentEnv,
+  baseLog: Logger,
+  bus: AgentBus,
+  store: DbStore,
+  holder: Holder,
+  signal: AbortSignal,
+): Promise<{ halted: boolean; reason: string }> {
   const log = baseLog.child({ bookId: ctx.bookId, book: ctx.name, symbol: ctx.symbol });
   const charter = await ctx.chain.readCharter();
   const mandate = await ctx.chain.readMandate();
@@ -303,6 +313,7 @@ async function runOnce(ctx: BookContext, env: AgentEnv, baseLog: Logger, bus: Ag
     },
   );
   holder.agent = agent;
+  if (signal.aborted) agent.stop(); // shutdown arrived during setup: run() only cancels and returns
   log.info(
     { venue: venue.kind, priceId: ctx.priceIdStr, maxInventoryUsd: mandate.maxInventoryUsd.toString(), minWidthBps: mandate.minQuoteWidthBps, maxSkewBps: mandate.maxSkewBps, hedging: !!hedger },
     "bookrunner agent starting",
@@ -348,10 +359,17 @@ async function main(): Promise<void> {
   const log = createLogger("bookrunner-agent", env.LOG_LEVEL);
   const ctl = new AbortController();
   const holder: Holder = { agent: null };
+  let forceExit: ReturnType<typeof setTimeout> | null = null;
   const onSignal = (sig: string) => {
-    log.info({ sig }, "shutdown requested");
+    log.info({ sig, graceMs: env.AGENT_SHUTDOWN_GRACE_MS }, "shutdown requested");
     ctl.abort();
     holder.agent?.stop();
+    // bounded: a stuck RPC / receipt wait never outlives the supervisor's force-exit window
+    forceExit ??= setTimeout(() => {
+      log.warn({ graceMs: env.AGENT_SHUTDOWN_GRACE_MS }, "shutdown grace elapsed with work in flight; exiting");
+      process.exit(0);
+    }, env.AGENT_SHUTDOWN_GRACE_MS);
+    forceExit.unref?.();
   };
   process.on("SIGINT", () => onSignal("SIGINT"));
   process.on("SIGTERM", () => onSignal("SIGTERM"));
@@ -380,7 +398,7 @@ async function main(): Promise<void> {
       subscribeOnce(CHANNELS.riskState(ctx.bookId), (raw) => holder.agent?.onRiskState(raw));
       let result: { halted: boolean; reason: string };
       try {
-        result = await runOnce(ctx, env, log, bus, store, holder);
+        result = await runOnce(ctx, env, log, bus, store, holder, ctl.signal);
       } catch (err) {
         log.error({ bookId: ctx.bookId, err: errMsg(err) }, "agent setup failed; retrying");
         await sleep(env.DEPLOYMENT_RETRY_MS, ctl.signal);
@@ -400,8 +418,12 @@ async function main(): Promise<void> {
 }
 
 if (import.meta.main) {
-  main().catch((err) => {
-    console.error(err);
-    process.exit(1);
-  });
+  // exit explicitly: open handles (e.g. the venue-report relay's Redis client) must not keep a stopped agent alive
+  main().then(
+    () => process.exit(0),
+    (err) => {
+      console.error(err);
+      process.exit(1);
+    },
+  );
 }

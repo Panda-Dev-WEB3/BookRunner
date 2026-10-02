@@ -2,7 +2,7 @@
 
 import { type Db, fills, hedges, quotes, receipts } from "@bookrunner/db";
 import { dbUsd } from "@bookrunner/shared";
-import { eq, max } from "drizzle-orm";
+import { desc, eq, max } from "drizzle-orm";
 import type { ReceiptRow } from "../domain/receipts";
 
 export interface QuoteRow {
@@ -48,6 +48,8 @@ export interface AgentStore {
   insertFills(rows: FillRow[], receiptsFor: (inserted: FillRow[]) => ReceiptRow[]): Promise<string[]>;
   insertHedge(row: HedgeRow, receipt: ReceiptRow): Promise<void>;
   lastFillTs(bookId: number): Promise<number | null>;
+  /** Latest hedge row (ms timestamp, buy = positive qty): seeds the hedger's reversal hold. */
+  lastHedge?(bookId: number): Promise<{ ts: number; buy: boolean } | null>;
 }
 
 const receiptValues = (r: ReceiptRow) => ({
@@ -100,5 +102,12 @@ export class DbStore implements AgentStore {
     const r = await this.db.select({ ts: max(fills.ts) }).from(fills).where(eq(fills.bookId, bookId));
     const ts = r[0]?.ts;
     return ts ? new Date(ts).getTime() : null;
+  }
+
+  async lastHedge(bookId: number): Promise<{ ts: number; buy: boolean } | null> {
+    const r = await this.db.select({ ts: hedges.ts, qtyRaw: hedges.qtyRaw }).from(hedges).where(eq(hedges.bookId, bookId)).orderBy(desc(hedges.ts)).limit(1);
+    const row = r[0];
+    if (!row) return null;
+    return { ts: new Date(row.ts).getTime(), buy: BigInt(row.qtyRaw) > 0n };
   }
 }
