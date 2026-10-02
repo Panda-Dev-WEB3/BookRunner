@@ -14,6 +14,9 @@ export interface AppOptions {
 export function createApp(deps: ApiDeps, opts: AppOptions) {
   const app = new Hono();
   const started = deps.now();
+  // tRPC procedure paths this build serves, so clients can skip optional procedures it does not
+  // have instead of probing them (each probe is a 404 in the browser console).
+  const procedures = Object.keys((appRouter as unknown as { _def: { procedures: Record<string, unknown> } })._def.procedures).sort();
 
   app.use(
     "*",
@@ -34,6 +37,7 @@ export function createApp(deps: ApiDeps, opts: AppOptions) {
       chainId: deps.settings.chainId,
       deployment: deps.chain() !== null,
       uptimeSec: Math.floor((deps.now() - started) / 1000),
+      procedures,
       ...extra,
     });
   });

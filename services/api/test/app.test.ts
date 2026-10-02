@@ -18,7 +18,12 @@ describe("http app", () => {
     const { app } = setup();
     const res = await app.request("/health");
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ ok: true, service: "api", chainId: 31337, deployment: true });
+    const body = (await res.json()) as { procedures?: string[] };
+    expect(body).toMatchObject({ ok: true, service: "api", chainId: 31337, deployment: true });
+    // the procedure list lets the web skip optional procedures this build does not serve (no 404 probes)
+    expect(body.procedures).toContain("book.get");
+    expect(body.procedures).toContain("tranche.position");
+    expect(body.procedures).not.toContain("book.fills");
   });
 
   test("CORS allows the web app origins only", async () => {

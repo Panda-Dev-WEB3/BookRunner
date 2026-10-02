@@ -1,5 +1,6 @@
 // Tolerant parsers: activity feeds, jury verdicts, mark PnL statements, API / wallet errors.
 import { describe, expect, test } from "bun:test";
+import { procedureListed } from "../src/api/hooks";
 import { describeError, errorCode, isMissingProcedure, zodIssueText } from "../src/lib/errors";
 import { hedgeQty, parseFills, parseHedges, parseReceipts } from "../src/lib/feeds";
 import { jurorLabel, parseVerdict, seatLabel } from "../src/lib/jury";
@@ -134,5 +135,14 @@ describe("errors", () => {
     expect(zodIssueText("[not json")).toBeNull();
     expect(zodIssueText("[]")).toBeNull();
     expect(zodIssueText("plain text")).toBeNull();
+  });
+});
+
+describe("optional procedures", () => {
+  test("a procedure missing from /health's list is never requested; an older API without the list is probed", () => {
+    expect(procedureListed(["book.get", "receipts.root"], "book.fills")).toBe(false);
+    expect(procedureListed(["book.get", "receipts.root"], "book.get")).toBe(true);
+    expect(procedureListed(null, "book.fills")).toBeNull();
+    expect(procedureListed(undefined, "receipts.list")).toBeNull();
   });
 });

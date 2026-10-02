@@ -10,6 +10,8 @@ export interface Health {
   deployment: boolean;
   db?: string;
   redis?: string;
+  /** tRPC procedure paths the API serves (null: an older API that does not list them). */
+  procedures: string[] | null;
 }
 
 /** GET /health of the API (chain id, deployment presence). Polls; never throws into the UI. */
@@ -28,6 +30,7 @@ export function useHealth() {
           deployment: j.deployment === true,
           db: typeof j.db === "string" ? j.db : undefined,
           redis: typeof j.redis === "string" ? j.redis : undefined,
+          procedures: Array.isArray(j.procedures) ? j.procedures.filter((p): p is string => typeof p === "string") : null,
         };
       } finally {
         clearTimeout(t);
@@ -50,12 +53,19 @@ export interface Optional<T> {
 /** Procedures this API answered "no procedure found" for (asked once per page load, not per mount). */
 const missingProcedures = new Set<string>();
 
+/** The API lists its procedures and `path` is not one of them (null: unknown, probe it). */
+export const procedureListed = (procedures: string[] | null | undefined, path: string): boolean | null => (procedures ? procedures.includes(path) : null);
+
 export function useOptional<T>(path: string, input: unknown, parse: (raw: unknown) => T, opts: { refetchInterval?: number; enabled?: boolean } = {}) {
+  const health = useHealth();
+  // wait for /health (or its failure): when it lists the procedures, an absent one is never requested
+  const healthSettled = health.data !== undefined || health.isError;
+  const listed = procedureListed(health.data?.procedures, path);
   return useQuery({
-    queryKey: ["optional", path, input],
-    enabled: opts.enabled ?? true,
+    queryKey: ["optional", path, input, listed],
+    enabled: (opts.enabled ?? true) && healthSettled,
     queryFn: async (): Promise<Optional<T>> => {
-      if (missingProcedures.has(path)) return { supported: false, data: parse([]) };
+      if (listed === false || missingProcedures.has(path)) return { supported: false, data: parse([]) };
       try {
         return { supported: true, data: parse(await untypedClient.query(path, input)) };
       } catch (e) {
