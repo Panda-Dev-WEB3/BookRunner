@@ -134,6 +134,8 @@ if (procs.length === 0) {
 }
 
 const running: Subprocess[] = [];
+let shuttingDown = false;
+const restarts = new Map<string, number>(); // service -> consecutive quick restarts (backoff)
 let colorIdx = 0;
 const width = 14;
 function start(p: Proc) {
@@ -154,7 +156,20 @@ function start(p: Proc) {
   };
   void pump(child.stdout);
   void pump(child.stderr);
-  void child.exited.then((code) => process.stdout.write(`${prefix}\x1b[2mexited with code ${code}\x1b[0m\n`));
+  const startedAt = Date.now();
+  void child.exited.then((code) => {
+    process.stdout.write(`${prefix}\x1b[2mexited with code ${code}\x1b[0m\n`);
+    // supervisor: long-running services restart after an unexpected exit, with backoff (2s..60s);
+    // one-shot jobs (launch) and clean exits don't
+    if (shuttingDown || code === 0 || p.name === "launch") return;
+    const n = Date.now() - startedAt > 120_000 ? 0 : (restarts.get(p.name) ?? 0) + 1;
+    restarts.set(p.name, n);
+    const delay = Math.min(60_000, 2_000 * 2 ** n);
+    process.stdout.write(`${prefix}\x1b[33mrestarting in ${Math.round(delay / 1000)}s (supervisor)\x1b[0m\n`);
+    setTimeout(() => {
+      if (!shuttingDown) start(p);
+    }, delay);
+  });
   return child;
 }
 procs.forEach(start);
@@ -193,6 +208,7 @@ setInterval(() => {
 }, 3000);
 
 const shutdown = () => {
+  shuttingDown = true;
   for (const c of running) c.kill("SIGTERM");
   setTimeout(() => process.exit(0), 1500);
 };
