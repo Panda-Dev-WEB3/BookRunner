@@ -1,6 +1,8 @@
 // Open a top-up round (new deposits into a Live book) as the sponsor: Book.openTopUp(window, seniorCap, juniorCap).
-// Deposits made during the round settle at the first mark whose period ends at or after the round end.
-//   bun scripts/open-topup.ts                     # every Live book, 30 days, 100k Senior / 100k Junior
+// Deposits made during the round stay in escrow and settle at the first mark whose period ends at or after
+// the round END (not the next mark), and a round cannot be closed early (only retire() cancels it) — so keep
+// rounds short: deposits become shares at most one mark interval after the round ends.
+//   bun scripts/open-topup.ts                     # every Live book, 1 day, 100k Senior / 100k Junior
 //   bun scripts/open-topup.ts NVDA --days 7 --senior 50000 --junior 50000
 //   CHAIN_ID=46630 RPC_URL=https://rpc.testnet.chain.robinhood.com DEPLOYMENT_FILE=contracts/deployments/46630.json \
 //     bun --env-file=.env.testnet scripts/open-topup.ts
@@ -20,7 +22,7 @@ const opt = (k: string, d: number) => {
   return i >= 0 ? Number(args[i + 1]) : d;
 };
 const names = args.filter((a, i) => !a.startsWith("--") && !args[i - 1]?.startsWith("--"));
-const windowSec = Math.round(opt("--days", 30) * 86_400);
+const windowSec = Math.round(opt("--days", 1) * 86_400);
 const seniorCap = usd(opt("--senior", 100_000));
 const juniorCap = usd(opt("--junior", 100_000));
 const sponsor = roleAccount("sponsor");
