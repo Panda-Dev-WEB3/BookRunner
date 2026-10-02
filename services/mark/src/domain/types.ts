@@ -1,5 +1,6 @@
 import type { BookState, Mandate } from "@bookrunner/shared";
 import type { Address, Hex } from "viem";
+import type { SignedPrice } from "./prices";
 
 /** One Stock Token held by the desk, valued by StockTokenRegistry (multiplier applied there, once). */
 export interface DeskPosition {
@@ -9,9 +10,11 @@ export interface DeskPosition {
   priceWad: bigint; // per share of the equity (oracle)
   multiplierWad: bigint; // shares per whole token (informational; never re-applied)
   decimals: number;
-  valueUsd: bigint; // registry.valueUsd(token, qtyRaw)
-  /** registry.valueUsd reverted (stale price): valued with valueUsdAt at the last attested price. */
+  valueUsd: bigint; // registry.valueUsd(token, qtyRaw) / valueUsdAt(token, qtyRaw, priceWad)
+  /** valued at an old price (older than config.maxPriceAge at the snapshot block, or the strict view reverted). */
   priceStale: boolean;
+  /** priceWad comes from the oracle's signed bundle (newer than the stored on-chain price; rides in the mark tx). */
+  signedPrice?: boolean;
 }
 
 /** Everything a mark needs, read at ONE block. */
@@ -34,6 +37,16 @@ export interface MarkSnapshot {
     /** In-house engine only: pool cash + equity (open-position MTM = equity - cash). */
     poolCashUsd: bigint | null;
     poolEquityUsd: bigint | null;
+    /** Orderly: adapter.lastFlowAt() at the snapshot block (0 when unknown / engine). */
+    lastFlowAt?: number;
+    /** Orderly: requested-but-unconfirmed withdrawals (IF + MM) at the snapshot block. */
+    pendingWithdrawUsd?: bigint;
+    /**
+     * Where the venue figures come from: the adapter's stored report / live engine views at the stored
+     * oracle price ("adapter"), ops-venue's signed report ("signed_report", domain/venue.ts) or the engine
+     * views re-evaluated after applying the signed bundle price in an eth_call ("engine_signed_price").
+     */
+    source?: "adapter" | "signed_report" | "engine_signed_price";
   };
   desk: {
     usdc: bigint;
@@ -57,4 +70,9 @@ export interface MarkSnapshot {
   mandate: Mandate;
   killed: boolean;
   underlyingPrice: { priceId: Hex; priceWad: bigint; publishedAt: number; held: boolean } | null;
+  /**
+   * Signed oracle prices this valuation used that are newer than the chain's stored ones (desk tokens,
+   * engine underlying). They form the mark tx's priceData so the chain ends up on the prices the NAV used.
+   */
+  signedPrices?: SignedPrice[];
 }

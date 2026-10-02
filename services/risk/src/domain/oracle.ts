@@ -15,6 +15,16 @@ export function oracleFromChain(
   return { priceWad: latest.priceWad, publishedAt, held: latest.held, stale: isStale || publishedAt === 0, source: "chain" };
 }
 
+/**
+ * The oracle service's signed print (pull oracle, docs/LOW_GAS.md §1), used when it is newer than the stored
+ * on-chain price: staleness is judged off-chain against the wall clock, never from an on-chain view (a quiet
+ * market's stored price is old by design in pull mode).
+ */
+export function oracleFromSigned(p: { priceWad: bigint; publishedAt: bigint; held: boolean }, nowSec: number, maxPriceAgeSec: number): OracleReading {
+  const publishedAt = Number(p.publishedAt);
+  return { priceWad: p.priceWad, publishedAt, held: p.held, stale: publishedAt === 0 || nowSec - publishedAt > maxPriceAgeSec, source: "signed" };
+}
+
 /** Fallback from KEYS.oracleLast(priceId) when the on-chain read fails. */
 export function oracleFromRedis(msg: OraclePriceMsg | null, nowSec: number, maxPriceAgeSec: number): OracleReading {
   if (!msg || !msg.publishedAt) return NO_ORACLE;

@@ -1,6 +1,8 @@
 // Decides, per book, when the mark of the latest closed period may run and enqueues it once.
+// The mark waits only for a distribution that is pending: a period the waterfall reported as having no
+// fee flow (SettlementSignals, LOW_GAS §3) is marked right away.
 import type { Logger, MarkJob } from "@bookrunner/shared";
-import { type BookRef, type KeeperChain, dueAssets, periodEndAt, settlesUpToIndex } from "@bookrunner/waterfall";
+import { type BookRef, type KeeperChain, type SettlementSignals, dueAssets, periodEndAt, settlesUpToIndex } from "@bookrunner/waterfall";
 import { type Readiness, liquidityShort, markReadiness } from "./domain/readiness";
 import type { MarkStore } from "./ports";
 
@@ -10,6 +12,8 @@ export interface SchedulerDeps {
   chain: Pick<KeeperChain, "snapshot" | "pendingRedemptions"> & { findDistributed(ref: BookRef, period: number): Promise<unknown | null> };
   maxMarkAge: () => Promise<number>;
   store: Pick<MarkStore, "distribution">;
+  /** The waterfall's "nothing to distribute" decisions (absent: always wait for a distribution or the timeout). */
+  signals?: Pick<SettlementSignals, "noDistribution">;
   enqueue: (job: MarkJob, generation: number) => Promise<void>;
   log: Logger;
   waitSeconds: number;
@@ -75,6 +79,14 @@ export class MarkScheduler {
     let distributed = this.distributed.has(k);
     if (!distributed) distributed = (await this.d.store.distribution(ref.bookId, periodEnd)) !== null || (await this.d.chain.findDistributed(ref, periodEnd)) !== null;
     if (distributed) this.distributed.add(k);
+    let noDistribution = false;
+    if (!distributed && this.d.signals) {
+      try {
+        noDistribution = (await this.d.signals.noDistribution(ref.bookId, periodEnd)) !== null;
+      } catch (err) {
+        this.d.log.debug({ bookId: ref.bookId, periodEnd, err: err instanceof Error ? err.message : String(err) }, "settlement signal unreadable; waiting for a distribution or the timeout");
+      }
+    }
 
     let short = false;
     // requested-but-unconfirmed recalls (Orderly) are in flight too: waiting for them can help
@@ -83,7 +95,7 @@ export class MarkScheduler {
       const shares = await this.d.chain.pendingRedemptions(ref, settlesUpToIndex(s.lastMarkPeriodEnd, s.markInterval), settlesUpToIndex(periodEnd, s.markInterval));
       short = liquidityShort(dueAssets(shares, s.sharePriceWad), s.unfundedClaims, s.vaultIdle, inFlight);
     }
-    const readiness = markReadiness({ ...base, distributed, liquidityShort: short });
+    const readiness = markReadiness({ ...base, distributed, noDistribution, liquidityShort: short });
     if (readiness.ready) {
       await this.d.enqueue({ bookId: ref.bookId, periodEnd }, this.generation.get(k) ?? 0);
       this.queued.set(ref.bookId, periodEnd);

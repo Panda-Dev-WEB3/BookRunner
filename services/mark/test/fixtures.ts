@@ -1,8 +1,10 @@
 import { type MarkInput, type MarkPnl, VENUE, WAD, usd } from "@bookrunner/shared";
 import type { BookRef } from "@bookrunner/waterfall";
 import type { Address, Hex } from "viem";
+import type { AdapterReportState } from "../../ops-venue/src/report712";
+import type { SignedPrice } from "../src/domain/prices";
 import type { MarkSnapshot } from "../src/domain/types";
-import type { CommittedMark, MarkAppliedEvent, MarkChain, MarkRow, MarkStore, ReceiptsRootPort, StoredMark } from "../src/ports";
+import type { AtomicMarkResult, CommittedMark, MarkAppliedEvent, MarkChain, MarkRow, MarkStore, ReceiptsRootPort, SimulationResult, StoredMark } from "../src/ports";
 
 export const P = 1_790_000_100; // multiple of 300
 export const USDC = "0x00000000000000000000000000000000000000c1" as Address;
@@ -86,6 +88,20 @@ export class FakeMarkChain implements MarkChain {
   applyCalls = 0;
   commitCalls = 0;
   failApply = false;
+  /** MarkRegistry has commitAndApply (default false: the pre-low-gas two-tx path). */
+  atomic = false;
+  supportsCalls = 0;
+  /** simulation outcome per (priceData, venueReport): an error name reverts that variant */
+  simulateError: (priceData: Hex, venueReport: Hex) => string | null = () => null;
+  /** the registry reverts with no data (function missing) */
+  simulateUnsupported = false;
+  simulations: Array<{ priceData: Hex; venueReport: Hex }> = [];
+  atomicCalls: Array<{ priceData: Hex; venueReport: Hex; input: MarkInput }> = [];
+  /** throw from commitAndApply (after a successful simulation) */
+  failAtomic: string[] = [];
+  reportState: AdapterReportState | null = { valuationAt: BigInt(P - 10), lastFlowAt: 0n, pendingWithdrawUsd: 0n };
+  /** prices handed to snapshot() */
+  lastPrices: ReadonlyMap<string, SignedPrice> | undefined;
 
   async head() {
     return { blockNumber: 100n, timestamp: P + 30 };
@@ -99,9 +115,36 @@ export class FakeMarkChain implements MarkChain {
   private get nonce(): bigint {
     return this.currentNonce ?? this.snap.flowNonce;
   }
-  async snapshot() {
+  async snapshot(_ref: BookRef, _block: bigint, prices?: ReadonlyMap<string, SignedPrice>) {
     this.snapshots++;
-    return { ...this.snap, flowNonce: this.nonce };
+    this.lastPrices = prices;
+    // the real adapter returns the signed prices it valued with; the fake values with every one handed in
+    const signedPrices = prices && prices.size ? [...prices.values()] : (this.snap.signedPrices ?? []);
+    return { ...this.snap, flowNonce: this.nonce, signedPrices };
+  }
+  async supportsCommitAndApply() {
+    this.supportsCalls++;
+    return this.atomic;
+  }
+  async simulateCommitAndApply(_ref: BookRef, _input: MarkInput, _sig: Hex, priceData: Hex, venueReport: Hex): Promise<SimulationResult> {
+    this.simulations.push({ priceData, venueReport });
+    if (this.simulateUnsupported) return { ok: false, error: "execution reverted", unsupported: true };
+    const err = this.simulateError(priceData, venueReport);
+    return err ? { ok: false, error: err, unsupported: false } : { ok: true };
+  }
+  async commitAndApply(ref: BookRef, input: MarkInput, sig: Hex, priceData: Hex, venueReport: Hex): Promise<AtomicMarkResult> {
+    this.atomicCalls.push({ priceData, venueReport, input });
+    const fail = this.failAtomic.shift();
+    if (fail) throw new Error(fail);
+    if (this.nonce !== input.flowNonce) throw new Error("execution reverted: FlowNonceMismatch");
+    const c = await this.commit(input, sig);
+    this.commitCalls--; // counted as an atomic call, not a commit tx
+    const a = await this.applyMark(ref, c.markId);
+    this.applyCalls--;
+    return { hash: a.hash, markId: c.markId, committedAt: c.committedAt, applied: a.applied };
+  }
+  async adapterReportState() {
+    return this.reportState;
   }
   async flowNonce() {
     const next = this.nonces.shift();

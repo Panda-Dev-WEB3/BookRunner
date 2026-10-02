@@ -188,6 +188,8 @@ describe.skipIf(!ENABLED)("on-chain: RevenueRouter distribution + MarkRegistry c
     expect(await chain.markInterval()).toBe(300);
     expect(await chain.maxMarkAge()).toBe(3600);
     // a second commit for the same period is refused by the registry (the pipeline maps this to "unmarkable")
+    // while the first can still be applied (same flowNonce as the book; a stale one would be replaceable)
+    await call(c.book, "CoreMocks.sol", "CoreMockBook", "setFlowNonce", [3n]);
     let err: unknown;
     try {
       await chain.commit(input, sig);

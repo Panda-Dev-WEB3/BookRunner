@@ -15,13 +15,18 @@ import {
 } from "@bookrunner/waterfall";
 import type { PublicClient } from "viem";
 import { MarkChainAdapter } from "./adapters/chain";
+import { type FeedRedis, RedisMarkFeeds, chainVerifier } from "./adapters/feeds";
 import { LocalMarkSigner, ReceiptsRootAdapter } from "./adapters/signer";
 import { PgMarkStore } from "./adapters/store";
 import type { MarkConfig } from "./config";
 import { MarkPipeline } from "./pipeline";
 import { MarkSpool } from "./spool";
 
-export async function wireMark(cfg: MarkConfig, log: Logger, deployment: Deployment, pc: PublicClient, publisher: Publisher | null) {
+/**
+ * `publisher`: domain events (null = none, e.g. dry runs). `feedRedis`: where the signed oracle prices and
+ * ops-venue reports are read from (docs/LOW_GAS.md); null = value from on-chain state only.
+ */
+export async function wireMark(cfg: MarkConfig, log: Logger, deployment: Deployment, pc: PublicClient, publisher: Publisher | null, feedRedis: FeedRedis | null = null) {
   const account = roleAccount("markSigner");
   const wallet = walletClientFor(cfg.CHAIN_ID, cfg.RPC_URL, account);
   const sender = new TxSender(pc, wallet, log);
@@ -34,6 +39,9 @@ export async function wireMark(cfg: MarkConfig, log: Logger, deployment: Deploym
   }
 
   const markChain = new MarkChainAdapter(pc, sender, deployment);
+  const feeds = feedRedis
+    ? new RedisMarkFeeds(feedRedis, chainVerifier(pc, { config: deployment.contracts.config, oracle: deployment.contracts.oracle }, cfg.CHAIN_ID), log)
+    : null;
   const markInterval = await markChain.markInterval(); // may throw (RPC): nothing allocated yet
   if (markInterval !== cfg.MARK_INTERVAL_SECONDS) log.warn({ onchain: markInterval, env: cfg.MARK_INTERVAL_SECONDS }, "config.markInterval() differs from MARK_INTERVAL_SECONDS; using the on-chain value");
   const { db, close } = createDb(cfg.DATABASE_URL, 5);
@@ -66,6 +74,9 @@ export async function wireMark(cfg: MarkConfig, log: Logger, deployment: Deploym
     maxVenueReportAgeSec: cfg.MARK_MAX_VENUE_REPORT_AGE_SECONDS,
     retireTokenDustUsd: cfg.MARK_RETIRE_TOKEN_DUST_USD,
     spool,
+    chainId: cfg.CHAIN_ID,
+    commitMode: cfg.MARK_COMMIT_MODE,
+    ...(feeds ? { feeds } : {}),
   });
   return { account, sender, db, close, books, markChain, readChain, store, events, spool, pipeline, markInterval };
 }

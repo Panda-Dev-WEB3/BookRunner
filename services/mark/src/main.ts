@@ -1,7 +1,9 @@
-// mark service: per Live/Retiring book per period, after the waterfall distribution (or MARK_WAIT_SECONDS),
-// one BullMQ job (QUEUES.marks) -> MarkPipeline (commit + applyMark).
+// mark service: per Live/Retiring book per period, after the waterfall distribution (or its "no fee flow"
+// signal, or MARK_WAIT_SECONDS), one BullMQ job (QUEUES.marks) -> MarkPipeline: ONE
+// MarkRegistry.commitAndApply tx carrying the signed prices + venue report it valued with (commit +
+// applyMark on a registry that predates it). Signed inputs come from Redis (oracle bundle, ops-venue reports).
 import { type MarkJob, QUEUES, createLogger, publicClientFor } from "@bookrunner/shared";
-import { onShutdown, retryUntil, startLoop, waitForDeployment } from "@bookrunner/waterfall";
+import { RedisSettlementSignals, onShutdown, retryUntil, startLoop, waitForDeployment } from "@bookrunner/waterfall";
 import { Queue, Worker } from "bullmq";
 import { Redis } from "ioredis";
 import { loadMarkConfig } from "./config";
@@ -29,7 +31,7 @@ export async function main() {
   const redis = new Redis(cfg.REDIS_URL, { maxRetriesPerRequest: 3 });
   redis.on("error", (err) => log.warn({ err: err.message }, "redis error"));
   cleanups.push(() => redis.quit());
-  const ctx = await retryUntil("wire mark service", () => wireMark(cfg, log, deployment, pc, redis), { log, signal: ac.signal });
+  const ctx = await retryUntil("wire mark service", () => wireMark(cfg, log, deployment, pc, redis, redis), { log, signal: ac.signal });
   if (!ctx) return;
   cleanups.push(ctx.close);
 
@@ -43,6 +45,8 @@ export async function main() {
     chain: ctx.readChain,
     maxMarkAge: () => ctx.markChain.maxMarkAge(),
     store: ctx.store,
+    // the waterfall's "no fee flow: nothing to distribute" decisions (LOW_GAS §3): marked without waiting
+    signals: new RedisSettlementSignals(redis),
     enqueue: async (job, generation) => {
       await queue.add("mark", job, {
         jobId: markJobId(job.bookId, job.periodEnd, generation),
@@ -86,7 +90,11 @@ export async function main() {
     },
   });
   cleanups.push(() => loop.stop());
-  log.info({ signer: ctx.account.address, markInterval: ctx.markInterval, waitSeconds: cfg.MARK_WAIT_SECONDS }, "mark service running");
+  const atomic = cfg.MARK_COMMIT_MODE === "legacy" ? false : await ctx.markChain.supportsCommitAndApply().catch(() => null);
+  log.info(
+    { signer: ctx.account.address, markInterval: ctx.markInterval, waitSeconds: cfg.MARK_WAIT_SECONDS, commitMode: cfg.MARK_COMMIT_MODE, commitAndApply: atomic },
+    "mark service running",
+  );
 }
 
 if (import.meta.main) await main();

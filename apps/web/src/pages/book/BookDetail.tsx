@@ -9,12 +9,14 @@ import { AGENTS_LINE, LIVE_VS_MARKED, venueDetail, venueLabel } from "../../lib/
 import { describeError } from "../../lib/errors";
 import { DASH, ageMs, fmtAge, fmtBps, fmtDuration, fmtSharePrice, fmtUsd, tickerOf, usdRaw } from "../../lib/format";
 import { bookState, limitState } from "../../lib/limits";
+import { cadenceTitle, markCadenceLine, nextMarkLabel } from "../../lib/lowgas";
 import { parseMarkStatement } from "../../lib/markStatement";
 import { ActivityPanel } from "./ActivityPanel";
 import { AllocatePanel } from "./AllocatePanel";
 import { DistributionPanel } from "./DistributionPanel";
 import { LimitsPanel } from "./LimitsPanel";
 import { LossOrderPanel } from "./LossOrderPanel";
+import { MarkCadencePanel } from "./MarkCadencePanel";
 import { MarksPanel, useBookMarks } from "./MarksPanel";
 import { NavPanel } from "./NavPanel";
 import { QuotePanel } from "./QuotePanel";
@@ -82,6 +84,11 @@ function Header({ b, now }: { b: BookDetail; now: number }) {
           {b.agent.alive ? `Agent quoting · ${hbAge === null ? "" : `${fmtAge(hbAge)} ago`}` : "Agent offline"}
         </Chip>
         {endsIn !== null && <Chip tone="accent">{endsIn > 0 ? `Window closes in ${fmtDuration(Math.ceil(endsIn / 1000))}` : "Window closed; awaiting settlement"}</Chip>}
+        {(b.state === "Live" || b.state === "Retiring") && (
+          <Chip tone="neutral" title={markCadenceLine(b.markSchedule.cadence, b.markSchedule.intervalSeconds)}>
+            {`${cadenceTitle(b.markSchedule.cadence)} · next ${nextMarkLabel(b.markSchedule, now)}`}
+          </Chip>
+        )}
         {b.source === "db" && <Chip tone="neutral" title="Chain reads unavailable; showing indexed data">Indexed data</Chip>}
       </div>
     </PageHeader>
@@ -172,6 +179,7 @@ export function BookDetailPage() {
         </div>
         <aside className="min-w-0 space-y-4">
           <AllocatePanel bookId={b.bookId} state={b.state} juniorNoticeSeconds={b.charter?.juniorNoticeSeconds ?? null} subscriptionEnds={b.subscriptionEnds} />
+          <MarkCadencePanel b={b} now={now} />
           <Panel title="Charter terms" meta={b.charterStatus ? `charter #${b.charterId} · ${b.charterStatus}` : undefined}>
             {b.charter ? <CharterTerms c={b.charter} stacked /> : <EmptyState compact title="Charter not indexed yet" />}
             <Link className="link mt-3 inline-block text-[12px]" to={`/charters/${b.charterId}`}>

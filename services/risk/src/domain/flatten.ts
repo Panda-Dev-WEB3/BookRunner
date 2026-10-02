@@ -18,6 +18,10 @@ export interface Holding {
   priceWad: bigint;
   multiplierWad: bigint;
   decimals: number;
+  /** unix seconds of the price used (0 = never published) */
+  publishedAt?: number;
+  /** the price is the oracle's signed print (newer than the stored on-chain one) */
+  signed?: boolean;
 }
 
 export interface FlattenOrder {

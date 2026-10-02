@@ -1,6 +1,12 @@
 // Per book per mark period: sweep fee flow into the RevenueRouter, then distribute(period, expenses).
 // Idempotent per (book, period): settlements table first, then the router's Distributed(bookId, period)
 // log, then a revert of distribute() re-checks the log ("already distributed").
+//
+// Skip empty work (docs/LOW_GAS.md §3/§4): no engine sweepFees tx when the engine accrued no fees, and no
+// distribute tx when the router holds no fee flow (pendingGross == 0 after the sweeps: the venue settled
+// nothing and no engine fees accrued) — a zero distribution is an on-chain no-op. The decision is
+// recorded through SettlementSignals so the mark service marks the period at once instead of waiting
+// for a distribution that will not happen. Fee flow arriving later rolls into the next period.
 import { type DomainEventPayloads, type Logger, type SettlementJob, VENUE } from "@bookrunner/shared";
 import type { Hex } from "viem";
 import { amountsToSplit, conserves, parityCheck, previewDistribution, splitMismatches, type SplitResult } from "./domain/split";
@@ -8,6 +14,7 @@ import { distributes } from "./domain/keeper";
 import type { DomainEventSink } from "./kit/events";
 import { usd6 } from "./kit/fmt";
 import { pollUntil, throwIfAborted } from "./kit/loop";
+import type { SettlementSignals } from "./kit/signals";
 import { describeRevert } from "./kit/tx";
 import type { BookRef } from "./kit/books";
 import type { BookLookup, DistributedLog, SettlementChain, SettlementStore, VenueOps } from "./ports";
@@ -15,6 +22,7 @@ import type { BookLookup, DistributedLog, SettlementChain, SettlementStore, Venu
 export type SettlementOutcome =
   | { status: "already"; source: "db" | "chain"; txHash: string }
   | { status: "distributed"; txHash: Hex; split: SplitResult; previewMismatches: string[]; parityMismatches: string[] }
+  | { status: "nothing_to_distribute"; reason: string }
   | { status: "skipped"; reason: string };
 
 export interface SettlementDeps {
@@ -30,6 +38,11 @@ export interface SettlementDeps {
   log: Logger;
   sweepWaitMs: number;
   pollMs: number;
+  /** Where "nothing to distribute" decisions go (read by the mark scheduler). */
+  signals?: SettlementSignals;
+  /** Send distribute(period) even with pendingGross == 0 (pre-low-gas behaviour; default false). */
+  distributeEmpty?: boolean;
+  now?: () => number;
 }
 
 export const distributionDedupeKey = (bookId: number, period: number) => `distribution.paid:${bookId}:${period}`;
@@ -77,9 +90,20 @@ export class SettlementRunner {
     if (ref.venue === VENUE.ORDERLY) await this.sweepOrderly(ref, period, log, signal);
     else await this.sweepEngine(ref, period, log);
 
-    // 3. distribute
+    // 3. distribute — only when there is fee flow to distribute
     throwIfAborted(signal);
     const params = await this.d.chain.splitParams(ref);
+    if (params.pendingGross === 0n && !this.d.distributeEmpty) {
+      const reason = "no fee flow this period (router pendingGross == 0)";
+      try {
+        await this.d.signals?.markNoDistribution({ bookId, period, reason, pendingGross: "0", at: (this.d.now ?? Date.now)() });
+      } catch (err) {
+        // the mark falls back to its bounded wait (MARK_WAIT_SECONDS); never fail the job on it
+        log.warn({ err: err instanceof Error ? err.message : String(err) }, "could not record the no-distribution decision");
+      }
+      log.info("no fee flow: distribute skipped (no tx); the mark is not held for it");
+      return { status: "nothing_to_distribute", reason };
+    }
     const expenses = this.d.expensesFor(bookId);
     const split = { expenseCapBps: params.expenseCapBps, carryBps: params.carryBps, seniorHurdleBps: params.seniorHurdleBps, seniorSupply: params.seniorSupply, juniorSupply: params.juniorSupply };
     const preview = previewDistribution({ ...split, gross: params.pendingGross, expensesRequested: expenses });
@@ -153,6 +177,11 @@ export class SettlementRunner {
   private async sweepEngine(ref: BookRef, period: number, log: Logger) {
     const prior = await this.d.chain.feesSwept(ref, period);
     if (prior) return this.recordReceived(ref, period, prior, log);
+    const accrued = await this.d.chain.engineFeesAccrued(ref);
+    if (accrued === 0n) {
+      log.debug("engine accrued no fees: sweepFees skipped (no tx)");
+      return;
+    }
     try {
       const { hash, received } = await this.d.chain.sweepEngineFees(ref, period);
       await this.d.store.insertReceived(ref.bookId, period, received);

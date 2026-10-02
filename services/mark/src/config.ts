@@ -4,8 +4,16 @@ import { loadServiceEnv } from "@bookrunner/waterfall";
 import { z } from "zod";
 
 export const markEnvShape = {
-  /** Max wait after periodEnd for the period's distribution (and in-flight recalls) before marking anyway. */
+  /**
+   * Max wait after periodEnd for the period's distribution (and in-flight recalls) before marking anyway.
+   * A period the waterfall reported as having nothing to distribute is not waited for (LOW_GAS §3).
+   */
   MARK_WAIT_SECONDS: z.coerce.number().min(0).default(90),
+  /**
+   * auto (default): one MarkRegistry.commitAndApply tx per book per period when the registry has it
+   * (feature-detected), carrying the signed prices + venue report the NAV used; legacy: commit + applyMark.
+   */
+  MARK_COMMIT_MODE: z.enum(["auto", "legacy"]).default("auto"),
   MARK_TICK_SECONDS: z.coerce.number().positive().default(5),
   /** Recompute + recommit attempts when flowNonce moves under the mark. */
   MARK_MAX_RETRIES: z.coerce.number().int().positive().default(3),
@@ -20,8 +28,9 @@ export const markEnvShape = {
   MARK_LOG_CHUNK_BLOCKS: z.coerce.bigint().positive().default(10_000n),
   MARK_LOG_LOOKBACK_BLOCKS: z.coerce.bigint().min(0n).default(0n),
   /**
-   * Orderly books: refuse to commit (retry later) while the adapter's last ops-venue report
-   * (valuationAt) is older than this at the snapshot block. Default 1200 = 4 x maxPriceAge (300),
+   * Orderly books: refuse to commit (retry later) while the venue valuation — the newest signed ops-venue
+   * report consistent with the snapshot (relayed in the mark tx), else the adapter's last on-chain report
+   * (valuationAt) — is older than this at the snapshot block. Default 1200 = 4 x maxPriceAge (300),
    * the freshness MMMandate already requires of Orderly reports for hedge-adding legs. 0 disables.
    */
   MARK_MAX_VENUE_REPORT_AGE_SECONDS: z.coerce.number().int().min(0).default(1200),

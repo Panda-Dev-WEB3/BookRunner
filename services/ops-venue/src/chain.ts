@@ -20,6 +20,7 @@ import {
   TransactionNotFoundError,
   TransactionReceiptNotFoundError,
   type Transport,
+  toFunctionSelector,
   type WalletClient,
 } from "viem";
 import { errMsg, Mutex } from "./util";
@@ -148,6 +149,44 @@ export interface ChainPort {
   usdcTransfer(to: Address, amount: bigint, opts?: WriteOpts): Promise<Hex>;
   headTimestamp(): Promise<bigint>;
   ensureMockAccount(accountId: Hex, brokerFrom: Address): Promise<void>;
+  /**
+   * The adapter's implementation has OrderlyAdapter.reportSigned (docs/LOW_GAS.md §2). Adapters deployed
+   * before the low-gas upgrade do not: signed-mode reports are then also posted with `report` so the
+   * on-chain venue view never goes stale on an old deployment.
+   */
+  supportsReportSigned(adapter: Address): Promise<boolean>;
+}
+
+/** OrderlyAdapter.reportSigned (docs/LOW_GAS.md §2; not in the generated ABI until the contracts land). */
+export const reportSignedAbi = parseAbi(["function reportSigned(uint256 insuranceUsd, int256 marginUsd, int256 netExposureUsd, uint64 asOf, bytes sig)"]);
+export const REPORT_SIGNED_SELECTOR = toFunctionSelector("reportSigned(uint256,int256,int256,uint64,bytes)");
+/** ERC-1967 implementation slot (UUPS adapters). */
+const ERC1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc" as const;
+const CODE_CHECK_TTL_MS = 10 * 60_000;
+
+/**
+ * True when the contract at `address` (or its ERC-1967 implementation) dispatches `selector`: the
+ * Solidity dispatcher pushes every external selector as a PUSH immediate (PUSH4 <4 bytes>; leading
+ * zero bytes may be dropped by the optimizer, e.g. PUSH3).
+ */
+export async function codeHasSelector(pc: Pick<PublicClient, "getStorageAt" | "getCode">, address: Address, selector: Hex): Promise<boolean> {
+  let target: Address = address;
+  try {
+    const slot = await pc.getStorageAt({ address, slot: ERC1967_IMPL_SLOT });
+    if (slot && !/^0x0*$/.test(slot)) target = `0x${slot.slice(-40)}` as Address;
+  } catch {
+    /* not a proxy / storage read unsupported */
+  }
+  const code = ((await pc.getCode({ address: target })) ?? "0x").toLowerCase();
+  return code.includes(selectorPush(selector));
+}
+
+/** PUSHn opcode + immediate for a 4-byte selector (leading zero bytes stripped). */
+export function selectorPush(selector: Hex): string {
+  let hex = selector.slice(2).toLowerCase().padStart(8, "0");
+  while (hex.length > 2 && hex.startsWith("00")) hex = hex.slice(2);
+  const op = (0x5f + hex.length / 2).toString(16);
+  return `${op}${hex}`;
 }
 
 export class ViemChain implements ChainPort {
@@ -431,6 +470,17 @@ export class ViemChain implements ChainPort {
   /** Chain head timestamp (unix seconds). Report asOf must be <= block.timestamp of the simulation block. */
   async headTimestamp(): Promise<bigint> {
     return (await this.pc.getBlock({ blockTag: "latest" })).timestamp;
+  }
+
+  private readonly reportSignedCache = new Map<string, { ok: boolean; at: number }>();
+
+  async supportsReportSigned(adapter: Address): Promise<boolean> {
+    const k = adapter.toLowerCase();
+    const hit = this.reportSignedCache.get(k);
+    if (hit && Date.now() - hit.at < CODE_CHECK_TTL_MS) return hit.ok;
+    const ok = await codeHasSelector(this.pc, adapter, REPORT_SIGNED_SELECTOR);
+    this.reportSignedCache.set(k, { ok, at: Date.now() });
+    return ok;
   }
 
   /**

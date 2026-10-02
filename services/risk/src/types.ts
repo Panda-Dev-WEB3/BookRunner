@@ -20,7 +20,8 @@ export interface OracleReading {
   publishedAt: number; // unix seconds
   held: boolean;
   stale: boolean;
-  source: "chain" | "redis" | "none";
+  /** signed: the oracle service's signed print (pull oracle), newer than the stored on-chain one */
+  source: "chain" | "signed" | "redis" | "none";
 }
 
 /** Everything read from chain for one book in one tick. */
@@ -37,9 +38,18 @@ export interface ChainObservation {
     valuationAt: number;
     /** Orderly: adapter.lastFlowAt() (last deposit/withdraw flow, unix s); 0 when unknown / engine. */
     lastFlowAt?: number;
+    /**
+     * Absent/"onchain": the adapter's stored figures. engine_signed_price: engine pool views re-read after
+     * applying the signed print in an eth_call. signed_report: ops-venue's signed report (monitor overlay).
+     */
+    source?: "onchain" | "engine_signed_price" | "signed_report";
   };
-  /** priceStale: the desk views reverted (StalePrice) and holdings were valued at the last attested price. */
-  desk: { hedgeNotionalUsd: bigint; valueUsd: bigint; priceStale?: boolean };
+  /**
+   * Desk tokens valued through StockTokenRegistry.valueUsdAt at the newest price (signed print when newer
+   * than the stored one). priceStale: some held token's newest price is older than maxPriceAge.
+   * signedPrices: the desk used at least one signed print.
+   */
+  desk: { hedgeNotionalUsd: bigint; valueUsd: bigint; priceStale?: boolean; signedPrices?: boolean };
   vaultIdleUsd: bigint;
   unfundedClaimsUsd: bigint;
   seniorNavUsd: bigint;
@@ -51,7 +61,8 @@ export interface ChainObservation {
   maxPriceAgeSec: number;
 }
 
-export type ExposureSource = "venue_api" | "adapter_report" | "engine";
+/** signed_report: ops-venue's signed venue report (newer than the adapter's on-chain one, LOW_GAS §2). */
+export type ExposureSource = "venue_api" | "adapter_report" | "signed_report" | "engine";
 
 /** Fully assembled per-tick input of the pure evaluation. */
 export interface BookObservation {
@@ -203,6 +214,10 @@ export interface RiskMeta {
   deskHedgeUsd: string;
   /** true while the desk is valued at the last attested price (on-chain valuation reverted StalePrice) */
   deskPriceStale: boolean;
+  /** verified signed oracle prints available this tick (LOW_GAS §1) */
+  signedPrices?: number;
+  /** asOf of the signed venue report the venue was valued with (null: none) */
+  venueReportAsOf?: number | null;
   liveNavUsd: string;
   drawdownBps: number;
   oracle: { priceId: string; price: number | null; publishedAt: number; held: boolean; stale: boolean; source: OracleReading["source"] };

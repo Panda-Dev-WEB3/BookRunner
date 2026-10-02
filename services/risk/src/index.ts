@@ -4,7 +4,9 @@ import { createLogger, publicClientFor, roleAccount, tryLoadDeployment, walletCl
 import { Redis } from "ioredis";
 import { type Hex, zeroHash } from "viem";
 import { ViemChain } from "./adapters/chain";
+import { RedisMarkFeeds, chainVerifier } from "../../mark/src/adapters/feeds";
 import { DrizzleStore } from "./adapters/db";
+import { CachedSignedFeeds } from "./adapters/feeds";
 import { createOrderlySigner } from "./adapters/orderlyAuth";
 import { BullVenueOpsQueue } from "./adapters/queue";
 import { RedisBus } from "./adapters/redis";
@@ -73,6 +75,12 @@ async function main(): Promise<void> {
         txTimeoutMs: env.RISK_TX_TIMEOUT_MS,
         killLogLookbackBlocks: env.RISK_KILL_LOG_LOOKBACK_BLOCKS,
         log,
+      }),
+    // LOW_GAS §1-§2: value from the oracle's signed prints + ops-venue's signed reports (Redis, verified)
+    makeFeeds: (dep) =>
+      new CachedSignedFeeds(new RedisMarkFeeds(redis, chainVerifier(pub, { config: dep.contracts.config, oracle: dep.contracts.oracle }, env.CHAIN_ID), log), {
+        ttlMs: Math.max(250, Math.floor(settings.intervalMs / 2)),
+        timeoutMs: env.RISK_REDIS_TIMEOUT_MS,
       }),
     makeVenues: (chain: ChainGateway) =>
       new OrderlyVenueProvider({

@@ -1,6 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { RECEIPT_KIND, VENUE, createLogger, usd } from "@bookrunner/shared";
-import { Cooldowns, KeeperRunner, MemoryEventSink, SettlementRunner, distributionDedupeKey, receiptRow } from "../src/index";
+import {
+  Cooldowns,
+  KeeperRunner,
+  MemoryEventSink,
+  MemorySettlementSignals,
+  RedisSettlementSignals,
+  SettlementRunner,
+  distributionDedupeKey,
+  noDistributionKey,
+  receiptRow,
+} from "../src/index";
 import { FakeBooks, FakeKeeperChain, FakeSettlementChain, FakeSettlementStore, FakeVenueOps, bookRef, fakeHash } from "./fakes";
 
 const log = createLogger("waterfall-test", "silent");
@@ -123,6 +133,128 @@ describe("SettlementRunner", () => {
     chain.tamper = (s) => ({ ...s, senior: s.senior + 1n, junior: s.junior - 1n });
     const out = await runner.run({ bookId: 1, period: P });
     expect(out.status === "distributed" && out.parityMismatches).toEqual(["senior", "junior"]);
+  });
+});
+
+describe("SettlementRunner: skip empty work (LOW_GAS §3/§4)", () => {
+  function lowGas(venue: 0 | 1 = VENUE.POOL_ENGINE, o: { distributeEmpty?: boolean; failSignal?: boolean } = {}) {
+    const ref = bookRef(1, venue);
+    const chain = new FakeSettlementChain();
+    const store = new FakeSettlementStore();
+    const venueOps = new FakeVenueOps();
+    const events = new MemoryEventSink();
+    const signals = new MemorySettlementSignals();
+    if (o.failSignal) signals.markNoDistribution = async () => Promise.reject(new Error("redis down"));
+    const runner = new SettlementRunner({
+      books: new FakeBooks([ref]),
+      chain,
+      store,
+      venueOps,
+      events,
+      expensesFor: () => usd("1.00"),
+      log,
+      sweepWaitMs: 50,
+      pollMs: 5,
+      signals,
+      distributeEmpty: o.distributeEmpty,
+      now: () => 1_790_000_105_000,
+    });
+    return { chain, store, venueOps, events, signals, runner };
+  }
+
+  test("engine book with no accrued fees and an empty router: no sweep tx, no distribute tx, mark told not to wait", async () => {
+    const { chain, signals, events, store, runner } = lowGas();
+    chain.engineFees = 0n;
+    chain.params.pendingGross = 0n;
+    const out = await runner.run({ bookId: 1, period: P });
+    expect(out).toEqual({ status: "nothing_to_distribute", reason: "no fee flow this period (router pendingGross == 0)" });
+    expect(chain.calls).not.toContain("sweepEngineFees");
+    expect(chain.calls).not.toContain("distribute");
+    expect(await signals.noDistribution(1, P)).toEqual({ bookId: 1, period: P, reason: out.status === "nothing_to_distribute" ? out.reason : "", pendingGross: "0", at: 1_790_000_105_000 });
+    expect(await signals.noDistribution(1, P + 300)).toBeNull();
+    expect(events.events).toHaveLength(0); // no distribution.paid for a period that paid nothing
+    expect(store.rows.size).toBe(0);
+  });
+
+  test("engine fees accrued: sweep, then distribute what landed", async () => {
+    const { chain, signals, runner } = lowGas();
+    chain.engineFees = usd("5");
+    chain.params.pendingGross = 0n;
+    chain.sweepAdds = usd("5");
+    const out = await runner.run({ bookId: 1, period: P });
+    expect(out.status).toBe("distributed");
+    expect(chain.calls.filter((c) => c === "sweepEngineFees")).toHaveLength(1);
+    expect(out.status === "distributed" && out.split.gross).toBe(usd("5"));
+    expect(signals.map.size).toBe(0);
+  });
+
+  test("no engine fees but fee flow already on the router (e.g. funding / liquidation share): distribute without the sweep tx", async () => {
+    const { chain, runner } = lowGas();
+    chain.engineFees = 0n;
+    const out = await runner.run({ bookId: 1, period: P });
+    expect(out.status).toBe("distributed");
+    expect(chain.calls).not.toContain("sweepEngineFees");
+    expect(chain.calls.filter((c) => c === "distribute")).toHaveLength(1);
+  });
+
+  test("Orderly book: ops-venue settled nothing (job completed, no FeesSwept) and an empty router -> nothing to distribute", async () => {
+    const { chain, venueOps, signals, runner } = lowGas(VENUE.ORDERLY);
+    venueOps.state = "completed";
+    chain.params.pendingGross = 0n;
+    const out = await runner.run({ bookId: 1, period: P });
+    expect(out.status).toBe("nothing_to_distribute");
+    expect(venueOps.enqueued).toEqual([`1:${P}`]); // a queue job, not a tx
+    expect(chain.calls).not.toContain("distribute");
+    expect(chain.calls).not.toContain("engineFeesAccrued");
+    expect(await signals.noDistribution(1, P)).not.toBeNull();
+  });
+
+  test("WATERFALL_DISTRIBUTE_EMPTY keeps the zero distribution (pre-low-gas behaviour)", async () => {
+    const { chain, signals, runner } = lowGas(VENUE.POOL_ENGINE, { distributeEmpty: true });
+    chain.engineFees = 0n;
+    chain.params.pendingGross = 0n;
+    const out = await runner.run({ bookId: 1, period: P });
+    expect(out.status).toBe("distributed");
+    expect(chain.calls).toContain("distribute");
+    expect(signals.map.size).toBe(0);
+  });
+
+  test("a failing signal store never fails the job (the mark falls back to its bounded wait)", async () => {
+    const { chain, runner } = lowGas(VENUE.POOL_ENGINE, { failSignal: true });
+    chain.engineFees = 0n;
+    chain.params.pendingGross = 0n;
+    expect((await runner.run({ bookId: 1, period: P })).status).toBe("nothing_to_distribute");
+  });
+
+  test("unreadable engine fee state: sweeps as before", async () => {
+    const { chain, runner } = lowGas();
+    chain.engineFees = null;
+    await runner.run({ bookId: 1, period: P });
+    expect(chain.calls).toContain("sweepEngineFees");
+  });
+});
+
+describe("RedisSettlementSignals", () => {
+  test("SET with TTL, round trip, foreign / malformed values ignored", async () => {
+    const kv = new Map<string, { v: string; ttl: number }>();
+    const redis = {
+      get: async (k: string) => kv.get(k)?.v ?? null,
+      set: async (k: string, v: string, _mode: "EX", ttl: number) => {
+        kv.set(k, { v, ttl });
+        return "OK";
+      },
+    };
+    const s = new RedisSettlementSignals(redis, 60);
+    const d = { bookId: 2, period: P, reason: "x", pendingGross: "0", at: 1 };
+    await s.markNoDistribution(d);
+    expect(kv.get(noDistributionKey(2, P))).toEqual({ v: JSON.stringify(d), ttl: 60 });
+    expect(noDistributionKey(2, P)).toBe(`bkrn:waterfall:nodist:2:${P}`);
+    expect(await s.noDistribution(2, P)).toEqual(d);
+    expect(await s.noDistribution(3, P)).toBeNull();
+    kv.set(noDistributionKey(3, P), { v: "{bad", ttl: 1 });
+    expect(await s.noDistribution(3, P)).toBeNull();
+    kv.set(noDistributionKey(4, P), { v: JSON.stringify({ ...d, bookId: 9 }), ttl: 1 });
+    expect(await s.noDistribution(4, P)).toBeNull();
   });
 });
 

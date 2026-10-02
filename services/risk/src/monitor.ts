@@ -17,7 +17,9 @@ import { finite, jsonSafe, receiptRow, usdNum, usdStr } from "./domain/records";
 import { type Effect, decide, newKillJournal } from "./domain/transitions";
 import { dedupe, emitDomainEvent } from "./events";
 import { runKillSequence } from "./kill/sequence";
-import type { BusPort, ChainPort, Clock, QueuePort, StorePort, VenueProvider } from "./ports";
+import { reportDeployedValueUsd } from "../../ops-venue/src/report712";
+import { pickVenueReport } from "./domain/venueReport";
+import type { BusPort, ChainPort, Clock, QueuePort, SignedFeedsPort, SignedPriceMap, StorePort, VenueProvider } from "./ports";
 import {
   type BookObservation,
   type BookRef,
@@ -42,7 +44,13 @@ export interface MonitorDeps {
   settings: RiskSettings;
   log: Logger;
   sleep?: Sleep;
+  /** Signed prices + venue reports (LOW_GAS §1-§2). Absent: on-chain state only (pre-low-gas). */
+  feeds?: SignedFeedsPort;
+  /** Chain the signed venue reports must be signed for. */
+  chainId?: number;
 }
+
+const NO_PRICES: SignedPriceMap = new Map();
 
 export interface TickResult {
   snapshot: LimitsSnapshot;
@@ -64,6 +72,10 @@ export class BookMonitor {
   private venueResolved = false;
   private firstObservation = true;
   private lastPayload: RiskStatePayload | null = null;
+  /** signed prints of the current tick (also used to value the flatten in the kill path) */
+  private prices: SignedPriceMap = NO_PRICES;
+  /** asOf of the signed venue report the current tick valued the venue with (null: none used) */
+  private venueReportAsOf: number | null = null;
   readonly log: Logger;
 
   constructor(
@@ -85,7 +97,10 @@ export class BookMonitor {
     const nowMs = this.d.clock.nowMs();
     const nowSec = Math.floor(nowMs / 1000);
 
-    const chainObs = await this.d.chain.observe(this.ref); // RPC failure -> tick fails -> loop backs off
+    // signed prints first (a feed outage degrades to the stored on-chain prices, never fails the tick)
+    const feeds = this.d.feeds;
+    this.prices = feeds ? await this.soft("signedPrices", () => feeds.prices(), NO_PRICES) : NO_PRICES;
+    const chainObs = await this.d.chain.observe(this.ref, this.prices.size ? this.prices : undefined); // RPC failure -> tick fails -> loop backs off
     const obs = await this.assemble(chainObs, nowMs);
     const ev = evaluate(obs, this.state.band, {
       quoteMaxAgeMs: s.quoteMaxAgeMs,
@@ -126,11 +141,38 @@ export class BookMonitor {
 
   // ------------------------------------------------------------------ gather
 
-  private async assemble(c: ChainObservation, nowMs: number): Promise<BookObservation> {
+  /**
+   * Orderly (LOW_GAS §2): ops-venue no longer posts reports on-chain every interval, so the adapter's stored
+   * figures can be a mark period old. The newest signed report that is newer than the adapter's and not
+   * older than its last on-chain flow replaces them (exposure, IF equity, deployed value).
+   */
+  private async withSignedVenueReport(c: ChainObservation, nowSec: number): Promise<ChainObservation> {
+    this.venueReportAsOf = null;
+    const feeds = this.d.feeds;
+    if (this.ref.venue !== VENUE.ORDERLY || !feeds) return c;
+    const reports = await this.soft("venueReports", () => feeds.venueReports(this.ref), []);
+    const r = pickVenueReport(reports, { adapter: this.ref.components.adapter, chainId: this.d.chainId ?? null, valuationAt: c.adapter.valuationAt, lastFlowAt: c.adapter.lastFlowAt ?? 0, nowSec });
+    if (!r) return c;
+    this.venueReportAsOf = Number(r.asOf);
+    return {
+      ...c,
+      adapter: {
+        ...c.adapter,
+        netExposureUsd: r.netExposureUsd,
+        insuranceEquityUsd: r.insuranceUsd,
+        deployedValueUsd: reportDeployedValueUsd(r, c.adapter.inTransitUsd),
+        valuationAt: Number(r.asOf),
+        source: "signed_report",
+      },
+    };
+  }
+
+  private async assemble(chainObs: ChainObservation, nowMs: number): Promise<BookObservation> {
     const ref = this.ref;
     const nowSec = Math.floor(nowMs / 1000);
+    const c = await this.withSignedVenueReport(chainObs, nowSec);
     let netExposureUsd = c.adapter.netExposureUsd;
-    let exposureSource: ExposureSource = ref.venue === VENUE.POOL_ENGINE ? "engine" : "adapter_report";
+    let exposureSource: ExposureSource = ref.venue === VENUE.POOL_ENGINE ? "engine" : c.adapter.source === "signed_report" ? "signed_report" : "adapter_report";
     let liveMmEquity: bigint | null = null;
 
     const venue = ref.venue === VENUE.ORDERLY ? await this.resolveVenue() : null;
@@ -147,9 +189,12 @@ export class BookMonitor {
     }
 
     let oracle = c.oracle;
-    if (!oracle) {
+    // pull oracle: a stored on-chain price is old between trades by design; without a verified signed
+    // print (feeds down) the oracle's latest message is the better reading when it is newer
+    if (!oracle || (oracle.source === "chain" && oracle.stale)) {
       const msg = await this.soft("oracleLast", () => this.d.bus.oracleLast(ref.priceIdStr), null);
-      oracle = oracleFromRedis(msg, nowSec, c.maxPriceAgeSec);
+      const fromRedis = oracleFromRedis(msg, nowSec, c.maxPriceAgeSec);
+      if (!oracle || fromRedis.publishedAt > oracle.publishedAt) oracle = fromRedis;
     }
     const quote = await this.soft("latestQuote", () => this.d.bus.latestQuote(ref.bookId), null);
 
@@ -242,6 +287,8 @@ export class BookMonitor {
       deskPriceStale: obs.deskPriceStale === true,
       liveNavUsd: usdStr(ev.nav.navUsd),
       drawdownBps: ev.nav.drawdownBps,
+      signedPrices: this.prices.size,
+      venueReportAsOf: this.venueReportAsOf,
       oracle: {
         priceId: this.ref.priceIdStr,
         price: oraclePrice(obs.oracle),
@@ -408,7 +455,7 @@ export class BookMonitor {
       j,
       { ref: this.ref, netExposureUsd: obs.netExposureUsd, deskHedgeUsd: obs.deskHedgeUsd, settings: this.d.settings, log: this.log },
       {
-        chain: this.d.chain,
+        chain: this.killChain(),
         store: this.d.store,
         bus: this.d.bus,
         queue: this.d.queue,
@@ -425,6 +472,21 @@ export class BookMonitor {
       this.log.error({ episodeId: j.episodeId, error: res.error, done: res.journal.done }, "kill sequence incomplete; resuming next tick");
     }
     return res.complete;
+  }
+
+  /** The chain port for the kill sequence: the flatten is planned at this tick's signed prints (pull oracle). */
+  private killChain(): Pick<ChainPort, "isKilled" | "latestKill" | "setReduceOnly" | "deskHoldings" | "flatten" | "mandateKill" | "riskAddress"> {
+    const chain = this.d.chain;
+    const prices = this.prices.size ? this.prices : undefined;
+    return {
+      riskAddress: chain.riskAddress,
+      isKilled: (r) => chain.isKilled(r),
+      latestKill: (r) => chain.latestKill(r),
+      setReduceOnly: (r) => chain.setReduceOnly(r),
+      deskHoldings: (r, p) => chain.deskHoldings(r, p ?? prices),
+      flatten: (r, o, fee) => chain.flatten(r, o, fee),
+      mandateKill: (r, reason) => chain.mandateKill(r, reason),
+    };
   }
 
   private async soft<T>(label: string, fn: () => Promise<T>, fallback: T): Promise<T> {

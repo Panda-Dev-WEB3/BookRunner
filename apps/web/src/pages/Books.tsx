@@ -7,6 +7,9 @@ import { config } from "../lib/config";
 import { AGENTS_LINE, LIVE_VS_MARKED, STRAPLINE, venueDetail, venueLabel } from "../lib/copy";
 import { DASH, ageMs, fmtAge, fmtSharePrice, fmtUsd, tickerOf, usdRaw } from "../lib/format";
 import { bookState, limitState } from "../lib/limits";
+import { markCadenceLine, nextMarkAt, nextMarkLabel } from "../lib/lowgas";
+
+const isMarkable = (b: BookListItem) => b.state === "Live" || b.state === "Retiring";
 
 function markAge(b: BookListItem, now: number) {
   const age = ageMs(b.lastMark?.committedAt ?? null, now);
@@ -43,7 +46,10 @@ function BookCard({ b, now }: { b: BookListItem; now: number }) {
       </div>
       <div className="mt-2 flex items-center justify-between text-[11.5px] text-muted">
         <StateChip meta={limitState(b.limits?.state)} />
-        <span className="num">{markAge(b, now)}</span>
+        <span className="num">
+          {markAge(b, now)}
+          {isMarkable(b) ? ` · next ${nextMarkLabel(b.markSchedule, now)}` : ""}
+        </span>
       </div>
     </Link>
   );
@@ -119,6 +125,9 @@ export function BooksPage() {
                         </Th>
                         <Th>Limits</Th>
                         <Th right>Last mark</Th>
+                        <Th right title="One signed mark transaction per book per period">
+                          Next mark
+                        </Th>
                       </tr>
                     </thead>
                     <tbody>
@@ -163,6 +172,10 @@ export function BooksPage() {
                           <Td right num className="text-ink-2">
                             {markAge(b, now)}
                           </Td>
+                          <Td right num className="text-ink-2" title={nextMarkAt(b.markSchedule)}>
+                            <div>{isMarkable(b) ? nextMarkLabel(b.markSchedule, now) : DASH}</div>
+                            <div className="text-[11px] text-muted">{b.markSchedule.cadence}</div>
+                          </Td>
                         </tr>
                       ))}
                     </tbody>
@@ -174,6 +187,7 @@ export function BooksPage() {
         </div>
       </Panel>
       <p className="mt-3 max-w-4xl text-[11.5px] text-muted">{LIVE_VS_MARKED}</p>
+      {q.data?.[0] && <p className="mt-1 max-w-4xl text-[11.5px] text-muted">{markCadenceLine(q.data[0].markSchedule.cadence, q.data[0].markSchedule.intervalSeconds)}</p>}
     </>
   );
 }

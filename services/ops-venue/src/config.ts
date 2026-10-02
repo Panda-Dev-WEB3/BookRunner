@@ -8,6 +8,10 @@ const bool = (d: boolean) =>
     .transform((v) => ["1", "true", "on", "yes"].includes(v));
 
 export const opsEnvSchema = baseEnvSchema.extend({
+  // signed (default, docs/LOW_GAS.md §2): sign each venue report off-chain (EIP-712, src/report712.ts) and
+  // publish it to Redis; the mark keeper relays the latest one inside its MarkRegistry.commitAndApply — no
+  // report tx. onchain: the pre-low-gas loop (OrderlyAdapter.report every interval).
+  OPS_REPORT_MODE: z.enum(["signed", "onchain"]).default("signed"),
   OPS_REPORT_INTERVAL_MS: z.coerce.number().default(15_000),
   OPS_REPORT_MAX_DROP_BPS: z.coerce.number().default(5_000), // hold reports showing a sharper unexplained fall
   OPS_REPORT_DROP_CONFIRMATIONS: z.coerce.number().default(3),

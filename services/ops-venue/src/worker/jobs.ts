@@ -50,8 +50,9 @@ export async function handleVenueOpsJob(job: VenueOpsJob, d: JobDeps): Promise<R
       return { stage: s.stage, attempts: s.attempts, ...(s.lastError ? { lastError: s.lastError } : {}) };
     }
     case "report": {
-      const tx = await d.reporter.report(book);
-      return { tx };
+      // follows OPS_REPORT_MODE: signed -> signature published (tx only on an adapter without reportSigned)
+      const r = await d.reporter.reportDetailed(book);
+      return { mode: d.ctx.settings.reportMode, tx: r?.tx ?? null, ...(r?.signature ? { signature: r.signature, asOf: Number(r.asOf) } : {}) };
     }
     case "sweep_fees": {
       if (job.period === undefined) throw new Error("sweep_fees needs period");

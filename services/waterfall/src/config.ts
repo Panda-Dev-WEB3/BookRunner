@@ -13,6 +13,11 @@ export const waterfallEnvShape = {
   WATERFALL_ETH_USD: zWad("0"),
   /** Orderly books: max wait for ops-venue's fee sweep before distributing (keep < MARK_WAIT_SECONDS). */
   WATERFALL_SWEEP_WAIT_SECONDS: z.coerce.number().min(0).default(30),
+  /**
+   * Send distribute(period) even when the router holds no fee flow (a no-op tx that only labels the
+   * period). Default false (docs/LOW_GAS.md §3): empty periods cost no gas and the mark is told not to wait.
+   */
+  WATERFALL_DISTRIBUTE_EMPTY: zBool(false),
   /** Settlement jobs processed in parallel (keeper txs stay serialised by the sender). */
   WATERFALL_CONCURRENCY: z.coerce.number().int().positive().default(4),
   WATERFALL_RECALL_BUFFER_BPS: z.coerce.number().int().min(0).max(10_000).default(100),

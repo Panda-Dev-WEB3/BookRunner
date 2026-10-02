@@ -39,5 +39,10 @@ export type ReceiptProof = Outputs["receipts"]["proof"];
 export type ReceiptsRootOut = Outputs["receipts"]["root"];
 export type MarkRootOut = Extract<ReceiptsRootOut, { kind: "mark" }>;
 export type OraclePricesOut = Outputs["oracle"]["prices"];
+// low-gas mode (docs/LOW_GAS.md): signed prices, signed venue reports, one mark tx per book per period
+export type OracleSignedOut = Outputs["oracle"]["signed"];
+export type MarkScheduleOut = BookListItem["markSchedule"];
+export type SignedPriceOut = NonNullable<BookDetail["signedPrice"]>;
+export type VenueReportOut = NonNullable<BookDetail["venueReport"]>;
 export type EventItem = Outputs["events"]["recent"]["items"][number];
 export type PreparedTx = SubscribeOut["txs"][number];

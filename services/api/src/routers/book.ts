@@ -2,7 +2,8 @@ import { BOOK_STATE } from "@bookrunner/shared/types";
 import { KEYS } from "@bookrunner/shared/queues";
 import { z } from "zod";
 import { mandateToView } from "../domain/charter";
-import { parseQuote } from "../domain/live";
+import { parseQuote, parseRiskState } from "../domain/live";
+import { ORACLE_BUNDLE_KEY, markSchedule, signedBundleView, venueReportKey, venueReportView } from "../domain/lowgas";
 import { iso, usdStr, wadStr } from "../format";
 import { parseJson } from "../kv";
 import { publicProcedure, router, softChain } from "../trpc";
@@ -17,9 +18,11 @@ import {
   liveNavs,
   loadBook,
   loadCharterOf,
+  markInterval,
   markView,
   paged,
   timeInput,
+  venueName,
 } from "./common";
 
 const DAY_MS = 86_400_000;
@@ -32,24 +35,53 @@ export function limitsBucketSeconds(spanMs: number, requested?: number): number 
   return Math.max(requested ?? auto, Math.ceil(span / 2000), 1);
 }
 
+/** Oracle price id of a book's underlying ("PERP_NVDA_USDC" -> "NVDA", "RHX5-PERP" -> "RHX5"); risk's view wins. */
+export function bookPriceId(symbol: string, riskMeta?: Record<string, unknown> | null): string {
+  const o = riskMeta?.oracle as { priceId?: unknown } | undefined;
+  if (o && typeof o.priceId === "string" && o.priceId) return o.priceId;
+  const m = /^PERP_([A-Z0-9.]+)_[A-Z]+$/i.exec(symbol) ?? /^([A-Z0-9.]+)-PERP$/i.exec(symbol);
+  return (m?.[1] ?? symbol).toUpperCase();
+}
+
+const MARKABLE = new Set(["Live", "Retiring"]);
+
 export const bookRouter = router({
   list: publicProcedure.query(async ({ ctx: { deps } }) => {
     const books = await deps.data.listBooks();
     const ids = books.map((b) => b.id);
-    const [marks, live, limits] = await Promise.all([deps.data.latestMarks(ids), liveNavs(deps, ids), limitsViews(deps, ids)]);
+    const [marks, live, limits, interval] = await Promise.all([deps.data.latestMarks(ids), liveNavs(deps, ids), limitsViews(deps, ids), markInterval(deps)]);
     const markBy = new Map(marks.map((m) => [m.bookId, m]));
-    return books.map((b) => bookSummary(b, markBy.get(b.id) ?? null, live.get(b.id) ?? null, limits.get(b.id) ?? null));
+    const now = deps.now();
+    return books.map((b) => {
+      const s = bookSummary(b, markBy.get(b.id) ?? null, live.get(b.id) ?? null, limits.get(b.id) ?? null);
+      return { ...s, markSchedule: markSchedule(now, interval, s.lastMark?.periodEnd ?? null, MARKABLE.has(s.state)) };
+    });
+  }),
+
+  /**
+   * ops-venue's latest signed venue report (docs/LOW_GAS.md §2): Orderly books only. Relayed on-chain inside
+   * the book's mark tx (MarkRegistry.commitAndApply), so between marks the adapter's stored report is older.
+   */
+  venueReport: publicProcedure.input(z.object({ bookId: bookIdInput })).query(async ({ ctx: { deps }, input }) => {
+    const b = await loadBook(deps, input.bookId);
+    if (venueName(b.venue) !== "orderly") return { bookId: b.id, applicable: false as const, report: null };
+    const report = await venueReportView(parseJson(await deps.kv.get(venueReportKey(b.id))), deps.now()).catch(() => null);
+    return { bookId: b.id, applicable: true as const, report };
   }),
 
   get: publicProcedure.input(z.object({ bookId: bookIdInput })).query(async ({ ctx: { deps }, input }) => {
     const b = await loadBook(deps, input.bookId);
-    const [{ row: charterRow, charter }, marks, live, limits, quoteRaw, hbRaw] = await Promise.all([
+    const [{ row: charterRow, charter }, marks, live, limits, quoteRaw, hbRaw, riskRaw, bundleRaw, reportRaw, interval] = await Promise.all([
       loadCharterOf(deps, b),
       deps.data.latestMarks([b.id]),
       liveNavs(deps, [b.id]),
       limitsViews(deps, [b.id]),
       deps.kv.get(KEYS.agentQuote(b.id)),
       deps.kv.get(KEYS.agentHeartbeat(b.id)),
+      deps.kv.get(KEYS.riskState(b.id)),
+      deps.kv.get(ORACLE_BUNDLE_KEY),
+      venueName(b.venue) === "orderly" ? deps.kv.get(venueReportKey(b.id)) : Promise.resolve(null),
+      markInterval(deps),
     ]);
     const mark = marks[0] ?? null;
     const summary = bookSummary(b, mark, live.get(b.id) ?? null, limits.get(b.id) ?? null);
@@ -69,6 +101,17 @@ export const bookRouter = router({
         }
       : {};
     const mandate = chainMandate ? chainMandate.mandate : (charter?.mandate ?? null);
+    // low-gas mode (LOW_GAS §1-§3): the latest signed print of the underlying, the signed venue report, the mark schedule
+    const now = deps.now();
+    const priceId = bookPriceId(b.symbol, parseRiskState(parseJson(riskRaw))?.meta ?? null);
+    const gw = deps.chain();
+    let messages: unknown[] = [];
+    if (!bundleRaw) messages = [parseJson(await deps.kv.get(KEYS.oracleLast(priceId)))];
+    const bundle = await signedBundleView(parseJson(bundleRaw), messages, now, { chainId: deps.settings.chainId, oracle: gw?.deployment.contracts.oracle ?? null }).catch(() => null);
+    const signedPrice = bundle?.prices.find((p) => p.priceId === priceId) ?? null;
+    const venueReport = reportRaw ? await venueReportView(parseJson(reportRaw), now).catch(() => null) : null;
+    const state = (overlay.state ?? summary.state) as string;
+    const lastPeriodEnd = summary.lastMark?.periodEnd ?? null;
     return {
       ...summary,
       ...overlay,
@@ -80,6 +123,10 @@ export const bookRouter = router({
       quote: parseQuote(parseJson(quoteRaw)),
       agent: { heartbeatAt: hb ? new Date(hb).toISOString() : null, alive: hb !== null && deps.now() - hb < AGENT_ALIVE_MS },
       source: chainBook ? ("chain" as const) : ("db" as const),
+      priceId,
+      signedPrice,
+      venueReport,
+      markSchedule: markSchedule(now, interval, lastPeriodEnd, MARKABLE.has(state)),
     };
   }),
 

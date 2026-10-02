@@ -10,6 +10,8 @@ export * from "./kit/deployment";
 export * from "./kit/logs";
 export * from "./kit/fmt";
 export * from "./kit/env";
+export * from "./kit/signals";
+export * from "./kit/code";
 export * from "./domain/split";
 export * from "./domain/expenses";
 export * from "./domain/recall";

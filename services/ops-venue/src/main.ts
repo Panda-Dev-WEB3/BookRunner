@@ -1,6 +1,7 @@
 // ops-venue service entry: Orderly builder operations for every Orderly-venue book.
-//   loops : book discovery + provisioning, chain logs (withdrawals, kills, re-mandates), adapter
-//           reports every OPS_REPORT_INTERVAL_MS, builder fee sweeps per mark period
+//   loops : book discovery + provisioning, chain logs (withdrawals, kills, re-mandates), venue reports
+//           every OPS_REPORT_INTERVAL_MS (OPS_REPORT_MODE=signed: EIP-712 signed + published to Redis
+//           bkrn:venue:report:<bookId>, no tx; onchain: adapter.report tx), builder fee sweeps per mark period
 //   queue : BullMQ QUEUES.venueOps (create_symbol, fund_if, deposit_mm, execute_withdraw, report,
 //           sweep_fees, revoke_key)
 //   redis : CHANNELS.kill(*) -> revoke the book's venue trade key
@@ -20,6 +21,7 @@ import { FileSagaStore, PgOpsStore } from "./store";
 import { errMsg, KeyedMutex, sleep } from "./util";
 import type { OpsContext } from "./worker/context";
 import { loadOrCreateBuilderKey, Provisioner } from "./worker/provision";
+import { accountReportSigner, RedisReportPublisher } from "./worker/reportSink";
 import { OpsService } from "./worker/service";
 
 const env = loadOpsEnv();
@@ -78,6 +80,7 @@ async function main() {
       reportMaxDropBps: env.OPS_REPORT_MAX_DROP_BPS,
       reportDropConfirmations: env.OPS_REPORT_DROP_CONFIRMATIONS,
       reportSettleSec: env.OPS_REPORT_SETTLE_S,
+      reportMode: env.OPS_REPORT_MODE,
     },
     chain,
     store,
@@ -89,9 +92,11 @@ async function main() {
     locks: new KeyedMutex(),
     log,
     now: Date.now,
+    reportSigner: accountReportSigner(ops, env.CHAIN_ID),
+    reportPublisher: new RedisReportPublisher(redis),
   };
   const service = new OpsService(ctx, new Provisioner(ctx, builderKey));
-  log.info({ ops: ops.address, builderAccountId, books: dep.books.length }, "deployment loaded");
+  log.info({ ops: ops.address, builderAccountId, books: dep.books.length, reportMode: env.OPS_REPORT_MODE }, "deployment loaded");
 
   const worker = new Worker<VenueOpsJob>(
     QUEUES.venueOps,
