@@ -19,3 +19,5 @@ contracts/deployments/31337.json
 .env.testnet
 .data/
 GITHUB_DEPLOY_KEY.txt
+contracts/broadcast/
+contracts/deployments/46630.json
