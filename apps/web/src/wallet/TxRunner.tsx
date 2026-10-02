@@ -5,7 +5,7 @@ import { Chip, Hash, cx } from "../components/ui";
 import type { PreparedTx } from "../lib/api-types";
 import { devEntry } from "../lib/devwallet";
 import type { Tone } from "../lib/limits";
-import { type TxItem, type TxStatus, callSummary, initialItems, runSequential, summarize } from "../lib/txflow";
+import { type TxItem, type TxStatus, awaitsReceipt, callSummary, initialItems, runSequential, summarize } from "../lib/txflow";
 import { appChain, chainName } from "./chains";
 import { GasWarning, NetworkNotice } from "./network";
 import { useDevRoleFor } from "./useDevRoleFor";
@@ -40,6 +40,8 @@ export function TxRunner(props: {
   }, [key]);
 
   const s = summarize(items);
+  // A failed step that was broadcast but lost its receipt wait: retrying waits for that hash again.
+  const lostReceipt = items.find((i) => i.status === "failed" && awaitsReceipt(i)) ?? null;
   const mismatch = !!props.signer && !!w.active && !sameAddress(props.signer, w.active.address);
   const suggested = useDevRoleFor(props.signer ?? null, w.devAvailable && mismatch);
   const chainIds = [...new Set(props.txs.map((t) => t.chainId))];
@@ -54,6 +56,9 @@ export function TxRunner(props: {
       props.onConfirmed?.();
     }
   };
+
+  // Only when the explorer does not show the transaction at all (dropped): forget the hash and sign it again.
+  const sendAgain = () => setItems((cur) => cur.map((i) => (i === lostReceipt ? { ...i, hash: undefined, reverted: undefined } : i)));
 
   if (props.txs.length === 0) return null;
 
@@ -128,7 +133,7 @@ export function TxRunner(props: {
         <div className="flex flex-wrap items-center gap-2">
           {w.active ? (
             <button type="button" className="btn btn-primary" disabled={s.running || s.allConfirmed || wrongChainForDev || foreignChain !== null || !w.executor} onClick={run}>
-              {s.running ? "Sending…" : s.allConfirmed ? "All confirmed" : s.failed ? "Retry from the failed step" : `Sign and send ${props.txs.length > 1 ? `${props.txs.length} transactions` : "transaction"}`}
+              {s.running ? "Sending…" : s.allConfirmed ? "All confirmed" : lostReceipt ? "Check the transaction again" : s.failed ? "Retry from the failed step" : `Sign and send ${props.txs.length > 1 ? `${props.txs.length} transactions` : "transaction"}`}
             </button>
           ) : (
             <WalletButton label="Connect a wallet to send" />
@@ -139,6 +144,14 @@ export function TxRunner(props: {
             </span>
           )}
         </div>
+        {lostReceipt && !s.running && (
+          <div className="text-[11.5px] text-ink-2">
+            The transaction was sent, but its confirmation could not be read yet; it may still confirm. Check it again rather than sending it twice.{" "}
+            <button type="button" className="link" onClick={sendAgain}>
+              The explorer does not show it: send it again
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Hex } from "viem";
-import { type PreparedTxLike, type TxExecutor, type TxItem, callSummary, initialItems, runSequential, summarize } from "../src/lib/txflow";
+import { type PreparedTxLike, type TxExecutor, type TxItem, awaitsReceipt, callSummary, initialItems, runSequential, summarize } from "../src/lib/txflow";
 
 const tx = (n: number): PreparedTxLike => ({ to: `0x${String(n).padStart(40, "0")}`, data: "0x095ea7b3" + "00".repeat(64), value: "0", chainId: 31337, description: `tx ${n}` });
 
@@ -49,6 +49,47 @@ describe("runSequential", () => {
     const r = await runSequential(initialItems([tx(1)]), exec, () => {});
     expect(r.items[0]?.status).toBe("failed");
     expect(r.items[0]?.error).toContain("reverted");
+    expect(r.items[0]?.reverted).toBe(true);
+    expect(awaitsReceipt(r.items[0] as TxItem)).toBe(false);
+    // a reverted transaction is sent again on retry
+    const again = fakeExecutor();
+    const r2 = await runSequential(r.items, again.exec, () => {});
+    expect(again.sent).toEqual(["tx 1"]);
+    expect(r2.items[0]).toMatchObject({ status: "confirmed", reverted: undefined });
+  });
+
+  test("retry after a lost receipt waits for the same hash again and never sends twice", async () => {
+    const sent: string[] = [];
+    const waited: Hex[] = [];
+    let waitFails = true;
+    const exec: TxExecutor = {
+      async send(t) {
+        sent.push(t.description);
+        return `0x${"bb".repeat(32)}` as Hex;
+      },
+      async wait(h) {
+        waited.push(h);
+        // the receipt poller rejects on a 429 / timeout although the transaction was broadcast
+        if (waitFails) throw Object.assign(new Error("HTTP request failed.\nStatus: 429"), { shortMessage: "HTTP request failed." });
+        return { status: "success", blockNumber: 9n };
+      },
+    };
+    const r = await runSequential(initialItems([tx(1), tx(2)]), exec, () => {});
+    expect(r.ok).toBe(false);
+    expect(r.items[0]).toMatchObject({ status: "failed", hash: `0x${"bb".repeat(32)}`, error: "HTTP request failed." });
+    expect(awaitsReceipt(r.items[0] as TxItem)).toBe(true);
+    waitFails = false;
+    const updates: string[][] = [];
+    const r2 = await runSequential(r.items, exec, (it) => updates.push(it.map((i) => i.status)));
+    expect(r2.ok).toBe(true);
+    expect(sent).toEqual(["tx 1", "tx 2"]); // tx 1 was sent once, tx 2 once
+    expect(waited.length).toBe(3);
+    expect(updates[0]).toEqual(["pending", "queued"]); // straight back to waiting, no signature
+    // after "send it again" clears the hash, the step is signed again
+    const cleared = r.items.map((i, j) => (j === 0 ? { ...i, hash: undefined } : i));
+    sent.length = 0;
+    await runSequential(cleared, exec, () => {});
+    expect(sent).toEqual(["tx 1", "tx 2"]);
   });
 });
 

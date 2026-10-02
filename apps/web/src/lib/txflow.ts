@@ -19,7 +19,16 @@ export interface TxItem<T extends PreparedTxLike = PreparedTxLike> {
   hash?: Hex;
   blockNumber?: bigint;
   error?: string;
+  /** The receipt of `hash` says it reverted: a retry sends the transaction again. */
+  reverted?: boolean;
 }
+
+/**
+ * The item was broadcast (it has a hash) but waiting for its receipt failed (timeout, RPC error), so
+ * the transaction may still confirm: a retry must wait for that hash again, never send it twice
+ * (a second requestRedeem would file a second withdrawal request).
+ */
+export const awaitsReceipt = (i: Pick<TxItem, "status" | "hash" | "reverted">): boolean => i.status !== "confirmed" && !!i.hash && !i.reverted;
 
 export interface TxExecutor<T extends PreparedTxLike = PreparedTxLike> {
   send(tx: T): Promise<Hex>;
@@ -36,7 +45,9 @@ export const errText = (e: unknown): string => {
 
 /**
  * Runs the queue in order, skipping items already confirmed (so a retry resumes where it stopped).
- * Stops at the first failure and marks the rest skipped. Reports every state change.
+ * An item that was already broadcast and only lost its receipt wait resumes waiting on its hash
+ * instead of being sent again; a reverted one is sent again. Stops at the first failure and marks
+ * the rest skipped. Reports every state change.
  */
 export async function runSequential<T extends PreparedTxLike>(
   items: TxItem<T>[],
@@ -52,11 +63,17 @@ export async function runSequential<T extends PreparedTxLike>(
     const item = cur[i];
     if (!item || item.status === "confirmed") continue;
     try {
-      set(i, { status: "signing" });
-      const hash = await exec.send(item.tx);
+      let hash = awaitsReceipt(item) ? item.hash : undefined;
+      if (!hash) {
+        set(i, { status: "signing", hash: undefined, reverted: undefined, blockNumber: undefined });
+        hash = await exec.send(item.tx);
+      }
       set(i, { status: "pending", hash });
       const r = await exec.wait(hash, item.tx);
-      if (r.status !== "success") throw new Error(`Transaction reverted in block ${r.blockNumber}`);
+      if (r.status !== "success") {
+        set(i, { reverted: true, blockNumber: r.blockNumber });
+        throw new Error(`Transaction reverted in block ${r.blockNumber}`);
+      }
       set(i, { status: "confirmed", blockNumber: r.blockNumber });
     } catch (e) {
       set(i, { status: "failed", error: errText(e) });
