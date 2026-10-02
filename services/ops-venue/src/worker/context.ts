@@ -10,7 +10,7 @@ import type { KeyedMutex } from "../util";
 /** Builder/ops venue operations the workers use (OrderlyBuilderClient satisfies it; tests fake it). */
 export type BuilderPort = Pick<
   OrderlyBuilderClient,
-  "createSymbol" | "setSymbolStatus" | "insuranceFund" | "addKey" | "keyInfo" | "revokeTradeKey" | "requestWithdraw" | "withdrawal" | "mockCompleteWithdraw" | "mockRegisterAccount"
+  "createSymbol" | "setSymbolStatus" | "insuranceFund" | "addKey" | "keyInfo" | "revokeTradeKey" | "requestWithdraw" | "withdrawal" | "withdrawals" | "mockCompleteWithdraw" | "mockRegisterAccount"
 > & { feeSettlements(sinceMs: number): Promise<FeeSettlement[]> };
 
 /** Venue account read for (accountId, symbol) authenticated with `key` (ops key). */
@@ -31,6 +31,8 @@ export interface OpsSettings {
   logMaxRange: bigint;
   reportMaxDropBps: number;
   reportDropConfirmations: number;
+  /** Hold reports this long (chain seconds) after any on-chain venue flow (deposit / confirm / fail) so the venue reflects it. */
+  reportSettleSec: number;
 }
 
 export interface OpsContext {

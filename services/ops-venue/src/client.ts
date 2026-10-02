@@ -201,6 +201,8 @@ export interface WithdrawRecordView {
   txHash: string | null;
   amountUsd: bigint;
   clientRef: string | null;
+  receiver: string | null; // VERIFY: present in Orderly asset history?
+  createdAt: number | null; // ms (created_time)
 }
 
 export interface OrderlyBuilderClientOptions {
@@ -443,6 +445,8 @@ export class OrderlyBuilderClient implements OrderlyBuilderApi {
       txHash: w.tx_id ? String(w.tx_id) : null,
       amountUsd: usdRaw(w.amount),
       clientRef: w.client_ref ? String(w.client_ref) : null,
+      receiver: w.receiver ? String(w.receiver) : null,
+      createdAt: w.created_time == null || !Number.isFinite(Number(w.created_time)) ? null : Number(w.created_time),
     }));
   }
 

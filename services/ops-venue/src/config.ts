@@ -11,6 +11,9 @@ export const opsEnvSchema = baseEnvSchema.extend({
   OPS_REPORT_INTERVAL_MS: z.coerce.number().default(15_000),
   OPS_REPORT_MAX_DROP_BPS: z.coerce.number().default(5_000), // hold reports showing a sharper unexplained fall
   OPS_REPORT_DROP_CONFIRMATIONS: z.coerce.number().default(3),
+  // no report within this many chain seconds of an on-chain venue flow (deposit/confirm/fail): the venue
+  // credits deposits asynchronously (mock indexer poll; Orderly cross-chain, VERIFY latency)
+  OPS_REPORT_SETTLE_S: z.coerce.number().default(30),
   OPS_BOOK_POLL_MS: z.coerce.number().default(5_000),
   OPS_LOG_POLL_MS: z.coerce.number().default(3_000),
   OPS_FEE_POLL_MS: z.coerce.number().default(10_000),

@@ -146,8 +146,9 @@ export function pruneSagas(s: SagaState, now: number, feeRetentionMs = 7 * 86_40
       changed = true;
     }
   }
+  // Safe to forget: a replayed WithdrawRequested is only acted on while its on-chain status is Requested.
   for (const [k, w] of Object.entries(s.withdrawals)) {
-    if (w.stage === "swept" && now - w.updatedAt > withdrawRetentionMs) {
+    if ((w.stage === "swept" || w.stage === "skipped" || w.stage === "cancelled") && now - w.updatedAt > withdrawRetentionMs) {
       delete s.withdrawals[k];
       changed = true;
     }

@@ -1,9 +1,12 @@
 // End-to-end on a PRIVATE anvil (never the shared one): BKRN_IT=1 [ANVIL_BIN=anvil] [IT_ANVIL_PORT=8591] bun test test/chain.it.test.ts
 // Contracts: test/fixtures/FakeOrderlyStack.sol (stand-ins with the frozen IOrderlyAdapter events),
-// compiled into test/fixtures/fake-orderly.json with Docker forge (solc 0.8.30):
-//   docker run --rm -v <dir>:/w -w /w --entrypoint forge ghcr.io/foundry-rs/foundry:latest build
-// Exercises: mock-orderly deposit indexer on real logs, ViemChain writes (report, operatorWithdraw,
-// confirmWithdraw, sweepToVault, creditFees, sweepFees), the withdraw saga and the fee sweep.
+// compiled into test/fixtures/fake-orderly.json with Docker forge (solc 0.8.30), from the repo root:
+//   bash scripts/forge.sh build --root /repo/services/ops-venue/test/fixtures --contracts /repo/services/ops-venue/test/fixtures \
+//     --out /repo/services/ops-venue/test/fixtures/.out --cache-path /repo/services/ops-venue/test/fixtures/.cache --use 0.8.30
+//   then {Name: {abi, bytecode: bytecode.object}} for FakeUSDC / FakeVault / FakeAdapter from .out (delete .out/.cache).
+// Exercises: mock-orderly deposit indexer on real logs, ViemChain reads/writes (report, withdrawRequest,
+// confirmWithdraw, operatorWithdraw, sweepToVault, mint + creditFees, sweepFees, forwardPendingFees,
+// txState), the report hold, the withdraw saga (confirm before payout) and the fee saga (earmark first).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { DepositIndexer } from "@bookrunner/mock-orderly";
 import { ACCOUNT, type Deployment, devAccount, localChain } from "@bookrunner/shared";
@@ -97,24 +100,48 @@ d("ops-venue on a private anvil", () => {
     reg.books.set(1, book);
     await new Provisioner(t.ctx, await loadOrCreateBuilderKey(t.keys, BUILDER_ID, undefined, 86_400_000, keyFromSecret)).ensure(book);
     t.mock.venue.setPrice("NVDA", 200, false);
-    const tx = await new Reporter(t.ctx).report(book);
+    const reporter = new Reporter(t.ctx);
+    t.ctx.settings.reportSettleSec = 3600; // deposits just landed: held while the venue may not reflect them
+    expect(await reporter.report(book)).toBeNull();
+    t.ctx.settings.reportSettleSec = 0;
+    const tx = await reporter.report(book);
     expect(tx).toMatch(/^0x/);
     const ins = await pc.readContract({ address: addr.adapter as Address, abi: fixture.FakeAdapter.abi as Abi, functionName: "insuranceEquityUsd" });
     expect(ins).toBe(25_000_000_000n);
 
-    // 3) withdraw: adapter.requestWithdraw(MM, 5k) -> saga -> vault pays adapter -> confirm -> sweep to vault
+    // txState on a real node: mined / unknown hash with an unused nonce (dropped) / with a used nonce (replaced)
+    const used = await pc.getTransactionCount({ address: ops.address });
+    expect(await chain.txState({ hash: tx as Hex, nonce: used - 1, at: 0 })).toBe("success");
+    const ghost = `0x${"ab".repeat(32)}` as Hex;
+    expect(await chain.txState({ hash: ghost, nonce: used + 5, at: 0 })).toBe("dropped");
+    expect(await chain.txState({ hash: ghost, nonce: 0, at: 0 })).toBe("replaced");
+
+    // 3) withdraw: adapter.requestWithdraw(MM, 5k) -> saga -> venue request -> confirm -> vault pays adapter -> sweep to vault
     await call("FakeAdapter", addr.adapter as Address, "requestWithdraw", [ACCOUNT.MM, 5_000_000_000n]);
+    expect(await reporter.report(book)).toBeNull(); // requested, not confirmed: no report
     const wp = new WithdrawProcessor(t.ctx, reg);
     const fees = new FeeSweeper(t.ctx, reg);
-    const watcher = new LogWatcher(t.ctx, reg, { onAdapterLog: (l) => (l.kind === "WithdrawRequested" ? void wp.onRequested(l) : fees.noteSwept(l.adapter, l.period, l.amount, l.block)), onMandateLog: () => {} });
+    const watcher = new LogWatcher(t.ctx, reg, {
+      onAdapterLog: async (l) => {
+        if (l.kind === "WithdrawRequested") await wp.onRequested(l);
+        else fees.noteSwept(l.adapter, l.period, l.amount, l.block, l.txHash, l.logIndex);
+      },
+      onMandateLog: () => {},
+    });
     await watcher.poll();
     await wp.processAll();
     const saga = Object.values(t.sagas.get().withdrawals)[0];
     expect(saga?.stage).toBe("swept");
+    expect(saga?.txs?.confirm?.hash).toMatch(/^0x/);
     expect(await usdcBal(SINK_VAULT)).toBe(5_000_000_000n);
+    expect(await pc.readContract({ address: addr.adapter as Address, abi: fixture.FakeAdapter.abi as Abi, functionName: "inTransitUsd" })).toBe(0n);
+    expect((await chain.withdrawStatus(addr.adapter as Address, 1n)).status).toBe(2); // Confirmed
     expect(t.mock.venue.getAccount(accounts.mm).holding).toBe(70_000_000_000);
+    await watcher.poll(); // replay-safe
+    t.ctx.sagas.get().withdrawals = {}; // saga pruned / file lost: a replay of the confirmed request is ignored
+    expect(await wp.onRequested({ kind: "WithdrawRequested", adapter: addr.adapter as Address, account: ACCOUNT.MM, amount: 5_000_000_000n, nonce: 1n, block: 1n, txHash: "0x01", logIndex: 0 })).toBeNull();
 
-    // 4) builder fees: taker flow on the book's quote -> settlement -> withdraw to adapter -> sweepFees
+    // 4) builder fees: taker flow on the book's quote -> settlement -> earmark -> builder -> ops EOA -> adapter -> router
     t.mock.venue.placeOrder({ accountId: accounts.mm, keyId: null }, { symbol: SYMBOL, order_type: "LIMIT", side: "SELL", order_price: 200, order_quantity: 50 });
     t.mock.venue.externalTaker(SYMBOL, "BUY", 50);
     const rows = t.mock.venue.settleNow();
@@ -123,6 +150,7 @@ d("ops-venue on a private anvil", () => {
     const s = await fees.sweep(1, period);
     expect(s.stage).toBe("swept");
     expect(await usdcBal(SINK_ROUTER)).toBe(3_000_000n);
+    expect(await pc.readContract({ address: addr.adapter as Address, abi: fixture.FakeAdapter.abi as Abi, functionName: "pendingFeesUsd" })).toBe(0n);
     expect(await fees.sweep(1, period)).toMatchObject({ stage: "swept" });
     expect(await usdcBal(SINK_ROUTER)).toBe(3_000_000n);
     expect(t.store.settlements).toHaveLength(1);

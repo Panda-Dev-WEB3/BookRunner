@@ -6,8 +6,9 @@ import { OrderlyVenue } from "../src/client";
 import { OrderlyHttpError } from "../src/orderly/http";
 import { pruneSagas } from "../src/store";
 import { loadOrCreateBuilderKey, Provisioner } from "../src/worker/provision";
+import { bookCursorName } from "../src/worker/logs";
 import { OpsService } from "../src/worker/service";
-import { ADAPTER, BASE, BUILDER_ID, IF_ID, MANDATE, makeCtx, MM_ID, SYMBOL, trackedBook } from "./helpers";
+import { ADAPTER, BASE, BUILDER_ID, IF_ID, MANDATE, makeCtx, MM_ID, setupReporting, SYMBOL, trackedBook } from "./helpers";
 
 const acct = (equity: bigint, qty = 0, mark = 0): VenueAccount => ({
   equityUsd: equity,
@@ -141,11 +142,42 @@ describe("kill -> venue key revocation", () => {
 
   test("log watcher persists its cursor and turns WithdrawRequested into sagas", async () => {
     const t = await service();
-    t.chain.adapterLogList.push({ kind: "WithdrawRequested", adapter: ADAPTER, account: ACCOUNT.IF, amount: 1n, nonce: 3n, block: 11n, txHash: "0x03", logIndex: 0 });
-    t.chain.block = 11n;
+    const req = t.chain.requestWithdraw(ADAPTER, ACCOUNT.IF, 1n); // block 11
     await t.svc.logs.poll();
     expect(t.store.cursors.get("ops-venue:logs")).toBe(12n);
-    expect(Object.keys(t.sagas.get().withdrawals)).toEqual([`${ADAPTER.toLowerCase()}:3`]);
+    expect(t.store.cursors.get(bookCursorName(ADAPTER))).toBe(12n);
+    expect(Object.keys(t.sagas.get().withdrawals)).toEqual([`${ADAPTER.toLowerCase()}:${req.nonce}`]);
+  });
+
+});
+
+// (the reviewed-finding scenarios live in regressions.test.ts)
+describe("venue report vs in-flight flows", () => {
+  test("held while a withdrawal is in flight and during the settle window after its confirm; then reports the debited venue value", async () => {
+    const t = await setupReporting();
+    const req = t.chain.requestWithdraw(ADAPTER, ACCOUNT.MM, 30_000_000_000n);
+    await t.svc.logs.poll();
+    t.chain.failNext.confirmWithdraw = "rpc down"; // saga stops after the venue debit
+    await t.svc.withdrawals.processAll();
+    expect(Object.values(t.sagas.get().withdrawals)[0]?.stage).toBe("requested");
+    expect(t.mock.venue.getAccount(MM_ID).holding).toBe(45_000_000_000);
+    t.tick(60);
+    expect(await t.svc.reporter.report(t.book())).toBeNull();
+    expect(t.chain.count("report")).toBe(0);
+    await t.svc.withdrawals.processNonce(1, req.nonce.toString()); // confirm -> pay -> sweep
+    t.tick(5);
+    expect(await t.svc.reporter.report(t.book())).toBeNull(); // confirm is a venue flow: settle window
+    t.tick(60);
+    expect(await t.svc.reporter.report(t.book())).toMatch(/^0x/);
+    expect(t.chain.calls.find((c) => c.fn === "report")?.args.slice(1, 3)).toEqual([25_000_000_000n, 45_000_000_000n]);
+  });
+
+  test("deposit settle window: reports again once it has passed", async () => {
+    const t = await setupReporting();
+    t.chain.adapter(ADAPTER).lastFlowAt = t.chain.headTs - 5n; // VenueDeposit 5s ago
+    expect(await t.svc.reporter.report(t.book())).toBeNull();
+    t.tick(30);
+    expect(await t.svc.reporter.report(t.book())).toMatch(/^0x/);
   });
 });
 

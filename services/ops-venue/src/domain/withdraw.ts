@@ -1,17 +1,26 @@
 // Withdrawal saga (pure). One saga per adapter WithdrawRequested(account, amount, nonce):
 //
-//   detected --venue_requested--> requested --venue_paid--> paid --confirmed--> confirmed --swept--> swept
-//        \___________________________ error (attempts++) ________________________/        |
-//                                  attempts >= max or fatal  ->  failed                    terminal
+//   detected --venue_requested--> requested --confirmed--> confirmed --venue_paid--> paid --swept--> swept
+//      |  \______________________ error (attempts++) __________________________/                 |
+//      |                          attempts >= max or fatal  ->  failed                             terminal
+//      +--skipped--> skipped      (on-chain request no longer Requested: never executed again)
+//   requested|confirmed --cancelled--> cancelled   (venue rejected/failed it; adapter.cancel/failWithdraw)
 //
-//   request : POST withdraw request on Orderly (delegate signer, receiver = adapter)
+//   request : on-chain withdrawRequest(nonce).status must still be Requested, then POST the Orderly
+//             withdraw request (delegate signer, receiver = adapter); the venue debits the account here
+//   confirm : adapter.confirmWithdraw(nonce) right after the venue accepted it, BEFORE any USDC can reach
+//             the adapter: from here the amount is in-transit principal (a sweep can never take it as
+//             unattributed, and the venue debit and the adapter debit happen back to back)
 //   pay     : mock -> MockOrderlyVault.operatorWithdraw(accountId, adapter, amount) (+ creditFees to
 //             materialise venue PnL the mock vault never received); live -> wait for Orderly to pay (VERIFY)
-//   confirm : adapter.confirmWithdraw(nonce)
-//   sweep   : adapter.sweepToVault()
+//   sweep   : adapter.sweepToVault() (waits while the mark-window gate is closed)
+// Every on-chain write is recorded (hash + nonce) before its receipt is awaited and inspected on retry.
 import type { Address, Hex } from "viem";
+import type { SentTx } from "../chain";
 
-export type WithdrawStage = "detected" | "requested" | "paid" | "confirmed" | "swept" | "failed";
+export type WithdrawStage = "detected" | "requested" | "confirmed" | "paid" | "swept" | "skipped" | "cancelled" | "failed";
+
+export type WithdrawTxSlot = "confirm" | "mint" | "credit" | "pay" | "sweep" | "cancel";
 
 export interface WithdrawSaga {
   key: string; // `${adapter}:${nonce}` (lowercase adapter)
@@ -23,9 +32,15 @@ export interface WithdrawSaga {
   nonce: string;
   stage: WithdrawStage;
   withdrawId?: string;
+  /** mock: venue PnL materialised before the payout (fixed once computed). */
+  creditAmount?: string;
+  /** txs broadcast by this saga, recorded before their receipts were awaited */
+  txs?: Partial<Record<WithdrawTxSlot, SentTx>>;
   payTx?: Hex;
   confirmTx?: Hex;
   sweepTx?: Hex | null;
+  cancelTx?: Hex;
+  reason?: string; // skipped / cancelled
   attempts: number;
   lastError?: string;
   detectedTx?: Hex;
@@ -35,12 +50,14 @@ export interface WithdrawSaga {
 
 export type WithdrawEvent =
   | { type: "venue_requested"; withdrawId: string }
-  | { type: "venue_paid"; payTx?: Hex }
   | { type: "confirmed"; confirmTx?: Hex }
+  | { type: "venue_paid"; payTx?: Hex }
   | { type: "swept"; sweepTx: Hex | null }
+  | { type: "skipped"; reason: string }
+  | { type: "cancelled"; reason: string; cancelTx?: Hex }
   | { type: "error"; error: string; fatal?: boolean };
 
-export type WithdrawStep = "request" | "pay" | "confirm" | "sweep";
+export type WithdrawStep = "request" | "confirm" | "pay" | "sweep";
 
 export const sagaKey = (adapter: Address, nonce: bigint | string) => `${adapter.toLowerCase()}:${nonce.toString()}`;
 
@@ -66,25 +83,27 @@ export function nextStep(s: WithdrawSaga): WithdrawStep | null {
     case "detected":
       return "request";
     case "requested":
-      return "pay";
-    case "paid":
       return "confirm";
     case "confirmed":
+      return "pay";
+    case "paid":
       return "sweep";
     default:
       return null;
   }
 }
 
-const NEXT: Record<Exclude<WithdrawEvent["type"], "error">, { from: WithdrawStage; to: WithdrawStage }> = {
-  venue_requested: { from: "detected", to: "requested" },
-  venue_paid: { from: "requested", to: "paid" },
-  confirmed: { from: "paid", to: "confirmed" },
-  swept: { from: "confirmed", to: "swept" },
+const NEXT: Record<Exclude<WithdrawEvent["type"], "error">, { from: readonly WithdrawStage[]; to: WithdrawStage }> = {
+  venue_requested: { from: ["detected"], to: "requested" },
+  confirmed: { from: ["requested"], to: "confirmed" },
+  venue_paid: { from: ["confirmed"], to: "paid" },
+  swept: { from: ["paid"], to: "swept" },
+  skipped: { from: ["detected"], to: "skipped" },
+  cancelled: { from: ["requested", "confirmed"], to: "cancelled" },
 };
 
 export function isTerminal(s: WithdrawSaga): boolean {
-  return s.stage === "swept" || s.stage === "failed";
+  return s.stage === "swept" || s.stage === "skipped" || s.stage === "cancelled" || s.stage === "failed";
 }
 
 /** Pure transition; throws on an illegal event for the current stage. */
@@ -96,13 +115,18 @@ export function transition(s: WithdrawSaga, ev: WithdrawEvent, now: number, maxA
     return { ...s, attempts, lastError: ev.error, stage: failed ? "failed" : s.stage, updatedAt: now };
   }
   const t = NEXT[ev.type];
-  if (s.stage !== t.from) throw new Error(`withdraw ${s.key}: illegal ${ev.type} in stage ${s.stage}`);
+  if (!t.from.includes(s.stage)) throw new Error(`withdraw ${s.key}: illegal ${ev.type} in stage ${s.stage}`);
   const next: WithdrawSaga = { ...s, stage: t.to, attempts: 0, updatedAt: now };
   delete next.lastError;
   if (ev.type === "venue_requested") next.withdrawId = ev.withdrawId;
   if (ev.type === "venue_paid" && ev.payTx) next.payTx = ev.payTx;
   if (ev.type === "confirmed" && ev.confirmTx) next.confirmTx = ev.confirmTx;
   if (ev.type === "swept") next.sweepTx = ev.sweepTx;
+  if (ev.type === "skipped") next.reason = ev.reason;
+  if (ev.type === "cancelled") {
+    next.reason = ev.reason;
+    if (ev.cancelTx) next.cancelTx = ev.cancelTx;
+  }
   return next;
 }
 
@@ -111,13 +135,38 @@ export function retryDelayMs(attempts: number, baseMs = 3000, maxMs = 120_000): 
   return Math.min(maxMs, baseMs * 2 ** Math.max(0, attempts - 1));
 }
 
-/** confirmWithdraw reverted: was it because the nonce is already confirmed (crash after send)? */
-export function looksAlreadyConfirmed(error: string): boolean {
-  return /already|confirmed|not.?pending|unknown.?nonce|invalid.?nonce|nonce/i.test(error);
-}
-
 /** Mock vault materialisation: how much must be credited so operatorWithdraw(amount) can pay. */
 export function shortfall(ledger: bigint | null, amount: bigint): bigint {
   if (ledger === null) return 0n;
   return ledger >= amount ? 0n : amount - ledger;
+}
+
+/** Venue withdrawal history row (subset used to recognise our own earlier request). */
+export interface VenueWithdrawRow {
+  id: number | string;
+  status: string;
+  amountUsd: bigint;
+  clientRef: string | null;
+  receiver?: string | null;
+  createdAt?: number | null; // ms
+}
+
+/**
+ * Before POSTing a venue withdrawal, find one an earlier attempt already created (a POST whose response
+ * was lost, a crash before the saga recorded it, a saga file lost while the on-chain request is still
+ * pending) so it is never requested twice. Only confident matches are adopted: our own client_ref, or the
+ * same amount + receiver created after the on-chain request (`sinceMs`, small clock skew) and not claimed
+ * by another saga. Rows without a creation time are never adopted: re-requesting is recoverable, adopting
+ * an older, already paid withdrawal would book phantom in-transit principal.
+ */
+export function matchPriorWithdrawal(rows: VenueWithdrawRow[], p: { ref: string; amount: bigint; receiver: string; sinceMs: number; claimed: ReadonlySet<string>; skewMs?: number }): VenueWithdrawRow | null {
+  const open = rows.filter((r) => r.status !== "FAILED" && !p.claimed.has(String(r.id)));
+  const byRef = open.find((r) => r.clientRef === p.ref);
+  if (byRef) return byRef;
+  const since = p.sinceMs - (p.skewMs ?? 5_000);
+  const cands = open.filter(
+    (r) => r.amountUsd === p.amount && (r.receiver == null || r.receiver.toLowerCase() === p.receiver.toLowerCase()) && typeof r.createdAt === "number" && r.createdAt >= since,
+  );
+  cands.sort((a, b) => (a.createdAt as number) - (b.createdAt as number));
+  return cands[0] ?? null;
 }

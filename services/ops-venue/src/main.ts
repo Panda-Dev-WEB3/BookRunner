@@ -77,6 +77,7 @@ async function main() {
       logMaxRange: BigInt(env.OPS_LOG_MAX_RANGE),
       reportMaxDropBps: env.OPS_REPORT_MAX_DROP_BPS,
       reportDropConfirmations: env.OPS_REPORT_DROP_CONFIRMATIONS,
+      reportSettleSec: env.OPS_REPORT_SETTLE_S,
     },
     chain,
     store,

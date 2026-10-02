@@ -43,9 +43,9 @@ export class OpsService {
     });
   }
 
-  private onAdapterLog(l: AdapterLog) {
-    if (l.kind === "WithdrawRequested") this.withdrawals.onRequested(l);
-    else this.fees.noteSwept(l.adapter, l.period, l.amount, l.block);
+  private async onAdapterLog(l: AdapterLog) {
+    if (l.kind === "WithdrawRequested") await this.withdrawals.onRequested(l);
+    else this.fees.noteSwept(l.adapter, l.period, l.amount, l.block, l.txHash, l.logIndex);
   }
 
   private async onMandateLog(l: MandateLog, book: TrackedBook) {

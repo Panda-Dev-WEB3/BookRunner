@@ -1,9 +1,19 @@
-// Builder fee settlement -> adapter.sweepFees (pure planning). Orderly settles the builder's 50% of
-// base taker fees into the builder account; ops-venue withdraws it to the book's adapter and calls
-// sweepFees(period, amount) once per mark period. Planning is cumulative so nothing is lost:
-//   pending(P) = Σ settlements(symbol, period <= P) − Σ FeesSwept(adapter) − in-flight sagas
+// Builder fee settlement -> adapter -> RevenueRouter (pure planning + saga). Orderly settles the
+// builder's 50% of base taker fees into the builder account. Once per mark period ops-venue runs:
+//
+//   planned --earmark--> earmarked --venue request--> requested --payout--> received --pay--> paid --forward--> swept
+//      adapter.sweepFees(period, amount)   builder account -> ops EOA         ops EOA -> adapter    adapter.forwardPendingFees
+//
+// The earmark comes FIRST: the adapter attributes its USDC principal-first, then to pending (earmarked)
+// fees, anything else is vault-bound, and sweepToVault is permissionless. Fee USDC that reached the adapter
+// before its earmark could be swept into the vault as capital, skipping the waterfall. Earmarking first
+// also means a rejected earmark moves nothing. Every tx is recorded before its receipt is awaited.
+//
+// Planning is cumulative so nothing is lost:
+//   pending(P) = Σ settlements(symbol, period <= P) − Σ FeesSwept(adapter) − sagas not yet earmarked
 //   amount(P)  = min(pending(P), adapter.maxFeeSweepPerPeriodUsd)   (excess carries to later periods)
 import type { Address, Hex } from "viem";
+import type { SentTx } from "../chain";
 
 export interface SettlementRow {
   id: string;
@@ -52,7 +62,9 @@ export function periodReady(p: { period: number; nowSec: number; graceSec: numbe
   return p.nowSec >= p.period + p.graceSec;
 }
 
-export type FeeStage = "planned" | "requested" | "paid" | "swept" | "skipped" | "failed";
+export type FeeStage = "planned" | "earmarked" | "requested" | "received" | "paid" | "swept" | "skipped" | "failed";
+
+export type FeeTxSlot = "earmark" | "mint" | "credit" | "withdraw" | "pay" | "forward";
 
 export interface FeeSaga {
   key: string; // `${bookId}:${period}`
@@ -62,12 +74,21 @@ export interface FeeSaga {
   period: number;
   amount: string; // raw 6dp
   stage: FeeStage;
+  /** adapter.sweepFees(period, amount) tx (FeesSwept): the earmark. Absent on sagas from the old order. */
+  earmarkTx?: Hex;
   withdrawId?: string;
-  creditTx?: Hex;
+  /** ms: when the (current) venue withdrawal became due: lower bound for recognising our own earlier request */
+  requestSince?: number;
+  /** venue withdrawal attempts that FAILED and were re-requested (client ref suffix) */
+  reqSeq?: number;
+  creditTx?: Hex; // mock: builder settlement materialised on MockOrderlyVault
   withdrawTx?: Hex; // mock: builder account -> ops EOA
-  payTx?: Hex;
-  sweepTx?: Hex;
+  payTx?: Hex; // ops EOA -> adapter
+  forwardTx?: Hex;
+  sweepTx?: Hex; // = earmarkTx (settlements row)
   logIndex?: number;
+  /** txs broadcast by this saga, recorded before their receipts were awaited */
+  txs?: Partial<Record<FeeTxSlot, SentTx>>;
   attempts: number;
   lastError?: string;
   createdAt: number;
@@ -76,14 +97,34 @@ export interface FeeSaga {
 
 export const feeSagaKey = (bookId: number, period: number) => `${bookId}:${period}`;
 
-export function feeInFlight(sagas: FeeSaga[], bookId: number): bigint {
-  return sagas.filter((s) => s.bookId === bookId && (s.stage === "planned" || s.stage === "requested" || s.stage === "paid")).reduce((x, s) => x + BigInt(s.amount), 0n);
+export const isFeeTerminal = (s: FeeSaga) => s.stage === "swept" || s.stage === "skipped" || s.stage === "failed";
+
+/**
+ * Amount of the book's open sagas whose earmark is not yet counted in Σ FeesSwept (`earmarkedPeriods` =
+ * periods with a FeesSwept log). Once earmarked, a saga's amount is part of the swept total; counting it
+ * here too would subtract it twice.
+ */
+export function feeInFlight(sagas: FeeSaga[], bookId: number, earmarkedPeriods: ReadonlySet<number>): bigint {
+  return sagas.filter((s) => s.bookId === bookId && !isFeeTerminal(s) && !earmarkedPeriods.has(s.period)).reduce((x, s) => x + BigInt(s.amount), 0n);
 }
 
-const FEE_NEXT: Record<"requested" | "paid" | "swept", FeeStage> = { requested: "planned", paid: "requested", swept: "paid" };
+/** Earmarks of the book's other open sagas whose USDC has not been paid to the adapter yet. */
+export function unpaidEarmarks(sagas: FeeSaga[], bookId: number, exceptKey: string): bigint {
+  return sagas
+    .filter((s) => s.bookId === bookId && s.key !== exceptKey && !isFeeTerminal(s) && s.earmarkTx !== undefined && s.stage !== "paid" && !s.payTx)
+    .reduce((x, s) => x + BigInt(s.amount), 0n);
+}
 
-export function advanceFee(s: FeeSaga, to: "requested" | "paid" | "swept", patch: Partial<FeeSaga>, now: number): FeeSaga {
-  if (s.stage !== FEE_NEXT[to]) throw new Error(`fee saga ${s.key}: illegal ${s.stage} -> ${to}`);
+const FEE_FROM: Record<"earmarked" | "requested" | "received" | "paid" | "swept", readonly FeeStage[]> = {
+  earmarked: ["planned", "requested"], // requested -> earmarked: the venue withdrawal FAILED, request it again
+  requested: ["earmarked"],
+  received: ["requested"],
+  paid: ["received"],
+  swept: ["paid"],
+};
+
+export function advanceFee(s: FeeSaga, to: "earmarked" | "requested" | "received" | "paid" | "swept", patch: Partial<FeeSaga>, now: number): FeeSaga {
+  if (!FEE_FROM[to].includes(s.stage)) throw new Error(`fee saga ${s.key}: illegal ${s.stage} -> ${to}`);
   const next: FeeSaga = { ...s, ...patch, stage: to, attempts: 0, updatedAt: now };
   delete next.lastError;
   return next;
