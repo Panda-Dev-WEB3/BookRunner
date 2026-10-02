@@ -313,14 +313,10 @@ export class ViemChain implements ChainPort {
   }
 
   async vaultCreditFees(accountId: Hex, amount: bigint): Promise<Hex> {
-    // MockOrderlyVault credits only unallocated USDC: mint the shortfall first (devnet mock USDC, open mint).
+    // MockOrderlyVault credits only unallocated USDC. Mint exactly `amount` first (devnet mock USDC, open
+    // mint): no read-then-mint, so concurrent fee/withdraw sagas cannot race each other's free balance.
     const vault = this.dep.contracts.orderlyVault;
-    const [bal, ledger] = await Promise.all([
-      this.pc.readContract({ address: this.usdc, abi: mockERC20Abi, functionName: "balanceOf", args: [vault] }) as Promise<bigint>,
-      this.pc.readContract({ address: vault, abi: mockVaultExtraAbi, functionName: "totalLedger" }) as Promise<bigint>,
-    ]);
-    const free = bal > ledger ? bal - ledger : 0n;
-    if (amount > free) await this.send("usdc.mint", { address: this.usdc, abi: mockERC20Abi, functionName: "mint", args: [vault, amount - free] });
+    await this.send("usdc.mint", { address: this.usdc, abi: mockERC20Abi, functionName: "mint", args: [vault, amount] });
     return (await this.send("mockVault.creditFees", { address: vault, abi: mockVaultExtraAbi, functionName: "creditFees", args: [accountId, amount] })).txHash;
   }
 
