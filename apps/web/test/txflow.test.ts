@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Hex } from "viem";
-import { type PreparedTxLike, type TxExecutor, type TxItem, awaitsReceipt, callSummary, initialItems, runSequential, summarize } from "../src/lib/txflow";
+import { checkCopy } from "@bookrunner/shared/copy";
+import { DECLINED_TEXT, type PreparedTxLike, REQUEST_OPEN_TEXT, type TxExecutor, type TxItem, awaitsReceipt, callSummary, errText, initialItems, isRequestOpen, isUserRejection, runSequential, summarize } from "../src/lib/txflow";
 
 const tx = (n: number): PreparedTxLike => ({ to: `0x${String(n).padStart(40, "0")}`, data: "0x095ea7b3" + "00".repeat(64), value: "0", chainId: 31337, description: `tx ${n}` });
 
@@ -32,12 +33,13 @@ describe("runSequential", () => {
     expect(updates.at(-1)).toEqual(["confirmed", "confirmed", "confirmed"]);
   });
 
-  test("stops at the first failure and marks the rest not sent; retry resumes", async () => {
+  test("a decline in the wallet is 'not sent', in plain words, not a failure; signing again resumes", async () => {
     const first = fakeExecutor({ rejectAt: 2 });
     const r = await runSequential(initialItems([tx(1), tx(2), tx(3)]), first.exec, () => {});
     expect(r.ok).toBe(false);
-    expect(r.items.map((i) => i.status)).toEqual(["confirmed", "failed", "skipped"]);
-    expect(r.items[1]?.error).toBe("User rejected the request.");
+    expect(r.items.map((i) => i.status)).toEqual(["confirmed", "skipped", "skipped"]);
+    expect(r.items[1]?.error).toBe(DECLINED_TEXT);
+    expect(summarize(r.items).failed).toBe(false);
     const again = fakeExecutor();
     const r2 = await runSequential(r.items, again.exec, () => {});
     expect(r2.ok).toBe(true);
@@ -102,5 +104,33 @@ describe("summaries", () => {
     expect(summarize(items)).toEqual({ done: 1, total: 2, failed: false, running: true, allConfirmed: false });
     expect(summarize([]).allConfirmed).toBe(false);
     expect(callSummary(tx(1).data)).toEqual({ selector: "0x095ea7b3", bytes: 68 });
+  });
+});
+
+describe("wallet error text", () => {
+  test("declines read as declined, in a neutral 'not sent' state, wherever they sit in the cause chain", () => {
+    expect(isUserRejection({ code: 4001, message: "denied" })).toBe(true);
+    expect(isUserRejection({ shortMessage: "User rejected the request." })).toBe(true);
+    expect(isUserRejection({ name: "ContractFunctionExecutionError", cause: { name: "UserRejectedRequestError" } })).toBe(true);
+    expect(isUserRejection(new Error("HTTP request failed."))).toBe(false);
+    expect(errText({ shortMessage: "User rejected the request.", code: 4001 })).toBe(DECLINED_TEXT);
+  });
+  test("a second click while the wallet prompt is open (MetaMask -32002)", () => {
+    const e = { code: -32002, message: "Request of type 'wallet_requestPermissions' already pending for origin http://127.0.0.1:5180. Please wait." };
+    expect(isRequestOpen(e)).toBe(true);
+    expect(errText(e)).toBe(REQUEST_OPEN_TEXT);
+  });
+  test("other failures keep their first line and stay failures", async () => {
+    const exec: TxExecutor = {
+      async send() {
+        throw Object.assign(new Error("Insufficient funds for gas.\nDetails: ..."), { shortMessage: "Insufficient funds for gas." });
+      },
+      async wait() {
+        return { status: "success", blockNumber: 1n };
+      },
+    };
+    const r = await runSequential(initialItems([tx(1)]), exec, () => {});
+    expect(r.items[0]).toMatchObject({ status: "failed", error: "Insufficient funds for gas." });
+    for (const t of [DECLINED_TEXT, REQUEST_OPEN_TEXT]) expect(checkCopy(t)).toEqual([]);
   });
 });

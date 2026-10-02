@@ -13,7 +13,7 @@ import { shortHex } from "../lib/format";
 import { useWalletBalances } from "./balances";
 import { appChain, chainName } from "./chains";
 import { useConnectModal } from "./ConnectModal";
-import { DevnetTopUp, isTestChain } from "./network";
+import { DevnetTopUp, NetworkIssueLine, isTestChain } from "./network";
 import { useMintTestUsdc } from "./useMintTestUsdc";
 import { useWallet } from "./WalletContext";
 
@@ -86,14 +86,14 @@ function AccountMenu({ onClose }: { onClose: () => void }) {
         <div className="space-y-2 rounded-control border border-warn/40 bg-warn/10 p-3 text-[12.5px]">
           <p>Your wallet is on another network. Switch to {appChain.name} to sign transactions here.</p>
           <div className="flex flex-wrap gap-2">
-            <button type="button" className="btn btn-primary btn-sm" disabled={w.switching} onClick={() => void w.switchToAppChain()}>
+            <button type="button" className="btn btn-primary btn-sm" disabled={w.switching} onClick={() => void w.switchToAppChain("menu")}>
               {w.switching ? "Check your wallet…" : "Switch network"}
             </button>
-            <button type="button" className="btn btn-sm" disabled={w.switching} onClick={() => void w.addAppChain()}>
+            <button type="button" className="btn btn-sm" disabled={w.switching} onClick={() => void w.addAppChain("menu")}>
               Add network
             </button>
           </div>
-          {w.networkError && <p className="text-[12px] text-critical-ink">{w.networkError}</p>}
+          <NetworkIssueLine places={["menu"]} />
         </div>
       )}
 

@@ -95,7 +95,7 @@ export function TxRunner(props: {
                   )}
                   {it.blockNumber !== undefined && <span className="num">block {it.blockNumber.toString()}</span>}
                 </div>
-                {it.error && <div className="mt-1 pl-5 text-[11.5px] text-critical-ink">{it.error}</div>}
+                {it.error && <div className={cx("mt-1 pl-5 text-[11.5px]", it.status === "skipped" ? "text-ink-2" : "text-critical-ink")}>{it.error}</div>}
               </div>
               <div className="pl-5 sm:pl-0">
                 <Chip tone={st.tone}>{st.label}</Chip>

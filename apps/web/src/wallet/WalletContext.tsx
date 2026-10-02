@@ -10,13 +10,23 @@ import { useHealth } from "../api/hooks";
 import type { PreparedTx } from "../lib/api-types";
 import { config } from "../lib/config";
 import { DEVNET_CHAIN_ID, devAccountFor, devAddress, devEntry, isDevRole } from "../lib/devwallet";
-import { errText } from "../lib/txflow";
+import { errText, isUserRejection } from "../lib/txflow";
 import type { TxExecutor } from "../lib/txflow";
 import { revertReason } from "../lib/revert";
 import { addChainParams, appChain, chainName, publicClient, wagmiConfig, walletConnectEnabled } from "./chains";
 import { connectWallet, disconnectAll } from "./connectFlow";
 
 type Mode = "dev" | "injected" | null;
+
+/** Where a network switch was asked for, so its error shows there and only there. */
+export type NetworkPlace = "banner" | "checklist" | "menu" | "tx" | "connect";
+
+export interface NetworkIssue {
+  message: string;
+  from: NetworkPlace;
+  /** The person declined the prompt (shown in a neutral tone, not as a failure). */
+  declined: boolean;
+}
 
 export interface ActiveWallet {
   kind: "dev" | "injected";
@@ -44,7 +54,8 @@ interface WalletCtx {
   /** Injected wallet connected on a chain other than the app chain. */
   wrongNetwork: boolean;
   switching: boolean;
-  networkError: string | null;
+  /** The last switch / add-network attempt failed: shown once, where it was asked for (NetworkIssue). */
+  networkIssue: NetworkIssue | null;
   selectDev(role: DevRole): void;
   /** Connect a specific wagmi connector (an EIP-6963 wallet, the generic injected one, WalletConnect). Resolves true when connected. */
   connectWith(connector: Connector): Promise<boolean>;
@@ -52,10 +63,12 @@ interface WalletCtx {
   walletConnectEnabled: boolean;
   clearConnectError(): void;
   disconnect(): void;
-  switchToAppChain(): Promise<boolean>;
-  addAppChain(): Promise<boolean>;
+  switchToAppChain(from?: NetworkPlace): Promise<boolean>;
+  addAppChain(from?: NetworkPlace): Promise<boolean>;
   executor: TxExecutor<PreparedTx> | null;
 }
+
+const issue = (e: unknown, from: NetworkPlace): NetworkIssue => ({ message: errText(e), from, declined: isUserRejection(e) });
 
 const Ctx = createContext<WalletCtx | null>(null);
 const STORAGE_KEY = "bkrn.wallet";
@@ -150,9 +163,11 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const [connectError, setConnectError] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [switching, setSwitching] = useState(false);
-  const [networkError, setNetworkError] = useState<string | null>(null);
+  const [networkIssue, setNetworkIssue] = useState<NetworkIssue | null>(null);
 
   useEffect(() => writeStored({ mode, role }), [mode, role]);
+  // a network error is about the chain the wallet was on: drop it once the wallet changes chain
+  useEffect(() => setNetworkIssue(null), [conn.chainId]);
 
   useEffect(() => {
     if (mode !== "dev" || !role || !devAvailable) {
@@ -189,13 +204,13 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   // network prompt leaves a connected wallet on the wrong network, never a "did not connect" error.
   const connectWith = useCallback(async (connector: Connector) => {
     setConnectError(null);
-    setNetworkError(null);
+    setNetworkIssue(null);
     setConnecting(true);
     try {
       const r = await connectWallet(wagmiConfig, connector, { chainId: appChain.id, addChain: addChainParams() });
       if (r.ok) setSel((s) => ({ mode: "injected", role: s.role }));
       else setConnectError(errText(r.error));
-      if (r.switchError) setNetworkError(errText(r.switchError));
+      if (r.switchError) setNetworkIssue(issue(r.switchError, "connect"));
       return r.ok;
     } finally {
       setConnecting(false);
@@ -210,22 +225,22 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     setSel((s) => ({ mode: null, role: s.role }));
   }, []);
 
-  const switchToAppChain = useCallback(async () => {
-    setNetworkError(null);
+  const switchToAppChain = useCallback(async (from: NetworkPlace = "banner") => {
+    setNetworkIssue(null);
     setSwitching(true);
     try {
       await switchChain(wagmiConfig, { chainId: appChain.id, addEthereumChainParameter: addChainParams() });
       return true;
     } catch (e) {
-      setNetworkError(errText(e));
+      setNetworkIssue(issue(e, from));
       return false;
     } finally {
       setSwitching(false);
     }
   }, []);
 
-  const addAppChain = useCallback(async () => {
-    setNetworkError(null);
+  const addAppChain = useCallback(async (from: NetworkPlace = "banner") => {
+    setNetworkIssue(null);
     setSwitching(true);
     try {
       const connector = conn.connector ?? injectedConnector;
@@ -234,7 +249,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       await provider.request({ method: "wallet_addEthereumChain", params: [addChainParams()] });
       return true;
     } catch (e) {
-      setNetworkError(errText(e));
+      setNetworkIssue(issue(e, from));
       return false;
     } finally {
       setSwitching(false);
@@ -275,7 +290,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     apiChainId,
     wrongNetwork: active?.kind === "injected" && active.chainId !== null && active.chainId !== appChain.id,
     switching,
-    networkError,
+    networkIssue,
     selectDev,
     connectWith,
     walletConnectEnabled,

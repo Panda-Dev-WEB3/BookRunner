@@ -38,8 +38,36 @@ export interface TxExecutor<T extends PreparedTxLike = PreparedTxLike> {
 
 export const initialItems = <T extends PreparedTxLike>(txs: T[]): TxItem<T>[] => txs.map((tx) => ({ tx, status: "queued" }));
 
-/** One line on why a step failed: a decoded revert reason when the chain gave one, else the error's first line. */
+export const DECLINED_TEXT = "The wallet declined the request. Nothing was sent.";
+export const REQUEST_OPEN_TEXT = "Your wallet already has a request open. Finish or close it first.";
+
+type ErrNode = { code?: unknown; name?: unknown; message?: unknown; shortMessage?: unknown; cause?: unknown };
+
+function someInChain(e: unknown, test: (n: ErrNode) => boolean): boolean {
+  let n: unknown = e;
+  for (let depth = 0; depth < 8 && n != null && typeof n === "object"; depth++) {
+    if (test(n as ErrNode)) return true;
+    n = (n as ErrNode).cause;
+  }
+  return false;
+}
+
+const msgOf = (n: ErrNode) => `${typeof n.shortMessage === "string" ? n.shortMessage : ""} ${typeof n.message === "string" ? n.message : ""}`;
+
+/** The person declined in the wallet (EIP-1193 4001 / viem UserRejectedRequestError), anywhere in the cause chain. */
+export const isUserRejection = (e: unknown): boolean =>
+  someInChain(e, (n) => n.code === 4001 || n.name === "UserRejectedRequestError" || /user rejected|user denied|rejected the request/i.test(msgOf(n)));
+
+/** The wallet already shows a prompt (MetaMask -32002 "Request of type ... already pending"). */
+export const isRequestOpen = (e: unknown): boolean => someInChain(e, (n) => n.code === -32002 || /already pending/i.test(msgOf(n)));
+
+/**
+ * One line on why a step failed, in plain words: a decline or an already-open wallet prompt, a
+ * decoded revert reason when the chain gave one, else the error's first line.
+ */
 export const errText = (e: unknown): string => {
+  if (isUserRejection(e)) return DECLINED_TEXT;
+  if (isRequestOpen(e)) return REQUEST_OPEN_TEXT;
   const reason = revertReason(e);
   if (reason) return reason;
   const o = (e ?? {}) as { shortMessage?: unknown; message?: unknown };
@@ -80,7 +108,8 @@ export async function runSequential<T extends PreparedTxLike>(
       }
       set(i, { status: "confirmed", blockNumber: r.blockNumber });
     } catch (e) {
-      set(i, { status: "failed", error: errText(e) });
+      // a decline is not a failure: the step simply was not sent (it can be signed again)
+      set(i, { status: isUserRejection(e) ? "skipped" : "failed", error: errText(e) });
       cur = cur.map((it, j) => (j > i && it.status !== "confirmed" ? { ...it, status: "skipped" as TxStatus } : it));
       onUpdate(cur);
       return { ok: false, items: cur };

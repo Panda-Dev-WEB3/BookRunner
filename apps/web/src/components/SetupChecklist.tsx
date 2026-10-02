@@ -9,7 +9,7 @@ import { shortHex } from "../lib/format";
 import type { OnboardingStepId } from "../lib/onboarding";
 import { appChain } from "../wallet/chains";
 import { useConnectModal } from "../wallet/ConnectModal";
-import { DevnetTopUp, isTestChain } from "../wallet/network";
+import { DevnetTopUp, NetworkIssueLine, isTestChain } from "../wallet/network";
 import { useMintTestUsdc } from "../wallet/useMintTestUsdc";
 import { useOnboarding } from "../wallet/useOnboarding";
 import { useWallet } from "../wallet/WalletContext";
@@ -103,13 +103,13 @@ export function SetupChecklist(props: SetupChecklistProps) {
       meta: status("network").status === "done" ? appChain.name : undefined,
       action: w.active ? (
         <>
-          <button type="button" className="btn btn-primary" disabled={w.switching} onClick={() => void w.switchToAppChain()}>
+          <button type="button" className="btn btn-primary" disabled={w.switching} onClick={() => void w.switchToAppChain("checklist")}>
             {w.switching ? "Check your wallet…" : "Switch network"}
           </button>
-          <button type="button" className="btn" disabled={w.switching} onClick={() => void w.addAppChain()}>
+          <button type="button" className="btn" disabled={w.switching} onClick={() => void w.addAppChain("checklist")}>
             Add network
           </button>
-          {w.networkError && <span className="basis-full text-[12px] text-critical-ink">{w.networkError}</span>}
+          <NetworkIssueLine places={["checklist"]} className="basis-full" />
         </>
       ) : undefined,
     },

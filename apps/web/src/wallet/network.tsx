@@ -11,7 +11,7 @@ import { config } from "../lib/config";
 import { DEVNET_TOPUP_WEI, TRANCHE_ASSET_ABI, fmtEth } from "../lib/funds";
 import { invalidateWalletBalances } from "./balances";
 import { appChain, chainName, publicClient } from "./chains";
-import { useWallet } from "./WalletContext";
+import { type NetworkPlace, useWallet } from "./WalletContext";
 
 /** A known devnet or testnet build (fails closed for an unknown chain: see isTestKind). */
 export const isTestChain = isTestKind(config.chain.kind);
@@ -43,6 +43,17 @@ export function useUsdcAddress() {
   });
 }
 
+/**
+ * The last network switch's error, shown only where it was asked for (one place, not the banner,
+ * the checklist and the menu at once), and in a neutral tone when the person simply declined.
+ */
+export function NetworkIssueLine({ places, className }: { places: NetworkPlace[]; className?: string }) {
+  const w = useWallet();
+  const i = w.networkIssue;
+  if (!i || !places.includes(i.from)) return null;
+  return <p className={cx("text-[12px]", i.declined ? "text-ink-2" : "text-critical-ink", className)}>{i.message}</p>;
+}
+
 /** Banner for an injected wallet on another chain: switch (adds the chain when missing) or add it. */
 export function NetworkNotice({ className }: { className?: string }) {
   const w = useWallet();
@@ -54,14 +65,14 @@ export function NetworkNotice({ className }: { className?: string }) {
         <span className="font-medium">{appChain.name}</span> (chain {appChain.id}).
       </div>
       <div className="mt-2 flex flex-wrap gap-2">
-        <button type="button" className="btn btn-primary h-7 min-h-7 text-[12px]" disabled={w.switching} onClick={() => void w.switchToAppChain()}>
+        <button type="button" className="btn btn-primary h-7 min-h-7 text-[12px]" disabled={w.switching} onClick={() => void w.switchToAppChain("tx")}>
           {w.switching ? "Waiting for the wallet…" : `Switch to ${appChain.name}`}
         </button>
-        <button type="button" className="btn h-7 min-h-7 text-[12px]" disabled={w.switching} onClick={() => void w.addAppChain()}>
+        <button type="button" className="btn h-7 min-h-7 text-[12px]" disabled={w.switching} onClick={() => void w.addAppChain("tx")}>
           Add network to wallet
         </button>
       </div>
-      {w.networkError && <div className="mt-1.5 text-[11.5px] text-critical-ink">{w.networkError}</div>}
+      <NetworkIssueLine places={["tx"]} className="mt-1.5" />
     </div>
   );
 }

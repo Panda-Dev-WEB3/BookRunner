@@ -3,6 +3,7 @@
 import { Container } from "../components/ui";
 import { IconWarn } from "../components/icons";
 import { appChain, chainName } from "./chains";
+import { NetworkIssueLine } from "./network";
 import { useWallet } from "./WalletContext";
 
 export function WrongNetworkBanner() {
@@ -19,17 +20,17 @@ export function WrongNetworkBanner() {
           </span>
         </p>
         <div className="flex shrink-0 flex-wrap items-center gap-2 pl-6 sm:pl-0">
-          <button type="button" className="btn btn-primary btn-sm" disabled={w.switching} onClick={() => void w.switchToAppChain()}>
+          <button type="button" className="btn btn-primary btn-sm" disabled={w.switching} onClick={() => void w.switchToAppChain("banner")}>
             {w.switching ? "Check your wallet…" : `Switch to ${appChain.name}`}
           </button>
-          <button type="button" className="btn btn-sm" disabled={w.switching} onClick={() => void w.addAppChain()}>
+          <button type="button" className="btn btn-sm" disabled={w.switching} onClick={() => void w.addAppChain("banner")}>
             Add network
           </button>
         </div>
       </Container>
-      {w.networkError && (
-        <Container className="pb-2 text-[12px] text-critical-ink">
-          <span className="pl-6 sm:pl-0">{w.networkError}</span>
+      {w.networkIssue && (w.networkIssue.from === "banner" || w.networkIssue.from === "connect") && (
+        <Container className="pb-2">
+          <NetworkIssueLine places={["banner", "connect"]} className="pl-6 sm:pl-0" />
         </Container>
       )}
     </div>
