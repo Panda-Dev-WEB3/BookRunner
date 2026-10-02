@@ -171,17 +171,6 @@ export function depositStatus(book: Pick<HomeBook, "state" | "subscriptionEnds">
 
 export const depositOpen = (s: DepositStatus): boolean => s.kind === "window" || s.kind === "topup";
 
-/**
- * How much of a top-up round's capacity is already committed (0..1, capped). `over` flags an
- * oversubscribed round: every deposit is then filled pro-rata at settlement and the rest refunded.
- */
-export function roundFill(committed: bigint, capacity: bigint): { frac: number; over: boolean } | null {
-  if (capacity <= 0n) return null;
-  const c = committed > 0n ? committed : 0n;
-  if (c >= capacity) return { frac: 1, over: c > capacity };
-  return { frac: Number((c * 10_000n) / capacity) / 10_000, over: false };
-}
-
 const DAY_UTC = new Intl.DateTimeFormat("en-GB", { timeZone: "UTC", day: "numeric", month: "short", year: "numeric" });
 
 /** Unix seconds -> "1 Nov 2026" (UTC, so every reader sees the same day). */

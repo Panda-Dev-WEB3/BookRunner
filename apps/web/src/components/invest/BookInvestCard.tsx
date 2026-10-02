@@ -14,7 +14,7 @@ import type { TopUpRound } from "../../lib/topup";
 import { IconArrowRight } from "../icons";
 import { Card, ProgressBar, Stat, StateChip, Term, cx } from "../ui";
 import { TrancheSwatch, WindowBadge } from "./InvestBits";
-import { roomFigure, roomNote } from "./investCopy";
+import { perWalletCapText, roomFigure, roomNote } from "./investCopy";
 import { TRANCHE_IDS, TRANCHE_NAME, type TrancheId, type TrancheRoom, bookRooms, depositWindow, distributionShares, pctOfBps } from "./logic";
 import type { BookRounds } from "./useInvestChain";
 
@@ -136,7 +136,7 @@ export function BookInvestCard(props: {
           <Term2 label={<Term id="hurdle">Fee-flow split</Term>} value={split ? `${pctOfBps(split.senior)} Senior · ${pctOfBps(split.junior)} Junior` : DASH} />
           <Term2 label="Senior cap" value={c ? `${pctOfBps(c.seniorCapBps)} of the book` : DASH} />
           <Term2 label={<Term id="redemptionNotice">Junior notice</Term>} value={c ? fmtDuration(c.juniorNoticeSeconds) : DASH} />
-          <Term2 label="Per-wallet cap" value={cap === null ? DASH : cap === 0n ? "None" : `${formatAmountDisplay(cap, USDC_DECIMALS, 0)} USDC per round`} />
+          <Term2 label="Per-wallet cap" value={perWalletCapText(cap, topUp && (w.status === "open" || w.status === "paused") ? (topUp.seniorCapacityUsd > topUp.juniorCapacityUsd ? topUp.seniorCapacityUsd : topUp.juniorCapacityUsd) : null)} />
         </dl>
       </div>
       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line bg-surface-2/40 px-4 py-3 sm:px-6">

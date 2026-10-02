@@ -15,6 +15,18 @@ export function roomFigure(room: RoundRoom): string {
 }
 
 /**
+ * The per-wallet cap in words. When it is above what the round can take per tranche, the round's
+ * capacity is the real limit, so say so instead of showing a cap that cannot be reached.
+ */
+export function perWalletCapText(cap: bigint | null, roundCapacity: bigint | null, sponsor = false): string {
+  if (cap === null) return "—";
+  if (cap === 0n) return "None";
+  if (sponsor) return "No cap (sponsor wallet)";
+  const base = `${whole(cap)} USDC per round`;
+  return roundCapacity !== null && roundCapacity > 0n && cap > roundCapacity ? `${base}; this round takes at most ${whole(roundCapacity)} USDC per tranche` : base;
+}
+
+/**
  * The line under a tranche's round figures, or null when nothing limits it: Senior can be limited
  * by the Senior cap well below the round capacity (Book._seniorTopUpRoom), and an oversubscribed
  * round is filled pro-rata at the settling mark.

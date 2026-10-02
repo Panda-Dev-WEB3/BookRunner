@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { checkCopy } from "@bookrunner/shared/copy";
 import { faqItems } from "../src/components/home/faqContent";
-import { type HomeBook, depositHeadline, depositOpen, depositStatus, fmtDayUtc, marketInfo, roundFill, sharePct, summarizeBooks, topUpIssueLine, trancheSplit } from "../src/components/home/model";
+import { type HomeBook, depositHeadline, depositOpen, depositStatus, fmtDayUtc, marketInfo, sharePct, summarizeBooks, topUpIssueLine, trancheSplit } from "../src/components/home/model";
 import { isGlossaryId } from "../src/lib/glossary";
 import type { TopUpRound } from "../src/lib/topup";
 
@@ -158,16 +158,6 @@ describe("fmtDayUtc", () => {
     expect(fmtDayUtc(1_793_491_200)).toBe("1 Nov 2026");
     expect(fmtDayUtc(0)).toBe("1 Jan 1970");
     expect(fmtDayUtc(Number.NaN)).toBe("—");
-  });
-});
-
-describe("roundFill", () => {
-  test("committed share of a round's capacity, capped, with oversubscription flagged", () => {
-    expect(roundFill(25_000_000_000n, 100_000_000_000n)).toEqual({ frac: 0.25, over: false });
-    expect(roundFill(0n, 100_000_000_000n)).toEqual({ frac: 0, over: false });
-    expect(roundFill(150_000_000_000n, 100_000_000_000n)).toEqual({ frac: 1, over: true });
-    expect(roundFill(100_000_000_000n, 100_000_000_000n)).toEqual({ frac: 1, over: false });
-    expect(roundFill(5n, 0n)).toBeNull();
   });
 });
 

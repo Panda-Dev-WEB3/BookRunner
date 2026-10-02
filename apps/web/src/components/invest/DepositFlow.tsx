@@ -21,7 +21,7 @@ import { IconArrowRight } from "../icons";
 import { SetupChecklist } from "../SetupChecklist";
 import { AmountInput, Callout, ErrorState, ExternalLink, Spinner, Stepper, type StepperStep, Term } from "../ui";
 import { InfoList, RiskNotice, TrancheSwatch } from "./InvestBits";
-import { noCancelLine } from "./investCopy";
+import { noCancelLine, perWalletCapText, roomFigure } from "./investCopy";
 import { type DepositWindow, type RoundRoom, TRANCHE_NAME, type TrancheId, checkDeposit, indicativeShares, pctOfBps, seniorRoomPerJunior, walletRoom, withPlainPrompts } from "./logic";
 import { type TrancheAddresses, invalidateInvestReads, useWalletRoom } from "./useInvestChain";
 
@@ -132,8 +132,8 @@ export function AmountStep(props: DepositContext & { amount: string; onAmount: (
               ["Wallet balance", ob.balances.usdc === undefined ? "…" : usdc(ob.balances.usdc)],
               props.window.status === "open" &&
                 props.window.kind === "topup" &&
-                props.room && [`${name} room this round`, `${formatAmountDisplay(props.room.remaining, USDC_DECIMALS, 0)} of ${usdc(props.room.capacity, 0)}`],
-              ["Per-wallet cap", capUsd === null ? "—" : capUsd === 0n ? "No cap" : isSponsor ? "No cap (sponsor wallet)" : `${usdc(capUsd, 0)} per round`],
+                props.room && [`${name} this round`, roomFigure(props.room)],
+              ["Per-wallet cap", capUsd === 0n ? "No cap" : perWalletCapText(capUsd, props.window.status === "open" && props.window.kind === "topup" ? (props.room?.capacity ?? null) : null, isSponsor)],
               mine?.committed != null && mine.committed > 0n && ["You committed this round", usdc(mine.committed)],
               room != null && !isSponsor && capUsd !== null && capUsd > 0n && ["You can still add", usdc(room)],
               t === "senior" && props.seniorRoom !== null && ["Senior cap room (estimate)", usdc(props.seniorRoom, 0)],

@@ -1,7 +1,7 @@
 // Invest-flow copy that encodes protocol behaviour (components/invest/investCopy.ts).
 import { describe, expect, test } from "bun:test";
 import { checkCopy } from "@bookrunner/shared/copy";
-import { INVEST_STEPS, killedDepositNote, noCancelLine, settlesClause, windowSentence } from "../src/components/invest/investCopy";
+import { INVEST_STEPS, killedDepositNote, noCancelLine, perWalletCapText, settlesClause, windowSentence } from "../src/components/invest/investCopy";
 import { depositWindow } from "../src/components/invest/logic";
 
 const HOUR = 3600;
@@ -50,5 +50,18 @@ describe("settlement timing", () => {
     const all = [...INVEST_STEPS.map((s) => s.body), noCancelLine(open), noCancelLine(sub), windowSentence(open), windowSentence(settling), windowSentence(sub), killedDepositNote(open), killedDepositNote(sub)];
     for (const w of ["no-round", "cancelled", "retiring", "retired", "unknown"] as const) all.push(windowSentence({ status: "closed", why: w }));
     for (const s of all) expect(checkCopy(s)).toEqual([]);
+  });
+});
+
+describe("round capacity and the per-wallet cap", () => {
+  const U = 1_000_000n;
+  test("a per-wallet cap above the round's capacity says the capacity is the real limit", () => {
+    expect(perWalletCapText(250_000n * U, 100_000n * U)).toBe("250,000 USDC per round; this round takes at most 100,000 USDC per tranche");
+    expect(perWalletCapText(50_000n * U, 100_000n * U)).toBe("50,000 USDC per round");
+    expect(perWalletCapText(250_000n * U, null)).toBe("250,000 USDC per round");
+    expect(perWalletCapText(0n, 100_000n * U)).toBe("None");
+    expect(perWalletCapText(250_000n * U, 100_000n * U, true)).toBe("No cap (sponsor wallet)");
+    expect(perWalletCapText(null, null)).toBe("—");
+    expect(checkCopy(perWalletCapText(250_000n * U, 100_000n * U))).toEqual([]);
   });
 });
