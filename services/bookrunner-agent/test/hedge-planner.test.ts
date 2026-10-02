@@ -1,7 +1,18 @@
 import { describe, expect, test } from "bun:test";
-import { BPS, absBig, checkHedgeLeg, hedgeInBand, hedgeRatioBps, usd, wad } from "@bookrunner/shared";
+import { BPS, absBig, checkHedgeLeg, hedgeInBand, hedgeRatioBps, usd, usdToNumber, wad } from "@bookrunner/shared";
 import type { Address, Hex } from "viem";
-import { type HedgeComponent, type HedgeLeg, type HedgePlanInput, type HedgePlannerConfig, engineWithdrawableUsd, planHedge, qtyForUsd, valueUsdOf } from "../src/domain/hedge-planner";
+import {
+  type HedgeComponent,
+  type HedgeLeg,
+  type HedgePlanInput,
+  type HedgePlannerConfig,
+  type LastHedgeTrade,
+  engineWithdrawableUsd,
+  planHedge,
+  planSide,
+  qtyForUsd,
+  valueUsdOf,
+} from "../src/domain/hedge-planner";
 import { nvdaMandate } from "./helpers";
 
 const m = nvdaMandate(); // 50k max inventory, band 5000-12000 bps
@@ -271,4 +282,103 @@ describe("planHedge property grid (exposure x hedge)", () => {
       expect(acted).toBeGreaterThan(50);
     });
   }
+});
+
+describe("planHedge hysteresis (reversal hold, deadband, leg floor)", () => {
+  const HOLD_MS = 600_000;
+  const holdCfg: HedgePlannerConfig = { ...cfg, reverseHoldMs: HOLD_MS };
+  const T0 = 1_760_000_000_000;
+
+  /** Runs the planner every 15 s over an exposure path, applying each plan to the hedge. */
+  function simulate(path: number[], c: HedgePlannerConfig) {
+    let hedge = 0;
+    let lastTrade: LastHedgeTrade | null = null;
+    const trades: Array<{ side: "buy" | "sell"; atMs: number; reason: string }> = [];
+    path.forEach((exp, i) => {
+      const nowMs = T0 + i * 15_000;
+      const p = planHedge(input(exp, hedge, { lastTrade, nowMs }), c);
+      const side = planSide(p);
+      if (!side) return;
+      hedge = Math.max(0, hedge + usdToNumber(sum(p.legs, "buy") - sum(p.legs, "sell") - sum(p.legs, "flatten")));
+      lastTrade = { side, atMs: nowMs };
+      trades.push({ side, atMs: nowMs, reason: p.reason });
+    });
+    return trades;
+  }
+
+  // simulated trader flow: short above the 5% threshold (2.5k), short below it, long - every 15 s for 9 min
+  const oscillating = Array.from({ length: 36 }, (_, i) => [-4_000, -1_500, 1_500][i % 3]!);
+
+  test("oscillating exposure: without the hold the desk churns buy/sell; with it no reversal inside the window", () => {
+    const churn = simulate(oscillating, cfg);
+    expect(churn.length).toBeGreaterThan(20);
+    expect(churn.slice(0, 3).map((t) => t.side)).toEqual(["buy", "sell", "sell"]);
+
+    const held = simulate(oscillating, holdCfg);
+    expect(held.map((t) => t.side)).toEqual(["buy"]);
+    for (let i = 1; i < held.length; i++) {
+      if (held[i]!.side !== held[i - 1]!.side) expect(held[i]!.atMs - held[i - 1]!.atMs >= HOLD_MS).toBe(true);
+    }
+  });
+
+  test("the hold defers trims the band does not require, and expires", () => {
+    const lastTrade: LastHedgeTrade = { side: "buy", atMs: T0 };
+    // below the enforcement threshold: trim deferred
+    expect(planHedge(input(-1_500, 3_400, { lastTrade, nowMs: T0 + 60_000 }), holdCfg)).toMatchObject({ action: "none", reason: "REVERSAL_HOLD" });
+    // long exposure (spot cannot offset it, band not enforced): flatten deferred
+    expect(planHedge(input(10_000, 3_400, { lastTrade, nowMs: T0 + 60_000 }), holdCfg)).toMatchObject({ action: "none", reason: "REVERSAL_HOLD" });
+    // same direction is never held
+    expect(planHedge(input(-10_000, 3_400, { lastTrade, nowMs: T0 + 60_000 }), holdCfg).action).toBe("buy");
+    // hold elapsed
+    expect(planHedge(input(-1_500, 3_400, { lastTrade, nowMs: T0 + HOLD_MS }), holdCfg).action).toBe("sell");
+    expect(planHedge(input(10_000, 3_400, { lastTrade, nowMs: T0 + HOLD_MS }), holdCfg).action).toBe("flatten");
+    // no clock / no hold configured: unchanged behaviour
+    expect(planHedge(input(-1_500, 3_400, { lastTrade }), holdCfg).action).toBe("sell");
+    expect(planHedge(input(-1_500, 3_400, { lastTrade, nowMs: T0 + 60_000 }), cfg).action).toBe("sell");
+  });
+
+  test("out of band is fixed immediately in both directions, whatever the hold", () => {
+    // over-hedged above the threshold (3.4k / 2.6k = 131% > 120%) right after a buy: sell now
+    const sell = planHedge(input(-2_600, 3_400, { lastTrade: { side: "buy", atMs: T0 }, nowMs: T0 + 15_000 }), holdCfg);
+    expect(sell.action).toBe("sell");
+    expect(hedgeInBand(m, sell.ratioAfter)).toBe(true);
+    // under-hedged (3.4k / 10k = 34% < 50%) right after a sell: buy now
+    const buy = planHedge(input(-10_000, 3_400, { lastTrade: { side: "sell", atMs: T0 }, nowMs: T0 + 15_000 }), holdCfg);
+    expect(buy.action).toBe("buy");
+    expect(hedgeInBand(m, buy.ratioAfter)).toBe(true);
+  });
+
+  test("risk reduction is never held: reduce-only mode, off-hours no-new-risk, Retiring", () => {
+    const lastTrade: LastHedgeTrade = { side: "buy", atMs: T0 };
+    expect(planHedge(input(-1_500, 3_400, { lastTrade, nowMs: T0 + 15_000, mode: "reduce_only" }), holdCfg).action).toBe("sell");
+    expect(planHedge(input(10_000, 3_400, { lastTrade, nowMs: T0 + 15_000, offHours: true }), holdCfg).action).toBe("flatten");
+    expect(planHedge(input(-1_500, 3_400, { lastTrade, nowMs: T0 + 15_000, mode: "flatten", deskUsdcUsd: 0n }), holdCfg).action).toBe("flatten");
+  });
+
+  test("inside the band nothing trades, anywhere in it", () => {
+    for (let r = 5_050; r <= 11_950; r += 300) {
+      expect(planHedge(input(-40_000, (40_000 * r) / 10_000), cfg)).toMatchObject({ action: "none", reason: "IN_BAND" });
+    }
+  });
+
+  test("below the threshold a trim waits until the hedge exceeds the band's upper bound by minTradeUsd", () => {
+    // 2.5k vs 1.2 x 2k = 2.4k: 100 over the bound, under the 250 minimum -> no trim (was an 800 sell)
+    expect(planHedge(input(-2_000, 2_500), cfg)).toMatchObject({ action: "none", reason: "BELOW_THRESHOLD" });
+    const trim = planHedge(input(-2_000, 2_700), cfg);
+    expect(trim.action).toBe("sell");
+    expect(absBig(sum(trim.legs, "sell") - usd(1_000)) <= usd(0.01)).toBe(true); // down to the 85% target
+  });
+
+  test("legs under minLegUsd are skipped; plans under minTradeUsd are dropped", () => {
+    const tokens = ["c1", "c2", "c3", "c4", "c5"].map((t) => ("0x" + "0".repeat(38) + t) as Address);
+    const weights = [9_600, 100, 100, 100, 100];
+    const comps = tokens.map((token, i) => ({ ...comp(0), token, weightBps: weights[i]! }));
+    const all = planHedge(input(-4_000, 0, { components: comps }), cfg); // 3.4k buy, 34 USD tail legs
+    expect(all.legs.filter((l) => l.kind === "buy").length).toBe(5);
+    const floored = planHedge(input(-4_000, 0, { components: comps }), { ...cfg, minLegUsd: usd(50) });
+    expect(floored.legs.filter((l) => l.kind === "buy").length).toBe(1);
+    expect(sum(floored.legs, "buy")).toBe(usd(3_264));
+    // every leg below the floor -> nothing left to trade
+    expect(planHedge(input(-4_000, 0, { components: comps }), { ...cfg, minLegUsd: usd(5_000) }).action).toBe("none");
+  });
 });

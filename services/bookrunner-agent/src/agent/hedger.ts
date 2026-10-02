@@ -1,7 +1,9 @@
 // Hedge executor: snapshot desk + registry + oracle state, run the pure planner, execute the legs as
 // desk actions (InventoryToVault(MM) -> FundDesk -> Hedge buys, Hedge sells, Flatten, ReturnToVault),
 // persist hedges rows + receipt leaves. A failed leg aborts the rest of the cycle; the next cycle
-// re-plans from chain state.
+// re-plans from chain state. The direction + time of the last executed trade feed the planner's
+// reversal hold (seeded from the hedges table at startup, so a restart does not reset it). On
+// shutdown (ctx.signal aborted) no new leg starts; the leg in flight finishes its receipt + record.
 
 import { ACCOUNT, HEDGE_VENUES, type Logger, type Mandate, bytes32ToStr } from "@bookrunner/shared";
 import { bookrunnerDeskAbi } from "@bookrunner/shared/abi";
@@ -10,7 +12,17 @@ import type { AgentStore } from "../adapters/store";
 import type { OraclePoint, StockTokenInfo } from "../chain/book-chain";
 import { encodeFlatten, encodeFundDesk, encodeHedge, encodeInventoryToVault, encodeReturnToVault } from "../chain/desk-actions";
 import type { DeskRunner } from "../chain/desk-client";
-import { type HedgeComponent, type HedgeMode, type HedgePlan, type HedgePlannerConfig, type MmRecallInfo, componentsValueUsd, planHedge } from "../domain/hedge-planner";
+import {
+  type HedgeComponent,
+  type HedgeMode,
+  type HedgePlan,
+  type HedgePlannerConfig,
+  type LastHedgeTrade,
+  type MmRecallInfo,
+  componentsValueUsd,
+  planHedge,
+  reversalHoldRemainingMs,
+} from "../domain/hedge-planner";
 import type { HedgeUniverse } from "../domain/hedge-universe";
 import { hedgeReceipt } from "../domain/receipts";
 import { errMsg } from "../util";
@@ -44,6 +56,8 @@ export interface HedgeCycleContext {
   netExposureUsd: bigint;
   /** False when the adapter valuation is too old for legs that add hedge. */
   allowAddHedge: boolean;
+  /** Aborted on shutdown: no new leg starts (the one in flight completes and is recorded). */
+  signal?: AbortSignal;
 }
 
 export interface HedgeCycleRunner {
@@ -86,6 +100,8 @@ export class Hedger implements HedgeCycleRunner {
   private lastReason = "";
   private warnedAllowList = false;
   private warnedValuation = false;
+  private lastTrade: LastHedgeTrade | null = null;
+  private seeded = false;
   private readonly now: () => number;
 
   constructor(private readonly d: HedgerDeps) {
@@ -131,7 +147,25 @@ export class Hedger implements HedgeCycleRunner {
     }
   }
 
+  /** Last executed spot trade (reversal hold). */
+  get lastTradeInfo(): LastHedgeTrade | null {
+    return this.lastTrade;
+  }
+
+  /** Seed the reversal hold from the last persisted hedge row (once; best-effort). */
+  private async seedLastTrade(): Promise<void> {
+    if (this.seeded || !this.d.store.lastHedge) return;
+    try {
+      const last = await this.d.store.lastHedge(this.d.bookId);
+      this.seeded = true;
+      if (last && !this.lastTrade) this.lastTrade = { side: last.buy ? "buy" : "sell", atMs: last.ts };
+    } catch (err) {
+      this.d.log.debug({ err: errMsg(err) }, "hedge: last hedge row unavailable; reversal hold starts empty");
+    }
+  }
+
   async cycle(ctx: HedgeCycleContext): Promise<HedgePlan> {
+    await this.seedLastTrade();
     const [usdc, comps, vaultDeployable, mmRecall] = await Promise.all([
       this.d.chain.deskUsdc(),
       this.snapshot(),
@@ -160,6 +194,8 @@ export class Hedger implements HedgeCycleRunner {
         mode: ctx.mode,
         perpAllowed: this.d.universe.perpAllowed,
         allowAddHedge: ctx.allowAddHedge,
+        lastTrade: this.lastTrade,
+        nowMs: this.now(),
       },
       this.d.cfg,
     );
@@ -173,6 +209,9 @@ export class Hedger implements HedgeCycleRunner {
       ratioBefore: plan.ratioBefore?.toString() ?? null,
       ratioAfter: plan.ratioAfter?.toString() ?? null,
       legs: plan.legs.map((l) => l.kind),
+      ...(plan.reason === "REVERSAL_HOLD" && this.lastTrade
+        ? { lastTrade: this.lastTrade.side, holdRemainingMs: reversalHoldRemainingMs(this.lastTrade.side === "buy" ? "sell" : "buy", { lastTrade: this.lastTrade, nowMs: this.now() }, this.d.cfg.reverseHoldMs) }
+        : {}),
     };
     if (plan.action === "none") {
       if (plan.reason !== this.lastReason) this.d.log.info(summary, "hedge: no action");
@@ -188,13 +227,18 @@ export class Hedger implements HedgeCycleRunner {
       }
       return { ...plan, action: "none", reason: "ALLOW_LIST_MISMATCH", legs: [] };
     }
+    if (ctx.signal?.aborted) {
+      this.d.log.info(summary, "hedge: shutting down; plan not started");
+      return { ...plan, action: "none", reason: "SHUTDOWN", legs: [] };
+    }
     this.d.log.info(summary, "hedge: executing plan");
-    await this.execute(plan, comps);
+    await this.execute(plan, comps, ctx.signal);
     return plan;
   }
 
   private async record(action: "buy" | "sell" | "flatten", comp: HedgeComponent, qtyRaw: bigint, amountIn: bigint, amountOut: bigint, valueUsd: bigint, txHash: Hex): Promise<void> {
     const ts = this.now();
+    this.lastTrade = { side: action === "buy" ? "buy" : "sell", atMs: ts };
     const pxPerToken = (Number(comp.priceWad) / 1e18) * (Number(comp.multiplierWad) / 1e18);
     const venue = bytes32ToStr(HEDGE_VENUES.UNIV3);
     try {
@@ -220,9 +264,14 @@ export class Hedger implements HedgeCycleRunner {
     }
   }
 
-  private async execute(plan: HedgePlan, comps: HedgeComponent[]): Promise<void> {
+  private async execute(plan: HedgePlan, comps: HedgeComponent[], signal?: AbortSignal): Promise<void> {
     const byToken = new Map(comps.map((c) => [c.token.toLowerCase(), c]));
-    for (const leg of plan.legs) {
+    for (const [i, leg] of plan.legs.entries()) {
+      if (signal?.aborted) {
+        // partial plan: the next cycle (after restart) re-plans from chain state
+        this.d.log.info({ done: plan.legs.slice(0, i).map((l) => l.kind), skipped: plan.legs.slice(i).map((l) => l.kind) }, "hedge: shutting down; remaining legs skipped");
+        return;
+      }
       switch (leg.kind) {
         case "recall_mm": {
           await this.d.runner.run(encodeInventoryToVault(ACCOUNT.MM, leg.amountUsd), "InventoryToVault:MM");

@@ -16,8 +16,18 @@
 //   - Off-hours with noNewRiskOffHours (and reduce-only mode): a leg must reduce |exposure + hedge|.
 //   - Every planned spot leg is pre-checked with checkHedgeLeg() (same rule as MMMandate.checkHedge).
 // Index books hedge with the weighted basket of their component tokens.
+// Hysteresis (simulated trader flow swings exposure within minutes; every leg is a desk tx):
+//   - inside the band nothing trades; out of band the hedge goes back to the band midpoint (the
+//     deadband is the whole band, so a fix is never followed by another one at the opposite edge
+//     unless exposure itself moved by more than the band allows);
+//   - a trim the band does not require (exposure below the enforcement threshold, or long exposure
+//     a spot hedge cannot offset) waits until the hedge exceeds what the band allows by minTradeUsd;
+//   - legs under minLegUsd are skipped, plans under minTradeUsd are dropped;
+//   - reversal hold: a plan that reverses the last executed trade direction (sell after buy, buy after
+//     sell) waits reverseHoldMs, unless the ratio is out of an enforced band (safety always wins) or
+//     the mode / off-hours rule asks for risk reduction.
 
-import { type Mandate, BPS, absBig, checkHedgeLeg, hedgeInBand, hedgeRatioBps, maxBig, minBig } from "@bookrunner/shared";
+import { type Mandate, BPS, absBig, checkHedgeLeg, hedgeBandOk, hedgeInBand, hedgeRatioBps, maxBig, minBig } from "@bookrunner/shared";
 import type { Address, Hex } from "viem";
 
 const E12 = 10n ** 12n;
@@ -54,6 +64,19 @@ export interface HedgePlannerConfig {
    * residue blocks finalizeRetirement (the final mark must carry deployedValueUsd == 0).
    */
   returnDustUsd: bigint;
+  /** Per-leg dust floor for normal / reduce-only legs (default 1 USD). Retiring uses RETIRE_FLATTEN_MIN_USD. */
+  minLegUsd?: bigint;
+  /**
+   * Minimum time (ms) between trades in opposite directions (buy after sell, sell after buy) when the
+   * reversal is not needed to bring an enforced band back in range. 0 / absent: no hold.
+   */
+  reverseHoldMs?: number;
+}
+
+/** Direction of the last executed spot hedge trade (buy legs: buy; sell / flatten legs: sell). */
+export interface LastHedgeTrade {
+  side: "buy" | "sell";
+  atMs: number;
 }
 
 /** What a desk InventoryToVault(MM) can bring to the vault right now. */
@@ -90,6 +113,10 @@ export interface HedgePlanInput {
    * adapter.netExposureUsd() is older than maxPriceAge * 4 (Orderly report lag): only reducing legs.
    */
   allowAddHedge?: boolean;
+  /** Last executed spot trade (reversal hold); absent: none known. */
+  lastTrade?: LastHedgeTrade | null;
+  /** Clock for the reversal hold (ms). Required for the hold to apply. */
+  nowMs?: number;
 }
 
 export type HedgeLeg =
@@ -159,7 +186,35 @@ export function componentsValueUsd(components: HedgeComponent[]): bigint {
   return components.reduce((s, c) => s + valueUsdOf(c.balanceRaw, c.priceWad, c.multiplierWad, c.decimals), 0n);
 }
 
+/** Direction a plan trades the spot hedge in (null: no spot trade). */
+export function planSide(plan: HedgePlan): "buy" | "sell" | null {
+  if (plan.action === "buy") return "buy";
+  if (plan.action === "sell" || plan.action === "flatten") return plan.legs.some((l) => l.kind === "sell" || l.kind === "flatten") ? "sell" : null;
+  return null;
+}
+
+/** Remaining reversal hold (ms) for a plan trading `side`; 0 when none applies. */
+export function reversalHoldRemainingMs(side: "buy" | "sell" | null, inp: Pick<HedgePlanInput, "lastTrade" | "nowMs">, holdMs: number | undefined): number {
+  const last = inp.lastTrade;
+  if (!side || !last || inp.nowMs === undefined || !holdMs || holdMs <= 0 || last.side === side) return 0;
+  return Math.max(0, last.atMs + holdMs - inp.nowMs);
+}
+
 export function planHedge(inp: HedgePlanInput, cfg: HedgePlannerConfig): HedgePlan {
+  const plan = planCore(inp, cfg);
+  const remaining = reversalHoldRemainingMs(planSide(plan), inp, cfg.reverseHoldMs);
+  if (remaining <= 0) return plan;
+  const m = inp.mandate;
+  // safety wins: never hold while an enforced band is breached, nor when risk reduction is asked for
+  // (reduce-only mode, off-hours no-new-risk, Retiring flatten)
+  const hedge = inp.deskHedgeUsd > 0n ? inp.deskHedgeUsd : 0n;
+  const canHedgeLong = cfg.perpEnabled && inp.perpAllowed;
+  if (!hedgeBandOk(m, inp.netExposureUsd, hedge, canHedgeLong)) return plan;
+  if (inp.mode !== "normal" || (inp.offHours && m.noNewRiskOffHours)) return plan;
+  return none("REVERSAL_HOLD", plan.ratioBefore, plan.targetHedgeUsd);
+}
+
+function planCore(inp: HedgePlanInput, cfg: HedgePlannerConfig): HedgePlan {
   const m = inp.mandate;
   const exp = inp.netExposureUsd;
   const hedge = inp.deskHedgeUsd > 0n ? inp.deskHedgeUsd : 0n;
@@ -169,7 +224,7 @@ export function planHedge(inp: HedgePlanInput, cfg: HedgePlannerConfig): HedgePl
   const targetBps = minBig(hi, maxBig(lo, cfg.targetRatioBps === undefined ? (lo + hi) / 2n : BigInt(Math.round(cfg.targetRatioBps))));
   const slip = BigInt(Math.max(0, Math.min(5_000, Math.round(cfg.slippageBps))));
   const ratioBefore = hedgeRatioBps(m, exp, hedge);
-  const minLegUsd = 1_000_000n; // 1 USD dust floor per leg
+  const minLegUsd = maxBig(1_000_000n, cfg.minLegUsd ?? 0n); // dust floor per leg (>= 1 USD)
   const reduceRule = inp.mode === "reduce_only" || (inp.offHours && m.noNewRiskOffHours);
   const ruleMandate: Mandate = reduceRule ? { ...m, noNewRiskOffHours: true } : m;
 
@@ -189,7 +244,7 @@ export function planHedge(inp: HedgePlanInput, cfg: HedgePlannerConfig): HedgePl
     if (hedge >= cfg.minTradeUsd) {
       // held spot only adds to the net long: flatten (always reduces |exposure + hedge|)
       const legs = flattenLegs(inp.components, slip, minLegUsd);
-      if (legs.length > 0) {
+      if (legs.reduce((s, l) => s + (l.kind === "flatten" ? l.notionalUsd : 0n), 0n) >= cfg.minTradeUsd) {
         return { action: "flatten", reason: "LONG_EXPOSURE_NO_SPOT_HEDGE", ratioBefore, ratioAfter: hedgeRatioBps(m, exp, 0n), targetHedgeUsd: 0n, legs };
       }
     }
@@ -218,8 +273,9 @@ export function planHedge(inp: HedgePlanInput, cfg: HedgePlannerConfig): HedgePl
     else if (ratioBefore > hi) side = "sell";
     else return none("IN_BAND", ratioBefore, targetHedge);
   } else {
-    // band not enforced below 5% of maxInventory: only trim a hedge above the band's upper bound
-    if (hedge > applyBps(absExp, hi) && hedge - targetHedge >= cfg.minTradeUsd) side = "sell";
+    // band not enforced below 5% of maxInventory: only trim a hedge that exceeds the band's upper
+    // bound by at least minTradeUsd (deadband: a shrinking exposure does not trigger a ladder of trims)
+    if (hedge - applyBps(absExp, hi) >= cfg.minTradeUsd) side = "sell";
     else return none("BELOW_THRESHOLD", ratioBefore, targetHedge);
   }
 

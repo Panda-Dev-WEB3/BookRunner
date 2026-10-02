@@ -190,7 +190,10 @@ export class BookAgent {
     this.d.price.ingest(msg);
   }
 
-  /** Graceful shutdown (SIGINT/SIGTERM): stop loops; run() then cancels resting quotes. */
+  /**
+   * Graceful shutdown (SIGINT/SIGTERM): stop loops; no new quote or hedge leg starts (a desk tx in
+   * flight completes and is recorded); run() then cancels resting quotes.
+   */
   stop(): void {
     this.stopped = true;
     this.stopCtl.abort();
@@ -542,6 +545,7 @@ export class BookAgent {
       offHours: this.isOffHours(this.d.price.latest(), this.now()),
       netExposureUsd: exposure,
       allowAddHedge,
+      signal: this.stopCtl.signal,
     });
   }
 }
