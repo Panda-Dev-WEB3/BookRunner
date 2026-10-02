@@ -175,9 +175,15 @@ export class ViemChainGateway implements ChainGateway {
     });
   }
 
+  /**
+   * Never served from the TTL cache: it is wallet-scoped, and the wallet re-reads it right after its
+   * own transaction confirms (tranche.position after a claim, subscribe / redeem / claim preparing the
+   * next step). A cached answer from before the transaction showed 'Ready to collect' after a claim
+   * and could prepare a no-op claimAllocation that still costs gas.
+   */
   trancheWallet(tranche: Address, wallet: Address, requestIds: bigint[]): Promise<TrancheWalletState> {
     const ids = [...new Set(requestIds.map(String))].map(BigInt).sort((a, b) => (a < b ? -1 : 1));
-    return cached(this.kv, this.key("tranche", tranche.toLowerCase(), wallet.toLowerCase(), ids.join(",")), this.ttlSeconds, async () => {
+    return cached(this.kv, this.key("tranche", tranche.toLowerCase(), wallet.toLowerCase(), ids.join(",")), 0, async () => {
       const abi = trancheAbi;
       const r = this.client;
       const address = tranche;

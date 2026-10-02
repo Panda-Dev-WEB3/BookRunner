@@ -6,7 +6,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
 import type { Address } from "viem";
-import { trpc } from "../../api/trpc";
+import { refreshPositions, trpc } from "../../api/trpc";
 import type { BookDetail } from "../../lib/api-types";
 import { USDC_DECIMALS, formatAmountDisplay, normalizeAmount } from "../../lib/amount";
 import { addressUrl } from "../../lib/config";
@@ -212,7 +212,7 @@ export function ReviewStep(props: DepositContext & { amount: string; onBack: () 
     setConfirmed(true);
     void invalidateWalletBalances(qc);
     void invalidateInvestReads(qc);
-    void utils.tranche.position.invalidate();
+    refreshPositions(utils);
     void utils.book.get.invalidate({ bookId: props.book.bookId });
   };
 

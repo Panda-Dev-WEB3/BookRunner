@@ -179,8 +179,9 @@ describe("ViemChainGateway (ABI round trip over EIP-1193)", () => {
     expect(m.activeKeys).toEqual([A(0xde5c)]);
     const before = calls.length;
     await g.bookState(BOOK.book);
-    await g.trancheWallet(BOOK.senior, ALICE, [3n, 9n]);
     expect(calls.length).toBe(before); // served from the TTL cache
+    await g.trancheWallet(BOOK.senior, ALICE, [3n, 9n]);
+    expect(calls.length).toBeGreaterThan(before); // wallet-scoped: always read fresh, right after the wallet's own tx
   });
 
   test("a tranche whose views all revert is an error (not silent zeros)", async () => {

@@ -5,7 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import type { Address } from "viem";
 import { useQueryError } from "../../api/hooks";
-import { trpc } from "../../api/trpc";
+import { refreshPositions, trpc } from "../../api/trpc";
 import type { BookDetail, PositionOut } from "../../lib/api-types";
 import { USDC_DECIMALS, amountIssue, amountIssueText, formatAmountDisplay, formatAmountInput, parseAmount } from "../../lib/amount";
 import { CASH_WAIT_LINE, NOTICE_LINE } from "../../lib/copy";
@@ -149,7 +149,7 @@ function ClaimBox(props: { book: BookDetail; ticker: string; addrs: TrancheAddre
     props.onUsed();
     void invalidateWalletBalances(qc);
     void invalidateInvestReads(qc);
-    void utils.tranche.position.invalidate();
+    refreshPositions(utils);
   };
   return (
     <section className="rounded-card border border-good/30 bg-good/[0.05] p-4 sm:p-5" aria-label="Collect">
@@ -226,7 +226,7 @@ function RedeemBox(props: { book: BookDetail; ticker: string; addrs: TrancheAddr
     setSent(true);
     void invalidateWalletBalances(qc);
     void invalidateInvestReads(qc);
-    void utils.tranche.position.invalidate();
+    refreshPositions(utils);
   };
 
   if (withShares.length === 0 && !red.data) {

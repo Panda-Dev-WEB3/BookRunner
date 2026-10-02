@@ -3,7 +3,7 @@
 // its BKRN staking state (staking contract views).
 import { type QueryClient, useQuery } from "@tanstack/react-query";
 import { type Address, parseAbiItem } from "viem";
-import { POLL, trpc } from "../../api/trpc";
+import { POLL, refreshPositions, trpc } from "../../api/trpc";
 import type { BookListItem } from "../../lib/api-types";
 import { invalidateWalletBalances } from "../../wallet/balances";
 import { appChain, publicClient } from "../../wallet/chains";
@@ -172,8 +172,8 @@ export function useStakingSummary(wallet: Address | null) {
 
 /** Refresh everything a claim or a redemption request changes. */
 export async function refreshAfterTx(qc: QueryClient, utils: ReturnType<typeof trpc.useUtils>): Promise<void> {
+  refreshPositions(utils);
   await Promise.all([
-    utils.tranche.position.invalidate(),
     utils.book.list.invalidate(),
     invalidateWalletBalances(qc),
     qc.invalidateQueries({ queryKey: ACTIVITY_QUERY_KEY }),

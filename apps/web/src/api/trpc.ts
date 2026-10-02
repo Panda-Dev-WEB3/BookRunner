@@ -42,3 +42,13 @@ export const POLL = {
   marks: 15_000,
   slow: 30_000,
 } as const;
+
+/**
+ * Re-reads wallet positions after a confirmed transaction: now, and once more a few seconds later,
+ * because a public RPC node can still answer from the block before the receipt for a moment (the
+ * API reads wallet positions uncached, so the second read sees the new state).
+ */
+export function refreshPositions(utils: ReturnType<typeof trpc.useUtils>, againAfterMs = 4_000): void {
+  void utils.tranche.position.invalidate();
+  setTimeout(() => void utils.tranche.position.invalidate(), againAfterMs);
+}
