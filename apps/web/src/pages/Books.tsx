@@ -5,7 +5,7 @@ import { EmptyState, PageHeader, Panel, QueryView, Stat, StateChip, Table, Td, T
 import type { BookListItem } from "../lib/api-types";
 import { config } from "../lib/config";
 import { AGENTS_LINE, LIVE_VS_MARKED, STRAPLINE, venueDetail, venueLabel } from "../lib/copy";
-import { DASH, ageMs, fmtAge, fmtSharePrice, fmtUsd, tickerOf, usdRaw } from "../lib/format";
+import { DASH, ageMs, fmtAgo, fmtSharePrice, fmtUsd, tickerOf, usdRaw } from "../lib/format";
 import { bookState, limitState } from "../lib/limits";
 import { markCadenceLine, nextMarkAt, nextMarkLabel } from "../lib/lowgas";
 import { isTestChain } from "../wallet/network";
@@ -14,7 +14,7 @@ const isMarkable = (b: BookListItem) => b.state === "Live" || b.state === "Retir
 
 function markAge(b: BookListItem, now: number) {
   const age = ageMs(b.lastMark?.committedAt ?? null, now);
-  return age === null ? "No mark yet" : `${fmtAge(age)} ago`;
+  return age === null ? "No mark yet" : `${fmtAgo(age)}`;
 }
 
 function totals(books: BookListItem[]) {
@@ -79,7 +79,7 @@ export function BooksPage() {
           <Stat label="Books" value={q.data?.length ?? 0} sub={`${t.live} live · ${t.open} in subscription`} />
           <Stat label="Marked NAV" value={fmtUsd(t.nav, { symbol: true, compact: true })} sub="sum of last marks" kind="marked" />
           <Stat label="Limit alerts" value={t.alerts} sub="books in breach or killed" />
-          <Stat label="Updated" value={q.dataUpdatedAt ? `${fmtAge(now - q.dataUpdatedAt)} ago` : DASH} sub={`polling every ${POLL.list / 1000}s`} />
+          <Stat label="Updated" value={q.dataUpdatedAt ? `${fmtAgo(now - q.dataUpdatedAt)}` : DASH} sub={`polling every ${POLL.list / 1000}s`} />
         </div>
       )}
       <Panel title="All books" meta={q.data ? `${q.data.length} book${q.data.length === 1 ? "" : "s"}` : undefined} bodyClassName="p-0">

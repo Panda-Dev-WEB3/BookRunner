@@ -7,7 +7,7 @@ import { Chip, EmptyState, ErrorState, Hash, KV, PageHeader, Panel, SkeletonRows
 import type { BookDetail, MarkItem } from "../../lib/api-types";
 import { AGENTS_LINE, LIVE_VS_MARKED, venueDetail, venueLabel } from "../../lib/copy";
 import { describeError } from "../../lib/errors";
-import { DASH, ageMs, fmtAge, fmtBps, fmtDuration, fmtSharePrice, fmtUsd, tickerOf, usdRaw } from "../../lib/format";
+import { DASH, ageMs, fmtAgo, fmtBps, fmtDuration, fmtSharePrice, fmtUsd, tickerOf, usdRaw } from "../../lib/format";
 import { bookState, limitState } from "../../lib/limits";
 import { cadenceTitle, markCadenceLine, nextMarkLabel } from "../../lib/lowgas";
 import { parseMarkStatement } from "../../lib/markStatement";
@@ -36,13 +36,13 @@ function Kpis({ b, now }: { b: BookDetail; now: number }) {
         label="NAV"
         kind="marked"
         value={fmtUsd(b.navUsd, { symbol: true })}
-        sub={b.lastMark ? `mark #${b.lastMark.markId} · ${markAge === null ? DASH : `${fmtAge(markAge)} ago`}` : "before the first mark"}
+        sub={b.lastMark ? `mark #${b.lastMark.markId} · ${markAge === null ? DASH : `${fmtAgo(markAge)}`}` : "before the first mark"}
       />
       <Stat
         label="NAV"
         kind="live"
         value={live ? fmtUsd(live, { symbol: true }) : DASH}
-        sub={live ? `${delta !== null ? `${fmtUsd(delta, { signed: true })} vs mark · ` : ""}${liveAge === null ? "" : `${fmtAge(liveAge)} ago`}` : "no live estimate"}
+        sub={live ? `${delta !== null ? `${fmtUsd(delta, { signed: true })} vs mark · ` : ""}${liveAge === null ? "" : `${fmtAgo(liveAge)}`}` : "no live estimate"}
         title="Intra-period estimate from the risk / mark services"
       />
       <Stat label="Senior / share" kind="marked" value={fmtSharePrice(b.seniorSharePrice)} sub={`Senior NAV ${fmtUsd(b.seniorNavUsd, { compact: true })}`} />
@@ -82,7 +82,7 @@ function Header({ b, now }: { b: BookDetail; now: number }) {
           {venueLabel(b.venue)}
         </Chip>
         <Chip tone={b.agent.alive ? "good" : "neutral"} title={AGENTS_LINE}>
-          {b.agent.alive ? `Agent quoting · ${hbAge === null ? "" : `${fmtAge(hbAge)} ago`}` : "Agent offline"}
+          {b.agent.alive ? `Agent quoting · ${hbAge === null ? "" : `${fmtAgo(hbAge)}`}` : "Agent offline"}
         </Chip>
         {endsIn !== null && <Chip tone="accent">{endsIn > 0 ? `Window closes in ${fmtDuration(Math.ceil(endsIn / 1000))}` : "Window closed; awaiting settlement"}</Chip>}
         {(b.state === "Live" || b.state === "Retiring") && (

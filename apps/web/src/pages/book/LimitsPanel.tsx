@@ -2,7 +2,7 @@ import { POLL, trpc } from "../../api/trpc";
 import { MiniLine } from "../../components/charts/MiniLine";
 import { Chip, EmptyState, MeterBar, Panel, StateChip, ValueKind } from "../../components/ui";
 import type { LimitsView, MandateView } from "../../lib/api-types";
-import { fmtAge, fmtBps, fmtPct, fmtUsd, fmtUsdFloat, ageMs, toNum } from "../../lib/format";
+import { fmtAgo, fmtBps, fmtPct, fmtUsd, fmtUsdFloat, ageMs, toNum } from "../../lib/format";
 import { HEDGE_THRESHOLD_PCT, breachText, drawdownMeter, hedgeMeter, limitState, utilMeter } from "../../lib/limits";
 import type { MarkStatement } from "../../lib/markStatement";
 
@@ -22,7 +22,7 @@ export function LimitsPanel(props: { bookId: number; limits: LimitsView | null; 
   return (
     <Panel
       title="Inventory, hedge & limits"
-      meta={l ? `${l.source === "live" ? "risk monitor" : "last stored snapshot"}${age === null ? "" : ` · ${fmtAge(age)} ago`}` : undefined}
+      meta={l ? `${l.source === "live" ? "risk monitor" : "last stored snapshot"}${age === null ? "" : ` · ${fmtAgo(age)}`}` : undefined}
       actions={
         <div className="flex items-center gap-2">
           {l?.offHours && <Chip tone="serious">Off-hours</Chip>}

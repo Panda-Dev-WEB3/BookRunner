@@ -4,7 +4,7 @@ import { QuoteLadder } from "../../components/charts/QuoteLadder";
 import { Chip, EmptyState, KV, Panel, ValueKind } from "../../components/ui";
 import type { MandateView, QuoteView } from "../../lib/api-types";
 import { AGENTS_LINE } from "../../lib/copy";
-import { fmtAge, fmtBps, fmtNum, fmtPct, fmtUsdFloat } from "../../lib/format";
+import { fmtAgo, fmtBps, fmtNum, fmtPct, fmtUsdFloat } from "../../lib/format";
 import { ringPush } from "../../lib/nav";
 import { ladderModel, quoteFreshness } from "../../lib/quote";
 
@@ -29,7 +29,7 @@ export function QuotePanel(props: { quote: QuoteView | null; mandate: MandateVie
   return (
     <Panel
       title="Live quote"
-      meta={quote ? `${fmtAge(props.now - quote.ts)} ago` : undefined}
+      meta={quote ? `${fmtAgo(props.now - quote.ts)}` : undefined}
       actions={
         <div className="flex items-center gap-2">
           {fresh === "stale" && <Chip tone="warn">Stale</Chip>}

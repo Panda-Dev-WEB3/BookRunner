@@ -50,3 +50,11 @@ describe("protocol copy", () => {
     });
   }
 });
+
+describe("age labels", () => {
+  test("no source builds '<age> ago' by hand (fmtAge returns 'now' below 2 s: use fmtAgo)", () => {
+    // template text joins its substitutions with "…": `${fmtAge(x)} ago` reads "… ago"
+    const hits = snippets.filter((s) => s.file !== "src/lib/format.ts" && /(^|…) ?ago\b/.test(s.text)).map((s) => `${s.file}:${s.line} ${s.text}`);
+    expect(hits).toEqual([]);
+  });
+});

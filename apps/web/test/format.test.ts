@@ -4,6 +4,7 @@ import {
   ageMs,
   bpsPct,
   fmtAge,
+  fmtAgo,
   fmtBps,
   fmtDateTime,
   fmtDay,
@@ -90,6 +91,13 @@ describe("time", () => {
     expect(fmtAge((50 * 60) * 60_000)).toBe("2d 2h");
     expect(ageMs("2026-10-02T06:00:00.000Z", Date.parse("2026-10-02T06:00:10.000Z"))).toBe(10_000);
     expect(ageMs(null, 0)).toBeNull();
+  });
+  test("age phrases never read 'now ago'", () => {
+    expect(fmtAgo(500)).toBe("just now");
+    expect(fmtAgo(0)).toBe("just now");
+    expect(fmtAgo(12_000)).toBe("12s ago");
+    expect(fmtAgo((3 * 60 + 12) * 60_000)).toBe("3h 12m ago");
+    expect(fmtAgo(null)).toBe("—");
   });
   test("durations", () => {
     expect(fmtDuration(600)).toBe("10 min");

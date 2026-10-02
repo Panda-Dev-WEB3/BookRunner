@@ -126,6 +126,12 @@ export function fmtAge(ms: number | null | undefined): string {
   return `${d}d ${h % 24}h`;
 }
 
+/** Elapsed time as a phrase: "just now" below 2 s, else "12s ago" (never "now ago"). */
+export function fmtAgo(ms: number | null | undefined): string {
+  if (ms == null || !Number.isFinite(ms)) return DASH;
+  return ms < 2_000 ? "just now" : `${fmtAge(ms)} ago`;
+}
+
 export function ageMs(iso: string | null | undefined, now: number): number | null {
   if (!iso) return null;
   const t = Date.parse(iso);

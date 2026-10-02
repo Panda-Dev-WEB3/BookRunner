@@ -5,7 +5,7 @@ import { POLL, trpc } from "../api/trpc";
 import { Chip, EmptyState, ErrorState, Field, Hash, PageHeader, Panel, QueryView, Segmented, Table, Td, Th } from "../components/ui";
 import type { AgentKey } from "../lib/api-types";
 import { AGENTS_LINE } from "../lib/copy";
-import { DASH, ageMs, fmtAge, fmtDateTime, fmtUsd, tickerOf } from "../lib/format";
+import { DASH, ageMs, fmtAgo, fmtDateTime, fmtUsd, tickerOf } from "../lib/format";
 import { TxRunner } from "../wallet/TxRunner";
 import { WalletButton } from "../wallet/WalletButton";
 import { useWallet } from "../wallet/WalletContext";
@@ -168,7 +168,7 @@ function BookAgents({ bookId }: { bookId: number }) {
           q.data && (
             <div className="flex items-center gap-2">
               {q.data.killed && <Chip tone="critical" solid>{`Killed${q.data.killReason ? `: ${q.data.killReason}` : ""}`}</Chip>}
-              <Chip tone={q.data.agent.alive ? "good" : "neutral"}>{q.data.agent.alive ? `Agent heartbeat ${hb === null ? "" : `${fmtAge(hb)} ago`}` : "No agent heartbeat"}</Chip>
+              <Chip tone={q.data.agent.alive ? "good" : "neutral"}>{q.data.agent.alive ? `Agent heartbeat ${hb === null ? "" : `${fmtAgo(hb)}`}` : "No agent heartbeat"}</Chip>
             </div>
           )
         }

@@ -8,7 +8,7 @@ import { POLL, trpc } from "../../api/trpc";
 import { USDC_DECIMALS, formatAmountDisplay } from "../../lib/amount";
 import type { BookListItem } from "../../lib/api-types";
 import { venueLabel } from "../../lib/copy";
-import { DASH, ageMs, fmtAge, fmtDuration, fmtSharePrice, fmtUsd, fmtWhen, isoToSec, tickerOf, usdRaw } from "../../lib/format";
+import { DASH, ageMs, fmtAgo, fmtDuration, fmtSharePrice, fmtUsd, fmtWhen, isoToSec, tickerOf, usdRaw } from "../../lib/format";
 import { bookState } from "../../lib/limits";
 import type { TopUpRound } from "../../lib/topup";
 import { IconArrowRight } from "../icons";
@@ -85,7 +85,7 @@ export function BookInvestCard(props: {
             term="nav"
             kind="marked"
             value={fmtUsd(b.navUsd, { symbol: true, dp: 0 })}
-            sub={b.lastMark ? `mark #${b.lastMark.markId} · ${markAge === null ? DASH : `${fmtAge(markAge)} ago`}` : "before the first mark"}
+            sub={b.lastMark ? `mark #${b.lastMark.markId} · ${markAge === null ? DASH : `${fmtAgo(markAge)}`}` : "before the first mark"}
             className="col-span-2 sm:col-span-1"
           />
           <Stat label="Senior share price" series="senior" value={fmtSharePrice(d?.seniorSharePrice ?? b.seniorSharePrice, 4)} sub="USDC per share" />

@@ -3,7 +3,7 @@ import { useNow } from "../api/hooks";
 import { POLL, trpc } from "../api/trpc";
 import { Chip, EmptyState, Hash, PageHeader, Panel, QueryView, Stat, StateChip, Table, Td, Th, cx } from "../components/ui";
 import type { BookListItem, KillItem } from "../lib/api-types";
-import { DASH, ageMs, fmtAge, fmtBps, fmtDateTime, fmtPct, fmtUsdFloat, tickerOf } from "../lib/format";
+import { DASH, ageMs, fmtAgo, fmtBps, fmtDateTime, fmtPct, fmtUsdFloat, tickerOf } from "../lib/format";
 import { LIMIT_STATES, breachText, limitState, utilMeter } from "../lib/limits";
 
 function MiniMeter({ util }: { util: number | null | undefined }) {
@@ -182,7 +182,7 @@ export function RiskPage() {
                           {l && l.breaches.length ? l.breaches.join(", ") : <span className="text-muted">none</span>}
                         </Td>
                         <Td right num className="text-ink-2">
-                          {age === null ? DASH : `${fmtAge(age)} ago`}
+                          {age === null ? DASH : `${fmtAgo(age)}`}
                         </Td>
                       </tr>
                     );

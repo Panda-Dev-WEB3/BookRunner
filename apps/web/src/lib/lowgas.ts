@@ -1,7 +1,7 @@
 // Low-gas mode display helpers (docs/LOW_GAS.md): the next mark (one mark transaction per book per period,
 // daily on mainnet), the age of the oracle's latest signed price (prices ride in the transactions that need
 // them, so the price stored on-chain is old between trades by design) and of ops-venue's signed venue report.
-import { DASH, fmtAge, fmtDuration } from "./format";
+import { DASH, fmtAge, fmtAgo, fmtDuration } from "./format";
 
 export interface MarkScheduleLike {
   intervalSeconds: number;
@@ -65,5 +65,5 @@ export function signedFreshness(ageSeconds: number | null | undefined, maxAgeSec
 export function ageOf(iso: string | null | undefined, nowMs: number): string {
   if (!iso) return DASH;
   const t = Date.parse(iso);
-  return Number.isNaN(t) ? DASH : `${fmtAge(Math.max(0, nowMs - t))} ago`;
+  return Number.isNaN(t) ? DASH : fmtAgo(Math.max(0, nowMs - t));
 }
