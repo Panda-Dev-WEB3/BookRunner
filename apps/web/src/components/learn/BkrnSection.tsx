@@ -3,11 +3,12 @@
 import { Link } from "react-router";
 import { BKRN_DECIMALS, formatAmountDisplay } from "../../lib/amount";
 import { fmtDuration, fmtUsd } from "../../lib/format";
+import { useBackstopBalance } from "../../wallet/backstop";
 import { IconArrowRight } from "../icons";
 import { Term } from "../Term";
 import { Card, Stat, StatGrid } from "../ui";
 import { Figure, FlowArrow, FlowNode, LearnSection, Prose } from "./parts";
-import { useBackstopBalance, useStakingStats } from "./useLearnData";
+import { useStakingStats } from "./useLearnData";
 
 /** 18dp BKRN as whole tokens, compact ("2.2M", "1B"); the exact amount goes in the tooltip. */
 const compactBkrn = (raw: bigint) => new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 }).format(Number(raw / 10n ** BigInt(BKRN_DECIMALS)));

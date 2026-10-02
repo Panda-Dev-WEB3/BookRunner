@@ -7,6 +7,7 @@ import { describeError } from "../../lib/errors";
 import { tickerOf } from "../../lib/format";
 import type { SeriesKey } from "../../lib/palette";
 import { SERIES_CLASS } from "../../lib/palette";
+import { useBackstopBalance } from "../../wallet/backstop";
 import { cx } from "../cx";
 import { Term } from "../Term";
 import { Badge, Callout, Card, Segmented, ValueKind } from "../ui";
@@ -28,7 +29,7 @@ import {
   simulateLoss,
   usdText,
 } from "./sim";
-import { markedBooks, useBackstopBalance, useLiveBooks } from "./useLearnData";
+import { markedBooks, useLiveBooks } from "./useLearnData";
 
 const USDC = (raw: bigint, dp = 2) => `${usdText(raw, dp)} USDC`;
 const whole = (n: number) => n.toLocaleString("en-US", { maximumFractionDigits: 2 });

@@ -9,6 +9,7 @@ import { formatAmountDisplay } from "../../lib/amount";
 import { DASH, fmtUsd, shortHex } from "../../lib/format";
 import { ageOf, nextMarkLabel } from "../../lib/lowgas";
 import { SERIES_CLASS } from "../../lib/palette";
+import { useBackstopBalance } from "../../wallet/backstop";
 import { appChain } from "../../wallet/chains";
 import { useConnectModal } from "../../wallet/ConnectModal";
 import { isTestChain } from "../../wallet/network";
@@ -16,7 +17,6 @@ import { useWallet } from "../../wallet/WalletContext";
 import { cx } from "../cx";
 import { IconArrowRight, IconWallet } from "../icons";
 import { Badge, Card, Container, Skeleton, Stat, Term, ValueKind } from "../ui";
-import { useBackstopPool } from "./chainReads";
 import { type BooksSummary, sharePct, summarizeBooks, trancheSplit } from "./model";
 
 export function Hero() {
@@ -142,7 +142,7 @@ function LiveItem(props: { label: ReactNode; value: string; sub: string; loading
 
 /** Senior over Junior (all books, latest marks), with the shared backstop on top: fee flow is paid top-down, losses absorbed bottom-up. */
 function CapitalStack({ summary, loading }: { summary: BooksSummary | null; loading: boolean }) {
-  const pool = useBackstopPool();
+  const pool = useBackstopBalance();
   const split = summary ? trancheSplit(summary.seniorRaw, summary.juniorRaw) : null;
   const seniorGrow = split ? Math.max(split.senior, 0.18) : 0.6;
   const juniorGrow = split ? Math.max(split.junior, 0.18) : 0.4;

@@ -1,6 +1,6 @@
 // Live data for the How it works page: the listed books (marked tranche NAVs, mark cadence), one
-// showcase book's detail (latest signed mark, charter and mandate), the shared backstop pool and the
-// staking contract. Every figure the page shows from here is read from the API or the chain.
+// showcase book's detail (latest signed mark, charter and mandate) and the staking contract (the
+// backstop pool comes from wallet/backstop.ts). Every figure the page shows is read from the API or the chain.
 import { useQuery } from "@tanstack/react-query";
 import { type Address, erc20Abi } from "viem";
 import { POLL, trpc } from "../../api/trpc";
@@ -11,8 +11,6 @@ import { useAppContracts } from "../../wallet/contracts";
 // Minimal view fragments (the generated ABIs in @bookrunner/shared/abi are much larger than these reads need).
 const uintView = <N extends string, T extends "uint256" | "uint64">(name: N, type: T) =>
   ({ type: "function", name, stateMutability: "view", inputs: [], outputs: [{ name: "", type }] }) as const;
-/** Backstop.balance(): USDC available for cover (6dp). */
-const BACKSTOP_ABI = [uintView("balance", "uint256")] as const;
 /** BkrnStaking.totalStaked() (18dp) and cooldown() (seconds). */
 const STAKING_ABI = [uintView("totalStaked", "uint256"), uintView("cooldown", "uint64")] as const;
 
@@ -31,22 +29,6 @@ export function useShowcaseBook() {
   const first = markedBooks(list.data)[0] ?? null;
   const detail = trpc.book.get.useQuery({ bookId: first?.bookId ?? 1 }, { enabled: first !== null, refetchInterval: POLL.marks });
   return { list, book: first, detail };
-}
-
-/** USDC held by the shared backstop pool (Backstop.balance()), 6dp. */
-export function useBackstopBalance() {
-  const contracts = useAppContracts();
-  const address: Address | null = contracts.data?.backstop ?? null;
-  return useQuery({
-    queryKey: ["learn-backstop-balance", appChain.id, address],
-    enabled: address !== null,
-    refetchInterval: 60_000,
-    retry: 1,
-    queryFn: () => {
-      if (!address) throw new Error("Backstop address unknown");
-      return publicClient.readContract({ address, abi: BACKSTOP_ABI, functionName: "balance" });
-    },
-  });
 }
 
 export interface StakingStats {

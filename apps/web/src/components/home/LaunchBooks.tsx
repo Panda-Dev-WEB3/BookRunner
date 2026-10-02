@@ -1,6 +1,7 @@
 // Launch books: one card per listed book (NVDA, TSLA, RHX5 on testnet) with what the market is, its
 // venue and state, the marked NAV and share prices, the Senior / Junior split and whether it takes
 // deposits right now (top-up round read on-chain, with the amount committed so far).
+import { useMemo } from "react";
 import { Link } from "react-router";
 import { useNow, useQueryError } from "../../api/hooks";
 import { POLL, trpc } from "../../api/trpc";
@@ -14,8 +15,8 @@ import { SERIES_CLASS } from "../../lib/palette";
 import { type TopUpRound, isTopUpOpen, useTopUpRounds } from "../../wallet/topUp";
 import { cx } from "../cx";
 import { IconArrowRight } from "../icons";
+import { type BookRounds, useTrancheRounds } from "../invest/useInvestChain";
 import { Badge, Card, EmptyState, ErrorState, ProgressBar, Section, Skeleton, Stat, StateChip } from "../ui";
-import { type RoundCommitted, useRoundCommitments } from "./chainReads";
 import { type DepositStatus, depositHeadline, depositOpen, depositStatus, fmtDayUtc, marketInfo, roundFill, sharePct, trancheSplit } from "./model";
 
 const MAX_CARDS = 6;
@@ -28,8 +29,10 @@ export function LaunchBooks() {
   const nowSec = Math.floor(now / 1000);
   const books = [...(q.data ?? [])].sort((a, b) => a.bookId - b.bookId).slice(0, MAX_CARDS);
   const roundOf = (id: number): TopUpRound | null | undefined => (rounds.data ? (rounds.data[id] ?? null) : rounds.isError ? null : undefined);
-  const openIds = books.filter((b) => isTopUpOpen(roundOf(b.bookId), nowSec)).map((b) => b.bookId);
-  const committed = useRoundCommitments(openIds);
+  // Same read (and cache) as the Invest page: each tranche's current round, refreshed after a deposit.
+  const addrs = useMemo(() => (q.data ?? []).map((b) => ({ bookId: b.bookId, senior: b.components.senior, junior: b.components.junior })), [q.data]);
+  const trancheRounds = useTrancheRounds(addrs);
+  const committedOf = (id: number): BookRounds | null => (isTopUpOpen(roundOf(id), nowSec) ? (trancheRounds.data?.[id] ?? null) : null);
 
   return (
     <Section
@@ -79,7 +82,7 @@ export function LaunchBooks() {
         <>
           <ul className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
             {books.map((b) => (
-              <BookCard key={b.bookId} b={b} deposit={depositStatus(b, roundOf(b.bookId), nowSec)} committed={committed.data?.[b.bookId] ?? null} now={now} />
+              <BookCard key={b.bookId} b={b} deposit={depositStatus(b, roundOf(b.bookId), nowSec)} committed={committedOf(b.bookId)} now={now} />
             ))}
           </ul>
           <p className="mt-5 max-w-3xl text-[12.5px] text-ink-2">{LIVE_VS_MARKED}</p>
@@ -89,7 +92,7 @@ export function LaunchBooks() {
   );
 }
 
-function BookCard({ b, deposit, committed, now }: { b: BookListItem; deposit: DepositStatus; committed: RoundCommitted | null; now: number }) {
+function BookCard({ b, deposit, committed, now }: { b: BookListItem; deposit: DepositStatus; committed: BookRounds | null; now: number }) {
   const m = marketInfo(b.symbol);
   const split = trancheSplit(usdRaw(b.seniorNavUsd) ?? 0n, usdRaw(b.juniorNavUsd) ?? 0n);
   const limits = limitState(b.limits?.state);
@@ -161,7 +164,7 @@ function BookCard({ b, deposit, committed, now }: { b: BookListItem; deposit: De
   );
 }
 
-function DepositRow({ deposit, committed }: { deposit: DepositStatus; committed: RoundCommitted | null }) {
+function DepositRow({ deposit, committed }: { deposit: DepositStatus; committed: BookRounds | null }) {
   const open = depositOpen(deposit);
   return (
     <div className="border-t border-line bg-surface-2/50 px-5 py-4">
@@ -172,8 +175,8 @@ function DepositRow({ deposit, committed }: { deposit: DepositStatus; committed:
       {deposit.kind === "topup" && (
         <>
           <div className="mt-3 space-y-2.5">
-            <TrancheRound tranche="senior" capacity={deposit.seniorCapacity} committed={committed?.senior ?? null} />
-            <TrancheRound tranche="junior" capacity={deposit.juniorCapacity} committed={committed?.junior ?? null} />
+            <TrancheRound tranche="senior" capacity={deposit.seniorCapacity} committed={committed?.senior.totalCommitted ?? null} />
+            <TrancheRound tranche="junior" capacity={deposit.juniorCapacity} committed={committed?.junior.totalCommitted ?? null} />
           </div>
           <p className="mt-3 text-[12px] text-ink-2">Deposits wait in escrow. Shares are issued at the first mark after {fmtDayUtc(deposit.endsAt)}, at that mark's share price.</p>
         </>

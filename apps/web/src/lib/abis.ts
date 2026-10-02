@@ -36,3 +36,8 @@ export const BOOK_TOPUP_ABI = [
     ],
   },
 ] as const;
+
+/** Backstop.balance(): USDC the shared backstop pool holds now (6 decimals). */
+export const BACKSTOP_BALANCE_ABI = [
+  { type: "function", name: "balance", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "uint256" }] },
+] as const;
