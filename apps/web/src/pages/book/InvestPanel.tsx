@@ -122,7 +122,21 @@ function BookInvest({ book, now }: { book: BookDetail; now: number }) {
     stepHeading.current?.focus({ preventScroll: true });
   }, [step, round]);
 
-  const go = (s: FlowStep) => setStep(s);
+  // Arriving with ?tranche= (a "Choose Junior" link) already made the choice: once that tranche is
+  // known to be open, go straight to the amount instead of leaving the only way forward ("Continue")
+  // below both full tranche cards, screens away on a phone. Once only, and never after a click.
+  const fromUrlStatus = fromUrl === "senior" || fromUrl === "junior" ? windows[fromUrl].status : null;
+  const advanced = useRef(false);
+  useEffect(() => {
+    if (advanced.current || fromUrlStatus === null || fromUrlStatus === "loading") return;
+    advanced.current = true;
+    if (fromUrlStatus === "open" && tranche === fromUrl) setStep((s) => (s === "tranche" ? "amount" : s));
+  }, [fromUrlStatus, fromUrl, tranche]);
+
+  const go = (s: FlowStep) => {
+    advanced.current = true;
+    setStep(s);
+  };
   const effectiveStep: FlowStep = step === "review" && !me ? "amount" : step;
   const ctx = tranche
     ? { book, ticker, addrs, tranche, window: windows[tranche], room: rooms[tranche], seniorRoom: tranche === "senior" ? seniorRoom : null }
