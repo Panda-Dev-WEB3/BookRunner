@@ -6,6 +6,8 @@ export const DEFAULT_JURY_MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "cla
 
 export const charterEnvShape = {
   CHARTER_PORT: z.coerce.number().int().positive().default(4430),
+  // loopback by default like the other services: the intake API is reached through the API / a proxy
+  CHARTER_HOST: z.string().min(1).default("127.0.0.1"),
   /** Model jury runs only when set; otherwise the deterministic rule-based ensemble votes. */
   ANTHROPIC_API_KEY: z.string().optional(),
   JURY_MODELS: z.string().default(DEFAULT_JURY_MODELS.join(",")),

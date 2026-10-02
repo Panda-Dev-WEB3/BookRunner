@@ -63,8 +63,8 @@ const app = createApp({
     return { ok: dbOk, db: dbOk, redis: redis.status, deployment: deployment !== null, jury: jurors.kind };
   },
 });
-const server = Bun.serve({ port: env.CHARTER_PORT, fetch: app.fetch });
-logger.info({ port: server.port }, "charter API listening");
+const server = Bun.serve({ port: env.CHARTER_PORT, hostname: env.CHARTER_HOST, fetch: app.fetch });
+logger.info({ host: env.CHARTER_HOST, port: server.port }, "charter API listening");
 
 function juryPorts(ch: CharterChain): JuryPorts {
   return {
