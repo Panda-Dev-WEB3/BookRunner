@@ -46,11 +46,24 @@ export function devAccount(role: DevRole, mnemonic = DEV_MNEMONIC): LocalAccount
   return mnemonicToAccount(mnemonic, { addressIndex: DEV_ROLE_INDEX[role] });
 }
 
+/** Robinhood Chain testnet: role keys derive from a locally generated mnemonic (.env.testnet, never committed). */
+export const TESTNET_CHAIN_ID = 46630;
+
 export function roleAccount(role: DevRole, env: Record<string, string | undefined> = process.env): LocalAccount {
   const envName = ENV_FOR_ROLE[role];
   const pk = envName ? env[envName] : undefined;
   if (pk) return privateKeyToAccount(pk as Hex);
   const chainId = Number(env.CHAIN_ID ?? 31337);
-  if (chainId !== 31337) throw new Error(`role ${role}: set ${envName ?? "a private key"} for chain ${chainId}`);
-  return devAccount(role, env.DEV_MNEMONIC || DEV_MNEMONIC);
+  if (chainId === 31337) return devAccount(role, env.DEV_MNEMONIC || DEV_MNEMONIC);
+  if (chainId === TESTNET_CHAIN_ID && env.BKRN_TESTNET_MNEMONIC) {
+    if (env.BKRN_TESTNET_MNEMONIC.trim() === DEV_MNEMONIC) throw new Error("refusing the public anvil mnemonic on a public testnet");
+    return devAccount(role, env.BKRN_TESTNET_MNEMONIC.trim());
+  }
+  throw new Error(`role ${role}: set ${envName ?? "a private key"} for chain ${chainId}` + (chainId === TESTNET_CHAIN_ID ? " (or BKRN_TESTNET_MNEMONIC)" : ""));
+}
+
+/** True when roleAccount() can derive keys for this env without explicit private keys. */
+export function hasDerivedKeys(env: Record<string, string | undefined> = process.env): boolean {
+  const chainId = Number(env.CHAIN_ID ?? 31337);
+  return chainId === 31337 || (chainId === TESTNET_CHAIN_ID && !!env.BKRN_TESTNET_MNEMONIC);
 }

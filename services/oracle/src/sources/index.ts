@@ -24,9 +24,10 @@ export function buildSources(cfg: OracleConfig, log: Logger, now: () => number =
   let market: SyntheticMarket | null = null;
 
   if (cfg.ORACLE_SYNTHETIC) {
-    if (cfg.CHAIN_ID !== 31337) {
-      log.error({ chainId: cfg.CHAIN_ID }, "synthetic sources are devnet-only; disabled on this chain (set ORACLE_SYNTHETIC=0 to silence)");
+    if (cfg.CHAIN_ID !== 31337 && cfg.CHAIN_ID !== 46630) {
+      log.error({ chainId: cfg.CHAIN_ID }, "synthetic sources are devnet/testnet-only; disabled on this chain (set ORACLE_SYNTHETIC=0 to silence)");
     } else {
+      if (cfg.CHAIN_ID === 46630) log.warn({ chainId: cfg.CHAIN_ID }, "TESTNET: prices are synthetic (seeded GBM), not market data — VERIFY real feeds before mainnet");
       const step = cfg.ORACLE_GBM_STEP_MS;
       const epochMs = cfg.ORACLE_GBM_EPOCH_MS ?? Math.floor(now() / step) * step;
       market = new SyntheticMarket({

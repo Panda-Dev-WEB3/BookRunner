@@ -3,6 +3,7 @@
 //   bun scripts/dev.ts                 # everything
 //   bun scripts/dev.ts api web         # only some
 //   bun scripts/dev.ts --no-sim        # without trader-sim
+//   bun scripts/dev.ts --network testnet   # Robinhood Chain testnet profile (.env.testnet)
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Subprocess } from "bun";
@@ -10,17 +11,59 @@ import type { Subprocess } from "bun";
 const ROOT = resolve(import.meta.dir, "..");
 const BUN = process.execPath; // the bun running this script
 const args = process.argv.slice(2);
+const netIdx = args.indexOf("--network");
+const network = (netIdx >= 0 ? args[netIdx + 1] : process.env.NETWORK) ?? "devnet";
+if (netIdx >= 0) args.splice(netIdx, 2);
 const only = args.filter((a) => !a.startsWith("--"));
 const noSim = args.includes("--no-sim");
 
 const env: Record<string, string> = { ...(process.env as Record<string, string>) };
-const envFile = resolve(ROOT, ".env");
-if (existsSync(envFile)) {
-  for (const line of readFileSync(envFile, "utf8").split(/\r?\n/)) {
+function loadEnvFile(file: string, override: boolean) {
+  const path = resolve(ROOT, file);
+  if (!existsSync(path)) return false;
+  for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
     const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
-    if (m && !line.trim().startsWith("#") && env[m[1]!] === undefined) env[m[1]!] = m[2]!.replace(/^["']|["']$/g, "");
+    if (m && !line.trim().startsWith("#") && (override || env[m[1]!] === undefined)) env[m[1]!] = m[2]!.replace(/^["']|["']$/g, "");
   }
+  return true;
 }
+
+if (network === "testnet") {
+  // Robinhood Chain testnet profile. Secrets (BKRN_TESTNET_MNEMONIC, optional RHC_TESTNET_RPC_URL,
+  // ANTHROPIC_API_KEY) live in .env.testnet (gitignored). Separate DB / Redis db / state files so the
+  // devnet stack's data is never mixed with testnet data.
+  if (!loadEnvFile(".env.testnet", true)) {
+    console.error("[dev] .env.testnet missing — run `bash scripts/deploy-testnet.sh` first");
+    process.exit(1);
+  }
+  const t: Record<string, string> = {
+    NETWORK: "testnet",
+    CHAIN_ID: "46630",
+    RPC_URL: env.RHC_TESTNET_RPC_URL || "https://rpc.testnet.chain.robinhood.com",
+    DEPLOYMENT_FILE: "contracts/deployments/46630.json",
+    DATABASE_URL: "postgres://bookrunner:bookrunner@127.0.0.1:54400/bookrunner_testnet",
+    REDIS_URL: "redis://127.0.0.1:63790/1",
+    MARK_INTERVAL_SECONDS: "300",
+    RECEIPTS_INTERVAL_SECONDS: "60",
+    SESSIONS_MODE: "24x7",
+    ORDERLY_MODE: "mock",
+    // public RPC: fewer, larger calls
+    ORACLE_PUSH_INTERVAL_MS: "15000",
+    ORACLE_PUSH_DEVIATION_BPS: "50",
+    ORACLE_TICK_MS: "2000",
+    RISK_INTERVAL_MS: "5000",
+    OPS_REPORT_INTERVAL_MS: "30000",
+    OPS_LOG_POLL_MS: "5000",
+    INDEXER_CONFIRMATIONS: "0",
+    // separate local state
+    MOCK_ORDERLY_SNAPSHOT_FILE: ".data/testnet/mock-orderly.json",
+    OPS_KEYS_DIR: ".data/testnet/keys",
+    OPS_SAGA_FILE: ".data/testnet/ops-venue/sagas.json",
+  };
+  for (const [k, v] of Object.entries(t)) if (env[k] === undefined || k === "CHAIN_ID" || k === "DEPLOYMENT_FILE") env[k] = v;
+  console.log(`[dev] network: Robinhood Chain testnet (46630) via ${env.RPC_URL}`);
+}
+loadEnvFile(".env", false);
 env.DEPLOYMENT_FILE ??= "contracts/deployments/31337.json";
 
 interface Proc {

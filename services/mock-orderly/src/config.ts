@@ -1,4 +1,4 @@
-import { baseEnvSchema, devAccount } from "@bookrunner/shared";
+import { baseEnvSchema, devAccount, roleAccount } from "@bookrunner/shared";
 import { z } from "zod";
 import { DEFAULT_FLOW, type FlowParams } from "./flow";
 import { ORDERLY_LEDGER_MAINNET } from "./orderly712";
@@ -94,10 +94,19 @@ export function loadMockConfig(source: Record<string, string | undefined> = proc
     ...(env.MOCK_ORDERLY_BUILDER_ACCOUNT_ID ? { builderAccountId: env.MOCK_ORDERLY_BUILDER_ACCOUNT_ID } : {}),
     flow,
   };
-  const delegateSigners = (env.MOCK_ORDERLY_DELEGATE_SIGNERS ? env.MOCK_ORDERLY_DELEGATE_SIGNERS.split(",") : [devAccount("opsVenue").address])
+  const delegateSigners = (env.MOCK_ORDERLY_DELEGATE_SIGNERS ? env.MOCK_ORDERLY_DELEGATE_SIGNERS.split(",") : [defaultDelegateSigner()])
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
   return { env, venue, delegateSigners };
 }
 
 export type MockConfig = ReturnType<typeof loadMockConfig>;
+
+/** ops-venue's address on this network (devnet: anvil #3; testnet: derived from BKRN_TESTNET_MNEMONIC). */
+function defaultDelegateSigner(): string {
+  try {
+    return roleAccount("opsVenue").address;
+  } catch {
+    return devAccount("opsVenue").address;
+  }
+}

@@ -18,3 +18,4 @@ contracts/deployments/31337.json
 .claude/worktrees/
 .env.testnet
 .data/
+GITHUB_DEPLOY_KEY.txt

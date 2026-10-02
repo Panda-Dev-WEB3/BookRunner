@@ -30,8 +30,7 @@ MSYS_NO_PATHCONV=1 exec docker run --rm "${TTY_FLAGS[@]}" \
   -w /repo/contracts \
   --add-host=host.docker.internal:host-gateway \
   -e FOUNDRY_PROFILE="${FOUNDRY_PROFILE:-default}" \
-  -e ETH_RPC_URL="${ETH_RPC_URL:-}" \
-  -e PRIVATE_KEY="${PRIVATE_KEY:-}" \
-  -e DEPLOY_OUT="${DEPLOY_OUT:-}" \
+  -e ETH_RPC_URL -e PRIVATE_KEY -e DEPLOY_OUT \
+  -e DEV_MNEMONIC -e NETWORK -e MARK_INTERVAL_SECONDS \
   --entrypoint "$TOOL" \
   "$IMAGE" "$@"

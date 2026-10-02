@@ -1,10 +1,12 @@
-// Lane C1 — launch the three studio-sponsored books on devnet (ARCHITECTURE §7):
+// Lane C1 — launch the three studio-sponsored books on devnet or Robinhood Chain testnet (ARCHITECTURE §7):
 //   NVDA (Orderly mock), TSLA (Orderly mock), RHX5 Stock-Token index (in-house PoolEngine).
 // Flow per book: sponsor files charter (fee + bond) -> model jury verdict (charter service; fallback
 // posts a launch verdict if the service is not running) -> committee 2-of-3 -> BookFactory.create ->
 // subscriptions (sponsor >= 10% Junior + allocators) -> desk session keys (operator consent + sponsor
 // registerKey) -> window close (keeper service, fallback here) -> books appended to the deployment file.
 //   bun scripts/launch-devnet.ts            (idempotent: exits if books already launched)
+// Testnet (CHAIN_ID=46630): keys derive from BKRN_TESTNET_MNEMONIC; the deployer first distributes gas ETH
+// to every role/participant key, and LAUNCH_USER_WALLET (if set) receives test USDC + BKRN + a little gas.
 import { readFileSync, writeFileSync } from "node:fs";
 import {
   type Abi,
@@ -12,8 +14,10 @@ import {
   type Hex,
   createPublicClient,
   createWalletClient,
+  formatEther,
   http,
   keccak256,
+  parseEther,
   parseEventLogs,
   stringToHex,
 } from "viem";
@@ -30,8 +34,8 @@ import {
   trancheAbi,
 } from "../packages/shared/src/abi";
 import { HEDGE_VENUES, indexUnderlying, strToBytes32, tokenUnderlying } from "../packages/shared/src/bytes32";
-import { localChain } from "../packages/shared/src/chains";
-import { devAccount } from "../packages/shared/src/devkeys";
+import { chainFor } from "../packages/shared/src/chains";
+import { type DevRole, roleAccount } from "../packages/shared/src/devkeys";
 import { deploymentPath, loadDeployment } from "../packages/shared/src/deployments";
 import { hedgeAllowTree } from "../packages/shared/src/merkle";
 import { SESSIONS_24X5, encodeSessions } from "../packages/shared/src/sessions";
@@ -44,7 +48,11 @@ const JUNIOR_NOTICE = BigInt(process.env.LAUNCH_JUNIOR_NOTICE_SECONDS ?? 900);
 const JURY_WAIT_MS = Number(process.env.LAUNCH_JURY_WAIT_SECONDS ?? 90) * 1000;
 const CLOSE_GRACE_MS = Number(process.env.LAUNCH_CLOSE_GRACE_SECONDS ?? 30) * 1000;
 
-const chain = { ...localChain, rpcUrls: { default: { http: [RPC] } } };
+const CHAIN_ID = Number(process.env.CHAIN_ID ?? 31337);
+const chain = chainFor(CHAIN_ID, RPC);
+const PUBLIC_CHAIN = CHAIN_ID !== 31337;
+const devAccount = (role: DevRole) => roleAccount(role); // network-aware (devnet anvil / testnet mnemonic)
+const USER_WALLET = process.env.LAUNCH_USER_WALLET as Address | undefined;
 const pub = createPublicClient({ chain, transport: http(RPC) });
 const log = (...a: unknown[]) => console.log("[launch]", ...a);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -128,8 +136,58 @@ function buildCharter(s: LaunchSpec) {
   };
 }
 
+/** Public chains only: the deployer tops every role/participant key up to a minimum gas balance (ETH). */
+async function fundGas() {
+  if (!PUBLIC_CHAIN) return;
+  const scale = Number(process.env.LAUNCH_GAS_SCALE ?? 1);
+  const need = (eth: string) => (parseEther(eth) * BigInt(Math.round(scale * 1000))) / 1000n;
+  // At RHC testnet's ~0.01 gwei a 300k-gas oracle push costs ~3e-6 ETH: these cover days of operation.
+  const plan: Array<[DevRole, bigint]> = [
+    ["oracleSigner", need("0.008")], ["opsVenue", need("0.003")], ["markSigner", need("0.002")], ["keeper", need("0.002")],
+    ["risk", need("0.0015")], ["jury", need("0.001")], ["sponsor", need("0.002")], ["committee0", need("0.0008")],
+    ["committee1", need("0.0008")], ["committee2", need("0.0008")], ["agentOperator", need("0.0008")],
+    ["deskKeyNvda", need("0.0015")], ["deskKeyTsla", need("0.0015")], ["deskKeyIndex", need("0.003")],
+    ["allocator0", need("0.0008")], ["allocator1", need("0.0008")], ["allocator2", need("0.0008")],
+    ["trader0", need("0.0015")], ["trader1", need("0.0015")], ["trader2", need("0.0015")], ["trader3", need("0.0015")],
+  ];
+
+  const deployer = acct.deployer;
+  const wallet = createWalletClient({ chain, transport: http(RPC), account: deployer });
+  const gaps: Array<[Address, bigint, string]> = [];
+  for (const [role, min] of plan) {
+    const a = devAccount(role).address;
+    const bal = await pub.getBalance({ address: a });
+    if (bal < min) gaps.push([a, min - bal, role]);
+  }
+  if (USER_WALLET) {
+    const bal = await pub.getBalance({ address: USER_WALLET });
+    if (bal < need("0.005")) gaps.push([USER_WALLET, need("0.005") - bal, "user wallet"]);
+  }
+  const total = gaps.reduce((t, [, v]) => t + v, 0n);
+  const have = await pub.getBalance({ address: deployer.address });
+  log(`gas: deployer ${deployer.address} holds ${formatEther(have)} ETH; topping up ${gaps.length} keys (${formatEther(total)} ETH)`);
+  const reserve = parseEther("0.003");
+  if (have < total + reserve) {
+    // auto-scale to the available balance (faucet drips vary); refuse below 20% of the plan
+    const avail = have > reserve ? have - reserve : 0n;
+    const k = total === 0n ? 0n : (avail * 1000n) / total;
+    if (k < 200n) {
+      throw new Error(`deployer needs ~${formatEther(total + reserve)} ETH (has ${formatEther(have)}) — fund it from https://faucet.testnet.chain.robinhood.com`);
+    }
+    for (const g of gaps) g[1] = (g[1] * k) / 1000n;
+    log(`gas: scaling top-ups to ${Number(k) / 10}% of plan to fit the deployer balance (re-run later to complete)`);
+  }
+  for (const [to, value, role] of gaps) {
+    const hash = await wallet.sendTransaction({ to, value });
+    await pub.waitForTransactionReceipt({ hash });
+    log(`  ${role.padEnd(14)} ${to} +${formatEther(value)} ETH`);
+  }
+}
+
 async function fundParticipants(d: Deployment) {
   const c = d.contracts;
+  // Idempotent: a partially completed launch can be re-run (only missing balances/stakes/bonds are added).
+  const balOf = (token: Address, who: Address) => read<bigint>(token, mockERC20Abi as Abi, "balanceOf", [who]);
   // USDC (devnet mock: open mint)
   const mints: Array<[LocalAccount, number]> = [
     [acct.sponsor, 2_000_000],
@@ -141,23 +199,35 @@ async function fundParticipants(d: Deployment) {
     [acct.t2, 100_000],
     [acct.t3, 100_000],
   ];
-  for (const [who, amount] of mints) await send(acct.deployer, c.usdc, mockERC20Abi as Abi, "mint", [who.address, usd(amount)]);
+  for (const [who, amount] of mints) {
+    if ((await balOf(c.usdc, who.address)) < usd(amount)) await send(acct.deployer, c.usdc, mockERC20Abi as Abi, "mint", [who.address, usd(amount)]);
+  }
   // BKRN from the deployer's allocations to committee members and the agent operator
   const bk = 10n ** 18n;
-  for (const who of [acct.c0, acct.c1, acct.c2]) await send(acct.deployer, c.bkrn, bkrnTokenAbi as Abi, "transfer", [who.address, 300_000n * bk]);
-  await send(acct.deployer, c.bkrn, bkrnTokenAbi as Abi, "transfer", [acct.operator.address, 300_000n * bk]);
+  const stakedOf = (who: Address) => read<bigint>(c.staking, bkrnStakingAbi as Abi, "stakedOf", [who]);
+  for (const who of [acct.c0, acct.c1, acct.c2, acct.operator]) {
+    const have = (await balOf(c.bkrn, who.address)) + (await stakedOf(who.address));
+    if (have < 300_000n * bk) await send(acct.deployer, c.bkrn, bkrnTokenAbi as Abi, "transfer", [who.address, 300_000n * bk - have]);
+  }
 
   // staking: sponsor bonds (3 charters), committee bonds, operator tier bonds (3 desk keys)
   const stakeAll = async (who: LocalAccount, amount: bigint) => {
-    await send(who, c.bkrn, bkrnTokenAbi as Abi, "approve", [c.staking, amount]);
-    await send(who, c.staking, bkrnStakingAbi as Abi, "stake", [amount]);
+    const missing = amount - (await stakedOf(who.address));
+    if (missing <= 0n) return;
+    await send(who, c.bkrn, bkrnTokenAbi as Abi, "approve", [c.staking, missing]);
+    await send(who, c.staking, bkrnStakingAbi as Abi, "stake", [missing]);
   };
   await stakeAll(acct.sponsor, 1_000_000n * bk);
   for (const who of [acct.c0, acct.c1, acct.c2]) {
     await stakeAll(who, 300_000n * bk);
-    await send(who, c.committee, riskCommitteeAbi as Abi, "bond");
+    if (!(await read<boolean>(c.committee, riskCommitteeAbi as Abi, "isBonded", [who.address]))) await send(who, c.committee, riskCommitteeAbi as Abi, "bond");
   }
   await stakeAll(acct.operator, 300_000n * bk);
+  if (USER_WALLET) {
+    if ((await balOf(c.usdc, USER_WALLET)) < usd(1_000_000)) await send(acct.deployer, c.usdc, mockERC20Abi as Abi, "mint", [USER_WALLET, usd(1_000_000)]);
+    if ((await balOf(c.bkrn, USER_WALLET)) < 1_000_000n * bk) await send(acct.deployer, c.bkrn, bkrnTokenAbi as Abi, "transfer", [USER_WALLET, 1_000_000n * bk]);
+    log(`user wallet ${USER_WALLET}: +1,000,000 test USDC, +1,000,000 BKRN`);
+  }
   log("participants funded, staked and committee bonded");
 }
 
@@ -261,6 +331,8 @@ async function main() {
     },
   ];
 
+  log(`network: chain ${CHAIN_ID} via ${RPC}`);
+  await fundGas();
   await fundParticipants(d);
   const books = [];
   for (const s of specs) books.push(await launchBook(d, s));

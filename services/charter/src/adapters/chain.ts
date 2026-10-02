@@ -210,7 +210,8 @@ export class CharterChain {
         return { mode: "configured", usd: BigInt(i) * 10n ** 6n + BigInt((f + "000000").slice(0, 6)) };
       }
     }
-    return this.opts.chainId === 31337 ? { mode: "devnet_mock", usd: null } : { mode: "unknown", usd: null };
+    // devnet and testnet books hedge in the protocol's own mock Stock Tokens via the mock router
+    return this.opts.chainId === 31337 || this.opts.chainId === 46630 ? { mode: "devnet_mock", usd: null } : { mode: "unknown", usd: null };
   }
 
   async ruleContext(ch: Charter, nowSec = Math.floor(Date.now() / 1000)): Promise<RuleContext> {

@@ -30,11 +30,14 @@ import {MockSwapRouter} from "../src/mocks/MockSwapRouter.sol";
 import {IAttestedOracle} from "../src/interfaces/IAttestedOracle.sol";
 import {IStockTokenRegistry} from "../src/interfaces/IStockTokenRegistry.sol";
 
-/// @title Deploy — devnet (anvil 31337) deployment of the full Bookrunner core.
+/// @title Deploy — devnet (anvil 31337) and Robinhood Chain TESTNET (46630) deployment of the Bookrunner core.
 /// @notice Mainnet (RHC 4663) deployment is NOT done by this script: see docs/RUNBOOK.md (TimelockController
 ///         48h, multisig admin, VERIFY register). Role keys are derived from DEV_MNEMONIC by the indices in
-///         packages/shared/src/devkeys.ts. Writes deployments/31337.json (shape: shared Deployment type);
-///         scripts/launch-devnet.ts then charters the launch books and fills `books`.
+///         packages/shared/src/devkeys.ts (testnet: the locally generated BKRN_TESTNET_MNEMONIC, passed in as
+///         DEV_MNEMONIC; the public anvil mnemonic is refused). Testnet uses the same protocol-owned mocks as
+///         devnet for USDC, Stock Tokens, the swap router and the Orderly vault (real venue/token integration
+///         needs an Orderly builder account and canonical Stock Tokens — see docs/VERIFY.md).
+///         Writes deployments/<chainId>.json; scripts/launch-devnet.ts then charters the launch books.
 ///
 ///   PRIVATE_KEY=<anvil #0> bash scripts/forge.sh script script/Deploy.s.sol:Deploy \
 ///       --rpc-url http://host.docker.internal:8547 --broadcast
@@ -81,9 +84,15 @@ contract Deploy is Script {
     uint256 internal startBlock;
 
     function run() external {
-        require(block.chainid == 31337, "Deploy.s.sol is devnet-only; mainnet: docs/RUNBOOK.md");
-        uint256 deployerKey = vm.envUint("PRIVATE_KEY");
+        bool testnet = block.chainid == 46630;
+        require(
+            block.chainid == 31337 || (testnet && keccak256(bytes(vm.envOr("NETWORK", string("")))) == keccak256("testnet")),
+            "Deploy.s.sol: devnet (31337) or NETWORK=testnet on 46630 only; mainnet: docs/RUNBOOK.md"
+        );
         string memory mnemonic = vm.envOr("DEV_MNEMONIC", DEFAULT_MNEMONIC);
+        if (testnet) require(keccak256(bytes(mnemonic)) != keccak256(bytes(DEFAULT_MNEMONIC)), "public mnemonic on testnet");
+        uint256 deployerKey = vm.envOr("PRIVATE_KEY", uint256(0));
+        if (deployerKey == 0) deployerKey = vm.deriveKey(mnemonic, 0);
         uint32 markInterval = uint32(vm.envOr("MARK_INTERVAL_SECONDS", uint256(300)));
         _roles(deployerKey, mnemonic);
         startBlock = block.number;
@@ -105,6 +114,9 @@ contract Deploy is Script {
         _registerImplementations();
         _grantRoles();
         _setupStockTokens();
+        // ERC-4337 EntryPoint v0.7 (canonical address) where deployed — RHC testnet has it (verified)
+        address ep = 0x0000000071727De22E5E9d8BAf0edAc6f37da032;
+        if (ep.code.length > 0) config.setAddress("entryPoint", ep);
         vm.stopBroadcast();
 
         _writeDeployment();
@@ -291,6 +303,8 @@ contract Deploy is Script {
         vm.serializeAddress(c, "poolEngine", address(poolEngine));
         vm.serializeAddress(c, "hedgeExecutor", address(hedgeExecutor));
         vm.serializeAddress(c, "orderlyVault", address(orderlyVault));
+        address ep = 0x0000000071727De22E5E9d8BAf0edAc6f37da032;
+        if (ep.code.length > 0) vm.serializeAddress(c, "entryPoint", ep);
         string memory contractsJson = vm.serializeAddress(c, "swapRouter", address(swapRouter));
 
         string memory st = "stockTokens";
