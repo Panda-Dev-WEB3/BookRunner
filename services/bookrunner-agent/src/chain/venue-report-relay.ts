@@ -69,7 +69,10 @@ export function makeVenueReportRelay(d: VenueReportRelayDeps): VenueReportRelay 
         await d.pub.waitForTransactionReceipt({ hash });
         d.log.info({ tx: hash, asOf: Number(r.asOf), netExposureUsd: r.netExposureUsd.toString() }, "signed venue report relayed before hedge leg");
       } catch (err) {
-        d.log.warn({ err: (err as Error).message }, "venue report relay failed");
+        const msg = (err as Error).message;
+        // expected right after a capital flow (recall / fund): wait for ops-venue's next signed report
+        if (msg.includes("ReportPredatesFlow")) d.log.info("venue report predates the last capital flow: waiting for the next signed report");
+        else d.log.warn({ err: msg }, "venue report relay failed");
       }
     },
   };
