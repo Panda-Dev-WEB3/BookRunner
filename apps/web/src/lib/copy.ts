@@ -25,6 +25,13 @@ export const TRANCHE_COPY = {
  */
 export const SPLIT_LINE =
   "Senior receives a fixed share of each distribution after expenses and carry; Junior receives the rest plus any trading gains at the marks.";
+/**
+ * What "never a revenue claim" means (the copy rule, ARCHITECTURE §2.2): BkrnStaking.notifyReward
+ * does share carry-funded BKRN pro-rata, so the rule is explained as no claim on book USDC or fee
+ * flow, with buybacks that depend on a keeper and can be zero, never as "no fixed rate".
+ */
+export const REVENUE_CLAIM_LINE =
+  "Stakers have no claim on any book's USDC or fee flow. The protocol may distribute bought-back BKRN, which depends on a keeper running a buyback and can be zero.";
 export const AGENTS_LINE = "Bookrunner agents quote the book under its mandate.";
 export const BACKSTOP_LINE = "Backstop up to the pool: covers Senior impairment only once Junior is exhausted.";
 export const LIVE_VS_MARKED =

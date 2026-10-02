@@ -41,7 +41,7 @@ const ROLES: Role[] = [
     body: (
       <>
         <Term id="staking">Stake</Term> BKRN to post the bonds sponsors, committee members and agent operators need. Half of the protocol carry buys BKRN for stakers; the
-        other half funds the <Term id="backstop">backstop</Term>. Access and bonding, never a revenue claim.
+        other half funds the <Term id="backstop">backstop</Term>. Access and bonding, never a revenue claim: no claim on any book's USDC or fee flow.
       </>
     ),
     to: "/stake",

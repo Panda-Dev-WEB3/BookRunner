@@ -42,7 +42,8 @@ export function StakePage() {
         lead={
           <>
             Staked <Term id="bkrn">BKRN</Term> is the bond behind the protocol's roles: <Term id="sponsor">sponsors</Term>, Risk Committee members and larger agent operators lock part of their stake
-            to show they will play by the rules. Anyone can stake, and every staker shares the BKRN that the protocol buys back with half of its <Term id="carry">carry</Term>.
+            to show they will play by the rules. Anyone can stake. Stakers have no claim on any book's USDC or fee flow; when a keeper buys BKRN back with half of the{" "}
+            <Term id="carry">carry</Term>, the staking contract shares it across all stake, and that can be zero.
           </>
         }
         actions={

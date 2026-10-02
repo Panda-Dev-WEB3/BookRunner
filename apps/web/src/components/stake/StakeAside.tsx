@@ -1,5 +1,6 @@
 // Side column of the Stake page: a short "what staking is and is not", the testnet BKRN note, and
 // the contracts every figure is read from.
+import { REVENUE_CLAIM_LINE } from "../../lib/copy";
 import { config } from "../../lib/config";
 import { isTestChain } from "../../wallet/network";
 import { cx } from "../cx";
@@ -9,8 +10,8 @@ import type { StakingProtocol } from "./useStaking";
 
 const POINTS: Array<{ yes: boolean; title: string; body: string }> = [
   { yes: true, title: "Access and bonding", body: "Sponsors, committee members and larger agent operators lock staked BKRN as a bond for their role." },
-  { yes: true, title: "A share of buybacks", body: "Half of the protocol carry buys BKRN, shared across all stake in proportion." },
-  { yes: false, title: "Not a revenue claim", body: "There is no fixed rate. What stakers receive can be zero." },
+  { yes: true, title: "A share of any buyback", body: "When a keeper buys BKRN back with half of the protocol carry, the staking contract shares it across all stake in proportion." },
+  { yes: false, title: "Not a revenue claim", body: REVENUE_CLAIM_LINE },
   { yes: false, title: "Not the backstop", body: "Book losses use the USDC backstop pool, never staked BKRN." },
 ];
 

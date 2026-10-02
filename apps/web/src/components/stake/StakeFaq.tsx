@@ -22,7 +22,8 @@ export function StakeFaq({ cooldownSec }: { cooldownSec: number | null }) {
             BKRN.
           </p>
           <p className="mt-2">
-            Anyone can also stake without a role. Every staker shares the BKRN bought back with half of the protocol carry. It is access and bonding, never a revenue claim.
+            Anyone can also stake without a role. When a keeper buys BKRN back with half of the protocol carry, the staking contract shares it across all stake; how much depends on the
+            keeper and can be zero. It is access and bonding, never a revenue claim: stakers have no claim on any book's USDC or fee flow.
           </p>
         </>
       ),

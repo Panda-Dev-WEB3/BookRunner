@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { checkCopy } from "@bookrunner/shared/copy";
 import { checkSnippets, extractCopy, extractHtmlCopy } from "../scripts/copy-extract";
 import { checkApp } from "../scripts/check-copy";
-import { AGENTS_LINE, BACKSTOP_LINE, FEE_FLOW_LINE, LEGAL, LIVE_VS_MARKED, NOTICE_LINE, STRAPLINE, TAGLINE, TESTNET_MOCKS_LINE, TRANCHE_COPY, buybackWhere, venueDetail } from "../src/lib/copy";
+import { AGENTS_LINE, BACKSTOP_LINE, FEE_FLOW_LINE, LEGAL, LIVE_VS_MARKED, NOTICE_LINE, REVENUE_CLAIM_LINE, STRAPLINE, TAGLINE, TESTNET_MOCKS_LINE, TRANCHE_COPY, buybackWhere, venueDetail } from "../src/lib/copy";
 
 describe("extractCopy", () => {
   test("finds JSX text, attributes shown to readers, literals and template text", () => {
@@ -64,6 +64,10 @@ describe("canonical copy", () => {
     expect(TRANCHE_COPY.junior.line).toContain("Notice is not a gate");
     expect(LEGAL).toBe("Bookrunner is software; not a fund, adviser, broker or venue operator of record. Stock-perp books are not offered to US persons.");
     expect(TAGLINE).toBe("Run the book.");
+    // "never a revenue claim" is explained as no claim on book USDC, never as "no fixed rate" (notifyReward does share BKRN)
+    expect(REVENUE_CLAIM_LINE).toContain("no claim on any book's USDC or fee flow");
+    expect(REVENUE_CLAIM_LINE).toContain("can be zero");
+    expect(checkCopy(REVENUE_CLAIM_LINE)).toEqual([]);
   });
 });
 

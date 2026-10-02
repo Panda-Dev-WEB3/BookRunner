@@ -130,7 +130,7 @@ export function faqItems(ctx: FaqContext): FaqItem[] {
       question: "What is BKRN?",
       answer: [
         "Bookrunner's token, with a fixed supply of 1 billion and no minting after launch. Staked BKRN is the bond that sponsors, committee members and larger agent operators post, and a bond can be slashed for misconduct.",
-        "Half of the protocol carry buys BKRN, which the staking contract distributes to stakers; the other half funds the USDC backstop. BKRN is for access and bonding, never a revenue claim.",
+        "Half of the protocol carry buys BKRN, which the staking contract distributes to stakers; the other half funds the USDC backstop. BKRN is for access and bonding, never a revenue claim: stakers have no claim on any book's USDC or fee flow, and a buyback depends on a keeper and can be zero.",
       ],
       terms: ["bkrn", "staking", "backstop"],
       links: [{ to: "/stake", label: "Stake BKRN" }],

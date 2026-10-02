@@ -196,7 +196,7 @@ const entries: GlossaryEntry[] = [
     id: "bkrn",
     term: "BKRN",
     short: "Bookrunner's token, with a fixed supply of 1 billion and no minting after launch. Sponsors, committee members and larger agent operators stake it as a bond.",
-    long: "Access and bonding, never a revenue claim. Half of the protocol carry buys BKRN through a swap router (on testnet, a protocol-owned mock at a fixed price), which is then distributed through the staking contract.",
+    long: "Access and bonding, never a revenue claim. Half of the protocol carry buys BKRN through a swap router (on testnet, a protocol-owned mock at a fixed price), which is then distributed through the staking contract. Stakers have no claim on any book's USDC or fee flow, and a buyback depends on a keeper and can be zero.",
     related: ["staking", "carry"],
   },
   {
