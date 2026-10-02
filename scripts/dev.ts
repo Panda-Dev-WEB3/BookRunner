@@ -18,21 +18,28 @@ const only = args.filter((a) => !a.startsWith("--"));
 const noSim = args.includes("--no-sim");
 
 const env: Record<string, string> = { ...(process.env as Record<string, string>) };
-function loadEnvFile(file: string, override: boolean) {
+/** Loads KEY=VALUE lines; returns the keys it defined (null when the file is missing). */
+function loadEnvFile(file: string, override: boolean): Set<string> | null {
   const path = resolve(ROOT, file);
-  if (!existsSync(path)) return false;
+  if (!existsSync(path)) return null;
+  const keys = new Set<string>();
   for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
     const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
-    if (m && !line.trim().startsWith("#") && (override || env[m[1]!] === undefined)) env[m[1]!] = m[2]!.replace(/^["']|["']$/g, "");
+    if (m && !line.trim().startsWith("#") && (override || env[m[1]!] === undefined)) {
+      env[m[1]!] = m[2]!.replace(/^["']|["']$/g, "");
+      keys.add(m[1]!);
+    }
   }
-  return true;
+  return keys;
 }
 
 if (network === "testnet") {
   // Robinhood Chain testnet profile. Secrets (BKRN_TESTNET_MNEMONIC, optional RHC_TESTNET_RPC_URL,
   // ANTHROPIC_API_KEY) live in .env.testnet (gitignored). Separate DB / Redis db / state files so the
   // devnet stack's data is never mixed with testnet data.
-  if (!loadEnvFile(".env.testnet", true)) {
+  // NB: bun auto-loads the repo .env (devnet values) into process.env — this profile must OVERRIDE them.
+  const testnetKeys = loadEnvFile(".env.testnet", true);
+  if (!testnetKeys) {
     console.error("[dev] .env.testnet missing — run `bash scripts/deploy-testnet.sh` first");
     process.exit(1);
   }
@@ -43,24 +50,38 @@ if (network === "testnet") {
     DEPLOYMENT_FILE: "contracts/deployments/46630.json",
     DATABASE_URL: "postgres://bookrunner:bookrunner@127.0.0.1:54400/bookrunner_testnet",
     REDIS_URL: "redis://127.0.0.1:63790/1",
-    MARK_INTERVAL_SECONDS: "300",
-    RECEIPTS_INTERVAL_SECONDS: "60",
+    // LOW-GAS profile (~0.004 ETH/day for 3 books at 0.01 gwei). MARK_INTERVAL must equal the on-chain
+    // markInterval set at deploy (scripts/deploy-testnet.sh uses the same 3600).
+    MARK_INTERVAL_SECONDS: "3600",
+    RECEIPTS_INTERVAL_SECONDS: "300",
     SESSIONS_MODE: "24x7",
     ORDERLY_MODE: "mock",
-    // public RPC: fewer, larger calls
-    ORACLE_PUSH_INTERVAL_MS: "15000",
+    // oracle: heartbeat below the on-chain maxPriceAge (300 s) + deviation pushes only
+    ORACLE_PUSH_INTERVAL_MS: "180000",
     ORACLE_PUSH_DEVIATION_BPS: "50",
     ORACLE_TICK_MS: "2000",
     RISK_INTERVAL_MS: "5000",
-    OPS_REPORT_INTERVAL_MS: "30000",
+    OPS_REPORT_INTERVAL_MS: "300000",
     OPS_LOG_POLL_MS: "5000",
+    // in-house quote: re-send at most once a minute, only on meaningful changes
+    ENGINE_MIN_RESEND_MS: "60000",
+    ENGINE_REFRESH_MS: "900000",
+    ENGINE_SPREAD_THRESHOLD_BPS: "5",
+    ENGINE_SKEW_THRESHOLD_BPS: "5",
+    // simulated takers (demo activity; traders pay their own gas)
+    TRADER_SIM_TRADES_PER_MIN: "1",
     INDEXER_CONFIRMATIONS: "0",
     // separate local state
     MOCK_ORDERLY_SNAPSHOT_FILE: ".data/testnet/mock-orderly.json",
     OPS_KEYS_DIR: ".data/testnet/keys",
     OPS_SAGA_FILE: ".data/testnet/ops-venue/sagas.json",
   };
-  for (const [k, v] of Object.entries(t)) if (env[k] === undefined || k === "CHAIN_ID" || k === "DEPLOYMENT_FILE") env[k] = v;
+  // testnet defaults win over anything inherited; only keys set explicitly in .env.testnet override them
+  for (const [k, v] of Object.entries(t)) if (!testnetKeys.has(k) || k === "CHAIN_ID" || k === "DEPLOYMENT_FILE") env[k] = v;
+  if (/127\.0\.0\.1|localhost/.test(env.RPC_URL ?? "") || (env.DATABASE_URL ?? "").endsWith("/bookrunner")) {
+    console.error(`[dev] refusing: testnet profile resolved to a local RPC or the devnet DB (${env.RPC_URL}, ${env.DATABASE_URL})`);
+    process.exit(1);
+  }
   console.log(`[dev] network: Robinhood Chain testnet (46630) via ${env.RPC_URL}`);
 }
 loadEnvFile(".env", false);
@@ -93,7 +114,7 @@ add(svc("receipts"));
 add(svc("waterfall"));
 add(svc("mark"));
 add(svc("api"));
-add(svc("web", "apps/web", "dev"));
+add(svc("web", "apps/web", network === "testnet" ? "dev:testnet" : "dev"));
 
 const depPath = resolve(ROOT, env.DEPLOYMENT_FILE);
 const agentDir = resolve(ROOT, "services/bookrunner-agent");

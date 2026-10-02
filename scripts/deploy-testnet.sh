@@ -42,8 +42,18 @@ echo "==> forge build"
 bash scripts/forge.sh build >/dev/null
 
 echo "==> Deploy.s.sol -> testnet"
-DEV_MNEMONIC="$BKRN_TESTNET_MNEMONIC" NETWORK=testnet MARK_INTERVAL_SECONDS="${MARK_INTERVAL_SECONDS:-300}" \
+DEV_MNEMONIC="$BKRN_TESTNET_MNEMONIC" NETWORK=testnet MARK_INTERVAL_SECONDS="${MARK_INTERVAL_SECONDS:-3600}" \
   bash scripts/forge.sh script script/Deploy.s.sol:Deploy --rpc-url "$FORGE_RPC" --broadcast --slow -q
+
+echo "==> verify on-chain (a partial broadcast must never pass silently)"
+CFG=$(node -e 'console.log(require("./contracts/deployments/46630.json").contracts.config)')
+REG=$(node -e 'console.log(require("./contracts/deployments/46630.json").contracts.stockRegistry)')
+FAC=$(node -e 'console.log(require("./contracts/deployments/46630.json").contracts.factory)')
+[ "$(cast code "$CFG" --rpc-url "$RPC" | wc -c)" -gt 10 ] || { echo "config has no code at $CFG"; exit 4; }
+NTOK=$(cast call "$REG" "tokens()(address[])" --rpc-url "$RPC" | tr ',' '\n' | grep -c 0x)
+[ "$NTOK" -ge 5 ] || { echo "stock registry has $NTOK tokens (expected 5) — broadcast incomplete"; exit 4; }
+[ "$(cast call "$FAC" "implementation(bytes32)(address)" "$(cast --format-bytes32-string BOOK)" --rpc-url "$RPC")" != "0x0000000000000000000000000000000000000000" ] || { echo "factory implementations not set"; exit 4; }
+echo "    ok: config, 5 stock tokens, factory implementations"
 
 echo "==> ABIs"
 "$BUN" scripts/gen-abi.ts >/dev/null

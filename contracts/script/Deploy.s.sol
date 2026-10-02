@@ -178,7 +178,7 @@ contract Deploy is Script {
         keys[0] = "markInterval";
         vals[0] = markInterval;
         keys[1] = "maxMarkAge";
-        vals[1] = 3600;
+        vals[1] = markInterval * 2 > 3600 ? uint256(markInterval) * 2 : 3600;
         keys[2] = "committeeWindow";
         vals[2] = 172_800;
         config.setParams(keys, vals);
