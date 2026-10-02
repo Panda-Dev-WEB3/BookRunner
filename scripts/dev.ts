@@ -70,10 +70,10 @@ if (network === "testnet") {
     OPS_REPORT_INTERVAL_MS: "60000",
     OPS_LOG_POLL_MS: "5000",
     // in-house quote: re-send at most once a minute, only on meaningful changes
-    ENGINE_MIN_RESEND_MS: "60000",
+    ENGINE_MIN_RESEND_MS: "300000", // quote = spread/skew around the price each trade carries: 5 min is plenty
     ENGINE_REFRESH_MS: "900000",
-    ENGINE_SPREAD_THRESHOLD_BPS: "5",
-    ENGINE_SKEW_THRESHOLD_BPS: "5",
+    ENGINE_SPREAD_THRESHOLD_BPS: "10",
+    ENGINE_SKEW_THRESHOLD_BPS: "10",
     // simulated takers (demo activity; traders pay their own gas)
     TRADER_SIM_TRADES_PER_MIN: "1",
     INDEXER_CONFIRMATIONS: "0",
