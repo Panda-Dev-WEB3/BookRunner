@@ -9,7 +9,7 @@ import { getConnection, sendTransaction, switchChain, waitForTransactionReceipt 
 import { useHealth } from "../api/hooks";
 import type { PreparedTx } from "../lib/api-types";
 import { config } from "../lib/config";
-import { DEVNET_CHAIN_ID, devEntry, isDevRole } from "../lib/devwallet";
+import { DEVNET_CHAIN_ID, devEntry, effectiveMode, isDevRole } from "../lib/devwallet";
 import { errText, isUserRejection } from "../lib/txflow";
 import type { TxExecutor } from "../lib/txflow";
 import { revertReason } from "../lib/revert";
@@ -175,6 +175,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (mode !== "dev" || !role || !devAvailable) {
       setDevAddr(null);
+      setDeriving(false); // never leave the wallet button on "Loading wallet…"
       return;
     }
     setDeriving(true);
@@ -184,7 +185,10 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       setDevAddr(dev.devAddress(role));
       setDeriving(false);
     }, 0);
-    return () => clearTimeout(id);
+    return () => {
+      clearTimeout(id);
+      setDeriving(false);
+    };
   }, [mode, role, devAvailable, dev]);
 
   const selectDev = useCallback((r: DevRole) => setSel({ mode: "dev", role: r }), []);
@@ -261,10 +265,11 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   }, [conn.connector, injectedConnector]);
 
   const active = useMemo<ActiveWallet | null>(() => {
-    if (mode === "dev" && devAvailable && role && devAddr) {
+    const m = effectiveMode(mode, devAvailable);
+    if (m === "dev" && role && devAddr) {
       return { kind: "dev", address: devAddr, label: devEntry(role)?.label ?? role, icon: null, connectorType: "dev", devRole: role, chainId: DEVNET_CHAIN_ID };
     }
-    if (mode !== "dev" && conn.isConnected && conn.address) {
+    if (m !== "dev" && conn.isConnected && conn.address) {
       return {
         kind: "injected",
         address: conn.address,

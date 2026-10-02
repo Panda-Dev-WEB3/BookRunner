@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { DEV_MNEMONIC, DEV_ROLE_INDEX } from "@bookrunner/shared/devkeys";
 import { DEV_MNEMONIC_MARK, filesWithDevKeys, isDevnetBuild } from "../scripts/bundle-check";
 import { devAddress, devRoleOf } from "../src/lib/devsigner";
-import { DEVNET_CHAIN_ID, DEV_GROUPS, DEV_WALLETS, devEntry, isDevRole } from "../src/lib/devwallet";
+import { DEVNET_CHAIN_ID, DEV_GROUPS, DEV_WALLETS, devEntry, effectiveMode, isDevRole } from "../src/lib/devwallet";
 
 describe("dev wallets (devnet only)", () => {
   test("every listed role is a real devkeys role in a known group", () => {
@@ -38,5 +38,14 @@ describe("dev keys never ship outside devnet (scripts/bundle-check.ts, used by v
     ];
     expect(filesWithDevKeys(files)).toEqual(["assets/devsigner.js"]);
     expect(DEV_MNEMONIC).toContain(DEV_MNEMONIC_MARK);
+  });
+});
+
+describe("stored wallet mode", () => {
+  test("a stored 'dev' choice only applies while dev wallets are available (shared 127.0.0.1:5180 storage)", () => {
+    expect(effectiveMode("dev", true)).toBe("dev");
+    expect(effectiveMode("dev", false)).toBeNull(); // testnet build, or an API on another chain: the browser wallet shows
+    expect(effectiveMode("injected", false)).toBe("injected");
+    expect(effectiveMode(null, true)).toBeNull();
   });
 });

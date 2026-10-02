@@ -39,3 +39,12 @@ const LISTED = new Set<string>(DEV_WALLETS.map((w) => w.role));
 export const isDevRole = (s: string | null | undefined): s is DevRole => !!s && LISTED.has(s);
 
 export const devEntry = (role: DevRole): DevWalletEntry | undefined => DEV_WALLETS.find((w) => w.role === role);
+
+/**
+ * The wallet mode that applies now. A stored "dev" choice only counts while dev wallets are
+ * available: the devnet and testnet dev servers share 127.0.0.1:5180 (and its storage), so a "dev"
+ * choice made on devnet must not hide a browser wallet that wagmi reconnected on testnet.
+ */
+export function effectiveMode<M extends "dev" | "injected" | null>(mode: M, devAvailable: boolean): M | null {
+  return mode === "dev" && !devAvailable ? null : mode;
+}
