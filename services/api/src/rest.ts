@@ -70,6 +70,10 @@ export function restRoutes(deps: ApiDeps, opts: { origins?: readonly string[] } 
   r.get("/books/:id/marks", (c) => run(c, (k) => k.book.marks(raw({ ...q(c), bookId: id(c) }))));
   r.get("/books/:id/risk", (c) => run(c, (k) => k.risk.state(raw({ bookId: id(c) }))));
   r.get("/books/:id/settlements", (c) => run(c, (k) => k.settlements.list(raw({ ...q(c), bookId: id(c) }))));
+  // activity feeds (newest first; ?limit=1..200, ?cursor=<nextCursor>; receipts also ?kind=fill|hedge|quote|decision|0..3)
+  r.get("/books/:id/fills", (c) => run(c, (k) => k.book.fills(raw({ ...q(c), bookId: id(c) }))));
+  r.get("/books/:id/hedges", (c) => run(c, (k) => k.book.hedges(raw({ ...q(c), bookId: id(c) }))));
+  r.get("/books/:id/receipts", (c) => run(c, (k) => k.receipts.list(raw({ ...q(c), bookId: id(c) }))));
   // ops-venue's latest signed venue report (LOW_GAS §2; relayed in the book's mark tx)
   r.get("/books/:id/venue-report", (c) => run(c, (k) => k.book.venueReport(raw({ bookId: id(c) }))));
 

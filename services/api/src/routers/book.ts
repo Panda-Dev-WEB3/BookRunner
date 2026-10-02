@@ -1,6 +1,9 @@
 import { BOOK_STATE } from "@bookrunner/shared/types";
 import { KEYS } from "@bookrunner/shared/queues";
 import { z } from "zod";
+import type { ReceiptLinkField } from "../data/types";
+import type { ApiDeps } from "../deps";
+import { decodeFillCursor, encodeFillCursor, fillView, hedgeView, linkKinds, receiptIdsFor } from "../domain/activity";
 import { mandateToView } from "../domain/charter";
 import { parseQuote, parseRiskState } from "../domain/live";
 import { ORACLE_BUNDLE_KEY, markSchedule, signedBundleView, venueReportKey, venueReportView } from "../domain/lowgas";
@@ -44,6 +47,36 @@ export function bookPriceId(symbol: string, riskMeta?: Record<string, unknown> |
 }
 
 const MARKABLE = new Set(["Live", "Retiring"]);
+
+/** Fills keyset cursor: the `nextCursor` of the previous page ("<unix ms>:<venueTradeId>"). */
+const fillCursorInput = z
+  .string()
+  .max(512)
+  .transform((v, ctx) => {
+    const c = decodeFillCursor(v);
+    if (!c) {
+      ctx.addIssue({ code: "custom", message: "invalid cursor (pass the nextCursor of the previous page)" });
+      return z.NEVER;
+    }
+    return c;
+  })
+  .optional();
+
+/** Receipt ids of feed rows; a failed lookup only drops the Verify links, never the feed. */
+async function softReceiptIds(
+  deps: ApiDeps,
+  bookId: number,
+  kind: number,
+  field: ReceiptLinkField,
+  rows: Array<{ ts: Date; value: string }>,
+): Promise<Map<string, number>> {
+  try {
+    return await receiptIdsFor(deps.data, bookId, kind, field, rows, deps.settings.receiptsIntervalSeconds);
+  } catch (err) {
+    deps.log.warn({ err, what: `receipt links (${field})` }, "receipt link lookup failed; serving the feed without receipt ids");
+    return new Map();
+  }
+}
 
 export const bookRouter = router({
   list: publicProcedure.query(async ({ ctx: { deps } }) => {
@@ -183,6 +216,32 @@ export const bookRouter = router({
         series: series.map((s) => ({ ...s, bucket: s.bucket.toISOString() })),
         mandate: charter ? mandateToView(charter.mandate) : null,
       };
+    }),
+
+  /** Venue fills of the book (fills table), newest first, each linked to its fill receipt. */
+  fills: publicProcedure
+    .input(z.object({ bookId: bookIdInput, limit: limitInput(50, 200), cursor: fillCursorInput }))
+    .query(async ({ ctx: { deps }, input }) => {
+      const b = await loadBook(deps, input.bookId);
+      const rows = await deps.data.listFills(b.id, { limit: input.limit, before: input.cursor });
+      const ids = await softReceiptIds(deps, b.id, linkKinds.fill, "venueTradeId", rows.map((r) => ({ ts: r.ts, value: r.venueTradeId })));
+      const last = rows[rows.length - 1];
+      return {
+        bookId: b.id,
+        items: rows.map((r) => fillView(r, ids.get(r.venueTradeId) ?? null)),
+        nextCursor: rows.length === input.limit && last ? encodeFillCursor(last) : null,
+      };
+    }),
+
+  /** Desk hedges of the book (hedges table), newest first, each linked to its hedge receipt. */
+  hedges: publicProcedure
+    .input(z.object({ bookId: bookIdInput, limit: limitInput(50, 200), cursor: cursorInput }))
+    .query(async ({ ctx: { deps }, input }) => {
+      const b = await loadBook(deps, input.bookId);
+      const rows = await deps.data.listHedges(b.id, { limit: input.limit, beforeId: input.cursor });
+      const ids = await softReceiptIds(deps, b.id, linkKinds.hedge, "txHash", rows.map((r) => ({ ts: r.ts, value: r.txHash })));
+      const items = rows.map((r) => hedgeView(r, ids.get(r.txHash.toLowerCase()) ?? null));
+      return { ...paged(items, input.limit, (i) => i.id), bookId: b.id };
     }),
 
   marks: publicProcedure

@@ -2,6 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import { procedureListed } from "../src/api/hooks";
 import { describeError, errorCode, isMissingProcedure, zodIssueText } from "../src/lib/errors";
+import type { FillsOut, HedgesOut, ReceiptListOut } from "../src/lib/api-types";
 import { hedgeQty, parseFills, parseHedges, parseReceipts } from "../src/lib/feeds";
 import { jurorLabel, parseVerdict, seatLabel } from "../src/lib/jury";
 import { markStatements, parseMarkStatement, wadToNumber } from "../src/lib/markStatement";
@@ -33,6 +34,35 @@ describe("feeds", () => {
       [9, "quote"],
       [3, "fill"],
     ]);
+  });
+});
+
+describe("feeds: the API's own output shapes (typed from the router)", () => {
+  test("book.fills / book.hedges / receipts.list pages parse with every field kept", () => {
+    const fills: FillsOut = {
+      bookId: 1,
+      nextCursor: "1790920800000:t-2",
+      items: [
+        { ts: "2026-10-02T06:00:00.000Z", side: "sell", qty: 2, px: 190.5, feeUsd: 0.04, venueTradeId: "t-2", maker: false, trader: null, receiptId: 901 },
+        { ts: "2026-10-02T06:01:00.000Z", side: "buy", qty: 1, px: 190.4, feeUsd: 0.02, venueTradeId: "t-3", maker: true, trader: "0xabc", receiptId: null },
+      ],
+    };
+    expect(parseFills(fills)).toEqual([
+      { ts: "2026-10-02T06:01:00.000Z", side: "buy", qty: 1, px: 190.4, feeUsd: 0.02, venueTradeId: "t-3", maker: true, trader: "0xabc", receiptId: null },
+      { ts: "2026-10-02T06:00:00.000Z", side: "sell", qty: 2, px: 190.5, feeUsd: 0.04, venueTradeId: "t-2", maker: false, trader: null, receiptId: 901 },
+    ]);
+    const hedges: HedgesOut = {
+      bookId: 1,
+      nextCursor: null,
+      items: [{ id: 4, ts: "2026-10-02T06:00:00.000Z", asset: "0x1001", qtyRaw: "-1000000000000000000", px: 190.4, mult: 1, venue: "UNIV3", valueUsd: "190.400000", txHash: "0xaa", receiptId: 903 }],
+    };
+    expect(parseHedges(hedges)).toEqual([{ id: 4, ts: "2026-10-02T06:00:00.000Z", asset: "0x1001", qtyRaw: "-1000000000000000000", px: 190.4, mult: 1, venue: "UNIV3", valueUsd: "190.400000", txHash: "0xaa", receiptId: 903 }]);
+    const receipts: ReceiptListOut = {
+      bookId: 1,
+      nextCursor: 900,
+      items: [{ id: 903, bookId: 1, kind: 2, kindName: "hedge", ts: "2026-10-02T06:00:01.000Z", hourStart: "2026-10-02T06:00:00.000Z", payloadHash: "0x11" }],
+    };
+    expect(parseReceipts(receipts)).toEqual([{ id: 903, kind: 2, kindName: "hedge", ts: "2026-10-02T06:00:01.000Z", hourStart: "2026-10-02T06:00:00.000Z", payloadHash: "0x11" }]);
   });
 });
 

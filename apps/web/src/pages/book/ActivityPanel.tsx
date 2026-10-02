@@ -1,10 +1,11 @@
-// Fills and hedges. Row feeds come from book.fills / book.hedges when the API serves them; until it
-// does, each tab falls back to the venue / desk state signed into every mark's PnL statement (the
-// same data the mark commits to), so the panel always shows real, verifiable activity.
+// Fills and hedges. Row feeds come from book.fills / book.hedges. When the API does not serve them
+// (an older version) or the feed request fails, each tab falls back to the venue / desk state signed
+// into every mark's PnL statement (the same data the mark commits to), so the panel always shows
+// real, verifiable activity.
 import { useMemo, useState } from "react";
 import { useOptional, useQueryError } from "../../api/hooks";
 import { POLL } from "../../api/trpc";
-import { EmptyState, ErrorState, Hash, Panel, Segmented, SkeletonRows, Table, Td, Th, ValueKind } from "../../components/ui";
+import { EmptyState, Hash, Panel, Segmented, SkeletonRows, Table, Td, Th, ValueKind } from "../../components/ui";
 import type { MarkItem } from "../../lib/api-types";
 import { hedgeQty, parseFills, parseHedges } from "../../lib/feeds";
 import { DASH, fmtDateTime, fmtNum, fmtPrice, fmtTime, fmtUsd, fmtUsdFloat, shortHex } from "../../lib/format";
@@ -23,11 +24,20 @@ function More({ shown, total, onMore }: { shown: number; total: number; onMore: 
   );
 }
 
-function FallbackNote({ what }: { what: string }) {
+function FallbackNote({ what, failed, onRetry }: { what: string; failed: boolean; onRetry: () => void }) {
+  const instead = `showing the ${what === "fills" ? "venue" : "desk"} state signed into each mark's PnL statement instead.`;
   return (
     <p className="mb-2 text-[11.5px] text-muted">
-      This API version does not serve the {what} feed yet; showing the {what === "fills" ? "venue" : "desk"} state signed into each mark&apos;s PnL statement instead. Every fill and
-      hedge is still a receipt leaf, verifiable below.
+      {failed ? `The ${what} feed could not be loaded; ${instead}` : `This API version does not serve the ${what} feed yet; ${instead}`} Every fill and hedge is still a
+      receipt leaf, verifiable below.
+      {failed && (
+        <>
+          {" "}
+          <button type="button" className="link" onClick={onRetry}>
+            Retry
+          </button>
+        </>
+      )}
     </p>
   );
 }
@@ -158,7 +168,9 @@ export function ActivityPanel({ bookId, marks, onVerify }: { bookId: number; mar
   const statements = useMemo(() => markStatements(marks), [marks]);
   const q = tab === "fills" ? fills : hedges;
   const error = useQueryError(q);
-  const fallback = q.data?.supported === false;
+  // a failed feed (no rows yet) degrades to the signed per-mark view instead of an error box
+  const failed = q.data === undefined && error != null;
+  const fallback = q.data?.supported === false || failed;
 
   return (
     <Panel
@@ -180,15 +192,11 @@ export function ActivityPanel({ bookId, marks, onVerify }: { bookId: number; mar
         </div>
       }
     >
-      {q.data === undefined ? (
-        error ? (
-          <ErrorState compact error={error} onRetry={() => q.refetch()} />
-        ) : (
-          <SkeletonRows rows={3} />
-        )
+      {q.data === undefined && !failed ? (
+        <SkeletonRows rows={3} />
       ) : fallback ? (
         <>
-          <FallbackNote what={tab} />
+          <FallbackNote what={tab} failed={failed} onRetry={() => q.refetch()} />
           {tab === "fills" ? <VenueByMark rows={statements} /> : <DeskByMark rows={statements} />}
         </>
       ) : tab === "fills" ? (

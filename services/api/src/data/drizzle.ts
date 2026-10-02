@@ -7,6 +7,8 @@ import {
   charters,
   committee,
   events,
+  fills,
+  hedges,
   juryVerdicts,
   killEvents,
   limits,
@@ -23,12 +25,14 @@ import { and, asc, desc, eq, gt, gte, inArray, lt, lte, sql } from "drizzle-orm"
 import type {
   DeliveryUpdate,
   EventRow,
+  FillCursor,
   LimitsBucket,
   LimitsRow,
   NewWebhookSubscription,
   OraclePriceRow,
   Page,
   ReadModel,
+  ReceiptLinkField,
   WebhookStore,
   WebhookSubscriptionPatch,
 } from "./types";
@@ -189,6 +193,63 @@ export class DrizzleReadModel implements ReadModel {
       .where(and(...conds))
       .orderBy(desc(settlements.id))
       .limit(q.limit);
+  }
+
+  listFills(bookId: number, q: { limit: number; before?: FillCursor }) {
+    const conds = [
+      eq(fills.bookId, bookId),
+      q.before ? sql`(${fills.ts}, ${fills.venueTradeId}) < (${q.before.ts.toISOString()}::timestamptz, ${q.before.venueTradeId})` : undefined,
+    ].filter((c) => c !== undefined);
+    return this.db
+      .select()
+      .from(fills)
+      .where(and(...conds))
+      .orderBy(desc(fills.ts), desc(fills.venueTradeId))
+      .limit(q.limit);
+  }
+
+  listHedges(bookId: number, q: Page) {
+    const conds = [eq(hedges.bookId, bookId), q.beforeId !== undefined ? lt(hedges.id, q.beforeId) : undefined].filter((c) => c !== undefined);
+    return this.db
+      .select()
+      .from(hedges)
+      .where(and(...conds))
+      .orderBy(desc(hedges.id))
+      .limit(q.limit);
+  }
+
+  listReceipts(bookId: number, q: Page & { kind?: number }) {
+    const conds = [
+      eq(receipts.bookId, bookId),
+      q.kind !== undefined ? eq(receipts.kind, q.kind) : undefined,
+      q.beforeId !== undefined ? lt(receipts.id, q.beforeId) : undefined,
+    ].filter((c) => c !== undefined);
+    return this.db
+      .select()
+      .from(receipts)
+      .where(and(...conds))
+      .orderBy(desc(receipts.id))
+      .limit(q.limit);
+  }
+
+  async receiptLinks(bookId: number, kind: number, field: ReceiptLinkField, values: string[], from: Date, to: Date) {
+    if (values.length === 0) return [];
+    const ci = field === "txHash";
+    const value = ci ? sql<string>`lower(${receipts.payload} ->> ${field})` : sql<string>`${receipts.payload} ->> ${field}`;
+    const wanted = ci ? values.map(lower) : values;
+    return this.db
+      .select({ id: receipts.id, value })
+      .from(receipts)
+      .where(
+        and(
+          eq(receipts.bookId, bookId),
+          eq(receipts.kind, kind),
+          gte(receipts.hourStart, from),
+          lte(receipts.hourStart, to),
+          inArray(value, wanted),
+        ),
+      )
+      .orderBy(asc(receipts.id));
   }
 
   async getReceipt(id: number) {

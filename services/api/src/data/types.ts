@@ -6,6 +6,8 @@ import type {
   charters,
   committee,
   events,
+  fills,
+  hedges,
   juryVerdicts,
   killEvents,
   limits,
@@ -28,6 +30,8 @@ export type LimitsRow = typeof limits.$inferSelect;
 export type SettlementRow = typeof settlements.$inferSelect;
 export type ReceiptRow = typeof receipts.$inferSelect;
 export type ReceiptRootRow = typeof receiptRoots.$inferSelect;
+export type FillRow = typeof fills.$inferSelect;
+export type HedgeRow = typeof hedges.$inferSelect;
 export type AgentKeyRow = typeof agentKeys.$inferSelect;
 export type RedemptionRow = typeof redemptions.$inferSelect;
 export type EventRow = typeof events.$inferSelect;
@@ -41,6 +45,15 @@ export interface Page {
   /** Exclusive upper bound on the row id (descending pagination). */
   beforeId?: number;
 }
+
+/** Keyset position in the fills feed (hypertable, no id): rows strictly older than (ts, venueTradeId). */
+export interface FillCursor {
+  ts: Date;
+  venueTradeId: string;
+}
+
+/** Payload field that links a fill / hedge row to its receipt leaf (agent + risk receipt payloads). */
+export type ReceiptLinkField = "venueTradeId" | "txHash";
 
 /** One bucket of the limits time series (Timescale time_bucket aggregation). */
 export interface LimitsBucket {
@@ -83,7 +96,20 @@ export interface ReadModel {
   // settlements
   listSettlements(bookId: number, q: Page): Promise<SettlementRow[]>;
 
+  // activity feeds (newest first)
+  /** Fills ordered by (ts, venueTradeId) descending. */
+  listFills(bookId: number, q: { limit: number; before?: FillCursor }): Promise<FillRow[]>;
+  /** Hedges ordered by id descending. */
+  listHedges(bookId: number, q: Page): Promise<HedgeRow[]>;
+
   // receipts
+  /** Receipts of a book ordered by id descending, optionally of one kind. */
+  listReceipts(bookId: number, q: Page & { kind?: number }): Promise<ReceiptRow[]>;
+  /**
+   * Receipts of `kind` whose payload[field] is one of `values` (txHash compared case-insensitively),
+   * with from <= hour_start <= to (bounds the scan to the receipts_book_hour index).
+   */
+  receiptLinks(bookId: number, kind: number, field: ReceiptLinkField, values: string[], from: Date, to: Date): Promise<Array<{ id: number; value: string }>>;
   getReceipt(id: number): Promise<ReceiptRow | null>;
   receiptsInHour(bookId: number, hourStart: Date): Promise<ReceiptRow[]>;
   receiptRoot(bookId: number, hourStart: Date): Promise<ReceiptRootRow | null>;
