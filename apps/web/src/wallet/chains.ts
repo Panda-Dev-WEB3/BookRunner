@@ -1,7 +1,7 @@
 // The one chain this build targets (shared/chains.ts reads process.env at import, so it is not used
 // in the browser). Devnet 31337 by default; Robinhood Chain testnet 46630 with VITE_CHAIN_ID=46630.
 import { type Chain, createPublicClient, defineChain, http } from "viem";
-import { type CreateConnectorFn, createConfig, createStorage, injected } from "wagmi";
+import { type Connector, type CreateConnectorFn, createConfig, createStorage, injected } from "wagmi";
 import { walletConnect } from "./walletConnect";
 import { chainLabel, isTestKind } from "../lib/chainConfig";
 import { config } from "../lib/config";
@@ -24,21 +24,30 @@ export const publicClient = createPublicClient({ chain: appChain, transport: htt
 /** WalletConnect (QR code / mobile wallets) is offered only when a WalletConnect Cloud project id is set. */
 export const walletConnectEnabled = config.walletConnectProjectId !== "";
 
+function walletConnectFn(): CreateConnectorFn {
+  const origin = typeof window !== "undefined" ? window.location.origin : "https://bookrunner.invalid";
+  return walletConnect({
+    projectId: config.walletConnectProjectId,
+    showQrModal: true,
+    metadata: { name: "Bookrunner", description: "The underwriting syndicate for on-chain perp markets.", url: origin, icons: [] },
+  });
+}
+
+/** The last session connected through WalletConnect (wagmi's recentConnectorId, JSON-encoded). */
+function lastUsedWalletConnect(): boolean {
+  return walletConnectEnabled && (safeLocalStorage().getItem("wagmi.recentConnectorId") ?? "").includes("walletConnect");
+}
+
 function connectors(): CreateConnectorFn[] {
   // EIP-6963 wallets are discovered by wagmi itself (multiInjectedProviderDiscovery); `injected` is
-  // the generic window.ethereum fallback for wallets that do not announce themselves. The WalletConnect
-  // provider (and its QR dialog) is imported lazily by the connector on first use.
+  // the generic window.ethereum fallback for wallets that do not announce themselves.
+  // WalletConnect is NOT registered here by default: wagmi runs every connector's setup() at
+  // createConfig and getProvider() at reconnect, and WalletConnect's import and initialise its SDK
+  // there (large chunks, calls to walletconnect.org / reown.com) for every visitor. It is
+  // registered at load only to restore a session that used it; otherwise walletConnectConnector()
+  // creates it when the person picks it.
   const list: CreateConnectorFn[] = [injected({ shimDisconnect: true })];
-  if (walletConnectEnabled) {
-    const origin = typeof window !== "undefined" ? window.location.origin : "https://bookrunner.invalid";
-    list.push(
-      walletConnect({
-        projectId: config.walletConnectProjectId,
-        showQrModal: true,
-        metadata: { name: "Bookrunner", description: "The underwriting syndicate for on-chain perp markets.", url: origin, icons: [] },
-      }),
-    );
-  }
+  if (lastUsedWalletConnect()) list.push(walletConnectFn());
   return list;
 }
 
@@ -51,6 +60,20 @@ export const wagmiConfig = createConfig({
   multiInjectedProviderDiscovery: true,
   transports: { [appChain.id]: http(c.rpcUrl) },
 });
+
+/**
+ * The WalletConnect connector, created on first use (null when VITE_WALLETCONNECT_PROJECT_ID is
+ * unset). Registered with the config the way wagmi's connect() registers a connector function, and
+ * kept, so its SDK starts once.
+ */
+export function walletConnectConnector(): Connector | null {
+  if (!walletConnectEnabled) return null;
+  const existing = wagmiConfig.connectors.find((x) => x.type === "walletConnect");
+  if (existing) return existing;
+  const created = wagmiConfig._internal.connectors.setup(walletConnectFn());
+  wagmiConfig._internal.connectors.setState((list) => [...list, created]);
+  return created;
+}
 
 declare module "wagmi" {
   interface Register {

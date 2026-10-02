@@ -10,7 +10,7 @@ import { IconChevronRight, IconWallet } from "../components/icons";
 import { Badge, Callout, ExternalLink, Modal, Spinner } from "../components/ui";
 import { DEV_GROUPS, DEV_WALLETS, deriveAll } from "../lib/devwallet";
 import { shortHex } from "../lib/format";
-import { appChain } from "./chains";
+import { appChain, walletConnectConnector } from "./chains";
 import { useWallet } from "./WalletContext";
 
 interface ConnectModalCtx {
@@ -30,11 +30,24 @@ export function useConnectModal(): ConnectModalCtx {
 
 export function ConnectModalProvider({ children }: { children: ReactNode }) {
   const [isOpen, setOpen] = useState(false);
-  const value = useMemo<ConnectModalCtx>(() => ({ isOpen, open: () => setOpen(true), close: () => setOpen(false) }), [isOpen]);
+  const w = useWallet();
+  const { clearConnectError } = w;
+  // A fresh open starts without the last error; reopening after a failed WalletConnect keeps it.
+  const value = useMemo<ConnectModalCtx>(
+    () => ({
+      isOpen,
+      open: () => {
+        clearConnectError();
+        setOpen(true);
+      },
+      close: () => setOpen(false),
+    }),
+    [isOpen, clearConnectError],
+  );
   return (
     <Ctx.Provider value={value}>
       {children}
-      <ConnectWalletModal open={isOpen} onClose={() => setOpen(false)} />
+      <ConnectWalletModal open={isOpen} onClose={() => setOpen(false)} onReopen={() => setOpen(true)} />
     </Ctx.Provider>
   );
 }
@@ -166,30 +179,38 @@ function NewToWallets() {
   );
 }
 
-function ConnectWalletModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+function ConnectWalletModal({ open, onClose, onReopen }: { open: boolean; onClose: () => void; onReopen: () => void }) {
   const w = useWallet();
   const connectors = useConnectors();
   const [pending, setPending] = useState<string | null>(null);
 
   useEffect(() => {
-    if (open) w.clearConnectError();
-    else setPending(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (!open) setPending(null);
   }, [open]);
 
   const discovered = connectors.filter((c) => c.type === "injected" && c.id !== "injected");
   const generic = connectors.find((c) => c.id === "injected");
-  const wc = w.walletConnectEnabled ? connectors.find((c) => c.type === "walletConnect") : undefined;
+  const wc = w.walletConnectEnabled;
   const showGeneric = discovered.length === 0 && w.injectedAvailable && generic;
   const activeLabel = w.active?.kind === "injected" ? w.active.label : null;
 
   const go = async (c: Connector) => {
     setPending(c.uid);
-    // WalletConnect shows its own QR dialog, which must not sit behind this one
-    if (c.type === "walletConnect") onClose();
     const ok = await w.connectWith(c);
     setPending(null);
     if (ok) onClose();
+  };
+
+  // WalletConnect shows its own QR dialog, which must not sit behind this one: close first, and
+  // reopen with the error when the QR dialog is dismissed or the phone declines.
+  const goWalletConnect = async () => {
+    const c = walletConnectConnector();
+    if (!c) return;
+    setPending("walletConnect");
+    onClose();
+    const ok = await w.connectWith(c);
+    setPending(null);
+    if (!ok) onReopen();
   };
 
   const nothing = discovered.length === 0 && !showGeneric && !wc;
@@ -236,9 +257,9 @@ function ConnectWalletModal({ open, onClose }: { open: boolean; onClose: () => v
                 }
                 title="WalletConnect"
                 sub="Scan a QR code with a wallet app on your phone"
-                busy={pending === wc.uid}
+                busy={pending === "walletConnect"}
                 disabled={pending !== null}
-                onClick={() => void go(wc)}
+                onClick={() => void goWalletConnect()}
               />
             </div>
           )}
