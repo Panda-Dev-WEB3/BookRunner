@@ -6,7 +6,7 @@ import { Link } from "react-router";
 import { ETH_DECIMALS, USDC_DECIMALS, formatAmountDisplay } from "../lib/amount";
 import { config } from "../lib/config";
 import { shortHex } from "../lib/format";
-import type { OnboardingStepId } from "../lib/onboarding";
+import { ONBOARDING_ORDER, type OnboardingStepId } from "../lib/onboarding";
 import { appChain } from "../wallet/chains";
 import { useConnectModal } from "../wallet/ConnectModal";
 import { DevnetTopUp, NetworkIssueLine, isTestChain } from "../wallet/network";
@@ -28,6 +28,11 @@ export interface SetupChecklistProps {
   readyAction?: ReactNode;
   /** Once the wallet is ready: one-line summary (default), nothing, or the full list. */
   whenReady?: "collapse" | "hide" | "show";
+  /**
+   * Only these steps, counted and shown in order (default: all five). Staking, for example, needs
+   * only connect, network and gas: "0 of 3 done", and ready once those are.
+   */
+  steps?: readonly OnboardingStepId[];
   compact?: boolean;
   className?: string;
   id?: string;
@@ -52,9 +57,17 @@ export function SetupChecklist(props: SetupChecklistProps) {
     ) : undefined;
   const investHref = props.investHref ?? "/invest";
   const net = config.chain.kind === "devnet" ? "devnet" : "testnet";
+  const only = props.steps ?? null;
+  const shownIds = only ?? ONBOARDING_ORDER;
+  const doneCount = shownIds.filter((id) => status(id).status === "done").length;
+  // a subset is ready when each of its steps is done; the full list when the wallet can invest
+  const ready = only ? doneCount === only.length : ob.ready;
+  // the first open step of the subset is the one to act on
+  const firstOpen = shownIds.find((id) => status(id).status !== "done") ?? null;
+  const stepStatus = (id: OnboardingStepId) => (only ? (status(id).status === "done" ? "done" : id === firstOpen ? "active" : "todo") : status(id).status);
 
-  if (ob.ready && props.whenReady === "hide") return null;
-  if (ob.ready && (props.whenReady ?? "collapse") === "collapse") {
+  if (ready && props.whenReady === "hide") return null;
+  if (ready && (props.whenReady ?? "collapse") === "collapse") {
     return (
       <Callout
         tone="success"
@@ -201,7 +214,7 @@ export function SetupChecklist(props: SetupChecklistProps) {
         </Link>
       ),
     },
-  ];
+  ].filter((s) => shownIds.includes(s.id as OnboardingStepId)).map((s) => ({ ...s, status: stepStatus(s.id as OnboardingStepId) }));
 
   return (
     <section id={props.id} className={cx("rounded-card border border-line bg-surface shadow-card", props.className)} aria-label="Setup checklist">
@@ -209,13 +222,13 @@ export function SetupChecklist(props: SetupChecklistProps) {
         <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
           <h2 className="text-[16px] font-semibold tracking-[-0.01em]">{props.title ?? "Get set up to invest"}</h2>
           <span className="num text-[12.5px] text-ink-2">
-            {ob.doneCount} of {ob.total} done
+            {doneCount} of {shownIds.length} done
           </span>
         </div>
         {props.description !== null && (
           <p className="mt-1 text-[13px] text-ink-2">{props.description ?? "Five short steps, a few minutes in total. Each one ticks itself as soon as it is done."}</p>
         )}
-        <ProgressBar value={ob.progress} label="Setup progress" className="mt-3" tone="good" />
+        <ProgressBar value={shownIds.length ? doneCount / shownIds.length : 0} label="Setup progress" className="mt-3" tone="good" />
       </div>
       <div className="px-4 py-5 sm:px-5">
         <Stepper steps={steps} ariaLabel="Setup steps" compact={props.compact} />

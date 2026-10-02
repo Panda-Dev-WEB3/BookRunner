@@ -71,7 +71,8 @@ export function StakePage() {
           {!setupDone && (
             <SetupChecklist
               title="Get set up to stake"
-              description="Staking needs the first three steps: a wallet, the network and a little ETH for gas. Test USDC is only for investing in books."
+              description="Staking needs three steps: a wallet, the network and a little ETH for gas. Test USDC is only for investing in books."
+              steps={["connect", "network", "gas"]}
               whenReady="hide"
               compact
             />

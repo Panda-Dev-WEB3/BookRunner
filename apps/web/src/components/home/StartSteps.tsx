@@ -75,7 +75,11 @@ export function StartSteps() {
           </li>
         ))}
       </ol>
-      <SetupChecklist id="setup" />
+      <SetupChecklist
+        id="setup"
+        title="Your wallet, checked live"
+        description="The same three steps in detail: connect and switch network (step 1), gas and test USDC (step 2), then a book (step 3). Each one ticks itself as soon as it is done."
+      />
     </Section>
   );
 }
