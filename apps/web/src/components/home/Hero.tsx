@@ -5,7 +5,6 @@ import type { CSSProperties, ReactNode } from "react";
 import { Link } from "react-router";
 import { useNow, useQueryError } from "../../api/hooks";
 import { POLL, trpc } from "../../api/trpc";
-import { formatAmountDisplay } from "../../lib/amount";
 import { DASH, fmtUsd, shortHex } from "../../lib/format";
 import { ageOf, nextMarkLabel } from "../../lib/lowgas";
 import { SERIES_CLASS } from "../../lib/palette";
@@ -164,7 +163,7 @@ function CapitalStack({ summary, loading }: { summary: BooksSummary | null; load
             swatch={cx("hatch border", SERIES_CLASS.backstop.border)}
             title={<Term id="backstop">Backstop pool</Term>}
             note="Covers Senior only after Junior is used up"
-            value={pool.data !== undefined ? `${formatAmountDisplay(pool.data, 6, 0)} USDC` : pool.isError ? DASH : null}
+            value={pool.data !== undefined ? `${fmtUsd(pool.data, { compact: true })} USDC` : pool.isError ? DASH : null}
           />
           <StackRow
             className={cx(SERIES_CLASS.senior.soft, "border", SERIES_CLASS.senior.border)}
