@@ -19,12 +19,11 @@ import {
   roundRoom,
   seniorRoundRoom,
 } from "../../components/invest/logic";
-import { PanelTabs } from "../../components/invest/PanelTabs";
 import { TrancheChoice } from "../../components/invest/TrancheChoice";
 import { useProtocolParams, useTrancheRounds } from "../../components/invest/useInvestChain";
 import { WithdrawPanel } from "../../components/invest/WithdrawPanel";
 import { IconArrowRight } from "../../components/icons";
-import { Badge, Callout, Card } from "../../components/ui";
+import { Badge, Callout, Card, Tabs } from "../../components/ui";
 import type { BookDetail } from "../../lib/api-types";
 import { venueLabel } from "../../lib/copy";
 import { tickerOf, usdRaw } from "../../lib/format";
@@ -190,7 +189,8 @@ function BookInvest({ book, now }: { book: BookDetail; now: number }) {
           {(book.state === "Live" || book.state === "Retiring") && <span className="text-[12px] text-muted">Next mark {nextMarkLabel(book.markSchedule, now)}</span>}
         </div>
       </div>
-      <PanelTabs<Tab>
+      <Tabs<Tab>
+        keepMounted
         ariaLabel={`Invest in ${ticker}`}
         value={tab}
         onChange={setTab}

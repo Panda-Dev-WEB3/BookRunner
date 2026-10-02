@@ -583,22 +583,35 @@ export function Stepper(props: { steps: StepperStep[]; className?: string; ariaL
   );
 }
 
-export interface TabItem {
-  id: string;
+export interface TabItem<T extends string = string> {
+  id: T;
   label: ReactNode;
   content: ReactNode;
   badge?: ReactNode;
   disabled?: boolean;
 }
 
-/** Accessible tabs (arrow keys, Home / End). Controlled with value + onChange, or uncontrolled. */
-export function Tabs(props: { items: TabItem[]; ariaLabel: string; value?: string; defaultValue?: string; onChange?: (id: string) => void; className?: string; panelClassName?: string }) {
+/**
+ * Accessible tabs (arrow keys, Home / End). Controlled with value + onChange, or uncontrolled.
+ * keepMounted renders every panel and hides the inactive ones, so a panel's state (a form, a
+ * transaction list in flight) survives a look at another tab.
+ */
+export function Tabs<T extends string = string>(props: {
+  items: Array<TabItem<T>>;
+  ariaLabel: string;
+  value?: T;
+  defaultValue?: T;
+  onChange?: (id: T) => void;
+  keepMounted?: boolean;
+  className?: string;
+  panelClassName?: string;
+}) {
   const base = useId();
-  const [inner, setInner] = useState(props.defaultValue ?? props.items[0]?.id ?? "");
+  const [inner, setInner] = useState<T | undefined>(props.defaultValue ?? props.items[0]?.id);
   const value = props.value ?? inner;
   const refs = useRef<Array<HTMLButtonElement | null>>([]);
   const enabled = props.items.filter((t) => !t.disabled);
-  const select = (id: string) => {
+  const select = (id: T) => {
     if (props.value === undefined) setInner(id);
     props.onChange?.(id);
   };
@@ -648,11 +661,25 @@ export function Tabs(props: { items: TabItem[]; ariaLabel: string; value?: strin
           );
         })}
       </div>
-      {active && (
-        <div role="tabpanel" id={`${base}-panel-${active.id}`} aria-labelledby={`${base}-tab-${active.id}`} tabIndex={0} className={cx("pt-4 focus-visible:outline-offset-4", props.panelClassName)}>
-          {active.content}
-        </div>
-      )}
+      {props.keepMounted
+        ? props.items.map((t) => (
+            <div
+              key={t.id}
+              role="tabpanel"
+              id={`${base}-panel-${t.id}`}
+              aria-labelledby={`${base}-tab-${t.id}`}
+              hidden={t.id !== active?.id}
+              tabIndex={0}
+              className={cx("pt-4 focus-visible:outline-offset-4", props.panelClassName)}
+            >
+              {t.content}
+            </div>
+          ))
+        : active && (
+            <div role="tabpanel" id={`${base}-panel-${active.id}`} aria-labelledby={`${base}-tab-${active.id}`} tabIndex={0} className={cx("pt-4 focus-visible:outline-offset-4", props.panelClassName)}>
+              {active.content}
+            </div>
+          )}
     </div>
   );
 }
