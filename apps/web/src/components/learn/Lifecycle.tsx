@@ -86,7 +86,7 @@ const STAGES: Stage[] = [
       </>
     ),
     detail:
-      "Top-up deposits wait in escrow and are accepted at the next mark, at that mark's share price. Senior redemptions settle at the next mark; Junior ones at the first mark after the notice period. Notice is not a gate: a request is always accepted, and no pause or kill can block it.",
+      "Top-up deposits wait in escrow until the first mark after the round ends, and are accepted at that mark's share price. Senior redemptions settle at the next mark; Junior ones at the first mark after the notice period. Notice is not a gate: a request is always accepted, and no pause or kill can block it.",
     when: "Settled at marks.",
     cycle: true,
   },

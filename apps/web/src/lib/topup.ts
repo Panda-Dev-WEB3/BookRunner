@@ -7,9 +7,11 @@ export interface TopUpRound {
   open: boolean;
   /** Round end, unix seconds (0 when no round was ever opened). */
   endsAt: number;
-  /** Remaining Senior capacity, USDC base units (6 decimals). */
+  /** The round's Senior capacity, USDC base units (6 decimals). Fixed when the round opens: it is not
+   *  reduced by deposits (subtract Tranche.totalCommitted for the room left; an oversubscribed round
+   *  is filled pro-rata when it settles at the first mark on or after endsAt). */
   seniorCapacityUsd: bigint;
-  /** Remaining Junior capacity, USDC base units (6 decimals). */
+  /** The round's Junior capacity, USDC base units (6 decimals); fixed, like seniorCapacityUsd. */
   juniorCapacityUsd: bigint;
 }
 
@@ -18,7 +20,7 @@ export function isTopUpOpen(r: TopUpRound | null | undefined, nowSec: number): b
   return !!r && r.open && r.endsAt > nowSec;
 }
 
-/** Capacity left for one tranche (0 when the round is closed). */
+/** The round's capacity for one tranche (0 when the round is closed). A total, not what is left. */
 export function topUpCapacity(r: TopUpRound | null | undefined, tranche: "senior" | "junior", nowSec: number): bigint {
   if (!isTopUpOpen(r, nowSec) || !r) return 0n;
   return tranche === "senior" ? r.seniorCapacityUsd : r.juniorCapacityUsd;
