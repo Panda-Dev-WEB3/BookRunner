@@ -879,9 +879,30 @@ export function Field(props: { label: ReactNode; help?: ReactNode; error?: strin
   );
 }
 
-export function Segmented<T extends string>(props: { value: T; options: Array<{ value: T; label: ReactNode; title?: string }>; onChange: (v: T) => void; size?: "sm" | "md"; ariaLabel?: string; className?: string }) {
+/**
+ * Radio group of 2-4 options. `layout`: one inline row (default; scrolls when too narrow), an even
+ * two-column grid, or a full-width stack, for groups that would otherwise wrap unevenly.
+ */
+export function Segmented<T extends string>(props: {
+  value: T;
+  options: Array<{ value: T; label: ReactNode; title?: string }>;
+  onChange: (v: T) => void;
+  size?: "sm" | "md";
+  ariaLabel?: string;
+  className?: string;
+  layout?: "inline" | "grid" | "stack";
+}) {
+  const layout = props.layout ?? "inline";
   return (
-    <div role="radiogroup" aria-label={props.ariaLabel} className={cx("inline-flex max-w-full overflow-x-auto rounded-control border border-line bg-surface-2 p-0.5", props.className)}>
+    <div
+      role="radiogroup"
+      aria-label={props.ariaLabel}
+      className={cx(
+        "rounded-control border border-line bg-surface-2 p-0.5",
+        layout === "grid" ? "grid w-full grid-cols-2 gap-0.5" : layout === "stack" ? "flex w-full flex-col gap-0.5" : "inline-flex max-w-full overflow-x-auto",
+        props.className,
+      )}
+    >
       {props.options.map((o) => {
         const on = o.value === props.value;
         return (
@@ -894,6 +915,8 @@ export function Segmented<T extends string>(props: { value: T; options: Array<{ 
             onClick={() => props.onChange(o.value)}
             className={cx(
               "rounded-[6px] px-3 font-medium whitespace-nowrap transition-[background,color,box-shadow] duration-150",
+              layout === "stack" && "text-left",
+              layout !== "inline" && "min-w-0 truncate",
               props.size === "sm" ? "h-6 text-[11.5px]" : "h-8 text-[13px]",
               on ? "bg-surface text-ink shadow-card ring-1 ring-line-strong" : "text-ink-2 hover:text-ink",
             )}

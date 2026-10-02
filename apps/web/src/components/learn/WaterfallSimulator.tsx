@@ -430,7 +430,7 @@ export function WaterfallSimulator() {
             <div className="mb-2 text-[13px] font-medium text-ink">Start from</div>
             <Segmented
               ariaLabel="Start from"
-              className="flex-wrap"
+              layout="grid"
               value={presetValue}
               options={options}
               onChange={(v) => {
@@ -485,7 +485,7 @@ export function WaterfallSimulator() {
             <div className="mb-2 text-[13px] font-medium text-ink">This period</div>
             <Segmented
               ariaLabel="What happens this period"
-              className="flex-wrap"
+              layout="stack"
               value={mode}
               options={[
                 { value: "fees", label: "Fee flow comes in" },
