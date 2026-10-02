@@ -130,3 +130,27 @@ describe("buckets", () => {
     expect(bucketIndex(1n, 300n)).toBe(1n);
   });
 });
+
+import { classifyLimits, hedgeBandEnforced } from "../src/mandate";
+import type { Mandate } from "../src/types";
+
+describe("hedge band enforceability (spot is long-only)", () => {
+  const m: Mandate = {
+    maxInventoryUsd: usd(50_000), maxSkewBps: 25, minQuoteWidthBps: 8, maxHedgeLeverage: 100,
+    hedgeRatioMinBps: 5000, hedgeRatioMaxBps: 12000, noNewRiskOffHours: true, killAtDrawdownBps: -800,
+    hedgeAllowRoot: "0x00",
+  };
+  test("long exposure with spot-only allow-list: band not enforced, no HEDGE_BAND breach even past grace", () => {
+    expect(hedgeBandEnforced(m, usd(20_000), 0n)).toBe(false);
+    const s = classifyLimits({ mandate: m, netExposureUsd: usd(20_000), deskHedgeUsd: 0n, drawdownBps: 0, offHours: false, outOfBandSinceSec: 3600, killed: false });
+    expect(s.breaches).not.toContain("HEDGE_BAND");
+  });
+  test("short exposure under-hedged past grace: HEDGE_BAND breach", () => {
+    expect(hedgeBandEnforced(m, -usd(20_000), 0n)).toBe(true);
+    const s = classifyLimits({ mandate: m, netExposureUsd: -usd(20_000), deskHedgeUsd: 0n, drawdownBps: 0, offHours: false, outOfBandSinceSec: 3600, killed: false });
+    expect(s.breaches).toContain("HEDGE_BAND");
+  });
+  test("long exposure with a perp hedge venue: band enforced", () => {
+    expect(hedgeBandEnforced(m, usd(20_000), 0n, true)).toBe(true);
+  });
+});

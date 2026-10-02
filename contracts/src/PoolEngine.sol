@@ -701,14 +701,17 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     }
 
     function _pendingIndex(Market storage m, uint256 price) internal view returns (int256) {
-        return m.fundingIndex + _fundingDelta(m, price, block.timestamp - m.lastFundingTime);
+        // eth_call may execute in a block older than the last accrual: never underflow in a view.
+        uint256 last = m.lastFundingTime;
+        uint256 dt = block.timestamp > last ? block.timestamp - last : 0;
+        return m.fundingIndex + _fundingDelta(m, price, dt);
     }
 
     /// @dev Accrues funding at `price` for the time since the last accrual (rate from the skew that
     ///      prevailed over that interval). `price` may be 0 only when the market is net-flat.
     function _accrue(uint256 marketId, Market storage m, uint256 price) internal {
         uint256 last = m.lastFundingTime;
-        if (block.timestamp == last) return;
+        if (block.timestamp <= last) return;
         int256 d = _fundingDelta(m, price, block.timestamp - last);
         m.lastFundingTime = uint64(block.timestamp);
         if (d != 0) {

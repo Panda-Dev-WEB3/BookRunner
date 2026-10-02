@@ -73,6 +73,24 @@ export function hedgeInBand(m: Mandate, ratioBps: bigint | null): boolean {
 }
 
 /**
+ * The hedge band is only ENFORCEABLE when the allow-listed instruments can offset the exposure:
+ * spot Stock Tokens are long-only (not borrowable), so a spot-only allow-list can hedge a SHORT venue
+ * exposure but never a LONG one. A long exposure with no perp hedge venue is managed by quote skew
+ * (inventory mean-reversion) and the inventory limit — it must not trip the HEDGE_BAND kill.
+ * `canHedgeLong` = an offsetting perp venue is allow-listed and enabled for the book.
+ */
+export function hedgeBandEnforced(m: Mandate, netExposureUsd: bigint, deskHedgeUsd: bigint, canHedgeLong = false): boolean {
+  if (hedgeRatioBps(m, netExposureUsd, deskHedgeUsd) === null) return false;
+  return netExposureUsd < 0n || canHedgeLong;
+}
+
+/** True when the band is not enforceable or the ratio is inside it. */
+export function hedgeBandOk(m: Mandate, netExposureUsd: bigint, deskHedgeUsd: bigint, canHedgeLong = false): boolean {
+  if (!hedgeBandEnforced(m, netExposureUsd, deskHedgeUsd, canHedgeLong)) return true;
+  return hedgeInBand(m, hedgeRatioBps(m, netExposureUsd, deskHedgeUsd));
+}
+
+/**
  * A hedge leg is acceptable if the post-trade ratio is inside the band, or strictly closer to the
  * band than pre-trade (rebalancing steps). Off-hours with noNewRiskOffHours: must reduce
  * |exposure + hedge| (net book exposure). Same rule enforced in MMMandate.checkHedge.
@@ -143,6 +161,7 @@ export function classifyLimits(args: {
   offHours: boolean;
   outOfBandSinceSec?: number | null; // seconds the ratio has been out of band
   killed: boolean;
+  canHedgeLong?: boolean; // offsetting perp hedge venue enabled (spot-only books: false)
 }): LimitsSnapshot {
   const m = args.mandate;
   const util = inventoryUtil(m, args.netExposureUsd);
@@ -154,7 +173,7 @@ export function classifyLimits(args: {
   if (q && q.violations.includes("SKEW")) breaches.push("SKEW");
   if (q && q.violations.includes("WIDTH")) breaches.push("WIDTH");
   if (m.killAtDrawdownBps < 0 && args.drawdownBps <= m.killAtDrawdownBps) breaches.push("DRAWDOWN");
-  const inBand = hedgeInBand(m, ratio);
+  const inBand = hedgeBandOk(m, args.netExposureUsd, args.deskHedgeUsd, args.canHedgeLong ?? false);
   if (!inBand && (args.outOfBandSinceSec ?? 0) > HEDGE_BAND_GRACE_SECONDS) breaches.push("HEDGE_BAND");
 
   let state: LimitState = "ok";

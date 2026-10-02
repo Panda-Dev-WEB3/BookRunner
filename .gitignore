@@ -16,3 +16,5 @@ contracts/deployments/31337.json
 # local runtime
 .data/
 .claude/worktrees/
+.env.testnet
+.data/

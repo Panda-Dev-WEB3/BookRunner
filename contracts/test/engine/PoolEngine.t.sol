@@ -856,6 +856,21 @@ contract PoolEngineTest is EngineBase {
         assertEq(usdc.balanceOf(address(engine)), _ledger(mA) + _ledger(mB));
     }
 
+    /// Regression (devnet): an eth_call executed in a block older than the last funding accrual must not
+    /// underflow `block.timestamp - lastFundingTime` (PoolEngineAdapter.marginEquityUsd panicked).
+    function test_funding_viewsDoNotUnderflowWhenCallBlockPredatesAccrual() public {
+        _deposit(alice, mB, 2000e6);
+        _trade(alice, mB, 100e18);
+        vm.warp(block.timestamp + 1 hours);
+        _price(PID_B, PX);
+        _trade(alice, mB, 1e18); // accrues funding at the current timestamp
+        int256 eqNow = engine.poolEquityUsd(mB);
+        vm.warp(block.timestamp - 5); // call context older than lastFundingTime
+        assertEq(engine.poolEquityUsd(mB), eqNow); // no pending delta, no panic
+        engine.traderEquityUsd(mB, alice);
+        engine.state(mB);
+    }
+
     function test_funding_shortsPayWhenCrowded_longsReceive() public {
         _deposit(alice, mB, 2000e6);
         _deposit(bob, mB, 2000e6);
