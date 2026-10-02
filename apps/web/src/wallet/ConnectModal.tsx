@@ -8,9 +8,10 @@ import { type Connector, useConnectors } from "wagmi";
 import { cx } from "../components/cx";
 import { IconChevronRight, IconWallet } from "../components/icons";
 import { Badge, Callout, ExternalLink, Modal, Spinner } from "../components/ui";
-import { DEV_GROUPS, DEV_WALLETS, deriveAll } from "../lib/devwallet";
+import { DEV_GROUPS, DEV_WALLETS } from "../lib/devwallet";
 import { shortHex } from "../lib/format";
 import { appChain, walletConnectConnector } from "./chains";
+import { useDevSigner } from "./devGate";
 import { useWallet } from "./WalletContext";
 
 interface ConnectModalCtx {
@@ -92,13 +93,15 @@ function OptionButton(props: { icon?: string | null; glyph?: ReactNode; title: R
 function DevWallets({ onPicked }: { onPicked: () => void }) {
   const w = useWallet();
   const [addrs, setAddrs] = useState<Partial<Record<DevRole, Address>>>({});
+  const dev = useDevSigner(true);
   useEffect(() => {
+    if (!dev) return;
     let alive = true;
-    void deriveAll((role, address) => alive && setAddrs((a) => (a[role] ? a : { ...a, [role]: address })));
+    void dev.deriveAll((role, address) => alive && setAddrs((a) => (a[role] ? a : { ...a, [role]: address })));
     return () => {
       alive = false;
     };
-  }, []);
+  }, [dev]);
   const a = w.active;
   return (
     <div>

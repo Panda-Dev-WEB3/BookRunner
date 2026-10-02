@@ -9,12 +9,13 @@ import { getConnection, sendTransaction, switchChain, waitForTransactionReceipt 
 import { useHealth } from "../api/hooks";
 import type { PreparedTx } from "../lib/api-types";
 import { config } from "../lib/config";
-import { DEVNET_CHAIN_ID, devAccountFor, devAddress, devEntry, isDevRole } from "../lib/devwallet";
+import { DEVNET_CHAIN_ID, devEntry, isDevRole } from "../lib/devwallet";
 import { errText, isUserRejection } from "../lib/txflow";
 import type { TxExecutor } from "../lib/txflow";
 import { revertReason } from "../lib/revert";
 import { addChainParams, appChain, chainName, publicClient, wagmiConfig, walletConnectEnabled } from "./chains";
 import { connectWallet, disconnectAll } from "./connectFlow";
+import { DEV_BUILD, type DevSigner, useDevSigner } from "./devGate";
 
 type Mode = "dev" | "injected" | null;
 
@@ -98,8 +99,8 @@ function wrongChainError(txChainId: number): Error {
   );
 }
 
-function devExecutor(role: DevRole): TxExecutor<PreparedTx> {
-  const account = devAccountFor(role);
+function devExecutor(dev: DevSigner, role: DevRole): TxExecutor<PreparedTx> {
+  const account = dev.devAccountFor(role);
   const wallet = createWalletClient({ account, chain: appChain, transport: http(config.rpcUrl) });
   const pub = createPublicClient({ chain: appChain, transport: http(config.rpcUrl) });
   return {
@@ -154,7 +155,9 @@ interface Eip1193 {
 export function WalletProvider({ children }: { children: ReactNode }) {
   const health = useHealth();
   const apiChainId = health.data?.chainId ?? null;
-  const devAvailable = config.chainId === DEVNET_CHAIN_ID && (apiChainId === null || apiChainId === DEVNET_CHAIN_ID);
+  const devAvailable = DEV_BUILD && config.chainId === DEVNET_CHAIN_ID && (apiChainId === null || apiChainId === DEVNET_CHAIN_ID);
+  // the anvil-key signer, loaded on devnet builds only (never in a testnet / mainnet bundle)
+  const dev = useDevSigner(devAvailable);
   const conn = useConnection();
   const connectors = useConnectors();
   const [{ mode, role }, setSel] = useState(readStored);
@@ -175,13 +178,14 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       return;
     }
     setDeriving(true);
+    if (!dev) return; // the signer module is still loading
     // seed derivation is synchronous; let the current frame paint first
     const id = setTimeout(() => {
-      setDevAddr(devAddress(role));
+      setDevAddr(dev.devAddress(role));
       setDeriving(false);
     }, 0);
     return () => clearTimeout(id);
-  }, [mode, role, devAvailable]);
+  }, [mode, role, devAvailable, dev]);
 
   const selectDev = useCallback((r: DevRole) => setSel({ mode: "dev", role: r }), []);
 
@@ -276,8 +280,9 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
   const executor = useMemo(() => {
     if (!active) return null;
-    return active.kind === "dev" && active.devRole ? devExecutor(active.devRole) : injectedExecutor;
-  }, [active]);
+    if (active.kind === "dev") return active.devRole && dev ? devExecutor(dev, active.devRole) : null;
+    return injectedExecutor;
+  }, [active, dev]);
 
   const value: WalletCtx = {
     active,

@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { DEV_ROLE_INDEX } from "@bookrunner/shared/devkeys";
-import { DEVNET_CHAIN_ID, DEV_GROUPS, DEV_WALLETS, devAddress, devEntry, devRoleOf, isDevRole } from "../src/lib/devwallet";
+import { DEV_MNEMONIC, DEV_ROLE_INDEX } from "@bookrunner/shared/devkeys";
+import { DEV_MNEMONIC_MARK, filesWithDevKeys, isDevnetBuild } from "../scripts/bundle-check";
+import { devAddress, devRoleOf } from "../src/lib/devsigner";
+import { DEVNET_CHAIN_ID, DEV_GROUPS, DEV_WALLETS, devEntry, isDevRole } from "../src/lib/devwallet";
 
 describe("dev wallets (devnet only)", () => {
   test("every listed role is a real devkeys role in a known group", () => {
@@ -18,5 +20,23 @@ describe("dev wallets (devnet only)", () => {
     expect(devRoleOf("0x14dc79964da2c08b23698b3d3cc7ca32193d9955")).toBe("sponsor");
     expect(devRoleOf("0x0000000000000000000000000000000000000001")).toBeNull();
     expect(devEntry("sponsor")?.label).toBe("Studio sponsor");
+  });
+});
+
+describe("dev keys never ship outside devnet (scripts/bundle-check.ts, used by vite.config.ts)", () => {
+  test("devnet builds are the ones with VITE_CHAIN_ID unset, empty or 31337", () => {
+    expect(isDevnetBuild(undefined)).toBe(true);
+    expect(isDevnetBuild("")).toBe(true);
+    expect(isDevnetBuild("31337")).toBe(true);
+    expect(isDevnetBuild("46630")).toBe(false);
+    expect(isDevnetBuild("4663")).toBe(false);
+  });
+  test("finds the anvil mnemonic in output files", () => {
+    const files = [
+      { file: "assets/index.js", text: "const a = 1;" },
+      { file: "assets/devsigner.js", text: `const m = "${DEV_MNEMONIC}";` },
+    ];
+    expect(filesWithDevKeys(files)).toEqual(["assets/devsigner.js"]);
+    expect(DEV_MNEMONIC).toContain(DEV_MNEMONIC_MARK);
   });
 });

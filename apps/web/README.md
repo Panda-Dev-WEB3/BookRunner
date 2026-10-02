@@ -38,7 +38,10 @@ defaults to the public Robinhood Chain testnet RPC, explorer and faucet.
 - Account menu: address (copy, explorer), network, ETH / USDC / BKRN balances, the faucet when gas is
   low and, on test networks whose USDC is the open-mint mock, "Mint 10,000 test USDC".
 - Devnet only (build for 31337 and an API on 31337): dev wallets sign with the anvil test accounts
-  behind each role (`@bookrunner/shared/devkeys`), listed in the connect dialog.
+  behind each role (`@bookrunner/shared/devkeys`), listed in the connect dialog. The signer
+  (`src/lib/devsigner.ts`) loads only behind the compile-time gate in `src/wallet/devGate.ts`, so
+  testnet and mainnet bundles never contain the anvil mnemonic; `vite.config.ts` fails such a build
+  if it ever does.
 - `src/wallet/walletConnect.js` re-exports wagmi's WalletConnect connector with a narrow
   `walletConnect.d.ts`: the package's own types would pull @walletconnect's type graph (and a second
   viem) into `tsc` and roughly double its memory.

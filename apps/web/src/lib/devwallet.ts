@@ -1,7 +1,8 @@
-// Devnet "dev wallet": signs with the anvil test accounts behind the protocol roles
-// (@bookrunner/shared/devkeys). Offered only when the API reports chain 31337; never on a live chain.
-import { DEV_MNEMONIC, DEV_ROLE_INDEX, type DevRole, devAccount } from "@bookrunner/shared/devkeys";
-import type { Address, LocalAccount } from "viem";
+// Devnet "dev wallet" metadata: the protocol roles a dev wallet can sign for, with labels. Offered
+// only on a devnet build whose API reports chain 31337; never on a live chain. The signer itself
+// (the anvil mnemonic and the key derivation) lives in ./devsigner and is loaded only by a devnet
+// build (wallet/devSigner.ts), so it never ships in a testnet or mainnet bundle.
+import type { DevRole } from "@bookrunner/shared/devkeys";
 
 export { DEVNET_CHAIN_ID } from "./chainConfig";
 
@@ -32,36 +33,9 @@ export const DEV_WALLETS: DevWalletEntry[] = [
 
 export const DEV_GROUPS: DevGroup[] = ["Sponsor", "Allocators", "Committee", "Desk", "Protocol"];
 
-const cache = new Map<DevRole, LocalAccount>();
+const LISTED = new Set<string>(DEV_WALLETS.map((w) => w.role));
 
-/** Derives (once per role) the anvil account for a role. BIP-39 seed derivation is not instant. */
-export function devAccountFor(role: DevRole): LocalAccount {
-  let a = cache.get(role);
-  if (!a) {
-    a = devAccount(role, DEV_MNEMONIC);
-    cache.set(role, a);
-  }
-  return a;
-}
-
-export const devAddress = (role: DevRole): Address => devAccountFor(role).address;
-
-export const isDevRole = (s: string | null | undefined): s is DevRole => !!s && Object.prototype.hasOwnProperty.call(DEV_ROLE_INDEX, s);
-
-/** The dev role behind an address among the already-derived roles (no derivation triggered). */
-export function devRoleOf(address: string | null | undefined): DevRole | null {
-  if (!address) return null;
-  const a = address.toLowerCase();
-  for (const [role, acct] of cache) if (acct.address.toLowerCase() === a) return role;
-  return null;
-}
-
-/** Derives every listed role, yielding between roles so the UI stays responsive. */
-export async function deriveAll(onEach?: (role: DevRole, address: Address) => void): Promise<void> {
-  for (const w of DEV_WALLETS) {
-    if (!cache.has(w.role)) await new Promise((r) => setTimeout(r, 0));
-    onEach?.(w.role, devAddress(w.role));
-  }
-}
+/** A role the dev-wallet picker offers (the only roles a stored selection may name). */
+export const isDevRole = (s: string | null | undefined): s is DevRole => !!s && LISTED.has(s);
 
 export const devEntry = (role: DevRole): DevWalletEntry | undefined => DEV_WALLETS.find((w) => w.role === role);

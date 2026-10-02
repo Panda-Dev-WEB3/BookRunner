@@ -1,15 +1,18 @@
 import type { DevRole } from "@bookrunner/shared/devkeys";
 import { useEffect, useState } from "react";
-import { DEV_WALLETS, devAddress, devRoleOf } from "../lib/devwallet";
+import { DEV_WALLETS } from "../lib/devwallet";
+import { useDevSigner } from "./devGate";
 
 /** The dev role whose anvil account is `address` (derives the role list lazily, devnet only). */
 export function useDevRoleFor(address: string | null | undefined, enabled: boolean): DevRole | null {
-  const [role, setRole] = useState<DevRole | null>(() => devRoleOf(address));
+  const dev = useDevSigner(enabled);
+  const [role, setRole] = useState<DevRole | null>(null);
   useEffect(() => {
-    if (!enabled || !address) {
+    if (!enabled || !address || !dev) {
       setRole(null);
       return;
     }
+    const { devAddress, devRoleOf } = dev;
     const known = devRoleOf(address);
     if (known) {
       setRole(known);
@@ -30,6 +33,6 @@ export function useDevRoleFor(address: string | null | undefined, enabled: boole
     return () => {
       cancelled = true;
     };
-  }, [address, enabled]);
+  }, [address, enabled, dev]);
   return role;
 }
