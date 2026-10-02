@@ -19,6 +19,9 @@ import type {
   CommitteeRow,
   DeliveryUpdate,
   EventRow,
+  FillCursor,
+  FillRow,
+  HedgeRow,
   JuryVerdictRow,
   KillEventRow,
   LimitsBucket,
@@ -28,6 +31,7 @@ import type {
   OraclePriceRow,
   Page,
   ReadModel,
+  ReceiptLinkField,
   ReceiptRootRow,
   ReceiptRow,
   RedemptionRow,
@@ -61,6 +65,8 @@ export class FakeReadModel implements ReadModel {
   limits: LimitsRow[] = [];
   kills: KillEventRow[] = [];
   settlements: SettlementRow[] = [];
+  fills: FillRow[] = [];
+  hedges: HedgeRow[] = [];
   receipts: ReceiptRow[] = [];
   receiptRoots: ReceiptRootRow[] = [];
   agentKeys: AgentKeyRow[] = [];
@@ -69,6 +75,8 @@ export class FakeReadModel implements ReadModel {
   events: EventRow[] = [];
   oraclePrices: OraclePriceRow[] = [];
   failPing = false;
+  /** Makes receiptLinks throw (feeds must still be served, without receipt ids). */
+  failReceiptLinks = false;
 
   async ping() {
     if (this.failPing) throw new Error("db down");
@@ -140,6 +148,30 @@ export class FakeReadModel implements ReadModel {
   }
   async listSettlements(bookId: number, q: Page) {
     return page(desc(this.settlements.filter((s) => s.bookId === bookId), (s) => s.id), q, (s) => s.id);
+  }
+  async listFills(bookId: number, q: { limit: number; before?: FillCursor }) {
+    const older = (f: FillRow, c: FillCursor) => f.ts < c.ts || (f.ts.getTime() === c.ts.getTime() && f.venueTradeId < c.venueTradeId);
+    return this.fills
+      .filter((f) => f.bookId === bookId && (!q.before || older(f, q.before)))
+      .sort((a, b) => b.ts.getTime() - a.ts.getTime() || (a.venueTradeId < b.venueTradeId ? 1 : a.venueTradeId > b.venueTradeId ? -1 : 0))
+      .slice(0, q.limit);
+  }
+  async listHedges(bookId: number, q: Page) {
+    return page(desc(this.hedges.filter((h) => h.bookId === bookId), (h) => h.id), q, (h) => h.id);
+  }
+  async listReceipts(bookId: number, q: Page & { kind?: number }) {
+    return page(desc(this.receipts.filter((r) => r.bookId === bookId && (q.kind === undefined || r.kind === q.kind)), (r) => r.id), q, (r) => r.id);
+  }
+  async receiptLinks(bookId: number, kind: number, field: ReceiptLinkField, values: string[], from: Date, to: Date) {
+    if (this.failReceiptLinks) throw new Error("db down");
+    const norm = (v: string) => (field === "txHash" ? v.toLowerCase() : v);
+    const wanted = new Set(values.map(norm));
+    return this.receipts
+      .filter((r) => r.bookId === bookId && r.kind === kind && r.hourStart >= from && r.hourStart <= to)
+      .map((r) => ({ id: r.id, raw: (r.payload as Record<string, unknown> | null)?.[field] }))
+      .filter((r): r is { id: number; raw: string } => typeof r.raw === "string" && wanted.has(norm(r.raw)))
+      .map((r) => ({ id: r.id, value: norm(r.raw) }))
+      .sort((a, b) => a.id - b.id);
   }
   async getReceipt(id: number) {
     return this.receipts.find((r) => r.id === id) ?? null;

@@ -216,3 +216,42 @@ export function seedReceipts(w: World) {
 }
 
 export const HEX32 = (n: number): Hex => `0x${n.toString(16).padStart(64, "0")}`;
+
+/**
+ * Fills + hedges of book 1 with their receipt leaves, written the way the producers do (the fill
+ * receipt payload carries venueTradeId, the hedge receipt payload carries txHash). Fill t-3 and
+ * hedge #2 have no receipt; book 2 rows must never leak into book 1 feeds.
+ */
+export function seedActivity(w: World) {
+  const interval = w.deps.settings.receiptsIntervalSeconds;
+  const hourOf = (d: Date) => new Date(Math.floor(d.getTime() / 1000 / interval) * interval * 1000);
+  let rid = 900;
+  const receipt = (kind: number, ts: Date, payload: Record<string, unknown>) => {
+    const tsSec = new Date(Math.floor(ts.getTime() / 1000) * 1000);
+    const row = { id: rid++, bookId: 1, kind, ts: tsSec, payload, payloadHash: payloadHash(payload), hourStart: hourOf(tsSec) };
+    w.data.receipts.push(row);
+    return row.id;
+  };
+  const fill = (venueTradeId: string, secOffset: number, side: "buy" | "sell", withReceipt = true, bookId = 1) => {
+    const ts = at(secOffset);
+    w.data.fills.push({ bookId, ts, side, qty: 2, px: 190.5, feeUsd: 0.04, venueTradeId, maker: side === "buy", trader: null });
+    if (!withReceipt || bookId !== 1) return null;
+    return receipt(RECEIPT_KIND.FILL, ts, { type: "fill", bookId, ts: ts.getTime(), side, qty: 2, px: 190.5, feeUsd: 0.04, venueTradeId, maker: side === "buy" });
+  };
+  const f1 = fill("t-1", -200, "buy");
+  const f2 = fill("t-2", -100, "sell");
+  fill("t-3", -50, "buy", false);
+  const f4 = fill("t-4", -100, "buy"); // same ts as t-2: keyset tie-break on venueTradeId
+  fill("t-9", -10, "buy", true, 2);
+
+  const hedge = (id: number, secOffset: number, qtyRaw: string, txHash: string, bookId = 1) => {
+    const ts = at(secOffset);
+    w.data.hedges.push({ id, bookId, ts, asset: A(0x1001).toLowerCase(), qtyRaw, px: 190.4, mult: 1, txHash, venue: "UNIV3", valueUsd: "380.8" });
+  };
+  hedge(1, -180, "2000000000000000000", "0xaaa1");
+  hedge(2, -90, "-1000000000000000000", "0xaaa2");
+  hedge(3, -30, "500000000000000000", "0xaaa3", 2);
+  // hash case differs from the row: the link is case-insensitive
+  const h1 = receipt(RECEIPT_KIND.HEDGE, at(-179), { type: "hedge", bookId: 1, action: "buy", token: A(0x1001).toLowerCase(), venue: "UNIV3", qtyRaw: "2000000000000000000", txHash: "0xAAA1" });
+  return { f1: f1!, f2: f2!, f4: f4!, h1 };
+}

@@ -6,7 +6,7 @@ import { decodeFunctionData, erc20Abi } from "viem";
 import { limitsBucketSeconds } from "../src/routers/book";
 import { hourlyTree, receiptsRootOf } from "../src/domain/receipts";
 import { A } from "./fakes";
-import { ALICE, BOOK, NOW, SPONSOR, makeWorld, seedBook, seedReceipts } from "./fixtures";
+import { ALICE, BOOK, NOW, SPONSOR, makeWorld, seedActivity, seedBook, seedReceipts } from "./fixtures";
 
 async function trpcErr(p: Promise<unknown>): Promise<TRPCError> {
   try {
@@ -529,5 +529,123 @@ describe("receipts router", () => {
     expect(p.period).toBeNull();
     expect(p.hourly.verified).toBe(true);
     expect(p.payloadHashMatches).toBe(false);
+  });
+});
+
+describe("activity feeds (book.fills, book.hedges, receipts.list)", () => {
+  test("book.fills: newest first, book-scoped, linked to fill receipts, keyset pages", async () => {
+    const w = makeWorld();
+    seedBook(w);
+    const { f1, f2, f4 } = seedActivity(w);
+    const all = await w.caller.book.fills({ bookId: 1 });
+    expect(all.bookId).toBe(1);
+    expect(all.items.map((f) => f.venueTradeId)).toEqual(["t-3", "t-4", "t-2", "t-1"]); // t-9 is book 2
+    expect(all.items.map((f) => f.receiptId)).toEqual([null, f4, f2, f1]);
+    expect(all.items[2]).toEqual({
+      ts: new Date(NOW - 100_000).toISOString(),
+      side: "sell",
+      qty: 2,
+      px: 190.5,
+      feeUsd: 0.04,
+      venueTradeId: "t-2",
+      maker: false,
+      trader: null,
+      receiptId: f2,
+    });
+    expect(all.nextCursor).toBeNull();
+
+    const p1 = await w.caller.book.fills({ bookId: 1, limit: 2 });
+    expect(p1.items.map((f) => f.venueTradeId)).toEqual(["t-3", "t-4"]);
+    expect(p1.nextCursor).toBe(`${NOW - 100_000}:t-4`);
+    const p2 = await w.caller.book.fills({ bookId: 1, limit: 2, cursor: p1.nextCursor! });
+    expect(p2.items.map((f) => f.venueTradeId)).toEqual(["t-2", "t-1"]); // same-ts t-2 is not skipped
+    const p3 = await w.caller.book.fills({ bookId: 1, limit: 2, cursor: p2.nextCursor! });
+    expect(p3).toMatchObject({ items: [], nextCursor: null });
+  });
+
+  test("book.hedges: newest first, decimal valueUsd, case-insensitive receipt link, id cursor", async () => {
+    const w = makeWorld();
+    seedBook(w);
+    const { h1 } = seedActivity(w);
+    const h = await w.caller.book.hedges({ bookId: 1 });
+    expect(h.items.map((x) => [x.id, x.receiptId])).toEqual([
+      [2, null],
+      [1, h1],
+    ]);
+    expect(h.items[1]).toMatchObject({ qtyRaw: "2000000000000000000", px: 190.4, mult: 1, venue: "UNIV3", valueUsd: "380.800000", txHash: "0xaaa1" });
+    expect(h.items[0]!.qtyRaw).toBe("-1000000000000000000");
+    expect(h.nextCursor).toBeNull();
+    const p1 = await w.caller.book.hedges({ bookId: 1, limit: 1 });
+    expect(p1.nextCursor).toBe(2);
+    const p2 = await w.caller.book.hedges({ bookId: 1, limit: 1, cursor: p1.nextCursor! });
+    expect(p2.items.map((x) => x.id)).toEqual([1]);
+  });
+
+  test("receipts.list: newest first, kind filter by number or name, id cursor", async () => {
+    const w = makeWorld();
+    seedBook(w);
+    const { f1, f2, f4, h1 } = seedActivity(w);
+    w.data.receipts.push({ id: 5000, bookId: 2, kind: 0, ts: new Date(NOW), payload: {}, payloadHash: `0x${"33".repeat(32)}`, hourStart: new Date(NOW) });
+    const all = await w.caller.receipts.list({ bookId: 1 });
+    expect(all.items.map((r) => r.id)).toEqual([h1, f4, f2, f1]);
+    const r = all.items[0]!;
+    expect(r).toMatchObject({ bookId: 1, kind: RECEIPT_KIND.HEDGE, kindName: "hedge", ts: new Date(NOW - 179_000).toISOString() });
+    expect(r.hourStart).toBe(new Date(NOW - 180_000).toISOString());
+    expect(r.payloadHash).toMatch(/^0x[0-9a-f]{64}$/);
+    expect((await w.caller.receipts.list({ bookId: 1, kind: "fill" })).items.map((x) => x.id)).toEqual([f4, f2, f1]);
+    expect((await w.caller.receipts.list({ bookId: 1, kind: 2 })).items.map((x) => x.id)).toEqual([h1]);
+    const p1 = await w.caller.receipts.list({ bookId: 1, limit: 3 });
+    expect(p1.nextCursor).toBe(f2);
+    expect((await w.caller.receipts.list({ bookId: 1, limit: 3, cursor: p1.nextCursor! })).items.map((x) => x.id)).toEqual([f1]);
+  });
+
+  test("empty feeds for a book with no activity", async () => {
+    const w = makeWorld();
+    seedBook(w);
+    expect(await w.caller.book.fills({ bookId: 1 })).toEqual({ bookId: 1, items: [], nextCursor: null });
+    expect(await w.caller.book.hedges({ bookId: 1 })).toEqual({ bookId: 1, items: [], nextCursor: null });
+    expect(await w.caller.receipts.list({ bookId: 1 })).toEqual({ bookId: 1, items: [], nextCursor: null });
+  });
+
+  test("a failed receipt-link lookup drops only the receipt ids", async () => {
+    const w = makeWorld();
+    seedBook(w);
+    seedActivity(w);
+    w.data.failReceiptLinks = true;
+    const f = await w.caller.book.fills({ bookId: 1 });
+    expect(f.items).toHaveLength(4);
+    expect(f.items.every((x) => x.receiptId === null)).toBe(true);
+    const h = await w.caller.book.hedges({ bookId: 1 });
+    expect(h.items.every((x) => x.receiptId === null)).toBe(true);
+  });
+
+  test("validation: unknown book NOT_FOUND, limits 1..200 (default 50), bad cursor / kind BAD_REQUEST", async () => {
+    const w = makeWorld();
+    seedBook(w);
+    for (let i = 0; i < 60; i++) w.data.fills.push({ bookId: 1, ts: new Date(NOW - i * 1000), side: "buy", qty: 1, px: 1, feeUsd: 0, venueTradeId: `x-${i}`, maker: true, trader: null });
+    expect((await w.caller.book.fills({ bookId: 1 })).items).toHaveLength(50);
+    expect((await w.caller.book.fills({ bookId: "1" as unknown as number, limit: "200" as unknown as number })).items).toHaveLength(60); // REST strings
+    for (const call of [
+      () => w.caller.book.fills({ bookId: 9 }),
+      () => w.caller.book.hedges({ bookId: 9 }),
+      () => w.caller.receipts.list({ bookId: 9 }),
+    ]) {
+      const e = await trpcErr(call());
+      expect(e.code).toBe("NOT_FOUND");
+      expect(e.message).toBe("book 9 not found");
+    }
+    for (const call of [
+      () => w.caller.book.fills({ bookId: 0 }),
+      () => w.caller.book.fills({ bookId: 1, limit: 201 }),
+      () => w.caller.book.fills({ bookId: 1, limit: 0 }),
+      () => w.caller.book.fills({ bookId: 1, cursor: "nope" }),
+      () => w.caller.book.hedges({ bookId: 1, limit: 500 }),
+      () => w.caller.book.hedges({ bookId: 1, cursor: 0 }),
+      () => w.caller.receipts.list({ bookId: 1, limit: 201 }),
+      () => w.caller.receipts.list({ bookId: 1, kind: 7 }),
+      () => w.caller.receipts.list({ bookId: 1, kind: "swap" as "fill" }),
+    ]) {
+      expect((await trpcErr(call())).code).toBe("BAD_REQUEST");
+    }
   });
 });

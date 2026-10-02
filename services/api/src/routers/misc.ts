@@ -1,11 +1,12 @@
-// risk.state, settlements.list, receipts.root/proof, oracle.prices + oracle.signed, events.recent
+// risk.state, settlements.list, receipts.list/root/proof, oracle.prices + oracle.signed, events.recent
 import { KEYS } from "@bookrunner/shared/queues";
 import { z } from "zod";
 import type { MarkRow, OraclePriceRow, ReceiptRootRow } from "../data/types";
 import type { ApiDeps } from "../deps";
+import { receiptListView } from "../domain/activity";
 import { limitsRowToView, type OraclePriceView, parseOraclePrice, parseRiskState } from "../domain/live";
 import { ORACLE_BUNDLE_KEY, signedBundleView } from "../domain/lowgas";
-import { buildReceiptProof, hourlyTree, periodBounds, receiptsRootOf } from "../domain/receipts";
+import { RECEIPT_KIND_NAMES, buildReceiptProof, hourlyTree, periodBounds, receiptsRootOf } from "../domain/receipts";
 import { dbUsdStr, unixSec } from "../format";
 import { parseJson } from "../kv";
 import { notFound, publicProcedure, router, softChain } from "../trpc";
@@ -79,7 +80,21 @@ async function periodRootsFor(deps: ApiDeps, mark: MarkRow, interval: number): P
   return { from, roots };
 }
 
+const KIND_BY_NAME = new Map(Object.entries(RECEIPT_KIND_NAMES).map(([k, name]) => [name, Number(k)]));
+/** Receipt kind as its number (0 quote, 1 fill, 2 hedge, 3 decision) or its name. */
+const kindInput = z.union([intLike(0, 3), z.enum(["quote", "fill", "hedge", "decision"]).transform((n) => KIND_BY_NAME.get(n) as number)]);
+
 export const receiptsRouter = router({
+  /** Receipt leaves of a book, newest first (ids to pass to receipts.proof). */
+  list: publicProcedure
+    .input(z.object({ bookId: bookIdInput, limit: limitInput(50, 200), cursor: cursorInput, kind: kindInput.optional() }))
+    .query(async ({ ctx: { deps }, input }) => {
+      const b = await loadBook(deps, input.bookId);
+      const rows = await deps.data.listReceipts(b.id, { limit: input.limit, beforeId: input.cursor, kind: input.kind });
+      return { ...paged(rows.map(receiptListView), input.limit, (i) => i.id), bookId: b.id };
+    }),
+
+
   /** Hourly root of a book-hour, or the receipts root of a mark with its hourly leaves. */
   root: publicProcedure
     .input(z.union([z.object({ markId: intLike(1) }), z.object({ bookId: bookIdInput, hourStart: timeInput })]))

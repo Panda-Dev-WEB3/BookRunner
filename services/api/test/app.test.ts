@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { createTRPCClient, httpBatchLink } from "@trpc/client";
+import { createTRPCClient, createTRPCUntypedClient, httpBatchLink, httpLink } from "@trpc/client";
 import superjson from "superjson";
 import { createApp } from "../src/app";
 import { webOrigins } from "../src/config";
 import type { AppRouter } from "../src/router";
-import { ALICE, BOOK, makeWorld, sampleDraft, seedBook } from "./fixtures";
+import { ALICE, BOOK, makeWorld, sampleDraft, seedActivity, seedBook } from "./fixtures";
 
 function setup() {
   const w = makeWorld();
@@ -23,7 +23,9 @@ describe("http app", () => {
     // the procedure list lets the web skip optional procedures this build does not serve (no 404 probes)
     expect(body.procedures).toContain("book.get");
     expect(body.procedures).toContain("tranche.position");
-    expect(body.procedures).not.toContain("book.fills");
+    // activity feeds the web probes optionally (ActivityPanel, VerifyPanel)
+    for (const p of ["book.fills", "book.hedges", "receipts.list"]) expect(body.procedures).toContain(p);
+    expect(body.procedures).not.toContain("book.trades");
   });
 
   test("CORS allows the web app origins only", async () => {
@@ -58,6 +60,24 @@ describe("http app", () => {
     expect(filed.txs.at(-1)?.description).toContain("File charter PERP_NVDA_USDC");
   });
 
+  test("activity feeds over HTTP the way the web asks for them (untyped client, unbatched)", async () => {
+    const { app, w } = setup();
+    const { f2, h1 } = seedActivity(w);
+    type LinkFetch = NonNullable<Parameters<typeof httpLink>[0]["fetch"]>;
+    const viaApp = (async (url: unknown, init?: RequestInit) => app.request(String(url), init)) as unknown as LinkFetch;
+    const client = createTRPCUntypedClient<AppRouter>({ links: [httpLink({ url: "http://api.test/trpc", transformer: superjson, fetch: viaApp })] });
+    const fills = (await client.query("book.fills", { bookId: 1, limit: 100 })) as { items: Array<{ venueTradeId: string; receiptId: number | null; ts: string }> };
+    expect(fills.items.find((f) => f.venueTradeId === "t-2")?.receiptId).toBe(f2);
+    expect(typeof fills.items[0]!.ts).toBe("string");
+    const hedges = (await client.query("book.hedges", { bookId: 1, limit: 100 })) as { items: Array<{ id: number; receiptId: number | null }> };
+    expect(hedges.items.find((h) => h.id === 1)?.receiptId).toBe(h1);
+    const receipts = (await client.query("receipts.list", { bookId: 1, limit: 25 })) as { items: Array<{ id: number; kindName: string }> };
+    expect(receipts.items[0]).toMatchObject({ id: h1, kindName: "hedge" });
+    // an unknown book is a NOT_FOUND that is not "no procedure found" (the web shows an error, not the fallback)
+    const missing = await client.query("book.fills", { bookId: 99 }).catch((e: unknown) => e as { message: string; data?: { code?: string } });
+    expect(missing).toMatchObject({ message: "book 99 not found", data: { code: "NOT_FOUND" } });
+  });
+
   test("REST mirror: GET + POST routes and error mapping", async () => {
     const { app, w } = setup();
     const books = (await (await app.request("/v1/books")).json()) as { items: Array<{ bookId: number }> };
@@ -69,6 +89,12 @@ describe("http app", () => {
     expect(await (await app.request("/v1/books/1/limits")).json()).toHaveProperty("series");
     expect(await (await app.request("/v1/books/1/risk")).json()).toHaveProperty("state", "warn");
     expect(await (await app.request("/v1/books/1/settlements")).json()).toHaveProperty("items");
+    for (const feed of ["fills", "hedges", "receipts"]) {
+      const r = await app.request(`/v1/books/1/${feed}?limit=5`);
+      expect(r.status).toBe(200);
+      expect(await r.json()).toMatchObject({ bookId: 1, items: [], nextCursor: null });
+    }
+    expect((await app.request("/v1/books/1/fills?limit=201")).status).toBe(400);
     expect(await (await app.request("/v1/charters?status=approved")).json()).toHaveProperty("items");
     expect(await (await app.request("/v1/charters/1")).json()).toHaveProperty("charterId", 1);
     expect(await (await app.request("/v1/oracle/prices?priceIds=NVDA,TSLA")).json()).toHaveProperty("prices");

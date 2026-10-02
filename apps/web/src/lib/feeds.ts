@@ -1,6 +1,7 @@
-// Tolerant parsers for activity feeds the dashboards show but the current API router does not type:
-// book.fills, book.hedges, receipts.list (optional procedures; see integration notes). Rows follow
-// the DB tables (fills, hedges, receipts) and are accepted as {items: [...]} or a bare array.
+// Tolerant parsers for the activity feeds book.fills, book.hedges and receipts.list. The API serves
+// them as {items, nextCursor, bookId} (rows follow the DB tables fills, hedges, receipts, with the
+// linked receipt id); they are queried as optional procedures (useOptional) so an older API that
+// lacks them degrades to the per-mark view. Accepted as {items: [...]} or a bare array.
 
 export interface FillRow {
   ts: string;
