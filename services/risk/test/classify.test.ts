@@ -174,6 +174,17 @@ describe("hedge band grace timing", () => {
     expect(after.snapshot.state).toBe("breach");
   });
 
+  test("the clock is paused while killed: a re-mandated book gets the full grace (regression: testnet NVDA)", () => {
+    const longAgo = { outOfBandSince: T0 - 4_500, lastObservedAt: T0 - 2 }; // out of band 75 min before + during the kill
+    const whileKilled = run({ ...outOfBand, killed: true }, longAgo);
+    expect(whileKilled.outOfBandSec).toBe(0);
+    expect(whileKilled.band.outOfBandSince).toBeNull();
+    // first tick after the re-mandate: the clock starts now -> warn, not an instant HEDGE_BAND breach
+    const first = evaluate(observation({ ...outOfBand, nowMs: (T0 + 2) * 1000 }), whileKilled.band, OPTS);
+    expect(first.band.outOfBandSince).toBe(T0 + 2);
+    expect(first.snapshot.state).toBe("warn");
+  });
+
   test("below 5% of maxInventory the band is not enforced", () => {
     const ev = run(exposure(usd(-2_000), 0n), { outOfBandSince: T0 - 5_000, lastObservedAt: T0 - 2 });
     expect(ev.snapshot.hedgeRatioBps).toBeNull();

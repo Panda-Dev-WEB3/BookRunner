@@ -33,7 +33,12 @@ export function evaluate(obs: BookObservation, prevBand: HedgeBandState, o: Eval
   const quote = selectLiveQuote(obs.quote, oraclePrice(obs.oracle), obs.nowMs, o.quoteMaxAgeMs, m.maxSkewBps);
   const canHedgeLong = o.canHedgeLong ?? false;
   const inBand = hedgeBandOk(m, obs.netExposureUsd, obs.deskHedgeUsd, canHedgeLong);
-  const band = stepHedgeBand(prevBand, inBand, nowSec, o.bandMaxGapSec);
+  // the grace clock does not run while the mandate is killed: the desk keys are revoked, so nobody can
+  // hedge, and a re-mandated book must get the full grace to hedge back into band (instead of being
+  // re-killed on its first tick with the clock still counting from before the kill)
+  const band = obs.killed
+    ? { state: { outOfBandSince: null, lastObservedAt: nowSec }, outOfBandSec: 0 }
+    : stepHedgeBand(prevBand, inBand, nowSec, o.bandMaxGapSec);
   const snapshot = classifyLimits({
     mandate: m,
     netExposureUsd: obs.netExposureUsd,
