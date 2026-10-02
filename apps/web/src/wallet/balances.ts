@@ -2,6 +2,7 @@
 // public RPC (works for browser wallets and devnet dev wallets alike). Polls every 15 s; call
 // invalidateWalletBalances() after a transaction that moves funds.
 import { type QueryClient, useQuery } from "@tanstack/react-query";
+import { useRef } from "react";
 import { type Address, erc20Abi } from "viem";
 import { appChain, publicClient } from "./chains";
 import { useAppContracts } from "./contracts";
@@ -25,8 +26,21 @@ export interface WalletBalances {
   refetch: () => Promise<void>;
 }
 
+/** One read, retried once: a single RPC hiccup (429 / 503 on the public RPC) is not "no balance". */
+async function readTwice<T>(f: () => Promise<T>): Promise<T | null> {
+  try {
+    return await f();
+  } catch {
+    try {
+      return await f();
+    } catch {
+      return null;
+    }
+  }
+}
+
 const erc20Balance = (token: Address | null, owner: Address): Promise<bigint | null> =>
-  token ? publicClient.readContract({ address: token, abi: erc20Abi, functionName: "balanceOf", args: [owner] }).catch(() => null) : Promise.resolve(null);
+  token ? readTwice(() => publicClient.readContract({ address: token, abi: erc20Abi, functionName: "balanceOf", args: [owner] })) : Promise.resolve(null);
 
 /** Balances of `address` (default: the active wallet). */
 export function useWalletBalances(address?: Address | null): WalletBalances {
@@ -36,6 +50,7 @@ export function useWalletBalances(address?: Address | null): WalletBalances {
   const usdc = c.data?.usdc ?? null;
   const bkrn = c.data?.bkrn ?? null;
   const tokensKnown = c.data !== undefined;
+  const lastGood = useRef<{ owner: Address | null; eth: bigint | null; usdc: bigint | null; bkrn: bigint | null }>({ owner: null, eth: null, usdc: null, bkrn: null });
   const q = useQuery({
     queryKey: [...BALANCES_QUERY_KEY, appChain.id, owner, usdc, bkrn],
     enabled: owner !== null,
@@ -43,8 +58,12 @@ export function useWalletBalances(address?: Address | null): WalletBalances {
     retry: false,
     queryFn: async () => {
       const me = owner as Address;
-      const [eth, u, b] = await Promise.all([publicClient.getBalance({ address: me }).catch(() => null), erc20Balance(usdc, me), erc20Balance(bkrn, me)]);
-      return { eth, usdc: u, bkrn: b };
+      const [eth, u, b] = await Promise.all([readTwice(() => publicClient.getBalance({ address: me })), erc20Balance(usdc, me), erc20Balance(bkrn, me)]);
+      // a read that still failed keeps the last value read for this wallet: unknown is not empty
+      const last = lastGood.current.owner === me ? lastGood.current : null;
+      const next = { eth: eth ?? last?.eth ?? null, usdc: u ?? last?.usdc ?? null, bkrn: b ?? last?.bkrn ?? null };
+      lastGood.current = { owner: me, ...next };
+      return next;
     },
   });
   const tokenValue = (v: bigint | null | undefined): bigint | null | undefined => {

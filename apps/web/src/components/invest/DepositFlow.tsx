@@ -84,7 +84,7 @@ export function AmountStep(props: DepositContext & { amount: string; onAmount: (
   return (
     <div className="space-y-5">
       <SelectedLine t={t} ticker={props.ticker} action={back} />
-      {!ob.ready && !ob.steps.some((s) => s.checking) && (
+      {!ob.ready && !ob.unsure && (
         <SetupChecklist compact whenReady="hide" title="Finish setting up your wallet" description="A few things are missing before you can deposit. Each step ticks itself when done." />
       )}
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,22rem)]">
@@ -115,7 +115,11 @@ export function AmountStep(props: DepositContext & { amount: string; onAmount: (
               Review deposit
               <IconArrowRight size={15} />
             </button>
-            {!ob.ready && <span className="text-[12.5px] text-muted">{ob.steps.some((s) => s.checking) ? "Checking your wallet…" : "Finish the setup steps above first."}</span>}
+            {!ob.ready && (
+              <span className="text-[12.5px] text-muted">
+                {ob.steps.some((s) => s.checking) ? "Checking your wallet…" : ob.unsure ? "Could not read your wallet balance; retrying…" : "Finish the setup steps above first."}
+              </span>
+            )}
             {ob.ready && !open && <span className="text-[12.5px] text-muted">Deposits are not open right now.</span>}
           </div>
         </div>

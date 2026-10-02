@@ -21,8 +21,6 @@ import { Callout, CopyButton, ProgressBar, Spinner, Stepper, type StepperStep } 
 export interface SetupChecklistProps {
   title?: ReactNode;
   description?: ReactNode;
-  /** The wallet already holds a tranche position (marks the last step done). */
-  hasPosition?: boolean;
   /** Where the last step points (default /invest). */
   investHref?: string;
   investLabel?: ReactNode;
@@ -42,10 +40,16 @@ export function SetupChecklist(props: SetupChecklistProps) {
   const w = useWallet();
   const modal = useConnectModal();
   const mint = useMintTestUsdc();
-  const ob = useOnboarding({ hasPosition: props.hasPosition });
+  const ob = useOnboarding();
   const b = ob.balances;
-  const status = (id: OnboardingStepId) => ob.steps.find((s) => s.id === id) ?? { id, status: "todo" as const, checking: false };
-  const checkingMeta = (id: OnboardingStepId) => (status(id).checking ? <Spinner size={14} label="Checking" className="text-muted" /> : undefined);
+  const status = (id: OnboardingStepId) => ob.steps.find((s) => s.id === id) ?? { id, status: "todo" as const, checking: false, unreadable: false };
+  // a balance that could not be read is unknown, not missing: say so instead of asking to fund the wallet
+  const checkingMeta = (id: OnboardingStepId) =>
+    status(id).checking ? (
+      <Spinner size={14} label="Checking" className="text-muted" />
+    ) : status(id).unreadable ? (
+      <span className="text-[12px] text-muted">Could not read the balance; retrying</span>
+    ) : undefined;
   const investHref = props.investHref ?? "/invest";
   const net = config.chain.kind === "devnet" ? "devnet" : "testnet";
 
@@ -57,17 +61,12 @@ export function SetupChecklist(props: SetupChecklistProps) {
         className={props.className}
         title="Your wallet is ready"
         action={
-          props.readyAction ??
-          (props.hasPosition ? (
-            <Link className="btn btn-sm" to="/portfolio">
-              Open your portfolio
-            </Link>
-          ) : (
+          props.readyAction ?? (
             <Link className="btn btn-primary btn-sm" to={investHref}>
               {props.investLabel ?? "Explore books"}
               <IconArrowRight size={14} />
             </Link>
-          ))
+          )
         }
       >
         <span className="num">
@@ -193,21 +192,13 @@ export function SetupChecklist(props: SetupChecklistProps) {
     {
       id: "invest",
       status: status("invest").status,
-      title: props.hasPosition ? "You are invested" : "Choose a book and invest",
-      description: props.hasPosition
-        ? "Track your position, marks and redemptions in your portfolio."
-        : "Pick a market and a tranche. You review every transaction in your wallet before anything is sent.",
-      action: props.hasPosition ? (
-        <Link className="btn" to="/portfolio">
-          Open your portfolio
+      title: "Choose a book and invest",
+      description: "Pick a market and a tranche. You review every transaction in your wallet before anything is sent.",
+      action: props.readyAction ?? (
+        <Link className="btn btn-primary" to={investHref}>
+          {props.investLabel ?? "Explore books"}
+          <IconArrowRight size={14} />
         </Link>
-      ) : (
-        (props.readyAction ?? (
-          <Link className="btn btn-primary" to={investHref}>
-            {props.investLabel ?? "Explore books"}
-            <IconArrowRight size={14} />
-          </Link>
-        ))
       ),
     },
   ];

@@ -8,8 +8,8 @@ export interface Onboarding extends OnboardingState {
   balances: WalletBalances;
 }
 
-/** Wallet -> network -> gas -> test USDC -> invest. Pass hasPosition when the page knows it. */
-export function useOnboarding(opts: { hasPosition?: boolean } = {}): Onboarding {
+/** Wallet -> network -> gas -> test USDC -> invest. */
+export function useOnboarding(): Onboarding {
   const w = useWallet();
   const balances = useWalletBalances();
   const state = deriveOnboarding({
@@ -19,7 +19,6 @@ export function useOnboarding(opts: { hasPosition?: boolean } = {}): Onboarding 
     appChainId: appChain.id,
     ethWei: balances.eth,
     usdcRaw: balances.usdc,
-    hasPosition: opts.hasPosition,
   });
   return { ...state, balances };
 }

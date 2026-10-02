@@ -21,8 +21,6 @@ export interface OnboardingInput {
   ethWei: bigint | null | undefined;
   /** USDC balance (6 decimals); undefined while loading, null when unreadable. */
   usdcRaw: bigint | null | undefined;
-  /** The wallet already holds or has committed to a tranche: the last step counts as done. */
-  hasPosition?: boolean;
   minGasWei?: bigint;
   /** Smallest USDC balance that counts (default: anything above zero). */
   minUsdcRaw?: bigint;
@@ -33,6 +31,11 @@ export interface OnboardingStep {
   status: OnboardingStatus;
   /** The value behind this step is still loading. */
   checking: boolean;
+  /**
+   * The value behind this step could not be read (an RPC failure): unknown, not "missing". The step
+   * is not done, but nothing should tell the person to fund the wallet because of it.
+   */
+  unreadable: boolean;
 }
 
 export interface OnboardingState {
@@ -41,6 +44,8 @@ export interface OnboardingState {
   current: OnboardingStepId | null;
   /** Wallet, network, gas and USDC are all in place: the wallet can invest. */
   ready: boolean;
+  /** Some step is still loading or could not be read: do not call the wallet unfunded yet. */
+  unsure: boolean;
   doneCount: number;
   total: number;
   /** 0..1 */
@@ -60,7 +65,7 @@ export function deriveOnboarding(i: OnboardingInput): OnboardingState {
     network: onChain,
     gas: gasOk,
     usdc: usdcOk,
-    invest: connected && i.hasPosition === true,
+    invest: false,
   };
   const checking: Record<OnboardingStepId, boolean> = {
     connect: false,
@@ -69,17 +74,25 @@ export function deriveOnboarding(i: OnboardingInput): OnboardingState {
     usdc: connected && i.usdcRaw === undefined,
     invest: false,
   };
+  const unreadable: Record<OnboardingStepId, boolean> = {
+    connect: false,
+    network: false,
+    gas: connected && i.ethWei === null,
+    usdc: connected && i.usdcRaw === null,
+    invest: false,
+  };
   let current: OnboardingStepId | null = null;
   const steps = ONBOARDING_ORDER.map((id): OnboardingStep => {
-    if (done[id]) return { id, status: "done", checking: false };
+    if (done[id]) return { id, status: "done", checking: false, unreadable: false };
     // the invest step becomes actionable only once every prerequisite is in place
     const actionable = id !== "invest" || ready;
     if (current === null && actionable) {
       current = id;
-      return { id, status: "active", checking: checking[id] };
+      return { id, status: "active", checking: checking[id], unreadable: unreadable[id] };
     }
-    return { id, status: "todo", checking: checking[id] };
+    return { id, status: "todo", checking: checking[id], unreadable: unreadable[id] };
   });
   const doneCount = steps.filter((s) => s.status === "done").length;
-  return { steps, current, ready, doneCount, total: steps.length, progress: doneCount / steps.length };
+  const unsure = steps.some((s) => s.checking || s.unreadable);
+  return { steps, current, ready, unsure, doneCount, total: steps.length, progress: doneCount / steps.length };
 }

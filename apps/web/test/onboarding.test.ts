@@ -38,7 +38,11 @@ describe("setup checklist state", () => {
     const on = { ...base, connected: true, walletKind: "injected" as const, walletChainId: APP, usdcRaw: 0n };
     expect(deriveOnboarding({ ...on, ethWei: MIN_GAS_WEI - 1n }).current).toBe("gas");
     expect(deriveOnboarding({ ...on, ethWei: MIN_GAS_WEI }).current).toBe("usdc");
-    expect(deriveOnboarding({ ...on, ethWei: null }).current).toBe("gas"); // unreadable is not funded
+    // unreadable is not done, but it is unknown rather than "unfunded"
+    const unread = deriveOnboarding({ ...on, ethWei: null });
+    expect(unread.current).toBe("gas");
+    expect(unread.steps.find((s) => s.id === "gas")).toMatchObject({ checking: false, unreadable: true });
+    expect(unread.unsure).toBe(true);
   });
 
   test("a funded wallet is ready and the invest step becomes active", () => {
@@ -50,12 +54,18 @@ describe("setup checklist state", () => {
     expect(s.progress).toBeCloseTo(0.8);
   });
 
-  test("an existing position completes every step", () => {
-    const i = { ...base, connected: true, walletKind: "injected" as const, walletChainId: APP, ethWei: 10n ** 16n, usdcRaw: 1n, hasPosition: true };
-    const s = deriveOnboarding(i);
-    expect(s.current).toBeNull();
-    expect(s.doneCount).toBe(5);
-    expect(s.progress).toBe(1);
+  test("a USDC balance that could not be read is unknown, never 'mint test USDC' for a funded wallet", () => {
+    const funded = { ...base, connected: true, walletKind: "injected" as const, walletChainId: APP, ethWei: 10n ** 16n };
+    const s = deriveOnboarding({ ...funded, usdcRaw: null });
+    expect(s.ready).toBe(false);
+    expect(s.unsure).toBe(true); // the deposit flow then says it is retrying instead of showing the setup steps
+    expect(s.steps.find((x) => x.id === "usdc")).toMatchObject({ status: "active", unreadable: true });
+    const ok = deriveOnboarding({ ...funded, usdcRaw: 10_000_000_000n });
+    expect(ok).toMatchObject({ ready: true, unsure: false });
+    // loading is "checking", also unsure
+    expect(deriveOnboarding({ ...funded, usdcRaw: undefined }).unsure).toBe(true);
+    // disconnected: nothing is unsure
+    expect(deriveOnboarding(base).unsure).toBe(false);
   });
 
   test("steps done out of order stay done; the first open step is the active one", () => {
