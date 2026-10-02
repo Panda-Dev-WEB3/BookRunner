@@ -8,13 +8,13 @@ import { POLL, trpc } from "../../api/trpc";
 import { USDC_DECIMALS, formatAmountDisplay } from "../../lib/amount";
 import type { BookListItem } from "../../lib/api-types";
 import { venueLabel } from "../../lib/copy";
-import { DASH, ageMs, fmtAge, fmtDuration, fmtSharePrice, fmtUsd, tickerOf, usdRaw } from "../../lib/format";
+import { DASH, ageMs, fmtAge, fmtDuration, fmtSharePrice, fmtUsd, fmtWhen, isoToSec, tickerOf, usdRaw } from "../../lib/format";
 import { bookState } from "../../lib/limits";
 import type { TopUpRound } from "../../lib/topup";
 import { IconArrowRight } from "../icons";
 import { Card, ProgressBar, Stat, StateChip, Term, cx } from "../ui";
 import { TrancheSwatch, WindowBadge } from "./InvestBits";
-import { TRANCHE_IDS, TRANCHE_NAME, type TrancheId, depositWindow, distributionShares, fmtWhen, isoToSec, pctOfBps, roundRoom } from "./logic";
+import { TRANCHE_IDS, TRANCHE_NAME, type TrancheId, depositWindow, distributionShares, pctOfBps, roundRoom } from "./logic";
 import type { BookRounds } from "./useInvestChain";
 
 export function BookInvestCard(props: {

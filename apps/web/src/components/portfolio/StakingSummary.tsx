@@ -4,10 +4,11 @@ import type { Address } from "viem";
 import { Link } from "react-router";
 import { useNow } from "../../api/hooks";
 import { BKRN_DECIMALS, formatAmountDisplay } from "../../lib/amount";
+import { fmtWhen } from "../../lib/format";
 import { IconArrowRight } from "../icons";
 import { Term } from "../Term";
 import { Card, ErrorState, KV, SkeletonRows } from "../ui";
-import { fmtUntil, fmtWhen } from "./display";
+import { fmtUntil } from "./display";
 import { useStakingSummary } from "./hooks";
 import { stakingView } from "./model";
 

@@ -1,6 +1,6 @@
 // Display helpers for the Portfolio page: amounts, times and plain-language labels. Pure (the
 // time-zone-free parts are unit-tested in test/portfolio.test.ts).
-import { DASH, fmtUsd } from "../../lib/format";
+import { DASH, fmtUsd, fmtWhen } from "../../lib/format";
 import type { ActivityKind, DepositSettlement, RedemptionStage, TrancheName } from "./model";
 
 export const PORTFOLIO_LEAD =
@@ -13,19 +13,6 @@ export const usd = (raw: bigint | null | undefined): string => (raw == null ? DA
 
 /** "1,234.56 shares" from 6-decimal base units. */
 export const shares = (raw: bigint | null | undefined): string => (raw == null ? DASH : `${fmtUsd(raw)} ${raw === 1_000_000n ? "share" : "shares"}`);
-
-/** Local date and time, e.g. "2 Oct 2026, 17:00". `timeZone` is for tests. */
-export function fmtWhen(unixSec: number | null | undefined, timeZone?: string): string {
-  if (unixSec == null || !Number.isFinite(unixSec) || unixSec <= 0) return DASH;
-  return new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone }).format(new Date(unixSec * 1000));
-}
-
-/** ISO string -> unix seconds (null when missing or malformed). */
-export function isoSec(iso: string | null | undefined): number | null {
-  if (!iso) return null;
-  const t = Date.parse(iso);
-  return Number.isFinite(t) ? Math.floor(t / 1000) : null;
-}
 
 /** Coarse time until a moment: "in 3 days", "in 4 h", "in 12 min", "now" (past: "now"). */
 export function fmtUntil(unixSec: number | null | undefined, nowSec: number): string {

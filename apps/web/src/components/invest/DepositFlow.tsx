@@ -10,7 +10,7 @@ import { trpc } from "../../api/trpc";
 import type { BookDetail } from "../../lib/api-types";
 import { USDC_DECIMALS, formatAmountDisplay } from "../../lib/amount";
 import { addressUrl } from "../../lib/config";
-import { fmtDuration, fmtSharePrice, shortHex, usdRaw } from "../../lib/format";
+import { fmtDuration, fmtSharePrice, fmtWhen, shortHex, usdRaw } from "../../lib/format";
 import { invalidateWalletBalances } from "../../wallet/balances";
 import { appChain } from "../../wallet/chains";
 import { TxRunner } from "../../wallet/TxRunner";
@@ -21,7 +21,7 @@ import { IconArrowRight } from "../icons";
 import { SetupChecklist } from "../SetupChecklist";
 import { AmountInput, Callout, ErrorState, ExternalLink, Spinner, Stepper, type StepperStep, Term } from "../ui";
 import { InfoList, RiskNotice, TrancheSwatch } from "./InvestBits";
-import { type DepositWindow, type RoundRoom, TRANCHE_NAME, type TrancheId, checkDeposit, fmtWhen, indicativeShares, pctOfBps, seniorRoomPerJunior, walletRoom, withPlainPrompts } from "./logic";
+import { type DepositWindow, type RoundRoom, TRANCHE_NAME, type TrancheId, checkDeposit, indicativeShares, pctOfBps, seniorRoomPerJunior, walletRoom, withPlainPrompts } from "./logic";
 import { type TrancheAddresses, invalidateInvestReads, useWalletRoom } from "./useInvestChain";
 
 const usdc = (raw: bigint | null | undefined, dp = 2) => (raw == null ? "—" : `${formatAmountDisplay(raw, USDC_DECIMALS, dp)} USDC`);

@@ -9,13 +9,13 @@ import { trpc } from "../../api/trpc";
 import type { BookDetail, PositionOut } from "../../lib/api-types";
 import { USDC_DECIMALS, amountIssue, amountIssueText, formatAmountDisplay, parseAmount } from "../../lib/amount";
 import { NOTICE_LINE } from "../../lib/copy";
-import { fmtDuration, fmtSharePrice, fmtUsd, usdRaw } from "../../lib/format";
+import { fmtDuration, fmtSharePrice, fmtUsd, fmtWhen, isoToSec, usdRaw } from "../../lib/format";
 import { invalidateWalletBalances } from "../../wallet/balances";
 import { TxRunner } from "../../wallet/TxRunner";
 import { WalletButton } from "../../wallet/WalletButton";
 import { AmountInput, Callout, EmptyState, ErrorState, Segmented, SkeletonRows, Spinner, Term, ValueKind, cx } from "../ui";
 import { InfoList, TrancheSwatch } from "./InvestBits";
-import { TRANCHE_IDS, TRANCHE_NAME, type TrancheId, fmtWhen, isoToSec, positionFlags, sharesValue, withPlainPrompts } from "./logic";
+import { TRANCHE_IDS, TRANCHE_NAME, type TrancheId, positionFlags, sharesValue, withPlainPrompts } from "./logic";
 import { type TrancheAddresses, invalidateInvestReads } from "./useInvestChain";
 
 type TranchePosition = PositionOut["tranches"][number];

@@ -7,11 +7,11 @@ import type { Address } from "viem";
 import { trpc } from "../../api/trpc";
 import { USDC_DECIMALS, amountIssue, formatAmountInput, parseAmount } from "../../lib/amount";
 import { NOTICE_LINE } from "../../lib/copy";
-import { fmtDuration, fmtSharePrice, usdRaw } from "../../lib/format";
+import { fmtDuration, fmtSharePrice, fmtWhen, isoToSec, usdRaw } from "../../lib/format";
 import { TxRunner } from "../../wallet/TxRunner";
 import { Term } from "../Term";
 import { AmountInput, Callout, ErrorState, KV, Modal, TrancheBadge } from "../ui";
-import { TRANCHE_NAME, fmtWhen, isoSec, shares, usd } from "./display";
+import { TRANCHE_NAME, shares, usd } from "./display";
 import { refreshAfterTx } from "./hooks";
 import { type TrancheHolding, sharesValue } from "./model";
 
@@ -95,8 +95,8 @@ export function RedeemModal(props: { open: boolean; onClose: () => void; bookId:
             <KV
               rows={[
                 ["Shares", shares(usdRaw(red.data.shares))],
-                ["Eligible from", fmtWhen(isoSec(red.data.eligibleAt))],
-                ["Settles at the mark ending", fmtWhen(isoSec(red.data.settlesAtPeriodEnd))],
+                ["Eligible from", fmtWhen(isoToSec(red.data.eligibleAt))],
+                ["Settles at the mark ending", fmtWhen(isoToSec(red.data.settlesAtPeriodEnd))],
                 ["Indicative value (estimate)", `${usd(usdRaw(red.data.indicative.valueUsd))} at ${fmtSharePrice(red.data.indicative.sharePrice, 6)}`],
               ]}
             />

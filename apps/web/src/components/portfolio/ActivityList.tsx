@@ -4,11 +4,11 @@
 import type { Address } from "viem";
 import type { BookListItem } from "../../lib/api-types";
 import { addressUrl } from "../../lib/config";
-import { tickerOf } from "../../lib/format";
+import { fmtWhen, tickerOf } from "../../lib/format";
 import type { BookContracts } from "../../wallet/contracts";
 import { cx } from "../cx";
 import { Card, EmptyState, ExternalLink, Hash, SkeletonRows, TrancheBadge } from "../ui";
-import { ACTIVITY_LABEL, fmtWhen, shares, usd } from "./display";
+import { ACTIVITY_LABEL, shares, usd } from "./display";
 import { useWalletActivity } from "./hooks";
 import { type ActivityItem, type ActivityKind, type BookHolding, activityFromRedemptions } from "./model";
 

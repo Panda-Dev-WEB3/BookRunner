@@ -6,6 +6,7 @@ import {
   fmtAge,
   fmtBps,
   fmtDateTime,
+  fmtDay,
   fmtDuration,
   fmtNum,
   fmtPct,
@@ -14,7 +15,9 @@ import {
   fmtTime,
   fmtUsd,
   fmtUsdFloat,
+  fmtWhen,
   isZeroHash,
+  isoToSec,
   rawToDecimal,
   shortHex,
   tickerOf,
@@ -113,5 +116,21 @@ describe("identifiers", () => {
     expect(tickerOf("CUSTOM")).toBe("CUSTOM");
     expect(isZeroHash("0x0000000000000000000000000000000000000000000000000000000000000000")).toBe(true);
     expect(isZeroHash("0x6aed")).toBe(false);
+  });
+});
+
+describe("investor dates", () => {
+  const ENDS = 1_793_549_809; // 1 Nov 2026, 16:16:49 UTC
+  test("fmtWhen / fmtDay in a fixed zone", () => {
+    expect(fmtWhen(ENDS, "UTC")).toBe("1 Nov 2026, 16:16 UTC");
+    expect(fmtDay(ENDS, "UTC")).toBe("1 Nov 2026");
+    expect(fmtWhen(null)).toBe(DASH);
+    expect(fmtWhen(0)).toBe(DASH);
+    expect(fmtDay(undefined)).toBe(DASH);
+  });
+  test("isoToSec", () => {
+    expect(isoToSec("2026-10-02T13:41:32.000Z")).toBe(1_790_948_492);
+    expect(isoToSec(null)).toBeNull();
+    expect(isoToSec("not a date")).toBeNull();
   });
 });

@@ -4,13 +4,13 @@ import { type ReactNode, useId } from "react";
 import { Link } from "react-router";
 import type { BookListItem } from "../../lib/api-types";
 import { venueLabel } from "../../lib/copy";
-import { fmtSharePrice, fmtUsd, tickerOf } from "../../lib/format";
+import { fmtSharePrice, fmtUsd, fmtWhen, isoToSec, tickerOf } from "../../lib/format";
 import { bookState } from "../../lib/limits";
 import type { TopUpRound } from "../../lib/topup";
 import { cx } from "../cx";
 import { IconArrowRight } from "../icons";
 import { Badge, Card, Hash, StateChip, TrancheBadge } from "../ui";
-import { STAGE_LABEL, STAGE_TONE, TRANCHE_NAME, fmtUntil, fmtWhen, isoSec, settlementText, shares, usd } from "./display";
+import { STAGE_LABEL, STAGE_TONE, TRANCHE_NAME, fmtUntil, settlementText, shares, usd } from "./display";
 import { type BookHolding, type DepositSettlement, type TrancheHolding, type TrancheName, depositSettlement, redemptionStage } from "./model";
 
 function Line(props: { label: ReactNode; value: ReactNode; note?: ReactNode; accent?: boolean }) {
@@ -89,7 +89,7 @@ function Redemptions(props: { holding: BookHolding; nowMs: number }) {
       <ul className="mt-2 divide-y divide-line">
         {rows.map((r) => {
           const stage = redemptionStage(r, props.nowMs);
-          const settles = isoSec(r.settlesAtPeriodEnd);
+          const settles = isoToSec(r.settlesAtPeriodEnd);
           return (
             <li key={`${r.tranche}-${r.requestId}-${r.requestTx ?? r.requestedAt}`} className="py-2.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -105,11 +105,11 @@ function Redemptions(props: { holding: BookHolding; nowMs: number }) {
               <dl className="mt-1.5 grid gap-x-5 gap-y-0.5 text-[12px] text-ink-2 sm:grid-cols-3">
                 <div>
                   <dt className="inline text-muted">Requested </dt>
-                  <dd className="num inline">{fmtWhen(isoSec(r.requestedAt))}</dd>
+                  <dd className="num inline">{fmtWhen(isoToSec(r.requestedAt))}</dd>
                 </div>
                 <div>
                   <dt className="inline text-muted">{r.tranche === "junior" ? "Notice ends " : "Eligible "}</dt>
-                  <dd className="num inline">{fmtWhen(isoSec(r.eligibleAt))}</dd>
+                  <dd className="num inline">{fmtWhen(isoToSec(r.eligibleAt))}</dd>
                 </div>
                 <div>
                   <dt className="inline text-muted">Settles at the mark ending </dt>

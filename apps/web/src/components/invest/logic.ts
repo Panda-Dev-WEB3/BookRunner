@@ -23,34 +23,6 @@ export function firstMarkAtOrAfter(tSec: number, intervalSec: number): number {
   return Math.ceil(tSec / i) * i;
 }
 
-/** "1 Nov 2026, 16:16 UTC" in the reader's time zone (or `timeZone`). */
-export function fmtWhen(sec: number | null | undefined, timeZone?: string): string {
-  if (sec == null || !Number.isFinite(sec) || sec <= 0) return "—";
-  return new Intl.DateTimeFormat("en-GB", {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-    timeZone,
-    timeZoneName: "short",
-  }).format(new Date(sec * 1000));
-}
-
-/** "1 Nov 2026" in the reader's time zone (or `timeZone`). */
-export function fmtDay(sec: number | null | undefined, timeZone?: string): string {
-  if (sec == null || !Number.isFinite(sec) || sec <= 0) return "—";
-  return new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone }).format(new Date(sec * 1000));
-}
-
-/** ISO string or null -> unix seconds or null. */
-export function isoToSec(iso: string | null | undefined): number | null {
-  if (!iso) return null;
-  const t = Date.parse(iso);
-  return Number.isNaN(t) ? null : Math.floor(t / 1000);
-}
-
 // ------------------------------------------------------------------ deposit window
 
 export interface DepositWindowInput {

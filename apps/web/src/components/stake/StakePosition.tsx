@@ -1,7 +1,7 @@
 // "Your stake": what the connected wallet holds, has staked, can unstake, has locked as bonds, has
 // cooling down, and can claim. Read live from BkrnStaking (useStakePosition) every 15 s.
 import { useNow } from "../../api/hooks";
-import { fmtDateTime, fmtDuration } from "../../lib/format";
+import { fmtDuration, fmtWhen } from "../../lib/format";
 import { cx } from "../cx";
 import { Badge, Card, ErrorState, ProgressBar, Skeleton, Stat, Term } from "../ui";
 import { WithUnit } from "./StakeOverview";
@@ -55,7 +55,7 @@ export function CooldownStatus(props: { pending: bigint; availableAt: number; co
             Cooldown over
           </Badge>
         </div>
-        <p className="mt-1 text-[12.5px] text-ink-2">The wait ended {fmtDateTime(s.availableAt)}. Withdraw it from the Unstake tab, or cancel the request to keep it staked.</p>
+        <p className="mt-1 text-[12.5px] text-ink-2">The wait ended {fmtWhen(s.availableAt)}. Withdraw it from the Unstake tab, or cancel the request to keep it staked.</p>
       </div>
     );
   }
@@ -72,7 +72,7 @@ export function CooldownStatus(props: { pending: bigint; availableAt: number; co
       </div>
       {s.progress !== null && <ProgressBar value={s.progress} label="Cooldown elapsed" tone="backstop" className="mt-2.5" />}
       <p className="mt-2 text-[12px] text-ink-2">
-        Withdrawable from {fmtDateTime(s.availableAt)} (your local time). It still counts as staked until then, so it keeps its share of any buyback.
+        Withdrawable from {fmtWhen(s.availableAt)}. It still counts as staked until then, so it keeps its share of any buyback.
       </p>
     </div>
   );

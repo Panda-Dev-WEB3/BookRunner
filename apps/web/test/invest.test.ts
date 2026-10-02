@@ -5,10 +5,7 @@ import {
   depositWindow,
   distributionShares,
   firstMarkAtOrAfter,
-  fmtDay,
-  fmtWhen,
   indicativeShares,
-  isoToSec,
   pctOfBps,
   positionFlags,
   priceWad,
@@ -37,20 +34,6 @@ describe("firstMarkAtOrAfter", () => {
   });
   test("guards a zero interval", () => {
     expect(firstMarkAtOrAfter(10, 0)).toBe(10);
-  });
-});
-
-describe("dates", () => {
-  test("fmtWhen / fmtDay in a fixed zone", () => {
-    expect(fmtWhen(ENDS, "UTC")).toBe("1 Nov 2026, 16:16 UTC");
-    expect(fmtDay(ENDS, "UTC")).toBe("1 Nov 2026");
-    expect(fmtWhen(null)).toBe("—");
-    expect(fmtWhen(0)).toBe("—");
-  });
-  test("isoToSec", () => {
-    expect(isoToSec("2026-10-02T13:41:32.000Z")).toBe(1_790_948_492);
-    expect(isoToSec(null)).toBeNull();
-    expect(isoToSec("not a date")).toBeNull();
   });
 });
 

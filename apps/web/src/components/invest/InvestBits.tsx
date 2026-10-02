@@ -2,11 +2,11 @@
 // the step trail (1 tranche · 2 amount · 3 review) and the tranche swatch.
 import type { ReactNode } from "react";
 import { config } from "../../lib/config";
-import { fmtDuration } from "../../lib/format";
+import { fmtDay, fmtDuration, fmtWhen } from "../../lib/format";
 import { isTestChain } from "../../wallet/network";
 import { IconCheck } from "../icons";
 import { Badge, Callout, Term, cx } from "../ui";
-import { type DepositWindow, type TrancheId, fmtDay, fmtWhen } from "./logic";
+import type { DepositWindow, TrancheId } from "./logic";
 
 /** Short status pill for a book's deposit window. */
 export function WindowBadge({ w, nowSec, size }: { w: DepositWindow; nowSec: number; size?: "sm" | "md" }) {

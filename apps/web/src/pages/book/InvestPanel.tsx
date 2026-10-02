@@ -14,7 +14,6 @@ import {
   TRANCHE_NAME,
   type TrancheId,
   depositWindow,
-  isoToSec,
   positionFlags,
   roundRoom,
   seniorRoundRoom,
@@ -26,7 +25,7 @@ import { IconArrowRight } from "../../components/icons";
 import { Badge, Callout, Card, Tabs } from "../../components/ui";
 import type { BookDetail } from "../../lib/api-types";
 import { venueLabel } from "../../lib/copy";
-import { tickerOf, usdRaw } from "../../lib/format";
+import { isoToSec, tickerOf, usdRaw } from "../../lib/format";
 import { nextMarkLabel } from "../../lib/lowgas";
 import type { TopUpRound } from "../../lib/topup";
 import { useTopUpRounds } from "../../wallet/topUp";

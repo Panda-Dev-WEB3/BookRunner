@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { fmtUntil, fmtWhen, markLabel, pctLabel, settlementText, shares } from "../src/components/portfolio/display";
+import { fmtUntil, markLabel, pctLabel, settlementText, shares } from "../src/components/portfolio/display";
 import {
   type TrancheLog,
   activityFromLogs,
@@ -220,9 +220,9 @@ describe("split, marks and settlement", () => {
   });
 
   test("settlementText", () => {
-    expect(settlementText({ kind: "round", endsAt: 1_793_491_200 }, "UTC")).toBe("Accepted at the first mark after the top-up round ends, 1 Nov 2026, 00:00, at that mark's share price.");
+    expect(settlementText({ kind: "round", endsAt: 1_793_491_200 }, "UTC")).toBe("Accepted at the first mark after the top-up round ends, 1 Nov 2026, 00:00 UTC, at that mark's share price.");
     expect(settlementText({ kind: "window", at: null })).toBe("Allocated when the subscription window closes.");
-    expect(settlementText({ kind: "nextMark", at: 1_790_964_000 }, "UTC")).toBe("The round has ended: accepted at the next mark, 2 Oct 2026, 18:00.");
+    expect(settlementText({ kind: "nextMark", at: 1_790_964_000 }, "UTC")).toBe("The round has ended: accepted at the next mark, 2 Oct 2026, 18:00 UTC.");
   });
 
   test("redemptionStage", () => {
@@ -314,11 +314,9 @@ describe("staking and labels", () => {
     expect(pctLabel(1)).toBe("100%");
   });
 
-  test("markLabel and dates", () => {
-    expect(fmtWhen(1_790_960_400, "UTC")).toBe("2 Oct 2026, 17:00");
-    expect(fmtWhen(0)).toBe("—");
-    expect(markLabel({ newest: 1_790_960_400, oldest: 1_790_960_400, same: true }, "UTC")).toBe("At the latest mark (2 Oct 2026, 17:00)");
-    expect(markLabel({ newest: 1_790_960_400, oldest: 1_790_956_800, same: false }, "UTC")).toBe("At each book's latest mark (2 Oct 2026, 16:00 to 2 Oct 2026, 17:00)");
+  test("markLabel", () => {
+    expect(markLabel({ newest: 1_790_960_400, oldest: 1_790_960_400, same: true }, "UTC")).toBe("At the latest mark (2 Oct 2026, 17:00 UTC)");
+    expect(markLabel({ newest: 1_790_960_400, oldest: 1_790_956_800, same: false }, "UTC")).toBe("At each book's latest mark (2 Oct 2026, 16:00 UTC to 2 Oct 2026, 17:00 UTC)");
     expect(markLabel({ newest: null, oldest: null, same: true })).toBe("No mark yet");
   });
 
