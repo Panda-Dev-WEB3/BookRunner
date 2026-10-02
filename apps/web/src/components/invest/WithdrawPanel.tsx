@@ -7,7 +7,7 @@ import type { Address } from "viem";
 import { useQueryError } from "../../api/hooks";
 import { trpc } from "../../api/trpc";
 import type { BookDetail, PositionOut } from "../../lib/api-types";
-import { USDC_DECIMALS, amountIssue, amountIssueText, formatAmountDisplay, parseAmount } from "../../lib/amount";
+import { USDC_DECIMALS, amountIssue, amountIssueText, formatAmountDisplay, formatAmountInput, parseAmount } from "../../lib/amount";
 import { CASH_WAIT_LINE, NOTICE_LINE } from "../../lib/copy";
 import { fmtDuration, fmtSharePrice, fmtUsd, fmtWhen, isoToSec, usdRaw } from "../../lib/format";
 import { invalidateWalletBalances } from "../../wallet/balances";
@@ -274,7 +274,7 @@ function RedeemBox(props: { book: BookDetail; ticker: string; addrs: TrancheAddr
             disabled={sent}
           />
           {!red.data && (
-            <button type="button" className="btn btn-primary" disabled={raw === null || red.isPending || !props.wallet} onClick={() => props.wallet && red.mutate({ bookId: props.book.bookId, tranche, shares: value.trim(), wallet: props.wallet })}>
+            <button type="button" className="btn btn-primary" disabled={raw === null || red.isPending || !props.wallet} onClick={() => props.wallet && raw !== null && red.mutate({ bookId: props.book.bookId, tranche, shares: formatAmountInput(raw, USDC_DECIMALS), wallet: props.wallet })}>
               {red.isPending ? (
                 <>
                   <Spinner size={14} /> Preparing…

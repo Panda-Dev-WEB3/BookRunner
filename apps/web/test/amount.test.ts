@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { amountIssue, amountIssueText, formatAmountDisplay, formatAmountInput, parseAmount, sanitizeAmountInput } from "../src/lib/amount";
+import { amountIssue, amountIssueText, formatAmountDisplay, formatAmountInput, normalizeAmount, parseAmount, sanitizeAmountInput } from "../src/lib/amount";
 
 describe("amount input", () => {
   test("sanitises what a person types", () => {
@@ -29,6 +29,21 @@ describe("amount input", () => {
     expect(parseAmount("1.0000001")).toBeNull();
     expect(parseAmount("-1")).toBeNull();
     expect(parseAmount("1e6")).toBeNull();
+  });
+
+  test("normalizes what is sent to the API (its usdInput regex rejects a trailing dot)", () => {
+    const api = /^\d+(\.\d{1,6})?$/;
+    // "1,000." sanitizes to "1000." and parses, so Review is enabled: the request must not carry the dot
+    expect(sanitizeAmountInput("1,000.")).toBe("1000.");
+    for (const [typed, sent] of [["1000.", "1000"], ["1,000.", "1000"], [".5", "0.5"], ["0.50", "0.5"], ["007", "7"], ["100.000001", "100.000001"]] as const) {
+      const v = normalizeAmount(sanitizeAmountInput(typed));
+      expect(v).toBe(sent);
+      expect(api.test(v ?? "")).toBe(true);
+    }
+    expect(normalizeAmount("")).toBeNull();
+    expect(normalizeAmount(".")).toBeNull();
+    expect(normalizeAmount("1.0000001")).toBeNull();
+    expect(normalizeAmount("1.5", 18)).toBe("1.5");
   });
 
   test("formats back for the input (floored) and for display (grouped)", () => {

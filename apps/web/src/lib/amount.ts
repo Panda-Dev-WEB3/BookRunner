@@ -39,6 +39,15 @@ export function parseAmount(value: string, decimals = USDC_DECIMALS): bigint | n
   }
 }
 
+/**
+ * A typed amount in the canonical form the API accepts (/^\d+(\.\d{1,6})?$/): "1000." -> "1000",
+ * "0.50" -> "0.5", ".5" -> "0.5". null when it does not parse. Send this, never the raw input.
+ */
+export function normalizeAmount(value: string, decimals = USDC_DECIMALS): string | null {
+  const raw = parseAmount(value, decimals);
+  return raw === null ? null : formatAmountInput(raw, decimals);
+}
+
 /** Base units -> plain decimal for an input value ("1234.5"), no grouping, trailing zeros trimmed. */
 export function formatAmountInput(raw: bigint, decimals = USDC_DECIMALS, maxDp = decimals): string {
   if (raw < 0n) raw = 0n;

@@ -1,6 +1,6 @@
 // Tolerant parsers: activity feeds, jury verdicts, mark PnL statements, API / wallet errors.
 import { describe, expect, test } from "bun:test";
-import { describeError, errorCode, isMissingProcedure } from "../src/lib/errors";
+import { describeError, errorCode, isMissingProcedure, zodIssueText } from "../src/lib/errors";
 import { hedgeQty, parseFills, parseHedges, parseReceipts } from "../src/lib/feeds";
 import { jurorLabel, parseVerdict, seatLabel } from "../src/lib/jury";
 import { markStatements, parseMarkStatement, wadToNumber } from "../src/lib/markStatement";
@@ -117,5 +117,22 @@ describe("errors", () => {
     expect(isMissingProcedure(e("NOT_FOUND", "book 9 not found"))).toBe(false);
     expect(describeError(e("NOT_FOUND", 'No procedure found on path "x"')).kind).toBe("unsupported");
     expect(describeError(undefined).kind).toBe("unknown");
+  });
+  test("a zod issue list (tRPC BAD_REQUEST) reads as its message, never as raw JSON", () => {
+    // what the API answers for tranche.subscribe with amountUsd "1000."
+    const zod = JSON.stringify(
+      [{ origin: "string", code: "invalid_format", format: "regex", pattern: "/^\\d+(\\.\\d{1,6})?$/", path: ["amountUsd"], message: "expected a non-negative USD amount with at most 6 decimals" }],
+      null,
+      2,
+    );
+    expect(describeError({ message: zod, data: { code: "BAD_REQUEST" } })).toEqual({
+      kind: "bad_request",
+      title: "Check the inputs",
+      message: "Expected a non-negative USD amount with at most 6 decimals",
+    });
+    expect(zodIssueText(JSON.stringify([{ message: "a" }, { message: "b" }, { message: "a" }]))).toBe("A; b");
+    expect(zodIssueText("[not json")).toBeNull();
+    expect(zodIssueText("[]")).toBeNull();
+    expect(zodIssueText("plain text")).toBeNull();
   });
 });

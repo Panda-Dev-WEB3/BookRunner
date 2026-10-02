@@ -8,7 +8,7 @@ import { Link } from "react-router";
 import type { Address } from "viem";
 import { trpc } from "../../api/trpc";
 import type { BookDetail } from "../../lib/api-types";
-import { USDC_DECIMALS, formatAmountDisplay } from "../../lib/amount";
+import { USDC_DECIMALS, formatAmountDisplay, normalizeAmount } from "../../lib/amount";
 import { addressUrl } from "../../lib/config";
 import { fmtDuration, fmtSharePrice, fmtWhen, shortHex, usdRaw } from "../../lib/format";
 import { invalidateWalletBalances } from "../../wallet/balances";
@@ -173,17 +173,19 @@ export function ReviewStep(props: DepositContext & { amount: string; onBack: () 
   const me = (w.active?.address ?? null) as Address | null;
   const t = props.tranche;
   const name = TRANCHE_NAME[t];
-  const amountText = usdc(usdRaw(props.amount));
+  // The API accepts only canonical amounts ("1000", never "1000."): send and show the parsed value.
+  const amountIn = normalizeAmount(props.amount, USDC_DECIMALS);
+  const amountText = usdc(amountIn === null ? null : usdRaw(amountIn));
   const win = props.window;
   const settlesAt = win.status === "open" || win.status === "settling" || win.status === "paused" ? win.settlesAt : null;
   const endsAt = win.status === "open" || win.status === "settling" || win.status === "paused" ? win.endsAt : null;
   const subscription = win.status !== "closed" && win.status !== "loading" && win.kind === "subscription";
-  const raw = usdRaw(props.amount);
+  const raw = amountIn === null ? null : usdRaw(amountIn);
   const est = raw !== null ? indicativeShares(raw, t === "senior" ? props.book.seniorSharePrice : props.book.juniorSharePrice) : null;
 
   const prepare = () => {
-    if (!me) return;
-    sub.mutate({ bookId: props.book.bookId, tranche: t, amountUsd: props.amount.trim(), wallet: me });
+    if (!me || amountIn === null) return;
+    sub.mutate({ bookId: props.book.bookId, tranche: t, amountUsd: amountIn, wallet: me });
   };
   // Prepare the transactions as soon as the review opens (the parent remounts this step when the
   // wallet, tranche or amount changes, so a prepared list always matches what is shown).

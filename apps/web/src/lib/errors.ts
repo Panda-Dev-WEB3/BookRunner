@@ -48,9 +48,29 @@ function isNetwork(e: unknown): boolean {
   return !errorCode(e) && /failed to fetch|networkerror|load failed|fetch failed|ECONNREFUSED|network request failed/i.test(msg);
 }
 
+/**
+ * A tRPC input-validation error carries zod's issue list as its message (a JSON array). Returns the
+ * issues' own messages joined, or null when the message is not such a list.
+ */
+export function zodIssueText(message: string): string | null {
+  const m = message.trim();
+  if (!m.startsWith("[")) return null;
+  try {
+    const issues = JSON.parse(m) as unknown;
+    if (!Array.isArray(issues) || issues.length === 0) return null;
+    const texts = issues.map((i) => (i && typeof i === "object" ? str((i as { message?: unknown }).message) : "")).filter((t) => t !== "");
+    if (texts.length === 0) return null;
+    const out = [...new Set(texts)].join("; ");
+    return out.charAt(0).toUpperCase() + out.slice(1);
+  } catch {
+    return null;
+  }
+}
+
 export function describeError(e: unknown): FriendlyError {
   const o = (e ?? {}) as ErrLike;
-  const message = str(o.shortMessage) || str(o.message) || "Unexpected error";
+  const raw = str(o.shortMessage) || str(o.message) || "Unexpected error";
+  const message = zodIssueText(raw) ?? raw;
   if (isNetwork(e)) {
     return {
       kind: "offline",
