@@ -72,12 +72,27 @@ export interface LimitsView {
 
 const numOr = (v: unknown, d: number): number => (typeof v === "number" && Number.isFinite(v) ? v : d);
 
-/** KEYS.riskState: LimitsSnapshot + meta (ts, netExposureUsd, ...). */
+/** A USD figure as a number: the risk service writes 6dp decimal strings ("-866.510000"). */
+const usdNum = (v: unknown): number | null => {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+};
+
+/**
+ * KEYS.riskState: LimitsSnapshot + meta. The risk service nests the meta (RiskStatePayload.meta:
+ * ts in ms, netExposureUsd / liveNavUsd as decimal strings); older writers put it at the top level.
+ * Reading only the top level left net exposure and the update time empty under a 'live' label.
+ */
 export function parseRiskState(raw: unknown): (LimitsView & { meta: Record<string, unknown> }) | null {
   if (!raw || typeof raw !== "object") return null;
   const o = raw as Partial<LimitsSnapshot> & Record<string, unknown>;
   if (typeof o.state !== "string") return null;
-  const { state, inventoryUtil, skewUtil, hedgeRatioBps, drawdownBps, offHours, breaches, ...meta } = o;
+  const { state, inventoryUtil, skewUtil, hedgeRatioBps, drawdownBps, offHours, breaches, meta: nested, ...top } = o;
+  const meta: Record<string, unknown> = { ...top, ...(nested && typeof nested === "object" ? (nested as Record<string, unknown>) : {}) };
   return {
     state,
     inventoryUtil: numOr(inventoryUtil, 0),
@@ -86,8 +101,8 @@ export function parseRiskState(raw: unknown): (LimitsView & { meta: Record<strin
     drawdownBps: numOr(drawdownBps, 0),
     offHours: Boolean(offHours),
     breaches: Array.isArray(breaches) ? breaches.map(String) : [],
-    netExposureUsd: typeof meta.netExposureUsd === "number" ? meta.netExposureUsd : null,
-    liveNavUsd: typeof meta.liveNavUsd === "number" ? meta.liveNavUsd : null,
+    netExposureUsd: usdNum(meta.netExposureUsd),
+    liveNavUsd: usdNum(meta.liveNavUsd),
     ts: toIso(meta.ts ?? meta.updatedAt),
     source: "live",
     meta,

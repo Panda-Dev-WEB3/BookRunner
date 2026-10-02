@@ -66,6 +66,21 @@ describe("live state parsers", () => {
     expect(parseRiskState({ inventoryUtil: 1 })).toBeNull();
   });
 
+  test("risk state as the risk service writes it: meta nested, USD as decimal strings, ts in ms", () => {
+    const r = parseRiskState({
+      state: "ok",
+      inventoryUtil: 0.02,
+      skewUtil: 0.1,
+      hedgeRatioBps: null,
+      drawdownBps: -12,
+      offHours: false,
+      breaches: [],
+      meta: { bookId: 2, ts: 1_790_970_000_000, netExposureUsd: "-866.510000", liveNavUsd: "106380.650000", exposureSource: "venue" },
+    });
+    expect(r).toMatchObject({ state: "ok", netExposureUsd: -866.51, liveNavUsd: 106380.65, ts: new Date(1_790_970_000_000).toISOString(), source: "live" });
+    expect(r?.meta.exposureSource).toBe("venue");
+  });
+
   test("oracle price staleness", () => {
     const p = { priceId: "NVDA", price: 190, publishedAt: 1000, held: true, sourceCount: 3 };
     expect(parseOraclePrice(p, 1_200_000, 300)).toMatchObject({ stale: false, held: true });
