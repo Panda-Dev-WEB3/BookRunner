@@ -71,6 +71,12 @@ export class FakeSettlementChain implements SettlementChain {
     const received: SettlementReceivedLog[] = this.sweepAdds ? [{ source: 1, amount: this.sweepAdds, txHash: fakeHash(), logIndex: 0, blockNumber: 1n, ts: new Date() }] : [];
     return { hash: fakeHash(), received };
   }
+  /** PoolEngine fees accrued (null = unreadable: the runner sweeps anyway). */
+  engineFees: bigint | null = null;
+  async engineFeesAccrued() {
+    this.calls.push("engineFeesAccrued");
+    return this.engineFees;
+  }
   async splitParams() {
     return { ...this.params };
   }

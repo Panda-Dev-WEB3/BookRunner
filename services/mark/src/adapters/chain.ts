@@ -1,4 +1,11 @@
 // viem adapter for the mark service. All valuation reads use one fixed blockNumber.
+//
+// Low-gas (docs/LOW_GAS.md): valuation prefers the oracle's SIGNED prices (passed in by the pipeline) over
+// the stored on-chain ones whenever they are newer — desk tokens through StockTokenRegistry.valueUsdAt (pure:
+// the multiplier is applied there, once), the in-house engine pool by re-reading its views in ONE eth_call
+// after AttestedOracle.update(priceData) (deployless Multicall3 aggregate, nothing is sent). The mark tx is
+// MarkRegistry.commitAndApply when the registry has it (feature-detected on its bytecode), else commit +
+// Book.applyMark.
 import { type Deployment, type Mandate, type MarkInput, VENUE, bytes32ToStr } from "@bookrunner/shared";
 import {
   attestedOracleAbi,
@@ -14,17 +21,27 @@ import {
   stockTokenRegistryAbi,
   underwritingVaultAbi,
 } from "@bookrunner/shared/abi";
-import { type BookRef, type TxSender, bookStateName, scanEvents } from "@bookrunner/waterfall";
-import { type Address, type Hex, type PublicClient, erc20Abi, isAddressEqual, parseEventLogs } from "viem";
+import { type BookRef, type TxSender, bookStateName, codeHasSelector, describeRevert, scanEvents } from "@bookrunner/waterfall";
+import { type Abi, type Address, type Hex, type PublicClient, createPublicClient, custom, erc20Abi, isAddressEqual, parseEventLogs } from "viem";
+import type { AdapterReportState } from "../../../ops-venue/src/report712";
+import { type SignedPrice, encodePriceData, pickSignedPrice } from "../domain/prices";
 import type { DeskPosition, MarkSnapshot } from "../domain/types";
-import type { CommittedMark, MarkAppliedEvent, MarkChain } from "../ports";
+import type { AtomicMarkResult, CommittedMark, MarkAppliedEvent, MarkChain, SimulationResult } from "../ports";
+import { COMMIT_AND_APPLY_SELECTOR, markRegistryLowGasAbi, oracleUpdateAsViewAbi } from "./lowgasAbi";
 
 const TICKER_RE = /^[A-Z0-9._-]{1,27}$/;
+const ERRORS_ABI = [...markRegistryAbi, ...bookAbi, ...attestedOracleAbi, ...orderlyAdapterAbi] as Abi;
+
+type EngineViews = { insuranceUsd: bigint; marginUsd: bigint; netExposureUsd: bigint; deployedValueUsd: bigint; poolCashUsd: bigint; poolEquityUsd: bigint };
 
 export class MarkChainAdapter implements MarkChain {
   private interval: number | null = null;
   private maxAge: number | null = null;
+  private maxPriceAgeSec: number | null = null;
+  private atomic: boolean | null = null;
   private tickers = new Map<string, string>();
+  /** Non-batching client for the deployless aggregate (batched multicall would split the calls). */
+  private readonly raw: PublicClient;
 
   constructor(
     private readonly pc: PublicClient,
@@ -32,6 +49,7 @@ export class MarkChainAdapter implements MarkChain {
     private readonly deployment: Deployment,
   ) {
     for (const [ticker, t] of Object.entries(deployment.stockTokens ?? {})) this.tickers.set(t.token.toLowerCase(), ticker);
+    this.raw = createPublicClient({ chain: pc.chain, transport: custom({ request: (args) => pc.request(args as never) }) }) as PublicClient;
   }
 
   private get c() {
@@ -51,6 +69,17 @@ export class MarkChainAdapter implements MarkChain {
   async maxMarkAge() {
     this.maxAge ??= Number(await this.pc.readContract({ address: this.c.config, abi: bookrunnerConfigAbi, functionName: "maxMarkAge" }));
     return this.maxAge;
+  }
+
+  private async maxPriceAge(): Promise<number> {
+    if (this.maxPriceAgeSec === null) {
+      try {
+        this.maxPriceAgeSec = Number(await this.pc.readContract({ address: this.c.config, abi: bookrunnerConfigAbi, functionName: "maxPriceAge" }));
+      } catch {
+        return 300;
+      }
+    }
+    return this.maxPriceAgeSec;
   }
 
   async flowNonce(ref: BookRef) {
@@ -112,13 +141,70 @@ export class MarkChainAdapter implements MarkChain {
       label: `Book.applyMark(book=${ref.bookId}, mark=${markId})`,
       bookId: ref.bookId,
     });
-    const ev = parseEventLogs({ abi: bookAbi, eventName: "MarkApplied", logs: out.receipt.logs }).find((l) => isAddressEqual(l.address, ref.components.book));
-    if (!ev) throw new Error(`applyMark tx ${out.hash} emitted no MarkApplied`);
-    const a = ev.args;
-    return { hash: out.hash, applied: { markId: a.markId, navUsd: a.navUsd, pnlUsd: a.pnlUsd, seniorNav: a.seniorNav, juniorNav: a.juniorNav, seniorPrice: a.seniorPrice, juniorPrice: a.juniorPrice } };
+    return { hash: out.hash, applied: this.appliedFrom(ref, out.hash, out.receipt.logs) };
   }
 
-  async snapshot(ref: BookRef, blockNumber: bigint): Promise<MarkSnapshot> {
+  private appliedFrom(ref: BookRef, hash: Hex, logs: Parameters<typeof parseEventLogs>[0]["logs"]): MarkAppliedEvent {
+    const ev = parseEventLogs({ abi: bookAbi, eventName: "MarkApplied", logs }).find((l) => isAddressEqual(l.address, ref.components.book));
+    if (!ev) throw new Error(`tx ${hash} emitted no MarkApplied`);
+    const a = ev.args;
+    return { markId: a.markId, navUsd: a.navUsd, pnlUsd: a.pnlUsd, seniorNav: a.seniorNav, juniorNav: a.juniorNav, seniorPrice: a.seniorPrice, juniorPrice: a.juniorPrice };
+  }
+
+  // ------------------------------------------------------------------ commitAndApply (LOW_GAS §3)
+
+  async supportsCommitAndApply(): Promise<boolean> {
+    this.atomic ??= await codeHasSelector(this.pc, this.c.markRegistry, COMMIT_AND_APPLY_SELECTOR);
+    return this.atomic;
+  }
+
+  private atomicCall(ref: BookRef, input: MarkInput, signature: Hex, priceData: Hex, venueReport: Hex) {
+    return {
+      address: this.c.markRegistry,
+      abi: markRegistryLowGasAbi as Abi,
+      functionName: "commitAndApply",
+      args: [input, signature, priceData, venueReport],
+      label: `MarkRegistry.commitAndApply(book=${ref.bookId}, periodEnd=${input.periodEnd}, prices=${priceData !== "0x"}, venueReport=${venueReport !== "0x"})`,
+      bookId: ref.bookId,
+    };
+  }
+
+  async simulateCommitAndApply(ref: BookRef, input: MarkInput, signature: Hex, priceData: Hex, venueReport: Hex): Promise<SimulationResult> {
+    try {
+      await this.sender.simulate(this.atomicCall(ref, input, signature, priceData, venueReport));
+      return { ok: true };
+    } catch (err) {
+      const info = describeRevert(err, ERRORS_ABI);
+      // no revert data at all + no selector in the dispatcher = the function does not exist (old registry)
+      const unsupported = !info.selector && !(await codeHasSelector(this.pc, this.c.markRegistry, COMMIT_AND_APPLY_SELECTOR).catch(() => true));
+      if (unsupported) this.atomic = false;
+      return { ok: false, error: info.errorName ?? info.reason ?? info.message, unsupported };
+    }
+  }
+
+  async commitAndApply(ref: BookRef, input: MarkInput, signature: Hex, priceData: Hex, venueReport: Hex): Promise<AtomicMarkResult> {
+    const out = await this.sender.send(this.atomicCall(ref, input, signature, priceData, venueReport));
+    const ev = parseEventLogs({ abi: markRegistryAbi, eventName: "MarkCommitted", logs: out.receipt.logs }).find((l) => isAddressEqual(l.address, this.c.markRegistry));
+    if (!ev) throw new Error(`commitAndApply tx ${out.hash} emitted no MarkCommitted`);
+    const block = await this.pc.getBlock({ blockNumber: out.receipt.blockNumber });
+    return { hash: out.hash, markId: ev.args.markId, committedAt: new Date(Number(block.timestamp) * 1000), applied: this.appliedFrom(ref, out.hash, out.receipt.logs) };
+  }
+
+  async adapterReportState(ref: BookRef): Promise<AdapterReportState | null> {
+    if (ref.venue !== VENUE.ORDERLY) return null;
+    const a = ref.components.adapter;
+    const [valuationAt, lastFlowAt, pIf, pMm] = await Promise.all([
+      this.pc.readContract({ address: a, abi: orderlyAdapterAbi, functionName: "valuationAt" }),
+      this.pc.readContract({ address: a, abi: orderlyAdapterAbi, functionName: "lastFlowAt" }),
+      this.pc.readContract({ address: a, abi: orderlyAdapterAbi, functionName: "pendingWithdrawUsd", args: [0] }),
+      this.pc.readContract({ address: a, abi: orderlyAdapterAbi, functionName: "pendingWithdrawUsd", args: [1] }),
+    ]);
+    return { valuationAt: BigInt(valuationAt), lastFlowAt: BigInt(lastFlowAt), pendingWithdrawUsd: pIf + pMm };
+  }
+
+  // ------------------------------------------------------------------ snapshot
+
+  async snapshot(ref: BookRef, blockNumber: bigint, prices?: ReadonlyMap<string, SignedPrice>): Promise<MarkSnapshot> {
     const { book, vault, adapter, desk, senior, junior, mandate } = ref.components;
     const b = { blockNumber } as const;
     const usdc = this.c.usdc;
@@ -133,6 +219,8 @@ export class MarkChainAdapter implements MarkChain {
       this.pc.readContract({ address: book, abi: bookAbi, functionName: "lastMarkPeriodEnd", ...b }),
       this.pc.readContract({ address: book, abi: bookAbi, functionName: "getCharter", ...b }),
     ]);
+    const blockTs = block.timestamp;
+    const used = new Map<string, SignedPrice>();
     const [vaultIdle, vaultIdleView, seniorSupply, juniorSupply, backstopBalance, mandateTerms, killed] = await Promise.all([
       this.pc.readContract({ address: usdc, abi: erc20Abi, functionName: "balanceOf", args: [vault], ...b }),
       this.pc.readContract({ address: vault, abi: underwritingVaultAbi, functionName: "idle", ...b }).catch(() => null),
@@ -142,7 +230,7 @@ export class MarkChainAdapter implements MarkChain {
       this.pc.readContract({ address: mandate, abi: mMMandateAbi, functionName: "getMandate", ...b }),
       this.pc.readContract({ address: mandate, abi: mMMandateAbi, functionName: "killed", ...b }),
     ]);
-    const [insuranceUsd, marginUsd, netExposureUsd, inTransitUsd, deployedValueUsd, valuationAt] = await Promise.all([
+    let [insuranceUsd, marginUsd, netExposureUsd, inTransitUsd, deployedValueUsd, valuationAt] = await Promise.all([
       this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "insuranceEquityUsd", ...b }),
       this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "marginEquityUsd", ...b }),
       this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "netExposureUsd", ...b }),
@@ -151,16 +239,55 @@ export class MarkChainAdapter implements MarkChain {
       this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "valuationAt", ...b }),
     ]);
 
+    let underlyingPrice: MarkSnapshot["underlyingPrice"] = null;
+    let underlyingPriceId: Hex | null = null;
+    let onchainUnderlying: { priceWad: bigint; publishedAt: bigint; held: boolean } | null = null;
+    try {
+      underlyingPriceId = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "priceIdOf", args: [charter.underlying], ...b });
+      const p = await this.pc.readContract({ address: this.c.oracle, abi: attestedOracleAbi, functionName: "latest", args: [underlyingPriceId], ...b });
+      onchainUnderlying = { priceWad: p.priceWad, publishedAt: BigInt(p.publishedAt), held: p.held };
+      underlyingPrice = { priceId: underlyingPriceId, priceWad: p.priceWad, publishedAt: Number(p.publishedAt), held: p.held };
+    } catch {
+      underlyingPrice = null;
+    }
+    const signedUnderlying = underlyingPriceId ? pickSignedPrice(prices, underlyingPriceId, onchainUnderlying?.publishedAt ?? 0n, blockTs) : null;
+    if (signedUnderlying && underlyingPriceId) {
+      underlyingPrice = { priceId: underlyingPriceId, priceWad: signedUnderlying.priceWad, publishedAt: Number(signedUnderlying.publishedAt), held: signedUnderlying.held };
+    }
+
     let poolCashUsd: bigint | null = null;
     let poolEquityUsd: bigint | null = null;
+    let lastFlowAt = 0;
+    let pendingWithdrawUsd = 0n;
+    let source: NonNullable<MarkSnapshot["venue"]["source"]> = "adapter";
     if (ref.venue === VENUE.POOL_ENGINE) {
-      const marketId = await this.pc.readContract({ address: adapter, abi: poolEngineAdapterAbi, functionName: "marketId", ...b });
+      const [marketId, engine] = await Promise.all([
+        this.pc.readContract({ address: adapter, abi: poolEngineAdapterAbi, functionName: "marketId", ...b }),
+        this.pc.readContract({ address: adapter, abi: poolEngineAdapterAbi, functionName: "engine", ...b }).catch(() => this.c.poolEngine),
+      ]);
       const [st, eq] = await Promise.all([
-        this.pc.readContract({ address: this.c.poolEngine, abi: poolEngineAbi, functionName: "state", args: [marketId], ...b }),
-        this.pc.readContract({ address: this.c.poolEngine, abi: poolEngineAbi, functionName: "poolEquityUsd", args: [marketId], ...b }),
+        this.pc.readContract({ address: engine, abi: poolEngineAbi, functionName: "state", args: [marketId], ...b }),
+        this.pc.readContract({ address: engine, abi: poolEngineAbi, functionName: "poolEquityUsd", args: [marketId], ...b }),
       ]);
       poolCashUsd = st.poolCashUsd;
       poolEquityUsd = eq;
+      // pool mark-to-market at the signed price (the engine views read the stored oracle price)
+      if (signedUnderlying && underlyingPriceId) {
+        const v = await this.engineAtSignedPrice({ adapter, engine, marketId, priceId: underlyingPriceId, price: signedUnderlying, blockNumber });
+        if (v) {
+          ({ insuranceUsd, marginUsd, netExposureUsd, deployedValueUsd, poolCashUsd, poolEquityUsd } = v);
+          source = "engine_signed_price";
+          used.set(signedUnderlying.underlying.toLowerCase(), signedUnderlying);
+        }
+      }
+    } else {
+      const [lf, pIf, pMm] = await Promise.all([
+        this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "lastFlowAt", ...b }).catch(() => 0n),
+        this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "pendingWithdrawUsd", args: [0], ...b }).catch(() => 0n),
+        this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "pendingWithdrawUsd", args: [1], ...b }).catch(() => 0n),
+      ]);
+      lastFlowAt = Number(lf);
+      pendingWithdrawUsd = pIf + pMm;
     }
 
     const [deskUsdc, held, deskValue, hedgeNotional] = await Promise.all([
@@ -169,19 +296,14 @@ export class MarkChainAdapter implements MarkChain {
       this.pc.readContract({ address: desk, abi: bookrunnerDeskAbi, functionName: "valueUsd", ...b }).catch(() => null),
       this.pc.readContract({ address: desk, abi: bookrunnerDeskAbi, functionName: "hedgeNotionalUsd", ...b }).catch(() => null),
     ]);
+    const maxPriceAge = BigInt(await this.maxPriceAge());
     const positions: DeskPosition[] = [];
     for (const token of held) {
-      positions.push(await this.position(token, desk, blockNumber));
+      const { position, signed } = await this.position(token, desk, blockNumber, blockTs, maxPriceAge, prices);
+      positions.push(position);
+      if (signed) used.set(signed.underlying.toLowerCase(), signed);
     }
-
-    let underlyingPrice: MarkSnapshot["underlyingPrice"] = null;
-    try {
-      const priceId = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "priceIdOf", args: [charter.underlying], ...b });
-      const p = await this.pc.readContract({ address: this.c.oracle, abi: attestedOracleAbi, functionName: "latest", args: [priceId], ...b });
-      underlyingPrice = { priceId, priceWad: p.priceWad, publishedAt: Number(p.publishedAt), held: p.held };
-    } catch {
-      underlyingPrice = null;
-    }
+    const deskSigned = positions.some((p) => p.signedPrice);
 
     const m: Mandate = {
       maxInventoryUsd: mandateTerms.maxInventoryUsd,
@@ -198,14 +320,27 @@ export class MarkChainAdapter implements MarkChain {
     return {
       bookId: ref.bookId,
       blockNumber,
-      blockTimestamp: Number(block.timestamp),
+      blockTimestamp: Number(blockTs),
       usdc,
       vaultIdle,
       vaultIdleView,
       unfundedClaims,
       flowNonce: BigInt(flowNonce),
-      venue: { insuranceUsd, marginUsd, netExposureUsd, inTransitUsd, deployedValueUsd, valuationAt: Number(valuationAt), poolCashUsd, poolEquityUsd },
-      desk: { usdc: deskUsdc, positions, onchainValueUsd: deskValue, hedgeNotionalUsd: hedgeNotional },
+      venue: {
+        insuranceUsd,
+        marginUsd,
+        netExposureUsd,
+        inTransitUsd,
+        deployedValueUsd,
+        valuationAt: Number(valuationAt),
+        poolCashUsd,
+        poolEquityUsd,
+        lastFlowAt,
+        pendingWithdrawUsd,
+        source,
+      },
+      // the desk views value at the STORED prices: no cross-check against them once a signed price was used
+      desk: { usdc: deskUsdc, positions, onchainValueUsd: deskSigned ? null : deskValue, hedgeNotionalUsd: deskSigned ? null : hedgeNotional },
       book: {
         state: bookStateName(Number(state)),
         seniorNav: trancheNav[0],
@@ -221,35 +356,94 @@ export class MarkChainAdapter implements MarkChain {
       mandate: m,
       killed,
       underlyingPrice,
+      signedPrices: [...used.values()],
     };
   }
 
-  /** Stock Token position valued by the registry (multiplier applied there exactly once). */
-  private async position(token: Address, desk: Address, blockNumber: bigint): Promise<DeskPosition> {
+  /**
+   * Engine pool views after AttestedOracle.update(priceData) in the same eth_call (deployless Multicall3 at
+   * the snapshot block; nothing is sent). null when the oracle has no `update` (pre-low-gas), the update did
+   * not take, or the call fails: the caller keeps the stored-price views.
+   */
+  private async engineAtSignedPrice(o: { adapter: Address; engine: Address; marketId: bigint; priceId: Hex; price: SignedPrice; blockNumber: bigint }): Promise<EngineViews | null> {
+    try {
+      const res = await this.raw.multicall({
+        deployless: true,
+        allowFailure: true,
+        blockNumber: o.blockNumber,
+        contracts: [
+          { address: this.c.oracle, abi: oracleUpdateAsViewAbi, functionName: "update", args: [encodePriceData([o.price])] },
+          { address: this.c.oracle, abi: attestedOracleAbi, functionName: "latest", args: [o.priceId] },
+          { address: o.adapter, abi: poolEngineAdapterAbi, functionName: "insuranceEquityUsd" },
+          { address: o.adapter, abi: poolEngineAdapterAbi, functionName: "marginEquityUsd" },
+          { address: o.adapter, abi: poolEngineAdapterAbi, functionName: "netExposureUsd" },
+          { address: o.adapter, abi: poolEngineAdapterAbi, functionName: "deployedValueUsd" },
+          { address: o.engine, abi: poolEngineAbi, functionName: "state", args: [o.marketId] },
+          { address: o.engine, abi: poolEngineAbi, functionName: "poolEquityUsd", args: [o.marketId] },
+        ],
+      });
+      if (res.some((r) => r.status !== "success")) return null;
+      const latest = res[1].result as { publishedAt: bigint | number };
+      if (BigInt(latest.publishedAt) !== o.price.publishedAt) return null; // the update was skipped
+      const st = res[6].result as { poolCashUsd: bigint };
+      return {
+        insuranceUsd: res[2].result as bigint,
+        marginUsd: res[3].result as bigint,
+        netExposureUsd: res[4].result as bigint,
+        deployedValueUsd: res[5].result as bigint,
+        poolCashUsd: st.poolCashUsd,
+        poolEquityUsd: res[7].result as bigint,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Stock Token position: signed price when newer than the stored one (valueUsdAt), else the registry valuation. */
+  private async position(
+    token: Address,
+    desk: Address,
+    blockNumber: bigint,
+    blockTs: bigint,
+    maxPriceAge: bigint,
+    prices?: ReadonlyMap<string, SignedPrice>,
+  ): Promise<{ position: DeskPosition; signed: SignedPrice | null }> {
     const b = { blockNumber } as const;
     const [qtyRaw, info] = await Promise.all([
       this.pc.readContract({ address: token, abi: erc20Abi, functionName: "balanceOf", args: [desk], ...b }),
       this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "getToken", args: [token], ...b }),
     ]);
     const latest = await this.pc.readContract({ address: this.c.oracle, abi: attestedOracleAbi, functionName: "latest", args: [info.priceId], ...b });
+    const signed = pickSignedPrice(prices, info.priceId, BigInt(latest.publishedAt), blockTs);
     let valueUsd: bigint;
     let priceStale = false;
-    try {
-      valueUsd = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "valueUsd", args: [token, qtyRaw], ...b });
-    } catch {
-      // StalePrice: value at the last attested price (still via the registry: multiplier applied once there)
-      priceStale = true;
-      valueUsd = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "valueUsdAt", args: [token, qtyRaw, latest.priceWad], ...b });
+    let priceWad = latest.priceWad;
+    if (signed) {
+      priceWad = signed.priceWad;
+      valueUsd = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "valueUsdAt", args: [token, qtyRaw, priceWad], ...b });
+      priceStale = blockTs > signed.publishedAt + maxPriceAge;
+    } else {
+      try {
+        valueUsd = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "valueUsd", args: [token, qtyRaw], ...b });
+      } catch {
+        // StalePrice: value at the last attested price (still via the registry: multiplier applied once there)
+        priceStale = true;
+        valueUsd = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "valueUsdAt", args: [token, qtyRaw, latest.priceWad], ...b });
+      }
     }
     return {
-      token,
-      ticker: this.tickerOf(token, info.priceId),
-      qtyRaw,
-      priceWad: latest.priceWad,
-      multiplierWad: info.multiplierWad,
-      decimals: Number(info.decimals),
-      valueUsd,
-      priceStale,
+      position: {
+        token,
+        ticker: this.tickerOf(token, info.priceId),
+        qtyRaw,
+        priceWad,
+        multiplierWad: info.multiplierWad,
+        decimals: Number(info.decimals),
+        valueUsd,
+        priceStale,
+        ...(signed ? { signedPrice: true } : {}),
+      },
+      signed: signed && qtyRaw > 0n ? signed : null,
     };
   }
 

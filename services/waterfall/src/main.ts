@@ -27,6 +27,7 @@ import { PgRedisEventSink } from "./kit/events";
 import { onShutdown, startLoop } from "./kit/loop";
 import { isNewPeriod, periodEndAt } from "./kit/period";
 import { insertReceipt } from "./kit/receipts";
+import { RedisSettlementSignals } from "./kit/signals";
 import { TxSender } from "./kit/tx";
 import { SettlementRunner } from "./settlement";
 
@@ -90,6 +91,8 @@ export async function main() {
     log,
     sweepWaitMs: cfg.WATERFALL_SWEEP_WAIT_SECONDS * 1000,
     pollMs: 2_000,
+    signals: new RedisSettlementSignals(redis),
+    distributeEmpty: cfg.WATERFALL_DISTRIBUTE_EMPTY,
   });
 
   const worker = new Worker<SettlementJob>(

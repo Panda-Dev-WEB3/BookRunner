@@ -18,6 +18,8 @@ import { BookRegistry } from "../src/worker/books";
 import type { OpsContext, TrackedBook } from "../src/worker/context";
 import { FeeSweeper } from "../src/worker/fees";
 import { loadOrCreateBuilderKey, Provisioner } from "../src/worker/provision";
+import type { SignedVenueReportJson, VenueReportValues } from "../src/report712";
+import type { ReportPublisher, ReportSigner } from "../src/worker/context";
 import { OpsService } from "../src/worker/service";
 import { WithdrawProcessor } from "../src/worker/withdrawals";
 
@@ -369,6 +371,12 @@ export class FakeChain implements ChainPort {
     this.mockAccounts.add(accountId.toLowerCase());
     this.end("ensureMockAccount", this.begin("ensureMockAccount", [accountId]));
   }
+  /** OrderlyAdapter implementation has reportSigned (false = pre-low-gas adapter); "throw" = RPC failure. */
+  reportSignedSupported: boolean | "throw" = true;
+  async supportsReportSigned() {
+    if (this.reportSignedSupported === "throw") throw new Error("rpc down");
+    return this.reportSignedSupported;
+  }
 }
 
 export class MemoryStore implements OpsStore {
@@ -409,11 +417,48 @@ export class MemoryStore implements OpsStore {
   }
 }
 
-export async function makeCtx(o: { mode?: "mock" | "live"; authMode?: "strict" | "permissive"; now?: () => number } = {}) {
+/** In-memory ReportPublisher (latest + every published report). Inline: see the NOTE on value imports. */
+export class TestReportPublisher implements ReportPublisher {
+  readonly latest = new Map<number, SignedVenueReportJson>();
+  readonly published: SignedVenueReportJson[] = [];
+  fail: string | null = null;
+  async publish(r: SignedVenueReportJson) {
+    if (this.fail) throw new Error(this.fail);
+    this.published.push(r);
+    this.latest.set(r.bookId, r);
+  }
+}
+
+/** OPS-key VenueReport signer (same typed data as src/report712.ts; cross-checked in report712.test.ts). */
+export const testReportSigner = (chainId = 31337): ReportSigner => ({
+  address: OPS.address,
+  chainId,
+  sign: (adapter: Address, r: VenueReportValues) =>
+    OPS.signTypedData({
+      domain: { name: "Bookrunner OrderlyAdapter", version: "1", chainId, verifyingContract: adapter },
+      types: {
+        VenueReport: [
+          { name: "insuranceUsd", type: "uint256" },
+          { name: "marginUsd", type: "int256" },
+          { name: "netExposureUsd", type: "int256" },
+          { name: "asOf", type: "uint64" },
+        ],
+      },
+      primaryType: "VenueReport",
+      message: { insuranceUsd: r.insuranceUsd, marginUsd: r.marginUsd, netExposureUsd: r.netExposureUsd, asOf: r.asOf },
+    }),
+});
+
+/**
+ * Test context. `reportMode` defaults to "onchain" (the scenarios below assert report txs); the service
+ * default is OPS_REPORT_MODE=signed (see report712.test.ts for the signed flow).
+ */
+export async function makeCtx(o: { mode?: "mock" | "live"; authMode?: "strict" | "permissive"; now?: () => number; reportMode?: "signed" | "onchain" } = {}) {
   const mock = makeMock(o.authMode ?? "permissive", o.now);
   const chain = new FakeChain();
   const store = new MemoryStore();
   const sagas = new MemorySagaStore();
+  const reports = new TestReportPublisher();
   const keys = new KeyStore(mkdtempSync(join(tmpdir(), "bkrn-keys-")));
   const builderKey = await generateKey();
   const builder = new OrderlyBuilderClient({
@@ -444,6 +489,7 @@ export async function makeCtx(o: { mode?: "mock" | "live"; authMode?: "strict" |
       reportMaxDropBps: 5000,
       reportDropConfirmations: 3,
       reportSettleSec: 30,
+      reportMode: o.reportMode ?? "onchain",
     },
     chain,
     store,
@@ -455,8 +501,10 @@ export async function makeCtx(o: { mode?: "mock" | "live"; authMode?: "strict" |
     locks: new KeyedMutex(),
     log,
     now: o.now ?? Date.now,
+    reportSigner: testReportSigner(31337),
+    reportPublisher: reports,
   };
-  return { ctx, mock, chain, store, sagas, keys, builder, builderKey };
+  return { ctx, mock, chain, store, sagas, keys, builder, builderKey, reports };
 }
 
 const provisioner = async (t: Awaited<ReturnType<typeof makeCtx>>) => new Provisioner(t.ctx, await loadOrCreateBuilderKey(t.keys, BUILDER_ID, undefined, 86_400_000, keyFromSecret));
@@ -500,9 +548,9 @@ export async function setupFees() {
 }
 
 /** Reporting fixture: full OpsService, venue funded, chain head in step with the injected clock. */
-export async function setupReporting() {
+export async function setupReporting(reportMode: "signed" | "onchain" = "onchain") {
   let now = 1_800_000_000_000;
-  const t = await makeCtx({ now: () => now });
+  const t = await makeCtx({ now: () => now, reportMode });
   t.chain.books = [trackedBook()];
   const svc = new OpsService(t.ctx, await provisioner(t));
   await svc.syncBooks();

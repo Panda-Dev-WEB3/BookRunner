@@ -16,6 +16,8 @@ export { base58Decode, base58Encode, type Ed25519Key, formatOrderlyKey, generate
 export { orderlyAccountId, toVenueAccount, toVenueFill } from "./orderly/convert";
 export { type FetchLike, OrderlyHttp, OrderlyHttpError } from "./orderly/http";
 export { BUILDER_PATHS, ORDERLY_PATHS } from "./orderly/paths";
+// signed venue reports (docs/LOW_GAS.md §2): also importable on their own as "@bookrunner/ops-venue/report712"
+export * from "./report712";
 
 /** Load the book's active venue trade key from the ops-venue key store (null if none / revoked). */
 export function loadBookTradeKey(bookId: number, keysDir?: string) {

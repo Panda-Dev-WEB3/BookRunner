@@ -128,6 +128,21 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain {
     return { hash: out.hash, received: await this.receivedFrom(ref, out.receipt) };
   }
 
+  async engineFeesAccrued(ref: BookRef): Promise<bigint | null> {
+    if (ref.venue !== VENUE.POOL_ENGINE) return null;
+    try {
+      const adapter = ref.components.adapter;
+      const [engine, marketId] = await Promise.all([
+        this.pc.readContract({ address: adapter, abi: poolEngineAdapterAbi, functionName: "engine" }),
+        this.pc.readContract({ address: adapter, abi: poolEngineAdapterAbi, functionName: "marketId" }),
+      ]);
+      const st = await this.pc.readContract({ address: engine, abi: poolEngineAbi, functionName: "state", args: [marketId] });
+      return st.feesAccruedUsd;
+    } catch {
+      return null;
+    }
+  }
+
   private async receivedFrom(ref: BookRef, receipt: TransactionReceipt): Promise<SettlementReceivedLog[]> {
     const logs = parseEventLogs({ abi: revenueRouterAbi, eventName: "SettlementReceived", logs: receipt.logs }).filter((l) => isAddressEqual(l.address, ref.components.router));
     const ts = await this.tsOf(receipt.blockNumber);

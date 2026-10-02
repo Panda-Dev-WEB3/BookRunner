@@ -43,6 +43,8 @@ export interface SettlementChain {
   receivedInTx(ref: BookRef, txHash: Hex): Promise<SettlementReceivedLog[]>;
   /** PoolEngineAdapter.sweepFees(period, 0) (anyone may call). */
   sweepEngineFees(ref: BookRef, period: number): Promise<{ hash: Hex; received: SettlementReceivedLog[] }>;
+  /** Engine fees accrued and not yet claimed (PoolEngine.state(marketId).feesAccruedUsd); null if unreadable. */
+  engineFeesAccrued(ref: BookRef): Promise<bigint | null>;
   splitParams(ref: BookRef): Promise<SplitParams>;
   /** router.previewSplit (null if the call fails). */
   previewOnChain(ref: BookRef, gross: bigint, expenses: bigint): Promise<SplitResult | null>;
