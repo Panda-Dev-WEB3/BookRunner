@@ -12,7 +12,6 @@ import { bookState, limitState } from "../../lib/limits";
 import { cadenceTitle, markCadenceLine, nextMarkLabel } from "../../lib/lowgas";
 import { parseMarkStatement } from "../../lib/markStatement";
 import { ActivityPanel } from "./ActivityPanel";
-import { AllocatePanel } from "./AllocatePanel";
 import { DistributionPanel } from "./DistributionPanel";
 import { InvestPanel } from "./InvestPanel";
 import { LimitsPanel } from "./LimitsPanel";
@@ -180,7 +179,6 @@ export function BookDetailPage() {
           <VerifyPanel bookId={b.bookId} mark={mark} marks={marks.data?.items ?? []} receiptId={receiptId} onReceipt={setReceiptId} />
         </div>
         <aside className="min-w-0 space-y-4">
-          <AllocatePanel bookId={b.bookId} state={b.state} juniorNoticeSeconds={b.charter?.juniorNoticeSeconds ?? null} subscriptionEnds={b.subscriptionEnds} />
           <MarkCadencePanel b={b} now={now} />
           <Panel title="Charter terms" meta={b.charterStatus ? `charter #${b.charterId} · ${b.charterStatus}` : undefined}>
             {b.charter ? <CharterTerms c={b.charter} stacked /> : <EmptyState compact title="Charter not indexed yet" />}

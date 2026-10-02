@@ -487,7 +487,7 @@ Vite + React 19 + TanStack Query + tRPC client + Tailwind 4 + viem/wagmi (inject
 "dev wallet" picker using anvil keys for demo). Pages: Books (table: book, venue, state, NAV,
 Senior/Junior NAV per share, limits state), Book detail (NAV + tranche chart from marks, waterfall
 of the last distribution, live quote + inventory, limit gauges, fills/hedges, marks with receipts
-roots and "verify proof", subscribe / request redemption / claim), Charters (file form with mandate
+roots and "verify proof", one invest panel to deposit, withdraw and collect), Charters (file form with mandate
 editor, status, jury verdict, committee votes), Committee (vote), Risk (all books' limit states,
 kill log), Docs/legal footer ("Bookrunner is software; not a fund, adviser, broker or venue operator
 of record"; "Not available to US persons"). Copy rules: §6.
