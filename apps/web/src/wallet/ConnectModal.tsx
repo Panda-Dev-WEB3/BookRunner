@@ -10,6 +10,7 @@ import { IconChevronRight, IconWallet } from "../components/icons";
 import { Badge, Callout, ExternalLink, Modal, Spinner } from "../components/ui";
 import { DEV_GROUPS, DEV_WALLETS } from "../lib/devwallet";
 import { shortHex } from "../lib/format";
+import { isMobileBrowser, walletAppLinks } from "../lib/mobileWallets";
 import { appChain, walletConnectConnector } from "./chains";
 import { useDevSigner } from "./devGate";
 import { useWallet } from "./WalletContext";
@@ -217,6 +218,7 @@ function ConnectWalletModal({ open, onClose, onReopen }: { open: boolean; onClos
   };
 
   const nothing = discovered.length === 0 && !showGeneric && !wc;
+  const mobile = typeof navigator !== "undefined" && isMobileBrowser(navigator.userAgent, navigator.maxTouchPoints);
 
   return (
     <Modal open={open} onClose={onClose} size="lg" title="Connect a wallet" description={`Choose the wallet you use. Bookrunner runs on ${appChain.name}.`}>
@@ -266,12 +268,26 @@ function ConnectWalletModal({ open, onClose, onReopen }: { open: boolean; onClos
               />
             </div>
           )}
-          {nothing && (
-            <Callout tone="info" title="No browser wallet found">
-              Install a wallet extension such as MetaMask or Rabby, then reload this page.
-              {w.devAvailable ? " On the local devnet you can also use a dev wallet below." : ""}
-            </Callout>
-          )}
+          {nothing &&
+            (mobile ? (
+              // phone browsers cannot run wallet extensions: open the page in a wallet app's own browser
+              <Callout tone="info" title="Open this page in your wallet app">
+                On a phone, wallets connect from inside their own app. Open this page in your wallet app's browser, for example:
+                <span className="mt-2 flex flex-wrap gap-2">
+                  {walletAppLinks(window.location.href).map((l) => (
+                    <a key={l.name} className="btn btn-sm" href={l.href} rel="noopener noreferrer">
+                      Open in {l.name}
+                    </a>
+                  ))}
+                </span>
+                <span className="mt-2 block text-[12px] text-ink-2">Or copy this page's address into the browser inside any other wallet app.</span>
+              </Callout>
+            ) : (
+              <Callout tone="info" title="No browser wallet found">
+                Install a wallet extension such as MetaMask or Rabby, then reload this page.
+                {w.devAvailable ? " On the local devnet you can also use a dev wallet below." : ""}
+              </Callout>
+            ))}
           {pending !== null && (
             <p className="text-[12.5px] text-ink-2" role="status">
               Open your wallet and approve the connection request.

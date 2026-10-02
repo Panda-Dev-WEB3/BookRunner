@@ -24,7 +24,8 @@ The API must allow the page's origin (`WEB_ORIGIN`, default `http://127.0.0.1:51
 `VITE_CHAIN_ID` (default 31337), `VITE_RPC_URL`, `VITE_EXPLORER_URL`, `VITE_FAUCET_URL`, `VITE_API_URL`
 (default `http://127.0.0.1:4400`), optional `VITE_CHAIN_NAME`, `VITE_CHAIN_KIND` (devnet / testnet / mainnet for a custom
 chain id, which otherwise gets no test-network features), `VITE_USDC_ADDRESS`, and
-`VITE_WALLETCONNECT_PROJECT_ID` (the WalletConnect option appears only when it is set). Chain 46630
+`VITE_WALLETCONNECT_PROJECT_ID` (the WalletConnect option appears only when it is set; set it for any public
+deployment, or phone visitors without a wallet app browser have no way to connect). Chain 46630
 defaults to the public Robinhood Chain testnet RPC, explorer and faucet.
 
 ## Wallets
