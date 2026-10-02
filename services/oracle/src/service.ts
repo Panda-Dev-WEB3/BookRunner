@@ -53,6 +53,14 @@ export interface TickSummary {
 
 export type OracleStatus = "waiting-deployment" | "waiting-universe" | "running";
 
+/** A price as served publicly (HTTP): never carries the EIP-712 signature. */
+export type PublicPriceMsg = Omit<OraclePriceMsg, "signature">;
+
+export function publicView(m: OraclePriceMsg): PublicPriceMsg {
+  const { signature: _signature, ...rest } = m;
+  return rest;
+}
+
 const CHAIN_BACKOFF_BASE_MS = 5_000;
 const CHAIN_BACKOFF_MAX_MS = 60_000;
 const SKIP_WARN_AFTER_MS = 30_000;
@@ -81,6 +89,8 @@ export class OracleService {
 
   private readonly lastOpen = new Map<string, LastOpen>();
   private readonly latest = new Map<string, OraclePriceMsg>();
+  /** Last update per key confirmed on-chain (pushMany receipt success): what the public HTTP serves. */
+  private readonly landed = new Map<string, OraclePriceMsg>();
   private readonly pushed = new Map<string, PushedState>();
   private readonly onchainAt = new Map<string, number>();
   private readonly skipSince = new Map<string, number>();
@@ -121,6 +131,7 @@ export class OracleService {
       // a different AttestedOracle: forget per-contract push state
       this.onchainAt.clear();
       this.pushed.clear();
+      this.landed.clear();
       this.chainFailures = 0;
       this.chainBackoffUntil = 0;
     }
@@ -386,7 +397,10 @@ export class OracleService {
         const r = await ctx.chain.pushMany(batch.map(updateFromMsg), batch.map((m) => m.signature));
         if (r.status === "success") {
           txHash = r.txHash;
-          for (const m of batch) this.onchainAt.set(m.priceId, m.publishedAt);
+          for (const m of batch) {
+            this.onchainAt.set(m.priceId, m.publishedAt);
+            this.landed.set(m.priceId, m);
+          }
           this.chainFailures = 0;
           this.chainBackoffUntil = 0;
         } else {
@@ -440,6 +454,21 @@ export class OracleService {
 
   price(priceId: string): OraclePriceMsg | null {
     return this.latest.get(priceId) ?? null;
+  }
+
+  /**
+   * Public view (HTTP): with on-chain pushes enabled, only updates that have already LANDED on-chain —
+   * never a fresher signed price the chain has not seen (a trader could otherwise trade at the stored
+   * price, relay the newer one and close: a risk-free sandwich of the in-house pool) — and never the
+   * signature. With on-chain pushes disabled (no on-chain consumer) the latest price, unsigned.
+   */
+  publicPrice(priceId: string): PublicPriceMsg | null {
+    const m = this.ctx?.chain ? this.landed.get(priceId) : this.latest.get(priceId);
+    return m ? publicView(m) : null;
+  }
+
+  publicPrices(): PublicPriceMsg[] {
+    return this.universe.map((e) => this.publicPrice(e.priceId)).filter((m): m is PublicPriceMsg => !!m);
   }
 
   health() {

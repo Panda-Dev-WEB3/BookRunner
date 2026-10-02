@@ -390,8 +390,14 @@ contract BookrunnerDeskTest is MandateBase {
         vm.expectRevert();
         desk.execute(_flattenAction(address(nvda), tokens / 2, 0));
         router.setHaircutBps(0);
-        // off-hours (held) does not block the reduce-only kind
+        // off-hours (held): a key Flatten is reduce-only for real — selling spot that offsets a short venue
+        // exposure would grow |exposure + hedge| (-5k -> -12.5k), so it reverts like a Hedge sell would
         oracle.setHeld(NVDA_ID, true);
+        vm.prank(key);
+        vm.expectRevert(IMMMandate.OffHoursNewRisk.selector);
+        desk.execute(_flattenAction(address(nvda), tokens / 2, 0));
+        // ... while with a long venue exposure selling spot always reduces net risk: allowed off-hours
+        adapter.setExposure(5000e6);
         uint256 notional = registry.valueUsd(address(nvda), tokens / 2);
         vm.expectEmit(true, false, false, true, address(desk));
         emit HedgeExecuted(

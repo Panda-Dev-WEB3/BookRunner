@@ -7,7 +7,7 @@ import { DrizzlePriceStore } from "./adapters/db";
 import { RedisPricePublisher, createRedis } from "./adapters/redis";
 import { builderPriceClient } from "./adapters/venue";
 import { loadOracleConfig } from "./config";
-import { createApp } from "./http";
+import { MAX_SAFE_PUSH_DEVIATION_BPS, createApp, serveOptions } from "./http";
 import { startLoop } from "./loop";
 import { Runtime } from "./runtime";
 import { OracleService } from "./service";
@@ -59,11 +59,17 @@ const loops = [
   startLoop("tick", cfg.ORACLE_TICK_MS, async () => void (await service.tick()), log),
 ];
 
-const server = Bun.serve({ port: cfg.ORACLE_PORT, fetch: createApp(service).fetch });
+const server = Bun.serve(serveOptions(cfg, createApp(service).fetch));
 log.info(
-  { port: server.port, signer: account.address, chainId: cfg.CHAIN_ID, sessionsMode: cfg.SESSIONS_MODE, orderlyMode: cfg.ORDERLY_MODE },
+  { host: cfg.ORACLE_HOST, port: server.port, signer: account.address, chainId: cfg.CHAIN_ID, sessionsMode: cfg.SESSIONS_MODE, orderlyMode: cfg.ORDERLY_MODE },
   "oracle service started",
 );
+if (cfg.ORACLE_PUSH_DEVIATION_BPS > MAX_SAFE_PUSH_DEVIATION_BPS) {
+  log.warn(
+    { pushDeviationBps: cfg.ORACLE_PUSH_DEVIATION_BPS, maxSafeBps: MAX_SAFE_PUSH_DEVIATION_BPS },
+    "ORACLE_PUSH_DEVIATION_BPS exceeds the cheapest in-house round trip: on-chain prices may lag by an arbitrageable move",
+  );
+}
 
 let shuttingDown = false;
 async function shutdown(signal: string) {

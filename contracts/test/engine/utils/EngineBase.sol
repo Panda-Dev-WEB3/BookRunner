@@ -36,6 +36,8 @@ abstract contract EngineBase is Test {
         signer = vm.addr(SIGNER_PK);
         oracle = new AttestedOracle(address(cfg), signer, bytes32("devnet-attestation"));
         cfg.setOracle(address(oracle));
+        // the test contract relays prices (AttestedOracle: signers, KEEPER or the timelock only)
+        cfg.grantRole(cfg.KEEPER_ROLE(), address(this));
         factory = new EngineMockFactory();
         cfg.setFactory(address(factory));
         engine = new PoolEngine(address(cfg));

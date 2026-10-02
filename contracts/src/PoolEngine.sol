@@ -117,8 +117,11 @@ library PoolEngineMath {
 ///         aggregate accounting (no loops over traders anywhere).
 /// @dev    Non-upgradeable (ARCHITECTURE §2.0, §2.8). Conservation: for every market,
 ///         poolCash + insurance + feesAccrued + totalMargin is exactly the USDC this contract holds for it.
-///         Off-hours (oracle `held`), stale oracle and market reduce-only block NEW risk only: reduces,
-///         margin top-ups and liquidations keep working at the latest (held) price.
+///         Off-hours (oracle `held`), stale oracle (new risk: older than NEW_RISK_MAX_PRICE_AGE) and market
+///         reduce-only block NEW risk only: reduces, margin top-ups and liquidations keep working at the
+///         latest (held) price. Each side's open interest is capped at the book's inventory cap, so
+///         |pool net exposure| stays within it whatever the counterparties close. A retiring book's market
+///         gets a close-out time after which anyone may close remaining positions at the oracle.
 contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
 
@@ -135,6 +138,10 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     uint256 public constant MAX_SIZE = uint256(uint128(type(int128).max));
     /// @notice Bound on accepted oracle prices (WAD).
     uint256 public constant MAX_PRICE_WAD = 1e36;
+    /// @notice NEW risk (open / increase / flip, margin withdrawal with a position) needs an oracle price at
+    ///         most this old (and never older than config.maxPriceAge()): bounds the window in which the
+    ///         stored price can lag the market, e.g. while the oracle's pushes are failing.
+    uint256 public constant NEW_RISK_MAX_PRICE_AGE = 60;
     uint256 internal constant FUNDING_PERIOD = 1 days;
 
     // ------------------------------------------------------------------------------------------------
@@ -157,6 +164,8 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         int256 fundingIndex; // cumulative funding per 1e18 size, wadUsd (positive = longs pay)
         int256 sumEntryWad; // sum(size * entryPrice / 1e18) over open positions
         int256 sumFundingWad; // sum(size * fundingIndexAtEntry / 1e18) over open positions
+        uint128 inventoryCapUsd; // mandate maxInventoryUsd: per-side OI cap + funding normaliser
+        uint64 closeOutAfter; // wind-down: positions may be force-closed at the oracle from then (0 = none)
     }
 
     /// @notice Protocol registry (oracle, factory, maxPriceAge are read live).
@@ -200,11 +209,24 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     error NoPosition(address trader);
     error InsufficientLiquidity(uint256 requestedUsd, uint256 availableUsd);
     error InsufficientInsurance(uint256 requestedUsd, uint256 availableUsd);
+    error OpenInterest(uint256 marketId);
+    error CloseOutActive(uint256 marketId);
+    error CloseOutNotOpen(uint256 marketId, uint64 closeOutAfter);
 
     event ReduceOnlySet(uint256 indexed marketId, bool reduceOnly);
     event FundingAccrued(uint256 indexed marketId, int256 fundingIndex, int256 indexDelta);
     event FundingSettled(uint256 indexed marketId, address indexed trader, int256 owedUsd);
     event InsuranceDrawn(uint256 indexed marketId, uint256 amountUsd);
+    event InventoryCapSet(uint256 indexed marketId, uint128 inventoryCapUsd);
+    event CloseOutScheduled(uint256 indexed marketId, uint64 closeOutAfter);
+    event ClosedOut(
+        uint256 indexed marketId,
+        address indexed trader,
+        address indexed by,
+        int256 size,
+        uint256 priceWad,
+        uint256 badDebtUsd
+    );
 
     // ------------------------------------------------------------------------------------------------
     // Construction
@@ -250,6 +272,7 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         m.cfg = cfg;
         m.adapter = msg.sender;
         m.lastFundingTime = uint64(block.timestamp);
+        m.inventoryCapUsd = cfg.maxNetExposureUsd;
         marketOf[msg.sender] = marketId;
         emit MarketCreated(marketId, msg.sender, cfg.underlying, cfg.symbol);
         emit QuoteSet(marketId, 0, 0, cfg.maxNetExposureUsd);
@@ -257,8 +280,8 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
 
     /// @inheritdoc IPoolEngine
     /// @dev Mandate checks (min width, max skew, maxNet <= maxInventory) are done by the desk/adapter; the
-    ///      engine only enforces sanity bounds that keep fill prices positive. Funding is accrued first
-    ///      because the funding rate depends on maxNetExposureUsd.
+    ///      engine only enforces sanity bounds that keep fill prices positive. The funding rate is
+    ///      normalised by the market's inventory cap, not by this (agent-driven) quote cap.
     function setQuote(uint256 marketId, uint16 spreadBps, int16 skewBps, uint128 maxNetExposureUsd)
         external
         onlyAdapter(marketId)
@@ -275,9 +298,41 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     }
 
     /// @inheritdoc IPoolEngine
+    /// @dev Cannot be lifted once a wind-down close-out is scheduled.
     function setReduceOnly(uint256 marketId, bool reduceOnly) external onlyAdapter(marketId) {
-        _markets[marketId].reduceOnly = reduceOnly;
+        Market storage m = _markets[marketId];
+        if (!reduceOnly && m.closeOutAfter != 0) revert CloseOutActive(marketId);
+        m.reduceOnly = reduceOnly;
         emit ReduceOnlySet(marketId, reduceOnly);
+    }
+
+    /// @notice Only the market's adapter (re-mandate): the book's maxInventoryUsd. Caps each side's open
+    ///         interest for new risk (so counterparty closes can never leave |pool net| above it) and
+    ///         normalises funding. The live quote cap is clamped to it. Funding is accrued first.
+    function setInventoryCap(uint256 marketId, uint128 capUsd) external onlyAdapter(marketId) {
+        Market storage m = _markets[marketId];
+        _accrue(marketId, m, _netSize(m) == 0 ? 0 : _latestPrice(m));
+        m.inventoryCapUsd = capUsd;
+        if (m.cfg.maxNetExposureUsd > capUsd) {
+            m.cfg.maxNetExposureUsd = capUsd;
+            emit QuoteSet(marketId, m.spreadBps, m.skewBps, capUsd);
+        }
+        emit InventoryCapSet(marketId, capUsd);
+    }
+
+    /// @notice Only the market's adapter (book winding down): reduce-only for good, and after `notice`
+    ///         seconds anyone may close any remaining position at the oracle ({forceClose}). Idempotent:
+    ///         the first schedule sticks.
+    function startCloseOut(uint256 marketId, uint64 notice) external onlyAdapter(marketId) {
+        Market storage m = _markets[marketId];
+        if (!m.reduceOnly) {
+            m.reduceOnly = true;
+            emit ReduceOnlySet(marketId, true);
+        }
+        if (m.closeOutAfter != 0) return;
+        uint64 at = uint64(block.timestamp) + notice;
+        m.closeOutAfter = at;
+        emit CloseOutScheduled(marketId, at);
     }
 
     /// @inheritdoc IPoolEngine
@@ -299,8 +354,10 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     }
 
     /// @inheritdoc IPoolEngine
-    /// @dev Requires `amount <= poolCash` and, after the withdrawal, poolEquity >= requiredPoolMargin
-    ///      (= |pool net exposure| * initialMarginBps). With open net exposure the price must be fresh or held.
+    /// @dev Requires `amount <= poolCash` and, after the withdrawal, poolEquity >= the gross pool margin
+    ///      (= max(long OI, short OI) * price * initialMarginBps): winners are paid from pool cash before the
+    ///      losing side pays in, so a net-flat book with large two-sided open interest keeps cash as well.
+    ///      With any open interest the price must be fresh or held.
     function withdrawLiquidity(uint256 marketId, uint256 amount, address to)
         external
         nonReentrant
@@ -310,24 +367,27 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         if (to == address(0)) revert ZeroAddress();
         Market storage m = _markets[marketId];
         uint256 price;
-        if (_netSize(m) != 0) {
-            bool stale;
+        if (_hasOpenInterest(m)) {
             uint64 publishedAt;
-            (price,, stale, publishedAt) = _oracle(m);
-            if (stale) revert StalePrice(m.cfg.underlying, publishedAt);
+            (price,, publishedAt) = _oracle(m);
+            if (_stale(publishedAt, protocolConfig.maxPriceAge())) {
+                revert StalePrice(m.cfg.underlying, publishedAt);
+            }
         }
         _accrue(marketId, m, price);
         uint256 cash = m.poolCashUsd;
         if (amount > cash) revert InsufficientLiquidity(amount, cash);
         m.poolCashUsd = cash - amount;
         int256 equity = _poolEquity(m, price, m.fundingIndex);
-        uint256 required = _requiredPoolMargin(m, price);
+        uint256 required = _requiredGrossMargin(m, price);
         if (equity < int256(required)) revert PoolUndercollateralized(equity, required);
         emit LiquidityChanged(marketId, -int256(amount), 0);
         usdc.safeTransfer(to, amount);
     }
 
     /// @inheritdoc IPoolEngine
+    /// @dev Only with no open interest: the IF backs open positions (bad debt, then winners the pool cannot
+    ///      pay) until every position is closed (a wind-down closes them via {forceClose}).
     function withdrawInsurance(uint256 marketId, uint256 amount, address to)
         external
         nonReentrant
@@ -336,6 +396,7 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         if (amount == 0) revert ZeroAmount();
         if (to == address(0)) revert ZeroAddress();
         Market storage m = _markets[marketId];
+        if (_hasOpenInterest(m)) revert OpenInterest(marketId);
         uint256 ins = m.insuranceUsd;
         if (amount > ins) revert InsufficientInsurance(amount, ins);
         m.insuranceUsd = ins - amount;
@@ -384,11 +445,10 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         uint256 price;
         if (p.size != 0) {
             bool held;
-            bool stale;
             uint64 publishedAt;
-            (price, held, stale, publishedAt) = _oracle(m);
+            (price, held, publishedAt) = _oracle(m);
             if (held) revert OffHours(marketId);
-            if (stale) revert StalePrice(m.cfg.underlying, publishedAt);
+            if (_newRiskStale(publishedAt)) revert StalePrice(m.cfg.underlying, publishedAt);
             _accrue(marketId, m, price);
             _settleFunding(marketId, m, p);
         }
@@ -419,8 +479,9 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     /// @inheritdoc IPoolEngine
     /// @dev Buy (sizeDelta > 0) fills at oracle*(1e4 + spread/2 + skew)/1e4 (rounded up), sell at
     ///      oracle*(1e4 - spread/2 + skew)/1e4 (rounded down). New risk (open/increase/flip) is blocked when
-    ///      reduce-only, held or stale, must keep |pool net exposure| <= maxNetExposureUsd, must pass the
-    ///      trader's initial margin and keep the pool collateralised. Reductions must not leave the
+    ///      reduce-only, held or stale, must keep |pool net exposure| <= maxNetExposureUsd and the trader's
+    ///      side OI <= inventoryCapUsd, must pass the trader's initial margin and keep the pool
+    ///      collateralised. Reductions must not leave the
     ///      position liquidatable (a full close only needs margin to cover losses + funding + fee).
     function trade(uint256 marketId, int256 sizeDelta, uint256 acceptablePriceWad)
         external
@@ -433,9 +494,8 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         TradeCtx memory c;
         {
             bool held;
-            bool stale;
             uint64 publishedAt;
-            (c.price, held, stale, publishedAt) = _oracle(m);
+            (c.price, held, publishedAt) = _oracle(m);
             c.oldSize = p.size;
             c.newSize = c.oldSize + sizeDelta;
             if (PoolEngineMath.abs(c.newSize) > MAX_SIZE) revert SizeTooLarge();
@@ -443,7 +503,7 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
             if (c.newRisk) {
                 if (m.reduceOnly) revert MarketReduceOnly(marketId);
                 if (held) revert OffHours(marketId);
-                if (stale) revert StalePrice(m.cfg.underlying, publishedAt);
+                if (_newRiskStale(publishedAt)) revert StalePrice(m.cfg.underlying, publishedAt);
             }
         }
         _accrue(marketId, m, c.price);
@@ -492,19 +552,12 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     function liquidate(uint256 marketId, address trader) external nonReentrant returns (uint256 rewardUsd) {
         Market storage m = _market(marketId);
         Position storage p = _positions[marketId][trader];
-        int256 size = p.size;
-        if (size == 0) revert NoPosition(trader);
-        (uint256 price,,,) = _oracle(m);
+        if (p.size == 0) revert NoPosition(trader);
+        (uint256 price,,) = _oracle(m);
         _accrue(marketId, m, price);
         if (!_isLiquidatable(m, p, price, m.fundingIndex)) revert NotLiquidatable(trader);
 
-        int256 fundingUsd = PoolEngineMath.fundingOwedUsd(size, m.fundingIndex, p.fundingIndexAtEntry);
-        int256 pnl = PoolEngineMath.pnlUsd(size, p.entryPriceWad, price);
-        _removeAggregates(m, p);
-        uint256 badDebt = _settle(marketId, m, p, fundingUsd - pnl, true);
-        p.size = 0;
-        p.entryPriceWad = 0;
-        p.fundingIndexAtEntry = m.fundingIndex;
+        (int256 size,, uint256 badDebt) = _closeAtOracle(marketId, m, p, trader, price);
 
         uint256 margin = p.marginUsd;
         uint256 feeUsd = Math.min(
@@ -516,9 +569,26 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         m.totalMarginUsd -= feeUsd;
         m.insuranceUsd += feeUsd - rewardUsd;
 
-        if (fundingUsd != 0) emit FundingSettled(marketId, trader, fundingUsd);
         emit Liquidation(marketId, trader, msg.sender, size, price, feeUsd, badDebt);
         if (rewardUsd != 0) usdc.safeTransfer(msg.sender, rewardUsd);
+    }
+
+    /// @notice Anyone, once a wind-down close-out is open (book Retiring, notice elapsed): closes `trader`'s
+    ///         whole position at the oracle price with no fee, like a liquidation without the maintenance
+    ///         check (a loss beyond margin is bad debt: IF, then ADL in this market). The price must not be
+    ///         stale. Leftover margin stays withdrawable by the trader. O(1) per position.
+    function forceClose(uint256 marketId, address trader) external nonReentrant {
+        Market storage m = _market(marketId);
+        uint64 at = m.closeOutAfter;
+        if (at == 0 || block.timestamp < at) revert CloseOutNotOpen(marketId, at);
+        Position storage p = _positions[marketId][trader];
+        if (p.size == 0) revert NoPosition(trader);
+        (uint256 price,, uint64 publishedAt) = _oracle(m);
+        if (_stale(publishedAt, protocolConfig.maxPriceAge())) revert StalePrice(m.cfg.underlying, publishedAt);
+        _accrue(marketId, m, price);
+        (int256 size, int256 pnl, uint256 badDebt) = _closeAtOracle(marketId, m, p, trader, price);
+        emit Trade(marketId, trader, -size, price, 0, pnl, 0);
+        emit ClosedOut(marketId, trader, msg.sender, size, price, badDebt);
     }
 
     // ------------------------------------------------------------------------------------------------
@@ -618,6 +688,26 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         return _requiredPoolMargin(m, _viewPrice(m));
     }
 
+    /// @notice MM liquidity {withdrawLiquidity} would release now: min(poolCash, poolEquity - gross pool
+    ///         margin) at the latest price (the call itself also needs a non-stale price with open interest).
+    function withdrawableLiquidityUsd(uint256 marketId) external view returns (uint256) {
+        Market storage m = _market(marketId);
+        uint256 price = _hasOpenInterest(m) ? _latestPrice(m) : 0;
+        int256 free = _poolEquity(m, price, _pendingIndex(m, price)) - int256(_requiredGrossMargin(m, price));
+        if (free <= 0) return 0;
+        return Math.min(uint256(free), m.poolCashUsd);
+    }
+
+    /// @notice The market's inventory cap (mandate maxInventoryUsd): per-side OI cap + funding normaliser.
+    function inventoryCapUsd(uint256 marketId) external view returns (uint128) {
+        return _market(marketId).inventoryCapUsd;
+    }
+
+    /// @notice Wind-down close-out time (0 = none scheduled); {forceClose} is open from then on.
+    function closeOutAfter(uint256 marketId) external view returns (uint64) {
+        return _market(marketId).closeOutAfter;
+    }
+
     /// @notice Sum of trader margins held for this market (USD 6dp).
     function totalMarginUsd(uint256 marketId) external view returns (uint256) {
         return _market(marketId).totalMarginUsd;
@@ -646,23 +736,27 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         if (m.adapter == address(0)) revert UnknownMarket(marketId);
     }
 
-    /// @dev Latest attested price + regime flags. Reverts when the underlying was never priced.
-    function _oracle(Market storage m)
-        internal
-        view
-        returns (uint256 price, bool held, bool stale, uint64 publishedAt)
-    {
+    /// @dev Latest attested price, held flag and publication time. Reverts when the underlying was never priced.
+    function _oracle(Market storage m) internal view returns (uint256 price, bool held, uint64 publishedAt) {
         IAttestedOracle.PriceData memory d = IAttestedOracle(protocolConfig.oracle()).latest(m.cfg.underlying);
         price = d.priceWad;
         if (price == 0 || d.publishedAt == 0) revert NoPrice(m.cfg.underlying);
         if (price > MAX_PRICE_WAD) revert PriceOutOfRange(price);
         held = d.held;
         publishedAt = d.publishedAt;
-        stale = uint256(publishedAt) + protocolConfig.maxPriceAge() < block.timestamp;
+    }
+
+    function _stale(uint64 publishedAt, uint256 maxAge) internal view returns (bool) {
+        return uint256(publishedAt) + maxAge < block.timestamp;
+    }
+
+    /// @dev Staleness bound for new risk: min(config.maxPriceAge(), NEW_RISK_MAX_PRICE_AGE).
+    function _newRiskStale(uint64 publishedAt) internal view returns (bool) {
+        return _stale(publishedAt, Math.min(protocolConfig.maxPriceAge(), NEW_RISK_MAX_PRICE_AGE));
     }
 
     function _latestPrice(Market storage m) internal view returns (uint256 price) {
-        (price,,,) = _oracle(m);
+        (price,,) = _oracle(m);
     }
 
     /// @dev Price for views: not needed (0) when the market is net-flat (aggregates are price-independent).
@@ -679,13 +773,14 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     }
 
     /// @dev Funding rate per day (unsigned WAD fraction of notional) for a net trader skew of `absNet`:
-    ///      fundingVelocityBps * min(|skewUsd| / maxNetExposureUsd, 1). Full velocity when maxNet == 0.
+    ///      fundingVelocityBps * min(|skewUsd| / inventoryCapUsd, 1). Full velocity when the cap is 0. The
+    ///      normaliser is the mandate's maxInventoryUsd, never the agent's dynamic quote cap.
     function _fundingRateWad(Market storage m, uint256 absNet, uint256 price)
         internal
         view
         returns (uint256)
     {
-        uint256 maxNet = m.cfg.maxNetExposureUsd;
+        uint256 maxNet = m.inventoryCapUsd;
         uint256 fracWad = maxNet == 0
             ? PoolEngineMath.WAD
             : Math.min(PoolEngineMath.WAD, Math.mulDiv(absNet, price, maxNet * 1e12));
@@ -805,11 +900,35 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         }
     }
 
+    /// @dev Closes the whole position at the oracle `price` (liquidation / wind-down close-out): funding and
+    ///      PnL settle against the pool; a trader shortfall is bad debt (IF, then ADL in this market).
+    function _closeAtOracle(uint256 marketId, Market storage m, Position storage p, address trader, uint256 price)
+        internal
+        returns (int256 size, int256 pnl, uint256 badDebt)
+    {
+        size = p.size;
+        int256 fundingUsd = PoolEngineMath.fundingOwedUsd(size, m.fundingIndex, p.fundingIndexAtEntry);
+        pnl = PoolEngineMath.pnlUsd(size, p.entryPriceWad, price);
+        _removeAggregates(m, p);
+        badDebt = _settle(marketId, m, p, fundingUsd - pnl, true);
+        p.size = 0;
+        p.entryPriceWad = 0;
+        p.fundingIndexAtEntry = m.fundingIndex;
+        if (fundingUsd != 0) emit FundingSettled(marketId, trader, fundingUsd);
+    }
+
+    /// @dev New risk: post-trade |pool net| <= the quote cap AND the side the trader added to stays within
+    ///      the inventory cap. Either side may close at will, so |pool net| can reach the larger side's OI:
+    ///      the side cap keeps |pool net exposure| <= maxInventoryUsd under any sequence of reductions.
     function _postTradeChecks(Market storage m, Position storage p, TradeCtx memory c) internal view {
         if (c.newRisk) {
             uint256 exposure =
                 Math.mulDiv(PoolEngineMath.abs(_netSize(m)), c.price, PoolEngineMath.SIZE_PRICE_TO_USD);
             if (exposure > m.cfg.maxNetExposureUsd) revert ExposureCap(exposure, m.cfg.maxNetExposureUsd);
+            uint256 sideOi = Math.mulDiv(
+                uint256(c.newSize > 0 ? m.longSize : -m.shortSize), c.price, PoolEngineMath.SIZE_PRICE_TO_USD
+            );
+            if (sideOi > m.inventoryCapUsd) revert ExposureCap(sideOi, m.inventoryCapUsd);
             uint256 required = PoolEngineMath.requirementUsd(c.newSize, c.price, m.cfg.initialMarginBps);
             int256 equity = int256(p.marginUsd) + PoolEngineMath.pnlUsd(c.newSize, p.entryPriceWad, c.price);
             if (equity < int256(required)) revert InsufficientMargin(required, equity);
@@ -851,6 +970,17 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         int256 net = _netSize(m);
         if (net == 0) return 0;
         return PoolEngineMath.requirementUsd(net, price, m.cfg.initialMarginBps);
+    }
+
+    function _hasOpenInterest(Market storage m) internal view returns (bool) {
+        return m.longSize != 0 || m.shortSize != 0;
+    }
+
+    /// @dev max(long OI, short OI) * price * initialMarginBps (ceil): pool margin kept against withdrawals.
+    function _requiredGrossMargin(Market storage m, uint256 price) internal view returns (uint256) {
+        int256 side = m.longSize > -m.shortSize ? m.longSize : -m.shortSize;
+        if (side == 0) return 0;
+        return PoolEngineMath.requirementUsd(side, price, m.cfg.initialMarginBps);
     }
 
     function _fillPrice(Market storage m, uint256 price, int256 sizeDelta) internal view returns (uint256) {

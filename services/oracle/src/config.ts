@@ -15,12 +15,18 @@ const flag = (def: boolean) => z.stringbool().default(def);
 
 export const oracleEnvShape = {
   ORACLE_PORT: z.coerce.number().int().positive().default(4410),
+  /** HTTP bind address. Loopback by default: the API is an internal health / debug surface. */
+  ORACLE_HOST: z.string().min(1).default("127.0.0.1"),
   /** Aggregation / Redis publication cadence. */
   ORACLE_TICK_MS: z.coerce.number().int().positive().default(1000),
   /** On-chain AttestedOracle.pushMany cadence per price id. */
   ORACLE_PUSH_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
-  /** Immediate push when |price - last pushed| exceeds this (bps). */
-  ORACLE_PUSH_DEVIATION_BPS: z.coerce.number().nonnegative().default(25),
+  /**
+   * Immediate push when |price - last pushed| exceeds this (bps). Keep it below the cheapest in-house
+   * round trip (spread + 2 x taker fee; RHX5 22 bps) so the stored price never lags the signed one by an
+   * arbitrageable move.
+   */
+  ORACLE_PUSH_DEVIATION_BPS: z.coerce.number().nonnegative().default(10),
   /** Sources further than this from the median are rejected (bps). */
   ORACLE_OUTLIER_BPS: z.coerce.number().positive().default(150),
   /** Minimum accepted sources for a non-held price (raised to AttestedOracle.minSources() if higher). */

@@ -48,8 +48,12 @@ interface IDeskReturnVault {
 ///
 ///         Swaps (Hedge / Flatten) go through config.hedgeExecutor() with an exact approval. Hedges are
 ///         validated post-trade on the measured inventory (`mandate.checkHedgeExecuted`), so the bound
-///         is the executed leg, not an estimate. Key-initiated swaps must also execute within
-///         `maxSlippageBps` of the attested oracle value (no self-sandwiching the book).
+///         is the executed leg, not an estimate; a key's Flatten meets the same off-hours / band rules
+///         (`mandate.checkFlatten`). Key-initiated swaps must also execute within `maxSlippageBps` of the
+///         attested oracle value (no self-sandwiching the book), and their cumulative loss vs the oracle
+///         per mark period is capped at `periodSlippageBudgetBps` of maxInventoryUsd (no bleeding the book
+///         by churning in-band). RISK Flatten is bounded by `riskMaxSlippageBps` whenever the price is
+///         fresh, and is never blocked by a stale price.
 contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
     using EnumerableSet for EnumerableSet.AddressSet;
@@ -69,6 +73,10 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
     uint256 public constant MAX_HELD_TOKENS = 16;
     uint16 public constant DEFAULT_MAX_SLIPPAGE_BPS = 300;
     uint16 public constant MAX_SLIPPAGE_LIMIT_BPS = 2000;
+    /// @notice RISK Flatten with a fresh price: max loss vs the oracle value (bps).
+    uint16 public constant DEFAULT_RISK_MAX_SLIPPAGE_BPS = 1000;
+    /// @notice Key swaps: cumulative loss vs the oracle per mark period, bps of maxInventoryUsd.
+    uint16 public constant DEFAULT_PERIOD_SLIPPAGE_BUDGET_BPS = 200;
     bytes32 public constant VENUE_UNIV3 = "UNIV3";
     bytes32 public constant VENUE_UNIV4 = "UNIV4";
 
@@ -90,6 +98,12 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
     /// @notice Mandate-maintained mirror of active keys: validUntil, 0 = inactive.
     mapping(address key => uint64) public sessionKeyValidUntil;
     EnumerableSet.AddressSet internal _held;
+    /// @notice Max loss vs the oracle value tolerated on a RISK Flatten priced at a fresh price (bps).
+    uint16 public riskMaxSlippageBps;
+    /// @notice Budget for key swaps' cumulative loss vs the oracle per mark period (bps of maxInventoryUsd).
+    uint16 public periodSlippageBudgetBps;
+    /// @notice Key swaps' cumulative loss vs the oracle value (USD 6dp) per period (timestamp / markInterval).
+    mapping(uint256 period => uint256 lossUsd) public slippageUsedUsd;
 
     struct HedgeOrder {
         address token;
@@ -118,12 +132,14 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
     error InsufficientBalance(uint256 requested, uint256 available);
     error FundingShortfall(uint256 expected, uint256 received);
     error SlippageTooHigh(uint256 valueGivenUsd, uint256 valueReceivedUsd);
+    error SlippageBudgetExceeded(uint256 usedUsd, uint256 budgetUsd);
     error BadSlippage(uint16 bps);
     error NativeTransferFailed();
 
     event SessionKeySynced(address indexed key, uint64 validUntil);
     event EntryPointSynced(address indexed entryPoint);
     event MaxSlippageSet(uint16 bps);
+    event RiskSlippageParamsSet(uint16 riskMaxSlippageBps, uint16 periodSlippageBudgetBps);
     event HeldTokenAdded(address indexed token);
     event HeldTokenRemoved(address indexed token);
     event NativeWithdrawn(address indexed to, uint256 amount);
@@ -158,10 +174,13 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
         usdc = usdc_;
         venue = b.getCharter().venue;
         maxSlippageBps = DEFAULT_MAX_SLIPPAGE_BPS;
+        riskMaxSlippageBps = DEFAULT_RISK_MAX_SLIPPAGE_BPS;
+        periodSlippageBudgetBps = DEFAULT_PERIOD_SLIPPAGE_BUDGET_BPS;
         address ep = cfg.entryPoint();
         entryPoint = ep;
         emit EntryPointSynced(ep);
         emit MaxSlippageSet(DEFAULT_MAX_SLIPPAGE_BPS);
+        emit RiskSlippageParamsSet(DEFAULT_RISK_MAX_SLIPPAGE_BPS, DEFAULT_PERIOD_SLIPPAGE_BUDGET_BPS);
     }
 
     receive() external payable {}
@@ -237,7 +256,7 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
         } else if (kind == ActionKind.SetQuote) {
             _setQuote(key, action.data);
         } else {
-            result = _flatten(viaRisk, action.data);
+            result = _flatten(key, viaRisk, action.data);
         }
         emit ActionExecuted(key, kind, action.data);
     }
@@ -283,8 +302,8 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
 
         uint256 tokenQty = o.buy ? received : spent;
         uint256 tokenValue = reg.valueUsd(o.token, tokenQty);
-        if (o.buy) _checkSlippage(spent, tokenValue);
-        else _checkSlippage(tokenValue, received);
+        if (o.buy) _chargeSlippage(spent, tokenValue);
+        else _chargeSlippage(tokenValue, received);
 
         IMMMandateDesk(mandate)
             .checkHedgeExecuted(
@@ -312,29 +331,33 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
         return abi.encode(received);
     }
 
-    function _flatten(bool viaRisk, bytes calldata data) internal returns (bytes memory) {
-        (address token, uint256 amountIn, uint256 minAmountOut, uint24 poolFee, bytes32 hedgeVenue) =
+    function _flatten(address key, bool viaRisk, bytes calldata data) internal returns (bytes memory) {
+        HedgeOrder memory o;
+        (o.token, o.amountIn, o.minAmountOut, o.poolFee, o.venue) =
             abi.decode(data, (address, uint256, uint256, uint24, bytes32));
-        if (amountIn == 0) revert ZeroAmount();
-        _requireSpotVenue(hedgeVenue);
-        if (!_held.contains(token)) revert NotHeld(token);
-        if (amountIn > IERC20(token).balanceOf(address(this))) revert IMMMandate.SpotShortNotAllowed();
-
-        (uint256 spent, uint256 received) = _swap(hedgeVenue, token, usdc, poolFee, amountIn, minAmountOut);
-        _syncHeld(token);
+        if (o.amountIn == 0) revert ZeroAmount();
+        _requireSpotVenue(o.venue);
+        if (!_held.contains(o.token)) revert NotHeld(o.token);
+        if (o.amountIn > IERC20(o.token).balanceOf(address(this))) revert IMMMandate.SpotShortNotAllowed();
 
         IStockTokenRegistry reg = _registry();
+        int256 before = viaRisk ? int256(0) : SafeCast.toInt256(_hedgeValue(reg));
+        (uint256 spent, uint256 received) = _swap(o.venue, o.token, usdc, o.poolFee, o.amountIn, o.minAmountOut);
+        _syncHeld(o.token);
+
         uint256 notional;
         if (viaRisk) {
-            // Emergency path (trusted role): never blocked by a stale price.
-            try reg.valueUsd(token, spent) returns (uint256 v) {
+            // Emergency path (trusted role): never blocked by a stale price, but bounded when it is fresh.
+            try reg.valueUsd(o.token, spent) returns (uint256 v) {
                 notional = v;
             } catch {}
+            _checkSlippageBps(notional, received, riskMaxSlippageBps);
         } else {
-            notional = reg.valueUsd(token, spent);
-            _checkSlippage(notional, received);
+            notional = reg.valueUsd(o.token, spent);
+            _chargeSlippage(notional, received);
+            IMMMandateDesk(mandate).checkFlatten(key, before, SafeCast.toInt256(_hedgeValue(reg)));
         }
-        emit HedgeExecuted(token, false, spent, received, notional);
+        emit HedgeExecuted(o.token, false, spent, received, notional);
         return abi.encode(received);
     }
 
@@ -383,6 +406,17 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
         if (bps > MAX_SLIPPAGE_LIMIT_BPS) revert BadSlippage(bps);
         maxSlippageBps = bps;
         emit MaxSlippageSet(bps);
+    }
+
+    /// @notice Timelock: RISK Flatten slippage bound (fresh price, <= MAX_SLIPPAGE_LIMIT_BPS) and the key
+    ///         swaps' per-period loss budget (bps of maxInventoryUsd, <= 1e4).
+    function setRiskSlippageParams(uint16 riskBps, uint16 periodBudgetBps) external {
+        if (msg.sender != config.timelock()) revert Unauthorized(msg.sender);
+        if (riskBps > MAX_SLIPPAGE_LIMIT_BPS) revert BadSlippage(riskBps);
+        if (periodBudgetBps > BPS) revert BadSlippage(periodBudgetBps);
+        riskMaxSlippageBps = riskBps;
+        periodSlippageBudgetBps = periodBudgetBps;
+        emit RiskSlippageParamsSet(riskBps, periodBudgetBps);
     }
 
     /// @notice Timelock: recover native gas balance held by the account.
@@ -458,11 +492,25 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
         }
     }
 
-    /// @dev Reverts unless valueReceived >= valueGiven * (1 - maxSlippageBps).
-    function _checkSlippage(uint256 valueGivenUsd, uint256 valueReceivedUsd) internal view {
-        if (valueReceivedUsd * BPS < valueGivenUsd * (BPS - maxSlippageBps)) {
+    /// @dev Reverts unless valueReceived >= valueGiven * (1 - bps).
+    function _checkSlippageBps(uint256 valueGivenUsd, uint256 valueReceivedUsd, uint16 bps) internal pure {
+        if (valueReceivedUsd * BPS < valueGivenUsd * (BPS - bps)) {
             revert SlippageTooHigh(valueGivenUsd, valueReceivedUsd);
         }
+    }
+
+    /// @dev Key-initiated swap: per-swap bound (maxSlippageBps) plus the per-mark-period budget on the
+    ///      cumulative loss vs the oracle value (periodSlippageBudgetBps of maxInventoryUsd).
+    function _chargeSlippage(uint256 valueGivenUsd, uint256 valueReceivedUsd) internal {
+        _checkSlippageBps(valueGivenUsd, valueReceivedUsd, maxSlippageBps);
+        if (valueReceivedUsd >= valueGivenUsd) return;
+        uint256 interval = config.markInterval();
+        uint256 period = interval == 0 ? 0 : block.timestamp / interval;
+        uint256 used = slippageUsedUsd[period] + (valueGivenUsd - valueReceivedUsd);
+        uint256 budget =
+            uint256(IMMMandate(mandate).getMandate().maxInventoryUsd) * periodSlippageBudgetBps / BPS;
+        if (used > budget) revert SlippageBudgetExceeded(used, budget);
+        slippageUsedUsd[period] = used;
     }
 
     function _requireSpotVenue(bytes32 v) internal pure {

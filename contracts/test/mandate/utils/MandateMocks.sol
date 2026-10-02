@@ -33,8 +33,13 @@ contract MandateMockConfig {
     address public entryPoint;
     address public timelock;
     uint32 public maxPriceAge = 300;
+    uint32 public markInterval = 86_400;
 
     uint256[] internal _tierThresholds;
+
+    function setMarkInterval(uint32 v) external {
+        markInterval = v;
+    }
     uint256[] internal _tierBonds;
 
     function grant(bytes32 role, address a) external {
@@ -385,6 +390,21 @@ contract MandateMockAdapter {
         require(!revertReduceOnly, "reduce-only reverts");
         reduceOnly = v;
         reduceOnlyCalls++;
+    }
+
+    uint256 public applyMandateCalls;
+    bool public revertApplyMandate;
+
+    function setRevertApplyMandate(bool v) external {
+        revertApplyMandate = v;
+    }
+
+    /// @dev PoolEngineAdapter.applyMandate stand-in (mandate-only re-mandate hook).
+    function applyMandate() external {
+        require(msg.sender == mandate, "only mandate");
+        require(!revertApplyMandate, "applyMandate reverts");
+        applyMandateCalls++;
+        reduceOnly = true;
     }
 }
 

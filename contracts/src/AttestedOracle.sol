@@ -10,8 +10,11 @@ import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 /// @title AttestedOracle — the protocol's single on-chain price surface.
 /// @notice Prices are produced off-chain by the oracle service (multi-source median, TEE-attested — the
 ///         attestation verification flow is VERIFY) and signed as EIP-712 `Price` structs by a registered
-///         signer. Anyone may relay a signed update. A `held` price is the feed holding a closed session's
-///         last price (off-hours): consumers go reduce-only but keep liquidating at the held price.
+///         signer. Relaying is restricted to an active signer, the KEEPER role or the timelock: a signed
+///         update lands only when the oracle (or a keeper) sends it, so a leaked / observed signature can
+///         never be pushed by a trader inside its own transaction (trade -> push -> close sandwich of the
+///         in-house pool). A `held` price is the feed holding a closed session's last price (off-hours):
+///         consumers go reduce-only but keep liquidating at the held price.
 /// @dev    Non-upgradeable (ARCHITECTURE §2.0). EIP-712 domain ("Bookrunner AttestedOracle", "1"); the type
 ///         string MUST stay byte-identical to `packages/shared/src/eip712.ts` (`priceTypes`).
 contract AttestedOracle is IAttestedOracle, EIP712 {
@@ -24,6 +27,8 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
     uint64 public constant MAX_FUTURE_DRIFT = 5;
     /// @notice Default minimum number of distinct sources for a non-held price.
     uint32 public constant DEFAULT_MIN_SOURCES = 3;
+    /// @dev BookrunnerConfig KEEPER role id (relayers besides the signers and the timelock).
+    bytes32 internal constant KEEPER_ROLE = keccak256("KEEPER");
 
     /// @notice Protocol registry (timelock + maxPriceAge).
     IBookrunnerConfig public immutable config;
@@ -45,6 +50,7 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
     error InsufficientSources(uint32 sourceCount, uint32 minSources);
     error LengthMismatch(uint256 updates, uint256 sigs);
     error BadMinSources(uint32 value);
+    error NotRelayer(address caller);
 
     /// @notice Emitted by `pushMany` for an entry that was validly signed but not newer than stored.
     event PriceSkipped(bytes32 indexed underlying, uint64 storedPublishedAt, uint64 incomingPublishedAt);
@@ -52,6 +58,11 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
 
     modifier onlyTimelock() {
         if (msg.sender != config.timelock()) revert NotTimelock(msg.sender);
+        _;
+    }
+
+    modifier onlyRelayer() {
+        if (!canRelay(msg.sender)) revert NotRelayer(msg.sender);
         _;
     }
 
@@ -99,9 +110,15 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
         return _domainSeparatorV4();
     }
 
+    /// @notice Whether `relayer` may push signed updates: an active signer, the KEEPER role or the timelock.
+    function canRelay(address relayer) public view returns (bool) {
+        return isSigner[relayer] || relayer == config.timelock() || config.hasRole(KEEPER_ROLE, relayer);
+    }
+
     /// @inheritdoc IAttestedOracle
-    /// @dev Reverts BadSigner (unsigned / unregistered), NotNewer, FuturePrice, ZeroPrice, InsufficientSources.
-    function push(PriceUpdate calldata u, bytes calldata sig) external {
+    /// @dev Only a relayer ({canRelay}, else NotRelayer). Reverts BadSigner (unsigned / unregistered),
+    ///      NotNewer, FuturePrice, ZeroPrice, InsufficientSources.
+    function push(PriceUpdate calldata u, bytes calldata sig) external onlyRelayer {
         address signer = _verify(u, sig);
         uint64 stored = _prices[u.underlying].publishedAt;
         if (u.publishedAt <= stored) revert NotNewer(stored, u.publishedAt);
@@ -111,8 +128,8 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
     /// @inheritdoc IAttestedOracle
     /// @dev Every entry must be correctly signed and well-formed (reverts otherwise, like `push`), but an
     ///      entry that is not newer than the stored price is skipped (PriceSkipped) instead of reverting, so
-    ///      one raced/stale entry never fails a relayer's whole batch.
-    function pushMany(PriceUpdate[] calldata us, bytes[] calldata sigs) external {
+    ///      one raced/stale entry never fails a relayer's whole batch. Only a relayer ({canRelay}).
+    function pushMany(PriceUpdate[] calldata us, bytes[] calldata sigs) external onlyRelayer {
         uint256 n = us.length;
         if (n != sigs.length) revert LengthMismatch(n, sigs.length);
         for (uint256 i; i < n; ++i) {

@@ -16,6 +16,12 @@ import {IMMMandate} from "./interfaces/IMMMandate.sol";
 import {IRevenueRouter} from "./interfaces/IRevenueRouter.sol";
 import {IStockTokenRegistry} from "./interfaces/IStockTokenRegistry.sol";
 
+/// @title IPoolEngineControls — PoolEngine market controls beyond the frozen IPoolEngine (only the adapter).
+interface IPoolEngineControls {
+    function setInventoryCap(uint256 marketId, uint128 capUsd) external;
+    function startCloseOut(uint256 marketId, uint64 notice) external;
+}
+
 /// @title PoolEngineAdapter — a book's venue adapter for its in-house PoolEngine market.
 /// @notice UUPS proxy per book (upgrades only by `config.timelock()`). Owns exactly one engine market:
 ///         the book's IF is the market's insurance fund and the book's MM inventory is the pool.
@@ -35,6 +41,9 @@ contract PoolEngineAdapter is IPoolEngineAdapter, Initializable, UUPSUpgradeable
     uint32 public constant DEFAULT_FUNDING_VELOCITY_BPS = 100;
     /// @dev Mirrors PoolEngine.MAX_SPREAD_BPS: the initial spread (mandate min width) is clamped to it.
     uint16 internal constant ENGINE_MAX_SPREAD_BPS = 5000;
+    /// @notice Wind-down: open positions may be force-closed at the oracle this many mark intervals after
+    ///         the book starts retiring (traders' notice).
+    uint256 public constant CLOSE_OUT_NOTICE_MARKS = 2;
 
     // ------------------------------------------------------------------------------------------------
     // Storage
@@ -54,6 +63,9 @@ contract PoolEngineAdapter is IPoolEngineAdapter, Initializable, UUPSUpgradeable
         address mandate;
         address router;
         uint256 withdrawNonce;
+        /// @dev Set by a re-mandate (market held reduce-only); the next in-mandate SetQuote lifts it. Any
+        ///      later reduce-only request (RISK, kill, retire) clears it, so a kill is never undone by a quote.
+        bool liftOnQuote;
     }
 
     // keccak256(abi.encode(uint256(keccak256("bookrunner.storage.PoolEngineAdapter")) - 1)) & ~bytes32(uint256(0xff))
@@ -85,6 +97,7 @@ contract PoolEngineAdapter is IPoolEngineAdapter, Initializable, UUPSUpgradeable
     error Unauthorized(address caller);
     error MandateKilled();
     error BookWindingDown();
+    error BookNotWindingDown();
     error ExposureAboveMandate(uint128 maxNetExposureUsd, uint128 maxInventoryUsd);
 
     event AdapterInitialized(
@@ -93,6 +106,10 @@ contract PoolEngineAdapter is IPoolEngineAdapter, Initializable, UUPSUpgradeable
     /// @notice Synchronous withdrawal settled: `amount` landed in the vault in the same call.
     event WithdrawSettled(uint8 indexed account, uint256 amount, uint256 indexed requestNonce);
     event ReduceOnlyRequested(address indexed by, bool reduceOnly);
+    /// @notice Re-mandate applied to the live market (quote clamped to the new terms, held reduce-only).
+    event MandateApplied(uint16 spreadBps, int16 skewBps, uint128 maxNetExposureUsd, uint128 inventoryCapUsd);
+    /// @notice Wind-down close-out scheduled on the engine market (`notice` seconds from now).
+    event CloseOutStarted(uint64 notice);
 
     // ------------------------------------------------------------------------------------------------
     // Construction / initialisation
@@ -253,7 +270,9 @@ contract PoolEngineAdapter is IPoolEngineAdapter, Initializable, UUPSUpgradeable
 
     /// @inheritdoc IPoolEngineAdapter
     /// @dev Only the book's desk (which runs mandate.checkQuote). Defence in depth: rejects a killed
-    ///      mandate and any maxNetExposureUsd above the mandate's maxInventoryUsd.
+    ///      mandate and any maxNetExposureUsd above the mandate's maxInventoryUsd. After a re-mandate the
+    ///      market is held reduce-only until this first in-mandate quote from a fresh key, which lifts it
+    ///      (Live book only); a reduce-only request made since (RISK / kill / retire) is never lifted here.
     function setQuote(uint16 spreadBps, int16 skewBps, uint128 maxNetExposureUsd) external {
         AdapterStorage storage $ = _s();
         if (msg.sender != $.desk) revert NotDesk(msg.sender);
@@ -262,28 +281,78 @@ contract PoolEngineAdapter is IPoolEngineAdapter, Initializable, UUPSUpgradeable
         uint128 maxInv = mandate_.getMandate().maxInventoryUsd;
         if (maxNetExposureUsd > maxInv) revert ExposureAboveMandate(maxNetExposureUsd, maxInv);
         $.engine.setQuote($.marketId, spreadBps, skewBps, maxNetExposureUsd);
+        if ($.liftOnQuote) {
+            $.liftOnQuote = false;
+            if (IBook($.book).state() == BRTypes.BookState.Live) {
+                emit ReduceOnlyRequested(msg.sender, false);
+                $.engine.setReduceOnly($.marketId, false);
+            }
+        }
     }
 
     /// @inheritdoc IPoolEngineAdapter
-    /// @dev Enable: desk, the book's mandate (kill), the book (retire) or the RISK role. Disable: desk,
-    ///      mandate or book only (never RISK), and never while the mandate is killed or the book is
-    ///      Retiring/Retired.
+    /// @dev Enable: desk, the book's mandate (kill), the book (retire) or the RISK role; on a Retiring /
+    ///      Retired book it also schedules the wind-down close-out. Disable: desk, mandate or book only
+    ///      (never RISK), and never while the mandate is killed or the book is Retiring/Retired.
     function setReduceOnly(bool reduceOnly) external {
         AdapterStorage storage $ = _s();
         address sender = msg.sender;
         bool component = sender == $.desk || sender == $.mandate || sender == $.book;
+        BRTypes.BookState st = IBook($.book).state();
+        bool windingDown = st == BRTypes.BookState.Retiring || st == BRTypes.BookState.Retired;
         if (reduceOnly) {
             if (!component && !$.config.hasRole($.config.RISK_ROLE(), sender)) revert Unauthorized(sender);
         } else {
             if (!component) revert Unauthorized(sender);
             if (IMMMandate($.mandate).killed()) revert MandateKilled();
-            BRTypes.BookState st = IBook($.book).state();
-            if (st == BRTypes.BookState.Retiring || st == BRTypes.BookState.Retired) {
-                revert BookWindingDown();
-            }
+            if (windingDown) revert BookWindingDown();
         }
+        $.liftOnQuote = false;
         emit ReduceOnlyRequested(sender, reduceOnly);
         $.engine.setReduceOnly($.marketId, reduceOnly);
+        if (reduceOnly && windingDown) _startCloseOut($);
+    }
+
+    /// @notice Anyone, once the book is Retiring or Retired: reduce-only for good and schedules the
+    ///         close-out (CLOSE_OUT_NOTICE_MARKS mark intervals from the first call), after which anyone may
+    ///         close remaining positions at the oracle (PoolEngine.forceClose) so the book can finalize.
+    ///         Idempotent. Also runs automatically when the retire kill sets reduce-only.
+    function startCloseOut() external {
+        AdapterStorage storage $ = _s();
+        BRTypes.BookState st = IBook($.book).state();
+        if (st != BRTypes.BookState.Retiring && st != BRTypes.BookState.Retired) revert BookNotWindingDown();
+        _startCloseOut($);
+    }
+
+    /// @notice Only the book's mandate, on a re-mandate: brings the live engine quote within the new terms
+    ///         (inventory cap = maxInventoryUsd, quote cap <= it, spread >= minQuoteWidthBps, |skew| <=
+    ///         maxSkewBps) and holds the market reduce-only until a fresh key quotes under the new terms.
+    function applyMandate() external {
+        AdapterStorage storage $ = _s();
+        if (msg.sender != $.mandate) revert Unauthorized(msg.sender);
+        BRTypes.Mandate memory md = IMMMandate($.mandate).getMandate();
+        IPoolEngine eng = $.engine;
+        uint256 id = $.marketId;
+        IPoolEngine.MarketState memory st = eng.state(id);
+        uint128 maxNet = eng.config(id).maxNetExposureUsd;
+        if (maxNet > md.maxInventoryUsd) maxNet = md.maxInventoryUsd;
+        uint16 spread = st.spreadBps > md.minQuoteWidthBps ? st.spreadBps : md.minQuoteWidthBps;
+        if (spread > ENGINE_MAX_SPREAD_BPS) spread = ENGINE_MAX_SPREAD_BPS;
+        int16 skew = st.skewBps;
+        if (skew > md.maxSkewBps) skew = md.maxSkewBps;
+        else if (skew < -md.maxSkewBps) skew = -md.maxSkewBps;
+        IPoolEngineControls(address(eng)).setInventoryCap(id, md.maxInventoryUsd);
+        eng.setQuote(id, spread, skew, maxNet);
+        eng.setReduceOnly(id, true);
+        $.liftOnQuote = IBook($.book).state() == BRTypes.BookState.Live;
+        emit MandateApplied(spread, skew, maxNet, md.maxInventoryUsd);
+    }
+
+    function _startCloseOut(AdapterStorage storage $) private {
+        $.liftOnQuote = false;
+        uint64 notice = uint64(CLOSE_OUT_NOTICE_MARKS * $.config.markInterval());
+        emit CloseOutStarted(notice);
+        IPoolEngineControls(address($.engine)).startCloseOut($.marketId, notice);
     }
 
     // ------------------------------------------------------------------------------------------------
@@ -367,9 +436,11 @@ contract PoolEngineAdapter is IPoolEngineAdapter, Initializable, UUPSUpgradeable
     }
 
     /// @inheritdoc IVenueAdapter
+    /// @dev max(insurance + poolEquity, 0): a negative pool equity (traders' unrealised gains the pool cash
+    ///      cannot pay) is a claim on the IF (`_settle` pays winners pool -> IF -> ADL), so it is netted.
     function deployedValueUsd() external view returns (uint256) {
-        int256 eq = marginEquityUsd();
-        return insuranceEquityUsd() + (eq > 0 ? uint256(eq) : 0);
+        int256 v = int256(insuranceEquityUsd()) + marginEquityUsd();
+        return v > 0 ? uint256(v) : 0;
     }
 
     /// @inheritdoc IVenueAdapter

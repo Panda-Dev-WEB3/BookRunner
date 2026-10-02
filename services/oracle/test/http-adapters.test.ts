@@ -3,7 +3,7 @@ import { SESSIONS_24X7, checkCopy, encodeSessions, priceId } from "@bookrunner/s
 import { LiveOrderlyPriceClient, MockOrderlyPriceClient, NotConfiguredError, builderPriceClient } from "../src/adapters/venue";
 import { loadOracleConfig } from "../src/config";
 import { buildUniverse } from "../src/domain/universe";
-import { ATTESTATION_NOTE, createApp } from "../src/http";
+import { ATTESTATION_NOTE, MAX_SAFE_PUSH_DEVIATION_BPS, createApp, serveOptions } from "../src/http";
 import { startLoop } from "../src/loop";
 import { ChainlinkSource } from "../src/sources/chainlink";
 import { GenericHttpSource, finnhubSpec, getPath } from "../src/sources/http";
@@ -42,6 +42,89 @@ describe("HTTP API", () => {
     expect((await a.request("/prices/NVDA")).status).toBe(200);
     expect((await a.request("/prices/NOPE")).status).toBe(404);
     expect((await a.request("/nope")).status).toBe(404);
+  });
+
+  // regression (oracle-signed-price-sandwich): a signed update must never be served publicly
+  test("GET /prices never carries the EIP-712 signature", async () => {
+    const { app: a } = await app();
+    const all = (await (await a.request("/prices")).json()) as { prices: Array<Record<string, unknown>> };
+    expect(all.prices).toHaveLength(1);
+    expect(all.prices[0]).not.toHaveProperty("signature");
+    expect(all.prices[0]).toMatchObject({ priceId: "NVDA", price: 190, held: false, sourceCount: 3 });
+    const one = (await (await a.request("/prices/NVDA")).json()) as Record<string, unknown>;
+    expect(one).not.toHaveProperty("signature");
+    expect(JSON.stringify(all)).not.toMatch(/0x[0-9a-f]{130}/i);
+  });
+
+  // regression (oracle-signed-price-sandwich): fresher signed prices the chain has not seen stay private
+  test("GET /prices serves only what has landed on-chain", async () => {
+    const t = Date.parse("2026-10-01T15:00:00Z");
+    let now = t;
+    const srcs = ["a", "b", "c"].map((n) => new ScriptedSource(n, () => now));
+    for (const s of srcs) s.set("NVDA", { price: 190 });
+    const { svc } = makeService({ sources: srcs, now: () => now });
+    const chain = new FakeChain();
+    chain.head = Math.floor(t / 1000);
+    await svc.setDeployment({ chainId: 31337, oracle: ORACLE_ADDR, chain });
+    await svc.setUniverse(
+      buildUniverse({ equities: [{ priceId: "NVDA", underlying: priceId("NVDA") }], indexes: [], books: [], defaultSessions: encodeSessions(SESSIONS_24X7) }).entries,
+    );
+    await svc.tick(now);
+    await svc.idle();
+    const a = createApp(svc);
+    // +5 bps a second later: signed and published internally, but below the push policy -> not on-chain yet
+    now = t + 1000;
+    chain.head = Math.floor(now / 1000);
+    for (const s of srcs) s.set("NVDA", { price: 190.1 });
+    const r = await svc.tick(now);
+    await svc.idle();
+    expect(r.published).toEqual(["NVDA"]);
+    expect(r.due).toEqual([]);
+    expect(svc.price("NVDA")?.price).toBe(190.1); // internal (Redis) view
+    const body = (await (await a.request("/prices/NVDA")).json()) as { price: number; publishedAt: number };
+    expect(body.price).toBe(190);
+    expect(body.publishedAt).toBe(Math.floor(t / 1000));
+    // once it lands (deviation push), it is served
+    now = t + 2000;
+    chain.head = Math.floor(now / 1000);
+    for (const s of srcs) s.set("NVDA", { price: 191 });
+    await svc.tick(now);
+    await svc.idle();
+    expect(((await (await a.request("/prices/NVDA")).json()) as { price: number }).price).toBe(191);
+  });
+
+  test("GET /prices: nothing while pushes are paused; latest (unsigned) without an on-chain oracle", async () => {
+    const t = Date.parse("2026-10-01T15:00:00Z");
+    const srcs = ["a", "b", "c"].map((n) => new ScriptedSource(n, () => t));
+    for (const s of srcs) s.set("NVDA", { price: 190 });
+    const uni = buildUniverse({ equities: [{ priceId: "NVDA", underlying: priceId("NVDA") }], indexes: [], books: [], defaultSessions: encodeSessions(SESSIONS_24X7) }).entries;
+
+    const paused = makeService({ sources: srcs, now: () => t }).svc;
+    const chain = new FakeChain();
+    chain.head = Math.floor(t / 1000);
+    chain.signer = false; // signer not registered: pushes paused
+    await paused.setDeployment({ chainId: 31337, oracle: ORACLE_ADDR, chain });
+    await paused.setUniverse(uni);
+    await paused.tick(t);
+    await paused.idle();
+    expect(paused.prices()).toHaveLength(1);
+    expect(((await (await createApp(paused).request("/prices")).json()) as { prices: unknown[] }).prices).toEqual([]);
+    expect((await createApp(paused).request("/prices/NVDA")).status).toBe(404);
+
+    const offchain = makeService({ sources: srcs, now: () => t }).svc;
+    await offchain.setDeployment({ chainId: 31337, oracle: ORACLE_ADDR, chain: null });
+    await offchain.setUniverse(uni);
+    await offchain.tick(t);
+    await offchain.idle();
+    const body = (await (await createApp(offchain).request("/prices")).json()) as { prices: Array<Record<string, unknown>> };
+    expect(body.prices.map((p) => p.price)).toEqual([190]);
+    expect(body.prices[0]).not.toHaveProperty("signature");
+  });
+
+  test("binds to loopback by default", () => {
+    const fetch = () => new Response("ok");
+    expect(serveOptions(loadOracleConfig({}), fetch)).toMatchObject({ hostname: "127.0.0.1", port: 4410 });
+    expect(serveOptions(loadOracleConfig({ ORACLE_HOST: "0.0.0.0" }), fetch).hostname).toBe("0.0.0.0");
   });
 
   test("GET /attestation: signer + devnet placeholder quote", async () => {
@@ -131,7 +214,10 @@ describe("config", () => {
     expect(c.ORACLE_PORT).toBe(4410);
     expect(c.ORACLE_OUTLIER_BPS).toBe(150);
     expect(c.ORACLE_PUSH_INTERVAL_MS).toBe(5000);
-    expect(c.ORACLE_PUSH_DEVIATION_BPS).toBe(25);
+    // pushes on any move larger than the cheapest in-house round trip could be arbitraged
+    expect(c.ORACLE_PUSH_DEVIATION_BPS).toBe(10);
+    expect(c.ORACLE_PUSH_DEVIATION_BPS).toBeLessThanOrEqual(MAX_SAFE_PUSH_DEVIATION_BPS);
+    expect(c.ORACLE_HOST).toBe("127.0.0.1");
     expect(c.ORACLE_MIN_SOURCES).toBe(3);
     expect(c.ORACLE_SYNTHETIC).toBe(true);
     expect(c.ORACLE_HTTP_FINNHUB).toBe(false);

@@ -336,6 +336,7 @@ contract PoolEngineInvariantTest is EngineBase {
         _price(PID_B, 250e18);
 
         handler = new EngineHandler(engine, oracle, usdc, [mA, mB], [adA, adB], [PID_A, PID_B]);
+        cfg.grantRole(cfg.KEEPER_ROLE(), address(handler)); // price relayer
         targetContract(address(handler));
     }
 

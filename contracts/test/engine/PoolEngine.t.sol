@@ -895,11 +895,15 @@ contract PoolEngineTest is EngineBase {
     }
 
     function test_funding_clampedAtFullSkew() public {
-        _setQuote(adB, mB, 10, 0, 1000e6);
-        _deposit(alice, mB, 2000e6);
-        _trade(alice, mB, 10e18); // skew 1000 == max
-        _price(PID_B, 300e18); // skew 3000 > max -> clamp
-        assertEq(engine.fundingRatePerDayWad(mB), int256(1e18 * uint256(100) / 1e4));
+        // the normaliser is the market's inventory cap (createMarket maxNetExposureUsd), here 1000
+        address ad = makeAddr("adapterC");
+        uint256 id = _createMarket(ad, _defaultCfg(PID_B, 1000e6));
+        _fundPool(ad, id, POOL, IF);
+        _setQuote(ad, id, 10, 0, 1000e6);
+        _deposit(alice, id, 2000e6);
+        _trade(alice, id, 10e18); // skew 1000 == cap
+        _price(PID_B, 300e18); // skew 3000 > cap -> clamp
+        assertEq(engine.fundingRatePerDayWad(id), int256(1e18 * uint256(100) / 1e4));
     }
 
     function test_funding_settledOnMarginWithdraw() public {
@@ -925,7 +929,7 @@ contract PoolEngineTest is EngineBase {
         vm.warp(block.timestamp + 1 days);
         _price(PID_B, PX);
         int256 pending = engine.state(mB).fundingIndex;
-        _setQuote(adB, mB, 10, 0, 1); // rate would jump to full velocity
+        _setQuote(adB, mB, 10, 0, 1); // quote cap change: accrual is checkpointed first
         assertEq(engine.state(mB).fundingIndex, pending);
         assertEq(engine.lastFundingTime(mB), block.timestamp);
     }

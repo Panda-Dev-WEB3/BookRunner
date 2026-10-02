@@ -84,12 +84,49 @@ contract AttestedOracleTest is EngineBase {
 
     // ------------------------------------------------------------------ push
 
+    /// @dev Relayers: an active signer, the KEEPER role or the timelock. Anyone else (a trader holding a
+    ///      leaked signature) is refused, for push and pushMany alike.
+    function test_push_onlyRelayers() public {
+        IAttestedOracle.PriceUpdate memory u = _update(PID_A, 190e18, uint64(block.timestamp), false, 3);
+        bytes memory sig = _sign(SIGNER_PK, u);
+        address stranger = makeAddr("stranger");
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSignature("NotRelayer(address)", stranger));
+        oracle.push(u, sig);
+        IAttestedOracle.PriceUpdate[] memory us = new IAttestedOracle.PriceUpdate[](0);
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSignature("NotRelayer(address)", stranger));
+        oracle.pushMany(us, new bytes[](0));
+        // a de-registered signer is no longer a relayer either
+        vm.prank(timelock);
+        oracle.setSigner(vm.addr(OTHER_PK), true, bytes32(0));
+        vm.prank(timelock);
+        oracle.setSigner(vm.addr(OTHER_PK), false, bytes32(0));
+        vm.prank(vm.addr(OTHER_PK));
+        vm.expectRevert(abi.encodeWithSignature("NotRelayer(address)", vm.addr(OTHER_PK)));
+        oracle.push(u, sig);
+
+        vm.prank(signer);
+        oracle.push(u, sig);
+        IAttestedOracle.PriceUpdate memory u2 = _update(PID_A, 191e18, uint64(block.timestamp) + 1, false, 3);
+        vm.prank(timelock);
+        oracle.push(u2, _sign(SIGNER_PK, u2));
+        IAttestedOracle.PriceUpdate memory u3 = _update(PID_A, 192e18, uint64(block.timestamp) + 2, false, 3);
+        address keeper = makeAddr("keeper");
+        cfg.grantRole(cfg.KEEPER_ROLE(), keeper);
+        vm.prank(keeper);
+        oracle.push(u3, _sign(SIGNER_PK, u3));
+        assertEq(oracle.latest(PID_A).priceWad, 192e18);
+    }
+
     function test_push_storesAndEmits() public {
         IAttestedOracle.PriceUpdate memory u = _update(PID_A, 190e18, uint64(block.timestamp), false, 5);
         bytes memory sig = _sign(SIGNER_PK, u);
+        address relayer = makeAddr("relayer");
+        cfg.grantRole(cfg.KEEPER_ROLE(), relayer); // KEEPER relays (signers and the timelock may too)
         vm.expectEmit(true, false, false, true, address(oracle));
         emit PricePushed(PID_A, 190e18, uint64(block.timestamp), false, 5, signer);
-        vm.prank(makeAddr("relayer"));
+        vm.prank(relayer);
         oracle.push(u, sig);
 
         IAttestedOracle.PriceData memory d = oracle.latest(PID_A);

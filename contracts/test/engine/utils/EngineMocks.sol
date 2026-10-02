@@ -28,8 +28,13 @@ contract EngineMockConfig {
     address public poolEngine;
     address public timelock;
     uint32 public maxPriceAge = 300;
+    uint32 public markInterval = 300;
 
     mapping(bytes32 => mapping(address => bool)) internal _roles;
+
+    function setMarkInterval(uint32 v) external {
+        markInterval = v;
+    }
 
     constructor(address timelock_) {
         timelock = timelock_;
@@ -161,6 +166,16 @@ contract EngineMockMandate {
     /// @dev Simulates mandate.kill() -> adapter.setReduceOnly(true).
     function forceReduceOnly(address adapter, bool v) external {
         (bool ok, bytes memory ret) = adapter.call(abi.encodeWithSignature("setReduceOnly(bool)", v));
+        if (!ok) {
+            assembly {
+                revert(add(ret, 32), mload(ret))
+            }
+        }
+    }
+
+    /// @dev Simulates mandate.remandate() -> adapter.applyMandate().
+    function callAdapter(address adapter, bytes calldata data) external {
+        (bool ok, bytes memory ret) = adapter.call(data);
         if (!ok) {
             assembly {
                 revert(add(ret, 32), mload(ret))

@@ -279,7 +279,12 @@ contract MandateRedTeamTest is MandateBase {
             key,
             _act(IBookrunnerDesk.ActionKind.SetQuote, abi.encode(uint16(40), int16(0), uint128(10_000e6)))
         );
-        _exec(key, _flattenAction(address(nvda), tokens / 4, 0));
+        // a key Flatten that would grow |exposure + hedge| (-5k -> -7.5k) is risk-adding: blocked off-hours
+        vm.prank(key);
+        vm.expectRevert(IMMMandate.OffHoursNewRisk.selector);
+        desk.execute(_flattenAction(address(nvda), tokens / 4, 0));
+        // the RISK role's emergency Flatten stays unchecked
+        _exec(risk, _flattenAction(address(nvda), tokens / 4, 0));
         _exec(key, _act(IBookrunnerDesk.ActionKind.ReturnToVault, abi.encode(uint256(1000e6))));
     }
 

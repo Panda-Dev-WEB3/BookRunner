@@ -9,7 +9,12 @@ EIP-712 sign (`priceTypedData`, role `oracleSigner`) → publish `OraclePriceMsg
 `KEYS.oracleLast(id)` + `CHANNELS.oraclePrice(id)` → builder price to the venue for Orderly books.
 On the push policy (first, every `ORACLE_PUSH_INTERVAL_MS`, a move > `ORACLE_PUSH_DEVIATION_BPS`, or
 a held flip) the due updates go to `AttestedOracle.pushMany` (receipt awaited, tx hash logged) and
-to `oracle_prices` with `pushed_tx`.
+to `oracle_prices` with `pushed_tx`. The pushMany sender is the `oracleSigner` account itself:
+AttestedOracle only accepts relays from an active signer, the KEEPER role or the timelock.
+
+`ORACLE_PUSH_DEVIATION_BPS` (default 10) must stay below the cheapest in-house round trip (spread +
+2 × taker fee; RHX5: 10 + 2 × 6 = 22 bps): otherwise the on-chain price can lag the market by a move a
+trader can arbitrage against the pool. The service logs a warning above 10 bps.
 
 ```
 bun run start        # idles (log + retry) until contracts/deployments/<chain>.json exists
@@ -49,8 +54,13 @@ BKRN_IT=1 DATABASE_URL=.../bkrn_oracle_it REDIS_URL=redis://127.0.0.1:63790/5 bu
 
 ## HTTP
 
+Bound to `ORACLE_HOST` (default `127.0.0.1`, set `0.0.0.0` only behind a proxy / firewall).
+
 - `GET /health` — status, universe, last push (tx), on-chain + venue state.
-- `GET /prices`, `GET /prices/:priceId` — latest signed `OraclePriceMsg` per key.
+- `GET /prices`, `GET /prices/:priceId` — per key, the last price that has LANDED on-chain (with
+  on-chain pushes disabled: the latest), always without its signature. A fresher signed update the
+  chain has not seen is never served: a trader could trade at the stored price, relay the newer one
+  and close in one transaction. The full signed message stays internal (Redis `KEYS.oracleLast`).
 - `GET /attestation` — signer address + `{type: "devnet-plain-key", quote: null}` (TEE quote
   verification is VERIFY).
 

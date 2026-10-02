@@ -366,7 +366,10 @@ contract PoolEngineAdapterTest is EngineBase {
         vm.expectPartialRevert(PoolEngine.PoolUndercollateralized.selector);
         vault.recall(BRTypes.ACCOUNT_MM, uint256(eq) - req + 1);
         vault.recall(BRTypes.ACCOUNT_MM, uint256(eq) - req);
-        // IF recall is never blocked by trader exposure
+        // the IF backs open positions: not withdrawable while any open interest remains
+        vm.expectRevert(abi.encodeWithSignature("OpenInterest(uint256)", mid));
+        vault.recall(BRTypes.ACCOUNT_IF, IF);
+        _trade(alice, mid, -500e18);
         vault.recall(BRTypes.ACCOUNT_IF, IF);
         assertEq(adapter.insuranceEquityUsd(), 0);
     }
@@ -507,6 +510,51 @@ contract PoolEngineAdapterTest is EngineBase {
         engine.liquidate(mid, alice);
     }
 
+    // ------------------------------------------------------------------ regression: retirement finalizes
+
+    function _forceClose(address trader) internal returns (bool ok) {
+        (ok,) = address(engine).call(abi.encodeWithSignature("forceClose(uint256,address)", mid, trader));
+    }
+
+    /// @dev PoC (engine-retire-never-finalizes): Eve ($50 margin, 0.01 unit long, 50x collateralised) kept
+    ///      poolEquity > 0 forever, so no final mark could carry deployedValueUsd == 0. The retire kill now
+    ///      schedules a close-out CLOSE_OUT_NOTICE_MARKS mark intervals out; after it anyone closes the
+    ///      remaining positions at the oracle, the keeper recalls MM + IF and the final mark sees 0.
+    function test_regression_retiringBookClosesOutPositionsAndFinalizes() public {
+        _fundVenue();
+        address eve = makeAddr("eve");
+        _deposit(eve, mid, 50e6);
+        _trade(eve, mid, 0.01e18);
+        _deposit(bob, mid, 5000e6);
+        _trade(bob, mid, -100e18);
+        bookMock.setState(BRTypes.BookState.Retiring);
+        mandate.forceReduceOnly(address(adapter), true); // Book.retire -> mandate.kill -> reduce-only
+        assertTrue(engine.state(mid).reduceOnly);
+        assertFalse(_forceClose(eve), "close-out before the notice");
+        // positions open: the IF stays, MM keeps the gross pool margin
+        vm.expectRevert();
+        vault.recall(BRTypes.ACCOUNT_IF, IF);
+
+        vm.warp(block.timestamp + 2 * 300); // 2 x markInterval (300 in the mock config)
+        _price(PID_A, 101e18);
+        assertTrue(_forceClose(eve), "eve closed out at the oracle");
+        assertTrue(_forceClose(bob), "bob closed out at the oracle");
+        assertEq(engine.positionOf(mid, eve).size, 0);
+        assertEq(engine.positionOf(mid, bob).size, 0);
+        assertTrue(engine.state(mid).reduceOnly);
+
+        // flat: the keeper recalls everything and the final mark reads zero
+        vault.recall(BRTypes.ACCOUNT_MM, uint256(adapter.marginEquityUsd()));
+        vault.recall(BRTypes.ACCOUNT_IF, adapter.insuranceEquityUsd());
+        assertEq(adapter.deployedValueUsd(), 0);
+        // traders keep their leftover margin
+        uint256 m = engine.positionOf(mid, eve).marginUsd;
+        assertGt(m, 49e6);
+        vm.prank(eve);
+        engine.withdrawMargin(mid, m);
+        assertEq(usdc.balanceOf(address(engine)), _ledger(mid));
+    }
+
     // ------------------------------------------------------------------ views
 
     function test_views_basic() public view {
@@ -526,15 +574,37 @@ contract PoolEngineAdapterTest is EngineBase {
         assertEq(adapter.deployedValueUsd(), IF + uint256(engine.poolEquityUsd(mid)));
     }
 
-    function test_views_negativePoolEquityClampedToZero() public {
+    /// @dev Regression (engine-nav-overstated): a negative pool equity is a claim on the IF (winners are paid
+    ///      pool -> IF -> ADL), so NAV nets it: deployedValueUsd = max(IF + poolEquity, 0), not IF + 0.
+    function test_views_negativePoolEquityNettedAgainstInsurance() public {
         usdc.mint(address(vault), IF + 1000e6);
         vault.deployToVenue(BRTypes.ACCOUNT_IF, IF);
         vault.deployToVenue(BRTypes.ACCOUNT_MM, 1000e6);
         _deposit(alice, mid, 2000e6);
         _trade(alice, mid, 99e18); // pool margin 990 <= equity ~1000
         _price(PID_A, 125e18); // trader +~2475 > pool cash 1000
-        assertLt(adapter.marginEquityUsd(), 0);
-        assertEq(adapter.deployedValueUsd(), IF);
+        int256 eq = adapter.marginEquityUsd();
+        assertLt(eq, 0);
+        assertEq(adapter.deployedValueUsd(), uint256(int256(IF) + eq));
+        assertLt(adapter.deployedValueUsd(), IF);
+        // the mark is what actually remains once the winner is paid (pool cash, then IF): closing at the
+        // bid only adds the half-spread the pool earns (99 * 125 * 5 bps ~ 6.2 USDC)
+        uint256 before = adapter.deployedValueUsd();
+        _trade(alice, mid, -99e18);
+        uint256 afterClose = adapter.deployedValueUsd();
+        assertGe(afterClose, before);
+        assertLe(afterClose, before + 7e6);
+    }
+
+    function test_views_poolDeficitBeyondInsuranceClampsToZero() public {
+        usdc.mint(address(vault), 100e6 + 1000e6);
+        vault.deployToVenue(BRTypes.ACCOUNT_IF, 100e6);
+        vault.deployToVenue(BRTypes.ACCOUNT_MM, 1000e6);
+        _deposit(alice, mid, 2000e6);
+        _trade(alice, mid, 99e18);
+        _price(PID_A, 125e18); // trader +~2475: pool -1475, IF 100
+        assertLt(int256(adapter.insuranceEquityUsd()) + adapter.marginEquityUsd(), 0);
+        assertEq(adapter.deployedValueUsd(), 0);
     }
 
     // ------------------------------------------------------------------ red-team: mandate bound + regimes

@@ -34,6 +34,16 @@ interface IMMMandateDesk {
 
     /// @notice FundDesk rule: desk value after <= maxInventoryUsd * hedgeRatioMaxBps / 1e4.
     function checkFundDesk(address key, uint256 amountUsd) external view;
+
+    /// @notice Key-initiated Flatten (sell held spot -> USDC), with the desk's measured hedge before/after:
+    ///         the same off-hours and band rules a Hedge sell meets (no allow-list proof). Not for RISK.
+    function checkFlatten(address key, int256 hedgeBeforeUsd, int256 hedgeAfterUsd) external view;
+}
+
+/// @title IEngineAdapterMandateHook — PoolEngineAdapter hook the mandate calls on a re-mandate.
+interface IEngineAdapterMandateHook {
+    /// @notice Clamp the live engine quote to the new terms and hold reduce-only until a fresh key quotes.
+    function applyMandate() external;
 }
 
 /// @title IDeskKeySync — desk hook the mandate calls so ERC-4337 validation only reads desk storage.
@@ -55,8 +65,10 @@ interface IDeskKeySync {
 ///         Kill: RISK or the book. Revokes every key, sets the engine market reduce-only (in-house books)
 ///         and notifies the book. Neither the bond release, the adapter call nor the book callback can
 ///         block a kill (each is try/caught and evented). `remandate` (committee) replaces the terms,
-///         clears the kill and revokes any remaining keys (keys must be re-registered); it does NOT lift
-///         the engine reduce-only flag — the RISK role does that once fresh quotes are set.
+///         clears the kill and revokes any remaining keys (keys must be re-registered). For an in-house
+///         book it also clamps the live engine quote to the new terms (adapter.applyMandate) and holds the
+///         market reduce-only until a freshly registered key's first in-mandate SetQuote, which lifts it
+///         (Live books only; a reduce-only set by RISK / a kill after the re-mandate is never lifted).
 ///
 ///         Retiring (`setRetiring`, book only): reduce-only without kill — keys stay so the agent can
 ///         flatten, but no venue deployments, desk funding, hedge growth or risk-adding quotes.
@@ -400,6 +412,22 @@ contract MMMandate is IMMMandate, IMMMandateDesk, Initializable, ReentrancyGuard
         if (attempted > cap) revert InventoryLimit(attempted, cap);
     }
 
+    /// @inheritdoc IMMMandateDesk
+    /// @dev Retiring: always allowed (wind-down sells). Otherwise the Hedge-sell rules without a proof:
+    ///      off-hours the leg must not increase |exposure + hedge|; with a short venue exposure (the only one
+    ///      a long spot hedge offsets) the ratio must end in band or strictly closer to it. With a long / flat
+    ///      venue exposure selling spot always reduces net risk.
+    function checkFlatten(address key, int256 hedgeBeforeUsd, int256 hedgeAfterUsd) external view override {
+        _requireActiveKey(key);
+        if (retiring) return;
+        BRTypes.Mandate storage m = _mandate;
+        int256 exposure = IVenueAdapter(adapter).netExposureUsd();
+        if (m.noNewRiskOffHours && offHours()) {
+            if (_absInt(exposure + hedgeAfterUsd) > _absInt(exposure + hedgeBeforeUsd)) revert OffHoursNewRisk();
+        }
+        if (exposure < 0) _checkBand(m, exposure, hedgeBeforeUsd, hedgeAfterUsd, false);
+    }
+
     /// @inheritdoc IMMMandate
     /// @dev Oracle `held`, never published, stale beyond config.maxPriceAge(), or an unresolvable price
     ///      id all count as off-hours (fail-safe).
@@ -459,7 +487,9 @@ contract MMMandate is IMMMandate, IMMMandateDesk, Initializable, ReentrancyGuard
 
     /// @inheritdoc IMMMandate
     /// @dev config.committee() only. Terms must pass {validateMandate}. Clears the kill and revokes any
-    ///      remaining keys (they must be re-registered against the new terms).
+    ///      remaining keys (they must be re-registered against the new terms). Engine books: the adapter
+    ///      clamps the live quote to the new terms and holds reduce-only until a fresh key re-quotes (a
+    ///      failure reverts the re-mandate: the market must never keep trading under stale terms).
     function remandate(BRTypes.Mandate calldata m) external override nonReentrant {
         if (msg.sender != config.committee()) revert Unauthorized(msg.sender);
         bytes32 bad = validateMandate(m);
@@ -468,6 +498,7 @@ contract MMMandate is IMMMandate, IMMMandateDesk, Initializable, ReentrancyGuard
         killed = false;
         killReason = bytes32(0);
         _revokeAll("REMANDATE");
+        if (venue == BRTypes.VENUE_POOL_ENGINE) IEngineAdapterMandateHook(adapter).applyMandate();
         emit Remandated(keccak256(abi.encode(m)));
     }
 
@@ -541,7 +572,8 @@ contract MMMandate is IMMMandate, IMMMandateDesk, Initializable, ReentrancyGuard
 
     /// @dev Shared rule set of checkHedge / checkHedgeExecuted. Mirrors checkHedgeLeg (mandate.ts):
     ///      leverage -> off-hours -> band (in band OR strictly closer), plus the on-chain-only rules
-    ///      (allow-list proof, retiring, Orderly report staleness for hedge-adding legs).
+    ///      (allow-list proof, retiring, Orderly report staleness for hedge-adding legs, and for spot legs
+    ///      below the band threshold no naked net position beyond 5% of maxInventoryUsd).
     function _checkLeg(
         bytes32 asset,
         bytes32 hedgeVenue,
@@ -567,11 +599,31 @@ contract MMMandate is IMMMandate, IMMMandateDesk, Initializable, ReentrancyGuard
             uint256 maxAge = uint256(config.maxPriceAge()) * ORDERLY_REPORT_AGE_FACTOR;
             if (block.timestamp > uint256(at) + maxAge) revert StaleVenueReport(at, maxAge);
         }
+        _checkBand(m, exposure, before, after_, _isSpotVenue(hedgeVenue));
+    }
 
+    /// @dev Band: post-trade ratio in band OR strictly closer to it. Below the enforcement threshold
+    ///      (|exposure| < 5% of maxInventory) the band does not apply; a SPOT leg then may not leave a net
+    ///      book position |exposure + hedge| above max(its prior value, 5% of maxInventory) — long spot with
+    ///      nothing to offset is a naked directional position (on-chain-only spot rule, like the float cap
+    ///      and SpotShortNotAllowed; only buys can trip it).
+    function _checkBand(BRTypes.Mandate storage m, int256 exposure, int256 before, int256 after_, bool spot)
+        internal
+        view
+    {
         uint256 lo = m.hedgeRatioMinBps;
         uint256 hi = m.hedgeRatioMaxBps;
         (bool enforced, uint256 rAfter) = _ratio(exposure, after_, m.maxInventoryUsd);
-        if (!enforced || (rAfter >= lo && rAfter <= hi)) return;
+        if (!enforced) {
+            if (!spot) return;
+            uint256 net = _absInt(exposure + after_);
+            uint256 limit = uint256(m.maxInventoryUsd) * HEDGE_RATIO_MIN_EXPOSURE_BPS / BPS;
+            uint256 prior = _absInt(exposure + before);
+            if (prior > limit) limit = prior;
+            if (net > limit) revert InventoryLimit(net, limit);
+            return;
+        }
+        if (rAfter >= lo && rAfter <= hi) return;
         (, uint256 rBefore) = _ratio(exposure, before, m.maxInventoryUsd);
         if (_dist(rAfter, lo, hi) < _dist(rBefore, lo, hi)) return;
         revert HedgeRatioOutOfBand(rAfter, lo, hi);
