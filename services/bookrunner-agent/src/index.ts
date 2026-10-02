@@ -30,6 +30,7 @@ import { type AgentBus, RedisBus } from "./adapters/bus";
 import { DbStore } from "./adapters/store";
 import { BookAgent } from "./agent/book-agent";
 import { type HedgeChain, Hedger } from "./agent/hedger";
+import { makeVenueReportRelay } from "./chain/venue-report-relay";
 import { PriceFeed, oracleMsgFromChain, parseOracleMsg } from "./agent/price-feed";
 import { BookChain } from "./chain/book-chain";
 import { DeskClient } from "./chain/desk-client";
@@ -238,6 +239,18 @@ async function runOnce(ctx: BookContext, env: AgentEnv, baseLog: Logger, bus: Ag
       receiptsIntervalSec: env.RECEIPTS_INTERVAL_SECONDS,
       log: log.child({ part: "hedge" }),
       perp: null, // HEDGE_PERP_ENABLED: perp venue client not wired in v1 (VERIFY venue integration)
+      ...(!(venue instanceof EngineVenue) && ctx.deskAccount
+        ? {
+            beforeRiskAddingHedge: makeVenueReportRelay({
+              redisUrl: env.REDIS_URL,
+              bookId: ctx.bookId,
+              adapter: ctx.chain.components.adapter,
+              pub: ctx.pub,
+              wallet: walletClientFor(env.CHAIN_ID, env.RPC_URL, ctx.deskAccount),
+              log: log.child({ part: "venue-report-relay" }),
+            }),
+          }
+        : {}),
     });
   }
 

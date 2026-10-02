@@ -20,6 +20,8 @@ function update(bytes calldata priceData) external;          // priceData = abi.
 function priceOf(bytes32 underlying) external view returns (uint256 priceWad, bool held); // unchanged
 ```
 
+- `update` also skips entries that are already stale on arrival (`publishedAt + maxPriceAge < now`), so
+  nobody can land an old, favourable print that happens to be newer than the stored one.
 - `pushMany` stays (backwards compatible) but **the oracle service no longer pushes on a timer** by
   default (`ORACLE_PUSH_MODE=pull`; `heartbeat` keeps the old behaviour for debugging).
 - Every consumer entry point that needs a fresh price gets a trailing `bytes calldata priceData`

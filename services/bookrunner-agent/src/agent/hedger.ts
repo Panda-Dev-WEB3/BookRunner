@@ -63,6 +63,8 @@ export interface HedgerDeps {
   log: Logger;
   now?: () => number;
   perp?: PerpHedger | null;
+  /** Orderly books (low-gas): relay the latest signed venue report before a risk-adding leg. */
+  beforeRiskAddingHedge?: () => Promise<void>;
   /**
    * Pull oracle: value the desk inventory from the snapshot (freshest signed prices) instead of the
    * on-chain desk views, which price at the stored oracle value and revert StalePrice once nothing
@@ -230,6 +232,7 @@ export class Hedger implements HedgeCycleRunner {
         case "buy": {
           const comp = byToken.get(leg.token.toLowerCase());
           if (!comp) throw new Error(`hedge: unknown component ${leg.token}`);
+          await this.d.beforeRiskAddingHedge?.();
           const r = await this.d.runner.run(
             encodeHedge({ token: leg.token, buy: true, amountIn: leg.amountInUsd, minAmountOut: leg.minAmountOutRaw, poolFee: this.d.poolFee, proof: leg.proof }),
             "Hedge:buy",
