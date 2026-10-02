@@ -105,6 +105,82 @@ export const markRegistryAbi = [
   },
   {
     "type": "function",
+    "name": "commitAndApply",
+    "inputs": [
+      {
+        "name": "m",
+        "type": "tuple",
+        "internalType": "struct BRTypes.MarkInput",
+        "components": [
+          {
+            "name": "bookId",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "periodEnd",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "navUsd",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "deployedValueUsd",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "flowNonce",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "inventoryRoot",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "pnlJsonHash",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "receiptsRoot",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ]
+      },
+      {
+        "name": "sig",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "priceData",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "venueReport",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "markId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "config",
     "inputs": [],
     "outputs": [
@@ -496,6 +572,37 @@ export const markRegistryAbi = [
       },
       {
         "name": "periodEnd",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "VenueReportSkipped",
+    "inputs": [
+      {
+        "name": "bookId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "adapter",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "asOf",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "valuationAt",
         "type": "uint64",
         "indexed": false,
         "internalType": "uint64"

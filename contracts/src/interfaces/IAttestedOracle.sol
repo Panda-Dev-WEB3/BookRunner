@@ -26,9 +26,18 @@ interface IAttestedOracle {
 
     function PRICE_TYPEHASH() external view returns (bytes32);
     function hashPrice(PriceUpdate calldata u) external view returns (bytes32);
-    /// @notice Anyone may relay; reverts unless signed by an active signer and newer than stored.
+    /// @notice Heartbeat relay (an active signer, KEEPER or the timelock); reverts unless signed by an
+    ///         active signer and newer than stored.
     function push(PriceUpdate calldata u, bytes calldata sig) external;
+    /// @notice Heartbeat batch relay (same relayers as `push`); entries not newer than stored are skipped.
     function pushMany(PriceUpdate[] calldata us, bytes[] calldata sigs) external;
+    /// @notice Pull oracle (LOW_GAS.md §1). Verifies and stores every update that is newer than the stored
+    ///         one (skips the rest, never reverts for "not newer"; reverts on a bad signature). Callable by
+    ///         anyone; consumers call it first. Empty `priceData` is a no-op. An update already stale on
+    ///         arrival (older than config.maxPriceAge()) is skipped too: the open relay never lands an old
+    ///         print a caller could have picked for being favourable.
+    /// @param priceData abi.encode(PriceUpdate[] updates, bytes[] signatures)
+    function update(bytes calldata priceData) external;
     function latest(bytes32 underlying) external view returns (PriceData memory);
     /// @notice Reverts StalePrice if older than config.maxPriceAge().
     function priceOf(bytes32 underlying) external view returns (uint256 priceWad, bool held);

@@ -299,6 +299,19 @@ export const bookrunnerConfigAbi = [
   },
   {
     "type": "function",
+    "name": "KEY_MAX_TRADE_PRICE_AGE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "KEY_ORACLE",
     "inputs": [],
     "outputs": [
@@ -808,6 +821,19 @@ export const bookrunnerConfigAbi = [
   {
     "type": "function",
     "name": "maxPriceAge",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "maxTradePriceAge",
     "inputs": [],
     "outputs": [
       {

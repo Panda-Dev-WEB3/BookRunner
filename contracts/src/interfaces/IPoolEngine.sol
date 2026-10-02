@@ -6,6 +6,8 @@ pragma solidity ^0.8.30;
 ///         the book's IF absorbs bad debt; when the IF is depleted, ADL applies to that market only.
 ///         Isolated margin. Fill price = oracle * (1 +/- (spreadBps/2 + skewBps)/1e4) per side.
 ///         Off-hours (oracle held) or stale price: new risk blocked; reduce + liquidations allowed.
+///         Pull oracle (LOW_GAS.md §1): the `priceData` overloads of trade / liquidate carry the signed
+///         prices the transaction needs; staleness is judged on the price after that in-tx update.
 ///         Sizes: 1e18 = 1 unit of underlying. Prices WAD. USD 6 decimals.
 interface IPoolEngine {
     struct MarketConfig {
@@ -57,6 +59,16 @@ interface IPoolEngine {
         external
         returns (uint256 fillPriceWad, uint256 feeUsd);
     function liquidate(uint256 marketId, address trader) external returns (uint256 rewardUsd);
+    /// @notice Pull oracle (LOW_GAS.md §1): `AttestedOracle.update(priceData)` first when non-empty
+    ///         (`priceData = abi.encode(IAttestedOracle.PriceUpdate[], bytes[])`), then `trade`. A trade
+    ///         adding risk needs the price it uses to satisfy publishedAt >= now - config.maxTradePriceAge().
+    function trade(uint256 marketId, int256 sizeDelta, uint256 acceptablePriceWad, bytes calldata priceData)
+        external
+        returns (uint256 fillPriceWad, uint256 feeUsd);
+    /// @notice Pull oracle: `AttestedOracle.update(priceData)` first when non-empty, then `liquidate`.
+    function liquidate(uint256 marketId, address trader, bytes calldata priceData)
+        external
+        returns (uint256 rewardUsd);
 
     // ---- views ----
     function adapterOf(uint256 marketId) external view returns (address);

@@ -61,6 +61,19 @@ export const orderlyAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "DOMAIN_SEPARATOR",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "FEE_SWEEP_LOOKBACK_PERIODS",
     "inputs": [],
     "outputs": [
@@ -68,6 +81,19 @@ export const orderlyAdapterAbi = [
         "name": "",
         "type": "uint64",
         "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "REPORT_TYPEHASH",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ],
     "stateMutability": "view"
@@ -283,6 +309,49 @@ export const orderlyAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "eip712Domain",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "fields",
+        "type": "bytes1",
+        "internalType": "bytes1"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "internalType": "string"
+      },
+      {
+        "name": "version",
+        "type": "string",
+        "internalType": "string"
+      },
+      {
+        "name": "chainId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "verifyingContract",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "salt",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "extensions",
+        "type": "uint256[]",
+        "internalType": "uint256[]"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "failWithdraw",
     "inputs": [
       {
@@ -348,6 +417,40 @@ export const orderlyAdapterAbi = [
         "name": "",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "hashReport",
+    "inputs": [
+      {
+        "name": "insuranceUsd",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "marginUsd",
+        "type": "int256",
+        "internalType": "int256"
+      },
+      {
+        "name": "exposureUsd",
+        "type": "int256",
+        "internalType": "int256"
+      },
+      {
+        "name": "asOf",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ],
     "stateMutability": "view"
@@ -560,6 +663,39 @@ export const orderlyAdapterAbi = [
         "name": "asOf",
         "type": "uint64",
         "internalType": "uint64"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "reportSigned",
+    "inputs": [
+      {
+        "name": "insuranceUsd",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "marginUsd",
+        "type": "int256",
+        "internalType": "int256"
+      },
+      {
+        "name": "exposureUsd",
+        "type": "int256",
+        "internalType": "int256"
+      },
+      {
+        "name": "asOf",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "sig",
+        "type": "bytes",
+        "internalType": "bytes"
       }
     ],
     "outputs": [],
@@ -1229,6 +1365,31 @@ export const orderlyAdapterAbi = [
   },
   {
     "type": "event",
+    "name": "VenueReportRelayed",
+    "inputs": [
+      {
+        "name": "signer",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "relayer",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "asOf",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "VenueReported",
     "inputs": [
       {
@@ -1472,6 +1633,11 @@ export const orderlyAdapterAbi = [
   },
   {
     "type": "error",
+    "name": "InvalidReportSignature",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "NativeTransferFailed",
     "inputs": []
   },
@@ -1499,6 +1665,17 @@ export const orderlyAdapterAbi = [
     "type": "error",
     "name": "NotOpsVenueOrTimelock",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotOpsVenueSigner",
+    "inputs": [
+      {
+        "name": "signer",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
   },
   {
     "type": "error",
