@@ -325,13 +325,13 @@ describe("planHedge hysteresis (reversal hold, deadband, leg floor)", () => {
     const lastTrade: LastHedgeTrade = { side: "buy", atMs: T0 };
     // below the enforcement threshold: trim deferred
     expect(planHedge(input(-1_500, 3_400, { lastTrade, nowMs: T0 + 60_000 }), holdCfg)).toMatchObject({ action: "none", reason: "REVERSAL_HOLD" });
-    // long exposure (spot cannot offset it, band not enforced): flatten deferred
-    expect(planHedge(input(10_000, 3_400, { lastTrade, nowMs: T0 + 60_000 }), holdCfg)).toMatchObject({ action: "none", reason: "REVERSAL_HOLD" });
+    // long exposure below the threshold: flatten deferred
+    expect(planHedge(input(1_500, 3_400, { lastTrade, nowMs: T0 + 60_000 }), holdCfg)).toMatchObject({ action: "none", reason: "REVERSAL_HOLD" });
     // same direction is never held
     expect(planHedge(input(-10_000, 3_400, { lastTrade, nowMs: T0 + 60_000 }), holdCfg).action).toBe("buy");
     // hold elapsed
     expect(planHedge(input(-1_500, 3_400, { lastTrade, nowMs: T0 + HOLD_MS }), holdCfg).action).toBe("sell");
-    expect(planHedge(input(10_000, 3_400, { lastTrade, nowMs: T0 + HOLD_MS }), holdCfg).action).toBe("flatten");
+    expect(planHedge(input(1_500, 3_400, { lastTrade, nowMs: T0 + HOLD_MS }), holdCfg).action).toBe("flatten");
     // no clock / no hold configured: unchanged behaviour
     expect(planHedge(input(-1_500, 3_400, { lastTrade }), holdCfg).action).toBe("sell");
     expect(planHedge(input(-1_500, 3_400, { lastTrade, nowMs: T0 + 60_000 }), cfg).action).toBe("sell");
@@ -346,6 +346,17 @@ describe("planHedge hysteresis (reversal hold, deadband, leg floor)", () => {
     const buy = planHedge(input(-10_000, 3_400, { lastTrade: { side: "sell", atMs: T0 }, nowMs: T0 + 15_000 }), holdCfg);
     expect(buy.action).toBe("buy");
     expect(hedgeInBand(m, buy.ratioAfter)).toBe(true);
+  });
+
+  test("exposure flips long above the threshold right after a buy: spot is sold immediately (|exposure + hedge| shrinks)", () => {
+    const trades = simulate([-4_000, 5_000], holdCfg);
+    expect(trades.map((t) => [t.side, t.reason])).toEqual([
+      ["buy", "UNDER_HEDGED"],
+      ["sell", "LONG_EXPOSURE_NO_SPOT_HEDGE"],
+    ]);
+    expect(trades[1]!.atMs - trades[0]!.atMs).toBe(15_000);
+    const p = planHedge(input(10_000, 3_400, { lastTrade: { side: "buy", atMs: T0 }, nowMs: T0 + 15_000 }), holdCfg);
+    expect(p.action).toBe("flatten");
   });
 
   test("risk reduction is never held: reduce-only mode, off-hours no-new-risk, Retiring", () => {

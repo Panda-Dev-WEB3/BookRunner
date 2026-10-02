@@ -24,8 +24,9 @@
 //     a spot hedge cannot offset) waits until the hedge exceeds what the band allows by minTradeUsd;
 //   - legs under minLegUsd are skipped, plans under minTradeUsd are dropped;
 //   - reversal hold: a plan that reverses the last executed trade direction (sell after buy, buy after
-//     sell) waits reverseHoldMs, unless the ratio is out of an enforced band (safety always wins) or
-//     the mode / off-hours rule asks for risk reduction.
+//     sell) waits reverseHoldMs, unless the ratio is out of an enforced band (safety always wins), the
+//     mode / off-hours rule asks for risk reduction, or the exposure is above the enforcement
+//     threshold and the plan shrinks |exposure + hedge| (e.g. selling spot once exposure flips long).
 
 import { type Mandate, BPS, absBig, checkHedgeLeg, hedgeBandOk, hedgeInBand, hedgeRatioBps, maxBig, minBig } from "@bookrunner/shared";
 import type { Address, Hex } from "viem";
@@ -211,8 +212,18 @@ export function planHedge(inp: HedgePlanInput, cfg: HedgePlannerConfig): HedgePl
   const canHedgeLong = cfg.perpEnabled && inp.perpAllowed;
   if (!hedgeBandOk(m, inp.netExposureUsd, hedge, canHedgeLong)) return plan;
   if (inp.mode !== "normal" || (inp.offHours && m.noNewRiskOffHours)) return plan;
+  // risk-reducing: shrinks the net book position |exposure + hedge| while the exposure is material
+  // (>= the 5% enforcement threshold), e.g. selling spot as soon as exposure flips long above it.
+  // Below the threshold the mandate does not care and the hold absorbs the flow's back-and-forth.
+  if (hedgeRatioBps(m, inp.netExposureUsd, hedge) !== null) {
+    const after = hedge + legsUsd(plan.legs, "buy") - legsUsd(plan.legs, "sell") - legsUsd(plan.legs, "flatten");
+    if (absBig(inp.netExposureUsd + after) < absBig(inp.netExposureUsd + hedge)) return plan;
+  }
   return none("REVERSAL_HOLD", plan.ratioBefore, plan.targetHedgeUsd);
 }
+
+const legsUsd = (legs: HedgeLeg[], kind: "buy" | "sell" | "flatten"): bigint =>
+  legs.reduce((s, l) => s + (l.kind === kind ? l.notionalUsd : 0n), 0n);
 
 function planCore(inp: HedgePlanInput, cfg: HedgePlannerConfig): HedgePlan {
   const m = inp.mandate;
