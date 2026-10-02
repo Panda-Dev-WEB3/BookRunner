@@ -253,7 +253,16 @@ export const trancheRouter = router({
       const chainBook = await softChain(deps, "book.state", (g) => g.bookState(getAddress(b.bookAddr)), null);
       const cancelled = (chainBook ? BOOK_STATE[chainBook.state] : b.state) === "Cancelled";
       const txs: PreparedTx[] = [];
-      const claimable: Array<{ tranche: TrancheName; allocationShares: string; refundUsd: string; redemptionUsd: string; cancelledRefundUsd: string }> = [];
+      const warnings: string[] = [];
+      const claimable: Array<{
+        tranche: TrancheName;
+        allocationShares: string;
+        refundUsd: string;
+        redemptionUsd: string;
+        cancelledRefundUsd: string;
+        /** Settled redemption USDC the book cannot pay yet: its cash is still on the venue. */
+        redemptionWaitingForCash: boolean;
+      }> = [];
       for (const t of input.tranche ? [input.tranche] : TRANCHES) {
         const addr = trancheAddress(b, t);
         const w = await softChain(deps, "tranche.wallet", (g) => g.trancheWallet(addr, input.wallet, []), null as TrancheWalletState | null);
@@ -262,13 +271,25 @@ export const trancheRouter = router({
         const cancelledRefund = cancelled ? w.committed : 0n;
         if (cancelledRefund > 0n) txs.push(claimCancelledRefundTx(chain.chainId, addr, input.wallet, label));
         else if (w.claimableShares > 0n || w.claimableRefund > 0n) txs.push(claimAllocationTx(chain.chainId, addr, input.wallet, label));
-        if (w.claimableAssets > 0n) txs.push(claimRedemptionTx(chain.chainId, addr, input.wallet, label));
+        // Tranche._claim reverts InsufficientLiquidity while escrow plus the vault's idle USDC is short:
+        // never prepare a claim that can only revert (and cost gas).
+        let waitingForCash = false;
+        if (w.claimableAssets > 0n) {
+          const liquidity = await softChain(deps, "tranche.claimLiquidity", (g) => g.claimLiquidity(addr, getAddress(b.vaultAddr)), null as bigint | null);
+          waitingForCash = liquidity !== null && liquidity < w.claimableAssets;
+          if (waitingForCash) {
+            warnings.push(
+              `${label}: ${usdStr(w.claimableAssets)} USDC of withdrawals has settled, but only ${usdStr(liquidity ?? 0n)} USDC is in escrow or idle in the vault. The book's cash is still on the venue: collecting waits until the keeper brings it back.`,
+            );
+          } else txs.push(claimRedemptionTx(chain.chainId, addr, input.wallet, label));
+        }
         claimable.push({
           tranche: t,
           allocationShares: usdStr(cancelledRefund > 0n ? 0n : w.claimableShares),
           refundUsd: usdStr(cancelledRefund > 0n ? 0n : w.claimableRefund),
           redemptionUsd: usdStr(w.claimableAssets),
           cancelledRefundUsd: usdStr(cancelledRefund),
+          redemptionWaitingForCash: waitingForCash,
         });
       }
       return {
@@ -276,7 +297,8 @@ export const trancheRouter = router({
         signer: input.wallet,
         bookId: b.id,
         claimable,
-        message: txs.length ? `${txs.length} claim transaction(s) prepared` : "Nothing to claim right now",
+        warnings,
+        message: txs.length ? `${txs.length} claim transaction(s) prepared` : warnings.length ? "Waiting for the book's cash to come back from the venue" : "Nothing to claim right now",
       };
     }),
 });

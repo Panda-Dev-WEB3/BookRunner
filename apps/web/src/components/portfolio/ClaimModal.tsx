@@ -53,6 +53,15 @@ export function ClaimModal(props: { open: boolean; onClose: () => void; bookId: 
         <ErrorState error={claim.error} onRetry={() => bookId !== null && mutate({ bookId, wallet })} />
       ) : claim.data ? (
         <div className="space-y-4">
+          {claim.data.warnings.length > 0 && (
+            <Callout tone="warn" compact title="Waiting for cash">
+              <ul className="list-disc space-y-1 pl-4">
+                {claim.data.warnings.map((x) => (
+                  <li key={x}>{x}</li>
+                ))}
+              </ul>
+            </Callout>
+          )}
           {rows.length > 0 ? (
             <KV rows={rows} />
           ) : (

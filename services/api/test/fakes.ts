@@ -339,6 +339,8 @@ export class FakeChain implements ChainGateway {
   stake = new Map<string, bigint>();
   tierBond = 25_000n * 10n ** 18n;
   usdc = { balance: 1_000_000_000_000n, allowance: 0n };
+  /** Tranche escrow + vault idle USDC a redemption claim can draw on. */
+  liquidity = 10n ** 18n;
   books = new Map<string, BookChainState>();
   wallets = new Map<string, TrancheWalletState>(); // key: tranche|wallet (lowercase)
   mandates = new Map<string, MandateChainState>();
@@ -399,6 +401,10 @@ export class FakeChain implements ChainGateway {
     const m = this.mandates.get(mandate.toLowerCase());
     if (!m) throw new Error(`no mandate ${mandate}`);
     return m;
+  }
+  async claimLiquidity() {
+    this.guard();
+    return this.liquidity;
   }
   async operatorConsent(mandate: Address, operator: Address, key: Address) {
     this.guard();

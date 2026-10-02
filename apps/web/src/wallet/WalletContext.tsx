@@ -12,7 +12,8 @@ import { config } from "../lib/config";
 import { DEVNET_CHAIN_ID, devAccountFor, devAddress, devEntry, isDevRole } from "../lib/devwallet";
 import { errText } from "../lib/txflow";
 import type { TxExecutor } from "../lib/txflow";
-import { addChainParams, appChain, chainName, wagmiConfig, walletConnectEnabled } from "./chains";
+import { revertReason } from "../lib/revert";
+import { addChainParams, appChain, chainName, publicClient, wagmiConfig, walletConnectEnabled } from "./chains";
 import { connectWallet } from "./connectFlow";
 
 type Mode = "dev" | "injected" | null;
@@ -100,11 +101,29 @@ function devExecutor(role: DevRole): TxExecutor<PreparedTx> {
   };
 }
 
+/**
+ * eth_call the transaction from the connected account just before the wallet prompt: browser wallets
+ * send without a local simulation, and the testnet RPC returns custom errors with no reason string,
+ * so a failing call would otherwise only show the wallet's generic "may fail" warning or "reverted
+ * in block N". Only a decoded revert stops the send; an RPC hiccup does not.
+ */
+async function simulate(tx: PreparedTx): Promise<void> {
+  const from = getConnection(wagmiConfig).address;
+  if (!from) return;
+  try {
+    await publicClient.call({ account: from, to: tx.to as Address, data: tx.data as Hex, value: BigInt(tx.value || "0") });
+  } catch (e) {
+    const why = revertReason(e);
+    if (why) throw new Error(why);
+  }
+}
+
 const injectedExecutor: TxExecutor<PreparedTx> = {
   async send(tx) {
     if (tx.chainId !== appChain.id) throw wrongChainError(tx.chainId);
     // wagmi's injected connector adds the chain (wallet_addEthereumChain) when the wallet lacks it.
     if (getConnection(wagmiConfig).chainId !== appChain.id) await switchChain(wagmiConfig, { chainId: appChain.id, addEthereumChainParameter: addChainParams() });
+    await simulate(tx);
     return sendTransaction(wagmiConfig, { to: tx.to, data: tx.data, value: BigInt(tx.value || "0"), chainId: appChain.id });
   },
   async wait(hash) {

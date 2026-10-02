@@ -281,6 +281,28 @@ describe("tranche router", () => {
     expect(r.claimable[0]!.cancelledRefundUsd).toBe("50.000000");
   });
 
+  test("claim: a settled redemption is not prepared while escrow + vault idle cannot pay it (InsufficientLiquidity)", async () => {
+    const w = makeWorld();
+    seedBook(w);
+    // testnet NVDA today: the vault's idle() is 0 with everything deployed on the venue
+    w.chain.liquidity = 100_000_000n;
+    w.chain.setWallet(BOOK.senior, ALICE, { claimableShares: 10n, claimableAssets: 400_159_336n });
+    const c = await w.caller.tranche.claim({ bookId: 1, wallet: ALICE, tranche: "senior" });
+    expect(c.txs.map((t) => decodeFunctionData({ abi: trancheAbi, data: t.data }).functionName)).toEqual(["claimAllocation"]);
+    expect(c.claimable[0]).toMatchObject({ redemptionUsd: "400.159336", redemptionWaitingForCash: true });
+    expect(c.warnings.join(" ")).toContain("collecting waits until the keeper brings it back");
+    // only the redemption was due: nothing to send, and the message says why
+    w.chain.setWallet(BOOK.senior, ALICE, { claimableAssets: 400_159_336n });
+    const only = await w.caller.tranche.claim({ bookId: 1, wallet: ALICE, tranche: "senior" });
+    expect(only.txs).toEqual([]);
+    expect(only.message).toBe("Waiting for the book's cash to come back from the venue");
+    // enough cash: prepared as before
+    w.chain.liquidity = 400_159_336n;
+    const ok = await w.caller.tranche.claim({ bookId: 1, wallet: ALICE, tranche: "senior" });
+    expect(ok.txs.map((t) => decodeFunctionData({ abi: trancheAbi, data: t.data }).functionName)).toEqual(["claimRedemption"]);
+    expect(ok.warnings).toEqual([]);
+  });
+
   test("on-chain mutations without a deployment are PRECONDITION_FAILED", async () => {
     const w = makeWorld({ chain: false });
     seedBook(w, { state: "Subscription", subscriptionEndsIn: 100 });

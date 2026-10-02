@@ -13,6 +13,7 @@ import {
   riskCommitteeAbi,
   stockTokenRegistryAbi,
   trancheAbi,
+  underwritingVaultAbi,
 } from "@bookrunner/shared/abi";
 import { type Address, type Hex, type PublicClient, erc20Abi, getAddress, zeroAddress } from "viem";
 import { type Kv, cached } from "../kv";
@@ -224,6 +225,14 @@ export class ViemChainGateway implements ChainGateway {
         buckets,
       };
     });
+  }
+
+  async claimLiquidity(tranche: Address, vault: Address): Promise<bigint> {
+    const [escrow, idle] = await Promise.all([
+      this.client.readContract({ address: tranche, abi: trancheAbi, functionName: "redemptionLiquidity" }),
+      this.client.readContract({ address: vault, abi: underwritingVaultAbi, functionName: "idle" }),
+    ]);
+    return escrow + idle;
   }
 
   mandateState(mandate: Address): Promise<MandateChainState> {

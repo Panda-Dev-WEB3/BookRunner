@@ -2,6 +2,7 @@
 // The API never sends transactions; the connected wallet signs each one in order and the next one
 // starts only after the previous is confirmed (approve -> deposit, approve -> stake -> file, ...).
 import type { Hex } from "viem";
+import { revertReason } from "./revert";
 
 export interface PreparedTxLike {
   to: string;
@@ -37,7 +38,10 @@ export interface TxExecutor<T extends PreparedTxLike = PreparedTxLike> {
 
 export const initialItems = <T extends PreparedTxLike>(txs: T[]): TxItem<T>[] => txs.map((tx) => ({ tx, status: "queued" }));
 
+/** One line on why a step failed: a decoded revert reason when the chain gave one, else the error's first line. */
 export const errText = (e: unknown): string => {
+  const reason = revertReason(e);
+  if (reason) return reason;
   const o = (e ?? {}) as { shortMessage?: unknown; message?: unknown };
   const s = typeof o.shortMessage === "string" ? o.shortMessage : typeof o.message === "string" ? o.message : String(e);
   return s.split("\n")[0] ?? s;

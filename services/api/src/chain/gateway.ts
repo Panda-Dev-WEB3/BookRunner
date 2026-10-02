@@ -78,6 +78,12 @@ export interface ChainGateway {
   usdcState(wallet: Address, spender: Address): Promise<{ balance: bigint; allowance: bigint }>;
   bookState(book: Address): Promise<BookChainState>;
   trancheWallet(tranche: Address, wallet: Address, requestIds: bigint[]): Promise<TrancheWalletState>;
+  /**
+   * USDC a redemption claim can draw on now (uncached): Tranche.redemptionLiquidity() plus the
+   * vault's idle USDC that Book.fundClaims() can move in. Tranche._claim reverts
+   * InsufficientLiquidity above it, while the book's cash is still deployed on the venue.
+   */
+  claimLiquidity(tranche: Address, vault: Address): Promise<bigint>;
   mandateState(mandate: Address): Promise<MandateChainState>;
   /** MMMandate.operatorConsent(operator, key) (uncached: the operator may have just consented). */
   operatorConsent(mandate: Address, operator: Address, key: Address): Promise<boolean>;

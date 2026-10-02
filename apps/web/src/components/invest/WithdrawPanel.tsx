@@ -179,8 +179,17 @@ function ClaimBox(props: { book: BookDetail; ticker: string; addrs: TrancheAddre
       {claim.error && <ErrorState compact error={claim.error} />}
       {claim.data && (
         <div className="mt-3 space-y-2">
+          {claim.data.warnings.length > 0 && (
+            <Callout tone="warn" compact title="Waiting for cash">
+              <ul className="list-disc space-y-1 pl-4">
+                {claim.data.warnings.map((x) => (
+                  <li key={x}>{x}</li>
+                ))}
+              </ul>
+            </Callout>
+          )}
           {claim.data.txs.length === 0 ? (
-            <p className="text-[13px] text-ink-2">Nothing to collect right now: the chain shows no settled amount for this wallet yet.</p>
+            claim.data.warnings.length === 0 && <p className="text-[13px] text-ink-2">Nothing to collect right now: the chain shows no settled amount for this wallet yet.</p>
           ) : (
             <TxRunner txs={txs} signer={claim.data.signer} onConfirmed={onConfirmed} />
           )}
