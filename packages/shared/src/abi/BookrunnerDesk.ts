@@ -216,6 +216,47 @@ export const bookrunnerDeskAbi = [
   },
   {
     "type": "function",
+    "name": "executeWithPrices",
+    "inputs": [
+      {
+        "name": "action",
+        "type": "tuple",
+        "internalType": "struct IBookrunnerDesk.Action",
+        "components": [
+          {
+            "name": "kind",
+            "type": "uint8",
+            "internalType": "enum IBookrunnerDesk.ActionKind"
+          },
+          {
+            "name": "data",
+            "type": "bytes",
+            "internalType": "bytes"
+          },
+          {
+            "name": "proof",
+            "type": "bytes32[]",
+            "internalType": "bytes32[]"
+          }
+        ]
+      },
+      {
+        "name": "priceData",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "result",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "hedgeNotionalUsd",
     "inputs": [],
     "outputs": [

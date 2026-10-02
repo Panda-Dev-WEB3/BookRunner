@@ -29,6 +29,8 @@ contract EngineMockConfig {
     address public timelock;
     uint32 public maxPriceAge = 300;
     uint32 public markInterval = 300;
+    /// @dev LOW_GAS.md §1 default (BookrunnerConfig constructor: 15 s).
+    uint32 public maxTradePriceAge = 15;
 
     mapping(bytes32 => mapping(address => bool)) internal _roles;
 
@@ -66,6 +68,10 @@ contract EngineMockConfig {
 
     function setMaxPriceAge(uint32 v) external {
         maxPriceAge = v;
+    }
+
+    function setMaxTradePriceAge(uint32 v) external {
+        maxTradePriceAge = v;
     }
 
     function grantRole(bytes32 role, address a) external {

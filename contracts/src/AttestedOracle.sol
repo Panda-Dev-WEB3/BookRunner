@@ -10,11 +10,15 @@ import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 /// @title AttestedOracle — the protocol's single on-chain price surface.
 /// @notice Prices are produced off-chain by the oracle service (multi-source median, TEE-attested — the
 ///         attestation verification flow is VERIFY) and signed as EIP-712 `Price` structs by a registered
-///         signer. Relaying is restricted to an active signer, the KEEPER role or the timelock: a signed
-///         update lands only when the oracle (or a keeper) sends it, so a leaked / observed signature can
-///         never be pushed by a trader inside its own transaction (trade -> push -> close sandwich of the
-///         in-house pool). A `held` price is the feed holding a closed session's last price (off-hours):
-///         consumers go reduce-only but keep liquidating at the held price.
+///         signer. Pull oracle (docs/LOW_GAS.md §1): the transaction that needs a price carries the signed
+///         bundle and the consumer (PoolEngine, BookrunnerDesk, MarkRegistry) calls {update} first — anyone
+///         may relay through {update}, which never lands a print already stale on arrival (older than
+///         maxPriceAge). The latency-arbitrage bound moved to the consumer: an engine trade adding risk only
+///         accepts a price published within `maxTradePriceAge` (a trader cannot pick an old favourable print;
+///         the spread covers the residual). The heartbeat relays {push} / {pushMany} stay
+///         restricted to an active signer, the KEEPER role or the timelock (backwards compatible). A `held`
+///         price is the feed holding a closed session's last price (off-hours): consumers go reduce-only but
+///         keep liquidating at the held price.
 /// @dev    Non-upgradeable (ARCHITECTURE §2.0). EIP-712 domain ("Bookrunner AttestedOracle", "1"); the type
 ///         string MUST stay byte-identical to `packages/shared/src/eip712.ts` (`priceTypes`).
 contract AttestedOracle is IAttestedOracle, EIP712 {
@@ -89,7 +93,11 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
     // ------------------------------------------------------------------------------------------------
 
     /// @inheritdoc IAttestedOracle
-    function hashPrice(PriceUpdate calldata u) public view returns (bytes32) {
+    function hashPrice(PriceUpdate calldata u) external view returns (bytes32) {
+        return _hashPrice(u);
+    }
+
+    function _hashPrice(PriceUpdate memory u) internal view returns (bytes32) {
         return _hashTypedDataV4(
             keccak256(
                 abi.encode(
@@ -119,10 +127,11 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
     /// @dev Only a relayer ({canRelay}, else NotRelayer). Reverts BadSigner (unsigned / unregistered),
     ///      NotNewer, FuturePrice, ZeroPrice, InsufficientSources.
     function push(PriceUpdate calldata u, bytes calldata sig) external onlyRelayer {
-        address signer = _verify(u, sig);
-        uint64 stored = _prices[u.underlying].publishedAt;
-        if (u.publishedAt <= stored) revert NotNewer(stored, u.publishedAt);
-        _store(u, signer);
+        PriceUpdate memory m = u;
+        address signer = _verify(m, sig);
+        uint64 stored = _prices[m.underlying].publishedAt;
+        if (m.publishedAt <= stored) revert NotNewer(stored, m.publishedAt);
+        _store(m, signer);
     }
 
     /// @inheritdoc IAttestedOracle
@@ -133,7 +142,7 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
         uint256 n = us.length;
         if (n != sigs.length) revert LengthMismatch(n, sigs.length);
         for (uint256 i; i < n; ++i) {
-            PriceUpdate calldata u = us[i];
+            PriceUpdate memory u = us[i];
             address signer = _verify(u, sigs[i]);
             uint64 stored = _prices[u.underlying].publishedAt;
             if (u.publishedAt <= stored) {
@@ -141,6 +150,33 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
                 continue;
             }
             _store(u, signer);
+        }
+    }
+
+    /// @inheritdoc IAttestedOracle
+    /// @dev Pull path (LOW_GAS.md §1), callable by anyone. `priceData = abi.encode(PriceUpdate[], bytes[])`;
+    ///      empty `priceData` is a no-op. Skipped silently, without verification (neither can change state,
+    ///      so the common case of several transactions carrying the same bundle costs no ecrecover and no
+    ///      event): an entry that is not newer than the stored price, and an entry that is already stale on
+    ///      arrival (publishedAt + config.maxPriceAge() < block.timestamp). The second rule closes the
+    ///      lookback a permissionless relay would otherwise open on an idle market: reductions and
+    ///      liquidations still run at whatever price is stored (stale included), so without it a trader or
+    ///      a liquidator could land any old print newer than stored — e.g. the most favourable one since the
+    ///      last landing — and trade on it. Every other entry is verified and stored, reverting exactly like
+    ///      {push} (BadSigner, FuturePrice, ZeroPrice, InsufficientSources). Reverts LengthMismatch when the
+    ///      arrays differ in length, and on malformed encoding.
+    function update(bytes calldata priceData) external {
+        if (priceData.length == 0) return;
+        (PriceUpdate[] memory us, bytes[] memory sigs) = abi.decode(priceData, (PriceUpdate[], bytes[]));
+        uint256 n = us.length;
+        if (n != sigs.length) revert LengthMismatch(n, sigs.length);
+        uint256 maxAge; // read once, only when an entry is newer than stored
+        for (uint256 i; i < n; ++i) {
+            PriceUpdate memory u = us[i];
+            if (u.publishedAt <= _prices[u.underlying].publishedAt) continue;
+            if (maxAge == 0) maxAge = config.maxPriceAge();
+            if (uint256(u.publishedAt) + maxAge < block.timestamp) continue;
+            _store(u, _verify(u, sigs[i]));
         }
     }
 
@@ -189,8 +225,8 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
     // Internals
     // ------------------------------------------------------------------------------------------------
 
-    function _verify(PriceUpdate calldata u, bytes calldata sig) internal view returns (address signer) {
-        (address recovered, ECDSA.RecoverError err,) = ECDSA.tryRecover(hashPrice(u), sig);
+    function _verify(PriceUpdate memory u, bytes memory sig) internal view returns (address signer) {
+        (address recovered, ECDSA.RecoverError err,) = ECDSA.tryRecover(_hashPrice(u), sig);
         if (err != ECDSA.RecoverError.NoError) recovered = address(0);
         if (recovered == address(0) || !isSigner[recovered]) revert BadSigner(recovered);
         if (u.priceWad == 0) revert ZeroPrice(u.underlying);
@@ -201,7 +237,7 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
         return recovered;
     }
 
-    function _store(PriceUpdate calldata u, address signer) internal {
+    function _store(PriceUpdate memory u, address signer) internal {
         _prices[u.underlying] = PriceData({
             priceWad: u.priceWad, publishedAt: u.publishedAt, held: u.held, sourceCount: u.sourceCount
         });

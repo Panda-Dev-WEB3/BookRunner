@@ -21,6 +21,7 @@ import {IStockTokenRegistry} from "./interfaces/IStockTokenRegistry.sol";
 import {IHedgeExecutor} from "./interfaces/IHedgeExecutor.sol";
 import {IUnderwritingVault} from "./interfaces/IUnderwritingVault.sol";
 import {IPoolEngineAdapter} from "./interfaces/IVenueAdapter.sol";
+import {IAttestedOracle} from "./interfaces/IAttestedOracle.sol";
 import {IMMMandateDesk, IDeskKeySync} from "./MMMandate.sol";
 
 /// @title IDeskReturnVault — UnderwritingVault extension the desk calls on ReturnToVault.
@@ -36,7 +37,11 @@ interface IDeskReturnVault {
 ///         each validated by the book's MMMandate. Holds the book's long-spot hedge inventory (canonical
 ///         Stock Tokens) and its USDC hedge budget.
 ///
-///         Callers of `execute`:
+///         Pull oracle (LOW_GAS.md §1): `executeWithPrices(action, priceData)` relays the signed price
+///         bundle to `AttestedOracle.update` and then runs exactly the `execute` path, so the mandate's
+///         off-hours / staleness rules and the registry valuations see the price this transaction brought.
+///
+///         Callers of `execute` / `executeWithPrices`:
 ///           - the EntryPoint, for a userOp validated by {validateUserOp}; the signer recorded at
 ///             validation is re-checked with `mandate.isActiveKey` at execution (revocation race closed);
 ///           - an active desk key directly (EOA tx; devnet / no bundler);
@@ -188,10 +193,11 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
     // ------------------------------------------------------------------ ERC-4337
 
     /// @inheritdoc IBookrunnerDesk
-    /// @dev Only the cached EntryPoint. Returns SIG_VALIDATION_FAILED (1) when callData is not
-    ///      `execute(Action)` or the signature (ECDSA over toEthSignedMessageHash(userOpHash)) is not by a
-    ///      key the mandate mirrored as active; on success returns the key's validUntil packed per
-    ///      ERC-4337 (sigFailed = 0). Pays `missingAccountFunds` to the EntryPoint.
+    /// @dev Only the cached EntryPoint. Returns SIG_VALIDATION_FAILED (1) when callData is neither
+    ///      `execute(Action)` nor `executeWithPrices(Action,bytes)` or the signature (ECDSA over
+    ///      toEthSignedMessageHash(userOpHash)) is not by a key the mandate mirrored as active; on success
+    ///      returns the key's validUntil packed per ERC-4337 (sigFailed = 0). Pays `missingAccountFunds` to
+    ///      the EntryPoint.
     function validateUserOp(
         PackedUserOperation calldata userOp,
         bytes32 userOpHash,
@@ -212,7 +218,9 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
         returns (uint256)
     {
         bytes calldata cd = userOp.callData;
-        if (cd.length < 4 || bytes4(cd[:4]) != this.execute.selector) return SIG_VALIDATION_FAILED;
+        if (cd.length < 4) return SIG_VALIDATION_FAILED;
+        bytes4 sel = bytes4(cd[:4]);
+        if (sel != this.execute.selector && sel != this.executeWithPrices.selector) return SIG_VALIDATION_FAILED;
         (address signer, ECDSA.RecoverError err,) =
             ECDSA.tryRecoverCalldata(MessageHashUtils.toEthSignedMessageHash(userOpHash), userOp.signature);
         if (err != ECDSA.RecoverError.NoError || signer == address(0)) return SIG_VALIDATION_FAILED;
@@ -242,6 +250,25 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
     /// @inheritdoc IBookrunnerDesk
     function execute(Action calldata action) external override nonReentrant returns (bytes memory result) {
         (address key, bool viaRisk) = _authorize(action.kind);
+        result = _execute(key, viaRisk, action);
+    }
+
+    /// @inheritdoc IBookrunnerDesk
+    /// @dev Same callers and checks as {execute}; after authorisation `AttestedOracle.update(priceData)`
+    ///      runs first when `priceData` is non-empty (not-newer entries skipped, a bad signature reverts the
+    ///      whole action).
+    function executeWithPrices(Action calldata action, bytes calldata priceData)
+        external
+        override
+        nonReentrant
+        returns (bytes memory result)
+    {
+        (address key, bool viaRisk) = _authorize(action.kind);
+        if (priceData.length != 0) IAttestedOracle(config.oracle()).update(priceData);
+        result = _execute(key, viaRisk, action);
+    }
+
+    function _execute(address key, bool viaRisk, Action calldata action) internal returns (bytes memory result) {
         ActionKind kind = action.kind;
         if (kind == ActionKind.Hedge) {
             result = _hedge(key, action.data, action.proof);

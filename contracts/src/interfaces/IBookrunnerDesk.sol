@@ -30,8 +30,15 @@ interface IBookrunnerDesk {
 
     /// @notice EntryPoint (after validateUserOp) or an active desk key.
     function execute(Action calldata action) external returns (bytes memory result);
+    /// @notice Pull oracle (LOW_GAS.md §1): same callers and checks as `execute`; relays `priceData`
+    ///         (abi.encode(IAttestedOracle.PriceUpdate[], bytes[])) to `AttestedOracle.update` first when
+    ///         non-empty, then runs the `execute` path on the in-tx price.
+    function executeWithPrices(Action calldata action, bytes calldata priceData)
+        external
+        returns (bytes memory result);
     /// @notice ERC-4337 v0.7. Signature = ECDSA(toEthSignedMessageHash(userOpHash)) by an active desk key;
-    ///         callData must be `execute(Action)`. Returns SIG_VALIDATION_FAILED (1) otherwise.
+    ///         callData must be `execute(Action)` or `executeWithPrices(Action,bytes)`. Returns
+    ///         SIG_VALIDATION_FAILED (1) otherwise.
     function validateUserOp(PackedUserOperation calldata userOp, bytes32 userOpHash, uint256 missingAccountFunds)
         external
         returns (uint256 validationData);
