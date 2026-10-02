@@ -15,9 +15,11 @@ import { SERIES_CLASS } from "../../lib/palette";
 import { type TopUpRound, isTopUpOpen, useTopUpRounds } from "../../wallet/topUp";
 import { cx } from "../cx";
 import { IconArrowRight } from "../icons";
+import { roomFigure, roomNote } from "../invest/investCopy";
+import { type TrancheId, type TrancheRoom, bookRooms } from "../invest/logic";
 import { type BookRounds, useTrancheRounds } from "../invest/useInvestChain";
 import { Badge, Card, EmptyState, ErrorState, ProgressBar, Section, Skeleton, Stat, StateChip } from "../ui";
-import { type DepositStatus, depositHeadline, depositOpen, depositStatus, fmtDayUtc, marketInfo, roundFill, sharePct, trancheSplit } from "./model";
+import { type DepositStatus, depositHeadline, depositOpen, depositStatus, fmtDayUtc, marketInfo, sharePct, trancheSplit } from "./model";
 
 const MAX_CARDS = 6;
 
@@ -93,6 +95,19 @@ export function LaunchBooks() {
 }
 
 function BookCard({ b, deposit, committed, now }: { b: BookListItem; deposit: DepositStatus; committed: BookRounds | null; now: number }) {
+  // The Senior cap lives in the charter (book.get, shared with the Invest page's cache).
+  const detail = trpc.book.get.useQuery({ bookId: b.bookId }, { enabled: deposit.kind === "topup", refetchInterval: POLL.slow, staleTime: 15_000 });
+  const capBps = detail.data?.charter?.seniorCapBps ?? null;
+  const rooms =
+    deposit.kind === "topup"
+      ? bookRooms({
+          topUp: { bookId: b.bookId, open: true, endsAt: deposit.endsAt, seniorCapacityUsd: deposit.seniorCapacity, juniorCapacityUsd: deposit.juniorCapacity },
+          committed: { senior: committed?.senior.totalCommitted, junior: committed?.junior.totalCommitted },
+          seniorNav: usdRaw(b.seniorNavUsd),
+          juniorNav: usdRaw(b.juniorNavUsd),
+          capBps,
+        })
+      : null;
   const m = marketInfo(b.symbol);
   const split = trancheSplit(usdRaw(b.seniorNavUsd) ?? 0n, usdRaw(b.juniorNavUsd) ?? 0n);
   const limits = limitState(b.limits?.state);
@@ -148,7 +163,7 @@ function BookCard({ b, deposit, committed, now }: { b: BookListItem; deposit: De
         )}
       </div>
 
-      <DepositRow deposit={deposit} committed={committed} />
+      <DepositRow deposit={deposit} rooms={rooms} capBps={capBps} />
 
       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line px-5 py-4">
         <div className="flex min-w-0 flex-col gap-1">
@@ -164,7 +179,7 @@ function BookCard({ b, deposit, committed, now }: { b: BookListItem; deposit: De
   );
 }
 
-function DepositRow({ deposit, committed }: { deposit: DepositStatus; committed: BookRounds | null }) {
+function DepositRow({ deposit, rooms, capBps }: { deposit: DepositStatus; rooms: Record<TrancheId, TrancheRoom | null> | null; capBps: number | null }) {
   const open = depositOpen(deposit);
   return (
     <div className="border-t border-line bg-surface-2/50 px-5 py-4">
@@ -175,8 +190,8 @@ function DepositRow({ deposit, committed }: { deposit: DepositStatus; committed:
       {deposit.kind === "topup" && (
         <>
           <div className="mt-3 space-y-2.5">
-            <TrancheRound tranche="senior" capacity={deposit.seniorCapacity} committed={committed?.senior.totalCommitted ?? null} />
-            <TrancheRound tranche="junior" capacity={deposit.juniorCapacity} committed={committed?.junior.totalCommitted ?? null} />
+            <TrancheRound tranche="senior" capacity={deposit.seniorCapacity} room={rooms?.senior ?? null} capBps={capBps} />
+            <TrancheRound tranche="junior" capacity={deposit.juniorCapacity} room={rooms?.junior ?? null} capBps={capBps} />
           </div>
           <p className="mt-3 text-[12px] text-ink-2">Deposits wait in escrow. Shares are issued at the first mark after {fmtDayUtc(deposit.endsAt)}, at that mark's share price.</p>
         </>
@@ -187,7 +202,7 @@ function DepositRow({ deposit, committed }: { deposit: DepositStatus; committed:
   );
 }
 
-function TrancheRound({ tranche, capacity, committed }: { tranche: "senior" | "junior"; capacity: bigint; committed: bigint | null }) {
+function TrancheRound({ tranche, capacity, room, capBps }: { tranche: TrancheId; capacity: bigint; room: TrancheRoom | null; capBps: number | null }) {
   const name = tranche === "senior" ? "Senior" : "Junior";
   if (capacity === 0n) {
     return (
@@ -196,17 +211,15 @@ function TrancheRound({ tranche, capacity, committed }: { tranche: "senior" | "j
       </div>
     );
   }
-  const fill = committed === null ? null : roundFill(committed, capacity);
+  const note = room ? roomNote(room, capBps) : null;
   return (
     <div>
       <div className="flex items-baseline justify-between gap-2 text-[12.5px]">
         <span className={cx("font-medium", SERIES_CLASS[tranche].text)}>{name}</span>
-        <span className="num text-ink-2">
-          {committed === null ? `${formatAmountDisplay(capacity, 6, 0)} USDC capacity` : `${formatAmountDisplay(committed, 6, 0)} of ${formatAmountDisplay(capacity, 6, 0)} USDC`}
-        </span>
+        <span className="num text-ink-2">{room ? roomFigure(room) : `${formatAmountDisplay(capacity, 6, 0)} USDC capacity`}</span>
       </div>
-      <ProgressBar className="mt-1.5" tone={tranche} value={fill?.frac ?? 0} label={`${name} capacity committed`} />
-      {fill?.over && <div className="mt-1 text-[11.5px] text-ink-2">Oversubscribed: deposits are filled pro-rata and the rest is refunded.</div>}
+      <ProgressBar className="mt-1.5" tone={tranche} value={room?.filled ?? 0} label={`${name} capacity committed`} />
+      {note && <div className={cx("mt-1 text-[11.5px]", room?.oversubscribed ? "text-warn-ink" : "text-ink-2")}>{note}</div>}
     </div>
   );
 }

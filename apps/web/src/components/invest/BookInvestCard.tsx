@@ -14,7 +14,8 @@ import type { TopUpRound } from "../../lib/topup";
 import { IconArrowRight } from "../icons";
 import { Card, ProgressBar, Stat, StateChip, Term, cx } from "../ui";
 import { TrancheSwatch, WindowBadge } from "./InvestBits";
-import { TRANCHE_IDS, TRANCHE_NAME, type TrancheId, depositWindow, distributionShares, pctOfBps, roundRoom } from "./logic";
+import { roomFigure, roomNote } from "./investCopy";
+import { TRANCHE_IDS, TRANCHE_NAME, type TrancheId, type TrancheRoom, bookRooms, depositWindow, distributionShares, pctOfBps } from "./logic";
 import type { BookRounds } from "./useInvestChain";
 
 export function BookInvestCard(props: {
@@ -39,6 +40,13 @@ export function BookInvestCard(props: {
     nowSec,
     markIntervalSec: b.markSchedule.intervalSeconds,
     guardianPaused: props.guardianPaused,
+  });
+  const rooms = bookRooms({
+    topUp,
+    committed: { senior: props.rounds?.senior.totalCommitted, junior: props.rounds?.junior.totalCommitted },
+    seniorNav: usdRaw(d?.seniorNavUsd ?? b.seniorNavUsd),
+    juniorNav: usdRaw(d?.juniorNavUsd ?? b.juniorNavUsd),
+    capBps: c?.seniorCapBps,
   });
   const markAge = ageMs(b.lastMark?.committedAt ?? null, props.now);
   const split = c ? distributionShares(c.seniorHurdleBps) : null;
@@ -106,7 +114,16 @@ export function BookInvestCard(props: {
           {topUp && (w.status === "open" || w.status === "paused") && (
             <ul className="mt-3 space-y-3">
               {TRANCHE_IDS.map((t) => (
-                <RoomRow key={t} t={t} ticker={ticker} topUp={topUp} committed={props.rounds?.[t].totalCommitted ?? null} paused={props.rounds?.[t].paused ?? null} href={`${href}?tranche=${t}#invest`} />
+                <RoomRow
+                  key={t}
+                  t={t}
+                  ticker={ticker}
+                  capacity={t === "senior" ? topUp.seniorCapacityUsd : topUp.juniorCapacityUsd}
+                  room={rooms[t]}
+                  capBps={c?.seniorCapBps ?? null}
+                  paused={props.rounds?.[t].paused ?? null}
+                  href={`${href}?tranche=${t}#invest`}
+                />
               ))}
             </ul>
           )}
@@ -144,10 +161,10 @@ function Term2(props: { label: ReactNode; value: ReactNode }) {
   );
 }
 
-function RoomRow(props: { t: TrancheId; ticker: string; topUp: TopUpRound; committed: bigint | null; paused: boolean | null; href: string }) {
-  const capacity = props.t === "senior" ? props.topUp.seniorCapacityUsd : props.topUp.juniorCapacityUsd;
-  const room = props.committed === null ? null : roundRoom(capacity, props.committed);
+function RoomRow(props: { t: TrancheId; ticker: string; capacity: bigint; room: TrancheRoom | null; capBps: number | null; paused: boolean | null; href: string }) {
+  const { capacity, room } = props;
   const name = TRANCHE_NAME[props.t];
+  const note = room && !props.paused ? roomNote(room, props.capBps) : null;
   return (
     // Phone: name + Choose on one line, then the bar, then the figures. sm+: one row.
     <li className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1.5 sm:grid-cols-[6rem_minmax(0,1fr)_auto_auto]">
@@ -163,13 +180,12 @@ function RoomRow(props: { t: TrancheId; ticker: string; topUp: TopUpRound; commi
         {props.paused ? (
           <span className="text-warn-ink">Paused</span>
         ) : room ? (
-          <>
-            <span className="font-medium text-ink">{formatAmountDisplay(room.remaining, USDC_DECIMALS, 0)}</span> of {formatAmountDisplay(capacity, USDC_DECIMALS, 0)} USDC left
-          </>
+          roomFigure(room)
         ) : (
           `${formatAmountDisplay(capacity, USDC_DECIMALS, 0)} USDC capacity`
         )}
       </span>
+      {note && <span className={cx("col-span-2 text-[12px] sm:order-5 sm:col-span-4", room?.oversubscribed ? "text-warn-ink" : "text-ink-2")}>{note}</span>}
     </li>
   );
 }

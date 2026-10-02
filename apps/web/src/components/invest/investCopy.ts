@@ -3,8 +3,31 @@
 // contracts' rules (test/invest-copy.test.ts): a top-up round settles only at the first mark whose
 // period ends at or after the ROUND END (Book._settleAtMark / Tranche.settleAtMark), never "at the
 // next mark", and a round cannot be closed early.
+import { USDC_DECIMALS, formatAmountDisplay } from "../../lib/amount";
 import { fmtWhen } from "../../lib/format";
-import type { DepositWindow } from "./logic";
+import { type DepositWindow, type RoundRoom, type TrancheRoom, pctOfBps } from "./logic";
+
+const whole = (raw: bigint) => formatAmountDisplay(raw, USDC_DECIMALS, 0);
+
+/** "0 of 100,000 USDC committed": one framing for a tranche's round on every page. */
+export function roomFigure(room: RoundRoom): string {
+  return `${whole(room.committed)} of ${whole(room.capacity)} USDC committed`;
+}
+
+/**
+ * The line under a tranche's round figures, or null when nothing limits it: Senior can be limited
+ * by the Senior cap well below the round capacity (Book._seniorTopUpRoom), and an oversubscribed
+ * round is filled pro-rata at the settling mark.
+ */
+export function roomNote(room: TrancheRoom, capBps: number | null | undefined): string | null {
+  const cap = capBps != null ? `${pctOfBps(capBps)} Senior cap` : "Senior cap";
+  if (room.capLimited) {
+    return room.oversubscribed
+      ? `Oversubscribed under the ${cap}: Senior deposits will be scaled down pro-rata unless more Junior comes in.`
+      : `Limited by the ${cap}: about ${whole(room.left)} USDC can still be accepted, more if Junior grows (estimate from the last mark).`;
+  }
+  return room.oversubscribed ? "Oversubscribed: deposits will be scaled down pro-rata." : null;
+}
 
 /** The three steps at the top of the Invest page. */
 export const INVEST_STEPS = [

@@ -14,9 +14,10 @@ import {
   type RoundRoom,
   TRANCHE_NAME,
   type TrancheId,
+  type TrancheRoom,
+  bookRooms,
   depositWindow,
   positionFlags,
-  roundRoom,
   seniorRoundRoom,
 } from "../../components/invest/logic";
 import { TrancheChoice } from "../../components/invest/TrancheChoice";
@@ -95,10 +96,13 @@ function BookInvest({ book, now }: { book: BookDetail; now: number }) {
     senior: depositWindow({ ...base, tranchePaused: r?.senior.paused ?? null }),
     junior: depositWindow({ ...base, tranchePaused: r?.junior.paused ?? null }),
   };
-  const rooms: Record<TrancheId, RoundRoom | null> = {
-    senior: topUp && r?.senior.totalCommitted != null ? roundRoom(topUp.seniorCapacityUsd, r.senior.totalCommitted) : null,
-    junior: topUp && r?.junior.totalCommitted != null ? roundRoom(topUp.juniorCapacityUsd, r.junior.totalCommitted) : null,
-  };
+  const rooms: Record<TrancheId, TrancheRoom | null> = bookRooms({
+    topUp,
+    committed: { senior: r?.senior.totalCommitted, junior: r?.junior.totalCommitted },
+    seniorNav: usdRaw(book.seniorNavUsd),
+    juniorNav: usdRaw(book.juniorNavUsd),
+    capBps: book.charter?.seniorCapBps,
+  });
   const seniorRoom = seniorRoomLeft(book, bookWindow, rooms);
 
   const flags = position.data ? positionFlags(position.data.tranches) : null;

@@ -3,13 +3,13 @@
 // left in the round and a one-line risk statement each.
 import type { ReactNode } from "react";
 import type { BookDetail } from "../../lib/api-types";
-import { USDC_DECIMALS, formatAmountDisplay } from "../../lib/amount";
 import { fmtDuration, fmtSharePrice } from "../../lib/format";
 import { cadenceTitle } from "../../lib/lowgas";
 import { IconCheck } from "../icons";
 import { ProgressBar, Term, cx } from "../ui";
 import { TrancheSwatch } from "./InvestBits";
-import { type DepositWindow, type RoundRoom, TRANCHE_IDS, type TrancheId, distributionShares, pctOfBps } from "./logic";
+import { roomFigure, roomNote } from "./investCopy";
+import { type DepositWindow, TRANCHE_IDS, type TrancheId, type TrancheRoom, distributionShares, pctOfBps } from "./logic";
 import type { ProtocolParams } from "./useInvestChain";
 
 export const TRANCHE_LINE: Record<TrancheId, string> = {
@@ -36,8 +36,8 @@ export interface TrancheChoiceProps {
   params: ProtocolParams | undefined;
   /** Deposit window per tranche (paused flags differ per tranche). */
   windows: Record<TrancheId, DepositWindow>;
-  /** Top-up room per tranche (null: not a top-up round or unknown). */
-  rooms: Record<TrancheId, RoundRoom | null>;
+  /** Top-up room per tranche, Senior with the Senior cap applied (null: not a top-up round or unknown). */
+  rooms: Record<TrancheId, TrancheRoom | null>;
   selected: TrancheId | null;
   onSelect: (t: TrancheId) => void;
 }
@@ -141,11 +141,11 @@ export function TrancheChoice(props: TrancheChoiceProps) {
                 <Row label={<Term id="topUpRound">Room this round</Term>}>
                   {win.status === "open" && room ? (
                     <div className="min-w-0">
-                      <div className="num">
-                        {formatAmountDisplay(room.remaining, USDC_DECIMALS, 0)} <span className="text-muted">of {formatAmountDisplay(room.capacity, USDC_DECIMALS, 0)} USDC left</span>
-                      </div>
+                      <div className="num">{roomFigure(room)}</div>
                       <ProgressBar className="mt-1.5" value={room.filled} tone={t} label={`${name} capacity committed`} />
-                      {room.over && <div className="mt-1 text-[12px] text-warn-ink">Oversubscribed: deposits will be scaled down pro-rata.</div>}
+                      {roomNote(room, c?.seniorCapBps) && (
+                        <div className={cx("mt-1 text-[12px]", room.oversubscribed ? "text-warn-ink" : "text-ink-2")}>{roomNote(room, c?.seniorCapBps)}</div>
+                      )}
                     </div>
                   ) : win.status === "open" ? (
                     win.kind === "subscription" ? (

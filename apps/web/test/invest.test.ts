@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { encodeFunctionData, getAddress } from "viem";
+import { roomFigure, roomNote } from "../src/components/invest/investCopy";
 import {
+  bookRooms,
   checkDeposit,
   depositWindow,
   distributionShares,
@@ -98,6 +100,32 @@ describe("capacity", () => {
     // Junior above its capacity only counts up to the capacity
     expect(seniorRoundRoom({ ...base, senior: roundRoom(100_000n * U, 0n), junior: roundRoom(3_000n * U, 9_000n * U) })).toBe(7_000n * U);
     expect(seniorRoundRoom({ ...base, capBps: 10_000, senior: roundRoom(1n, 0n), junior: null })).toBeNull();
+  });
+  test("bookRooms: Senior room is min(capacity, Senior cap room), never the full capacity when the cap binds", () => {
+    // live NVDA marked NAVs: S 73,529.28 · J 32,293.22 · cap 70% · 100k capacity per tranche
+    const nav = { seniorNav: 73_529_280_000n, juniorNav: 32_293_220_000n, capBps: 7000 };
+    const r = bookRooms({ topUp: round, committed: { senior: 0n, junior: 0n }, ...nav });
+    expect(r.senior).toMatchObject({ capacity: 100_000n * U, remaining: 100_000n * U, left: 1_821_566_666n, capLimited: true, oversubscribed: false });
+    expect(r.junior).toMatchObject({ left: 100_000n * U, capLimited: false, oversubscribed: false });
+    expect(roomFigure(r.senior!)).toBe("0 of 100,000 USDC committed");
+    expect(roomNote(r.senior!, 7000)).toBe("Limited by the 70% Senior cap: about 1,821 USDC can still be accepted, more if Junior grows (estimate from the last mark).");
+    expect(roomNote(r.junior!, 7000)).toBeNull();
+    // 50k of Senior committed is far above the cap room: oversubscribed although the capacity is not
+    const over = bookRooms({ topUp: round, committed: { senior: 50_000n * U, junior: 0n }, ...nav }).senior!;
+    expect(over).toMatchObject({ over: false, left: 0n, capLimited: true, oversubscribed: true });
+    expect(roomNote(over, 7000)).toContain("Oversubscribed under the 70% Senior cap");
+    // Junior committed this round adds Senior room (c / (1 - c) per USDC)
+    const withJunior = bookRooms({ topUp: round, committed: { senior: 0n, junior: 3_000n * U }, ...nav }).senior!;
+    expect(withJunior.left).toBe(((32_293_220_000n + 3_000n * U) * 7000n) / 3000n - 73_529_280_000n);
+    // unknown NAVs or cap: capacity only; unknown committed totals: no room shown
+    expect(bookRooms({ topUp: round, committed: { senior: 0n, junior: 0n }, seniorNav: null, juniorNav: null, capBps: 7000 }).senior).toMatchObject({ left: 100_000n * U, capLimited: false });
+    expect(bookRooms({ topUp: round, committed: { senior: undefined, junior: null }, ...nav })).toEqual({ senior: null, junior: null });
+    expect(bookRooms({ topUp: null, committed: { senior: 0n, junior: 0n }, ...nav })).toEqual({ senior: null, junior: null });
+    // a cap at 100%, or a cap room above the capacity, leaves the capacity in charge
+    expect(bookRooms({ topUp: round, committed: { senior: 0n, junior: 0n }, ...nav, capBps: 10_000 }).senior).toMatchObject({ capLimited: false });
+    const small = { ...round, seniorCapacityUsd: 1_000n * U };
+    expect(bookRooms({ topUp: small, committed: { senior: 1_200n * U, junior: 0n }, ...nav }).senior).toMatchObject({ capLimited: false, over: true, oversubscribed: true, left: 0n });
+    for (const x of [r.senior!, over, withJunior]) expect(checkCopy(roomNote(x, 7000) ?? "")).toEqual([]);
   });
   test("seniorRoomPerJunior", () => {
     expect(seniorRoomPerJunior(7000)).toBeCloseTo(2.3333, 3);

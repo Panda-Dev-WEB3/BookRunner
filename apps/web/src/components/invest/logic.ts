@@ -117,6 +117,53 @@ export function seniorRoundRoom(i: { seniorNav: bigint; juniorNav: bigint; capBp
   return room > i.senior.committed ? room - i.senior.committed : 0n;
 }
 
+export interface TrancheRoom extends RoundRoom {
+  /**
+   * What the round can still accept: the capacity left or, for Senior, the smaller of that and the
+   * room left under the Senior cap (an estimate from the last mark; see seniorCapRoom).
+   */
+  left: bigint;
+  /** Senior only: the Senior cap, not the round capacity, limits what can be accepted. */
+  capLimited: boolean;
+  /** More is committed than the round can accept (its capacity or, for Senior, the Senior cap): deposits are scaled down pro-rata. */
+  oversubscribed: boolean;
+}
+
+/**
+ * Room in a top-up round as the contract applies it at the settling mark: min(capacity, Senior cap
+ * room) for Senior (Book._seniorTopUpRoom), the capacity for Junior. `seniorCap` is null for Junior,
+ * or when the NAVs or the cap are unknown (then only the capacity is applied).
+ */
+export function trancheRoom(room: RoundRoom, seniorCap: { seniorNav: bigint; juniorNav: bigint; capBps: number; junior: RoundRoom | null } | null): TrancheRoom {
+  const plain: TrancheRoom = { ...room, left: room.remaining, capLimited: false, oversubscribed: room.over };
+  if (!seniorCap) return plain;
+  const j = seniorCap.junior;
+  const juniorIn = j ? (j.committed < j.capacity ? j.committed : j.capacity) : 0n;
+  const capTotal = seniorCapRoom(seniorCap.seniorNav, seniorCap.juniorNav + juniorIn, seniorCap.capBps);
+  if (capTotal === null || capTotal >= room.capacity) return plain;
+  const left = capTotal > room.committed ? capTotal - room.committed : 0n;
+  return { ...room, left: left < room.remaining ? left : room.remaining, capLimited: true, oversubscribed: room.over || room.committed > capTotal };
+}
+
+/**
+ * Both tranches' room in a book's open top-up round (null per tranche when the round or its
+ * committed total is unknown). Senior gets the Senior cap applied whenever the NAVs and the cap are
+ * known, so no page shows the full capacity when the cap allows far less.
+ */
+export function bookRooms(i: {
+  topUp: TopUpRound | null | undefined;
+  committed: Record<TrancheId, bigint | null | undefined>;
+  seniorNav: bigint | null;
+  juniorNav: bigint | null;
+  capBps: number | null | undefined;
+}): Record<TrancheId, TrancheRoom | null> {
+  const t = i.topUp;
+  const junior = t && i.committed.junior != null ? roundRoom(t.juniorCapacityUsd, i.committed.junior) : null;
+  const senior = t && i.committed.senior != null ? roundRoom(t.seniorCapacityUsd, i.committed.senior) : null;
+  const cap = i.seniorNav !== null && i.juniorNav !== null && i.capBps != null ? { seniorNav: i.seniorNav, juniorNav: i.juniorNav, capBps: i.capBps, junior } : null;
+  return { senior: senior ? trancheRoom(senior, cap) : null, junior: junior ? trancheRoom(junior, null) : null };
+}
+
 /** USDC of Senior room each 1 USDC of accepted Junior adds (c / (1 - c)); null when uncapped. */
 export function seniorRoomPerJunior(capBps: number): number | null {
   if (!Number.isFinite(capBps) || capBps >= BPS || capBps <= 0) return null;
