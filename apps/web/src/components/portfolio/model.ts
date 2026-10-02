@@ -6,7 +6,7 @@
 import { WAD, parseFixed } from "@bookrunner/shared/units";
 import type { BookListItem, PositionOut } from "../../lib/api-types";
 import { usdRaw } from "../../lib/format";
-import type { TopUpRound } from "../../lib/topup";
+import { type TopUpRound, firstMarkAtOrAfter } from "../../lib/topup";
 
 export type TrancheName = "senior" | "junior";
 export const TRANCHE_ORDER: readonly TrancheName[] = ["senior", "junior"];
@@ -264,10 +264,15 @@ export function markTimes(books: readonly Pick<BookListItem, "bookId" | "lastMar
 export type DepositSettlement =
   /** First deposit period: allocated when the subscription window closes. */
   | { kind: "window"; at: number | null }
-  /** Top-up round still open: accepted at the first mark after it ends. */
-  | { kind: "round"; endsAt: number }
-  /** The round has ended: accepted at the next mark. */
-  | { kind: "nextMark"; at: number | null };
+  /** Top-up round still open: accepted at the first mark after it ends (`settlesAt`). */
+  | { kind: "round"; endsAt: number; settlesAt: number }
+  /**
+   * The round has ended: accepted at the first mark whose period ends at or after the round end
+   * (`settlesAt`; null when the round could not be read).
+   */
+  | { kind: "ended"; settlesAt: number | null }
+  /** The round is not known yet (still loading or unreadable). */
+  | { kind: "unknown" };
 
 /** When a pending deposit in a book settles (all times unix seconds). */
 export function depositSettlement(
@@ -279,8 +284,12 @@ export function depositSettlement(
     const at = book.subscriptionEnds ? Math.floor(Date.parse(book.subscriptionEnds) / 1000) : null;
     return { kind: "window", at: at !== null && Number.isFinite(at) ? at : null };
   }
-  if (round && round.open && round.endsAt > nowSec) return { kind: "round", endsAt: round.endsAt };
-  return { kind: "nextMark", at: book.markSchedule?.nextPeriodEnd ?? null };
+  if (!round) return { kind: "unknown" };
+  const interval = book.markSchedule?.intervalSeconds ?? null;
+  const settlesAt = round.endsAt > 0 && interval ? firstMarkAtOrAfter(round.endsAt, interval) : null;
+  if (round.open && round.endsAt > nowSec && settlesAt !== null) return { kind: "round", endsAt: round.endsAt, settlesAt };
+  // Never "the next mark": a mark whose period closed before the round end does not settle it.
+  return { kind: "ended", settlesAt: round.open ? settlesAt : null };
 }
 
 export type RedemptionStage = "notice" | "queued" | "claimable" | "settled" | "claimed";

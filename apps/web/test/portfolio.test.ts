@@ -211,18 +211,30 @@ describe("split, marks and settlement", () => {
   const schedule = { intervalSeconds: 3600, cadence: "hourly", lastPeriodEnd: 1_790_960_400, nextPeriodEnd: 1_790_964_000, nextPeriodEndAt: "", status: "scheduled" as const, secondsUntil: 10 };
   const round = { bookId: 1, open: true, endsAt: 1_793_491_200, seniorCapacityUsd: 1n, juniorCapacityUsd: 1n };
 
-  test("depositSettlement", () => {
+  test("depositSettlement: a top-up round settles at the first mark at or after its END, never the next mark", () => {
     const live = { state: "Live", subscriptionEnds: "2026-10-02T13:41:32.000Z", markSchedule: schedule };
-    expect(depositSettlement(live, round, 1_790_960_000)).toEqual({ kind: "round", endsAt: 1_793_491_200 });
-    expect(depositSettlement(live, round, 1_793_491_200)).toEqual({ kind: "nextMark", at: 1_790_964_000 });
-    expect(depositSettlement(live, undefined, 0)).toEqual({ kind: "nextMark", at: 1_790_964_000 });
+    // Book.topUp() on testnet: endsAt 2026-11-01 16:16:49 UTC settles at the 17:00 UTC mark that day
+    const testnet = { ...round, endsAt: 1_793_549_809 };
+    expect(depositSettlement(live, testnet, 1_790_960_000)).toEqual({ kind: "round", endsAt: 1_793_549_809, settlesAt: 1_793_552_400 });
+    // ended but not settled yet: still the mark at or after the round end, not markSchedule.nextPeriodEnd
+    expect(depositSettlement(live, testnet, 1_793_550_000)).toEqual({ kind: "ended", settlesAt: 1_793_552_400 });
+    expect(depositSettlement(live, round, 1_793_491_200)).toEqual({ kind: "ended", settlesAt: 1_793_491_200 });
+    expect(depositSettlement(live, { ...round, open: false }, 1_793_491_200)).toEqual({ kind: "ended", settlesAt: null });
+    expect(depositSettlement(live, undefined, 0)).toEqual({ kind: "unknown" });
     expect(depositSettlement({ ...live, state: "Subscription" }, round, 0)).toEqual({ kind: "window", at: 1_790_948_492 });
   });
 
   test("settlementText", () => {
-    expect(settlementText({ kind: "round", endsAt: 1_793_491_200 }, "UTC")).toBe("Accepted at the first mark after the top-up round ends, 1 Nov 2026, 00:00 UTC, at that mark's share price.");
+    expect(settlementText({ kind: "round", endsAt: 1_793_549_809, settlesAt: 1_793_552_400 }, "UTC")).toBe(
+      "Accepted at the mark of 1 Nov 2026, 17:00 UTC, the first after the top-up round ends (1 Nov 2026, 16:16 UTC), at that mark's share price.",
+    );
     expect(settlementText({ kind: "window", at: null })).toBe("Allocated when the subscription window closes.");
-    expect(settlementText({ kind: "nextMark", at: 1_790_964_000 }, "UTC")).toBe("The round has ended: accepted at the next mark, 2 Oct 2026, 18:00 UTC.");
+    expect(settlementText({ kind: "ended", settlesAt: 1_793_552_400 }, "UTC")).toBe("The round has ended: accepted at the mark of 1 Nov 2026, 17:00 UTC, the first after the round end.");
+    expect(settlementText({ kind: "ended", settlesAt: null })).toBe("The round has ended: accepted at the first mark after the round end.");
+    for (const k of ["round", "ended", "unknown"] as const) {
+      const s = k === "round" ? { kind: k, endsAt: 1, settlesAt: 3600 } : k === "ended" ? { kind: k, settlesAt: 3600 } : { kind: k };
+      expect(settlementText(s, "UTC")).not.toMatch(/next mark/i);
+    }
   });
 
   test("redemptionStage", () => {

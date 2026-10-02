@@ -15,6 +15,16 @@ export interface TopUpRound {
   juniorCapacityUsd: bigint;
 }
 
+/**
+ * Period end (unix seconds) of the first mark on or after `tSec`. A top-up round settles at the
+ * first mark whose period ends at or after the round end (Tranche.settleAtMark checks
+ * upToIndex * markInterval >= endsAt), never earlier: rounds cannot be closed early.
+ */
+export function firstMarkAtOrAfter(tSec: number, intervalSec: number): number {
+  const i = Math.max(1, Math.floor(intervalSec));
+  return Math.ceil(tSec / i) * i;
+}
+
 /** Deposits are accepted now: the round is open and has not ended. */
 export function isTopUpOpen(r: TopUpRound | null | undefined, nowSec: number): boolean {
   return !!r && r.open && r.endsAt > nowSec;

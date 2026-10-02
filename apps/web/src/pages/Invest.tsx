@@ -8,6 +8,7 @@ import { useNow, useQueryError } from "../api/hooks";
 import { POLL, trpc } from "../api/trpc";
 import { BookInvestCard } from "../components/invest/BookInvestCard";
 import { RiskNotice } from "../components/invest/InvestBits";
+import { INVEST_STEPS } from "../components/invest/investCopy";
 import { pctOfBps } from "../components/invest/logic";
 import { FeesNote } from "../components/invest/TrancheChoice";
 import { useProtocolParams, useTrancheRounds } from "../components/invest/useInvestChain";
@@ -21,24 +22,6 @@ import { appChain } from "../wallet/chains";
 import { useTopUpRounds } from "../wallet/topUp";
 import { useOnboarding } from "../wallet/useOnboarding";
 import { useWallet } from "../wallet/WalletContext";
-
-const STEPS = [
-  {
-    n: 1,
-    title: "Pick a book",
-    body: "Each book is the underwriting pool of one perp market, with its own rules, marks and contracts.",
-  },
-  {
-    n: 2,
-    title: "Choose Senior or Junior",
-    body: "Senior is paid first and is last in line for losses. Junior takes losses first and keeps the rest of the fee flow.",
-  },
-  {
-    n: 3,
-    title: "Deposit and sign",
-    body: "Your USDC waits in escrow until the round settles at the next mark, then becomes shares at that mark's price.",
-  },
-] as const;
 
 export function InvestPage() {
   const list = trpc.book.list.useQuery(undefined, { refetchInterval: POLL.slow });
@@ -132,7 +115,7 @@ export function InvestPage() {
         lead="Each book funds one perp market's insurance fund and market-making inventory, and receives that market's fee flow. Pick a book, choose Senior or Junior, and deposit USDC while a deposit round is open."
       >
         <ol className="grid gap-3 sm:grid-cols-3">
-          {STEPS.map((s) => (
+          {INVEST_STEPS.map((s) => (
             <li key={s.n} className="flex gap-3 rounded-card border border-line bg-surface/80 p-4 shadow-card">
               <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[13px] font-semibold text-accent-text tnum" aria-hidden>
                 {s.n}

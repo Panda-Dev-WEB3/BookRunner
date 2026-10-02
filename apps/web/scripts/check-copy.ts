@@ -2,7 +2,7 @@
 // src/**/*.{ts,tsx} plus index.html and runs the shared checkCopy over them. Exit 1 on violations.
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
-import { type FileViolation, checkSnippets, extractCopy, extractHtmlCopy } from "./copy-extract";
+import { type CopySnippet, type FileViolation, checkSnippets, extractCopy, extractHtmlCopy } from "./copy-extract";
 
 export const WEB_ROOT = resolve(import.meta.dir, "..");
 
@@ -15,13 +15,19 @@ function walk(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-/** All violations in the app's user-facing sources (paths relative to apps/web). */
-export function checkApp(root = WEB_ROOT): { files: number; snippets: number; violations: FileViolation[] } {
+/** Every user-facing snippet of the app's sources (paths relative to apps/web). */
+export function appSnippets(root = WEB_ROOT): { files: number; snippets: CopySnippet[] } {
   const files = walk(join(root, "src"));
   const snippets = files.flatMap((f) => extractCopy(readFileSync(f, "utf8"), relative(root, f).replace(/\\/g, "/")));
   const html = join(root, "index.html");
   snippets.push(...extractHtmlCopy(readFileSync(html, "utf8"), "index.html"));
-  return { files: files.length + 1, snippets: snippets.length, violations: checkSnippets(snippets) };
+  return { files: files.length + 1, snippets };
+}
+
+/** All violations in the app's user-facing sources (paths relative to apps/web). */
+export function checkApp(root = WEB_ROOT): { files: number; snippets: number; violations: FileViolation[] } {
+  const { files, snippets } = appSnippets(root);
+  return { files, snippets: snippets.length, violations: checkSnippets(snippets) };
 }
 
 if (import.meta.main) {

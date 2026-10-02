@@ -28,7 +28,7 @@ const STEPS: Step[] = [
     title: "Accepted at a mark",
     body: (
       <>
-        After a top-up round ends, the next <Term id="mark">mark</Term> accepts deposits up to its capacity, as shares at that mark's <Term id="sharePrice">share price</Term>. A new book's first window allocates when it closes. Any excess is refunded.
+        Only after a top-up round ends: the first <Term id="mark">mark</Term> after the round end accepts deposits up to its capacity, as shares at that mark's <Term id="sharePrice">share price</Term>. A new book's first window allocates when it closes. Any excess is refunded.
       </>
     ),
     icon: (

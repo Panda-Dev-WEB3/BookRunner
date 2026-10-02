@@ -5,7 +5,9 @@
 import { WAD, parseFixed } from "@bookrunner/shared/units";
 import { type Address, type Hex, decodeFunctionData, isAddressEqual } from "viem";
 import { type AmountIssue, USDC_DECIMALS, amountIssue, amountIssueText, formatAmountDisplay, parseAmount } from "../../lib/amount";
-import { type TopUpRound, isTopUpOpen } from "../../lib/topup";
+import { type TopUpRound, firstMarkAtOrAfter, isTopUpOpen } from "../../lib/topup";
+
+export { firstMarkAtOrAfter };
 
 export type TrancheId = "senior" | "junior";
 export const TRANCHE_IDS: readonly TrancheId[] = ["senior", "junior"];
@@ -14,14 +16,6 @@ export const TRANCHE_NAME: Readonly<Record<TrancheId, string>> = { senior: "Seni
 const BPS = 10_000;
 /** Above this, Tranche.maxDeposit() means "no per-wallet cap" (it answers type(uint256).max). */
 const UNCAPPED = 2n ** 255n;
-
-// ------------------------------------------------------------------ dates
-
-/** Period end (unix seconds) of the first mark on or after `tSec`: a top-up round settles there. */
-export function firstMarkAtOrAfter(tSec: number, intervalSec: number): number {
-  const i = Math.max(1, Math.floor(intervalSec));
-  return Math.ceil(tSec / i) * i;
-}
 
 // ------------------------------------------------------------------ deposit window
 
@@ -45,7 +39,7 @@ export type DepositRoundKind = "subscription" | "topup";
 export type DepositWindow =
   /** Deposits are accepted now. `settlesAt`: window close (subscription) or the settling mark (top-up). */
   | { status: "open"; kind: DepositRoundKind; endsAt: number; settlesAt: number }
-  /** The round ended; it settles at window close (subscription) or at the next mark (top-up). */
+  /** The round ended; it settles at window close (subscription) or at the first mark whose period ends at or after the round end (top-up). */
   | { status: "settling"; kind: DepositRoundKind; endsAt: number; settlesAt: number }
   | { status: "paused"; by: "guardian" | "tranche"; kind: DepositRoundKind; endsAt: number; settlesAt: number }
   | { status: "closed"; why: "no-round" | "cancelled" | "retiring" | "retired" | "unknown" }

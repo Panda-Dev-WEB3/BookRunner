@@ -245,7 +245,8 @@ Subscription --closeWindow ok--> Live --retire--> Retiring --finalizeRetirement-
   wallet `claimAllocation(wallet)` → Senior: `walletAllocation(commit, totalCommitted, allocated)`;
   Junior: `juniorWindowAllocation(commit, wallet == sponsor, totalCommitted, sponsorWindowCommit,
   allocated)` (sponsor first, then pro-rata; `sponsorWindowCommit` snapshotted at `settleWindow`)
-  shares transferred + refund USDC. Top-up rounds settle at the next mark: accepted = min(committed,
+  shares transferred + refund USDC. Top-up rounds settle at the first mark whose period ends at or after
+  the round end (`upToIndex * markInterval >= endsAt`; a round cannot be closed early): accepted = min(committed,
   capacity, senior-cap constraint for Senior), shares minted at that mark's price.
 - Redemptions: `requestRedeem(shares, controller, owner)` transfers shares from owner (msg.sender
   must be owner or have allowance/operator) into escrow; bucket = `bucketIndex(eligibleAt,

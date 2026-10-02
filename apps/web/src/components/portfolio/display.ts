@@ -32,9 +32,13 @@ export function settlementText(s: DepositSettlement, timeZone?: string): string 
     case "window":
       return s.at ? `Allocated when the subscription window closes, ${fmtWhen(s.at, timeZone)}.` : "Allocated when the subscription window closes.";
     case "round":
-      return `Accepted at the first mark after the top-up round ends, ${fmtWhen(s.endsAt, timeZone)}, at that mark's share price.`;
-    case "nextMark":
-      return s.at ? `The round has ended: accepted at the next mark, ${fmtWhen(s.at, timeZone)}.` : "The round has ended: accepted at the next mark.";
+      return `Accepted at the mark of ${fmtWhen(s.settlesAt, timeZone)}, the first after the top-up round ends (${fmtWhen(s.endsAt, timeZone)}), at that mark's share price.`;
+    case "ended":
+      return s.settlesAt
+        ? `The round has ended: accepted at the mark of ${fmtWhen(s.settlesAt, timeZone)}, the first after the round end.`
+        : "The round has ended: accepted at the first mark after the round end.";
+    case "unknown":
+      return "Accepted at the first mark after the top-up round ends, at that mark's share price.";
   }
 }
 

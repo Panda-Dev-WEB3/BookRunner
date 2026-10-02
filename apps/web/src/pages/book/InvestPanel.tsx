@@ -7,7 +7,8 @@ import { useSearchParams } from "react-router";
 import { getAddress } from "viem";
 import { POLL, trpc } from "../../api/trpc";
 import { AmountStep, ReviewStep } from "../../components/invest/DepositFlow";
-import { type FlowStep, StepTrail, WindowBadge, windowSentence } from "../../components/invest/InvestBits";
+import { type FlowStep, StepTrail, WindowBadge } from "../../components/invest/InvestBits";
+import { killedDepositNote, windowSentence } from "../../components/invest/investCopy";
 import {
   type DepositWindow,
   type RoundRoom,
@@ -126,7 +127,7 @@ function BookInvest({ book, now }: { book: BookDetail; now: number }) {
       {book.killed && (
         <Callout tone="warn" title="This book's mandate is killed">
           Quoting has stopped and the agent's keys are revoked; the Risk Committee may re-mandate the book.
-          {bookWindow.status === "open" ? " Deposits are still accepted and settle at the next mark's share price." : ""} Withdrawals and claims are never blocked by a kill.
+          {killedDepositNote(bookWindow)} Withdrawals and claims are never blocked by a kill.
         </Callout>
       )}
       {bookWindow.status === "open" ? (
