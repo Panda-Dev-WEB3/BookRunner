@@ -18,6 +18,13 @@ export const TRANCHE_COPY = {
   },
 } as const;
 
+/**
+ * How a distribution is shared (Waterfall.splitDistribution / RevenueRouter.computeSplit): Senior
+ * gets a fixed share of what is left after expenses and carry and Junior the rest, in the same
+ * transaction, so neither is "paid first"; mark gains go to Junior once Senior impairment is restored.
+ */
+export const SPLIT_LINE =
+  "Senior receives a fixed share of each distribution after expenses and carry; Junior receives the rest plus any trading gains at the marks.";
 export const AGENTS_LINE = "Bookrunner agents quote the book under its mandate.";
 export const BACKSTOP_LINE = "Backstop up to the pool: covers Senior impairment only once Junior is exhausted.";
 export const LIVE_VS_MARKED =

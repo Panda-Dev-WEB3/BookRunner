@@ -23,10 +23,10 @@ const ROWS: Row[] = [
     label: "Fee flow",
     senior: (
       <>
-        Paid first: its <Term id="hurdle">hurdle share</Term> of what is left after expenses and carry.
+        A fixed share: its <Term id="hurdle">hurdle share</Term> of what is left after expenses and carry.
       </>
     ),
-    junior: "The residual: everything left after Senior's share. This is where the upside sits.",
+    junior: "The residual: everything left after Senior's share, plus any trading gains at the marks. This is where the upside sits.",
   },
   {
     label: "Losses",
@@ -89,7 +89,7 @@ export function TrancheStack() {
     <svg viewBox="0 0 360 420" className="mx-auto block h-auto w-full max-w-[400px]" role="img" aria-labelledby="stack-title stack-desc">
       <title id="stack-title">The tranche stack</title>
       <desc id="stack-desc">
-        Fee flow enters at the top and pays Senior first, then Junior. Losses rise from the bottom and hit Junior first, then Senior. The backstop sits beside
+        Fee flow enters at the top and is split between Senior and Junior in fixed shares. Losses rise from the bottom and hit Junior first, then Senior. The backstop sits beside
         Senior and covers a Senior shortfall once Junior is used up, up to what the pool holds.
       </desc>
       <defs>
@@ -119,10 +119,10 @@ export function TrancheStack() {
         Senior
       </text>
       <text x="48" y="124" fontSize="12.5" fill="var(--ink-2)">
-        Paid first, up to its
+        A fixed share of
       </text>
       <text x="48" y="141" fontSize="12.5" fill="var(--ink-2)">
-        hurdle share
+        each distribution
       </text>
       <text x="48" y="200" fontSize="12.5" fontWeight="600" fill="var(--ink-2)">
         Loses last
@@ -217,8 +217,8 @@ export function TranchesSection(props: { index: number }) {
       title="Two tranches, one clear order"
       lead={
         <>
-          Every book is split into <Term id="senior">Senior</Term> and <Term id="junior">Junior</Term>. They hold the same book. What differs is who is paid first
-          and who takes losses first.
+          Every book is split into <Term id="senior">Senior</Term> and <Term id="junior">Junior</Term>. They hold the same book. What differs is how each
+          distribution is shared and who takes losses first.
         </>
       }
     >

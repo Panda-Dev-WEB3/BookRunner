@@ -53,7 +53,7 @@ export function FeeFlowDiagram({ carryPct, className }: { carryPct?: string | nu
     <svg viewBox={`0 0 ${W} ${H}`} className={className} role="img" aria-labelledby={`${id}-t ${id}-d`} width="100%">
       <title id={`${id}-t`}>Fee flow pays down</title>
       <desc id={`${id}-d`}>
-        The market's fee flow pays expenses first, then the protocol carry, then Senior's share of what is left; Junior receives the rest.
+        The market's fee flow pays expenses first, then the protocol carry; what is left is split in fixed shares, Senior's share and the rest to Junior.
       </desc>
       <Box x={20} y={4} w={280} label="Fee flow from the market" color={SERIES.fee} />
       <Arrow x={160} y1={42} y2={58} color={SERIES.fee} />
@@ -62,7 +62,7 @@ export function FeeFlowDiagram({ carryPct, className }: { carryPct?: string | nu
       <Box x={20} y={112} w={280} label={`2. Protocol carry${carryPct ? ` (${carryPct})` : ""}`} sub="half to the backstop, half to BKRN stakers" color={SERIES.backstop} />
       <Arrow x={90} y1={150} y2={168} color={SERIES.fee} />
       <Arrow x={230} y1={150} y2={168} color={SERIES.fee} />
-      <Box x={20} y={168} w={136} label="3. Senior" sub="its share, first" color={SERIES.senior} />
+      <Box x={20} y={168} w={136} label="3. Senior" sub="its fixed share" color={SERIES.senior} />
       <Box x={164} y={168} w={136} label="4. Junior" sub="the rest" color={SERIES.junior} />
     </svg>
   );

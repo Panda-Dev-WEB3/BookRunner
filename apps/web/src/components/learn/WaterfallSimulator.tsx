@@ -259,7 +259,7 @@ function FeeResult({ o, hurdleBps }: { o: FeeOutcome; hurdleBps: number }) {
         />
         <Step
           n={4}
-          title={<Term id="hurdle">Senior hurdle share</Term>}
+          title={<Term id="hurdle">Senior's share of fee flow</Term>}
           amount={USDC(o.senior)}
           from={o.junior}
           to={o.toTranches}
@@ -522,8 +522,8 @@ export function WaterfallSimulator() {
               />
               <SimField
                 id={`${id}-hurdle`}
-                label={<Term id="hurdle">Senior hurdle share</Term>}
-                name="Senior hurdle share"
+                label={<Term id="hurdle">Senior's share of fee flow</Term>}
+                name="Senior's share of fee flow"
                 value={input.hurdleBps}
                 min={0}
                 max={10_000}
@@ -611,7 +611,7 @@ export function SimulatorSection(props: { index: number }) {
       lead={
         <>
           Move the sliders to see where each dollar goes. Fee flow runs <em>down</em> the <Term id="waterfall">waterfall</Term>: expenses, then the 10% carry,
-          then Senior's hurdle share, then Junior. Losses run <em>up</em> it: Junior, then Senior, then the backstop up to the pool.
+          then a fixed split between Senior's share and Junior. Losses run <em>up</em> it: Junior, then Senior, then the backstop up to the pool.
         </>
       }
     >

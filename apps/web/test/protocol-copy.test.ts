@@ -27,6 +27,10 @@ const RULES: Rule[] = [
     why: "PoolEngine accrues only taker fees to feesAccruedUsd (the router's fee flow); spread capture and the IF half of liquidation fees reach the book through NAV",
     pattern: /taker fees, liquidation fees|liquidation fees and spread capture/i,
   },
+  {
+    why: "Waterfall.splitDistribution pays Senior a fixed share and Junior the rest in the same transaction: Senior is not 'paid first' (expenses are)",
+    pattern: /(?<!are )\bpaid first\b|\bbefore Junior\b|its share, first|goes to Senior first|pays Senior first/i,
+  },
 ];
 
 const { snippets } = appSnippets();

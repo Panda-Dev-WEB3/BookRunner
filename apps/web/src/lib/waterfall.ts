@@ -43,7 +43,7 @@ const NOTES: Record<StepKey, string> = {
   gross: "Fee flow settled into the book's router over the period",
   expenses: "Oracle, keeper and venue operating costs, capped on-chain",
   carry: "Protocol carry on net fee flow: half to BKRN buybacks, half to the backstop pool",
-  senior: "Senior share of fee flow, up to its share; first claim",
+  senior: "Senior's fixed share of what reached the tranches",
   junior: "Residual fee flow to the Junior tranche",
 };
 

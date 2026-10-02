@@ -3,7 +3,7 @@
 // left in the round and a one-line risk statement each.
 import type { ReactNode } from "react";
 import type { BookDetail } from "../../lib/api-types";
-import { SPONSOR_SKIN_SHORT } from "../../lib/copy";
+import { SPLIT_LINE, SPONSOR_SKIN_SHORT } from "../../lib/copy";
 import { fmtDuration, fmtSharePrice } from "../../lib/format";
 import { cadenceTitle } from "../../lib/lowgas";
 import { IconCheck } from "../icons";
@@ -14,8 +14,8 @@ import { type DepositWindow, TRANCHE_IDS, type TrancheId, type TrancheRoom, dist
 import type { ProtocolParams } from "./useInvestChain";
 
 export const TRANCHE_LINE: Record<TrancheId, string> = {
-  senior: "Paid first from the fee flow, up to its share. Junior absorbs losses before Senior does.",
-  junior: "Takes losses first, and keeps what is left of the fee flow after Senior's share.",
+  senior: "A fixed share of each distribution after expenses and carry. Junior absorbs losses before Senior does.",
+  junior: "Takes losses first, and keeps the rest of each distribution plus any trading gains at the marks.",
 };
 
 export const TRANCHE_RISK: Record<TrancheId, string> = {
@@ -55,7 +55,7 @@ export function TrancheChoice(props: TrancheChoiceProps) {
         <Term key="t" id="hurdle">
           Share of fee flow
         </Term>,
-        split ? `${pctOfBps(split.senior)} of each distribution, paid before Junior` : "Set in the charter",
+        split ? `${pctOfBps(split.senior)} of each distribution after expenses and carry` : "Set in the charter",
       ],
       ["Loss order", "Second: only after all of Junior is used up. The backstop may then cover Senior, up to what its pool holds."],
       ["Size limit", c ? `At most ${pctOfBps(c.seniorCapBps)} of the book when deposits are accepted (the Senior cap)` : "Set in the charter"],
@@ -79,7 +79,7 @@ export function TrancheChoice(props: TrancheChoiceProps) {
         <Term key="t" id="hurdle">
           Share of fee flow
         </Term>,
-        split ? `${pctOfBps(split.junior)} of each distribution: what is left after Senior` : "Set in the charter",
+        split ? `${pctOfBps(split.junior)} of each distribution, plus any trading gains at the marks` : "Set in the charter",
       ],
       ["Loss order", "First: Junior absorbs losses before anyone else."],
       ["Size limit", c ? `At least ${pctOfBps(10_000 - c.seniorCapBps)} of the book when deposits are accepted. The sponsor ${SPONSOR_SKIN_SHORT}; later top-ups can dilute that share.` : "Set in the charter"],
@@ -124,7 +124,7 @@ export function TrancheChoice(props: TrancheChoiceProps) {
                       <Term id={t}>{name}</Term>
                     </h3>
                     {t === "senior" ? (
-                      <span className="rounded-full bg-senior/12 px-2 py-0.5 text-[11.5px] font-medium text-senior-ink">Paid first</span>
+                      <span className="rounded-full bg-senior/12 px-2 py-0.5 text-[11.5px] font-medium text-senior-ink">Last loss</span>
                     ) : (
                       <span className="rounded-full bg-junior/14 px-2 py-0.5 text-[11.5px] font-medium text-junior-ink">First loss · residual</span>
                     )}
@@ -203,7 +203,7 @@ export function FeesNote({ params, className }: { params: ProtocolParams | undef
       <span className="font-semibold text-ink">Fees. </span>
       No fee to deposit or withdraw (you only pay network gas), and no management fee. Before the <Term id="feeFlow">fee flow</Term> is shared, expenses (oracle and keeper gas
       {expense !== null ? `, capped at ${pctOfBps(expense)} of it` : ", capped on-chain"}) come off, then the protocol takes a{" "}
-      <Term id="carry">{carry !== null ? `${pctOfBps(carry)} carry` : "carry"}</Term>. The rest is split between Senior and Junior along the <Term id="waterfall">waterfall</Term>.
+      <Term id="carry">{carry !== null ? `${pctOfBps(carry)} carry` : "carry"}</Term>. Along the <Term id="waterfall">waterfall</Term>, {SPLIT_LINE}
     </div>
   );
 }

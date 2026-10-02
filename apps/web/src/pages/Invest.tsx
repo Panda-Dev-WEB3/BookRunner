@@ -212,17 +212,17 @@ export function InvestPage() {
         tone="muted"
         eyebrow="Two ways in"
         title="Senior or Junior?"
-        lead="Both tranches of a book hold the same assets. They differ in who is paid first and who absorbs losses first."
+        lead="Both tranches of a book hold the same assets. They differ in how each distribution is shared and in who absorbs losses first."
         headerSize="md"
       >
         <div className="grid gap-4 md:grid-cols-2">
           <Card padding="lg">
             <div className="mb-3 flex flex-wrap items-center gap-2">
               <TrancheBadge tranche="senior" term />
-              <span className="text-[13px] text-ink-2">paid first, last loss</span>
+              <span className="text-[13px] text-ink-2">fixed share, last loss</span>
             </div>
             <p className="text-[14px] text-ink-2">
-              Senior receives its <Term id="hurdle">share</Term> of each distribution before Junior. Losses reach Senior only after all of Junior is used up. Senior is last loss, not no loss.
+              Senior receives a fixed <Term id="hurdle">share</Term> of each distribution after expenses and carry; Junior's share is paid in the same transaction. Losses reach Senior only after all of Junior is used up. Senior is last loss, not no loss.
             </p>
           </Card>
           <Card padding="lg">
@@ -231,7 +231,7 @@ export function InvestPage() {
               <span className="text-[13px] text-ink-2">first loss, residual</span>
             </div>
             <p className="text-[14px] text-ink-2">
-              Junior keeps what is left of each distribution after Senior's share, and absorbs losses first. The sponsor holds at least 10% of Junior when the subscription window closes, so it shares the first losses too; later top-ups can dilute that share.
+              Junior keeps what is left of each distribution after Senior's share, plus any trading gains at the marks, and absorbs losses first. The sponsor holds at least 10% of Junior when the subscription window closes, so it shares the first losses too; later top-ups can dilute that share.
             </p>
           </Card>
           <Card padding="lg" as="section" aria-label="Fee flow pays down">

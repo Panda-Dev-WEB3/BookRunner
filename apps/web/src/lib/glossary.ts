@@ -97,7 +97,7 @@ const entries: GlossaryEntry[] = [
   {
     id: "senior",
     term: "Senior tranche",
-    short: "Paid first from fee flow, up to its hurdle share, and last in line for losses. Junior absorbs losses first; Senior is last loss, not no loss.",
+    short: "Receives a fixed share of each distribution (its hurdle share) and is last in line for losses. Junior absorbs losses first; Senior is last loss, not no loss.",
     long: "If losses use up all of a book's Junior, the backstop may cover Senior's shortfall, up to what the pool holds. Senior redemptions settle at NAV at every mark, with no notice period.",
     related: ["junior", "hurdle", "backstop"],
   },
@@ -110,8 +110,9 @@ const entries: GlossaryEntry[] = [
   },
   {
     id: "hurdle",
-    term: "Hurdle share",
-    short: "Senior's share of each distribution, set in the charter (for example 60%). After expenses and carry, this share of the fee flow goes to Senior first; Junior receives the rest.",
+    term: "Senior's share of fee flow",
+    short: "The fixed share of each distribution that goes to Senior, set in the charter as the hurdle share (for example 60%). After expenses and carry, Senior receives this share and Junior the rest, in the same transaction.",
+    long: "It is a fixed split, not a hurdle rate: both shares are paid in the same transaction, and gains at the marks go to Junior once any Senior shortfall is restored.",
     related: ["senior", "waterfall", "carry"],
   },
   {
@@ -124,7 +125,7 @@ const entries: GlossaryEntry[] = [
   {
     id: "waterfall",
     term: "Waterfall",
-    short: "The order money moves in. Fee flow runs down: expenses, then the 10% carry, then Senior's hurdle share, then the Junior residual. Losses run up: Junior first, then Senior, then the backstop up to the pool.",
+    short: "The order money moves in. Fee flow runs down: expenses, then the 10% carry, then a fixed split between Senior's hurdle share and the Junior residual. Losses run up: Junior first, then Senior, then the backstop up to the pool.",
     related: ["carry", "hurdle", "backstop"],
   },
   {

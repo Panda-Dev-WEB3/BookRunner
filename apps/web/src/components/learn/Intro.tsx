@@ -22,7 +22,7 @@ const SHORT_VERSION = [
     title: "Allocators fund it in two tranches",
     body: (
       <>
-        <Term id="senior">Senior</Term> is paid first and loses last. <Term id="junior">Junior</Term> takes losses first and gets the residual.
+        <Term id="senior">Senior</Term> gets a fixed share of the fee flow and loses last. <Term id="junior">Junior</Term> takes losses first and gets the residual.
       </>
     ),
   },

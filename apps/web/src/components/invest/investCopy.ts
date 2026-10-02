@@ -39,7 +39,7 @@ export const INVEST_STEPS = [
   {
     n: 2,
     title: "Choose Senior or Junior",
-    body: "Senior is paid first and is last in line for losses. Junior takes losses first and keeps the rest of the fee flow.",
+    body: "Senior receives a fixed share of each distribution and is last in line for losses. Junior takes losses first and keeps the rest, plus any trading gains.",
   },
   {
     n: 3,

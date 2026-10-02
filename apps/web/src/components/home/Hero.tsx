@@ -49,8 +49,8 @@ function HeroCopy() {
       </h1>
       <p className="mt-5 max-w-xl text-[16.5px] leading-relaxed text-ink-2 sm:text-[18px]">
         <Term id="allocator">Allocators</Term> fund a single market through a <Term id="senior">Senior</Term> or a <Term id="junior">Junior</Term> tranche. A software agent
-        quotes and hedges that market under a <Term id="mandate">mandate</Term> enforced in code, and the market's <Term id="feeFlow">fee flow</Term> is paid out in a fixed
-        order.
+        quotes and hedges that market under a <Term id="mandate">mandate</Term> enforced in code, and the market's <Term id="feeFlow">fee flow</Term> is shared out by fixed
+        rules.
       </p>
       <div className="mt-8 flex flex-wrap items-center gap-3">
         {w.active ? (
@@ -171,7 +171,7 @@ function CapitalStack({ summary, loading }: { summary: BooksSummary | null; load
             style={{ flexGrow: seniorGrow }}
             swatch={SERIES_CLASS.senior.bg}
             title="Senior"
-            note="Paid first · last loss"
+            note="Fixed share of fee flow · last loss"
             value={loading ? null : summary ? `${fmtUsd(summary.seniorRaw, { symbol: true, compact: true })}${split ? ` · ${sharePct(split.senior)}` : ""}` : DASH}
           />
           <StackRow
@@ -189,7 +189,7 @@ function CapitalStack({ summary, loading }: { summary: BooksSummary | null; load
         <li className="flex items-center gap-2">
           <span className={cx("inline-block h-2.5 w-2.5 rounded-full", SERIES_CLASS.fee.bg)} aria-hidden />
           <span>
-            <span className="font-medium text-ink">Fee flow</span> is paid top-down
+            <span className="font-medium text-ink">Fee flow</span> is split in fixed shares
           </span>
         </li>
         <li className="flex items-center gap-2">

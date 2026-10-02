@@ -82,7 +82,7 @@ export function ProblemSection(props: { index: number }) {
             <div className="text-[13.5px] font-semibold text-ink">Book</div>
             <div className="mt-2 grid gap-1.5">
               <FlowNode series="senior" title="Senior" className="!p-2">
-                Paid first, loses last
+                Fixed share, loses last
               </FlowNode>
               <FlowNode series="junior" title="Junior" className="!p-2">
                 Loses first, gets the residual

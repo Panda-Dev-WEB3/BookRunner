@@ -100,7 +100,7 @@ function AllocatorCard() {
       <div className="mt-4 grid gap-3 sm:grid-cols-2">
         <div className={cx("rounded-[10px] border p-4", SERIES_CLASS.senior.border, SERIES_CLASS.senior.soft)}>
           <TrancheBadge tranche="senior" />
-          <p className="mt-2 text-[13.5px] text-ink">Paid first from fee flow, up to its hurdle share. Last loss, not no loss.</p>
+          <p className="mt-2 text-[13.5px] text-ink">A fixed share of each distribution. Last loss, not no loss.</p>
         </div>
         <div className={cx("rounded-[10px] border p-4", SERIES_CLASS.junior.border, SERIES_CLASS.junior.soft)}>
           <TrancheBadge tranche="junior" />
