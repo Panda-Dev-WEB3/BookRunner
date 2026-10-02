@@ -162,12 +162,11 @@ export function fmtDuration(seconds: number | null | undefined): string {
   return parts.join(" ");
 }
 
-/** Timestamp in a fixed, sortable form: "2026-10-02 14:05:12". */
-export function fmtDateTime(iso: string | number | null | undefined, timeZone?: string): string {
-  if (iso == null) return DASH;
+function dateTimeParts(iso: string | number | null | undefined, timeZone?: string): Record<string, string> | null {
+  if (iso == null) return null;
   const d = new Date(typeof iso === "number" ? (iso > 1e12 ? iso : iso * 1000) : iso);
-  if (Number.isNaN(d.getTime())) return DASH;
-  const parts = Object.fromEntries(
+  if (Number.isNaN(d.getTime())) return null;
+  return Object.fromEntries(
     new Intl.DateTimeFormat("en-GB", {
       timeZone,
       year: "numeric",
@@ -177,16 +176,27 @@ export function fmtDateTime(iso: string | number | null | undefined, timeZone?: 
       minute: "2-digit",
       second: "2-digit",
       hourCycle: "h23",
+      timeZoneName: "short",
     })
       .formatToParts(d)
       .map((p) => [p.type, p.value]),
   );
-  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
 }
 
+/**
+ * Timestamp in a fixed, sortable form with its zone: "2026-10-02 14:05:12 CEST". The viewer's zone
+ * (or `timeZone`), labelled like fmtWhen, so one page never mixes unlabelled local times with UTC.
+ */
+export function fmtDateTime(iso: string | number | null | undefined, timeZone?: string): string {
+  const p = dateTimeParts(iso, timeZone);
+  if (!p) return DASH;
+  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}${p.timeZoneName ? ` ${p.timeZoneName}` : ""}`;
+}
+
+/** Time of day only ("14:05:12"), for rows under a heading that already names the day and zone. */
 export function fmtTime(iso: string | number | null | undefined, timeZone?: string): string {
-  const s = fmtDateTime(iso, timeZone);
-  return s === DASH ? s : s.slice(11);
+  const p = dateTimeParts(iso, timeZone);
+  return p ? `${p.hour}:${p.minute}:${p.second}` : DASH;
 }
 
 /** 0x1234…abcd */

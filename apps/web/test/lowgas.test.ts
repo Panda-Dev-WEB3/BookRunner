@@ -14,7 +14,8 @@ describe("next mark", () => {
     expect(nextMarkLabel(s, T + 13 * 3600 * 1000)).toBe("due now");
     expect(nextMarkLabel({ ...s, status: "due" }, T)).toBe("due now");
     expect(nextMarkLabel(null, T)).toBe("—");
-    expect(nextMarkAt(s)).toBe("2026-10-03 00:00 UTC");
+    expect(nextMarkAt(s, "UTC")).toBe("3 Oct 2026, 00:00 UTC");
+    expect(nextMarkAt(s, "Europe/Paris")).toBe("3 Oct 2026, 02:00 CEST");
   });
 
   test("cadence copy: daily per spec, any interval reads naturally, and passes the copy rules", () => {

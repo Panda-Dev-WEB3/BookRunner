@@ -107,9 +107,11 @@ describe("time", () => {
     expect(fmtDuration(0)).toBe("none");
   });
   test("fixed timestamps (unix seconds, ms, ISO)", () => {
-    expect(fmtDateTime("2026-10-02T06:05:00.000Z", "UTC")).toBe("2026-10-02 06:05:00");
-    expect(fmtDateTime(1790921100, "UTC")).toBe("2026-10-02 06:05:00");
-    expect(fmtDateTime(1790921100000, "UTC")).toBe("2026-10-02 06:05:00");
+    // labelled with its zone, so a page never mixes unlabelled local times with UTC ones
+    expect(fmtDateTime("2026-10-02T06:05:00.000Z", "UTC")).toBe("2026-10-02 06:05:00 UTC");
+    expect(fmtDateTime(1790921100, "UTC")).toBe("2026-10-02 06:05:00 UTC");
+    expect(fmtDateTime(1790921100000, "UTC")).toBe("2026-10-02 06:05:00 UTC");
+    expect(fmtDateTime(1790921100, "Europe/Paris")).toBe("2026-10-02 08:05:00 CEST");
     expect(fmtTime("2026-10-02T06:05:00.000Z", "UTC")).toBe("06:05:00");
     expect(fmtDateTime("nope")).toBe(DASH);
   });

@@ -1,7 +1,7 @@
 // Low-gas mode display helpers (docs/LOW_GAS.md): the next mark (one mark transaction per book per period,
 // daily on mainnet), the age of the oracle's latest signed price (prices ride in the transactions that need
 // them, so the price stored on-chain is old between trades by design) and of ops-venue's signed venue report.
-import { DASH, fmtAge, fmtAgo, fmtDuration } from "./format";
+import { DASH, fmtAge, fmtAgo, fmtDuration, fmtWhen } from "./format";
 
 export interface MarkScheduleLike {
   intervalSeconds: number;
@@ -18,10 +18,10 @@ export function nextMarkLabel(s: MarkScheduleLike | null | undefined, nowMs: num
   return left <= 0 ? "due now" : `in ${fmtAge(left * 1000)}`;
 }
 
-/** Period end of the next mark as a short UTC time ("2026-10-03 00:00 UTC"). */
-export function nextMarkAt(s: MarkScheduleLike | null | undefined): string {
+/** Period end of the next mark in the viewer's zone, labelled ("3 Oct 2026, 02:00 CEST"), like every other time on the page. */
+export function nextMarkAt(s: MarkScheduleLike | null | undefined, timeZone?: string): string {
   if (!s) return DASH;
-  return `${new Date(s.nextPeriodEnd * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+  return fmtWhen(s.nextPeriodEnd, timeZone);
 }
 
 /**

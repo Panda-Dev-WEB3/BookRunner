@@ -2,7 +2,7 @@
 // signed price of the underlying and, on Orderly books, ops-venue's latest signed venue report.
 import { Chip, KV, Panel } from "../../components/ui";
 import type { BookDetail } from "../../lib/api-types";
-import { DASH, fmtPrice, fmtUsd } from "../../lib/format";
+import { DASH, fmtPrice, fmtUsd, fmtWhen } from "../../lib/format";
 import { SIGNED_PRICE_LINE, VENUE_REPORT_LINE, ageOf, cadenceTitle, markCadenceLine, nextMarkAt, nextMarkLabel, signedFreshness } from "../../lib/lowgas";
 
 const TONE = { fresh: "good", aging: "warn", stale: "critical" } as const;
@@ -18,7 +18,7 @@ export function MarkCadencePanel({ b, now, maxPriceAgeSeconds = 300 }: { b: Book
       <KV
         rows={[
           ["Next mark", <span key="n" className="num">{`${nextMarkLabel(s, now)} · ${nextMarkAt(s)}`}</span>],
-          ["Last mark period", <span key="l" className="num">{s.lastPeriodEnd ? `${new Date(s.lastPeriodEnd * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC` : "none yet"}</span>],
+          ["Last mark period", <span key="l" className="num">{s.lastPeriodEnd ? fmtWhen(s.lastPeriodEnd) : "none yet"}</span>],
           [
             `Signed price${b.priceId ? ` (${b.priceId})` : ""}`,
             p ? (
