@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { checkCopy } from "@bookrunner/shared/copy";
 import { faqItems } from "../src/components/home/faqContent";
-import { type HomeBook, depositHeadline, depositOpen, depositStatus, fmtDayUtc, marketInfo, roundFill, sharePct, summarizeBooks, trancheSplit } from "../src/components/home/model";
+import { type HomeBook, depositHeadline, depositOpen, depositStatus, fmtDayUtc, marketInfo, roundFill, sharePct, summarizeBooks, topUpIssueLine, trancheSplit } from "../src/components/home/model";
 import { isGlossaryId } from "../src/lib/glossary";
 import type { TopUpRound } from "../src/lib/topup";
 
@@ -141,6 +141,15 @@ describe("depositStatus", () => {
       expect(h.length).toBeGreaterThan(0);
       expect(checkCopy(h)).toEqual([]);
     }
+  });
+});
+
+describe("topUpIssueLine", () => {
+  test("names the settling mark with its time: the round ends 16:16 UTC and settles at 17:00 UTC the same day", () => {
+    const line = topUpIssueLine(1_793_549_809, 3600, "UTC");
+    expect(line).toBe("Deposits wait in escrow and cannot be cancelled. Shares are issued at the mark of 1 Nov 2026, 17:00 UTC, the first after the round ends, at that mark's share price.");
+    expect(line).not.toContain("after 1 Nov 2026,");
+    expect(checkCopy(line)).toEqual([]);
   });
 });
 

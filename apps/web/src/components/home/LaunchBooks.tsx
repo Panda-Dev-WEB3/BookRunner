@@ -20,7 +20,7 @@ import { roomFigure, roomNote } from "../invest/investCopy";
 import { type TrancheId, type TrancheRoom, bookRooms } from "../invest/logic";
 import { type BookRounds, useTrancheRounds } from "../invest/useInvestChain";
 import { Badge, Card, EmptyState, ErrorState, ProgressBar, Section, Skeleton, Stat, StateChip } from "../ui";
-import { type DepositStatus, depositHeadline, depositOpen, depositStatus, fmtDayUtc, marketInfo, sharePct, trancheSplit } from "./model";
+import { type DepositStatus, depositHeadline, depositOpen, depositStatus, marketInfo, sharePct, topUpIssueLine, trancheSplit } from "./model";
 
 const MAX_CARDS = 6;
 
@@ -164,7 +164,7 @@ function BookCard({ b, deposit, committed, now }: { b: BookListItem; deposit: De
         )}
       </div>
 
-      <DepositRow deposit={deposit} rooms={rooms} capBps={capBps} />
+      <DepositRow deposit={deposit} rooms={rooms} capBps={capBps} markIntervalSec={b.markSchedule.intervalSeconds} />
 
       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line px-5 py-4">
         <div className="flex min-w-0 flex-col gap-1">
@@ -180,7 +180,7 @@ function BookCard({ b, deposit, committed, now }: { b: BookListItem; deposit: De
   );
 }
 
-function DepositRow({ deposit, rooms, capBps }: { deposit: DepositStatus; rooms: Record<TrancheId, TrancheRoom | null> | null; capBps: number | null }) {
+function DepositRow({ deposit, rooms, capBps, markIntervalSec }: { deposit: DepositStatus; rooms: Record<TrancheId, TrancheRoom | null> | null; capBps: number | null; markIntervalSec: number }) {
   const open = depositOpen(deposit);
   return (
     <div className="border-t border-line bg-surface-2/50 px-5 py-4">
@@ -194,7 +194,7 @@ function DepositRow({ deposit, rooms, capBps }: { deposit: DepositStatus; rooms:
             <TrancheRound tranche="senior" capacity={deposit.seniorCapacity} room={rooms?.senior ?? null} capBps={capBps} />
             <TrancheRound tranche="junior" capacity={deposit.juniorCapacity} room={rooms?.junior ?? null} capBps={capBps} />
           </div>
-          <p className="mt-3 text-[12px] text-ink-2">Deposits wait in escrow. Shares are issued at the first mark after {fmtDayUtc(deposit.endsAt)}, at that mark's share price.</p>
+          <p className="mt-3 text-[12px] text-ink-2">{topUpIssueLine(deposit.endsAt, markIntervalSec)}</p>
         </>
       )}
       {deposit.kind === "window" && <p className="mt-1.5 text-[12px] text-ink-2">Commitments are allocated pro-rata when the window closes; any excess is refunded.</p>}

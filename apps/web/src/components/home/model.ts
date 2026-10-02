@@ -1,7 +1,7 @@
 // Pure helpers behind the Home page (no DOM, no React): the live strip summary, the launch-book market
 // descriptions and the deposit-round status of each book. Unit-tested in test/home.test.ts.
-import { tickerOf, usdRaw } from "../../lib/format";
-import { type TopUpRound, isTopUpOpen } from "../../lib/topup";
+import { fmtWhen, tickerOf, usdRaw } from "../../lib/format";
+import { type TopUpRound, firstMarkAtOrAfter, isTopUpOpen } from "../../lib/topup";
 
 /** The fields of a book.list row the Home page reads (BookListItem satisfies it). */
 export interface HomeBook {
@@ -190,6 +190,15 @@ export function fmtDayUtc(sec: number): string {
   if (!Number.isFinite(sec) || Number.isNaN(d.getTime())) return "—";
   const parts = Object.fromEntries(DAY_UTC.formatToParts(d).map((p) => [p.type, p.value]));
   return `${parts.day} ${parts.month} ${parts.year}`;
+}
+
+/**
+ * When a top-up round's deposits become shares, with the settling mark's date AND time: the round
+ * ends mid-period (16:16 UTC on testnet) and settles at the next period end (17:00 UTC) the same
+ * day, so "after 1 Nov 2026" alone reads as 2 Nov or later.
+ */
+export function topUpIssueLine(endsAt: number, markIntervalSec: number, timeZone?: string): string {
+  return `Deposits wait in escrow and cannot be cancelled. Shares are issued at the mark of ${fmtWhen(firstMarkAtOrAfter(endsAt, markIntervalSec), timeZone)}, the first after the round ends, at that mark's share price.`;
 }
 
 /** One-line headline for a deposit status. */
