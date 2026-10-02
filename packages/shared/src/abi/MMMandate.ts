@@ -180,6 +180,29 @@ export const mMMandateAbi = [
   },
   {
     "type": "function",
+    "name": "checkFlatten",
+    "inputs": [
+      {
+        "name": "key",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "hedgeBeforeUsd",
+        "type": "int256",
+        "internalType": "int256"
+      },
+      {
+        "name": "hedgeAfterUsd",
+        "type": "int256",
+        "internalType": "int256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "checkFundDesk",
     "inputs": [
       {

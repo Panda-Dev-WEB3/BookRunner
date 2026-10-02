@@ -11,7 +11,7 @@ import {
 } from "@bookrunner/shared";
 import type { RiskSettings } from "./config";
 import { type Evaluation, evaluate } from "./domain/evaluate";
-import { venueDeployedValue } from "./domain/nav";
+import { trustLiveVenueEquity, venueDeployedValue } from "./domain/nav";
 import { oracleFromRedis, oraclePrice } from "./domain/oracle";
 import { finite, jsonSafe, receiptRow, usdNum, usdStr } from "./domain/records";
 import { type Effect, decide, newKillJournal } from "./domain/transitions";
@@ -138,7 +138,8 @@ export class BookMonitor {
       try {
         const a = await withTimeout(venue.account(), this.d.settings.venueTimeoutMs, "venue.account");
         netExposureUsd = a.position?.netExposureUsd ?? 0n;
-        liveMmEquity = a.equityUsd;
+        if (trustLiveVenueEquity(nowSec, c.adapter.lastFlowAt, this.d.settings.venueSettleSec)) liveMmEquity = a.equityUsd;
+        else this.log.debug({ lastFlowAt: c.adapter.lastFlowAt }, "venue equity ignored: capital flow still settling at the venue");
         exposureSource = "venue_api";
       } catch (err) {
         this.log.warn({ err: errMsg(err) }, "venue API unavailable; using the adapter's last report");

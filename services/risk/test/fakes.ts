@@ -139,6 +139,7 @@ export const settings = (over: Partial<RiskSettings> = {}): RiskSettings => ({
   stepAttempts: 2,
   stepRetryMs: 1,
   venueTimeoutMs: 1000,
+  venueSettleSec: 120,
   ...over,
 });
 

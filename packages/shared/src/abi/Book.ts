@@ -725,6 +725,11 @@ export const bookAbi = [
         "name": "assetsOwed",
         "type": "uint256",
         "internalType": "uint256"
+      },
+      {
+        "name": "sharesBurned",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "outputs": [],

@@ -41,6 +41,15 @@ export function computeLiveNav(n: NavInputs): LiveNavResult {
  *   insurance (last report) + max(live MM equity, 0) + in-transit.
  * Otherwise the adapter's own deployedValueUsd (engine: live on-chain; Orderly: last report).
  */
+/**
+ * The live venue API lags on-chain deposits (the venue credits them only after indexing / cross-chain
+ * delivery). Within `settleSec` of the adapter's last capital flow the venue equity is not trusted and
+ * the adapter's on-chain figures are used instead — a deposit in flight must never read as a drawdown.
+ */
+export function trustLiveVenueEquity(nowSec: number, lastFlowAt: number | undefined, settleSec: number): boolean {
+  return !lastFlowAt || nowSec - lastFlowAt >= settleSec;
+}
+
 export function venueDeployedValue(
   adapter: { deployedValueUsd: bigint; insuranceEquityUsd: bigint; inTransitUsd: bigint },
   liveMmEquityUsd: bigint | null,

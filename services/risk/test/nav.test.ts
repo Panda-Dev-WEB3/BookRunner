@@ -120,3 +120,14 @@ describe("stepHedgeBand state machine", () => {
     expect(out).toBe(902);
   });
 });
+
+import { trustLiveVenueEquity } from "../src/domain/nav";
+
+describe("venue settle window (deposit in flight must not read as a drawdown)", () => {
+  test("live venue equity ignored within settleSec of the adapter's last capital flow", () => {
+    expect(trustLiveVenueEquity(1_000, 950, 120)).toBe(false);
+    expect(trustLiveVenueEquity(1_000, 880, 120)).toBe(true);
+    expect(trustLiveVenueEquity(1_000, 0, 120)).toBe(true);
+    expect(trustLiveVenueEquity(1_000, undefined, 120)).toBe(true);
+  });
+});

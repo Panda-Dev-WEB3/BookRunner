@@ -233,7 +233,7 @@ describe("ViemChain reads", () => {
       oracle: { priceWad: wad(190), publishedAt: T0, held: false, stale: false, source: "chain" },
     });
     expect(o.mandate).toEqual(MANDATE);
-    expect(o.adapter).toEqual({ netExposureUsd: usd(-20_000), deployedValueUsd: usd(84_000), insuranceEquityUsd: usd(25_000), inTransitUsd: 0n, valuationAt: T0 });
+    expect(o.adapter).toEqual({ netExposureUsd: usd(-20_000), deployedValueUsd: usd(84_000), insuranceEquityUsd: usd(25_000), inTransitUsd: 0n, valuationAt: T0, lastFlowAt: expect.any(Number) });
     expect(o.desk).toEqual({ hedgeNotionalUsd: usd(16_000), valueUsd: usd(16_000), priceStale: false });
   });
 

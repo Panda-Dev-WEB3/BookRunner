@@ -24,6 +24,32 @@ export const bookrunnerDeskAbi = [
   },
   {
     "type": "function",
+    "name": "DEFAULT_PERIOD_SLIPPAGE_BUDGET_BPS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "DEFAULT_RISK_MAX_SLIPPAGE_BPS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "MAX_HELD_TOKENS",
     "inputs": [],
     "outputs": [
@@ -265,6 +291,32 @@ export const bookrunnerDeskAbi = [
   },
   {
     "type": "function",
+    "name": "periodSlippageBudgetBps",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "riskMaxSlippageBps",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "sessionKeyValidUntil",
     "inputs": [
       {
@@ -294,6 +346,43 @@ export const bookrunnerDeskAbi = [
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setRiskSlippageParams",
+    "inputs": [
+      {
+        "name": "riskBps",
+        "type": "uint16",
+        "internalType": "uint16"
+      },
+      {
+        "name": "periodBudgetBps",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "slippageUsedUsd",
+    "inputs": [
+      {
+        "name": "period",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "lossUsd",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -614,6 +703,25 @@ export const bookrunnerDeskAbi = [
   },
   {
     "type": "event",
+    "name": "RiskSlippageParamsSet",
+    "inputs": [
+      {
+        "name": "riskMaxSlippageBps",
+        "type": "uint16",
+        "indexed": false,
+        "internalType": "uint16"
+      },
+      {
+        "name": "periodSlippageBudgetBps",
+        "type": "uint16",
+        "indexed": false,
+        "internalType": "uint16"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "SessionKeySynced",
     "inputs": [
       {
@@ -805,6 +913,22 @@ export const bookrunnerDeskAbi = [
         "name": "token",
         "type": "address",
         "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "SlippageBudgetExceeded",
+    "inputs": [
+      {
+        "name": "usedUsd",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "budgetUsd",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ]
   },

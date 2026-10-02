@@ -13,6 +13,19 @@ export const poolEngineAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "CLOSE_OUT_NOTICE_MARKS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "DEFAULT_FUNDING_VELOCITY_BPS",
     "inputs": [],
     "outputs": [
@@ -88,6 +101,13 @@ export const poolEngineAdapterAbi = [
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "applyMandate",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -342,6 +362,13 @@ export const poolEngineAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "startCloseOut",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "sweepFees",
     "inputs": [
       {
@@ -501,6 +528,19 @@ export const poolEngineAdapterAbi = [
   },
   {
     "type": "event",
+    "name": "CloseOutStarted",
+    "inputs": [
+      {
+        "name": "notice",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "FeesSwept",
     "inputs": [
       {
@@ -527,6 +567,37 @@ export const poolEngineAdapterAbi = [
         "type": "uint64",
         "indexed": false,
         "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "MandateApplied",
+    "inputs": [
+      {
+        "name": "spreadBps",
+        "type": "uint16",
+        "indexed": false,
+        "internalType": "uint16"
+      },
+      {
+        "name": "skewBps",
+        "type": "int16",
+        "indexed": false,
+        "internalType": "int16"
+      },
+      {
+        "name": "maxNetExposureUsd",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "inventoryCapUsd",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
       }
     ],
     "anonymous": false
@@ -682,6 +753,11 @@ export const poolEngineAdapterAbi = [
         "internalType": "uint256"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "BookNotWindingDown",
+    "inputs": []
   },
   {
     "type": "error",

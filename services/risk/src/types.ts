@@ -35,6 +35,8 @@ export interface ChainObservation {
     insuranceEquityUsd: bigint;
     inTransitUsd: bigint;
     valuationAt: number;
+    /** Orderly: adapter.lastFlowAt() (last deposit/withdraw flow, unix s); 0 when unknown / engine. */
+    lastFlowAt?: number;
   };
   /** priceStale: the desk views reverted (StalePrice) and holdings were valued at the last attested price. */
   desk: { hedgeNotionalUsd: bigint; valueUsd: bigint; priceStale?: boolean };

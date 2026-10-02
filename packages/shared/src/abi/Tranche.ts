@@ -1143,6 +1143,19 @@ export const trancheAbi = [
   },
   {
     "type": "function",
+    "name": "sponsorWindowCommit",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "symbol",
     "inputs": [],
     "outputs": [

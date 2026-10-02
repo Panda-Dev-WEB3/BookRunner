@@ -34,6 +34,8 @@ export const riskEnvShape = {
   /** 0 = scan Kill logs from deployment.startBlock; otherwise only the last N blocks. */
   RISK_KILL_LOG_LOOKBACK_BLOCKS: z.coerce.number().int().min(0).default(0),
   RISK_VENUE_TIMEOUT_MS: z.coerce.number().int().positive().default(3000),
+  /** ignore live venue equity this long after an on-chain capital flow (the venue credits deposits late) */
+  RISK_VENUE_SETTLE_SEC: z.coerce.number().int().nonnegative().default(120),
   RISK_REDIS_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
   RISK_TX_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
   RISK_SHUTDOWN_GRACE_MS: z.coerce.number().int().positive().default(20_000),
@@ -74,6 +76,7 @@ export interface RiskSettings {
   stepAttempts: number;
   stepRetryMs: number;
   venueTimeoutMs: number;
+  venueSettleSec: number;
 }
 
 export function settingsFromEnv(env: RiskEnv): RiskSettings {
@@ -90,6 +93,7 @@ export function settingsFromEnv(env: RiskEnv): RiskSettings {
     stepAttempts: env.RISK_STEP_ATTEMPTS,
     stepRetryMs: env.RISK_STEP_RETRY_MS,
     venueTimeoutMs: env.RISK_VENUE_TIMEOUT_MS,
+    venueSettleSec: env.RISK_VENUE_SETTLE_SEC,
   };
 }
 

@@ -9,6 +9,7 @@ import {
   type Deployment,
   HEDGE_VENUES,
   type Logger,
+  VENUE,
   type VenueId,
   bytes32ToStr,
   strToBytes32,
@@ -108,6 +109,15 @@ export class ViemChain implements ChainPort, DiscoveryPort {
     return BOOK_STATE[s] ?? "Subscription";
   }
 
+  /** Orderly: last on-chain capital flow (deposit/confirm/cancel), 0 if unreadable. */
+  async orderlyLastFlowAt(ref: BookRef): Promise<number> {
+    try {
+      return Number(await this.pub.readContract({ address: ref.components.adapter, abi: orderlyAdapterAbi, functionName: "lastFlowAt" }));
+    } catch {
+      return 0;
+    }
+  }
+
   /** Orderly MM account id (bytes32) held by the OrderlyAdapter. */
   async orderlyAccountId(ref: BookRef, account: number = ACCOUNT.MM): Promise<Hex> {
     return this.pub.readContract({ address: ref.components.adapter, abi: orderlyAdapterAbi, functionName: "accountId", args: [account] });
@@ -170,6 +180,7 @@ export class ViemChain implements ChainPort, DiscoveryPort {
         insuranceEquityUsd,
         inTransitUsd,
         valuationAt: Number(valuationAt),
+        lastFlowAt: ref.venue === VENUE.ORDERLY ? await this.orderlyLastFlowAt(ref) : 0,
       },
       desk,
       vaultIdleUsd,
