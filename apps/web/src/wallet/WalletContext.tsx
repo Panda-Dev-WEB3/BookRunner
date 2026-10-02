@@ -9,7 +9,7 @@ import { getConnection, sendTransaction, switchChain, waitForTransactionReceipt 
 import { useHealth } from "../api/hooks";
 import type { PreparedTx } from "../lib/api-types";
 import { config } from "../lib/config";
-import { DEVNET_CHAIN_ID, devEntry, effectiveMode, isDevRole } from "../lib/devwallet";
+import { DEVNET_CHAIN_ID, devEntry, devWalletsAvailable, effectiveMode, isDevRole } from "../lib/devwallet";
 import { errText, isUserRejection } from "../lib/txflow";
 import type { TxExecutor } from "../lib/txflow";
 import { revertReason } from "../lib/revert";
@@ -155,7 +155,7 @@ interface Eip1193 {
 export function WalletProvider({ children }: { children: ReactNode }) {
   const health = useHealth();
   const apiChainId = health.data?.chainId ?? null;
-  const devAvailable = DEV_BUILD && config.chainId === DEVNET_CHAIN_ID && (apiChainId === null || apiChainId === DEVNET_CHAIN_ID);
+  const devAvailable = devWalletsAvailable({ devBuild: DEV_BUILD, appChainId: config.chainId, apiChainId });
   // the anvil-key signer, loaded on devnet builds only (never in a testnet / mainnet bundle)
   const dev = useDevSigner(devAvailable);
   const conn = useConnection();

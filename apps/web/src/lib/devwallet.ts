@@ -4,7 +4,9 @@
 // build (wallet/devSigner.ts), so it never ships in a testnet or mainnet bundle.
 import type { DevRole } from "@bookrunner/shared/devkeys";
 
-export { DEVNET_CHAIN_ID } from "./chainConfig";
+import { DEVNET_CHAIN_ID } from "./chainConfig";
+
+export { DEVNET_CHAIN_ID };
 
 export type DevGroup = "Sponsor" | "Allocators" | "Committee" | "Desk" | "Protocol";
 
@@ -39,6 +41,14 @@ const LISTED = new Set<string>(DEV_WALLETS.map((w) => w.role));
 export const isDevRole = (s: string | null | undefined): s is DevRole => !!s && LISTED.has(s);
 
 export const devEntry = (role: DevRole): DevWalletEntry | undefined => DEV_WALLETS.find((w) => w.role === role);
+
+/**
+ * Dev wallets are offered only on a devnet build (the signer is compiled in) for chain 31337, and
+ * only while the API is on 31337 too (unknown counts as yes until /health answers).
+ */
+export function devWalletsAvailable(i: { devBuild: boolean; appChainId: number; apiChainId: number | null }): boolean {
+  return i.devBuild && i.appChainId === DEVNET_CHAIN_ID && (i.apiChainId === null || i.apiChainId === DEVNET_CHAIN_ID);
+}
 
 /**
  * The wallet mode that applies now. A stored "dev" choice only counts while dev wallets are

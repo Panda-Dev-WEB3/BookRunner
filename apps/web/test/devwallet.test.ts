@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { DEV_MNEMONIC, DEV_ROLE_INDEX } from "@bookrunner/shared/devkeys";
 import { DEV_MNEMONIC_MARK, filesWithDevKeys, isDevnetBuild } from "../scripts/bundle-check";
 import { devAddress, devRoleOf } from "../src/lib/devsigner";
-import { DEVNET_CHAIN_ID, DEV_GROUPS, DEV_WALLETS, devEntry, effectiveMode, isDevRole } from "../src/lib/devwallet";
+import { DEVNET_CHAIN_ID, DEV_GROUPS, DEV_WALLETS, devEntry, devWalletsAvailable, effectiveMode, isDevRole } from "../src/lib/devwallet";
 
 describe("dev wallets (devnet only)", () => {
   test("every listed role is a real devkeys role in a known group", () => {
@@ -47,5 +47,18 @@ describe("stored wallet mode", () => {
     expect(effectiveMode("dev", false)).toBeNull(); // testnet build, or an API on another chain: the browser wallet shows
     expect(effectiveMode("injected", false)).toBe("injected");
     expect(effectiveMode(null, true)).toBeNull();
+  });
+});
+
+describe("dev wallet gate", () => {
+  test("devnet build for 31337 and an API on 31337 (unknown counts until /health answers)", () => {
+    expect(devWalletsAvailable({ devBuild: true, appChainId: 31337, apiChainId: null })).toBe(true);
+    expect(devWalletsAvailable({ devBuild: true, appChainId: 31337, apiChainId: 31337 })).toBe(true);
+    // the API reports another chain: no dev wallets, and a stored 'dev' choice falls back to the browser wallet
+    expect(devWalletsAvailable({ devBuild: true, appChainId: 31337, apiChainId: 46630 })).toBe(false);
+    expect(effectiveMode("dev", devWalletsAvailable({ devBuild: true, appChainId: 31337, apiChainId: 46630 }))).toBeNull();
+    // a testnet build never offers them, whatever the API says
+    expect(devWalletsAvailable({ devBuild: false, appChainId: 46630, apiChainId: 31337 })).toBe(false);
+    expect(devWalletsAvailable({ devBuild: true, appChainId: 46630, apiChainId: null })).toBe(false);
   });
 });
