@@ -4,6 +4,8 @@ import { roomFigure, roomNote } from "../src/components/invest/investCopy";
 import {
   bookRooms,
   checkDeposit,
+  hasClaimableAllocation,
+  pendingCommitment,
   depositWindow,
   distributionShares,
   firstMarkAtOrAfter,
@@ -231,6 +233,17 @@ describe("positionFlags", () => {
       { tranche: "junior", ...empty, shares: null, committedUsd: "1" },
     ]);
     expect(f).toMatchObject({ hasShares: true, hasCommitted: true, redemptionToClaim: true, allocationToClaim: false });
+  });
+  test("a settled round is a claimable allocation, not a commitment still waiting (committedOf lasts until the claim)", () => {
+    const settled = { tranche: "senior" as const, ...empty, committedUsd: "1000.000000", claimableAllocation: { shares: "999.601816", refundUsd: "0.000000" } };
+    expect(positionFlags([settled])).toMatchObject({ hasCommitted: false, allocationToClaim: true });
+    expect(pendingCommitment(settled)).toBe(false);
+    expect(hasClaimableAllocation(settled)).toBe(true);
+    const refundOnly = { ...settled, claimableAllocation: { shares: "0.000000", refundUsd: "1000.000000" } };
+    expect(pendingCommitment(refundOnly)).toBe(false);
+    const waiting = { ...settled, claimableAllocation: { shares: "0.000000", refundUsd: "0.000000" } };
+    expect(pendingCommitment(waiting)).toBe(true);
+    expect(positionFlags([waiting])).toMatchObject({ hasCommitted: true, allocationToClaim: false });
   });
 });
 

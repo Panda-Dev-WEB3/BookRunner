@@ -293,9 +293,20 @@ const positive = (v: string | null | undefined): boolean => {
   }
 };
 
+/**
+ * The tranche has a settled allocation (shares or a refund) waiting to be claimed. Tranche.committedOf
+ * keeps returning walletCommit after the round settles, until the wallet claims: that commitment is
+ * the claimable allocation now, no longer "waiting in the current round".
+ */
+export const hasClaimableAllocation = (t: Pick<TranchePositionLike, "claimableAllocation">): boolean =>
+  !!t.claimableAllocation && (positive(t.claimableAllocation.shares) || positive(t.claimableAllocation.refundUsd));
+
+/** USDC committed to a round that has not settled yet (a settled one shows as a claimable allocation). */
+export const pendingCommitment = (t: Pick<TranchePositionLike, "committedUsd" | "claimableAllocation">): boolean => positive(t.committedUsd) && !hasClaimableAllocation(t);
+
 export interface PositionFlags {
   hasShares: boolean;
-  /** USDC committed to the current round, waiting for settlement. */
+  /** USDC committed to the current round, waiting for settlement (not yet a claimable allocation). */
   hasCommitted: boolean;
   /** Settled allocation (shares and/or refund) waiting to be claimed. */
   allocationToClaim: boolean;
@@ -308,8 +319,8 @@ export interface PositionFlags {
 /** What a wallet holds in one book, summarised for badges and the Withdraw tab. */
 export function positionFlags(tranches: TranchePositionLike[]): PositionFlags {
   const hasShares = tranches.some((t) => positive(t.shares));
-  const hasCommitted = tranches.some((t) => positive(t.committedUsd));
-  const allocationToClaim = tranches.some((t) => !!t.claimableAllocation && (positive(t.claimableAllocation.shares) || positive(t.claimableAllocation.refundUsd)));
+  const hasCommitted = tranches.some(pendingCommitment);
+  const allocationToClaim = tranches.some(hasClaimableAllocation);
   const redemptionToClaim = tranches.some((t) => positive(t.claimableRedemptionUsd));
   const pendingRequests = tranches.reduce((n, t) => n + t.redemptions.filter((r) => r.status === "pending").length, 0);
   return {

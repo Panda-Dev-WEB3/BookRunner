@@ -15,7 +15,7 @@ import { TxRunner } from "../../wallet/TxRunner";
 import { WalletButton } from "../../wallet/WalletButton";
 import { AmountInput, Callout, EmptyState, ErrorState, Segmented, SkeletonRows, Spinner, Term, ValueKind, cx } from "../ui";
 import { InfoList, TrancheSwatch } from "./InvestBits";
-import { TRANCHE_IDS, TRANCHE_NAME, type TrancheId, positionFlags, sharesValue, withPlainPrompts } from "./logic";
+import { TRANCHE_IDS, TRANCHE_NAME, type TrancheId, hasClaimableAllocation, pendingCommitment, positionFlags, sharesValue, withPlainPrompts } from "./logic";
 import { type TrancheAddresses, invalidateInvestReads } from "./useInvestChain";
 
 type TranchePosition = PositionOut["tranches"][number];
@@ -91,7 +91,7 @@ export function WithdrawPanel(props: {
 
 function PositionCard({ t }: { t: TranchePosition }) {
   const name = TRANCHE_NAME[t.tranche];
-  const toClaim = t.claimableAllocation && (isPositive(t.claimableAllocation.shares) || isPositive(t.claimableAllocation.refundUsd));
+  const toClaim = hasClaimableAllocation(t);
   return (
     <div className={cx("rounded-card border bg-surface p-4", t.tranche === "senior" ? "border-senior/40" : "border-junior/45")}>
       <div className="flex items-center justify-between gap-2">
@@ -106,7 +106,7 @@ function PositionCard({ t }: { t: TranchePosition }) {
         worth {t.navValueUsd === null ? "—" : fmtUsd(t.navValueUsd, { symbol: true })} at {fmtSharePrice(t.sharePrice, 6)} per share
       </div>
       <ul className="mt-3 space-y-1 text-[12.5px]">
-        {isPositive(t.committedUsd) && (
+        {pendingCommitment(t) && (
           <li className="text-ink-2">
             <span className="num font-medium text-ink">{fmtUsd(t.committedUsd)} USDC</span> waiting in the current round
           </li>
