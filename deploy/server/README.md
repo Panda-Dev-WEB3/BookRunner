@@ -8,7 +8,7 @@ The host is shared with other services, so everything is loopback-only and memor
 |---|---|
 | Code | `/opt/bookrunner/app` (git clone of this repo, user `bookrunner`) |
 | Secrets + state (never in git) | `.env.testnet` (mode 600), `contracts/deployments/46630.json`, `.data/testnet/` |
-| Stack | `bookrunner.service` → `scripts/dev.ts --network testnet --no-web` (cap 1.5 GB RAM) |
+| Stack | `bookrunner.service` → `scripts/dev.ts --network testnet --no-web` (cap 2.5 GB RAM) |
 | Infra | `deploy/server/docker-compose.yml` → Postgres 127.0.0.1:54400, Redis 127.0.0.1:63790 |
 | Web | built to `/var/www/bookrunner`, nginx site `bookrunner` (proxies `/trpc`, `/health` → API :4400) |
 | Logs | `/opt/bookrunner/app/.data/testnet/dev.log` (logrotate daily, 7 kept) |

@@ -1,6 +1,6 @@
 # Bookrunner testnet stack: every service + one agent per book + trader-sim (scripts/dev.ts --network testnet),
 # without the vite dev server (nginx serves the built web app). Installed to /etc/systemd/system/.
-# Shared host: capped so memory pressure only ever slows / restarts Bookrunner, never the host's other services.
+# Capped so memory pressure only ever slows / restarts Bookrunner, never the host itself.
 [Unit]
 Description=Bookrunner testnet stack (services + agents)
 Documentation=https://github.com/Panda-Dev-WEB3/BookRunner/tree/main/deploy/server
@@ -25,8 +25,8 @@ KillMode=mixed
 TimeoutStopSec=30
 Restart=always
 RestartSec=10
-MemoryHigh=1300M
-MemoryMax=1536M
+MemoryHigh=2G
+MemoryMax=2560M
 MemorySwapMax=2G
 OOMScoreAdjust=500
 NoNewPrivileges=true
