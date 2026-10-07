@@ -46,3 +46,16 @@ export function normal(key: number, ...coords: number[]): number {
   const u2 = uniform(key, ...coords, 0x2e9b);
   return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
 }
+
+/** A source of independent standard normals (the synthetic market's per-step entropy). */
+export type NormalSource = () => number;
+
+/** Uniform in (0, 1) from the platform CSPRNG (crypto.getRandomValues): never reproducible. */
+export function csprngUniform(): number {
+  const buf = new Uint32Array(1);
+  crypto.getRandomValues(buf);
+  return (buf[0]! + 0.5) / 4294967296;
+}
+
+/** Standard normal from the platform CSPRNG (Box-Muller). */
+export const csprngNormal: NormalSource = () => Math.sqrt(-2 * Math.log(csprngUniform())) * Math.cos(2 * Math.PI * csprngUniform());

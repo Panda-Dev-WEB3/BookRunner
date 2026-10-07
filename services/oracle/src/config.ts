@@ -13,6 +13,22 @@ export const DEFAULT_INDEXES: Record<string, Record<string, number>> = {
 
 const flag = (def: boolean) => z.stringbool().default(def);
 
+/** The repo's devnet seed: public, so every synthetic price derived from it is predictable by anyone. */
+export const PUBLIC_DEFAULT_ORACLE_SEED = "bookrunner-devnet";
+export const MIN_SECRET_SEED_LENGTH = 16;
+
+/**
+ * Why synthetic sources must not run with this seed (null = fine). Devnet (31337) accepts anything;
+ * every other chain needs a secret ORACLE_SEED: signed synthetic prices derived from a public seed can be
+ * computed in advance and traded against with perfect foresight.
+ */
+export function syntheticSeedProblem(chainId: number, seed: string): string | null {
+  if (chainId === 31337) return null;
+  if (seed.trim() === PUBLIC_DEFAULT_ORACLE_SEED) return "ORACLE_SEED is the public repo default";
+  if (seed.trim().length < MIN_SECRET_SEED_LENGTH) return `ORACLE_SEED is shorter than ${MIN_SECRET_SEED_LENGTH} characters`;
+  return null;
+}
+
 export const oracleEnvShape = {
   ORACLE_PORT: z.coerce.number().int().positive().default(4410),
   /** HTTP bind address. Loopback by default: the API is an internal health / debug surface. */
@@ -53,9 +69,15 @@ export const oracleEnvShape = {
   ORACLE_PUSH_ONCHAIN: flag(true),
   ORACLE_VENUE_PRICES: flag(true),
 
-  // ---- synthetic GBM sources (devnet) ----
+  // ---- synthetic GBM sources (devnet; testnet only with a secret ORACLE_SEED) ----
   ORACLE_SYNTHETIC: flag(true),
-  ORACLE_SEED: z.string().min(1).default("bookrunner-devnet"),
+  /**
+   * Seed of the synthetic GBM paths. The default is public (it is in this repo), so it is accepted on the
+   * local devnet only: any other chain refuses to start synthetic sources unless ORACLE_SEED is a secret
+   * of at least MIN_SECRET_SEED_LENGTH characters (`openssl rand -hex 32` into .env.testnet). Off devnet
+   * every step also mixes CSPRNG noise, so not even the seed reproduces the path.
+   */
+  ORACLE_SEED: z.string().min(1).default(PUBLIC_DEFAULT_ORACLE_SEED),
   ORACLE_GBM_STEP_MS: z.coerce.number().int().positive().default(1000),
   /** Fixed path origin (unix ms) for reproducible runs; default = process start floored to a step. */
   ORACLE_GBM_EPOCH_MS: z.coerce.number().int().nonnegative().optional(),

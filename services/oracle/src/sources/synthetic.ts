@@ -1,8 +1,10 @@
 // Devnet sources: one seeded GBM path per ticker, observed by N synthetic sources that each add
 // small independent noise, occasional dropouts and rare spikes (to exercise outlier rejection).
-// Everything is a pure function of (seed, ticker, source index, step) -> reproducible runs.
+// Without `entropy` (devnet) everything is a pure function of (seed, ticker, source index, step) ->
+// reproducible runs. With it (every other chain) each path step and each observation mixes in a fresh
+// CSPRNG draw, so future prints cannot be computed from the seed or anything else public.
 import { GbmPath } from "../domain/gbm";
-import { hashString, normal, uniform } from "../domain/rng";
+import { type NormalSource, hashString, normal, uniform } from "../domain/rng";
 import type { PriceSource } from "../domain/types";
 
 export interface SyntheticTicker {
@@ -16,6 +18,8 @@ export interface SyntheticMarketOptions {
   /** step 0 of every path is at this unix ms */
   epochMs: number;
   tickers: Record<string, SyntheticTicker>;
+  /** Per-step entropy (csprngNormal off devnet): the path is then not reproducible. */
+  entropy?: NormalSource;
   volScale?: number;
   noiseBps?: number;
   dropoutProb?: number;
@@ -42,7 +46,7 @@ export class SyntheticMarket {
     if (this.paths.has(ticker)) return;
     this.paths.set(
       ticker,
-      new GbmPath(this.opts.seed, ticker, { s0: t.s0, volAnnual: t.vol * (this.opts.volScale ?? 1), stepMs: this.opts.stepMs }),
+      new GbmPath(this.opts.seed, ticker, { s0: t.s0, volAnnual: t.vol * (this.opts.volScale ?? 1), stepMs: this.opts.stepMs }, this.opts.entropy),
     );
   }
 
@@ -67,7 +71,8 @@ export class SyntheticMarket {
     const step = this.stepAt(ms);
     const key = hashString(`src:${this.opts.seed}:${ticker}:${index}`);
     if (uniform(key, step, 1) < this.dropoutProb) return null;
-    let bps = normal(key, step, 2) * this.noiseBps;
+    const z = this.opts.entropy ? (normal(key, step, 2) + this.opts.entropy()) / Math.SQRT2 : normal(key, step, 2);
+    let bps = z * this.noiseBps;
     if (uniform(key, step, 3) < this.spikeProb) bps += (uniform(key, step, 4) < 0.5 ? -1 : 1) * this.spikeBps;
     return { price: path.priceAt(step) * Math.exp(bps / 1e4), ts: this.opts.epochMs + step * this.opts.stepMs };
   }
