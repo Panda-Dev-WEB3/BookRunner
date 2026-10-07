@@ -307,6 +307,11 @@ export const riskCommitteeAbi = [
             "name": "executed",
             "type": "bool",
             "internalType": "bool"
+          },
+          {
+            "name": "expiresAt",
+            "type": "uint64",
+            "internalType": "uint64"
           }
         ]
       }

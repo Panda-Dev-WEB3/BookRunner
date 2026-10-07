@@ -167,17 +167,33 @@ export class FakeBuybackChain implements BuybackChain {
   quoteWad: bigint | null = 20n * 10n ** 18n;
   failQuote = false;
   failExecute = false;
-  executed: Array<{ amountIn: bigint; minOut: bigint; poolFee: number }> = [];
+  /** Pre-A5-02 router (no on-chain bound; executeBuyback takes the pool fee). */
+  legacy = false;
+  /** maxBuybackPerCall (0 = uncapped). */
+  maxPerCall = 0n;
+  /** On-chain reference price behind buybackFloor (whole BKRN per whole USDC, WAD), and its slippage (bps). */
+  refWad = 20n * 10n ** 18n;
+  refSlippageBps = 500n;
+  /** buybackFloor reverts (reference unset / oracle stale). */
+  failFloor = false;
+  executed: Array<{ amountIn: bigint; minOut: bigint; poolFee?: number }> = [];
   async buybackPending() {
     return this.pending;
+  }
+  async buybackBounds() {
+    return { legacy: this.legacy, maxPerCall: this.legacy ? 0n : this.maxPerCall };
+  }
+  async buybackFloor(amountIn: bigint) {
+    if (this.failFloor) throw new Error("execution reverted: StalePrice");
+    return (((amountIn * this.refWad) / 10n ** 6n) * (10_000n - this.refSlippageBps)) / 10_000n;
   }
   async quoteBuyback(amountIn: bigint) {
     if (this.failQuote) throw new Error("quote reverted");
     return this.quoteWad === null ? null : (amountIn * this.quoteWad) / 10n ** 6n;
   }
-  async executeBuyback(amountIn: bigint, minOut: bigint, poolFee: number) {
+  async executeBuyback(amountIn: bigint, minOut: bigint, poolFee?: number) {
     if (this.failExecute) throw new Error("execution reverted: InsufficientOutput");
-    this.executed.push({ amountIn, minOut, poolFee });
+    this.executed.push(poolFee === undefined ? { amountIn, minOut } : { amountIn, minOut, poolFee });
     const bkrnOut = this.quoteWad === null ? minOut : (amountIn * this.quoteWad) / 10n ** 6n;
     this.pending -= amountIn;
     return { hash: fakeHash(), usdcIn: amountIn, bkrnOut };

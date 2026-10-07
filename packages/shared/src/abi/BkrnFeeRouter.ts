@@ -13,6 +13,19 @@ export const bkrnFeeRouterAbi = [
   },
   {
     "type": "function",
+    "name": "MAX_SLIPPAGE_BPS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "bkrn",
     "inputs": [],
     "outputs": [
@@ -26,6 +39,38 @@ export const bkrnFeeRouterAbi = [
   },
   {
     "type": "function",
+    "name": "bkrnPriceId",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "buybackFloor",
+    "inputs": [
+      {
+        "name": "amountIn",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "buybackPending",
     "inputs": [],
     "outputs": [
@@ -33,6 +78,19 @@ export const bkrnFeeRouterAbi = [
         "name": "",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "buybackPoolFee",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint24",
+        "internalType": "uint24"
       }
     ],
     "stateMutability": "view"
@@ -76,11 +134,6 @@ export const bkrnFeeRouterAbi = [
         "name": "minBkrnOut",
         "type": "uint256",
         "internalType": "uint256"
-      },
-      {
-        "name": "poolFee",
-        "type": "uint24",
-        "internalType": "uint24"
       }
     ],
     "outputs": [
@@ -94,6 +147,32 @@ export const bkrnFeeRouterAbi = [
   },
   {
     "type": "function",
+    "name": "maxBuybackPerCall",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "maxSlippageBps",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "notifyCarry",
     "inputs": [
       {
@@ -103,6 +182,73 @@ export const bkrnFeeRouterAbi = [
       },
       {
         "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "refBkrnPerUsdcWad",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "referenceBkrnPerUsdc",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "setBkrnPriceId",
+    "inputs": [
+      {
+        "name": "priceId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setBuybackParams",
+    "inputs": [
+      {
+        "name": "poolFee",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "refBkrnPerUsdcWad_",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "maxSlippageBps_",
+        "type": "uint16",
+        "internalType": "uint16"
+      },
+      {
+        "name": "maxPerCall",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -190,6 +336,19 @@ export const bkrnFeeRouterAbi = [
   },
   {
     "type": "event",
+    "name": "BkrnPriceIdSet",
+    "inputs": [
+      {
+        "name": "priceId",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "BuybackExecuted",
     "inputs": [
       {
@@ -200,6 +359,37 @@ export const bkrnFeeRouterAbi = [
       },
       {
         "name": "bkrnOut",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "BuybackParamsSet",
+    "inputs": [
+      {
+        "name": "poolFee",
+        "type": "uint24",
+        "indexed": false,
+        "internalType": "uint24"
+      },
+      {
+        "name": "refBkrnPerUsdcWad",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "maxSlippageBps",
+        "type": "uint16",
+        "indexed": false,
+        "internalType": "uint16"
+      },
+      {
+        "name": "maxPerCall",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
@@ -250,6 +440,27 @@ export const bkrnFeeRouterAbi = [
       }
     ],
     "anonymous": false
+  },
+  {
+    "type": "error",
+    "name": "BadBuybackParams",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BuybackTooLarge",
+    "inputs": [
+      {
+        "name": "amountIn",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "maxPerCall",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
   },
   {
     "type": "error",

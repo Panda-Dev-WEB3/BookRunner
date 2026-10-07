@@ -123,8 +123,15 @@ export interface BuybackChain {
   buybackPending(): Promise<bigint>;
   /** BKRN out for `amountIn` USDC from the buyback router's own quote (MockSwapRouter.quote); null if it has none. */
   quoteBuyback(amountIn: bigint): Promise<bigint | null>;
-  /** BkrnFeeRouter.executeBuyback(amountIn, minBkrnOut, poolFee) (KEEPER). */
-  executeBuyback(amountIn: bigint, minBkrnOut: bigint, poolFee: number): Promise<{ hash: Hex; usdcIn: bigint | null; bkrnOut: bigint | null }>;
+  /**
+   * BkrnFeeRouter's on-chain bound: maxBuybackPerCall (USDC 6dp). `legacy` = a pre-A5-02 router (no
+   * pinned fee / floor / cap, executeBuyback takes the pool fee): maxPerCall is then 0 (uncapped).
+   */
+  buybackBounds(): Promise<{ legacy: boolean; maxPerCall: bigint }>;
+  /** BkrnFeeRouter.buybackFloor(amountIn) (BKRN 18dp); reverts when the reference price is unset / stale. */
+  buybackFloor(amountIn: bigint): Promise<bigint>;
+  /** BkrnFeeRouter.executeBuyback(amountIn, minBkrnOut) (KEEPER); `legacyPoolFee` only for a legacy router. */
+  executeBuyback(amountIn: bigint, minBkrnOut: bigint, legacyPoolFee?: number): Promise<{ hash: Hex; usdcIn: bigint | null; bkrnOut: bigint | null }>;
 }
 
 export interface BookLookup {

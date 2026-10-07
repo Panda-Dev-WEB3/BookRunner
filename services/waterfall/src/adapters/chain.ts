@@ -12,7 +12,7 @@ import {
   revenueRouterAbi,
   underwritingVaultAbi,
 } from "@bookrunner/shared/abi";
-import { type Address, type Hex, type PublicClient, type TransactionReceipt, erc20Abi, isAddressEqual, parseEventLogs, zeroAddress } from "viem";
+import { type Address, BaseError, type Hex, type PublicClient, type TransactionReceipt, erc20Abi, isAddressEqual, parseAbi, parseEventLogs, zeroAddress } from "viem";
 import { engineWithdrawableUsd } from "../domain/recall";
 import { amountsToSplit } from "../domain/split";
 import { type BookRef, bookStateName } from "../kit/books";
@@ -20,6 +20,14 @@ import { scanEvents } from "../kit/logs";
 import type { TxSender } from "../kit/tx";
 import type { BuybackChain, DistributedLog, FeeForwarding, KeeperChain, KeeperSnapshot, SettlementChain, SettlementReceivedLog, SplitParams } from "../ports";
 import { type CandidateSource, pendingShares } from "./redemptions";
+
+/** Pre-A5-02 BkrnFeeRouter (the live testnet until a redeploy): the keeper passed the pool fee tier. */
+const legacyFeeRouterAbi = parseAbi(["function executeBuyback(uint256 amountIn, uint256 minBkrnOut, uint24 poolFee) returns (uint256 bkrnOut)"]);
+
+/** True when a read reverted on-chain (e.g. an unknown selector), as opposed to a transport failure. */
+function isOnChainRevert(err: unknown): boolean {
+  return err instanceof BaseError && !!err.walk((e) => e instanceof BaseError && (e.name === "ContractFunctionRevertedError" || e.name === "ContractFunctionZeroDataError"));
+}
 
 export interface ChainAdapterOptions {
   pc: PublicClient;
@@ -34,6 +42,7 @@ export interface ChainAdapterOptions {
 export class WaterfallChainAdapter implements SettlementChain, KeeperChain, BuybackChain {
   private markInterval: number | null = null;
   private buybackTokens: { usdc: Address; bkrn: Address } | null = null;
+  private legacyFeeRouter: boolean | null = null;
   private distributedCache = new Map<string, DistributedLog>();
   private blockTs = new Map<bigint, Date>();
   /** FeesSwept (amount, position) per earmark tx: immutable once mined. */
@@ -360,14 +369,30 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain, Buyb
     }
   }
 
-  async executeBuyback(amountIn: bigint, minBkrnOut: bigint, poolFee: number) {
-    const out = await this.o.sender.send({
-      address: this.feeRouter,
-      abi: bkrnFeeRouterAbi,
-      functionName: "executeBuyback",
-      args: [amountIn, minBkrnOut, poolFee],
-      label: `executeBuyback(${amountIn}, min=${minBkrnOut})`,
-    });
+  async buybackBounds(): Promise<{ legacy: boolean; maxPerCall: bigint }> {
+    try {
+      const maxPerCall = await this.pc.readContract({ address: this.feeRouter, abi: bkrnFeeRouterAbi, functionName: "maxBuybackPerCall" });
+      this.legacyFeeRouter = false;
+      return { legacy: false, maxPerCall };
+    } catch (err) {
+      // a router deployed before the on-chain price bound has no maxBuybackPerCall(): legacy keeper call
+      if (!isOnChainRevert(err)) throw err;
+      this.legacyFeeRouter = true;
+      return { legacy: true, maxPerCall: 0n };
+    }
+  }
+
+  buybackFloor(amountIn: bigint) {
+    return this.pc.readContract({ address: this.feeRouter, abi: bkrnFeeRouterAbi, functionName: "buybackFloor", args: [amountIn] });
+  }
+
+  async executeBuyback(amountIn: bigint, minBkrnOut: bigint, legacyPoolFee?: number) {
+    const legacy = legacyPoolFee !== undefined && this.legacyFeeRouter === true;
+    const out = await this.o.sender.send(
+      legacy
+        ? { address: this.feeRouter, abi: legacyFeeRouterAbi, functionName: "executeBuyback", args: [amountIn, minBkrnOut, legacyPoolFee], label: `executeBuyback(${amountIn}, min=${minBkrnOut}, fee=${legacyPoolFee}) [legacy router]` }
+        : { address: this.feeRouter, abi: bkrnFeeRouterAbi, functionName: "executeBuyback", args: [amountIn, minBkrnOut], label: `executeBuyback(${amountIn}, min=${minBkrnOut})` },
+    );
     const l = parseEventLogs({ abi: bkrnFeeRouterAbi, eventName: "BuybackExecuted", logs: out.receipt.logs }).find((x) => isAddressEqual(x.address, this.feeRouter));
     return { hash: out.hash, usdcIn: l?.args.usdcIn ?? null, bkrnOut: l?.args.bkrnOut ?? null };
   }
