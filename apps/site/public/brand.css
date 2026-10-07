@@ -1,0 +1,179 @@
+:root{--br-ink:#0a04f4;--br-blue:#326bd0;--br-paper:#f5f5f3;--br-soft:#dce7fb}
+body,#main,#main>div{--token-fa39109f-fc6b-47ce-8b5c-ecbce18206f9:#f5f5f3!important;--token-41862f85-d984-4269-90b9-0c207a5502ff:#1748c7!important;--token-7f0b8fdb-3b99-4688-a850-c33f6603b94c:#dce7fb!important;--token-7bf9a068-abd4-4063-bdf0-52c70cd939e4:#294574!important;--token-9af4dda5-2a9c-4539-840f-b50f13e8a486:#e1e8f5!important;--token-5a9e4c65-dd8e-41e6-a10c-f110a7af0558:#f5f5f3cc!important;--token-97a39cd4-7a89-477d-8e83-6eb15404c07f:#9cb9ed!important;--token-bc95b61a-a7e2-421b-af5d-ae02de34d353:#f5f5f3!important;--token-655dcc0a-ca89-49a3-990c-16f929c98adc:#1748c7b3!important;--token-5d1bd577-a67d-4807-a015-6a1c823a1b44:#7188b2!important;--token-37a2385e-c29d-4970-8d38-f5f764691007:#dce7fb80!important;--token-4596d182-a9f9-4b92-8e3c-bbb49e267701:#f5f5f380!important;--token-ef3c6be2-679e-478d-91a4-be8b6109f534:#1748c780!important;--token-2ca580be-a8b0-4337-b3c4-5b498e9ea843:#326bd0!important;--token-2297e23c-cf9c-4b4a-94c6-6fa3f3f57b40:#c5d6f2!important;--token-d7a7b860-4f65-47ac-b765-3bedc34812bd:#456ccc!important;--token-1d7e2ccf-e2df-4272-9713-66a28ab81f33:#294574b3!important;--token-49698c7a-9b7b-4d58-a1f1-07f521343a53:#214fbd!important;--token-10a4e0ab-9575-478d-8e12-fd98dbc69df2:#1748c740!important;--token-611c850d-46ea-411c-8a60-82bdc87ce779:#7188b214!important;--token-2fd4fbc6-6866-444a-830c-97e54da5bf44:#294574!important;--token-b41fadc5-398f-4902-bf89-28bef02808d0:#1748c71a!important;--token-a717c499-2c42-4177-8cf0-c2fa9b51e86c:#7188b233!important;--token-40b055b5-09d3-4426-8d48-e1ea3199b25f:#a5bced!important;--token-ab949c6a-e055-41f0-a8c3-806480bea7c2:#b5c9f1!important;--token-801d3a88-933e-4993-8d34-0b518546a05d:#adc5ef!important;--token-8142da6f-1e2c-48f4-ba05-2bab09ebf2dd:#7197dc!important;background:var(--br-paper);color:#1748c7}
+img:not(.br-logo),video,canvas{filter:url(#bookrunner-print-ink);mix-blend-mode:multiply}
+h1.framer-text,h2.framer-text,h3.framer-text{font-family:'Source Serif 4','Times New Roman',serif!important}
+.br-wordmark{position:relative!important;min-width:120px}
+.br-wordmark>:not(.br-brand-lockup){visibility:hidden}
+.br-wordmark:after{content:none}
+.br-brand-lockup{position:absolute;inset:0;display:flex;gap:8px;align-items:center;color:#1748c7;font:14px/1.2 'Source Serif 4','Times New Roman',serif;white-space:nowrap;letter-spacing:.025em;pointer-events:none}
+.br-brand-lockup img{width:28px;height:28px;object-fit:contain;flex:none;filter:none;mix-blend-mode:normal}
+.br-wordmark{min-width:145px}
+a[data-framer-name='Logo Banner']:after{content:'';position:absolute;top:15px;left:5%;width:90%;height:53px;background:url('/assets/bookrunner-logo-transparent.png') center/contain no-repeat;filter:brightness(0) invert(1);pointer-events:none}
+a[data-framer-name='Logo Banner'] [data-framer-name='Star']{visibility:hidden}
+.br-socials{display:flex;gap:12px;align-items:center;min-height:28px}
+.br-social{appearance:none;border:0;background:transparent;color:#1748c7;padding:7px;cursor:pointer;border-radius:50%;display:grid;place-items:center;transition:background .3s,transform .3s}
+.br-social:hover{background:#dce7fb;transform:translateY(-3px)}
+.br-social svg{width:20px;height:20px;fill:currentColor}
+.br-social:focus-visible,a:focus-visible,button:focus-visible{outline:2px solid #0a04f4;outline-offset:4px}
+.br-dialog{border:1px solid #a1b8ec;border-radius:18px;padding:44px 50px;background:#f5f5f3;color:#1748c7;max-width:450px;width:calc(100% - 40px);text-align:center;box-shadow:0 20px 100px #164bb233}
+.br-dialog::backdrop{background:#112d6655;backdrop-filter:blur(7px)}
+.br-dialog .br-logo{width:100px;height:100px;object-fit:contain;filter:none;mix-blend-mode:normal}
+.br-dialog h2{font:40px/1.15 'Source Serif 4','Times New Roman',serif;margin:10px 0 24px}
+.br-dialog button{border:0;border-radius:99px;padding:13px 30px;background:#1748c7;color:white;font:15px/1.4 Arial,sans-serif;cursor:pointer}
+.br-source-note{font:11px/1.4 Arial,sans-serif;color:#597ab2;letter-spacing:.08em;text-transform:uppercase}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*:before,*:after{animation-duration:.01ms!important;transition-duration:.01ms!important}}
+
+a[data-framer-name='Logo Banner'] svg path{fill:#1748c7!important}a[data-framer-name='Logo Banner'] [data-framer-name='Star'] svg path{fill:white!important}
+
+.br-footer-wordmark{position:relative!important;overflow:visible!important}.br-footer-wordmark>:not(.br-brand-lockup){visibility:hidden}.br-footer-wordmark:after{content:none}.br-footer-wordmark .br-brand-lockup{font-size:clamp(22px,2vw,28px);gap:12px}.br-footer-wordmark .br-brand-lockup img{width:44px;height:44px}a[data-framer-name='Logo Banner'] [data-framer-name='Symbol']{visibility:hidden}
+
+.framer-NLAj7,.framer-RuYMa{mask:none!important;-webkit-mask:none!important;background:transparent!important;overflow:visible!important}.framer-NLAj7:after,.framer-RuYMa:after{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#1748c7;font-family:'Source Serif 4','Times New Roman',serif;font-size:22px;line-height:1;letter-spacing:.015em;white-space:nowrap}.framer-NLAj7:after{content:'BOOK'}.framer-RuYMa:after{content:'RUNNER';font-size:18px}
+
+/* A complete alphabet replaces the reference's display-font aliases. */
+@font-face{font-family:BookRunnerSerif;src:url('/assets/media/vEFF2_tTDB4M7-auWDN0ahZJW3IX2ih5nk3AucvUHf6kDXr4.woff2') format('woff2');font-style:normal;font-weight:100 900;font-display:swap}
+h1.framer-text,h2.framer-text,h3.framer-text,[data-br-display]{font-family:BookRunnerSerif,'Source Serif 4','Times New Roman',serif!important}
+
+.br-brand-lockup img,.br-report-art{filter:none!important;mix-blend-mode:normal!important}
+.br-product-icon{width:100%;height:100%;min-width:16px;min-height:16px;color:#1748c7;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+
+[data-br-card-copy]{font-size:14px!important;line-height:1.4!important}
+html{scroll-padding-top:104px}
+
+/* Match the reference navigation wordmark without a second symbol. */
+.br-wordmark{min-width:120px!important;width:120px!important;height:15px!important}
+.br-wordmark .br-brand-lockup{gap:3px;letter-spacing:0;line-height:1;justify-content:flex-start}
+.br-brand-lockup .br-book{font-family:BookRunnerSerif,'Times New Roman',serif;font-weight:800;font-size:26px;letter-spacing:-.065em}
+.br-brand-lockup .br-runner{font-family:Arial,sans-serif;font-weight:700;font-size:15px;letter-spacing:-.045em}
+.br-footer-wordmark .br-book{font-size:32px}.br-footer-wordmark .br-runner{font-size:23px}
+/* Retain native loader positions, including the absolute off-screen end state. */
+.framer-46DDF .framer-6o6cjz{gap:8px!important}
+.framer-46DDF .framer-115rbw1{width:110px!important}
+.framer-46DDF .framer-h00siy{padding-right:0!important}
+.framer-46DDF .framer-zd0u89{width:144px!important}
+.framer-NLAj7:after{content:'book';font-family:BookRunnerSerif,'Times New Roman',serif;font-weight:800;font-size:42px;letter-spacing:-.065em}
+.framer-RuYMa:after{content:'RUNNER';font-family:Arial,sans-serif;font-weight:700;font-size:30px;letter-spacing:-.045em}
+/* Four logo quadrants keep the reference's reveal choreography. */
+.framer-46DDF .framer-ZbzZz{mask:none!important;-webkit-mask:none!important;background-color:transparent!important;background-image:url('/assets/bookrunner-logo-transparent.png');background-size:200% 200%;background-repeat:no-repeat;transform:none!important}
+.framer-46DDF .framer-1segufd{background-position:left top}
+.framer-46DDF .framer-1rgcjfd{background-position:right top}
+.framer-46DDF .framer-15h3kqv{background-position:left bottom}
+.framer-46DDF .framer-t1s44y{background-position:right bottom}
+/* Remove decorative company marks from the underwriting capital sequence. */
+#experts [data-framer-name='Images']{visibility:visible!important}
+svg > foreignObject.framer-fit-text > p{white-space:nowrap!important;text-align:center!important}
+
+
+
+@keyframes br-page-out{to{opacity:0;transform:translateY(-8px)}}
+@keyframes br-page-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+html.br-leaving #main{opacity:0;transform:translateY(-8px);transition:opacity .17s ease,transform .17s ease}
+[data-br-tech] img{filter:none!important;mix-blend-mode:normal!important}
+
+.br-hero-emblem{position:absolute;pointer-events:none;z-index:2;mix-blend-mode:normal!important;filter:url(#bookrunner-print-ink);mask-image:linear-gradient(to right,transparent,#000 3%,#000 97%,transparent);-webkit-mask-image:linear-gradient(to right,transparent,#000 3%,#000 97%,transparent)}
+
+.br-branded-film{filter:url(#bookrunner-print-ink);mix-blend-mode:multiply}.br-branded-film video,.br-branded-film canvas{filter:none!important;mix-blend-mode:normal!important}
+.framer-46DDF[data-framer-name*='(END'] .framer-NLAj7,.framer-46DDF[data-framer-name*='(END'] .framer-h00siy{visibility:hidden!important}
+
+/* One complete wordmark, with room for ascenders and descenders. */
+.br-wordmark{width:129px!important;min-width:129px!important;height:28px!important;overflow:visible!important}
+.br-brand-lockup{inset:0;align-items:center;overflow:visible;line-height:1}
+.br-name{font:600 23px/1.15 BookRunnerSerif,'Times New Roman',serif;letter-spacing:-.045em;white-space:nowrap;display:block}
+.br-footer-wordmark .br-name{font-size:32px}
+.framer-NLAj7:after{content:'Book';font:600 40px/1.2 BookRunnerSerif,serif;letter-spacing:-.04em}
+.framer-RuYMa:after{content:'Runner';font:600 40px/1.2 BookRunnerSerif,serif;letter-spacing:-.04em}
+.framer-46DDF .framer-115rbw1{width:95px!important;height:52px!important;aspect-ratio:auto!important}
+.framer-46DDF .framer-zd0u89{width:135px!important;height:52px!important;aspect-ratio:auto!important}
+.framer-46DDF .framer-6o6cjz{gap:6px!important;align-items:center!important}
+/* Keep the native artwork geometry; make tranche selection unambiguous. */
+.br-tranche-selector .framer-s3UVv,.br-tranche-selector .framer-14gbq51,.br-tranche-selector .framer-1r8iqsw{display:none!important}
+.br-tranche-tag{position:absolute;left:12px;top:12px;z-index:5;padding:8px 12px;background:#f5f5f3f2;border:1px solid #b6c9ed;border-radius:99px;font:500 12px/1.2 Arial,sans-serif;color:#1748c7;white-space:nowrap;box-shadow:0 2px 10px #1748c718;pointer-events:none}
+.br-choice-active{outline:2px solid #1748c7;outline-offset:3px}
+[data-br-choice][aria-pressed=true]{background:#1748c7!important;border-color:#1748c7!important}
+[data-br-choice][aria-pressed=true] p{color:#f5f5f3!important;--framer-text-color:#f5f5f3!important}
+[data-br-choice] .framer-n1vghz{width:max-content!important;min-width:110px!important;overflow:visible!important}
+[data-br-choice]:focus-visible{outline:2px solid #1748c7;outline-offset:4px}
+@media(max-width:809px){.br-wordmark{min-width:120px!important;width:120px!important}.br-name{font-size:22px}.br-tranche-tag{left:8px;top:8px;font-size:10px;padding:6px 8px}.framer-NLAj7:after,.framer-RuYMa:after{font-size:32px}.framer-46DDF .framer-115rbw1{width:78px!important}.framer-46DDF .framer-zd0u89{width:109px!important}}
+
+.br-wordmark>:not(.br-brand-lockup),.br-footer-wordmark>:not(.br-brand-lockup){display:none!important}
+.framer-a3keJ:is([data-framer-name='D-01'],[data-framer-name='D-02'],[data-framer-name='M-01'],[data-framer-name='M-02']) .br-tranche-tag{display:none}
+body,#main,#main>div{--token-e74ebd20-481e-42d0-9895-af13ee2e0c68:#1748c7!important;--token-85302234-4f0c-4c90-8189-8b3e2d706302:#dce7fb!important}
+.framer-a3keJ>[data-framer-name='Frame BKG']{background-color:#1748c7!important}
+
+.br-mobile-wordmark{position:absolute;left:64px;top:28px;transform:translateY(-50%);z-index:4;display:block;color:#1748c7;font:600 20px/1.2 BookRunnerSerif,serif;letter-spacing:-.045em;text-decoration:none;white-space:nowrap;overflow:visible}
+.br-mobile-action{padding-left:12px!important;padding-right:12px!important}
+@media(max-width:360px){.br-mobile-wordmark{font-size:16px}.br-mobile-action{padding-left:10px!important;padding-right:10px!important}.br-mobile-action p{font-size:13px!important}}
+
+#svg-1550932204_292 path{fill:#1748c7!important}
+
+/* Persistent component selectors cover every native hover variant. */
+a.framer-roWoR{position:relative!important;display:inline-flex!important;width:129px!important;min-width:129px!important;height:30px!important;overflow:visible!important;align-items:center!important}
+a.framer-roWoR>:not(.br-brand-lockup),a.framer-zubHS>:not(.br-brand-lockup){display:none!important}
+a.framer-roWoR>.br-brand-lockup{inset:0!important;align-items:center;justify-content:flex-start;transform:none!important}
+a.framer-roWoR .br-name{font:600 23px/1.2 BookRunnerSerif,serif;letter-spacing:-.045em;white-space:nowrap}
+/* An intrinsic footer box keeps the lockup inside its layout and clip bounds. */
+a.framer-zubHS{display:inline-flex!important;flex:none!important;flex-direction:row!important;align-items:center!important;justify-content:flex-start!important;width:max-content!important;min-width:0!important;height:56px!important;min-height:56px!important;padding:4px 0!important;overflow:visible!important}
+a.framer-zubHS>.br-brand-lockup{position:static!important;inset:auto!important;display:flex;align-items:center;gap:12px;width:max-content!important;height:48px!important;transform:none!important}
+a.framer-zubHS .br-logo{width:44px!important;height:44px!important;object-fit:contain}
+a.framer-zubHS .br-name{font-size:32px!important;line-height:1.2!important}
+@media(max-width:809px){a.framer-zubHS{height:52px!important;min-height:52px!important}a.framer-zubHS .br-name{font-size:28px!important}a.framer-zubHS .br-logo{width:40px!important;height:40px!important}}
+
+.framer-bb3cF,.framer-zGvwE{mask:none!important;-webkit-mask:none!important;background:transparent!important}
+
+[data-br-report-thumbnail]{aspect-ratio:16/9!important}
+[data-br-report-thumbnail] img{object-fit:contain!important}
+
+@media(max-width:480px){.br-role-card>span:first-child{font-size:clamp(20px,5.7vw,26px)!important;line-height:1.13!important;overflow-wrap:normal!important;word-break:normal!important}}
+
+/* Generated fantasy prints preserve their own blue palette and cutout geometry. */
+img.br-fantasy-art,img[src*='/assets/fantasy/images/']{filter:url(#bookrunner-fantasy-ink)!important;mix-blend-mode:normal!important}
+video.br-fantasy-video,video[src*='/assets/fantasy/videos/']{filter:none!important;mix-blend-mode:normal!important}
+img[src*='/assets/fantasy/videos/']{filter:none!important;mix-blend-mode:normal!important}
+
+/* Keep the capital connection copy and role links in true black. */
+.framer-hBNP7 .framer-4jjpyx .framer-text,.framer-hBNP7 .framer-rZ5Gy .framer-text{color:#000!important;--framer-text-color:#000!important;--framer-link-text-color:#000!important;--framer-link-hover-text-color:#000!important}
+/* Center one three-icon row beneath the footer actions. */
+.framer-q92cxp{width:100%!important;align-self:stretch!important;justify-content:center!important}
+.framer-q92cxp>.br-socials{width:100%;justify-content:center;align-items:center;gap:12px}
+.br-social{width:44px;height:44px;padding:0;flex:none;line-height:0}
+.br-social svg{display:block;overflow:visible}
+/* Preserve normal spaces and readable linked copy above the footer film. */
+.framer-1skbf83 .framer-text{color:#1748c7!important;--framer-text-color:#1748c7!important;--framer-link-text-color:#1748c7!important;--framer-link-hover-text-color:#0a04f4!important;word-spacing:normal!important;white-space:normal!important;line-height:1.55!important}
+
+.framer-1skbf83 .framer-text,.framer-g4nnbe p,.framer-m6i6n p{letter-spacing:0!important;word-spacing:.06em!important}
+
+/* Remove the floating fade strip and join footer copy to the film cleanly. */
+.framer-ydGnO .framer-7x29zh{gap:24px!important}
+.framer-ydGnO .framer-1fkjjom{display:none!important}
+.framer-ydGnO .framer-1d2qmnz{height:auto!important;min-height:0!important;gap:0!important}
+.framer-ydGnO .framer-1gxpqik{height:auto!important;min-height:0!important;aspect-ratio:var(--br-footer-aspect,1920 / 820);overflow:hidden!important}
+.framer-ydGnO .framer-wvp6og-container{position:absolute!important;inset:0!important;width:100%!important;height:100%!important}
+.framer-ydGnO .framer-wvp6og-container video{display:block;width:100%!important;height:100%!important;object-fit:cover!important;object-position:center bottom!important}
+
+.framer-ydGnO .framer-czrp3q,.framer-ydGnO .framer-rlvj7m,.framer-ydGnO .framer-1cieuiw{height:auto!important;min-height:0!important}
+.framer-ydGnO .framer-1cieuiw{gap:24px!important}
+
+/* Retain the native scroll choreography and both final tranche cards. */
+.br-tranche-selector [data-br-tranche] img{object-fit:contain!important}
+
+/* Hide offering card overlay text permanently. */
+.framer-Ps7zc .framer-1ph681r,
+.framer-Ps7zc .framer-1cmyjj9,
+.framer-Ps7zc .framer-ed0ec2{display:none!important}
+
+/* "Built around per-market" and "underwriting capital" each on one line */
+.framer-1ldh6w7 h3.framer-text{white-space:nowrap;width:auto}
+.framer-1ldh6w7{width:auto!important}
+
+/* "The syndicate for on-chain markets" on one line */
+.framer-3h215y{width:auto!important}
+.framer-3h215y h1.framer-text{white-space:nowrap!important}
+
+/* Bold the hero film headings */
+.framer-1rdmy1p h3.framer-text{font-weight:700!important}
+.framer-3438ad h2.framer-text{font-weight:700!important}
+
+/* Nudge "Open dashboard" button upward */
+.framer-1uzezez-container{transform:translateY(-24px)}
+
+/* Mobile-only: the hero film is removed on phones; desktop keeps the original hero video. */
+@media(max-width:809.98px){#hero video{display:none!important}}

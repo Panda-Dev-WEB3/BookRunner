@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" role="img" aria-labelledby="title">
+  <title id="title">Risk mandate</title>
+  <circle cx="24" cy="24" r="24" fill="#edf2fc"/>
+  <g fill="none" stroke="#1748c7" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M24 10 12 15v10c0 7 12 13 12 13s12-6 12-13V15Z"/>
+    <path d="m18 24 4 4 8-9" stroke="#326bd0" stroke-width="2"/>
+  </g>
+</svg>
