@@ -37,9 +37,9 @@ export const waterfallEnvShape = {
   WATERFALL_BUYBACK_THRESHOLD_USD: zUsd("10.00"),
   /** Slippage tolerance below the buyback router's quote for minBkrnOut. */
   WATERFALL_BUYBACK_SLIPPAGE_BPS: z.coerce.number().int().min(0).max(9_999).default(100),
-  /** Uniswap v3 fee tier of the USDC/BKRN pool (MockSwapRouter ignores it). */
+  /** Uniswap v3 fee tier passed ONLY to a legacy (pre-A5-02) BkrnFeeRouter; the current router pins it on-chain. */
   WATERFALL_BUYBACK_POOL_FEE: z.coerce.number().int().min(0).max(1_000_000).default(3000),
-  /** Whole BKRN per whole USDC used when the buyback router has no quote (a real SwapRouter02); 0 = skip. */
+  /** Whole BKRN per whole USDC used when the buyback router has no quote (a real SwapRouter02); 0 = use the router's on-chain floor. */
   WATERFALL_BUYBACK_BKRN_PER_USDC: zWad("0"),
   WATERFALL_LOG_CHUNK_BLOCKS: z.coerce.bigint().positive().default(10_000n),
   /** 0 = scan logs from deployment.startBlock. */

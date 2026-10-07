@@ -225,8 +225,8 @@ contract BookrunnerConfigTest is Test {
         config.setParam("maxMarkAge", 3600);
         config.setParam("maxPriceAge", 60);
         vm.expectEmit(true, false, false, true, address(config));
-        emit IBookrunnerConfig.ParamSet("committeeWindow", 0);
-        config.setParam("committeeWindow", 0);
+        emit IBookrunnerConfig.ParamSet("committeeWindow", 1 days);
+        config.setParam("committeeWindow", 1 days);
         vm.stopPrank();
         assertEq(config.carryBps(), 2500);
         assertEq(config.expenseCapBps(), 10_000);
@@ -236,7 +236,7 @@ contract BookrunnerConfigTest is Test {
         assertEq(config.markInterval(), 300);
         assertEq(config.maxMarkAge(), 3600);
         assertEq(config.maxPriceAge(), 60);
-        assertEq(config.committeeWindow(), 0);
+        assertEq(config.committeeWindow(), 1 days);
     }
 
     function test_setParam_rangeChecks() public {
@@ -244,9 +244,12 @@ contract BookrunnerConfigTest is Test {
         _expectOutOfRange("expenseCapBps", 10_001);
         _expectOutOfRange("markInterval", 0);
         _expectOutOfRange("markInterval", uint256(type(uint32).max) + 1);
+        _expectOutOfRange("maxMarkAge", 0);
         _expectOutOfRange("maxMarkAge", uint256(type(uint32).max) + 1);
         _expectOutOfRange("maxPriceAge", 0);
         _expectOutOfRange("maxPriceAge", uint256(type(uint32).max) + 1);
+        _expectOutOfRange("committeeWindow", 0);
+        _expectOutOfRange("committeeWindow", 1 days - 1);
         _expectOutOfRange("committeeWindow", uint256(type(uint32).max) + 1);
         // boundaries accepted
         vm.startPrank(admin);

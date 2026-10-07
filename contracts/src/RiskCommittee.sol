@@ -17,7 +17,10 @@ import {CharterRules} from "./MarketCharter.sol";
 ///         with `config.committeeBondBkrn()` locked vote once per charter. Approve = verdict posted AND
 ///         2 approvals (3 if the jury recommended reject); reject = 2 rejections (no verdict needed).
 ///         Votes and action approvals are tracked per member address and only count while that
-///         address holds a seat, so a replaced member's ballots stop counting immediately.
+///         address holds a seat AND is bonded (`isBonded`): the ballots of a replaced member, or of a
+///         member slashed below (or not re-bonded after a raise of) `committeeBondBkrn`, stop counting
+///         immediately and count again only once that seated member re-bonds.
+///         Action deadlines are fixed at proposal (`expiresAt`), independent of later window changes.
 ///         Live-book actions (2-of-3): REMANDATE, RETIRE, SLASH_SPONSOR, REVOKE_KEY.
 ///         Seat changes and slashing only via `config.timelock()`. Non-upgradeable.
 contract RiskCommittee is IRiskCommittee, ReentrancyGuardTransient {
@@ -59,6 +62,8 @@ contract RiskCommittee is IRiskCommittee, ReentrancyGuardTransient {
         address proposer;
         uint64 proposedAt;
         bool executed;
+        /// @dev proposedAt + committeeWindow at proposal time; later window changes do not move it.
+        uint64 expiresAt;
     }
 
     /// @notice Protocol registry (addresses, params, roles).
@@ -247,10 +252,12 @@ contract RiskCommittee is IRiskCommittee, ReentrancyGuardTransient {
     }
 
     /// @inheritdoc IRiskCommittee
-    /// @dev Counts only ballots of currently seated members.
+    /// @dev Counts only ballots of currently seated AND bonded members (see isBonded).
     function votesOf(uint256 charterId) public view returns (uint8 approvals, uint8 rejections) {
+        address[3] memory voters = _bondedSeats();
         for (uint256 i; i < SEATS; ++i) {
-            Ballot b = _ballots[charterId][_members[i]];
+            if (voters[i] == address(0)) continue;
+            Ballot b = _ballots[charterId][voters[i]];
             if (b == Ballot.Approve) ++approvals;
             else if (b == Ballot.Reject) ++rejections;
         }
@@ -275,7 +282,8 @@ contract RiskCommittee is IRiskCommittee, ReentrancyGuardTransient {
     /// @dev Bonded seated members. The book must exist in the factory, `actionKind` must be one of
     ///      REMANDATE / RETIRE / SLASH_SPONSOR / REVOKE_KEY and `data` well-formed for it (REMANDATE
     ///      terms must also pass the charter mandate rules). The proposer's approval is recorded.
-    ///      Approvals expire `config.committeeWindow()` after proposal. [ext]
+    ///      The action expires `config.committeeWindow()` after proposal; the deadline is stored here, so
+    ///      a later window change can neither revive an expired action nor cut a pending one short. [ext]
     function proposeAction(uint256 bookId, bytes32 actionKind, bytes calldata data)
         external
         nonReentrant
@@ -292,6 +300,7 @@ contract RiskCommittee is IRiskCommittee, ReentrancyGuardTransient {
         a.data = data;
         a.proposer = msg.sender;
         a.proposedAt = uint64(block.timestamp);
+        a.expiresAt = uint64(block.timestamp + config.committeeWindow());
         _actionApproved[actionId][msg.sender] = true;
 
         emit ActionProposed(actionId, bookId, actionKind, msg.sender);
@@ -299,17 +308,16 @@ contract RiskCommittee is IRiskCommittee, ReentrancyGuardTransient {
     }
 
     /// @inheritdoc IRiskCommittee
-    /// @dev Bonded seated members, once per address. Executes when approvals of currently seated
-    ///      members reach ACTION_THRESHOLD; a failing execution reverts the approval too.
+    /// @dev Bonded seated members, once per address, before the action's stored `expiresAt`. Executes
+    ///      when approvals of currently seated and bonded members reach ACTION_THRESHOLD; a failing
+    ///      execution reverts the approval too.
     function approveAction(uint256 actionId) external nonReentrant {
         address m = msg.sender;
         if (!isBonded(m)) revert NotBondedMember();
         Action storage a = _actions[actionId];
         if (a.proposer == address(0)) revert UnknownAction(actionId);
         if (a.executed) revert ActionAlreadyExecuted(actionId);
-        if (block.timestamp >= uint256(a.proposedAt) + config.committeeWindow()) {
-            revert ActionExpired(actionId);
-        }
+        if (block.timestamp >= a.expiresAt) revert ActionExpired(actionId);
         if (_actionApproved[actionId][m]) revert AlreadyApproved(actionId, m);
 
         _actionApproved[actionId][m] = true;
@@ -322,10 +330,11 @@ contract RiskCommittee is IRiskCommittee, ReentrancyGuardTransient {
         }
     }
 
-    /// @notice Approvals of currently seated members for `actionId`.
+    /// @notice Approvals of currently seated and bonded members for `actionId`.
     function actionApprovals(uint256 actionId) public view returns (uint8 approvals) {
+        address[3] memory voters = _bondedSeats();
         for (uint256 i; i < SEATS; ++i) {
-            if (_actionApproved[actionId][_members[i]]) ++approvals;
+            if (voters[i] != address(0) && _actionApproved[actionId][voters[i]]) ++approvals;
         }
     }
 
@@ -382,6 +391,15 @@ contract RiskCommittee is IRiskCommittee, ReentrancyGuardTransient {
     // ------------------------------------------------------------------------------------------
     // Internals
     // ------------------------------------------------------------------------------------------
+
+    /// @dev The seats whose ballots count (same rule as isBonded); a non-counting seat is address(0).
+    function _bondedSeats() private view returns (address[3] memory voters) {
+        uint256 required = config.committeeBondBkrn();
+        for (uint256 i; i < SEATS; ++i) {
+            address m = _members[i];
+            if (_bondActive[m] && _bondOf[m] >= required) voters[i] = m;
+        }
+    }
 
     /// @dev Filed in MarketCharter and inside the committee window.
     function _isOpen(uint256 charterId) private view returns (bool) {

@@ -69,12 +69,12 @@ contract BookrunnerConfigLowGasTest is Test {
         vm.startPrank(admin);
         config.setParam("maxTradePriceAge", 42);
         config.setParam("maxPriceAge", 77);
-        config.setParam("committeeWindow", 9);
+        config.setParam("committeeWindow", 1 days + 9);
         config.setNewBooksPaused(true);
         vm.stopPrank();
         assertEq(config.maxTradePriceAge(), 42);
         assertEq(config.maxPriceAge(), 77);
-        assertEq(config.committeeWindow(), 9);
+        assertEq(config.committeeWindow(), 1 days + 9);
         assertTrue(config.newBooksPaused());
         assertEq(config.markInterval(), 86_400);
         assertEq(config.carryBps(), 1000);

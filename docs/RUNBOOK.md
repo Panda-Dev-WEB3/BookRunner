@@ -28,20 +28,49 @@ Preconditions (all must be checked off in `docs/VERIFY.md` with sources):
 
 Deployment (fresh deployer, multisig admin, unlinked from other studio deployers):
 
-1. Deploy with `Deploy.s.sol` using `--rpc-url $RHC_RPC_URL` and a hardware/multisig-controlled
-   deployer; set the TimelockController min delay to 48h; grant `DEFAULT_ADMIN_ROLE` on
+1. **Not with `Deploy.s.sol`.** That script is devnet (31337) / testnet (46630) only: it refuses any
+   other chain id and deploys protocol-owned mocks (USDC, Stock Tokens, MockSwapRouter,
+   MockOrderlyVault). Mainnet needs a dedicated script (Lane C4, not in this repo) that performs the
+   same wiring (`_deployCore` / `_deployVenuesAndGovernance` / `_registerImplementations` /
+   `_grantRoles`) against the VERIFY-ed external addresses, with a hardware/multisig-controlled
+   deployer and `--rpc-url $RHC_RPC_URL`. It must keep the governance choices of `Deploy.s.sol`:
+   - `StockTokenRegistry` constructed with `admin = address(0)`: it is governed by
+     `config.timelock()` only, so the timelock handover below also hands over the registry;
+   - `expenseRecipient` (charter fees) and `slashRecipient` (slashed BKRN) set to the treasury
+     multisig (`TREASURY_ADDRESS` / `SLASH_RECIPIENT_ADDRESS`), never the deployer key;
+   - `BkrnFeeRouter.setBuybackParams(poolFee, refBkrnPerUsdcWad, maxSlippageBps, maxPerCall)` with the
+     VERIFY-ed SwapRouter02 BKRN/USDC fee tier, a reference price near market (or
+     `setBkrnPriceId` once the oracle prices BKRN) and a per-call cap;
+   - BKRN allocations minted to the deployer (`community` / `liquidity` / `contributors`) go to
+     their multisig / vesting addresses at construction, not to the deployer.
+2. Handover: set the TimelockController min delay to 48h; grant `DEFAULT_ADMIN_ROLE` on
    BookrunnerConfig to the TimelockController, call `config.setAddress("timelock", <controller>)`
    (it must already hold the admin role), transfer every other admin role to the timelock and the
-   timelock proposer/executor roles to the multisig; renounce the deployer. Assert afterwards that
-   `config.timelock() == <controller>` and the deployer holds no role (`timelock()` resolves to
-   `address(0)` — every upgrade/timelock power fails closed — if the recorded address lost the admin
-   role).
-2. Grant roles: MARK_SIGNER, RISK, OPS_VENUE, JURY, KEEPER to service keys held in a secret manager
+   timelock proposer/executor roles to the multisig; renounce the deployer's `GUARDIAN_ROLE` and
+   `DEFAULT_ADMIN_ROLE` (grant GUARDIAN to the guardian multisig).
+
+   **Post-conditions** (assert every one on-chain; `timelock()` resolves to `address(0)` — every
+   timelock power fails closed — if the recorded address lost the admin role):
+   - `config.timelock() == <controller>`; the deployer holds no BookrunnerConfig role
+     (DEFAULT_ADMIN, GUARDIAN, MARK_SIGNER, RISK, OPS_VENUE, JURY, KEEPER);
+   - `StockTokenRegistry.admin() == address(0)` (if a registry was deployed with an admin, call
+     `renounceAdmin()` from it first);
+   - `config.expenseRecipient()` and `config.slashRecipient()` are the treasury multisig, not the
+     deployer;
+   - `BkrnFeeRouter.buybackRouter()` is the real SwapRouter02 (never MockSwapRouter) and
+     `buybackPoolFee()` / `refBkrnPerUsdcWad()` (or `bkrnPriceId()`) / `maxSlippageBps()` /
+     `maxBuybackPerCall()` are set; `BkrnStaking.cooldown() >= 1 day` and `rewardsDuration()` set;
+   - the deployer holds no BKRN allocation and owns no contract (`Ownable` mocks are never deployed).
+
+   Testnet (46630) keeps the deployer as `config.timelock()` (0s delay) on purpose: the post-
+   conditions above apply to mainnet only, except that the testnet treasury is devkeys index 22,
+   not the deployer.
+3. Grant roles: MARK_SIGNER, RISK, OPS_VENUE, JURY, KEEPER to service keys held in a secret manager
    (never the test mnemonic; `devkeys.ts` refuses non-local chains without explicit keys).
-3. Register oracle signer(s) with the attestation hash; register Stock Tokens and indices with
+4. Register oracle signer(s) with the attestation hash; register Stock Tokens and indices with
    multipliers and float caps; set venue minimum IF per venue; set agent tier bonds.
-4. Seat the three committee members; each calls `bond()`.
-5. Charter the three launch books (NVDA, TSLA, Stock-Token index) from the studio treasury
+5. Seat the three committee members; each calls `bond()`.
+6. Charter the three launch books (NVDA, TSLA, Stock-Token index) from the studio treasury
    (sponsor), committee approves, subscription windows open at launch, first marks the same day.
 
 ## Operations

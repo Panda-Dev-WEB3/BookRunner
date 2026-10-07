@@ -26,7 +26,59 @@ export const bkrnStakingAbi = [
   },
   {
     "type": "function",
+    "name": "DEFAULT_REWARDS_DURATION",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "MAX_COOLDOWN",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MAX_REWARDS_DURATION",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MIN_COOLDOWN",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MIN_REWARDS_DURATION",
     "inputs": [],
     "outputs": [
       {
@@ -142,6 +194,25 @@ export const bkrnStakingAbi = [
   },
   {
     "type": "function",
+    "name": "earningOf",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "isLocker",
     "inputs": [
       {
@@ -155,6 +226,19 @@ export const bkrnStakingAbi = [
         "name": "",
         "type": "bool",
         "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "lastUpdateTime",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ],
     "stateMutability": "view"
@@ -293,6 +377,19 @@ export const bkrnStakingAbi = [
   },
   {
     "type": "function",
+    "name": "periodFinish",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "queuedReward",
     "inputs": [],
     "outputs": [
@@ -319,7 +416,33 @@ export const bkrnStakingAbi = [
   },
   {
     "type": "function",
+    "name": "rewardPerToken",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "rpt",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "rewardPerTokenStored",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "rewardRate",
     "inputs": [],
     "outputs": [
       {
@@ -339,6 +462,19 @@ export const bkrnStakingAbi = [
         "name": "",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "rewardsDuration",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ],
     "stateMutability": "view"
@@ -369,6 +505,19 @@ export const bkrnStakingAbi = [
         "name": "allowed",
         "type": "bool",
         "internalType": "bool"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setRewardsDuration",
+    "inputs": [
+      {
+        "name": "duration",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ],
     "outputs": [],
@@ -437,6 +586,19 @@ export const bkrnStakingAbi = [
   },
   {
     "type": "function",
+    "name": "totalEarning",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "totalStaked",
     "inputs": [],
     "outputs": [
@@ -484,6 +646,19 @@ export const bkrnStakingAbi = [
       }
     ],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "unstreamedReward",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -601,6 +776,19 @@ export const bkrnStakingAbi = [
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "RewardsDurationSet",
+    "inputs": [
+      {
+        "name": "duration",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
       }
     ],
     "anonymous": false
@@ -745,6 +933,17 @@ export const bkrnStakingAbi = [
   },
   {
     "type": "error",
+    "name": "BadRewardsDuration",
+    "inputs": [
+      {
+        "name": "duration",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "CooldownActive",
     "inputs": [
       {
@@ -765,6 +964,22 @@ export const bkrnStakingAbi = [
       },
       {
         "name": "max",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "CooldownTooShort",
+    "inputs": [
+      {
+        "name": "cooldown",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "min",
         "type": "uint64",
         "internalType": "uint64"
       }

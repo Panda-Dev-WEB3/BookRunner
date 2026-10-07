@@ -149,6 +149,7 @@ contract BkrnStakingInvariantTest is CoreFixture {
     /// @dev Sum of stakes == totalStaked; per account staked >= locked + pending; locks sum to locked.
     function invariant_accounting() public view {
         uint256 sum;
+        uint256 earningSum;
         uint256 n = handler.actorCount();
         for (uint256 i; i < n; ++i) {
             address a = handler.actors(i);
@@ -156,6 +157,8 @@ contract BkrnStakingInvariantTest is CoreFixture {
             uint256 lk = staking.lockedOf(a);
             (uint256 pending,) = staking.pendingUnstakeOf(a);
             assertGe(st, lk + pending);
+            assertEq(staking.earningOf(a), st - pending);
+            earningSum += st - pending;
             assertEq(staking.availableOf(a), st - lk - pending);
             uint256 lockSum;
             for (uint256 j; j < handler.lockIdCount(); ++j) {
@@ -165,6 +168,7 @@ contract BkrnStakingInvariantTest is CoreFixture {
             sum += st;
         }
         assertEq(sum, staking.totalStaked());
+        assertEq(earningSum, staking.totalEarning());
     }
 
     /// @dev Rewards owed never exceed rewards notified minus claimed (and the queued remainder).
@@ -175,7 +179,7 @@ contract BkrnStakingInvariantTest is CoreFixture {
             owed += staking.earned(handler.actors(i));
         }
         assertEq(staking.rewardReserve(), handler.totalNotified() - handler.totalClaimed());
-        assertLe(owed + staking.queuedReward(), staking.rewardReserve());
+        assertLe(owed + staking.queuedReward() + staking.unstreamedReward(), staking.rewardReserve());
     }
 
     /// @dev Slashed BKRN goes only to the slash recipient.

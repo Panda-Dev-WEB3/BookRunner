@@ -83,11 +83,12 @@ contract FeeFlowHandler is Test {
     function buyback(uint256 amountIn) external {
         uint256 pending = feeRouter.buybackPending();
         if (pending == 0) return;
-        amountIn = bound(amountIn, 1, pending);
+        uint256 cap = feeRouter.maxBuybackPerCall();
+        amountIn = bound(amountIn, 1, pending < cap ? pending : cap);
         uint256 q = swap.quote(address(usdc), address(feeRouter.bkrn()), amountIn);
         if (q == 0) return;
         vm.prank(keeper);
-        feeRouter.executeBuyback(amountIn, q, 3000);
+        feeRouter.executeBuyback(amountIn, q);
         buybackUsdc += amountIn;
     }
 

@@ -15,14 +15,18 @@ import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 ///         locked stake cannot be unstaked. Slashing reduces the lock and the stake and sends the
 ///         slashed BKRN to `config.slashRecipient()`.
 ///
-///         Buyback distribution: BKRN bought back by `BkrnFeeRouter` is distributed pro-rata to staked
-///         balances through a Synthetix-style reward-per-token accumulator (instant, no streaming).
-///         Rewards notified while nothing is staked, and the exact division remainder of every
-///         allocation, are carried forward into the next notification; per-account flooring dust
-///         stays in the contract.
+///         Buyback distribution: BKRN bought back by `BkrnFeeRouter` is STREAMED to stakers over
+///         `rewardsDuration` (timelock-set, default 7 days; Synthetix rewardRate / periodFinish): a
+///         notification adds its amount plus the unstreamed rest of the current period to a new period
+///         starting now. Stake earns pro-rata to its EARNING balance `staked - pendingUnstake`: stake in
+///         its unstake cooldown earns nothing, and the cooldown is at least MIN_COOLDOWN (1 day). Together
+///         this removes the just-in-time stake (front-run the keeper's buyback, or flash-stake) that the
+///         previous instant allocation paid a full pro-rata share of carry accrued before it was staked.
+///         Rewards streamed while nothing earns, and the exact division remainder of every accrual, are
+///         carried forward into the next notification; per-account flooring dust stays in the contract.
 /// @dev Invariants: for every account `staked >= locked + pendingUnstake`;
-///      `bkrn.balanceOf(this) >= totalStaked + rewardReserve`; the sum of all `earned` is
-///      `<= rewardReserve - queuedReward`.
+///      `totalEarning == sum(staked - pendingUnstake)`; `bkrn.balanceOf(this) >= totalStaked + rewardReserve`;
+///      the sum of all `earned` is `<= rewardReserve - queuedReward - unstreamedReward`.
 contract BkrnStaking is IBkrnStaking, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
 
@@ -33,6 +37,13 @@ contract BkrnStaking is IBkrnStaking, ReentrancyGuardTransient {
     uint64 public constant DEFAULT_COOLDOWN = 7 days;
     /// @notice Maximum configurable cooldown.
     uint64 public constant MAX_COOLDOWN = 90 days;
+    /// @notice Minimum configurable cooldown (no same-block stake/unstake round trips).
+    uint64 public constant MIN_COOLDOWN = 1 days;
+    /// @notice Default period over which a buyback notification is streamed.
+    uint64 public constant DEFAULT_REWARDS_DURATION = 7 days;
+    /// @notice Bounds of the configurable rewards duration.
+    uint64 public constant MIN_REWARDS_DURATION = 1 days;
+    uint64 public constant MAX_REWARDS_DURATION = 90 days;
 
     struct Account {
         uint256 staked;
@@ -51,10 +62,20 @@ contract BkrnStaking is IBkrnStaking, ReentrancyGuardTransient {
     /// @notice The staked token (config.bkrn() at deployment).
     IERC20 public immutable bkrn;
 
-    /// @notice Unstake cooldown in seconds (admin-settable, default 7 days).
+    /// @notice Unstake cooldown in seconds (admin-settable, default 7 days, >= MIN_COOLDOWN).
     uint64 public cooldown;
+    /// @notice Streaming period of each reward notification (admin-settable, default 7 days).
+    uint64 public rewardsDuration;
+    /// @notice End of the current reward stream (0 before the first notification).
+    uint64 public periodFinish;
+    /// @notice Last time the accumulator was brought forward (capped at periodFinish).
+    uint64 public lastUpdateTime;
     /// @notice Sum of all staked balances (including locked and cooling-down stake).
     uint256 public totalStaked;
+    /// @notice Sum of earning balances (`staked - pendingUnstake`): the reward denominator.
+    uint256 public totalEarning;
+    /// @notice Current stream rate: BKRN wei per second, scaled by 1e18.
+    uint256 public rewardRate;
 
     /// @inheritdoc IBkrnStaking
     mapping(address locker => bool) public isLocker;
@@ -67,9 +88,9 @@ contract BkrnStaking is IBkrnStaking, ReentrancyGuardTransient {
     uint256 public rewardPerTokenStored;
     /// @notice BKRN notified as rewards and not yet claimed (includes `queuedReward` and rounding dust).
     uint256 public rewardReserve;
-    /// @dev Rewards not yet allocated to stakers, scaled by 1e18: everything notified while nothing was
-    ///      staked plus the exact division remainder of each allocation (always < totalStaked when
-    ///      something is staked). Carried into the next notification, so nothing is double counted.
+    /// @dev Rewards not yet allocated to stakers, scaled by 1e18: everything streamed while nothing was
+    ///      earning plus the exact division remainder of each accrual and of each rate computation.
+    ///      Carried into the next notification, so nothing is double counted.
     uint256 private _unallocatedScaled;
     /// @notice Snapshot of `rewardPerTokenStored` at the account's last reward update.
     mapping(address account => uint256) public userRewardPerTokenPaid;
@@ -85,6 +106,8 @@ contract BkrnStaking is IBkrnStaking, ReentrancyGuardTransient {
     error NothingPending();
     error CooldownActive(uint64 availableAt);
     error CooldownTooLong(uint64 cooldown, uint64 max);
+    error CooldownTooShort(uint64 cooldown, uint64 min);
+    error BadRewardsDuration(uint64 duration);
     error NotAdmin(address caller);
     error NotAdminOrFactory(address caller);
     error NotLocker(address caller);
@@ -97,6 +120,8 @@ contract BkrnStaking is IBkrnStaking, ReentrancyGuardTransient {
     event LockerSet(address indexed locker, bool allowed, address indexed by);
     /// @notice Unstake cooldown changed.
     event CooldownSet(uint64 cooldown);
+    /// @notice Rewards streaming duration changed (applies from the next notification).
+    event RewardsDurationSet(uint64 duration);
     /// @notice A pending unstake request was cancelled; the amount is available again.
     event UnstakeCancelled(address indexed account, uint256 amount);
 
@@ -112,7 +137,9 @@ contract BkrnStaking is IBkrnStaking, ReentrancyGuardTransient {
         if (token == address(0)) revert ZeroAddress();
         bkrn = IERC20(token);
         cooldown = DEFAULT_COOLDOWN;
+        rewardsDuration = DEFAULT_REWARDS_DURATION;
         emit CooldownSet(DEFAULT_COOLDOWN);
+        emit RewardsDurationSet(DEFAULT_REWARDS_DURATION);
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -125,28 +152,34 @@ contract BkrnStaking is IBkrnStaking, ReentrancyGuardTransient {
         _updateReward(msg.sender);
         _accounts[msg.sender].staked += amount;
         totalStaked += amount;
+        totalEarning += amount;
         emit Staked(msg.sender, amount);
         bkrn.safeTransferFrom(msg.sender, address(this), amount);
     }
 
     /// @inheritdoc IBkrnStaking
     /// @dev Adds to any existing pending request and restarts the cooldown for the whole pending amount.
+    ///      Stake pending unstake stops earning rewards immediately.
     function requestUnstake(uint256 amount) external {
         if (amount == 0) revert ZeroAmount();
         uint256 available = availableOf(msg.sender);
         if (available < amount) revert InsufficientAvailable(available, amount);
+        _updateReward(msg.sender);
         Account storage a = _accounts[msg.sender];
         a.pendingUnstake += amount;
+        totalEarning -= amount;
         uint64 availableAt = uint64(block.timestamp) + cooldown;
         a.unstakeAvailableAt = availableAt;
         emit UnstakeRequested(msg.sender, amount, availableAt);
     }
 
-    /// @notice Cancels the caller's pending unstake request; the amount becomes available again.
+    /// @notice Cancels the caller's pending unstake request; the amount becomes available (and earns) again.
     function cancelUnstake() external returns (uint256 amount) {
         Account storage a = _accounts[msg.sender];
         amount = a.pendingUnstake;
         if (amount == 0) revert NothingPending();
+        _updateReward(msg.sender);
+        totalEarning += amount;
         a.pendingUnstake = 0;
         a.unstakeAvailableAt = 0;
         emit UnstakeCancelled(msg.sender, amount);
@@ -238,6 +271,7 @@ contract BkrnStaking is IBkrnStaking, ReentrancyGuardTransient {
         a.locked -= slashed;
         a.staked -= slashed;
         totalStaked -= slashed;
+        totalEarning -= slashed; // slashed <= locked, so the pending-unstake part is untouched
         emit Slashed(account, lockId, slashed, recipient);
         bkrn.safeTransfer(recipient, slashed);
     }
@@ -248,7 +282,9 @@ contract BkrnStaking is IBkrnStaking, ReentrancyGuardTransient {
 
     /// @inheritdoc IBkrnStaking
     /// @dev Only `config.feeRouter()`, which must have transferred `bkrnAmount` BKRN to this contract
-    ///      first (checked against `totalStaked + rewardReserve`).
+    ///      first (checked against `totalStaked + rewardReserve`). Starts a new stream of
+    ///      `rewardsDuration` carrying `bkrnAmount`, the unstreamed rest of the current stream and the
+    ///      unallocated carry (rewards streamed while nothing was earning + rounding remainders).
     function notifyReward(uint256 bkrnAmount) external nonReentrant {
         if (msg.sender != config.feeRouter()) revert NotFeeRouter(msg.sender);
         if (bkrnAmount == 0) return;
@@ -256,15 +292,17 @@ contract BkrnStaking is IBkrnStaking, ReentrancyGuardTransient {
         uint256 bal = bkrn.balanceOf(address(this));
         if (bal < required) revert RewardNotReceived(required, bal);
 
+        _accrue();
         rewardReserve += bkrnAmount;
-        uint256 unallocated = _unallocatedScaled + bkrnAmount * PRECISION;
-        uint256 staked = totalStaked;
-        if (staked != 0) {
-            uint256 increment = unallocated / staked;
-            rewardPerTokenStored += increment;
-            unallocated -= increment * staked;
-        }
-        _unallocatedScaled = unallocated;
+        uint256 scaled = _unallocatedScaled + bkrnAmount * PRECISION;
+        uint256 finish = periodFinish;
+        if (block.timestamp < finish) scaled += (finish - block.timestamp) * rewardRate;
+        uint256 duration = rewardsDuration;
+        uint256 rate = scaled / duration;
+        rewardRate = rate;
+        _unallocatedScaled = scaled - rate * duration;
+        lastUpdateTime = uint64(block.timestamp);
+        periodFinish = uint64(block.timestamp + duration);
         emit RewardNotified(bkrnAmount);
     }
 
@@ -281,31 +319,59 @@ contract BkrnStaking is IBkrnStaking, ReentrancyGuardTransient {
 
     /// @inheritdoc IBkrnStaking
     function earned(address account) public view returns (uint256) {
-        return _rewards[account]
-            + (_accounts[account].staked * (rewardPerTokenStored - userRewardPerTokenPaid[account]))
-            / PRECISION;
+        (uint256 rpt,) = _accrued();
+        return _rewards[account] + (_earningOf(account) * (rpt - userRewardPerTokenPaid[account])) / PRECISION;
+    }
+
+    /// @notice Cumulative reward per earning token (scaled by 1e18), including the stream up to now.
+    function rewardPerToken() external view returns (uint256 rpt) {
+        (rpt,) = _accrued();
+    }
+
+    /// @notice Stake that currently earns rewards: `staked - pendingUnstake`.
+    function earningOf(address account) external view returns (uint256) {
+        return _earningOf(account);
     }
 
     // ---------------------------------------------------------------------------------------------
     // Admin
     // ---------------------------------------------------------------------------------------------
 
-    /// @notice Sets the unstake cooldown (applies to requests made afterwards). Config admin only.
+    /// @notice Sets the unstake cooldown (applies to requests made afterwards), within
+    ///         [MIN_COOLDOWN, MAX_COOLDOWN]. Config admin only.
     function setCooldown(uint64 newCooldown) external {
         if (!config.hasRole(DEFAULT_ADMIN_ROLE, msg.sender)) revert NotAdmin(msg.sender);
         if (newCooldown > MAX_COOLDOWN) revert CooldownTooLong(newCooldown, MAX_COOLDOWN);
+        if (newCooldown < MIN_COOLDOWN) revert CooldownTooShort(newCooldown, MIN_COOLDOWN);
         cooldown = newCooldown;
         emit CooldownSet(newCooldown);
+    }
+
+    /// @notice Sets the streaming period of later reward notifications (the running stream keeps its
+    ///         rate and end), within [MIN_REWARDS_DURATION, MAX_REWARDS_DURATION]. Config admin only.
+    function setRewardsDuration(uint64 duration) external {
+        if (!config.hasRole(DEFAULT_ADMIN_ROLE, msg.sender)) revert NotAdmin(msg.sender);
+        if (duration < MIN_REWARDS_DURATION || duration > MAX_REWARDS_DURATION) revert BadRewardsDuration(duration);
+        rewardsDuration = duration;
+        emit RewardsDurationSet(duration);
     }
 
     // ---------------------------------------------------------------------------------------------
     // Views
     // ---------------------------------------------------------------------------------------------
 
-    /// @notice Rewards notified but not yet allocated to stakers (whole BKRN wei): rewards notified while
-    ///         nothing was staked, plus rounding carry. Allocated on the next notification.
+    /// @notice Rewards notified but not allocated to stakers (BKRN wei): rewards streamed while nothing
+    ///         was earning, plus rounding carry. Re-streamed by the next notification.
     function queuedReward() external view returns (uint256) {
-        return _unallocatedScaled / PRECISION;
+        (, uint256 unallocated) = _accrued();
+        return unallocated / PRECISION;
+    }
+
+    /// @notice Rewards of the current stream not yet streamed (BKRN wei, floored).
+    function unstreamedReward() external view returns (uint256) {
+        uint256 finish = periodFinish;
+        if (block.timestamp >= finish) return 0;
+        return ((finish - block.timestamp) * rewardRate) / PRECISION;
     }
 
     /// @inheritdoc IBkrnStaking
@@ -349,11 +415,49 @@ contract BkrnStaking is IBkrnStaking, ReentrancyGuardTransient {
     // Internals
     // ---------------------------------------------------------------------------------------------
 
+    /// @dev Brings the global accumulator forward to min(now, periodFinish).
+    function _accrue() private {
+        (uint256 rpt, uint256 unallocated) = _accrued();
+        rewardPerTokenStored = rpt;
+        _unallocatedScaled = unallocated;
+        uint256 t = _lastTimeApplicable();
+        if (t > lastUpdateTime) lastUpdateTime = uint64(t);
+    }
+
+    /// @dev (rewardPerTokenStored, _unallocatedScaled) as of min(now, periodFinish). The stream since
+    ///      lastUpdateTime is split over totalEarning; its division remainder (or all of it while nothing
+    ///      earns) is added to the unallocated carry.
+    function _accrued() private view returns (uint256 rpt, uint256 unallocated) {
+        rpt = rewardPerTokenStored;
+        unallocated = _unallocatedScaled;
+        uint256 t = _lastTimeApplicable();
+        uint256 last = lastUpdateTime;
+        if (t <= last) return (rpt, unallocated);
+        uint256 streamed = (t - last) * rewardRate;
+        uint256 earning = totalEarning;
+        if (earning == 0) return (rpt, unallocated + streamed);
+        uint256 increment = streamed / earning;
+        return (rpt + increment, unallocated + (streamed - increment * earning));
+    }
+
+    function _lastTimeApplicable() private view returns (uint256) {
+        uint256 finish = periodFinish;
+        return block.timestamp < finish ? block.timestamp : finish;
+    }
+
+    function _earningOf(address account) private view returns (uint256) {
+        Account storage a = _accounts[account];
+        return a.staked - a.pendingUnstake;
+    }
+
+    /// @dev Accrues globally, then settles `account`'s earning balance up to the current accumulator.
+    ///      Call before any change of the account's staked or pendingUnstake.
     function _updateReward(address account) private {
+        _accrue();
         uint256 rpt = rewardPerTokenStored;
         uint256 paid = userRewardPerTokenPaid[account];
         if (rpt != paid) {
-            _rewards[account] += (_accounts[account].staked * (rpt - paid)) / PRECISION;
+            _rewards[account] += (_earningOf(account) * (rpt - paid)) / PRECISION;
             userRewardPerTokenPaid[account] = rpt;
         }
     }

@@ -29,6 +29,7 @@ export const DEV_ROLE_INDEX = {
   trader1: 19,
   trader2: 20,
   trader3: 21,
+  treasury: 22, // protocol treasury: config.expenseRecipient + slashRecipient (Deploy.s.sol TREASURY_INDEX)
 } as const;
 export type DevRole = keyof typeof DEV_ROLE_INDEX;
 

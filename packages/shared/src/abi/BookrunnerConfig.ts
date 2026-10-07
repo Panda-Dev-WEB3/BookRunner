@@ -455,6 +455,19 @@ export const bookrunnerConfigAbi = [
   },
   {
     "type": "function",
+    "name": "MIN_COMMITTEE_WINDOW",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "OPS_VENUE_ROLE",
     "inputs": [],
     "outputs": [

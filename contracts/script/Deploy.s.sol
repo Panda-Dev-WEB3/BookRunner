@@ -31,8 +31,14 @@ import {IAttestedOracle} from "../src/interfaces/IAttestedOracle.sol";
 import {IStockTokenRegistry} from "../src/interfaces/IStockTokenRegistry.sol";
 
 /// @title Deploy — devnet (anvil 31337) and Robinhood Chain TESTNET (46630) deployment of the Bookrunner core.
-/// @notice Mainnet (RHC 4663) deployment is NOT done by this script: see docs/RUNBOOK.md (TimelockController
-///         48h, multisig admin, VERIFY register). Role keys are derived from DEV_MNEMONIC by the indices in
+/// @notice Mainnet (RHC 4663) deployment is NOT done by this script (it refuses any chain but 31337 / 46630
+///         and deploys mocks): see docs/RUNBOOK.md (TimelockController 48h, multisig admin, VERIFY register,
+///         handover post-conditions). Governance after this script: the deployer is `config.timelock()`
+///         (0s delay); StockTokenRegistry has NO separate admin (it follows `config.timelock()`, so a
+///         timelock handover also hands over the registry); charter fees (`expenseRecipient`) and slashed
+///         BKRN (`slashRecipient`) go to an explicit treasury, never to the deployer key: TREASURY_ADDRESS /
+///         SLASH_RECIPIENT_ADDRESS, defaulting to devkeys.ts index 22 ("treasury") of the mnemonic.
+///         Role keys are derived from DEV_MNEMONIC by the indices in
 ///         packages/shared/src/devkeys.ts (testnet: the locally generated BKRN_TESTNET_MNEMONIC, passed in as
 ///         DEV_MNEMONIC; the public anvil mnemonic is refused). Testnet uses the same protocol-owned mocks as
 ///         devnet for USDC, Stock Tokens, the swap router and the Orderly vault (real venue/token integration
@@ -45,6 +51,14 @@ contract Deploy is Script {
     string internal constant DEFAULT_MNEMONIC = "test test test test test test test test test test test junk";
     bytes32 internal constant BROKER_HASH = keccak256("bookrunner"); // VERIFY: Orderly broker id
     bytes32 internal constant TOKEN_HASH = keccak256("USDC"); // VERIFY: Orderly token hash (RHC lists USDG)
+    uint32 internal constant TREASURY_INDEX = 22; // devkeys.ts DEV_ROLE_INDEX.treasury
+    /// @dev Buyback pool fee tier pinned on BkrnFeeRouter (MockSwapRouter ignores it; mainnet: VERIFY pool).
+    uint24 internal constant BUYBACK_POOL_FEE = 3000;
+    /// @dev Devnet/testnet buyback reference price: whole BKRN per whole USDC (= the MockSwapRouter price).
+    uint256 internal constant BUYBACK_REF_BKRN_PER_USDC = 20e18;
+    /// @dev Max buyback slippage vs the reference price, and the per-call USDC cap.
+    uint16 internal constant BUYBACK_MAX_SLIPPAGE_BPS = 500;
+    uint256 internal constant BUYBACK_MAX_PER_CALL = 250_000e6;
 
     // ---- role addresses (devkeys.ts indices) ----
     address internal deployer;
@@ -57,6 +71,8 @@ contract Deploy is Script {
     uint256 internal oracleSignerKey;
     address internal sponsor;
     address[3] internal committeeMembers;
+    address internal treasury; // config.expenseRecipient (charter fees)
+    address internal slashTreasury; // config.slashRecipient (slashed BKRN)
 
     // ---- deployed ----
     BookrunnerConfig internal config;
@@ -135,6 +151,9 @@ contract Deploy is Script {
         committeeMembers[0] = vm.addr(vm.deriveKey(mnemonic, 8));
         committeeMembers[1] = vm.addr(vm.deriveKey(mnemonic, 9));
         committeeMembers[2] = vm.addr(vm.deriveKey(mnemonic, 10));
+        treasury = vm.envOr("TREASURY_ADDRESS", vm.addr(vm.deriveKey(mnemonic, TREASURY_INDEX)));
+        slashTreasury = vm.envOr("SLASH_RECIPIENT_ADDRESS", treasury);
+        require(treasury != deployer && slashTreasury != deployer, "treasury must not be the deployer");
     }
 
     function _deployCore(uint32 markInterval) internal {
@@ -157,13 +176,14 @@ contract Deploy is Script {
         config.setAddress("feeRouter", address(feeRouter));
         config.setAddress("backstop", address(backstop));
         config.setAddress("markRegistry", address(markRegistry));
-        config.setAddress("expenseRecipient", deployer);
-        config.setAddress("slashRecipient", deployer);
+        config.setAddress("expenseRecipient", treasury);
+        config.setAddress("slashRecipient", slashTreasury);
 
         oracle = new AttestedOracle(address(config), oracleSigner, keccak256("devnet-plain-key"));
         config.setAddress("oracle", address(oracle));
 
-        registry = new StockTokenRegistry(address(config), deployer);
+        // no separate registry admin: governed by config.timelock() (the deployer until a handover)
+        registry = new StockTokenRegistry(address(config), address(0));
         config.setAddress("stockRegistry", address(registry));
 
         swapRouter = new MockSwapRouter(deployer);
@@ -199,6 +219,9 @@ contract Deploy is Script {
         staking.setLocker(address(charter), true);
         staking.setLocker(address(committee), true);
         feeRouter.setBuybackRouter(address(swapRouter));
+        feeRouter.setBuybackParams(
+            BUYBACK_POOL_FEE, BUYBACK_REF_BKRN_PER_USDC, BUYBACK_MAX_SLIPPAGE_BPS, BUYBACK_MAX_PER_CALL
+        );
     }
 
     function _registerImplementations() internal {
@@ -322,6 +345,8 @@ contract Deploy is Script {
         vm.serializeJson(root, "{\"books\":[]}");
         vm.serializeUint(root, "chainId", block.chainid);
         vm.serializeUint(root, "startBlock", startBlock);
+        vm.serializeAddress(root, "expenseRecipient", treasury);
+        vm.serializeAddress(root, "slashRecipient", slashTreasury);
         vm.serializeString(root, "contracts", contractsJson);
         string memory out = vm.serializeString(root, "stockTokens", stJson);
         string memory path = string.concat(vm.projectRoot(), "/deployments/", vm.toString(block.chainid), ".json");

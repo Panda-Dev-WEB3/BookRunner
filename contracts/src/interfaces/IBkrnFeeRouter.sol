@@ -7,8 +7,9 @@ interface IBkrnFeeRouter {
     function notifyCarry(uint256 bookId, uint256 amount) external;
     /// @notice USDC waiting to be swapped to BKRN for stakers.
     function buybackPending() external view returns (uint256);
-    /// @notice KEEPER: swaps pending USDC -> BKRN via the configured router and notifies staking.
-    function executeBuyback(uint256 amountIn, uint256 minBkrnOut, uint24 poolFee) external returns (uint256 bkrnOut);
+    /// @notice KEEPER: swaps pending USDC -> BKRN via the configured router (pinned pool fee, on-chain
+    ///         reference-price floor, per-call cap) and notifies staking.
+    function executeBuyback(uint256 amountIn, uint256 minBkrnOut) external returns (uint256 bkrnOut);
 
     event CarryReceived(uint256 indexed bookId, uint256 amount, uint256 toBuyback, uint256 toBackstop);
     event BuybackExecuted(uint256 usdcIn, uint256 bkrnOut);

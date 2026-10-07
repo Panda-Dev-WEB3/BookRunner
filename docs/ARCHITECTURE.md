@@ -131,19 +131,23 @@ venueMinIf[PoolEngine] 10,000 USDC, tiers: entry 50k USD → 0, ≥50k → 25k B
   constructor **80 / 10 / 5 / 5** to four recipient addresses passed in (labels in deployment
   config: `community`, `studio`, `liquidity`, `contributors` — **[ext]** labels; spec gives only the
   split). ERC20Permit. No mint after construction.
-- `BkrnStaking`: `IBkrnStaking`. Cooldown 7 days (param). Lockers set by admin (MarketCharter,
+- `BkrnStaking`: `IBkrnStaking`. Cooldown 7 days (param, >= 1 day). Lockers set by admin (MarketCharter,
   RiskCommittee, every book's MMMandate — the factory is authorised to add mandate clones as
   lockers: `setLocker` callable by admin or factory). `lock` requires `availableOf >= amount`
   (locks are keyed `(account, lockId)` and only the locker that created a lock may unlock/slash it).
   `slash` transfers slashed BKRN to `config.slashRecipient()`. Rewards: Synthetix-style
-  reward-per-token accumulator over *staked* balance, funded by `notifyReward` (only feeRouter;
-  BKRN transferred in first). "Access and bonding, never a revenue claim" is a copy rule for the UI;
+  reward-per-token accumulator over the *earning* balance (`staked - pendingUnstake`: stake in its
+  unstake cooldown does not earn), funded by `notifyReward` (only feeRouter; BKRN transferred in
+  first) and STREAMED over `rewardsDuration` (timelock param, default 7 days; rewardRate /
+  periodFinish) so stake placed just before a buyback cannot take carry accrued before it (A5-03). "Access and bonding, never a revenue claim" is a copy rule for the UI;
   the buyback distribution is specified in §5 of the overview and implemented as written.
 - `BkrnFeeRouter`: `notifyCarry` only callable by a factory-registered component (RevenueRouter);
   splits 50/50 (odd unit to backstop): backstop share transferred to `Backstop` + `notifyDeposit`;
-  buyback share accumulates. `executeBuyback` (KEEPER) swaps via `ISwapRouter02.exactInputSingle`
-  (router = `config.hedgeExecutor()`'s UNIV3 router or a dedicated `buybackRouter` param), sends BKRN
-  to staking and calls `notifyReward`.
+  buyback share accumulates. `executeBuyback(amountIn, minBkrnOut)` (KEEPER) swaps via
+  `ISwapRouter02.exactInputSingle` (dedicated `buybackRouter` param) through the timelock-pinned
+  `buybackPoolFee`, at most `maxBuybackPerCall` per call, with `amountOutMinimum >=
+  amountIn x reference x (1 - maxSlippageBps)`; reference = AttestedOracle `bkrnPriceId` when set,
+  else the timelock-set `refBkrnPerUsdcWad` (A5-02). Sends BKRN to staking and calls `notifyReward`.
 - `Backstop`: holds USDC. `cover(bookId, shortfall)` only by `factory.bookOf(bookId) == msg.sender`;
   pays `min(shortfall, balance)` to the book's vault; emits `Covered`. Optional per-cover cap param
   (`maxCoverBps` of balance, default 10000).
@@ -494,7 +498,7 @@ guarded by `process.env.BKRN_IT === "1"`.
 | `bookrunner-agent` | — | One process per book (`BOOK_ID`). Avellaneda-Stoikov quoting: reservation price `r = s − q·γ·σ²·τ`, spread `δ = γσ²τ + (2/γ)ln(1+γ/k)`, then clamp to mandate (width ≥ min, |skew| ≤ max, sides per `allowedSides`). Venues: `OrderlyVenue` or `EngineVenue` (desk SetQuote). Hedge planner: keep `hedgeRatioBps` in band using desk `Hedge`/`Flatten` (signed with the session key, direct `execute` tx on devnet; userOp path for bundlers). Kill logic: on `CHANNELS.kill` or mandate killed → cancel-all and stop. Writes quotes/fills/hedges to DB (+ receipts leaves), heartbeat in Redis. Includes `trader-sim` entry (`src/trader-sim.ts`) generating taker flow on the engine and mock venue. |
 | `risk` | — | Every few seconds per live book: read venue exposure (adapter / venue API), desk hedge, last quote, live NAV estimate → `classifyLimits` → write `limits` row + Redis state; transitions emit `limit.breached`; breach → kill sequence (§3.4) with `kill_events` row and `kill.executed`. Off-hours flags from oracle held/stale. Drawdown intra-mark from live NAV vs book high-water. Exports nothing; consumes `QuotingVenue`. |
 | `mark` | — | Per book per period: wait for distribution of the period (or timeout), recall-if-needed check, compute NAV components (vault idle, adapter equity/in-transit, desk USDC + hedge value via registry), inventory tree, receipts root over hourly roots of the period, `MarkPnl` JSON (canonical, hash), sign EIP-712, `commit`, `applyMark`, persist `marks`, emit `mark.committed`. Uses archive-style reads at a fixed block. |
-| `waterfall` | — | Per book per period: Orderly → enqueue ops-venue sweep, then wait (bounded, `WATERFALL_FEE_FORWARD_WAIT_SECONDS`) for the earmarked fees to reach the router via `forwardPendingFees`; engine → `adapter.sweepFees`; then `router.distribute(period, expenses)` with expenses from oracle/keeper gas accounting (devnet: fixed small amount, capped on-chain); persist `settlements`; emit `distribution.paid`. Also keeper duties: `closeWindow` when due, `fundClaims`, `finalizeRetirement`, and once per pass `BkrnFeeRouter.executeBuyback` when `buybackPending` ≥ `WATERFALL_BUYBACK_THRESHOLD_USD` (minBkrnOut = buyback router quote − `WATERFALL_BUYBACK_SLIPPAGE_BPS`). |
+| `waterfall` | — | Per book per period: Orderly → enqueue ops-venue sweep, then wait (bounded, `WATERFALL_FEE_FORWARD_WAIT_SECONDS`) for the earmarked fees to reach the router via `forwardPendingFees`; engine → `adapter.sweepFees`; then `router.distribute(period, expenses)` with expenses from oracle/keeper gas accounting (devnet: fixed small amount, capped on-chain); persist `settlements`; emit `distribution.paid`. Also keeper duties: `closeWindow` when due, `fundClaims`, `finalizeRetirement`, and once per pass `BkrnFeeRouter.executeBuyback` when `buybackPending` ≥ `WATERFALL_BUYBACK_THRESHOLD_USD` (amountIn capped at `maxBuybackPerCall`; minBkrnOut = max(buyback router quote − `WATERFALL_BUYBACK_SLIPPAGE_BPS`, on-chain `buybackFloor`); a quote below the floor is skipped). |
 | `receipts` | — | Hourly (devnet: `RECEIPTS_INTERVAL_SECONDS`) per book: StandardMerkleTree over `receipts` leaves in the window → `receipt_roots`; proof API helpers. Leaves are written by agent (quotes, fills, hedges), risk (decisions), charter (decisions). |
 | `charter` | 4430 | Intake API (validated charter drafts → prepared tx), indexing of `CharterFiled`, model jury: N models (Claude via `@anthropic-ai/sdk` when `ANTHROPIC_API_KEY`, models from `JURY_MODELS`) each return structured `{vote, rationale, risks[]}` given the charter + rule checks; majority → recommendation; deterministic rule-based jury fallback without a key. Verdict JSON → CIDv1 (raw, sha2-256 via `multiformats`) → `postJuryVerdict(digest)`; committee notifications (`committee` table, events). |
 | `indexer` | — | Chain → DB: watches all protocol events from `deployment.startBlock` with a `chain_cursor` (reorg-safe with N confirmations on mainnet, 0 on devnet): charters, books, subscriptions, redemptions, marks, settlements, desk keys, kills, committee votes. Emits internal domain events. |
