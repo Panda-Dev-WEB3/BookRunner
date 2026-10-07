@@ -643,6 +643,16 @@ contract LowGasMarkTest is LowGasMarkBase {
         );
         registry.commitAndApply(m, sig, "", early);
 
+        // a snapshot from the confirmation second may still predate the debit: refused too
+        bytes memory sameSecond = _venueReport(OPS_PK, 25_000e6, 55_000e6, 0, uint64(block.timestamp));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OrderlyAdapter.ReportPredatesFlow.selector, uint64(block.timestamp), uint64(block.timestamp)
+            )
+        );
+        registry.commitAndApply(m, sig, "", sameSecond);
+
+        vm.warp(block.timestamp + 1);
         bytes memory fresh = _venueReport(OPS_PK, 25_000e6, 55_000e6, 0, uint64(block.timestamp));
         registry.commitAndApply(m, sig, "", fresh);
         assertEq(adapter.deployedValueUsd(), 100_000e6, "25k IF + 55k MM + 20k in transit");
@@ -688,6 +698,7 @@ contract LowGasMarkTest is LowGasMarkBase {
         vm.prank(opsSigner);
         adapter.confirmWithdraw(1);
         assertTrue(registry.latestMarkReplaceable(BOOK_ID));
+        vm.warp(block.timestamp + 1); // the venue snapshot must be strictly after the confirmation
 
         BRTypes.MarkInput memory m2 = _mark(p1, 101_200e6, book.flowNonce());
         bytes memory venueReport = _venueReport(OPS_PK, 25_000e6, 71_200e6, 0, uint64(block.timestamp));

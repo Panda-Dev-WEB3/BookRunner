@@ -48,7 +48,7 @@ interface IVaultFlowNotify {
 ///           Confirmed  moved venue-side -> inTransit (ops-venue confirms as soon as the venue has debited
 ///                      the account). Reports are raw venue equity, i.e. net of executed withdrawals.
 ///           Swept      inTransit -> vault idle (mark-window gated, bumps `book.flowNonce`).
-///         Reports must also already reflect every on-chain deposit (`asOf >= lastFlowAt` is enforced
+///         Reports must also already reflect every on-chain deposit (`asOf > lastFlowAt` is enforced
 ///         here; ops-venue must additionally wait until the venue has credited `totalDepositedUsd`).
 ///
 ///         Signed reports (LOW_GAS §2): ops-venue signs the same snapshot off-chain as EIP-712
@@ -452,9 +452,10 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     /// @dev OPS_VENUE. Overwrites the venue-side balances with raw venue equity (net of every withdrawal the
     ///      venue executed, gross of nothing). Reverts `WithdrawalPending` while any withdrawal is Requested
     ///      (the venue debits on request, the adapter on confirmation: a snapshot in between would debit
-    ///      the same amount twice). `asOf` must be strictly increasing, not in the future, and not older
-    ///      than the last on-chain flow (a snapshot taken before a deposit/confirmation/cancellation/failure
-    ///      would silently undo it). Values are bounded to 128-bit ranges.
+    ///      the same amount twice). `asOf` must be strictly increasing, not in the future, and strictly
+    ///      after the last on-chain flow (a snapshot taken before — or in the same second as — a
+    ///      deposit/confirmation/cancellation/failure may not reflect it and would silently undo it).
+    ///      Values are bounded to 128-bit ranges.
     function report(uint256 insuranceUsd, int256 marginUsd, int256 exposureUsd, uint64 asOf) external {
         _checkOpsVenue();
         _storeReport(insuranceUsd, marginUsd, exposureUsd, asOf);
@@ -893,7 +894,7 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         if (pending != 0) revert WithdrawalPending(pending);
         if (asOf > block.timestamp) revert ReportInFuture(asOf, uint64(block.timestamp));
         if (asOf <= $.lastReportAsOf) revert StaleReport(asOf, $.lastReportAsOf);
-        if (asOf < $.lastFlowAt) revert ReportPredatesFlow(asOf, $.lastFlowAt);
+        if (asOf <= $.lastFlowAt) revert ReportPredatesFlow(asOf, $.lastFlowAt);
         if (
             insuranceUsd > type(uint128).max || marginUsd > type(int128).max || marginUsd < type(int128).min
                 || exposureUsd > type(int128).max || exposureUsd < type(int128).min

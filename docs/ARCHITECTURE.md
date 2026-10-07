@@ -401,7 +401,7 @@ are oracle keys published by the oracle service as the weighted index level.
   (never swept as unattributed nor forwarded as fees); `report` reverts `WithdrawalPending` while any
   request is Requested; ops-venue confirms as soon as the venue has debited the account (before the
   payout), cancels requests the venue will not execute, and reports raw venue equity (net of executed
-  withdrawals) only once the venue has credited every on-chain deposit (`asOf >= lastFlowAt`, which
+  withdrawals) only once the venue has credited every on-chain deposit (`asOf > lastFlowAt`, which
   deposit/confirm/cancel/fail set). Only principal sweeps notify the vault (`flowNonce++`).
   `sweepFees` labels are monotonic and at most `FEE_SWEEP_LOOKBACK_PERIODS` (2) intervals old; the
   earmark must precede the fee payment to the adapter.

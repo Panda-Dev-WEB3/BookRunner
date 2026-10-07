@@ -271,7 +271,13 @@ contract OrderlyReportSignedTest is OrderlyFixture {
         _deploy(MM, 1000e6);
         vm.expectRevert(abi.encodeWithSelector(OrderlyAdapter.ReportPredatesFlow.selector, snapshot, _now()));
         adapter.reportSigned(0, 0, 0, snapshot, sig);
-        _relay(0, 1000e6, 0, _now()); // same-timestamp snapshot is accepted
+        // a same-second snapshot may predate the flow (A3-03): rejected too
+        uint64 same = _now();
+        sig = _sign(OPS_SIGNER_PK, adapter, 0, 0, 0, same);
+        vm.expectRevert(abi.encodeWithSelector(OrderlyAdapter.ReportPredatesFlow.selector, same, same));
+        adapter.reportSigned(0, 0, 0, same, sig);
+        vm.warp(block.timestamp + 1);
+        _relay(0, 1000e6, 0, _now()); // strictly after the flow is accepted
     }
 
     function test_reportSigned_rejectedWhileWithdrawalPending() public {
@@ -282,8 +288,14 @@ contract OrderlyReportSignedTest is OrderlyFixture {
         bytes memory sig = _sign(OPS_SIGNER_PK, adapter, 0, 6000e6, 0, asOf);
         vm.expectRevert(abi.encodeWithSelector(OrderlyAdapter.WithdrawalPending.selector, 4000e6));
         adapter.reportSigned(0, 6000e6, 0, asOf, sig);
-        // after confirmation the venue-side debit is booked; a snapshot from the confirmation second lands
+        // after confirmation the venue-side debit is booked; a snapshot from the confirmation second is
+        // refused (it may predate the debit), one taken strictly after it lands
         _confirm(nonce);
+        vm.expectRevert(abi.encodeWithSelector(OrderlyAdapter.ReportPredatesFlow.selector, asOf, asOf));
+        adapter.reportSigned(0, 6000e6, 0, asOf, sig);
+        vm.warp(block.timestamp + 1);
+        asOf = _now();
+        sig = _sign(OPS_SIGNER_PK, adapter, 0, 6000e6, 0, asOf);
         adapter.reportSigned(0, 6000e6, 0, asOf, sig);
         assertEq(adapter.marginEquityUsd(), int256(6000e6));
         assertEq(adapter.deployedValueUsd(), 10_000e6, "6k venue-side + 4k in transit");
@@ -331,6 +343,7 @@ contract OrderlyReportSignedTest is OrderlyFixture {
         margin = bound(margin, int256(type(int128).min) - 2, int256(type(int128).max) + 2);
         exposure = bound(exposure, int256(type(int128).min) - 2, int256(type(int128).max) + 2);
         _deploy(MM, 1000e6);
+        vm.warp(block.timestamp + 1); // a report must be strictly after the deposit
         _report(0, 1000e6, 0);
         if (pending) _recall(MM, 1);
         vm.warp(block.timestamp + bound(dtNow, 0, 1 days));
