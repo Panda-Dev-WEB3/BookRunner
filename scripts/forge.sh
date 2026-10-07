@@ -31,6 +31,6 @@ MSYS_NO_PATHCONV=1 exec docker run --rm "${TTY_FLAGS[@]}" \
   --add-host=host.docker.internal:host-gateway \
   -e FOUNDRY_PROFILE="${FOUNDRY_PROFILE:-default}" \
   -e ETH_RPC_URL -e PRIVATE_KEY -e DEPLOY_OUT \
-  -e DEV_MNEMONIC -e NETWORK -e MARK_INTERVAL_SECONDS \
+  -e DEV_MNEMONIC -e NETWORK -e MARK_INTERVAL_SECONDS -e TREASURY_ADDRESS -e SLASH_RECIPIENT_ADDRESS \
   --entrypoint "$TOOL" \
   "$IMAGE" "$@"
