@@ -640,7 +640,9 @@ contract PoolEngineAdapterTest is EngineBase {
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(PoolEngine.OffHours.selector, mid));
         engine.trade(mid, -1e18, 0);
-        _trade(bob, mid, 20e18); // reduce to flat
+        vm.prank(bob); // reductions wait for the session too (audit A2-03)
+        vm.expectRevert(abi.encodeWithSelector(PoolEngine.OffHours.selector, mid));
+        engine.trade(mid, 20e18, type(uint256).max);
         engine.liquidate(mid, alice); // liquidation on margin at the held price
         assertEq(engine.positionOf(mid, alice).size, 0);
         // the book can still recall its capital off-hours

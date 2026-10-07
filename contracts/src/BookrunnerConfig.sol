@@ -66,7 +66,7 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
     bytes32 public constant KEY_MAX_MARK_AGE = "maxMarkAge";
     bytes32 public constant KEY_MAX_PRICE_AGE = "maxPriceAge";
     bytes32 public constant KEY_COMMITTEE_WINDOW = "committeeWindow";
-    /// @notice LOW_GAS.md §1: max age of the price an engine trade adding risk may use (seconds).
+    /// @notice LOW_GAS.md §1: max age of the price any engine trade may use (seconds).
     bytes32 public constant KEY_MAX_TRADE_PRICE_AGE = "maxTradePriceAge";
 
     /// @notice Upper bound on the number of agent bond tiers (keeps `agentTierBond` O(1)-bounded).
@@ -383,10 +383,10 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
         return _committeeWindow;
     }
 
-    /// @notice Pull-oracle latency-arbitrage bound (LOW_GAS.md §1): an engine trade that adds risk may only
-    ///         use a price with `publishedAt >= block.timestamp - maxTradePriceAge` (default 15 s,
-    ///         timelock-settable via `setParam("maxTradePriceAge", v)`, v > 0). Reductions and liquidations
-    ///         are not bound by it.
+    /// @notice Pull-oracle latency-arbitrage bound (LOW_GAS.md §1): any engine trade (opens, increases,
+    ///         reductions, closes, flips) may only use a price with
+    ///         `publishedAt >= block.timestamp - maxTradePriceAge` (default 15 s, timelock-settable via
+    ///         `setParam("maxTradePriceAge", v)`, v > 0). Liquidations are not bound by it.
     /// @dev Not part of IBookrunnerConfig (keeps existing config stand-ins compiling); consumers read it
     ///      through `IBookrunnerConfigTradeAge` (PoolEngine.sol).
     function maxTradePriceAge() external view returns (uint32) {

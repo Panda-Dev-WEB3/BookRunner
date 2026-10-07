@@ -168,8 +168,8 @@ contract EnginePullIntegrationTest is EngineBase {
         assertEq(engine.positionOf(mid, alice).size, 0);
     }
 
-    /// @dev Off-hours via a carried held price: the desk may only widen, the engine refuses new risk, and the
-    ///      trader can still close on the held price.
+    /// @dev Off-hours via a carried held price: the desk may only widen and the engine refuses every trade,
+    ///      closes included (audit A2-03: a held print is a free option); the trader closes at the reopen.
     function test_pullMode_heldBundle() public {
         bytes memory pd = _fresh();
         vm.prank(key);
@@ -187,7 +187,12 @@ contract EnginePullIntegrationTest is EngineBase {
         vm.expectRevert(abi.encodeWithSelector(PoolEngine.OffHours.selector, mid));
         engine.trade(mid, 1e18, type(uint256).max, held);
         vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(PoolEngine.OffHours.selector, mid));
         engine.trade(mid, -10e18, 0, held);
+        vm.warp(block.timestamp + 1 hours);
+        pd = _fresh();
+        vm.prank(alice);
+        engine.trade(mid, -10e18, 0, pd);
         assertEq(engine.positionOf(mid, alice).size, 0);
     }
 

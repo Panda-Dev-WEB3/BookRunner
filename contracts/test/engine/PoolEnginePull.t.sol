@@ -158,37 +158,44 @@ contract PoolEnginePullTest is EngineBase {
         assertEq(engine.positionOf(mA, alice).size, 3e18);
     }
 
-    /// @dev Reductions keep today's rule: they work at the latest stored price however old (red-team: stale
-    ///      oracle blocks new risk only) and with a carried price older than maxTradePriceAge.
-    function test_trade_reductionsNotBoundByMaxTradePriceAge() public {
+    /// @dev Audit A2-01: reductions and closes are bound by maxTradePriceAge like new risk. A stale stored
+    ///      price (or a carried print older than the bound) fills nothing, otherwise a market-neutral pair
+    ///      closes its losing leg at the stale price and its winning leg at the current one.
+    function test_trade_reductionsBoundByMaxTradePriceAge() public {
         _deposit(alice, mA, 10_000e6);
         _trade(alice, mA, 10e18);
+        uint64 stored = oracle.latest(PID_A).publishedAt;
         vm.warp(block.timestamp + 1 hours);
-        _trade(alice, mA, -2e18); // legacy reduce at the stale stored price
-        _tradeWith(alice, -3e18, _priceData(PID_A, 100e18, _now() - 200, false)); // 200 s old print
-        assertEq(oracle.latest(PID_A).publishedAt, _now() - 200);
-        _tradeWith(alice, -5e18, "");
+        vm.prank(alice); // legacy reduce at the stale stored price
+        vm.expectRevert(abi.encodeWithSelector(PoolEngine.StalePrice.selector, PID_A, stored));
+        engine.trade(mA, -2e18, 0);
+        uint64 at = _now() - 200;
+        bytes memory old = _priceData(PID_A, 100e18, at, false); // lands (newer than stored), too old to fill
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(PoolEngine.StalePrice.selector, PID_A, at));
+        engine.trade(mA, -3e18, 0, old);
+        _tradeWith(alice, -10e18, _priceData(PID_A, 100e18, _now(), false)); // fresh print: closes
         assertEq(engine.positionOf(mA, alice).size, 0);
     }
 
     /// @dev Lookback guard: after an idle hour a short holds a print from 50 minutes ago at 90 (newer than the
-    ///      stored price, far below the market). Carrying it lands nothing (stale on arrival), so the close
-    ///      fills at the stored price — or at the current print if the trader carries that one.
+    ///      stored price, far below the market). Carrying it lands nothing (stale on arrival) and the stored
+    ///      price is an hour old, so the close reverts; only the current print fills it.
     function test_trade_reductionCannotCherryPickOldPrint() public {
         _deposit(alice, mA, 10_000e6);
         _trade(alice, mA, -10e18); // short at ~100
         vm.warp(block.timestamp + 1 hours);
         bytes memory dip = _priceData(PID_A, 90e18, _now() - 50 minutes, false);
-        uint256 fill = _tradeWith(alice, 5e18, dip); // buy to close
-        assertEq(fill, _buyFill(PX), "old print skipped: closed at the stored price");
-        assertEq(oracle.latest(PID_A).priceWad, PX);
-        assertEq(oracle.latest(PID_A).publishedAt, t0);
-        fill = _tradeWith(alice, 5e18, _priceData(PID_A, 103e18, _now(), false));
-        assertEq(fill, _buyFill(103e18), "the current print is what moves the price");
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(PoolEngine.StalePrice.selector, PID_A, t0));
+        engine.trade(mA, 5e18, type(uint256).max, dip); // buy to close
+        uint256 fill = _tradeWith(alice, 10e18, _priceData(PID_A, 103e18, _now(), false));
+        assertEq(fill, _buyFill(103e18), "the current print is what fills the close");
         assertEq(engine.positionOf(mA, alice).size, 0);
     }
 
-    function test_trade_heldPriceDataBlocksNewRiskOnly() public {
+    /// @dev Audit A2-03: a held print fills no trade at all (the real price may have moved after hours).
+    function test_trade_heldPriceDataBlocksAllTrades() public {
         _deposit(alice, mA, 10_000e6);
         _trade(alice, mA, 5e18);
         vm.warp(block.timestamp + 10);
@@ -196,8 +203,17 @@ contract PoolEnginePullTest is EngineBase {
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(PoolEngine.OffHours.selector, mA));
         engine.trade(mA, 1e18, type(uint256).max, held);
-        _tradeWith(alice, -1e18, held); // reduce works on the held price
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(PoolEngine.OffHours.selector, mA));
+        engine.trade(mA, -1e18, 0, held);
+        oracle.update(held);
         assertTrue(oracle.latest(PID_A).held);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(PoolEngine.OffHours.selector, mA));
+        engine.trade(mA, -5e18, 0); // close on the stored held price
+        vm.warp(block.timestamp + 1 hours); // session reopens
+        _tradeWith(alice, -5e18, _priceData(PID_A, 100e18, _now(), false));
+        assertEq(engine.positionOf(mA, alice).size, 0);
     }
 
     function test_trade_badSignatureRevertsTrade() public {

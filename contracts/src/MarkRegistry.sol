@@ -124,7 +124,10 @@ contract MarkRegistry is IMarkRegistryAtomic, EIP712 {
     ///           relayed by someone else first): then the relay is skipped with `VenueReportSkipped`, so
     ///           front-running the keeper with its own report cannot grief the mark. Every other rejection
     ///           (signature, signer, withdrawal pending, report predating a flow, range) reverts the mark;
-    ///        3. `commit(m, sig)` with identical checks (incl. stale-mark replacement);
+    ///        3. `commit(m, sig)` with identical checks (incl. stale-mark replacement) -- unless the book's
+    ///           latest mark is unapplied and identical to `m` (the same signed mark was committed first, e.g.
+    ///           a front-run with the permissionless `commit`): then that mark is applied as is, so the
+    ///           front-run cannot revert the keeper's atomic mark (and drop its prices / venue report);
     ///        4. `IBook(factory.bookOf(m.bookId)).applyMark(markId)` (state / order / flowNonce checks are the
     ///           book's; a mark that cannot be applied therefore is not committed either).
     function commitAndApply(
@@ -140,8 +143,21 @@ contract MarkRegistry is IMarkRegistryAtomic, EIP712 {
         }
         if (venueReport.length != 0) _relayVenueReport(m.bookId, venueReport);
         address book;
-        (markId, book) = _commit(m, sig);
+        markId = _pendingIdentical(m);
+        if (markId != 0) book = _factory().bookOf(m.bookId);
+        else (markId, book) = _commit(m, sig);
         IBook(book).applyMark(markId);
+    }
+
+    /// @dev Step 3 idempotence (front-run of `commitAndApply` with a bare `commit` of the same signed mark):
+    ///      the book's latest mark id when it is unapplied and its input is identical to `m` (same EIP-712
+    ///      digest, already signature-checked when it was committed); 0 otherwise. That mark is then applied
+    ///      instead of re-committing it (which would revert `PeriodNotAfterLast`).
+    function _pendingIdentical(BRTypes.MarkInput calldata m) private view returns (uint256 id) {
+        id = latestMarkId[m.bookId];
+        if (id == 0) return 0;
+        BRTypes.Mark storage mk = _marks[id];
+        if (mk.applied || keccak256(abi.encode(mk.input)) != keccak256(abi.encode(m))) return 0;
     }
 
     /// @notice Whether a commit for `bookId`'s latest committed period would currently be accepted as a

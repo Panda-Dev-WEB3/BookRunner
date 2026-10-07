@@ -193,8 +193,11 @@ contract EngineReviewRegressionsTest is EngineBase {
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(PoolEngine.StalePrice.selector, PID_A, at));
         engine.withdrawMargin(mA, 1e6);
-        _trade(alice, mA, -5e18); // reduce ok
+        vm.prank(alice); // reductions too (audit A2-01)
+        vm.expectRevert(abi.encodeWithSelector(PoolEngine.StalePrice.selector, PID_A, at));
+        engine.trade(mA, -5e18, 0);
         _price(PID_A, PX);
+        _trade(alice, mA, -5e18);
         _trade(alice, mA, 1e18);
     }
 }

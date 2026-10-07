@@ -14,7 +14,7 @@ import {IBookFactory} from "./interfaces/IBookFactory.sol";
 /// @title IBookrunnerConfigTradeAge — LOW_GAS.md §1 parameter read by the engine.
 /// @dev Implemented by BookrunnerConfig; kept off IBookrunnerConfig so existing config stand-ins compile.
 interface IBookrunnerConfigTradeAge {
-    /// @notice Max age (seconds) of the price an engine trade adding risk may use.
+    /// @notice Max age (seconds) of the price any engine trade may use.
     function maxTradePriceAge() external view returns (uint32);
 }
 
@@ -124,10 +124,13 @@ library PoolEngineMath {
 ///         aggregate accounting (no loops over traders anywhere).
 /// @dev    Non-upgradeable (ARCHITECTURE §2.0, §2.8). Conservation: for every market,
 ///         poolCash + insurance + feesAccrued + totalMargin is exactly the USDC this contract holds for it.
-///         Off-hours (oracle `held`), stale oracle (a trade adding risk: price older than
-///         min(maxPriceAge, NEW_RISK_MAX_PRICE_AGE, maxTradePriceAge); a margin withdrawal with a position:
-///         older than min(maxPriceAge, NEW_RISK_MAX_PRICE_AGE)) and market reduce-only block NEW risk only:
-///         reduces, margin top-ups and liquidations keep working at the latest (held) price.
+///         Every voluntary trade (open, increase, reduce, close, flip) needs a live price no older than
+///         min(maxPriceAge, NEW_RISK_MAX_PRICE_AGE, maxTradePriceAge): off-hours (oracle `held`) or stale, no
+///         trade fills (a held / stale price is a free option against the pool, audit A2-01 / A2-03). A
+///         margin withdrawal with a position needs a non-held price no older than
+///         min(maxPriceAge, NEW_RISK_MAX_PRICE_AGE). Market reduce-only blocks new risk only. Margin top-ups,
+///         liquidations and wind-down close-outs keep working at the latest (held) price; while held, the
+///         maintenance requirement is OFF_HOURS_MARGIN_MULTIPLE x initial margin (audit A2-02).
 ///         Pull oracle (LOW_GAS.md §1): `trade` / `liquidate` overloads take a trailing signed `priceData`
 ///         bundle and call `AttestedOracle.update(priceData)` first, so every rule above is evaluated on the
 ///         price this transaction brought (never on whether a timer push happened to land). Each side's open interest is capped at the book's inventory cap, so
@@ -154,6 +157,11 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     ///         stored price can lag the market, e.g. while the oracle's pushes are failing. A trade adding
     ///         risk is further bounded by config.maxTradePriceAge() (LOW_GAS.md §1, default 15 s).
     uint256 public constant NEW_RISK_MAX_PRICE_AGE = 60;
+    /// @notice Off-hours (oracle `held`) maintenance requirement as a multiple of the market's initial margin
+    ///         (capped at 100 % of notional): a position must carry this much equity to be held through a
+    ///         closed session, else it is liquidatable at the held price. Bounds the gap loss a reopen can turn
+    ///         into bad debt (audit A2-02: a market-neutral pair at max leverage across a gap).
+    uint256 public constant OFF_HOURS_MARGIN_MULTIPLE = 2;
     uint256 internal constant FUNDING_PERIOD = 1 days;
 
     // ------------------------------------------------------------------------------------------------
@@ -490,13 +498,14 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
 
     /// @inheritdoc IPoolEngine
     /// @dev Buy (sizeDelta > 0) fills at oracle*(1e4 + spread/2 + skew)/1e4 (rounded up), sell at
-    ///      oracle*(1e4 - spread/2 + skew)/1e4 (rounded down). New risk (open/increase/flip) is blocked when
-    ///      reduce-only, held or stale (price older than min(maxPriceAge, NEW_RISK_MAX_PRICE_AGE,
-    ///      maxTradePriceAge)), must keep |pool net exposure| <= maxNetExposureUsd and the trader's
+    ///      oracle*(1e4 - spread/2 + skew)/1e4 (rounded down). Every trade is blocked when the price is held
+    ///      or stale (older than min(maxPriceAge, NEW_RISK_MAX_PRICE_AGE, maxTradePriceAge)); new risk
+    ///      (open/increase/flip) is also blocked when reduce-only, must keep |pool net exposure| <=
+    ///      maxNetExposureUsd and the trader's
     ///      side OI <= inventoryCapUsd, must pass the trader's initial margin and keep the pool
     ///      collateralised. Reductions must not leave the
     ///      position liquidatable (a full close only needs margin to cover losses + funding + fee).
-    ///      Uses the stored price (callers needing a fresh one use the `priceData` overload).
+    ///      Uses the stored price, which must therefore be fresh (otherwise use the `priceData` overload).
     function trade(uint256 marketId, int256 sizeDelta, uint256 acceptablePriceWad)
         external
         nonReentrant
@@ -507,9 +516,9 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
 
     /// @inheritdoc IPoolEngine
     /// @dev Pull oracle: `AttestedOracle.update(priceData)` first when non-empty (not-newer entries are
-    ///      skipped, a bad signature reverts), then exactly {trade}. A trade adding risk still needs the
-    ///      resulting stored price to satisfy `publishedAt >= block.timestamp - maxTradePriceAge`, so a
-    ///      trader cannot replay an old favourable print.
+    ///      skipped, a bad signature reverts), then exactly {trade}. Any trade (reductions and closes too)
+    ///      still needs the resulting stored price to be live (not held) and to satisfy
+    ///      `publishedAt >= block.timestamp - maxTradePriceAge`, so a trader cannot replay an old print.
     function trade(uint256 marketId, int256 sizeDelta, uint256 acceptablePriceWad, bytes calldata priceData)
         external
         nonReentrant
@@ -535,11 +544,12 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
             c.newSize = c.oldSize + sizeDelta;
             if (PoolEngineMath.abs(c.newSize) > MAX_SIZE) revert SizeTooLarge();
             c.newRisk = PoolEngineMath.isNewRisk(c.oldSize, c.newSize);
-            if (c.newRisk) {
-                if (m.reduceOnly) revert MarketReduceOnly(marketId);
-                if (held) revert OffHours(marketId);
-                if (_tradeStale(publishedAt)) revert StalePrice(m.cfg.underlying, publishedAt);
-            }
+            if (c.newRisk && m.reduceOnly) revert MarketReduceOnly(marketId);
+            // Every voluntary trade (reductions and closes included) needs a live, fresh price: a held print
+            // or a stored price older than the trade bound would let a trader pick the stale price for one
+            // leg and the real one for another (audit A2-01 / A2-03).
+            if (held) revert OffHours(marketId);
+            if (_tradeStale(publishedAt)) revert StalePrice(m.cfg.underlying, publishedAt);
         }
         _accrue(marketId, m, c.price);
 
@@ -579,7 +589,9 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     }
 
     /// @inheritdoc IPoolEngine
-    /// @dev Anyone. Works off-hours, stale and reduce-only (at the latest / held price). Closes the whole
+    /// @dev Anyone. Works off-hours, stale and reduce-only (at the latest / held price): involuntary, only
+    ///      below maintenance (while held: below OFF_HOURS_MARGIN_MULTIPLE x initial margin), and it forfeits
+    ///      the liquidation fee, so a stored price is not a free option for the trader. Closes the whole
     ///      position at the oracle price; losses + funding settle against the pool; any shortfall is bad
     ///      debt paid by this market's IF, the remainder absorbed by this market's pool (ADL). The
     ///      liquidation fee (liquidationFeeBps of notional, capped by remaining margin) is split 50% to
@@ -604,9 +616,9 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         Market storage m = _market(marketId);
         Position storage p = _positions[marketId][trader];
         if (p.size == 0) revert NoPosition(trader);
-        (uint256 price,,) = _oracle(m);
+        (uint256 price, bool held,) = _oracle(m);
         _accrue(marketId, m, price);
-        if (!_isLiquidatable(m, p, price, m.fundingIndex)) revert NotLiquidatable(trader);
+        if (!_isLiquidatable(m, p, price, m.fundingIndex, held)) revert NotLiquidatable(trader);
 
         (int256 size,, uint256 badDebt) = _closeAtOracle(marketId, m, p, trader, price);
 
@@ -720,8 +732,8 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         Market storage m = _market(marketId);
         Position storage p = _positions[marketId][trader];
         if (p.size == 0) return false;
-        uint256 price = _latestPrice(m);
-        return _isLiquidatable(m, p, price, _pendingIndex(m, price));
+        (uint256 price, bool held,) = _oracle(m);
+        return _isLiquidatable(m, p, price, _pendingIndex(m, price), held);
     }
 
     /// @notice Trader equity (margin + unrealised PnL - unsettled funding) at the latest price, USD 6dp.
@@ -806,7 +818,7 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         return _stale(publishedAt, Math.min(protocolConfig.maxPriceAge(), NEW_RISK_MAX_PRICE_AGE));
     }
 
-    /// @dev Staleness bound for a trade adding risk (LOW_GAS.md §1 latency-arbitrage bound): the new-risk
+    /// @dev Staleness bound for every trade (LOW_GAS.md §1 latency-arbitrage bound): the new-risk
     ///      bound tightened by config.maxTradePriceAge(), i.e. allowed iff
     ///      publishedAt >= block.timestamp - min(maxPriceAge, NEW_RISK_MAX_PRICE_AGE, maxTradePriceAge).
     function _tradeStale(uint64 publishedAt) internal view returns (bool) {
@@ -1000,7 +1012,7 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
             int256 poolEq = _poolEquity(m, c.price, m.fundingIndex);
             uint256 poolReq = _requiredPoolMargin(m, c.price);
             if (poolEq < int256(poolReq)) revert PoolUndercollateralized(poolEq, poolReq);
-        } else if (c.newSize != 0 && _isLiquidatable(m, p, c.price, m.fundingIndex)) {
+        } else if (c.newSize != 0 && _isLiquidatable(m, p, c.price, m.fundingIndex, false)) {
             revert WouldBeLiquidatable();
         }
     }
@@ -1011,13 +1023,18 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
             - PoolEngineMath.fundingOwedUsd(p.size, index, p.fundingIndexAtEntry);
     }
 
-    function _isLiquidatable(Market storage m, Position storage p, uint256 price, int256 index)
+    /// @dev Below maintenance margin; while the oracle is `held` (session closed) below the off-hours
+    ///      requirement min(OFF_HOURS_MARGIN_MULTIPLE * initialMarginBps, 100 %) instead.
+    function _isLiquidatable(Market storage m, Position storage p, uint256 price, int256 index, bool held)
         internal
         view
         returns (bool)
     {
         if (p.size == 0) return false;
-        uint256 required = PoolEngineMath.requirementUsd(p.size, price, m.cfg.maintenanceMarginBps);
+        uint256 bps = held
+            ? Math.min(OFF_HOURS_MARGIN_MULTIPLE * m.cfg.initialMarginBps, PoolEngineMath.BPS)
+            : m.cfg.maintenanceMarginBps;
+        uint256 required = PoolEngineMath.requirementUsd(p.size, price, bps);
         return _traderEquity(p, price, index) < int256(required);
     }
 

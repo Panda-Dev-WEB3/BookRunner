@@ -5,7 +5,8 @@ pragma solidity ^0.8.30;
 /// @notice One market per in-house book. The book's MM inventory is the pool (counterparty to traders);
 ///         the book's IF absorbs bad debt; when the IF is depleted, ADL applies to that market only.
 ///         Isolated margin. Fill price = oracle * (1 +/- (spreadBps/2 + skewBps)/1e4) per side.
-///         Off-hours (oracle held) or stale price: new risk blocked; reduce + liquidations allowed.
+///         Off-hours (oracle held) or stale price: no trade fills (reductions / closes included);
+///         margin top-ups and liquidations allowed (off-hours maintenance = 2x initial margin).
 ///         Pull oracle (LOW_GAS.md §1): the `priceData` overloads of trade / liquidate carry the signed
 ///         prices the transaction needs; staleness is judged on the price after that in-tx update.
 ///         Sizes: 1e18 = 1 unit of underlying. Prices WAD. USD 6 decimals.

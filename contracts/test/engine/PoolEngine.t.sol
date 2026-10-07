@@ -676,7 +676,9 @@ contract PoolEngineTest is EngineBase {
         _trade(alice, mA, 1e18);
     }
 
-    function test_offHours_heldBlocksNewRisk_reduceAndLiquidateWork() public {
+    /// @dev Audit A2-03: while held every voluntary trade reverts (a held print is a free option on the
+    ///      after-hours move); margin top-ups and liquidations keep working at the held price.
+    function test_offHours_heldBlocksAllTrades_liquidateWorks() public {
         _deposit(alice, mA, 110e6);
         _deposit(bob, mA, 1000e6);
         _trade(alice, mA, 10e18);
@@ -688,14 +690,21 @@ contract PoolEngineTest is EngineBase {
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(PoolEngine.OffHours.selector, mA));
         engine.trade(mA, -3e18, 0); // flip
-        _trade(bob, mA, -1e18); // reduce works
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(PoolEngine.OffHours.selector, mA));
+        engine.trade(mA, -1e18, 0); // reduce
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(PoolEngine.OffHours.selector, mA));
+        engine.trade(mA, -2e18, 0); // close
+        _deposit(bob, mA, 1e6); // top-up works
         assertTrue(engine.isLiquidatable(mA, alice));
         vm.prank(keeper);
         engine.liquidate(mA, alice); // liquidation works at the held price
         assertEq(engine.positionOf(mA, alice).size, 0);
     }
 
-    function test_stale_blocksNewRisk_reduceAndLiquidateWork() public {
+    /// @dev Audit A2-01: a stale stored price fills no trade (closes included); liquidations still work.
+    function test_stale_blocksAllTrades_liquidateWorks() public {
         _deposit(alice, mA, 110e6);
         _deposit(bob, mA, 1000e6);
         _trade(alice, mA, 10e18);
@@ -707,10 +716,58 @@ contract PoolEngineTest is EngineBase {
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(PoolEngine.StalePrice.selector, PID_A, t));
         engine.trade(mA, 1e18, type(uint256).max);
-        _trade(bob, mA, -2e18); // close works
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(PoolEngine.StalePrice.selector, PID_A, t));
+        engine.trade(mA, -2e18, 0); // close needs a fresh price too
         vm.prank(keeper);
         engine.liquidate(mA, alice);
         assertEq(engine.positionOf(mA, alice).size, 0);
+    }
+
+    /// @dev Audit A2-02: while held, maintenance is 2x initial margin (20 % here), so a position that cannot
+    ///      absorb a reopen gap of that size is liquidated at the held (close) price instead of turning the
+    ///      gap into IF bad debt. Live again, the normal 5 % maintenance applies.
+    function test_offHours_maintenanceIsTwiceInitialMargin() public {
+        assertEq(engine.OFF_HOURS_MARGIN_MULTIPLE(), 2);
+        _deposit(alice, mA, 150e6); // ~14.8 % equity on $1000: fine live
+        _deposit(bob, mA, 300e6); // ~29.8 %: survives the close
+        _trade(alice, mA, 10e18);
+        _trade(bob, mA, -10e18);
+        assertFalse(engine.isLiquidatable(mA, alice));
+        vm.expectRevert(abi.encodeWithSelector(PoolEngine.NotLiquidatable.selector, alice));
+        engine.liquidate(mA, alice);
+
+        _push(PID_A, PX, true); // session closes at the same price
+        assertTrue(engine.isLiquidatable(mA, alice));
+        assertFalse(engine.isLiquidatable(mA, bob));
+        vm.expectRevert(abi.encodeWithSelector(PoolEngine.NotLiquidatable.selector, bob));
+        engine.liquidate(mA, bob);
+        _deposit(alice, mA, 60e6); // a top-up before a keeper acts restores the off-hours requirement
+        assertFalse(engine.isLiquidatable(mA, alice));
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(PoolEngine.OffHours.selector, mA));
+        engine.withdrawMargin(mA, 60e6);
+
+        // a reopen gap of 15 %: both positions are still solvent, no bad debt
+        uint256 ifBefore = engine.state(mA).insuranceUsd;
+        _push(PID_A, 115e18, false);
+        vm.expectRevert(abi.encodeWithSelector(PoolEngine.NotLiquidatable.selector, bob));
+        engine.liquidate(mA, bob);
+        _trade(bob, mA, 10e18);
+        _trade(alice, mA, -10e18);
+        assertEq(engine.state(mA).insuranceUsd, ifBefore);
+    }
+
+    function test_offHours_belowRequirementLiquidatedAtHeldPrice() public {
+        _deposit(alice, mA, 150e6);
+        _trade(alice, mA, 10e18);
+        _push(PID_A, PX, true);
+        uint256 ifBefore = engine.state(mA).insuranceUsd;
+        vm.prank(keeper);
+        engine.liquidate(mA, alice);
+        assertEq(engine.positionOf(mA, alice).size, 0);
+        assertGt(engine.positionOf(mA, alice).marginUsd, 0, "closed at the held price, margin left");
+        assertGe(engine.state(mA).insuranceUsd, ifBefore, "no bad debt");
     }
 
     function test_regimes_otherMarketUnaffected() public {

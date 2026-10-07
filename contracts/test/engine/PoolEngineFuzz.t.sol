@@ -186,9 +186,9 @@ contract PoolEngineFuzzTest is EngineBase {
         }
     }
 
-    /// @dev Off-hours / stale / reduce-only: every new-risk trade reverts, every reduction and every due
-    ///      liquidation succeeds.
-    function testFuzz_regimesBlockNewRiskOnly(uint8 regime, int256 add, uint256 reduce, uint256 crash)
+    /// @dev Off-hours / stale: every trade reverts (reductions too, audit A2-01 / A2-03); reduce-only: every
+    ///      new-risk trade reverts and every reduction succeeds. Every due liquidation succeeds in all three.
+    function testFuzz_regimesBlockTrades(uint8 regime, int256 add, uint256 reduce, uint256 crash)
         public
     {
         regime = uint8(bound(regime, 0, 2));
@@ -216,8 +216,14 @@ contract PoolEngineFuzzTest is EngineBase {
             engine.trade(mA, add, add > 0 ? type(uint256).max : 0);
         }
         reduce = bound(reduce, 1, 50e18);
-        _trade(alice, mA, -int256(reduce));
-        assertEq(engine.positionOf(mA, alice).size, 50e18 - int256(reduce));
+        if (regime == 2) {
+            _trade(alice, mA, -int256(reduce));
+            assertEq(engine.positionOf(mA, alice).size, 50e18 - int256(reduce));
+        } else {
+            vm.prank(alice);
+            vm.expectRevert();
+            engine.trade(mA, -int256(reduce), 0);
+        }
         assertTrue(engine.isLiquidatable(mA, bob));
         vm.prank(keeper);
         engine.liquidate(mA, bob);
