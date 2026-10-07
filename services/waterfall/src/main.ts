@@ -7,6 +7,7 @@ import {
   type SettlementJob,
   createLogger,
   publicClientFor,
+  redactUrl,
   roleAccount,
   walletClientFor,
 } from "@bookrunner/shared";
@@ -45,7 +46,7 @@ export async function main() {
   });
 
   const pc = publicClientFor(cfg.CHAIN_ID, cfg.RPC_URL);
-  log.info({ chainId: cfg.CHAIN_ID, rpc: cfg.RPC_URL }, "waterfall service starting");
+  log.info({ chainId: cfg.CHAIN_ID, rpc: redactUrl(cfg.RPC_URL) }, "waterfall service starting");
   const deployment = await waitForDeployment({ file: cfg.DEPLOYMENT_FILE, log, signal: ac.signal, publicClient: pc });
   if (!deployment) return;
 

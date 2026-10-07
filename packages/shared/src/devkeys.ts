@@ -29,10 +29,11 @@ export const DEV_ROLE_INDEX = {
   trader1: 19,
   trader2: 20,
   trader3: 21,
+  funder: 22, // gas keeper (public test chains): tops up the hot role keys; holds test ETH only, no protocol role
 } as const;
 export type DevRole = keyof typeof DEV_ROLE_INDEX;
 
-const ENV_FOR_ROLE: Partial<Record<DevRole, string>> = {
+export const ENV_FOR_ROLE: Partial<Record<DevRole, string>> = {
   markSigner: "MARK_SIGNER_PRIVATE_KEY",
   risk: "RISK_PRIVATE_KEY",
   opsVenue: "OPS_VENUE_PRIVATE_KEY",
@@ -40,7 +41,17 @@ const ENV_FOR_ROLE: Partial<Record<DevRole, string>> = {
   keeper: "KEEPER_PRIVATE_KEY",
   oracleSigner: "ORACLE_SIGNER_PRIVATE_KEY",
   deployer: "DEPLOYER_PRIVATE_KEY",
+  funder: "BKRN_TESTNET_FUNDER_PK",
 };
+
+/**
+ * Roles holding protocol-admin power (deployer = admin / timelock / guardian, contracts/script/Deploy.s.sol).
+ * On a public chain they are never derived from the shared hot mnemonic that the signing services hold:
+ * only an explicit *_PRIVATE_KEY, or the mnemonic with ADMIN_KEY_OPT_IN=1 set for that one process
+ * (operator-run deploy / launch scripts; scripts/dev.ts never sets it for a service).
+ */
+export const ADMIN_ROLES: ReadonlySet<DevRole> = new Set<DevRole>(["deployer"]);
+export const ADMIN_KEY_OPT_IN = "BKRN_ALLOW_ADMIN_KEY";
 
 export function devAccount(role: DevRole, mnemonic = DEV_MNEMONIC): LocalAccount {
   return mnemonicToAccount(mnemonic, { addressIndex: DEV_ROLE_INDEX[role] });
@@ -57,6 +68,12 @@ export function roleAccount(role: DevRole, env: Record<string, string | undefine
   if (chainId === 31337) return devAccount(role, env.DEV_MNEMONIC || DEV_MNEMONIC);
   if (chainId === TESTNET_CHAIN_ID && env.BKRN_TESTNET_MNEMONIC) {
     if (env.BKRN_TESTNET_MNEMONIC.trim() === DEV_MNEMONIC) throw new Error("refusing the public anvil mnemonic on a public testnet");
+    if (ADMIN_ROLES.has(role) && env[ADMIN_KEY_OPT_IN] !== "1") {
+      throw new Error(
+        `role ${role} is a protocol-admin key: it is not derived from the shared service mnemonic on chain ${chainId}. ` +
+          `Set ${envName} for this process, or ${ADMIN_KEY_OPT_IN}=1 in an operator-run deploy/launch script (never in a service).`,
+      );
+    }
     return devAccount(role, env.BKRN_TESTNET_MNEMONIC.trim());
   }
   throw new Error(`role ${role}: set ${envName ?? "a private key"} for chain ${chainId}` + (chainId === TESTNET_CHAIN_ID ? " (or BKRN_TESTNET_MNEMONIC)" : ""));

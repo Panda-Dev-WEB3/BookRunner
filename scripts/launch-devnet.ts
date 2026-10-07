@@ -7,6 +7,9 @@
 //   bun scripts/launch-devnet.ts            (idempotent: exits if books already launched)
 // Testnet (CHAIN_ID=46630): keys derive from BKRN_TESTNET_MNEMONIC; the deployer first distributes gas ETH
 // to every role/participant key, and LAUNCH_USER_WALLET (if set) receives test USDC + BKRN + a little gas.
+// The deployer is a protocol-admin key: on testnet it derives from the mnemonic only with
+// BKRN_ALLOW_ADMIN_KEY=1 (scripts/dev.ts sets it for this one-shot process; set it yourself when running
+// this by hand) or from DEPLOYER_PRIVATE_KEY.
 import { readFileSync, writeFileSync } from "node:fs";
 import {
   type Abi,
