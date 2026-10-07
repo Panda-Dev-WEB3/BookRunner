@@ -6,8 +6,9 @@ pragma solidity ^0.8.24;
 // IPoolEngine state/config/positionOf/quotePrice/depositMargin/trade + Trade event, MockERC20) with
 // deliberately simplified semantics. Never deployed outside the private test anvil.
 // Low-gas entry points (docs/LOW_GAS.md §1, binding signatures): BookrunnerDesk.executeWithPrices(Action,
-// priceData), PoolEngine.trade(..., priceData) with the maxTradePriceAge bound on new risk (reverting
-// StalePrice like the real engine) and liquidate(..., priceData). Both relay to the REAL AttestedOracle
+// priceData), PoolEngine.trade(..., priceData) with the maxTradePriceAge bound on every trade, closes
+// included (reverting StalePrice / OffHours on a held price like the real engine, audit A2-01 / A2-03)
+// and liquidate(..., priceData). Both relay to the REAL AttestedOracle
 // (deployed by the IT from contracts/out) through IPullOracle, so the shared encodePriceData / the
 // oracle service's signatures are verified by the production contract. Semantics simplified, signatures exact.
 
@@ -87,6 +88,7 @@ contract FixtureEngine {
     error MaxNetExposure(uint256 attemptedUsd, uint256 maxUsd);
     error WorsePrice(uint256 fill, uint256 acceptable);
     error StalePrice(bytes32 underlying, uint64 publishedAt);
+    error OffHours(uint256 marketId);
     error NoPosition(address trader);
     error NotLiquidatable(address trader);
 
@@ -98,7 +100,8 @@ contract FixtureEngine {
     /// pull-oracle mode (set by setOracle): trades / liquidations price from the oracle after the in-tx update
     IPullOracle public oracle;
     uint64 internal pricePublishedAt;
-    /// BookrunnerConfig.maxTradePriceAge default: a trade adding risk needs a price at most this old
+    bool internal priceHeld;
+    /// BookrunnerConfig.maxTradePriceAge default: every trade needs a price at most this old
     uint256 public constant MAX_TRADE_PRICE_AGE = 15;
 
     constructor(FixtureUSDC usdc_) {
@@ -127,6 +130,7 @@ contract FixtureEngine {
         IPullOracle.PriceData memory d = oracle.latest(cfg.underlying);
         priceWad = d.priceWad;
         pricePublishedAt = d.publishedAt;
+        priceHeld = d.held;
     }
 
     function trade(uint256 marketId, int256 sizeDelta, uint256 acceptablePriceWad, bytes calldata priceData)
@@ -210,9 +214,12 @@ contract FixtureEngine {
         Position storage p = pos[msg.sender];
         int256 newSize = p.size + sizeDelta;
         bool newRisk = _abs(newSize) > _abs(p.size);
-        // the latency-arbitrage bound (both trade entry points): new risk only on a recent price
-        if (address(oracle) != address(0) && newRisk && uint256(pricePublishedAt) + MAX_TRADE_PRICE_AGE < block.timestamp) {
-            revert StalePrice(cfg.underlying, pricePublishedAt);
+        // the latency-arbitrage bound (both trade entry points): every trade on a recent, live price
+        if (address(oracle) != address(0)) {
+            if (priceHeld) revert OffHours(marketId);
+            if (uint256(pricePublishedAt) + MAX_TRADE_PRICE_AGE < block.timestamp) {
+                revert StalePrice(cfg.underlying, pricePublishedAt);
+            }
         }
         fill = quotePrice(marketId, sizeDelta);
         if (sizeDelta > 0 ? fill > acceptablePriceWad : fill < acceptablePriceWad) revert WorsePrice(fill, acceptablePriceWad);
