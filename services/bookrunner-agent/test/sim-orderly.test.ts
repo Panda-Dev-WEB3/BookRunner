@@ -2,7 +2,20 @@ import { describe, expect, test } from "bun:test";
 import type { QuotingVenue } from "@bookrunner/shared";
 import { mulberry32 } from "../src/domain/rng";
 import { MockOrderlyTaker } from "../src/sim/orderly-taker";
-import { CLOSE_ONLY_CLASSES, acceptablePriceWad, classifyTradeError, nextAction, nextDelayMs, sizeDeltaFor } from "../src/sim/trader-logic";
+import {
+  CLOSE_ONLY_CLASSES,
+  PAUSE_CLASSES,
+  acceptablePriceWad,
+  classifyTradeError,
+  engineGate,
+  holdableLeverage,
+  liquidationMarginBps,
+  nearLiquidation,
+  nextAction,
+  nextDelayMs,
+  offHoursMarginBps,
+  sizeDeltaFor,
+} from "../src/sim/trader-logic";
 import { type FetchLike, MockOrderlyHttpVenue, createOrderlyVenue } from "../src/venues/orderly";
 import { silentLog } from "./helpers";
 
@@ -52,7 +65,44 @@ describe("trader-sim logic", () => {
     expect(classifyTradeError(null, "InsufficientMargin")).toBe("margin");
     expect(classifyTradeError(null, "worse than acceptable price")).toBe("price");
     expect(classifyTradeError(null, "boom")).toBe("other");
-    expect(CLOSE_ONLY_CLASSES).toContain("off_hours");
+    // held / stale engine price: PoolEngine fills no trade (closes included) -> pause, not close-only
+    expect(CLOSE_ONLY_CLASSES).not.toContain("off_hours");
+    expect(PAUSE_CLASSES).toContain("off_hours");
+    expect(CLOSE_ONLY_CLASSES).toContain("reduce_only");
+  });
+
+  test("engine gate: held / stale price freezes every trade (audit A2-01 / A2-03), reduce-only only closes", () => {
+    const g = { reduceOnly: false, oracleHeld: false, oracleStale: false, poolExposureUsd: 0, maxNetExposureUsd: 50_000 };
+    expect(engineGate(g)).toEqual({ closeOnly: false, frozen: false });
+    expect(engineGate({ ...g, oracleHeld: true })).toEqual({ closeOnly: false, frozen: true });
+    expect(engineGate({ ...g, oracleStale: true })).toEqual({ closeOnly: false, frozen: true });
+    expect(engineGate({ ...g, reduceOnly: true })).toEqual({ closeOnly: true, frozen: false });
+    const rng = mulberry32(3);
+    for (let i = 0; i < 50; i++) {
+      // a frozen trader neither opens nor closes, whatever its position / mode
+      expect(nextAction(rng, { positionUsd: 1_000, marginUsd: 10_000, closeOnly: true, frozen: true }, params)).toEqual({ kind: "none", reason: "PRICE_NOT_LIVE" });
+      expect(nextAction(rng, { positionUsd: -1_000, marginUsd: 10_000, closeOnly: false, frozen: true }, params).kind).toBe("none");
+    }
+  });
+
+  test("off-hours margin (audit A2-02): 2x initial margin while held; sim leverage survives a session close", () => {
+    expect(offHoursMarginBps(1_000)).toBe(2_000);
+    expect(offHoursMarginBps(6_000)).toBe(10_000); // capped at 100 %
+    const m = { initialMarginBps: 1_000, maintenanceMarginBps: 500 };
+    expect(liquidationMarginBps(m, false)).toBe(500);
+    expect(liquidationMarginBps(m, true)).toBe(2_000);
+    expect(holdableLeverage(5, 1_000)).toBeCloseTo(4); // 0.8 / 20 %
+    expect(holdableLeverage(3, 1_000)).toBe(3);
+    // 4x on 20 % off-hours: ~25 % equity, not a sweep candidate even with the 20 % buffer (24 %)
+    const UNIT = 10n ** 18n;
+    const px = 100n * UNIT;
+    const size = 400n * UNIT; // $40k on $10k margin
+    const pos = { size, entryPriceWad: px, marginUsd: 10_000_000_000n };
+    expect(nearLiquidation(pos, px, liquidationMarginBps(m, true))).toBe(false);
+    // 5x is (live: fine; held: a candidate)
+    const pos5 = { size: 500n * UNIT, entryPriceWad: px, marginUsd: 10_000_000_000n };
+    expect(nearLiquidation(pos5, px, liquidationMarginBps(m, false))).toBe(false);
+    expect(nearLiquidation(pos5, px, liquidationMarginBps(m, true))).toBe(true);
   });
 });
 

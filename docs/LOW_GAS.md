@@ -36,7 +36,21 @@ function priceOf(bytes32 underlying) external view returns (uint256 priceWad, bo
   engine and mandate treat `held` / stale exactly as today, but evaluated after the in-tx update.
 - Latency-arbitrage bound: a trade may only use a price whose `publishedAt >= block.timestamp -
   maxTradePriceAge` (new config param `maxTradePriceAge`, default 15 s, timelock-settable) — the
-  trader cannot pick an old favourable print; the spread covers the residual.
+  trader cannot pick an old favourable print; the spread covers the residual. This holds for **every**
+  voluntary trade, reductions and closes included (audit A2-01): with no timer pushes the stored price
+  can be arbitrarily old, and a market-neutral pair that closes its losing leg at the stale stored
+  price and its winning leg at the current print extracts the whole move from the pool. A close
+  therefore carries a fresh signed print like an open.
+- Off-hours (`held` price): **no** trade fills, closes included (audit A2-03) — the held close is
+  known-stale once after-hours news moves the real price. Margin top-ups, liquidations and wind-down
+  close-outs keep working at the held price. While held, the maintenance requirement is
+  `OFF_HOURS_MARGIN_MULTIPLE` (2) × the market's initial margin (capped at 100 %): positions that
+  cannot absorb a reopen gap of that size are liquidated at the held close instead of turning the gap
+  into IF bad debt (audit A2-02). Traders top up or deleverage before the session closes.
+- Liquidations (`liquidate`, with or without `priceData`) are not bound by `maxTradePriceAge` and work
+  at the stored / held price: they are involuntary, need the position under its requirement at that
+  price and forfeit the liquidation fee. `forceClose` (wind-down close-out, keeper-driven) keeps
+  `maxPriceAge` staleness and works at a held price.
 - Off-chain readers (mark, risk, api, web) value positions from the oracle service's latest signed
   bundle (`GET /prices/signed`, Redis `KEYS.oracleLast`), never from strict on-chain views that revert
   when no recent update landed.
@@ -74,6 +88,10 @@ function commitAndApply(BRTypes.MarkInput calldata m, bytes calldata sig, bytes 
 - `venueReport = abi.encode(uint256 insuranceUsd, int256 marginUsd, int256 netExposureUsd, uint64 asOf, bytes sig)`.
 - The adapter is `IBookFactory(config.factory()).componentsOf(m.bookId).adapter`.
 - `commit` + `Book.applyMark` stay callable separately (backwards compatible).
+- Step 3 is idempotent (audit A2-04): if the book's latest mark is already the identical, unapplied
+  mark (someone front-ran the keeper with a bare `commit(m, sig)` copied from the mempool), it is
+  applied as is instead of reverting `PeriodNotAfterLast`, so the period's prices and venue report
+  still land in the keeper's transaction.
 - Cadence: `markInterval` = 86 400 (daily, per spec) for mainnet; testnet profile default 86 400 with
   `MARK_INTERVAL_SECONDS` override (hourly costs ~0.0002 ETH/day for 3 books in this mode).
 - The waterfall's sweep + distribute run in the same keeper pass, **skipped when there is no fee flow**

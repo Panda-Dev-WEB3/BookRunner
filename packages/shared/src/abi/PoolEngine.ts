@@ -104,6 +104,19 @@ export const poolEngineAbi = [
   },
   {
     "type": "function",
+    "name": "OFF_HOURS_MARGIN_MULTIPLE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "adapterOf",
     "inputs": [
       {

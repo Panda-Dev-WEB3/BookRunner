@@ -1,7 +1,11 @@
 // trader-sim: simulated taker flow for the launch books.
 //   in-house books: trader0..traderN (devkeys) mint devnet USDC, depositMargin, trade with an
-//                   acceptable price, close occasionally; reduce-only / off-hours rejections switch the
-//                   trader to closes for a while, exposure-cap rejections are expected and skipped. Pull
+//                   acceptable price, close occasionally; reduce-only rejections switch the trader to
+//                   closes for a while; while the engine's price is held (off-hours) or stale no trade is
+//                   sent at all (PoolEngine fills none then, closes included) and an OffHours / StalePrice
+//                   rejection pauses the trader; exposure-cap rejections are expected and skipped.
+//                   Leverage stays below what survives a session close (off-hours maintenance = 2x
+//                   initial margin), and the liquidation sweep applies that requirement while held. Pull
 //                   oracle (docs/LOW_GAS.md §1): every trade carries the freshest signed price of its market
 //                   (PoolEngine.trade(..., priceData) — the trader pays the oracle update), quoted off-chain
 //                   from it; sim positions close to maintenance are liquidated the same way
@@ -41,11 +45,14 @@ import { EngineTrader } from "./sim/engine-trader";
 import { MockOrderlyTaker } from "./sim/orderly-taker";
 import {
   CLOSE_ONLY_CLASSES,
+  PAUSE_CLASSES,
   type SimParams,
   acceptablePriceWad,
   classifyTradeError,
   engineFillPriceWad,
   engineGate,
+  holdableLeverage,
+  liquidationMarginBps,
   nearLiquidation,
   nextAction,
   nextDelayMs,
@@ -92,14 +99,16 @@ async function liquidationSweep(
   liquidator: EngineTrader,
   traders: EngineTrader[],
   px: OraclePoint,
-  maintenanceMarginBps: number,
+  pool: { initialMarginBps: number; maintenanceMarginBps: number },
   priceData: Hex | null,
   log: Logger,
 ): Promise<void> {
+  // while held the engine liquidates below the off-hours requirement (2x initial margin), else maintenance
+  const requirementBps = liquidationMarginBps(pool, px.held);
   for (const t of traders) {
     if (t === liquidator) continue;
     const pos = await t.position(marketId).catch(() => null);
-    if (!pos || !nearLiquidation(pos, px.priceWad, maintenanceMarginBps)) continue;
+    if (!pos || !nearLiquidation(pos, px.priceWad, requirementBps)) continue;
     const hash = await liquidator.liquidate(marketId, t.address, priceData).catch((err: unknown) => {
       log.debug({ book: book.name, trader: t.name, err: errMsg(err) }, "sim: liquidation send failed");
       return null;
@@ -122,6 +131,7 @@ async function engineLoop(
   const chain = new BookChain(pub, dep, book.components);
   const params = simParams(env);
   const closeOnlyUntil = new Map<string, number>();
+  const pausedUntil = new Map<string, number>();
   let marketId: bigint | null = null;
   let priceIdHex: Hex | null = null;
   let failures = 0;
@@ -155,7 +165,7 @@ async function engineLoop(
       const offChainQuote = !!signed;
       const quoteAt = async (size: bigint) => (offChainQuote ? engineFillPriceWad(px.priceWad, pool.spreadBps, pool.skewBps, size) : trader!.quotePrice(marketId!, size));
 
-      await liquidationSweep(book, marketId, trader, traders, px, pool.maintenanceMarginBps, priceData, log);
+      await liquidationSweep(book, marketId, trader, traders, px, pool, priceData, log);
 
       const unitPx = Number(await quoteAt(UNIT)) / 1e18;
       const gate = engineGate({
@@ -171,9 +181,10 @@ async function engineLoop(
           positionUsd: (Number(pos.size) / 1e18) * unitPx,
           marginUsd: Number(pos.marginUsd) / 1e6,
           closeOnly: gate.closeOnly || state === "Retiring" || (closeOnlyUntil.get(trader.name) ?? 0) > Date.now(),
+          ...(gate.frozen || (pausedUntil.get(trader.name) ?? 0) > Date.now() ? { frozen: true } : {}),
           ...(gate.forceSide ? { forceSide: gate.forceSide } : {}),
         },
-        params,
+        { ...params, maxLeverage: holdableLeverage(params.maxLeverage, pool.initialMarginBps) },
       );
       if (action.kind === "none") continue;
       const sizeDelta = action.kind === "close" ? -pos.size : sizeDeltaFor(action.notionalUsd, unitPx, action.side);
@@ -197,7 +208,10 @@ async function engineLoop(
       );
     } catch (err) {
       const cls = classifyTradeError(revertName(err), errMsg(err), { carriedPrice: carried });
-      if (trader && CLOSE_ONLY_CLASSES.includes(cls)) {
+      if (trader && PAUSE_CLASSES.includes(cls)) {
+        pausedUntil.set(trader.name, Date.now() + 60_000);
+        log.info({ book: book.name, trader: trader.name, cls }, "sim: engine price not live (held / stale); trader pauses for 60s");
+      } else if (trader && CLOSE_ONLY_CLASSES.includes(cls)) {
         closeOnlyUntil.set(trader.name, Date.now() + 60_000);
         log.info({ book: book.name, trader: trader.name, cls }, "sim: venue rejects new risk; trader closes only for 60s");
       } else if (cls === "exposure_cap" || cls === "price" || cls === "stale_price") {

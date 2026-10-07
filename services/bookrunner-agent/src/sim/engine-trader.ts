@@ -21,6 +21,7 @@ export interface PoolView {
   maxNetExposureUsd: bigint;
   spreadBps: number;
   skewBps: number;
+  initialMarginBps: number;
   maintenanceMarginBps: number;
 }
 
@@ -85,6 +86,7 @@ export class EngineTrader {
       maxNetExposureUsd: cfg.maxNetExposureUsd,
       spreadBps: Number(st.spreadBps),
       skewBps: Number(st.skewBps),
+      initialMarginBps: Number(cfg.initialMarginBps),
       maintenanceMarginBps: Number(cfg.maintenanceMarginBps),
     };
   }

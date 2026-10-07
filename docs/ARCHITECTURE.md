@@ -365,13 +365,22 @@ are oracle keys published by the oracle service as the weighted index level.
     `oracle * (1e4 - spread/2 + skew) / 1e4` — skew (signed bps) shifts both sides; reverts if worse
     than `acceptablePriceWad`.
   - taker fee `takerFeeBps` of notional → `feesAccruedUsd` (claimed by the adapter → RevenueRouter).
-  - new risk (|size| increases) blocked when the oracle is held/stale, market reduceOnly, or the
-    post-trade pool |net exposure| would exceed `maxNetExposureUsd`; initial margin check on new risk.
+  - every voluntary trade (open, increase, reduce, close, flip) needs a live price: none fills while
+    the oracle is `held` (off-hours) or older than `min(maxPriceAge, 60 s, maxTradePriceAge)` (audit
+    A2-01 / A2-03: a stale or held price would let a market-neutral pair close one leg at the old
+    price and the other at the real one). New risk (|size| increases) is further blocked when the
+    market is reduceOnly or the post-trade pool |net exposure| would exceed `maxNetExposureUsd`;
+    initial margin check on new risk.
   - funding: skew-based, `rate/day = fundingVelocityBps * netSkew / maxNetExposure`, accrued on a
     cumulative index per unit size; paid by the crowded side to the pool's counterparty side; the
     pool's net funding is part of pool equity.
   - realised trader PnL settles against `poolCashUsd`; liquidation when margin ratio <
-    maintenance: position closed at oracle, `liquidationFeeBps` split 50% liquidator / 50% IF;
+    maintenance — while the oracle is `held` (session closed) < `OFF_HOURS_MARGIN_MULTIPLE` (2) ×
+    initial margin, capped at 100 % (audit A2-02: a position held through the close must absorb a
+    reopen gap of that size, else it is liquidated at the held close rather than leaving the gap as IF
+    bad debt; traders top up or deleverage before the close, top-ups work off-hours). Liquidations
+    use the latest (held) price with no `maxTradePriceAge` bound (involuntary, fee-bearing); position
+    closed at oracle, `liquidationFeeBps` split 50% liquidator / 50% IF;
     bad debt paid by IF, then **ADL within that market only** (pool cash reduced by shortfall,
     `ADL` event) — never touches other markets.
   - `withdrawLiquidity` keeps `poolEquity - amount >= requiredPoolMargin` (pool must cover current
@@ -416,8 +425,8 @@ Waterfall ordering under partial losses (fuzz) · redemption always honoured (in
 permission revert — handler tries requestRedeem/claim under pause, kill, Retiring, Retired,
 guardian pause) · mandate escalation (key cannot raise its own limits / call non-typed actions) ·
 key revocation race (revoke then execute in same block → revert) · off-hours quoting blocked
-(engine trade new risk + desk SetQuote widening + hedge adding risk) · oracle staleness → engine
-pause for new risk only (reduce + liquidate still work) · Stock Tokens not borrowable (sell > held
+(engine trades incl. closes + desk SetQuote widening + hedge adding risk) · oracle staleness → engine
+pause for every trade (liquidate still works) · Stock Tokens not borrowable (sell > held
 reverts) · float caps · multiplier double-apply (valuation with multiplier 2e18 equals exactly 2×).
 Plus A10 invariants: redemption never permission-gated; waterfall conservation (S + J == marked
 NAV + backstop cover after every applyMark, modulo credited flows); mandate bounds (engine pool

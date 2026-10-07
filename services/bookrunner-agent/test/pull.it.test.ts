@@ -229,7 +229,7 @@ describe.skipIf(!IT)("pull oracle on the production AttestedOracle (private anvi
     console.log(`[gas] fixture desk SetQuote: executeWithPrices (1 fresh price) ${r1.receipt.gasUsed} vs plain execute ${r3.receipt.gasUsed}`);
   }, 60_000);
 
-  test("EngineTrader: trade(..., priceData) under maxTradePriceAge, reductions on the stored price, liquidate(..., priceData)", async () => {
+  test("EngineTrader: trade(..., priceData) under maxTradePriceAge (reductions too), liquidate(..., priceData)", async () => {
     const trader = new EngineTrader("trader0", pub, walletClientFor(31337, RPC, devAccount("trader0")), addr.engine, addr.usdc, silentLog, 30_000, true, { trade: true, liquidate: true });
     const victim = new EngineTrader("trader2", pub, walletClientFor(31337, RPC, devAccount("trader2")), addr.engine, addr.usdc, silentLog, 30_000, true, { trade: true, liquidate: true });
     await trader.ensureMargin(1n, usd(25_000), usd(100_000));
@@ -257,9 +257,13 @@ describe.skipIf(!IT)("pull oracle on the production AttestedOracle (private anvi
     const e2 = await trader.trade(1n, size, acceptablePriceWad(q1, size, 50), sel(old, await sign(old))).catch((e: unknown) => e);
     expect(revertName(e2)).toBe("StalePrice");
     expect(classifyTradeError(revertName(e2), String(e2), { carriedPrice: true })).toBe("stale_price");
-    // a reduction works on the stored (old) price without priceData
+    // a reduction on the stored (old) price is refused too (audit A2-01); it carries a fresh print instead
     const q0 = await trader.quotePrice(1n, -UNIT);
-    await trader.trade(1n, -UNIT, acceptablePriceWad(q0, -UNIT, 50));
+    const e3 = await trader.trade(1n, -UNIT, acceptablePriceWad(q0, -UNIT, 50)).catch((e: unknown) => e);
+    expect(revertName(e3)).toBe("StalePrice");
+    t = await head();
+    const pr = upd(NVDA, 100.3, t);
+    await trader.trade(1n, -UNIT, acceptablePriceWad(engineFillPriceWad(pr.priceWad, pool.spreadBps, pool.skewBps, -UNIT), -UNIT, 50), sel(pr, await sign(pr)));
     expect((await trader.position(1n)).size).toBe(size - UNIT);
     // and new risk works again with a fresh carried price
     t = await head();
