@@ -8,7 +8,9 @@
 //   split:  [gross, expensesRequested, expenseCapBps, carryBps, seniorHurdleBps, seniorSupply, juniorSupply,
 //            expenses, carry, senior, junior]
 //   mark:   [S, J, seniorImpairment, perfIndex, highWater, nav, juniorSupply, backstopAvailable,
-//            S', J', seniorImpairment', perfIndex', highWater', backstopCovered, |drawdownBps|]
+//            S', J', seniorImpairment', perfIndex', highWater', backstopCovered, |drawdownBps|,
+//            backstopDebt, backstopRepaid, backstopDebt'] (debt columns appended; derived from the row index
+//            so the earlier columns keep their RNG stream)
 //   wallet: [commit, isSponsor(0|1), totalCommitted, sponsorCommitted, totalAllocated, shares, refund]
 //            (juniorWindowAllocation: Junior window settlement with sponsor priority)
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -70,8 +72,10 @@ for (let i = 0; i < N; i++) {
   const nav = pick([0n, accounted, accounted / 2n, (accounted * 11n) / 10n, accounted + amt(), rnd(accounted)]);
   const juniorSupply = J === 0n ? pick([0n, 1n]) : pick([1n, 10n ** 9n]);
   const backstopAvailable = amt();
-  const m = applyMarkPnl({ seniorNav: S, juniorNav: J, seniorImpairment: imp, perfIndex, highWater }, { nav, juniorSupply, backstopAvailable });
-  mark.push([S, J, imp, perfIndex, highWater, nav, juniorSupply, backstopAvailable, m.seniorNav, m.juniorNav, m.seniorImpairment, m.perfIndex, m.highWater, m.backstopCovered, -m.drawdownBps].map(String));
+  // no RNG draw: 0 / below / above the gain / the impairment, by row index
+  const backstopDebt = [0n, 0n, 1n, (S + J) / 20n, imp, backstopAvailable][i % 6]!;
+  const m = applyMarkPnl({ seniorNav: S, juniorNav: J, seniorImpairment: imp, perfIndex, highWater, backstopDebt }, { nav, juniorSupply, backstopAvailable });
+  mark.push([S, J, imp, perfIndex, highWater, nav, juniorSupply, backstopAvailable, m.seniorNav, m.juniorNav, m.seniorImpairment, m.perfIndex, m.highWater, m.backstopCovered, -m.drawdownBps, backstopDebt, m.backstopRepaid, m.backstopDebt].map(String));
 }
 
 // Junior window wallet settlement (generated last so the rows above keep their inputs). Domain as on

@@ -33,6 +33,19 @@ export const trancheAbi = [
   },
   {
     "type": "function",
+    "name": "MAX_TOPUP_PRICE_WAD",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "RETIRED_BUCKET_BASE",
     "inputs": [],
     "outputs": [
@@ -1891,6 +1904,11 @@ export const trancheAbi = [
   {
     "type": "error",
     "name": "GuardianPaused",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "HookOutOfGas",
     "inputs": []
   },
   {

@@ -11,11 +11,12 @@ import {IBook} from "./interfaces/IBook.sol";
 import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 import {IUnderwritingVault} from "./interfaces/IUnderwritingVault.sol";
 import {IVenueAdapter} from "./interfaces/IVenueAdapter.sol";
+import {IBackstop} from "./interfaces/IBkrnFeeRouter.sol";
 
 /// @title UnderwritingVault — holds one book's undeployed USDC (EIP-1167 clone).
 /// @notice Capital leaves only to the book's venue adapter (IF / MM accounts), the book's desk (hedge
-///         budget) or the book's tranche escrows (claims / window settlement). Recalls always land back
-///         here. Every deploy / recall / desk funding / desk return / venue return bumps the book's
+///         budget), the book's tranche escrows (claims / window settlement) or, book-initiated, the
+///         protocol backstop (repaying cover it advanced). Recalls always land back here. Every deploy / recall / desk funding / desk return / venue return bumps the book's
 ///         flowNonce (book.onCapitalFlow), invalidating marks valued against the previous state.
 ///         Cash backing settled-but-unfunded redemption claims (book.unfundedClaims()) is reserved:
 ///         it cannot be deployed to the venue or the desk, and capital only goes out while the book is
@@ -146,6 +147,20 @@ contract UnderwritingVault is IUnderwritingVault, Initializable, ReentrancyGuard
         if (amount == 0) return;
         emit Paid(to, amount);
         _usdc.safeTransfer(to, amount);
+    }
+
+    /// @notice Only book: repays the protocol backstop (config.backstop()) `amount` of the cover it
+    ///         advanced to this book, then acknowledges the deposit (Backstop.notifyDeposit). The book
+    ///         reserves the amount out of NAV first (Book.backstopDebt).
+    function repayBackstop(uint256 amount) external nonReentrant {
+        if (msg.sender != book) revert NotBook();
+        address backstop = IBookrunnerConfig(config).backstop();
+        if (backstop == address(0)) revert ZeroAddress();
+        if (amount == 0) revert ZeroAmount();
+        emit Paid(backstop, amount);
+        _usdc.safeTransfer(backstop, amount);
+        // the cash is in the backstop's balance() either way; only its accounting needs the notice
+        try IBackstop(backstop).notifyDeposit(amount) {} catch {}
     }
 
     /// @notice Desk only (ReturnToVault): pulls `amount` USDC from the desk (desk approves first) and

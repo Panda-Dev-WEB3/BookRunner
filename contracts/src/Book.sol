@@ -24,13 +24,18 @@ interface IMMMandateRetiring {
     function setRetiring() external;
 }
 
+/// @dev UnderwritingVault's backstop repayment (book only), not part of the frozen IUnderwritingVault.
+interface IVaultBackstopRepay {
+    function repayBackstop(uint256 amount) external;
+}
+
 /// @title Book — one book per approved charter (bookId == charterId). ERC1967 proxy, UUPS logic,
 ///        upgrades only via config.timelock(). Owns the waterfall accounting (S = Senior NAV,
 ///        J = Junior NAV) and the lifecycle Subscription -> Live -> Retiring -> Retired (or Cancelled).
 /// @notice Accounting identity: S + J == vault idle + deployed - unfundedClaims at every applied mark,
 ///         where unfundedClaims are settled redemption assets not yet moved from the vault to tranche
-///         escrow. Between marks S/J move only by credited fee flow and (Retired) redemptions, each
-///         matched one-for-one by vault cash. Per-tranche values are indexed by kind
+///         escrow plus a backstop repayment not yet paid. Between marks S/J move only by credited fee
+///         flow and (Retired) redemptions, each matched one-for-one by vault cash. Per-tranche values are indexed by kind
 ///         (BRTypes.SENIOR = 0, BRTypes.JUNIOR = 1).
 contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, ReentrancyGuardTransient {
     uint256 internal constant WAD = 1e18;
@@ -96,6 +101,11 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
         bool sponsorAbandoned;
         bytes32 lastKillReason;
         uint64 lastKillAt;
+        // ---- appended (upgrade-safe) ----
+        /// @dev backstop cover received and not yet repaid from later gains (A5-01)
+        uint256 backstopDebt;
+        /// @dev repayment owed to the backstop, netted from NAV, paid from vault idle once claims are funded
+        uint256 backstopPayable;
     }
 
     // keccak256(abi.encode(uint256(keccak256("bookrunner.storage.Book")) - 1)) & ~bytes32(uint256(0xff))
@@ -279,10 +289,18 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
         return _s().lastMark;
     }
 
-    /// @notice Settled redemption assets owed to tranche escrows but not yet funded from the vault.
+    /// @notice Vault cash owed out of the book and netted from its NAV: settled redemption assets owed to
+    ///         tranche escrows but not yet funded, plus the backstop repayment not yet paid (the vault
+    ///         reserves all of it from deployment).
     function unfundedClaims() external view returns (uint256) {
+        return _liabilities(_s());
+    }
+
+    /// @notice Backstop cover not yet repaid from gains (`debt`), and the part of it already earned back
+    ///         by a gain, netted from NAV and waiting for vault idle (`payable_`).
+    function backstopDebt() external view returns (uint256 debt, uint256 payable_) {
         BookStorage storage $ = _s();
-        return $.unfunded[S] + $.unfunded[J];
+        return ($.backstopDebt, $.backstopPayable);
     }
 
     function unfundedOf(uint8 kind) external view returns (uint256) {
@@ -293,7 +311,7 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
     function markedNavPreview(uint256 deployedValueUsd) external view returns (uint256) {
         BookStorage storage $ = _s();
         return Waterfall.markedNavNet(
-            IUnderwritingVault($.components.vault).idle(), $.unfunded[S] + $.unfunded[J], deployedValueUsd
+            IUnderwritingVault($.components.vault).idle(), _liabilities($), deployedValueUsd
         );
     }
 
@@ -374,10 +392,12 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
         if (mmAmount > 0) IUnderwritingVault(vault).deployToVenue(BRTypes.ACCOUNT_MM, mmAmount);
     }
 
-    /// @notice Anyone. Applies a committed mark: must be for this book, not applied, newer than the last
-    ///         applied mark and computed against the current flowNonce. Runs P&L through the waterfall
-    ///         (Junior -> Senior -> backstop), the drawdown kill check, settles due redemption buckets and
-    ///         an ended top-up round at the post-P&L share prices and funds claims from vault idle.
+    /// @notice Anyone. Applies a committed mark: must be for this book, not applied, the book's latest
+    ///         committed mark in the registry (a superseded older one reverts MarkOutOfOrder), newer than
+    ///         the last applied mark and computed against the current flowNonce. Runs P&L through the
+    ///         waterfall (Junior -> Senior -> backstop, backstop debt repaid from gains), the drawdown kill
+    ///         check, settles due redemption buckets and an ended top-up round at the post-P&L share prices
+    ///         and funds claims (then a backstop repayment owed) from vault idle.
     function applyMark(uint256 markId) external nonReentrant {
         BookStorage storage $ = _s();
         BRTypes.BookState st = $.state;
@@ -388,7 +408,8 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
         if (m.committedAt == 0 || m.signer == address(0)) revert UnknownMark(markId);
         if (m.input.bookId != $.bookId) revert MarkForOtherBook(markId, m.input.bookId);
         if (m.applied) revert MarkAlreadyApplied(markId);
-        if (m.input.periodEnd <= $.lastMark.periodEnd) {
+        // only the book's latest committed mark: an older unapplied one is superseded (A7-02)
+        if (m.input.periodEnd <= $.lastMark.periodEnd || registry.latestMarkId($.bookId) != markId) {
             revert MarkOutOfOrder(m.input.periodEnd, $.lastMark.periodEnd);
         }
         if (m.input.flowNonce != $.flowNonce) revert FlowNonceMismatch($.flowNonce, m.input.flowNonce);
@@ -446,7 +467,7 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
     }
 
     /// @notice Anyone: moves vault idle USDC to tranche escrows for settled-but-unfunded claims
-    ///         (Senior claims first).
+    ///         (Senior claims first), then to the backstop for a repayment owed to it.
     function fundClaims() external nonReentrant returns (uint256 funded) {
         return _fundClaims(_s());
     }
@@ -593,9 +614,8 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
         returns (int256 pnl)
     {
         address vault = $.components.vault;
-        uint256 nav = Waterfall.markedNavNet(
-            IUnderwritingVault(vault).idle(), $.unfunded[S] + $.unfunded[J], sum.deployedValueUsd
-        );
+        uint256 nav =
+            Waterfall.markedNavNet(IUnderwritingVault(vault).idle(), _liabilities($), sum.deployedValueUsd);
         address backstop = cfg.backstop();
         Waterfall.MarkResult memory r = Waterfall.applyMarkPnl(
             Waterfall.MarkState({
@@ -603,7 +623,8 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
                 juniorNav: $.nav[J],
                 seniorImpairment: $.seniorImpairment,
                 perfIndex: $.perfIndex,
-                highWater: $.highWater
+                highWater: $.highWater,
+                backstopDebt: $.backstopDebt
             }),
             Waterfall.MarkInputs({
                 nav: nav,
@@ -619,10 +640,14 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
             // replace the modelled cover with the USDC actually received
             r.seniorNav = r.seniorNav - r.backstopCovered + covered;
             r.seniorImpairment = shortfall - covered;
+            r.backstopDebt = r.backstopDebt - r.backstopCovered + covered;
         }
 
         $.nav = [r.seniorNav, r.juniorNav];
         $.seniorImpairment = r.seniorImpairment;
+        // cover is owed back from later gains; a repayment earned now leaves NAV until the vault pays it
+        $.backstopDebt = r.backstopDebt;
+        $.backstopPayable += r.backstopRepaid;
         $.perfIndex = r.perfIndex;
         $.highWater = r.highWater;
         $.drawdownBps = r.drawdownBps;
@@ -637,7 +662,7 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
         }
         if (pnl > 0) {
             // senior side = impairment restored (+ the residual when Junior has no supply)
-            emit GainAllocated($.bookId, uint256(pnl) - r.juniorGain, r.juniorGain);
+            emit GainAllocated($.bookId, uint256(pnl) - r.juniorGain - r.backstopRepaid, r.juniorGain);
         }
     }
 
@@ -656,8 +681,10 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
         }
         // Junior first so the Senior top-up cap sees the final Junior NAV
         _settleTranche($, sum, J, upTo, topUpDue ? $.topUpCapacity[J] : 0);
-        uint256 seniorCap =
-            topUpDue ? _seniorTopUpRoom($.nav[S], $.nav[J], $.charter.seniorCapBps, $.topUpCapacity[S]) : 0;
+        // no Senior top-up while impaired: new shares would share the restoration owed to the old ones
+        uint256 seniorCap = topUpDue && $.seniorImpairment == 0
+            ? _seniorTopUpRoom($.nav[S], $.nav[J], $.charter.seniorCapBps, $.topUpCapacity[S])
+            : 0;
         _scaleImpairment($, _settleTranche($, sum, S, upTo, seniorCap), seniorSupply);
 
         if (topUpDue) {
@@ -694,21 +721,35 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
         return Math.min(room, capacity);
     }
 
-    /// @dev Pays unfunded claims from vault idle, Senior first.
+    /// @dev Pays unfunded claims from vault idle, Senior first, then the backstop repayment owed (A5-01).
+    ///      The repayment never blocks the caller: a vault that cannot pay it (e.g. a vault clone older
+    ///      than repayBackstop) leaves it owed and reserved.
     function _fundClaims(BookStorage storage $) internal returns (uint256 funded) {
         uint256 us = $.unfunded[S];
         uint256 uj = $.unfunded[J];
-        if (us == 0 && uj == 0) return 0;
+        uint256 owed = $.backstopPayable;
+        if (us == 0 && uj == 0 && owed == 0) return 0;
         IUnderwritingVault vault = IUnderwritingVault($.components.vault);
         uint256 idle = vault.idle();
         uint256 ps = Math.min(idle, us);
         uint256 pj = Math.min(idle - ps, uj);
         funded = ps + pj;
-        if (funded == 0) return 0;
-        $.unfunded = [us - ps, uj - pj];
-        emit ClaimsFunded($.bookId, funded, (us - ps) + (uj - pj));
-        if (ps > 0) vault.payTo($.components.senior, ps);
-        if (pj > 0) vault.payTo($.components.junior, pj);
+        if (funded > 0) {
+            $.unfunded = [us - ps, uj - pj];
+            emit ClaimsFunded($.bookId, funded, (us - ps) + (uj - pj));
+            if (ps > 0) vault.payTo($.components.senior, ps);
+            if (pj > 0) vault.payTo($.components.junior, pj);
+        }
+        uint256 pb = Math.min(idle - funded, owed);
+        if (pb > 0) {
+            try IVaultBackstopRepay(address(vault)).repayBackstop(pb) {
+                $.backstopPayable = owed - pb;
+            } catch {}
+        }
+    }
+
+    function _liabilities(BookStorage storage $) internal view returns (uint256) {
+        return $.unfunded[S] + $.unfunded[J] + $.backstopPayable;
     }
 
     function _settleRetiredBacklog(BookStorage storage $) internal {

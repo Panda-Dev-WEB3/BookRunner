@@ -57,6 +57,10 @@ contract Tranche is ITranche, ITrancheBookHooks, Initializable, ERC20Upgradeable
     uint256 public constant MAX_SETTLE_BUCKETS = 256;
     /// @notice Max controller buckets processed per claim call (call again to continue).
     uint256 public constant MAX_CLAIM_BUCKETS = 64;
+    /// @notice A top-up round settling above this price (assets per share unit, WAD; 1 share unit worth
+    ///         more than 1 USDC) is refunded in full: per-wallet share rounding could otherwise lose up to
+    ///         one share unit's worth per wallet (share-price inflation by donation, A1-02).
+    uint256 public constant MAX_TOPUP_PRICE_WAD = 1e6 * WAD;
 
     uint8 private constant MODE_ALL = 0;
     uint8 private constant MODE_SHARES = 1;
@@ -77,6 +81,14 @@ contract Tranche is ITranche, ITrancheBookHooks, Initializable, ERC20Upgradeable
         bool settled;
     }
 
+    /// @notice What a settled round has paid out so far. Once every commitment of the round is claimed,
+    ///         the share units no wallet received (per-wallet floor rounding) are burned, so they cannot
+    ///         keep "supply > 0" on shares nobody can redeem (A1-05).
+    struct RoundClaims {
+        uint256 commit; // commitments claimed
+        uint256 shares; // shares paid
+    }
+
     error NotBook();
     error NotPauser();
     error NotAuthorized();
@@ -92,6 +104,7 @@ contract Tranche is ITranche, ITrancheBookHooks, Initializable, ERC20Upgradeable
     error ExceedsClaimable(uint256 requested, uint256 claimable);
     error AsyncFlow();
     error GuardianPaused();
+    error HookOutOfGas();
 
     event WindowSettled(uint256 committed, uint256 allocated);
     event RoundOpened(uint256 indexed round, uint64 endsAt);
@@ -145,6 +158,9 @@ contract Tranche is ITranche, ITrancheBookHooks, Initializable, ERC20Upgradeable
     mapping(address controller => uint256) internal _ctrlHead;
     mapping(uint256 bucket => mapping(address controller => uint256)) internal _remaining;
     mapping(address controller => mapping(address operator => bool)) public isOperator;
+
+    // ---- appended ----
+    mapping(uint256 round => RoundClaims) internal _roundClaims;
 
     modifier onlyBook() {
         if (msg.sender != book) revert NotBook();
@@ -303,17 +319,19 @@ contract Tranche is ITranche, ITrancheBookHooks, Initializable, ERC20Upgradeable
     /// @notice USDC claimable by `controller` across all settled buckets (claim calls process at most
     ///         MAX_CLAIM_BUCKETS buckets each).
     function claimableAssets(address controller) public view returns (uint256 assets) {
-        (, assets) = _claimableTotals(controller);
+        (, assets) = _claimableTotals(controller, false);
     }
 
-    /// @notice ERC-7540: settled (claimable) redemption shares of `controller`.
+    /// @notice ERC-7540: settled (claimable) redemption shares of `controller` that one redeem call can
+    ///         take (its next MAX_CLAIM_BUCKETS buckets; call again for the rest).
     function maxRedeem(address controller) external view returns (uint256 shares) {
-        (shares,) = _claimableTotals(controller);
+        (shares,) = _claimableTotals(controller, true);
     }
 
-    /// @notice ERC-7540: settled (claimable) redemption assets of `controller`.
+    /// @notice ERC-7540: settled (claimable) redemption assets of `controller` that one withdraw call can
+    ///         take (its next MAX_CLAIM_BUCKETS buckets; call again for the rest).
     function maxWithdraw(address controller) external view returns (uint256 assets) {
-        (, assets) = _claimableTotals(controller);
+        (, assets) = _claimableTotals(controller, true);
     }
 
     function redeemEligibleAt(uint64 requestedAt) external view returns (uint64) {
@@ -605,19 +623,27 @@ contract Tranche is ITranche, ITrancheBookHooks, Initializable, ERC20Upgradeable
     }
 
     function _settleAllocation(address wallet) internal returns (uint256 shares, uint256 refund) {
+        uint256 commit = walletCommit[wallet];
+        uint256 r = walletRound[wallet];
+        Round storage rd = _rounds[r];
+        // nothing committed, or the round is not settled yet
+        if (commit == 0 || !rd.settled) return (0, 0);
         (shares, refund) = claimableAllocation(wallet);
-        if (shares == 0 && refund == 0) {
-            // settled with nothing owed (e.g. dust commitment): clear it so the wallet can recommit
-            if (walletCommit[wallet] != 0 && _rounds[walletRound[wallet]].settled) {
-                walletCommit[wallet] = 0;
-                emit AllocationClaimed(wallet, 0, 0);
-            }
-            return (0, 0);
-        }
+        // also when nothing is owed (e.g. dust commitment): clear it so the wallet can recommit
         walletCommit[wallet] = 0;
+        RoundClaims storage c = _roundClaims[r];
+        uint256 claimedCommit = c.commit + commit;
+        uint256 paidShares = c.shares + shares;
+        c.commit = claimedCommit;
+        c.shares = paidShares;
         if (refund > 0) commitEscrow -= refund;
         emit AllocationClaimed(wallet, shares, refund);
         if (shares > 0) _transfer(address(this), wallet, shares);
+        // round fully claimed: burn the unallocatable rounding dust left in escrow (A1-05)
+        if (claimedCommit == rd.totalCommitted && rd.sharesMinted > paidShares) {
+            c.shares = rd.sharesMinted;
+            _burn(address(this), rd.sharesMinted - paidShares);
+        }
         if (refund > 0) _usdc.safeTransfer(wallet, refund);
     }
 
@@ -626,7 +652,8 @@ contract Tranche is ITranche, ITrancheBookHooks, Initializable, ERC20Upgradeable
         returns (uint256 accepted, uint256 minted)
     {
         accepted = Math.min(rd.totalCommitted, capacity);
-        if (accepted > 0 && priceWad > 0) {
+        // an inflated price (e.g. a donation to a near-empty tranche) refunds the round in full
+        if (accepted > 0 && priceWad > 0 && priceWad <= MAX_TOPUP_PRICE_WAD) {
             minted = Math.mulDiv(accepted, WAD, priceWad);
             if (minted == 0) accepted = 0;
         } else {
@@ -739,10 +766,18 @@ contract Tranche is ITranche, ITrancheBookHooks, Initializable, ERC20Upgradeable
         return (Math.mulDiv(left, WAD, price, Math.Rounding.Ceil), left);
     }
 
-    function _claimableTotals(address controller) internal view returns (uint256 shares, uint256 assets) {
+    /// @param capped true: only the next MAX_CLAIM_BUCKETS buckets, i.e. what one claim call processes
+    ///        (ERC-7540 maxRedeem / maxWithdraw must not exceed what redeem / withdraw accept).
+    function _claimableTotals(address controller, bool capped)
+        internal
+        view
+        returns (uint256 shares, uint256 assets)
+    {
         uint256[] storage list = _ctrlBuckets[controller];
+        uint256 head = _ctrlHead[controller];
         uint256 len = list.length;
-        for (uint256 i = _ctrlHead[controller]; i < len; i++) {
+        if (capped) len = Math.min(len, head + MAX_CLAIM_BUCKETS);
+        for (uint256 i = head; i < len; i++) {
             uint256 b = list[i];
             Bucket storage bk = _buckets[b];
             if (!bk.settled) break;
@@ -773,11 +808,18 @@ contract Tranche is ITranche, ITrancheBookHooks, Initializable, ERC20Upgradeable
     }
 
     /// @dev Junior: any outflow of the sponsor's shares (redeem request or transfer) is reported to the
-    ///      book for the sponsor-skin check. The hook can never block the transfer.
+    ///      book for the sponsor-skin check. A hook failing with a reason never blocks the transfer; one
+    ///      failing without revert data does (A1-01): that is how running out of gas surfaces anywhere in
+    ///      the hook's call chain (book proxy -> book -> tranche views), so a caller tuning the gas limit
+    ///      can no longer starve the hook (63/64 rule) and move the sponsor's skin out unflagged. A bare
+    ///      `gasleft()` threshold is not enough here: every nested frame keeps its own 1/64.
     function _update(address from, address to, uint256 value) internal override {
         super._update(from, to, value);
         if (kind == BRTypes.JUNIOR && from != address(0) && from == sponsor && value > 0) {
-            try IBookTrancheHooks(book).onJuniorRedeemRequested(from) {} catch {}
+            try IBookTrancheHooks(book).onJuniorRedeemRequested(from) {}
+            catch (bytes memory reason) {
+                if (reason.length == 0) revert HookOutOfGas();
+            }
         }
     }
 

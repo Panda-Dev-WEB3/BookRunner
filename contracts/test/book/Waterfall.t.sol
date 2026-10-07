@@ -239,7 +239,12 @@ contract WaterfallTest is Test {
     {
         return Waterfall.applyMarkPnl(
             Waterfall.MarkState({
-                seniorNav: s, juniorNav: j, seniorImpairment: imp, perfIndex: WAD, highWater: WAD
+                seniorNav: s,
+                juniorNav: j,
+                seniorImpairment: imp,
+                perfIndex: WAD,
+                highWater: WAD,
+                backstopDebt: 0
             }),
             Waterfall.MarkInputs({nav: nav, juniorSupply: jSup, backstopAvailable: avail})
         );
@@ -290,6 +295,46 @@ contract WaterfallTest is Test {
         assertGt(r.perfIndex, WAD - 1);
     }
 
+    /// @dev A5-01: gains restore Senior impairment, then repay backstop debt, then go to the residual;
+    ///      a cover adds to the debt. Conservation: S' + J' == nav + covered - repaid.
+    function testFuzz_mark_backstopDebt(
+        uint256 s,
+        uint256 j,
+        uint256 imp,
+        uint256 debt,
+        uint256 nav,
+        uint256 avail
+    ) public pure {
+        s = bound(s, 0, MAX_USD);
+        j = bound(j, 0, MAX_USD);
+        imp = bound(imp, 0, MAX_USD);
+        debt = bound(debt, 0, MAX_USD);
+        nav = bound(nav, 0, 3 * MAX_USD);
+        avail = bound(avail, 0, MAX_USD);
+        Waterfall.MarkResult memory r = Waterfall.applyMarkPnl(
+            Waterfall.MarkState({
+                seniorNav: s,
+                juniorNav: j,
+                seniorImpairment: imp,
+                perfIndex: WAD,
+                highWater: WAD,
+                backstopDebt: debt
+            }),
+            Waterfall.MarkInputs({nav: nav, juniorSupply: 1, backstopAvailable: avail})
+        );
+        assertEq(r.seniorNav + r.juniorNav, nav + r.backstopCovered - r.backstopRepaid, "conservation");
+        assertEq(r.backstopDebt, debt - r.backstopRepaid + r.backstopCovered, "debt");
+        if (nav <= s + j) {
+            assertEq(r.backstopRepaid, 0, "no repayment without a gain");
+        } else {
+            uint256 gain = nav - s - j;
+            uint256 afterImp = gain - r.seniorRestored;
+            assertEq(r.backstopRepaid, afterImp < debt ? afterImp : debt, "repaid after impairment");
+            assertEq(r.juniorGain, afterImp - r.backstopRepaid, "junior only gets the rest");
+            if (r.juniorGain > 0) assertEq(r.backstopDebt, 0, "junior gains only once the debt is repaid");
+        }
+    }
+
     function testFuzz_drawdownKill(int256 dd, int256 killAt) public pure {
         dd = bound(dd, -10_000, 0);
         killAt = bound(killAt, -10_000, 10_000);
@@ -301,7 +346,12 @@ contract WaterfallTest is Test {
     function test_perfIndex_hugeMoves_noOverflow() public pure {
         Waterfall.MarkResult memory r = Waterfall.applyMarkPnl(
             Waterfall.MarkState({
-                seniorNav: 1, juniorNav: 0, seniorImpairment: 0, perfIndex: 1e50, highWater: 1e50
+                seniorNav: 1,
+                juniorNav: 0,
+                seniorImpairment: 0,
+                perfIndex: 1e50,
+                highWater: 1e50,
+                backstopDebt: 0
             }),
             Waterfall.MarkInputs({nav: 1e24, juniorSupply: 0, backstopAvailable: 0})
         );

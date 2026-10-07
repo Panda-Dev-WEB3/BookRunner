@@ -66,6 +66,7 @@ contract BookHandler is Test {
     uint256 public requestsRetiring;
     uint256 public requestsRetired;
     uint256 public backstopCovers;
+    uint256 public backstopRepayments;
     uint256 public topUpsAccepted;
     uint256 public finalized;
 
@@ -297,10 +298,11 @@ contract BookHandler is Test {
             receiptsRoot: 0
         });
         uint256 id = env.registry.commit(m, "");
+        (uint256 debtBefore,) = env.book.backstopDebt();
         vm.recordLogs();
         try env.book.applyMark(id) {
             marksApplied++;
-            _checkConservation();
+            _checkConservation(debtBefore);
         } catch (bytes memory err) {
             markViolation = true;
             lastViolation = err;
@@ -309,7 +311,7 @@ contract BookHandler is Test {
         }
     }
 
-    function _checkConservation() internal {
+    function _checkConservation(uint256 debtBefore) internal {
         Vm.Log[] memory logs = vm.getRecordedLogs();
         Book.LastMark memory lm = env.book.lastMarkSummary();
         (uint256 s, uint256 j) = env.book.trancheNav();
@@ -321,8 +323,13 @@ contract BookHandler is Test {
                 abi.decode(logs[i].data, (uint256, uint256[2], uint256[2], uint256[2]));
             if (covered > 0) backstopCovers++;
             if (topUp[0] + topUp[1] > 0) topUpsAccepted++;
-            // waterfall conservation: S + J == marked NAV + backstop cover (before settlement flows)
-            if (post[0] + post[1] != lm.navUsd + covered) conservationViolation = true;
+            // waterfall conservation: S + J == marked NAV + backstop cover - backstop repayment (before
+            // settlement flows); the debt moves by cover - repayment
+            (uint256 debtAfter,) = env.book.backstopDebt();
+            if (debtBefore + covered < debtAfter) conservationViolation = true;
+            uint256 repaid = debtBefore + covered - debtAfter;
+            if (repaid > 0) backstopRepayments++;
+            if (post[0] + post[1] + repaid != lm.navUsd + covered) conservationViolation = true;
             if (covered != lm.backstopCovered) conservationViolation = true;
             // settlement flows explain the final tranche NAVs exactly
             if (s != post[0] - owed[0] + topUp[0] || j != post[1] - owed[1] + topUp[1]) {

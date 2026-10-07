@@ -1,5 +1,5 @@
 // Tranche NAV preview (pure): the NORMATIVE applyMarkPnl from shared waterfall.ts on the book's current
-// on-chain S / J / impairment / perf index / high-water and the backstop balance.
+// on-chain S / J / impairment / backstop debt / perf index / high-water and the backstop balance.
 import { type MarkResult, applyMarkPnl, drawdownKill, sharePriceWad } from "@bookrunner/shared";
 import type { MarkSnapshot } from "./types";
 
@@ -12,7 +12,14 @@ export interface TranchePreview {
 
 export function previewTranches(s: Pick<MarkSnapshot, "book" | "backstopBalance" | "mandate">, navUsd: bigint): TranchePreview {
   const result = applyMarkPnl(
-    { seniorNav: s.book.seniorNav, juniorNav: s.book.juniorNav, seniorImpairment: s.book.seniorImpairment, perfIndex: s.book.perfIndex, highWater: s.book.highWater },
+    {
+      seniorNav: s.book.seniorNav,
+      juniorNav: s.book.juniorNav,
+      seniorImpairment: s.book.seniorImpairment,
+      perfIndex: s.book.perfIndex,
+      highWater: s.book.highWater,
+      backstopDebt: s.book.backstopDebt ?? 0n,
+    },
     { nav: navUsd, juniorSupply: s.book.juniorSupply, backstopAvailable: s.backstopBalance },
   );
   return {

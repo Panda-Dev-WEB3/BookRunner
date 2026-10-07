@@ -13,8 +13,8 @@ import {BookHandler} from "./utils/BookHandler.sol";
 ///   (a) requestRedeem / claims never revert for lack of permission — fuzzed under tranche pause,
 ///       guardian pause (newBooksPaused), kill, Retiring and Retired; only InsufficientLiquidity may
 ///       revert a claim;
-///   (b) waterfall conservation after every applyMark: S + J == marked NAV + backstop cover (before the
-///       settlement flows of the same mark, which are reconciled exactly);
+///   (b) waterfall conservation after every applyMark: S + J == marked NAV + backstop cover - backstop
+///       repayment (before the settlement flows of the same mark, which are reconciled exactly);
 ///   (c) total claimable <= tranche redemption escrow + unfunded claims, per tranche;
 ///   plus the book accounting identity S + J + unfundedClaims == vault idle + venue value, and marks /
 ///   retirement are never blocked.
@@ -103,7 +103,7 @@ contract BookInvariantTest is StdInvariant, BookFixture {
     /// @dev (b) waterfall conservation after each applyMark.
     /// forge-config: default.invariant.fail-on-revert = true
     function invariant_waterfallConservation() public view {
-        assertFalse(handler.conservationViolation(), "S + J != marked NAV + backstop cover");
+        assertFalse(handler.conservationViolation(), "S + J != marked NAV + backstop cover - repayment");
     }
 
     /// @dev marks and retirement are never blocked.
@@ -163,6 +163,7 @@ contract BookInvariantTest is StdInvariant, BookFixture {
         console2.log("requests Retiring", handler.requestsRetiring());
         console2.log("requests Retired", handler.requestsRetired());
         console2.log("backstop covers", handler.backstopCovers());
+        console2.log("backstop repayments", handler.backstopRepayments());
         console2.log("top-ups accepted", handler.topUpsAccepted());
         console2.log("finalized", handler.finalized());
     }

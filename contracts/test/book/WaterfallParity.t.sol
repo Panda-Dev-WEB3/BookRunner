@@ -12,7 +12,8 @@ import {Waterfall} from "../../src/libraries/Waterfall.sol";
 ///   split:  [gross, expensesRequested, expenseCapBps, carryBps, seniorHurdleBps, seniorSupply, juniorSupply,
 ///            expenses, carry, senior, junior]
 ///   mark:   [S, J, seniorImpairment, perfIndex, highWater, nav, juniorSupply, backstopAvailable,
-///            S', J', seniorImpairment', perfIndex', highWater', backstopCovered, |drawdownBps|]
+///            S', J', seniorImpairment', perfIndex', highWater', backstopCovered, |drawdownBps|,
+///            backstopDebt, backstopRepaid, backstopDebt']
 ///   wallet: [commit, isSponsor(0|1), totalCommitted, sponsorCommitted, totalAllocated, shares, refund]
 contract WaterfallParityTest is Test {
     string internal json;
@@ -89,10 +90,15 @@ contract WaterfallParityTest is Test {
     function test_parity_mark() public view {
         for (uint256 i = 0; i < count; i++) {
             uint256[] memory v = _row("mark", i);
-            assertEq(v.length, 15, "mark row width");
+            assertEq(v.length, 18, "mark row width");
             Waterfall.MarkResult memory r = Waterfall.applyMarkPnl(
                 Waterfall.MarkState({
-                    seniorNav: v[0], juniorNav: v[1], seniorImpairment: v[2], perfIndex: v[3], highWater: v[4]
+                    seniorNav: v[0],
+                    juniorNav: v[1],
+                    seniorImpairment: v[2],
+                    perfIndex: v[3],
+                    highWater: v[4],
+                    backstopDebt: v[15]
                 }),
                 Waterfall.MarkInputs({nav: v[5], juniorSupply: v[6], backstopAvailable: v[7]})
             );
@@ -105,8 +111,14 @@ contract WaterfallParityTest is Test {
             assertEq(r.backstopCovered, v[13], string.concat(tag, " backstopCovered"));
             assertLe(r.drawdownBps, int256(0), string.concat(tag, " drawdown sign"));
             assertEq(uint256(-r.drawdownBps), v[14], string.concat(tag, " |drawdownBps|"));
-            // conservation: S' + J' == nav + backstopCovered
-            assertEq(r.seniorNav + r.juniorNav, v[5] + r.backstopCovered, string.concat(tag, " conservation"));
+            assertEq(r.backstopRepaid, v[16], string.concat(tag, " backstopRepaid"));
+            assertEq(r.backstopDebt, v[17], string.concat(tag, " backstopDebt'"));
+            // conservation: S' + J' == nav + backstopCovered - backstopRepaid
+            assertEq(
+                r.seniorNav + r.juniorNav,
+                v[5] + r.backstopCovered - r.backstopRepaid,
+                string.concat(tag, " conservation")
+            );
             assertEq(r.pnl, int256(v[5]) - int256(v[0] + v[1]), string.concat(tag, " pnl"));
         }
     }

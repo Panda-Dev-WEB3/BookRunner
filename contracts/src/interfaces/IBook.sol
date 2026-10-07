@@ -41,7 +41,7 @@ interface IBook {
     ///         moves capital to the vault and deploys IF + MM inventory via the vault -> adapter.
     function closeWindow() external;
     /// @notice Anyone. Applies a committed mark from MarkRegistry (reverts if flowNonce mismatch,
-    ///         out of order, or already applied). Runs losses/gains, backstop, drawdown kill check,
+    ///         out of order, not the book's latest committed mark, or already applied). Runs losses/gains, backstop, drawdown kill check,
     ///         settles due redemption + top-up buckets at the post-P&L share prices.
     function applyMark(uint256 markId) external;
     /// @notice Only the book's RevenueRouter, after transferring senior+junior USDC to the vault.

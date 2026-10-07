@@ -361,7 +361,9 @@ contract BookSponsorPriorityTest is BookFixture {
         assertLe(shares, j, "shares <= allocated");
         assertGe(shares + 3, j, "<= 1 unit of dust per non-sponsor wallet");
         assertLe(refunds, jC - j, "refunds <= unallocated");
-        assertEq(junior.balanceOf(address(junior)), j - shares);
+        // A1-05: the round is fully claimed, so its j - shares rounding dust was burned from escrow
+        assertEq(junior.balanceOf(address(junior)), 0, "rounding dust burned");
+        assertEq(junior.totalSupply(), shares);
         assertEq(usdc.balanceOf(address(junior)), (jC - j) - refunds);
     }
 }
