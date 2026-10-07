@@ -5,13 +5,17 @@ Postgres/Timescale + Redis in Docker, and nginx serving `https://bookrunner.use-
 (`apps/site`) at `/`, the operator app (`apps/web`) at `/app/`, and the API at `/trpc` + `/health`.
 The host is shared with other services, so everything is loopback-only and memory-capped.
 
+Hardening (root-owned deploy copy, infra unit, sandbox, passwords, secrets per process) and the exact
+operator steps to move an existing server: [HARDENING.md](HARDENING.md).
+
 | Piece | Where |
 |---|---|
-| Code | `/opt/bookrunner/app` (git clone of this repo, user `bookrunner`) |
-| Secrets + state (never in git) | `.env.testnet` (mode 600), `contracts/deployments/46630.json`, `.data/testnet/` |
-| Stack | `bookrunner.service` → `scripts/dev.ts --network testnet --no-web` (cap 2.5 GB RAM) |
-| Infra | `deploy/server/docker-compose.yml` → Postgres 127.0.0.1:54400, Redis 127.0.0.1:63790 |
-| Web | site → `/var/www/bookrunner/`, app → `/var/www/bookrunner/app/`; nginx site `bookrunner` + snippet `/etc/nginx/snippets/bookrunner-locations.conf` |
+| Code | `/opt/bookrunner/app` (git clone of this repo, user `bookrunner`; built and run as that user) |
+| Deploy scripts / units / nginx conf / compose, as root runs them | `/usr/local/lib/bookrunner-src` (root-owned clone) → `/usr/local/lib/bookrunner-deploy` (root-owned copy of `deploy/server`) |
+| Secrets + state (never in git) | `.env.testnet` (mode 600: mnemonic, `ORACLE_SEED`, ...), `contracts/deployments/46630.json`, `.data/testnet/`; infra passwords in `/usr/local/lib/bookrunner-deploy/.env.infra` (root, 600) |
+| Stack | `bookrunner.service` (user `bookrunner`, sandboxed) → `scripts/dev.ts --network testnet --no-web` (cap 2.5 GB RAM) |
+| Infra | `bookrunner-infra.service` (root) → `docker-compose.yml` → Postgres 127.0.0.1:54400, Redis 127.0.0.1:63790 (both password-protected) |
+| Web | site → `/var/www/bookrunner/`, app → `/var/www/bookrunner/app/`; nginx site `bookrunner` + snippet `/etc/nginx/snippets/bookrunner-locations.conf` + rate-limit zones `/etc/nginx/conf.d/bookrunner-ratelimit.conf` |
 | Logs | `/opt/bookrunner/app/.data/testnet/dev.log` (logrotate daily, 7 kept) |
 
 ## URL layout
@@ -32,9 +36,13 @@ root, never under `/app/`. The dev server (`bun run dev`) still serves the app a
 - `nginx-bookrunner.conf` — the site template (`server{}` with `server_name`, `root`, security headers and
   `include /etc/nginx/snippets/bookrunner-locations.conf;`). `install.sh` installs it only on a first install:
   certbot rewrites that file in place (TLS listeners, port-80 redirect), so it is never overwritten later.
-- `nginx-bookrunner-locations.conf` — every `location` block. `install.sh` and `update.sh` copy it to
+- `nginx-bookrunner-locations.conf` — every `location` block, the security headers (HSTS, the
+  Content-Security-Policy `$bookrunner_csp`, Permissions-Policy), `server_tokens off`, `*.map` → 404 and the
+  per-IP rate limits of `/trpc/` and `/health`. `install.sh` and `update.sh` copy it to
   `/etc/nginx/snippets/bookrunner-locations.conf` (nginx's `www-data` cannot read `/opt/bookrunner`, mode 750),
   validate with `nginx -t`, reload, and put the previous copy back if validation fails.
+- `nginx-bookrunner-http.conf` — the http{}-level rate-limit zones the snippet uses, installed (same validate /
+  rollback) to `/etc/nginx/conf.d/bookrunner-ratelimit.conf` before the snippet.
 - `patch-nginx.sh` — one-time conversion of a live site that predates the snippet: in each `server{}` block that
   has location blocks (the 443 block certbot made), it replaces them with the `include`, keeping certbot's
   listeners/certificates, then runs `nginx -t` and reloads, or restores the backup
@@ -46,19 +54,22 @@ root, never under `/app/`. The dev server (`bun run dev`) still serves the app a
 ```bash
 # as a sudo user on the server
 sudo useradd --system --create-home --home-dir /opt/bookrunner --shell /usr/sbin/nologin bookrunner
-sudo apt-get install -y docker.io docker-compose-v2 && sudo usermod -aG docker bookrunner
+sudo apt-get install -y docker.io docker-compose-v2   # the bookrunner user is NOT added to the docker group
 sudo -u bookrunner HOME=/opt/bookrunner git clone https://github.com/Panda-Dev-WEB3/BookRunner.git /opt/bookrunner/app
 sudo -u bookrunner HOME=/opt/bookrunner npm install --prefix /opt/bookrunner/tools bun@1.4.2
 cd /opt/bookrunner/app && sudo -u bookrunner HOME=/opt/bookrunner /opt/bookrunner/tools/node_modules/.bin/bun install --frozen-lockfile
-sudo bash deploy/server/install.sh
+# what root runs comes from a root-owned clone, never from the bookrunner-owned app tree
+sudo git clone https://github.com/Panda-Dev-WEB3/BookRunner.git /usr/local/lib/bookrunner-src
+sudo bash /usr/local/lib/bookrunner-src/deploy/server/install.sh   # also generates .env.infra (fresh DB: used as is)
 ```
 
 Then move the running stack's secrets and state here (the same keys must never run in two places):
-stop the old stack, copy `.env.testnet`, `contracts/deployments/46630.json`, `.data/testnet/` (mock venue
-snapshot, ops keys, sagas), restore the `bookrunner_testnet` Postgres dump and the Redis AOF/RDB, then:
+stop the old stack, copy `.env.testnet` (it needs `ORACLE_SEED`, see HARDENING.md step 1),
+`contracts/deployments/46630.json`, `.data/testnet/` (mock venue snapshot, ops keys, sagas), restore the
+`bookrunner_testnet` Postgres dump and the Redis AOF/RDB, then:
 
 ```bash
-sudo bash deploy/server/update.sh                     # builds + publishes the web app, starts the stack
+sudo /usr/local/lib/bookrunner-deploy/update.sh       # builds + publishes the web app, starts infra + stack
 sudo certbot --nginx -d bookrunner.141-94-203-130.sslip.io   # works at once (sslip.io resolves to the IP)
 # once the A record bookrunner.use-cert.com -> 141.94.203.130 exists, add it to the same certificate:
 sudo certbot --nginx --expand -d bookrunner.141-94-203-130.sslip.io -d bookrunner.use-cert.com
@@ -67,20 +78,24 @@ sudo certbot --nginx --expand -d bookrunner.141-94-203-130.sslip.io -d bookrunne
 ## Operate
 
 ```bash
-sudo systemctl status bookrunner        # stack
+sudo systemctl status bookrunner bookrunner-infra   # stack, infra
 sudo tail -f /opt/bookrunner/app/.data/testnet/dev.log
 sudo systemctl restart bookrunner
-sudo bash /opt/bookrunner/app/deploy/server/update.sh            # deploy origin/main
-sudo bash /opt/bookrunner/app/deploy/server/update.sh --web-only # site + app + nginx snippet, no stack restart
+sudo /usr/local/lib/bookrunner-deploy/update.sh            # deploy origin/main
+sudo /usr/local/lib/bookrunner-deploy/update.sh --web-only # site + app + nginx + units, no restart
 ```
 
-`update.sh` builds the app (`apps/web`, base `/app/`) and the site (`apps/site`; skipped with a message while
-`apps/site/package.json` does not exist), publishes the app with `rsync --delete` to `/var/www/bookrunner/app/`
-and the site with `rsync --delete --exclude=/app` to `/var/www/bookrunner/` (so the site's `--delete` never
-removes the app), then installs the nginx snippet. When a pull changes `update.sh` itself, it re-runs the new
-version. It warns while the live site does not include the snippet yet (run `patch-nginx.sh` once).
+`update.sh` (root-owned copy only; it refuses to run from the app tree) fetches `origin/main` into the root
+clone, refreshes `/usr/local/lib/bookrunner-deploy` (re-running itself when `update.sh` changed),
+fast-forwards the app checkout to the same commit (refusing local modifications), builds the app
+(`apps/web`, base `/app/`) and the site (`apps/site`) as `bookrunner`, publishes the app with
+`rsync --delete` to `/var/www/bookrunner/app/` and the site with `rsync --delete --exclude=/app` to
+`/var/www/bookrunner/` (so the site's `--delete` never removes the app), installs the nginx rate-limit conf +
+snippet and the units from the root copy, applies a changed compose file (`systemctl reload
+bookrunner-infra`) and restarts the stack. It warns while the live site does not include the snippet yet
+(run `patch-nginx.sh` once).
 
-### Moving an existing server to the site + `/app/` layout (once)
+### Moving an existing server to the site + `/app/` layout (once; historical, before HARDENING.md)
 
 ```bash
 cd /opt/bookrunner/app
