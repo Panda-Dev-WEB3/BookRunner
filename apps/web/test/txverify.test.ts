@@ -3,8 +3,10 @@ import { describe, expect, test } from "bun:test";
 import { trancheAbi } from "@bookrunner/shared/abi";
 import { encodeFunctionData, erc20Abi, maxUint256 } from "viem";
 import type { PreparedTx } from "../src/lib/api-types";
-import { appChain } from "../src/wallet/chains";
-import { checkTxs } from "../src/wallet/txVerify";
+import { checkTxs as checkWith } from "../src/lib/txcheck";
+
+const appChain = { id: 46630 };
+const checkTxs = (txs: PreparedTx[], targets: Parameters<typeof checkWith>[1], opts: { account?: string; amount?: bigint } = {}) => checkWith(txs, targets, { ...opts, chainId: appChain.id });
 
 const USDC = "0x6666666666666666666666666666666666666666";
 const SENIOR = "0x7777777777777777777777777777777777777777";

@@ -8,7 +8,7 @@ import type { Tone } from "../lib/limits";
 import { type TxItem, type TxStatus, awaitsReceipt, callSummary, initialItems, runSequential, summarize } from "../lib/txflow";
 import { appChain, chainName } from "./chains";
 import { GasWarning, NetworkNotice } from "./network";
-import { checkTxs, useFlowTargets } from "./txVerify";
+import { checkAppTxs, useFlowTargets } from "./txVerify";
 import { useDevRoleFor } from "./useDevRoleFor";
 import { WalletButton } from "./WalletButton";
 import { sameAddress, useWallet } from "./WalletContext";
@@ -36,7 +36,7 @@ export function TxRunner(props: {
   // verified against chain-derived contracts before any prompt (txVerify.ts); nothing is sent otherwise
   const flowTargets = useFlowTargets();
   const account = props.signer ?? w.active?.address ?? null;
-  const verified = useMemo(() => checkTxs(props.txs, flowTargets.data, { account, amount: props.amount }), [props.txs, flowTargets.data, account, props.amount]);
+  const verified = useMemo(() => checkAppTxs(props.txs, flowTargets.data, { account, amount: props.amount }), [props.txs, flowTargets.data, account, props.amount]);
   const blocked = verified.status !== "ok";
   const [items, setItems] = useState<TxItem<PreparedTx>[]>(() => initialItems(props.txs));
   const key = useMemo(() => props.txs.map((t) => `${t.to}:${t.data}`).join("|"), [props.txs]);

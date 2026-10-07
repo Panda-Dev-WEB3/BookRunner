@@ -3,11 +3,11 @@
 // contracts its BookrunnerConfig names — never the addresses an API response carries. See
 // @bookrunner/shared/preparedTx for the rules (known functions only, approvals only to a later step's
 // contract for the amount it moves, the entered amount, the user's account as receiver).
-import { type DecodedStep, type PreparedCheck, verifyPreparedTxs } from "@bookrunner/shared/preparedTx";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { type Address, getAddress } from "viem";
 import type { PreparedTx } from "../lib/api-types";
+import { type FlowTargets, type TxCheck, checkTxs } from "../lib/txcheck";
 import { appChain, publicClient } from "./chains";
 import { useAppContracts } from "./contracts";
 
@@ -36,7 +36,7 @@ const BOOK_COMPONENTS_ABI = [
   },
 ] as const;
 
-export type FlowTargets = Required<Pick<PreparedCheck, "targets" | "labels" | "decimals">>;
+export type { FlowTargets, TxCheck };
 
 /** Contracts a prepared step may call, from the chain (null while loading or when the reads failed). */
 export function useFlowTargets(): { data: FlowTargets | null; error: unknown } {
@@ -81,20 +81,6 @@ export function useFlowTargets(): { data: FlowTargets | null; error: unknown } {
   return { data, error: app.error ?? parts.error ?? null };
 }
 
-export type TxCheck = { status: "pending" } | { status: "ok"; steps: DecodedStep[] } | { status: "refused"; error: string };
-
-/** Verifies `txs` once the chain-derived targets are known; pure apart from the targets. */
-export function checkTxs(txs: readonly PreparedTx[], targets: FlowTargets | null, opts: { account?: string | null; amount?: bigint | null } = {}): TxCheck {
-  if (!targets) return { status: "pending" };
-  try {
-    const steps = verifyPreparedTxs(txs, {
-      chainId: appChain.id,
-      ...targets,
-      ...(opts.account ? { account: opts.account } : {}),
-      ...(opts.amount != null ? { amount: opts.amount } : {}),
-    });
-    return { status: "ok", steps };
-  } catch (e) {
-    return { status: "refused", error: e instanceof Error ? e.message : String(e) };
-  }
-}
+/** checkTxs (lib/txcheck.ts) on this build's chain. */
+export const checkAppTxs = (txs: readonly PreparedTx[], targets: FlowTargets | null, opts: { account?: string | null; amount?: bigint | null } = {}): TxCheck =>
+  checkTxs(txs, targets, { ...opts, chainId: appChain.id });
