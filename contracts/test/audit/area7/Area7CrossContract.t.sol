@@ -188,6 +188,62 @@ contract Area7CrossContractTest is Test {
     }
 
     // =============================================================================================
+    // Regression (testnet v3 launch): desk and adapter must agree on "mark pending" in the first period
+    // =============================================================================================
+
+    /// @notice Before the first mark the desk lets a key recall MM inventory (reference = subscriptionEnds);
+    ///         the adapter must then also let that withdrawal be swept back to the vault. With the old adapter
+    ///         rule (lastMarkPeriodEnd >= periodStart, i.e. 0 before the first mark) the sweep reverted
+    ///         SweepBlockedUntilMark while the mark service refused every venue report because the withdrawal
+    ///         was pending: a deadlock (TSLA, first period after launch, 2026-10-07).
+    function test_regression_firstPeriodRecallCanBeSwept() public {
+        address ops = makeAddr("ops");
+        vm.startPrank(timelock);
+        config.grantRole(config.OPS_VENUE_ROLE(), ops);
+        vm.stopPrank();
+        ov.setOperator(address(this), true);
+
+        // first (partial) period: no mark yet, the desk gate is open
+        assertEq(book.lastMarkPeriodEnd(), 0);
+        assertTrue(desk.capitalFlowOpen(), "desk gate open before the first mark");
+
+        // the key recalls 1,000 USDC of MM inventory
+        vm.prank(key);
+        desk.execute(
+            IBookrunnerDesk.Action({
+                kind: IBookrunnerDesk.ActionKind.InventoryToVault,
+                data: abi.encode(BRTypes.ACCOUNT_MM, uint256(1_000e6)),
+                proof: new bytes32[](0)
+            })
+        );
+        uint256 n = adapter.withdrawNonce();
+
+        // ops-venue confirms, the venue pays the adapter, the sweep must go through (no pending mark deadlock)
+        vm.prank(ops);
+        adapter.confirmWithdraw(n);
+        ov.operatorWithdraw(adapter.accountId(BRTypes.ACCOUNT_MM), address(adapter), 1_000e6);
+        uint256 swept = adapter.sweepToVault();
+        assertEq(swept, 1_000e6, "recall started in the first period is swept back");
+        assertEq(adapter.pendingWithdrawUsd(BRTypes.ACCOUNT_MM), 0, "no withdrawal left pending");
+    }
+
+    /// @notice After the first period ends with no mark, BOTH gates are closed (consistent): the key cannot
+    ///         start a recall the adapter could not sweep.
+    function test_regression_gatesAgreeOncePeriodEnded() public {
+        vm.warp(uint256(p1) + 120);
+        assertFalse(desk.capitalFlowOpen(), "desk gate closed while the p1 mark is pending");
+        vm.prank(key);
+        vm.expectRevert();
+        desk.execute(
+            IBookrunnerDesk.Action({
+                kind: IBookrunnerDesk.ActionKind.InventoryToVault,
+                data: abi.encode(BRTypes.ACCOUNT_MM, uint256(1_000e6)),
+                proof: new bytes32[](0)
+            })
+        );
+    }
+
+    // =============================================================================================
     // A7-02: an older committed mark can still be applied after a newer one was committed
     // =============================================================================================
 

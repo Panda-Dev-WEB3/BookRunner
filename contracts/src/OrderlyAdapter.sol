@@ -994,7 +994,12 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         if (st != BRTypes.BookState.Live && st != BRTypes.BookState.Retiring) return true;
         uint32 interval = $.config.markInterval();
         if (interval == 0) return true;
-        return b.lastMarkPeriodEnd() >= block.timestamp - (block.timestamp % interval);
+        // same reference as BookrunnerDesk._flowGate: before the first mark the subscription end stands in, so a
+        // recall the desk lets a key start in the first (partial) period can also be swept back (no deadlock with
+        // the mark, which refuses a venue report while that withdrawal is pending)
+        uint64 lastEnd = b.lastMarkPeriodEnd();
+        uint64 ref = lastEnd == 0 ? b.subscriptionEnds() : lastEnd;
+        return ref >= block.timestamp - (block.timestamp % interval);
     }
 
     function _checkSweepOpen(AdapterStorage storage $) private view {
