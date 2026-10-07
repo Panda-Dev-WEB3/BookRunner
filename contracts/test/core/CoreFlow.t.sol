@@ -26,15 +26,18 @@ contract CoreFlowTest is CoreFixture {
         assertEq(feeRouter.buybackPending(), 495e6);
         assertEq(backstop.balance(), 495e6);
 
-        // keeper buys back BKRN with the buyback half: 495 USDC * 20 = 9900 BKRN to stakers
+        // keeper buys back BKRN with the buyback half: 495 USDC * 20 = 9900 BKRN, streamed to stakers
         vm.prank(keeper);
-        uint256 out = feeRouter.executeBuyback(495e6, 9900e18, 3000);
+        uint256 out = feeRouter.executeBuyback(495e6, 9900e18);
         assertEq(out, 9900e18);
-        assertEq(staking.earned(alice), 2475e18);
-        assertEq(staking.earned(bob), 7425e18);
+        assertEq(staking.earned(alice), 0);
+        vm.warp(block.timestamp + staking.rewardsDuration());
+        assertApproxEqAbs(staking.earned(alice), 2475e18, 1e7);
+        assertApproxEqAbs(staking.earned(bob), 7425e18, 1e7);
         vm.prank(bob);
-        staking.claimReward();
-        assertEq(bkrn.balanceOf(bob), 7425e18);
+        uint256 claimed = staking.claimReward();
+        assertApproxEqAbs(claimed, 7425e18, 1e7);
+        assertEq(bkrn.balanceOf(bob), claimed);
 
         // the book's Senior is impaired after Junior is exhausted: backstop covers up to the pool
         uint256 covered = book.coverFrom(address(backstop), BOOK_ID, 1000e6);

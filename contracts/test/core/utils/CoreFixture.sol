@@ -89,6 +89,8 @@ abstract contract CoreFixture is Test {
         config.grantRole(config.RISK_ROLE(), risk);
         config.grantRole(config.MARK_SIGNER_ROLE(), markSigner);
         feeRouter.setBuybackRouter(address(swapRouter));
+        // pinned 0.3% tier; reference 20 BKRN per USDC, 5% max slippage, 10M USDC per call
+        feeRouter.setBuybackParams(3000, 20e18, 500, 10_000_000e6);
         // 1 USDC buys 20 BKRN ($0.05 / BKRN)
         swapRouter.setPriceBoth(address(usdc), address(bkrn), 20e18);
         staking.setLocker(locker, true);

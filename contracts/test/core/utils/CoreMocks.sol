@@ -163,7 +163,7 @@ contract CoreReentrantRouter {
         payable
         returns (uint256)
     {
-        IBkrnFeeRouter(msg.sender).executeBuyback(p.amountIn, 1, p.fee);
+        IBkrnFeeRouter(msg.sender).executeBuyback(p.amountIn, 1);
         return 0;
     }
 }

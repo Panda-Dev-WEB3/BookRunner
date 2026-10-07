@@ -3,12 +3,28 @@ pragma solidity ^0.8.30;
 
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {CoreFixture} from "./utils/CoreFixture.sol";
-import {CoreMisbehavingRouter, CoreReentrantRouter} from "./utils/CoreMocks.sol";
+import {CoreMisbehavingRouter, CoreReentrantRouter, CoreMockOracle} from "./utils/CoreMocks.sol";
+import {IAttestedOracle} from "../../src/interfaces/IAttestedOracle.sol";
 import {BookrunnerConfig} from "../../src/BookrunnerConfig.sol";
 import {BkrnFeeRouter} from "../../src/BkrnFeeRouter.sol";
 import {IBkrnFeeRouter, IBackstop} from "../../src/interfaces/IBkrnFeeRouter.sol";
 import {IBkrnStaking} from "../../src/interfaces/IBkrnStaking.sol";
 import {MockSwapRouter} from "../../src/mocks/MockSwapRouter.sol";
+import {ISwapRouter02} from "../../src/interfaces/external/ISwapRouter02.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+/// @dev Records the fee tier and minimum it is called with; pays exactly the minimum.
+contract FeeEchoRouter {
+    uint24 public lastFee;
+    uint256 public lastMin;
+
+    function exactInputSingle(ISwapRouter02.ExactInputSingleParams calldata p) external payable returns (uint256) {
+        (lastFee, lastMin) = (p.fee, p.amountOutMinimum);
+        IERC20(p.tokenIn).transferFrom(msg.sender, address(this), p.amountIn);
+        IERC20(p.tokenOut).transfer(p.recipient, p.amountOutMinimum);
+        return p.amountOutMinimum;
+    }
+}
 
 contract BkrnFeeRouterTest is CoreFixture {
     /// @dev The book's RevenueRouter clone is a registered component.
@@ -138,13 +154,14 @@ contract BkrnFeeRouterTest is CoreFixture {
         vm.expectEmit(false, false, false, true, address(staking));
         emit IBkrnStaking.RewardNotified(1200e18);
         vm.prank(keeper);
-        uint256 out = feeRouter.executeBuyback(60e6, 1200e18, 3000);
+        uint256 out = feeRouter.executeBuyback(60e6, 1200e18);
         assertEq(out, 1200e18);
         assertEq(feeRouter.buybackPending(), 40e6);
         assertEq(usdc.balanceOf(address(feeRouter)), 40e6);
         assertEq(bkrn.balanceOf(address(feeRouter)), 0);
         assertEq(usdc.allowance(address(feeRouter), address(swapRouter)), 0);
-        assertEq(staking.earned(alice), 1200e18);
+        vm.warp(block.timestamp + staking.rewardsDuration());
+        assertApproxEqAbs(staking.earned(alice), 1200e18, 1e4);
         assertEq(feeRouter.totalBuybackUsdc(), 60e6);
         assertEq(feeRouter.totalBkrnDistributed(), 1200e18);
     }
@@ -153,18 +170,113 @@ contract BkrnFeeRouterTest is CoreFixture {
         _carry(200e6);
         vm.expectRevert(abi.encodeWithSelector(BkrnFeeRouter.NotKeeper.selector, alice));
         vm.prank(alice);
-        feeRouter.executeBuyback(1, 1, 3000);
+        feeRouter.executeBuyback(1, 1);
 
         vm.startPrank(keeper);
         vm.expectRevert(BkrnFeeRouter.ZeroAmount.selector);
-        feeRouter.executeBuyback(0, 1, 3000);
-        vm.expectRevert(BkrnFeeRouter.ZeroAmount.selector);
-        feeRouter.executeBuyback(1, 0, 3000);
+        feeRouter.executeBuyback(0, 1);
         vm.expectRevert(abi.encodeWithSelector(BkrnFeeRouter.InsufficientPending.selector, 100e6, 100e6 + 1));
-        feeRouter.executeBuyback(100e6 + 1, 1, 3000);
+        feeRouter.executeBuyback(100e6 + 1, 1);
         // slippage enforced by the router
         vm.expectRevert(abi.encodeWithSelector(MockSwapRouter.TooLittleReceived.selector, 20e18, 20e18 + 1));
-        feeRouter.executeBuyback(1e6, 20e18 + 1, 3000);
+        feeRouter.executeBuyback(1e6, 20e18 + 1);
+        vm.stopPrank();
+
+        // per-call cap
+        vm.prank(admin);
+        feeRouter.setBuybackParams(3000, 20e18, 500, 10e6);
+        vm.expectRevert(abi.encodeWithSelector(BkrnFeeRouter.BuybackTooLarge.selector, 10e6 + 1, 10e6));
+        vm.prank(keeper);
+        feeRouter.executeBuyback(10e6 + 1, 1);
+    }
+
+    /// @dev A zero (or too low) keeper minimum is raised to the on-chain floor: the router is asked for at
+    ///      least amountIn x 20 x 95% (MockSwapRouter at 10 BKRN/USDC now fills below it -> revert).
+    function test_executeBuyback_floorOverridesKeeperMin() public {
+        _stake(alice, 1e18);
+        _carry(200e6);
+        assertEq(feeRouter.referenceBkrnPerUsdc(), 20e18);
+        assertEq(feeRouter.buybackFloor(10e6), 190e18);
+        vm.prank(admin);
+        swapRouter.setPriceBoth(address(usdc), address(bkrn), 10e18); // pool off-market
+        vm.expectRevert(abi.encodeWithSelector(MockSwapRouter.TooLittleReceived.selector, 100e18, 190e18));
+        vm.prank(keeper);
+        feeRouter.executeBuyback(10e6, 0);
+        // within 5% of the reference: fills, keeper minimum 0 still means "at least the floor"
+        vm.prank(admin);
+        swapRouter.setPriceBoth(address(usdc), address(bkrn), 19e18);
+        vm.prank(keeper);
+        assertEq(feeRouter.executeBuyback(10e6, 0), 190e18);
+    }
+
+    /// @dev The pool fee tier is the pinned one, never the keeper's.
+    function test_executeBuyback_usesPinnedPoolFee() public {
+        FeeEchoRouter echo = new FeeEchoRouter();
+        _giveBkrn(address(echo), 1_000e18);
+        vm.startPrank(admin);
+        feeRouter.setBuybackRouter(address(echo));
+        feeRouter.setBuybackParams(500, 20e18, 500, 10_000_000e6);
+        vm.stopPrank();
+        _carry(20e6);
+        vm.prank(keeper);
+        feeRouter.executeBuyback(10e6, 1);
+        assertEq(echo.lastFee(), 500);
+        assertEq(echo.lastMin(), 190e18);
+    }
+
+    /// @dev Reference from the AttestedOracle once the timelock sets a BKRN price id ($0.04 -> 25 BKRN/USDC).
+    function test_referencePrice_fromOracle() public {
+        CoreMockOracle o = new CoreMockOracle();
+        o.set("BKRN", 0.04e18, false, false);
+        vm.startPrank(admin);
+        config.setAddress("oracle", address(o));
+        vm.expectEmit(false, false, false, true, address(feeRouter));
+        emit BkrnFeeRouter.BkrnPriceIdSet("BKRN");
+        feeRouter.setBkrnPriceId("BKRN");
+        vm.stopPrank();
+        assertEq(feeRouter.referenceBkrnPerUsdc(), 25e18);
+        assertEq(feeRouter.buybackFloor(1e6), 23.75e18);
+        // router at 20 BKRN/USDC is >5% below the oracle reference: refused
+        _carry(20e6);
+        vm.expectRevert(abi.encodeWithSelector(MockSwapRouter.TooLittleReceived.selector, 200e18, 237.5e18));
+        vm.prank(keeper);
+        feeRouter.executeBuyback(10e6, 1);
+        // stale oracle -> no buyback
+        o.set("BKRN", 0.04e18, false, true);
+        vm.expectRevert(abi.encodeWithSelector(IAttestedOracle.StalePrice.selector, bytes32("BKRN"), 0));
+        feeRouter.buybackFloor(1e6);
+        // back to the governance price
+        vm.prank(admin);
+        feeRouter.setBkrnPriceId(bytes32(0));
+        assertEq(feeRouter.referenceBkrnPerUsdc(), 20e18);
+    }
+
+    function test_setBuybackParams() public {
+        vm.expectEmit(false, false, false, true, address(feeRouter));
+        emit BkrnFeeRouter.BuybackParamsSet(10_000, 7e18, 2000, 5e6);
+        vm.prank(admin);
+        feeRouter.setBuybackParams(10_000, 7e18, 2000, 5e6);
+        assertEq(feeRouter.buybackPoolFee(), 10_000);
+        assertEq(feeRouter.refBkrnPerUsdcWad(), 7e18);
+        assertEq(feeRouter.maxSlippageBps(), 2000);
+        assertEq(feeRouter.maxBuybackPerCall(), 5e6);
+
+        vm.expectRevert(abi.encodeWithSelector(BkrnFeeRouter.NotAdmin.selector, keeper));
+        vm.prank(keeper);
+        feeRouter.setBuybackParams(3000, 20e18, 500, 1);
+        vm.expectRevert(abi.encodeWithSelector(BkrnFeeRouter.NotAdmin.selector, keeper));
+        vm.prank(keeper);
+        feeRouter.setBkrnPriceId("BKRN");
+
+        vm.startPrank(admin);
+        vm.expectRevert(BkrnFeeRouter.BadBuybackParams.selector);
+        feeRouter.setBuybackParams(0, 20e18, 500, 1);
+        vm.expectRevert(BkrnFeeRouter.BadBuybackParams.selector);
+        feeRouter.setBuybackParams(3000, 0, 500, 1);
+        vm.expectRevert(BkrnFeeRouter.BadBuybackParams.selector);
+        feeRouter.setBuybackParams(3000, 20e18, 2001, 1);
+        vm.expectRevert(BkrnFeeRouter.BadBuybackParams.selector);
+        feeRouter.setBuybackParams(3000, 20e18, 500, 0);
         vm.stopPrank();
     }
 
@@ -189,26 +301,34 @@ contract BkrnFeeRouterTest is CoreFixture {
             abi.encodeWithSelector(BkrnFeeRouter.NotConfigured.selector, bytes32("buybackRouter"))
         );
         vm.prank(keeper);
-        fr.executeBuyback(5, 1, 3000);
+        fr.executeBuyback(5, 1);
 
         vm.prank(admin);
         fr.setBuybackRouter(address(swapRouter));
+        vm.expectRevert(abi.encodeWithSelector(BkrnFeeRouter.NotConfigured.selector, bytes32("buybackParams")));
+        vm.prank(keeper);
+        fr.executeBuyback(5, 1);
+
+        vm.prank(admin);
+        fr.setBuybackParams(3000, 20e18, 500, 1e6);
         vm.expectRevert(abi.encodeWithSelector(BkrnFeeRouter.NotConfigured.selector, bytes32("staking")));
         vm.prank(keeper);
-        fr.executeBuyback(5, 1, 3000);
+        fr.executeBuyback(5, 1);
     }
 
     function test_executeBuyback_partialPullRefundsPending() public {
         CoreMisbehavingRouter bad = new CoreMisbehavingRouter();
         _giveBkrn(address(bad), 1000e18);
         bad.configure(5000, 100e18, 0); // pulls half, pays 100 BKRN, reports 0
-        vm.prank(admin);
+        vm.startPrank(admin);
         feeRouter.setBuybackRouter(address(bad));
+        feeRouter.setBuybackParams(3000, 1e18, 0, 10_000_000e6); // floor(100 USDC) = 100 BKRN
+        vm.stopPrank();
         _stake(alice, 1e18);
         _carry(200e6);
 
         vm.prank(keeper);
-        uint256 out = feeRouter.executeBuyback(100e6, 100e18, 500);
+        uint256 out = feeRouter.executeBuyback(100e6, 100e18);
         assertEq(out, 100e18); // measured by balance delta, not the router's return value
         assertEq(feeRouter.buybackPending(), 50e6);
         assertEq(usdc.balanceOf(address(feeRouter)), 50e6);
@@ -220,12 +340,14 @@ contract BkrnFeeRouterTest is CoreFixture {
         CoreMisbehavingRouter bad = new CoreMisbehavingRouter();
         _giveBkrn(address(bad), 1000e18);
         bad.configure(10_000, 1e18, 1e30); // pays 1 BKRN but reports a huge amount
-        vm.prank(admin);
+        vm.startPrank(admin);
         feeRouter.setBuybackRouter(address(bad));
+        feeRouter.setBuybackParams(3000, 0.01e18, 0, 10_000_000e6); // floor(100 USDC) = 1 BKRN
+        vm.stopPrank();
         _carry(200e6);
         vm.expectRevert(abi.encodeWithSelector(BkrnFeeRouter.InsufficientOutput.selector, 1e18, 2e18));
         vm.prank(keeper);
-        feeRouter.executeBuyback(100e6, 2e18, 500);
+        feeRouter.executeBuyback(100e6, 2e18);
     }
 
     function test_executeBuyback_reentrancyBlocked() public {
@@ -235,19 +357,21 @@ contract BkrnFeeRouterTest is CoreFixture {
         _carry(200e6);
         vm.expectRevert(ReentrancyGuardTransient.ReentrancyGuardReentrantCall.selector);
         vm.prank(keeper);
-        feeRouter.executeBuyback(10e6, 1, 500);
+        feeRouter.executeBuyback(10e6, 1);
     }
 
     function test_executeBuyback_noStakersQueuesReward() public {
         _carry(2e6);
         vm.prank(keeper);
-        feeRouter.executeBuyback(1e6, 20e18, 3000);
-        assertEq(staking.queuedReward(), 20e18);
+        feeRouter.executeBuyback(1e6, 20e18);
+        vm.warp(block.timestamp + staking.rewardsDuration());
+        assertEq(staking.queuedReward(), 20e18); // streamed to nobody: queued
         _stake(bob, 1e18);
         _carry(2e6);
         vm.prank(keeper);
-        feeRouter.executeBuyback(1e6, 20e18, 3000);
-        assertEq(staking.earned(bob), 40e18);
+        feeRouter.executeBuyback(1e6, 20e18); // re-streams the queue with the new 20
+        vm.warp(block.timestamp + staking.rewardsDuration());
+        assertApproxEqAbs(staking.earned(bob), 40e18, 2);
     }
 
     // ---------------------------------------------------------------- admin
@@ -278,7 +402,7 @@ contract BkrnFeeRouterTest is CoreFixture {
         uint256 quoted = swapRouter.quote(address(usdc), address(bkrn), amountIn);
         vm.assume(quoted > 0);
         vm.prank(keeper);
-        uint256 out = feeRouter.executeBuyback(amountIn, quoted, 3000);
+        uint256 out = feeRouter.executeBuyback(amountIn, quoted);
         assertEq(out, quoted);
         assertEq(feeRouter.buybackPending(), pending - amountIn);
         assertEq(usdc.balanceOf(address(feeRouter)), feeRouter.buybackPending());

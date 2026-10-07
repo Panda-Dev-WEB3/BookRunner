@@ -383,6 +383,10 @@ contract BkrnStakingTest is CoreFixture {
         vm.stopPrank();
     }
 
+    function _finishStream() internal {
+        vm.warp(block.timestamp + staking.rewardsDuration());
+    }
+
     function test_notifyReward_proRata() public {
         _stake(alice, 100e18);
         _stake(bob, 300e18);
@@ -391,17 +395,46 @@ contract BkrnStakingTest is CoreFixture {
         emit IBkrnStaking.RewardNotified(40e18);
         vm.prank(address(feeRouter));
         staking.notifyReward(40e18);
-        assertEq(staking.earned(alice), 10e18);
-        assertEq(staking.earned(bob), 30e18);
+        assertEq(staking.earned(alice), 0); // streamed, nothing yet
+        assertEq(staking.periodFinish(), block.timestamp + 7 days);
+        assertEq(staking.rewardRate(), uint256(40e36) / 7 days);
+        _finishStream();
+        assertApproxEqAbs(staking.earned(alice), 10e18, 1e3);
+        assertApproxEqAbs(staking.earned(bob), 30e18, 1e3);
+        assertEq(staking.unstreamedReward(), 0);
         assertEq(staking.rewardReserve(), 40e18);
 
+        uint256 e = staking.earned(alice);
         vm.expectEmit(true, false, false, true, address(staking));
-        emit IBkrnStaking.RewardClaimed(alice, 10e18);
+        emit IBkrnStaking.RewardClaimed(alice, e);
         vm.prank(alice);
-        assertEq(staking.claimReward(), 10e18);
-        assertEq(bkrn.balanceOf(alice), 10e18);
+        assertEq(staking.claimReward(), e);
+        assertEq(bkrn.balanceOf(alice), e);
         assertEq(staking.earned(alice), 0);
-        assertEq(staking.rewardReserve(), 30e18);
+        assertEq(staking.rewardReserve(), 40e18 - e);
+    }
+
+    /// @dev Linear stream: half the duration pays half; the rest is unstreamed until it elapses.
+    function test_rewards_streamLinearly() public {
+        _stake(alice, 100e18);
+        _notify(70e18);
+        vm.warp(block.timestamp + 3.5 days);
+        assertApproxEqAbs(staking.earned(alice), 35e18, 1e3);
+        assertApproxEqAbs(staking.unstreamedReward(), 35e18, 1e3);
+        vm.warp(block.timestamp + 100 days); // capped at periodFinish
+        assertApproxEqAbs(staking.earned(alice), 70e18, 1e3);
+    }
+
+    /// @dev A notification mid-stream re-spreads the unstreamed rest plus the new amount over a fresh period.
+    function test_rewards_notifyMidStreamCarriesLeftover() public {
+        _stake(alice, 100e18);
+        _notify(70e18);
+        vm.warp(block.timestamp + 3.5 days); // 35 streamed, 35 left
+        _notify(35e18); // 70 over the next 7 days
+        assertEq(staking.periodFinish(), block.timestamp + 7 days);
+        assertApproxEqAbs(staking.unstreamedReward(), 70e18, 1e3);
+        _finishStream();
+        assertApproxEqAbs(staking.earned(alice), 105e18, 1e3);
     }
 
     function test_rewards_lockedStakeEarns_andLateStakerDoesNot() public {
@@ -409,31 +442,71 @@ contract BkrnStakingTest is CoreFixture {
         vm.prank(locker);
         staking.lock(alice, LOCK_A, 100e18);
         _notify(10e18);
+        _finishStream();
         _stake(bob, 100e18);
-        assertEq(staking.earned(alice), 10e18);
+        assertApproxEqAbs(staking.earned(alice), 10e18, 1e3);
         assertEq(staking.earned(bob), 0);
         _notify(10e18);
-        assertEq(staking.earned(alice), 15e18);
-        assertEq(staking.earned(bob), 5e18);
+        _finishStream();
+        assertApproxEqAbs(staking.earned(alice), 15e18, 1e3);
+        assertApproxEqAbs(staking.earned(bob), 5e18, 1e3);
+    }
+
+    /// @dev Stake placed right before a notification only shares the stream for the time it stays.
+    function test_rewards_justInTimeStakeEarnsOnlyWhileStaked() public {
+        _stake(alice, 100e18);
+        _stake(bob, 100e18); // front-runs the buyback
+        _notify(70e18);
+        vm.prank(bob);
+        staking.requestUnstake(100e18); // leaves right away: earns nothing more
+        _finishStream();
+        assertEq(staking.earned(bob), 0);
+        assertApproxEqAbs(staking.earned(alice), 70e18, 1e3);
+    }
+
+    /// @dev Stake in its unstake cooldown does not earn; cancelling resumes earning.
+    function test_rewards_cooldownStakeDoesNotEarn() public {
+        _stake(alice, 100e18);
+        _stake(bob, 100e18);
+        vm.prank(bob);
+        staking.requestUnstake(40e18);
+        assertEq(staking.earningOf(bob), 60e18);
+        assertEq(staking.totalEarning(), 160e18);
+        _notify(16e18);
+        vm.warp(block.timestamp + 3.5 days);
+        assertApproxEqAbs(staking.earned(alice), 5e18, 1e3);
+        assertApproxEqAbs(staking.earned(bob), 3e18, 1e3);
+        vm.prank(bob);
+        staking.cancelUnstake();
+        assertEq(staking.totalEarning(), 200e18);
+        vm.warp(block.timestamp + 3.5 days);
+        assertApproxEqAbs(staking.earned(alice), 9e18, 1e3);
+        assertApproxEqAbs(staking.earned(bob), 7e18, 1e3);
     }
 
     function test_rewards_queuedWhenNothingStaked() public {
         _notify(9e18);
-        assertEq(staking.queuedReward(), 9e18);
+        _finishStream();
+        assertEq(staking.queuedReward(), 9e18); // streamed to nobody
         assertEq(staking.rewardPerTokenStored(), 0);
         _stake(alice, 1e18);
         _notify(1e18);
         assertEq(staking.queuedReward(), 0);
-        assertEq(staking.earned(alice), 10e18);
+        _finishStream();
+        assertApproxEqAbs(staking.earned(alice), 10e18, 1e3);
     }
 
     function test_rewards_roundingRemainderCarried() public {
         _stake(alice, 3);
-        _notify(10); // 10e18 / 3 per token: alice floors to 9, the scaled remainder is carried
-        assertEq(staking.earned(alice), 9);
-        assertEq(staking.queuedReward(), 0);
-        _notify(2); // (2e18 + 1) / 3 -> cumulative 4e18 per token: exactly 12 for 12 notified
-        assertEq(staking.earned(alice), 12);
+        _notify(10);
+        _finishStream();
+        assertGe(staking.earned(alice), 9);
+        assertLe(staking.earned(alice) + staking.queuedReward(), 10);
+        _notify(2);
+        _finishStream();
+        // every remainder is carried forward: at most one wei of flooring dust is lost overall
+        assertGe(staking.earned(alice), 11);
+        assertLe(staking.earned(alice) + staking.queuedReward(), 12);
     }
 
     function test_rewards_survivePartialSlashAndUnstake() public {
@@ -441,17 +514,19 @@ contract BkrnStakingTest is CoreFixture {
         vm.prank(locker);
         staking.lock(alice, LOCK_A, 50e18);
         _notify(10e18);
+        _finishStream();
         vm.prank(locker);
         staking.slash(alice, LOCK_A, 50e18);
-        assertEq(staking.earned(alice), 10e18);
+        uint256 e = staking.earned(alice);
+        assertApproxEqAbs(e, 10e18, 1e3);
         vm.prank(alice);
         staking.requestUnstake(50e18);
         vm.warp(block.timestamp + 7 days);
         vm.prank(alice);
         staking.unstake();
-        assertEq(staking.earned(alice), 10e18);
+        assertEq(staking.earned(alice), e);
         vm.prank(alice);
-        assertEq(staking.claimReward(), 10e18);
+        assertEq(staking.claimReward(), e);
     }
 
     function test_claimReward_nothing() public {
@@ -499,12 +574,11 @@ contract BkrnStakingTest is CoreFixture {
         (, uint64 at) = staking.pendingUnstakeOf(alice);
         assertEq(at, block.timestamp + 1 days);
 
-        vm.prank(admin);
-        staking.setCooldown(0);
         vm.prank(alice);
         staking.cancelUnstake();
         vm.prank(alice);
         staking.requestUnstake(1e18);
+        vm.warp(block.timestamp + 1 days);
         vm.prank(alice);
         assertEq(staking.unstake(), 1e18);
     }
@@ -516,6 +590,34 @@ contract BkrnStakingTest is CoreFixture {
         vm.expectRevert(abi.encodeWithSelector(BkrnStaking.CooldownTooLong.selector, 91 days, 90 days));
         vm.prank(admin);
         staking.setCooldown(91 days);
+        // no same-block (flash) stake round trips
+        vm.expectRevert(abi.encodeWithSelector(BkrnStaking.CooldownTooShort.selector, 0, 1 days));
+        vm.prank(admin);
+        staking.setCooldown(0);
+        vm.expectRevert(abi.encodeWithSelector(BkrnStaking.CooldownTooShort.selector, 1 days - 1, 1 days));
+        vm.prank(admin);
+        staking.setCooldown(1 days - 1);
+    }
+
+    function test_setRewardsDuration() public {
+        assertEq(staking.rewardsDuration(), 7 days);
+        vm.expectEmit(false, false, false, true, address(staking));
+        emit BkrnStaking.RewardsDurationSet(14 days);
+        vm.prank(admin);
+        staking.setRewardsDuration(14 days);
+        _stake(alice, 1e18);
+        _notify(14e18);
+        assertEq(staking.periodFinish(), block.timestamp + 14 days);
+
+        vm.expectRevert(abi.encodeWithSelector(BkrnStaking.NotAdmin.selector, alice));
+        vm.prank(alice);
+        staking.setRewardsDuration(7 days);
+        vm.startPrank(admin);
+        vm.expectRevert(abi.encodeWithSelector(BkrnStaking.BadRewardsDuration.selector, 1 days - 1));
+        staking.setRewardsDuration(1 days - 1);
+        vm.expectRevert(abi.encodeWithSelector(BkrnStaking.BadRewardsDuration.selector, 90 days + 1));
+        staking.setRewardsDuration(90 days + 1);
+        vm.stopPrank();
     }
 
     // ---------------------------------------------------------------- fuzz
@@ -527,14 +629,16 @@ contract BkrnStakingTest is CoreFixture {
         _stake(alice, a);
         _stake(bob, b);
         _notify(reward);
+        vm.warp(block.timestamp + 7 days);
         uint256 ea = staking.earned(alice);
         uint256 eb = staking.earned(bob);
         assertLe(ea + eb + staking.queuedReward(), reward);
         assertEq(staking.rewardReserve(), reward);
-        // floor error of the accumulator: at most a / 1e18 + 1 below the exact pro-rata share
+        // floor error of the accumulator (+ the < 1 wei rate remainder): at most a / 1e18 + 2 below
+        // the exact pro-rata share
         uint256 exact = (reward * a) / (a + b);
         assertLe(ea, exact);
-        assertApproxEqAbs(ea, exact, a / 1e18 + 2);
+        assertApproxEqAbs(ea, exact, a / 1e18 + 3);
         vm.prank(alice);
         staking.claimReward();
         vm.prank(bob);

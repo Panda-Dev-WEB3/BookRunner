@@ -32,9 +32,12 @@ contract FeeTierRouter {
     }
 }
 
-/// @notice AUDIT area 5 — executeBuyback trusts the KEEPER's minBkrnOut and poolFee entirely: there is no
-///         on-chain price reference, so a compromised / buggy keeper (a hot key on the ops server) routes
-///         the whole buybackPending through an attacker-seeded fee tier with minBkrnOut = 1.
+/// @notice AUDIT area 5 (A5-02) — executeBuyback trusted the KEEPER's minBkrnOut and poolFee entirely: there
+///         was no on-chain price reference, so a compromised / buggy keeper (a hot key on the ops server)
+///         could route the whole buybackPending through an attacker-seeded fee tier with minBkrnOut = 1.
+///         FIXED: the fee tier is pinned by the timelock (`buybackPoolFee`, the keeper no longer passes
+///         one) and the swap minimum is at least amountIn x reference price x (1 - maxSlippageBps).
+///         Kept as regression tests.
 contract Area5BuybackKeeperTest is CoreFixture {
     FeeTierRouter internal v3;
 
@@ -58,13 +61,27 @@ contract Area5BuybackKeeperTest is CoreFixture {
 
         uint256 fairOut = (pending * 20e18) / 1e6;
 
-        // keeper key: rogue fee tier + minOut = 1 (the only on-chain check is minOut != 0)
+        // keeper key: minOut = 1; it can no longer pick the rogue 1% tier: the pinned 0.3% tier is used
+        // and the minimum is raised to the on-chain floor.
         vm.prank(keeper);
-        try feeRouter.executeBuyback(pending, 1, 10_000) returns (uint256 out) {
-            // 50,000 USDC of stakers' buyback swapped for 1 wei of BKRN; the USDC sits in the rogue pool.
-            assertGe(out * 100, fairOut * 95, "buyback executed >5% below fair value (no on-chain price bound)");
-        } catch {
-            // secure: the contract refuses a swap priced far from a reference price / non-pinned fee tier
-        }
+        uint256 out = feeRouter.executeBuyback(pending, 1);
+        assertGe(out * 100, fairOut * 95, "buyback executed >5% below fair value (no on-chain price bound)");
+    }
+
+    /// @notice Even if the PINNED tier itself is the rogue pool (governance mistake / pool drained), the
+    ///         reference-price floor refuses the swap: the USDC stays pending for stakers.
+    function test_audit_buybackRoguePinnedPoolRefusedByFloor() public {
+        vm.prank(admin);
+        feeRouter.setBuybackParams(10_000, 20e18, 500, 10_000_000e6);
+        usdc.mint(address(feeRouter), 100_000e6);
+        vm.prank(address(router));
+        feeRouter.notifyCarry(BOOK_ID, 100_000e6);
+        uint256 pending = feeRouter.buybackPending();
+
+        vm.expectRevert(FeeTierRouter.TooLittleReceived.selector);
+        vm.prank(keeper);
+        feeRouter.executeBuyback(pending, 1);
+        assertEq(feeRouter.buybackPending(), pending);
+        assertEq(usdc.balanceOf(address(v3)), 0);
     }
 }
