@@ -19,7 +19,7 @@ Group=bookrunner
 WorkingDirectory=/opt/bookrunner/app
 Environment=HOME=/opt/bookrunner
 # browser origins of the web app (API CORS, exactly these): the real domain + the sslip.io name
-Environment=WEB_ORIGIN=https://bookrunner.use-cert.com,https://bookrunner.141-94-203-130.sslip.io
+Environment=WEB_ORIGIN=https://bookrunner.tech,https://www.bookrunner.tech,https://bookrunner.use-cert.com,https://bookrunner.141-94-203-130.sslip.io
 # infra passwords (POSTGRES_PASSWORD, REDIS_PASSWORD): read by systemd as root, so the file stays root:root 0600;
 # scripts/dev.ts builds DATABASE_URL / REDIS_URL from them and never hands the raw values to a child
 EnvironmentFile=-/usr/local/lib/bookrunner-deploy/.env.infra
