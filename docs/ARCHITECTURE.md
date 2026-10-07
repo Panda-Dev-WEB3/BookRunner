@@ -380,7 +380,9 @@ are oracle keys published by the oracle service as the weighted index level.
     reopen gap of that size, else it is liquidated at the held close rather than leaving the gap as IF
     bad debt; traders top up or deleverage before the close, top-ups work off-hours). Liquidations
     use the latest (held) price with no `maxTradePriceAge` bound (involuntary, fee-bearing); position
-    closed at oracle, `liquidationFeeBps` split 50% liquidator / 50% IF;
+    closed at oracle, `liquidationFeeBps` split 50% liquidator / 50% IF; wind-down `forceClose`
+    (anyone, once the close-out is open) instead needs a live, fresh price like a trade (optionally
+    carried as `priceData`), so it never fills at a held price;
     bad debt paid by IF, then **ADL within that market only** (pool cash reduced by shortfall,
     `ADL` event) — never touches other markets.
   - `withdrawLiquidity` keeps `poolEquity - amount >= requiredPoolMargin` (pool must cover current

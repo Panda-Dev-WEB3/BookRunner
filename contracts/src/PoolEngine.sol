@@ -128,9 +128,10 @@ library PoolEngineMath {
 ///         min(maxPriceAge, NEW_RISK_MAX_PRICE_AGE, maxTradePriceAge): off-hours (oracle `held`) or stale, no
 ///         trade fills (a held / stale price is a free option against the pool, audit A2-01 / A2-03). A
 ///         margin withdrawal with a position needs a non-held price no older than
-///         min(maxPriceAge, NEW_RISK_MAX_PRICE_AGE). Market reduce-only blocks new risk only. Margin top-ups,
-///         liquidations and wind-down close-outs keep working at the latest (held) price; while held, the
-///         maintenance requirement is OFF_HOURS_MARGIN_MULTIPLE x initial margin (audit A2-02).
+///         min(maxPriceAge, NEW_RISK_MAX_PRICE_AGE). Market reduce-only blocks new risk only. Wind-down
+///         close-outs ({forceClose}) follow the trade rule (live, fresh price). Margin top-ups and
+///         liquidations keep working at the latest (held) price; while held, the maintenance requirement
+///         is OFF_HOURS_MARGIN_MULTIPLE x initial margin (audit A2-02).
 ///         Pull oracle (LOW_GAS.md §1): `trade` / `liquidate` overloads take a trailing signed `priceData`
 ///         bundle and call `AttestedOracle.update(priceData)` first, so every rule above is evaluated on the
 ///         price this transaction brought (never on whether a timer push happened to land). Each side's open interest is capped at the book's inventory cap, so
@@ -638,16 +639,30 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
 
     /// @notice Anyone, once a wind-down close-out is open (book Retiring, notice elapsed): closes `trader`'s
     ///         whole position at the oracle price with no fee, like a liquidation without the maintenance
-    ///         check (a loss beyond margin is bad debt: IF, then ADL in this market). The price must not be
-    ///         stale. Leftover margin stays withdrawable by the trader. O(1) per position.
+    ///         check (a loss beyond margin is bad debt: IF, then ADL in this market). Like a voluntary
+    ///         trade, the price must be live (not held) and within maxTradePriceAge: the position owner can
+    ///         call it too, so a held / stale price would be a fee-free free option (close-outs wait for the
+    ///         session to reopen; callers carry the price via the `priceData` overload). Leftover margin
+    ///         stays withdrawable by the trader. O(1) per position.
     function forceClose(uint256 marketId, address trader) external nonReentrant {
+        _forceClose(marketId, trader);
+    }
+
+    /// @notice {forceClose} carrying a signed price bundle (`AttestedOracle.update(priceData)` first).
+    function forceClose(uint256 marketId, address trader, bytes calldata priceData) external nonReentrant {
+        _pull(priceData);
+        _forceClose(marketId, trader);
+    }
+
+    function _forceClose(uint256 marketId, address trader) internal {
         Market storage m = _market(marketId);
         uint64 at = m.closeOutAfter;
         if (at == 0 || block.timestamp < at) revert CloseOutNotOpen(marketId, at);
         Position storage p = _positions[marketId][trader];
         if (p.size == 0) revert NoPosition(trader);
-        (uint256 price,, uint64 publishedAt) = _oracle(m);
-        if (_stale(publishedAt, protocolConfig.maxPriceAge())) revert StalePrice(m.cfg.underlying, publishedAt);
+        (uint256 price, bool held, uint64 publishedAt) = _oracle(m);
+        if (held) revert OffHours(marketId);
+        if (_tradeStale(publishedAt)) revert StalePrice(m.cfg.underlying, publishedAt);
         _accrue(marketId, m, price);
         (int256 size, int256 pnl, uint256 badDebt) = _closeAtOracle(marketId, m, p, trader, price);
         emit Trade(marketId, trader, -size, price, 0, pnl, 0);

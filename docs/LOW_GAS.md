@@ -42,15 +42,17 @@ function priceOf(bytes32 underlying) external view returns (uint256 priceWad, bo
   price and its winning leg at the current print extracts the whole move from the pool. A close
   therefore carries a fresh signed print like an open.
 - Off-hours (`held` price): **no** trade fills, closes included (audit A2-03) — the held close is
-  known-stale once after-hours news moves the real price. Margin top-ups, liquidations and wind-down
-  close-outs keep working at the held price. While held, the maintenance requirement is
+  known-stale once after-hours news moves the real price. Margin top-ups and liquidations keep working
+  at the held price. While held, the maintenance requirement is
   `OFF_HOURS_MARGIN_MULTIPLE` (2) × the market's initial margin (capped at 100 %): positions that
   cannot absorb a reopen gap of that size are liquidated at the held close instead of turning the gap
   into IF bad debt (audit A2-02). Traders top up or deleverage before the session closes.
 - Liquidations (`liquidate`, with or without `priceData`) are not bound by `maxTradePriceAge` and work
   at the stored / held price: they are involuntary, need the position under its requirement at that
-  price and forfeit the liquidation fee. `forceClose` (wind-down close-out, keeper-driven) keeps
-  `maxPriceAge` staleness and works at a held price.
+  price and forfeit the liquidation fee. `forceClose` (wind-down close-out) follows the trade rule:
+  live (not held) price within `maxTradePriceAge`, carried via `forceClose(marketId, trader, priceData)`.
+  The position owner can call it too, so a held / stale price would be a fee-free free option;
+  close-outs of a retiring book wait for the session to reopen.
 - Off-chain readers (mark, risk, api, web) value positions from the oracle service's latest signed
   bundle (`GET /prices/signed`, Redis `KEYS.oracleLast`), never from strict on-chain views that revert
   when no recent update landed.

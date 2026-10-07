@@ -185,14 +185,57 @@ contract EngineCloseOutTest is EngineBase {
         vm.warp(at);
         vm.expectRevert(abi.encodeWithSelector(PoolEngine.NoPosition.selector, bob));
         engine.forceClose(mid, bob);
-        // a stale price never closes positions
-        vm.warp(block.timestamp + 302);
+        // a stale price never closes positions (maxTradePriceAge, like a trade)
+        vm.warp(block.timestamp + 16);
         vm.expectPartialRevert(PoolEngine.StalePrice.selector);
         engine.forceClose(mid, alice);
-        // a held (off-hours) price is fine, like liquidations
+        // nor a held (off-hours) one, stored or carried
         _push(PID_A, PX, true);
+        vm.expectRevert(abi.encodeWithSelector(PoolEngine.OffHours.selector, mid));
         engine.forceClose(mid, alice);
+        vm.warp(block.timestamp + 1);
+        bytes memory heldPd = _priceData(PID_A, PX, uint64(block.timestamp), true);
+        vm.expectRevert(abi.encodeWithSelector(PoolEngine.OffHours.selector, mid));
+        engine.forceClose(mid, alice, heldPd);
+        // the session reopens: a carried live price closes it
+        vm.warp(block.timestamp + 1 hours);
+        bytes memory livePd = _priceData(PID_A, PX, uint64(block.timestamp), false);
+        engine.forceClose(mid, alice, livePd);
         assertEq(engine.positionOf(mid, alice).size, 0);
+    }
+
+    /// @dev Regression (forceClose free option): an attacker pair is held into the close of a Retiring market
+    ///      whose close-out is open. After-hours news moves the real price to 90 while the feed holds 100. The
+    ///      long owner force-closes its own losing leg (fee-free) at the held 100 and the short rides the
+    ///      reopen at 90 -> riskless profit from the pool. forceClose must refuse a held price, so both legs
+    ///      settle at the reopen price and the pair extracts nothing.
+    function test_regression_forceCloseHeldPriceNoFreeOption() public {
+        address longAcct = makeAddr("pairLong");
+        address shortAcct = makeAddr("pairShort");
+        uint256 dep = 2_000e6;
+        _deposit(longAcct, mid, dep);
+        _deposit(shortAcct, mid, dep);
+        _trade(longAcct, mid, 10e18);
+        _trade(shortAcct, mid, -10e18);
+        _retire();
+        vm.warp(engine.closeOutAfter(mid));
+        _push(PID_A, PX, true); // session closed: the feed holds 100
+
+        vm.warp(block.timestamp + 2 hours); // after-hours: real price 90, the feed still holds 100
+        bytes memory heldNow = _priceData(PID_A, PX, uint64(block.timestamp), true);
+        vm.prank(longAcct);
+        vm.expectRevert(abi.encodeWithSelector(PoolEngine.OffHours.selector, mid));
+        engine.forceClose(mid, longAcct, heldNow);
+        vm.prank(longAcct);
+        vm.expectRevert(abi.encodeWithSelector(PoolEngine.OffHours.selector, mid));
+        engine.forceClose(mid, longAcct);
+
+        vm.warp(block.timestamp + 14 hours); // reopen at 90: both legs at the same price
+        bytes memory open = _priceData(PID_A, 90e18, uint64(block.timestamp), false);
+        engine.forceClose(mid, shortAcct, open);
+        engine.forceClose(mid, longAcct);
+        uint256 out = engine.positionOf(mid, longAcct).marginUsd + engine.positionOf(mid, shortAcct).marginUsd;
+        assertLe(out, 2 * dep, "pair extracted the after-hours move via a held-price forceClose");
     }
 
     function test_forceClose_winnerPaidLoserCharged_noFee() public {

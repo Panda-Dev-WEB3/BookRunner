@@ -376,6 +376,29 @@ export const poolEngineAbi = [
         "name": "trader",
         "type": "address",
         "internalType": "address"
+      },
+      {
+        "name": "priceData",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "forceClose",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "trader",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "outputs": [],
