@@ -1,0 +1,24 @@
+# Bookrunner testnet infra: Postgres/Timescale + Redis in Docker (docker-compose.yml), run by ROOT from the
+# root-owned copy /usr/local/lib/bookrunner-deploy, so the bookrunner user never needs the docker group
+# (docker group = root on this host). Installed to /etc/systemd/system/ by install.sh / update.sh.
+#   systemctl reload bookrunner-infra    # apply a changed compose file (recreates only what changed)
+[Unit]
+Description=Bookrunner testnet infra (Postgres/Timescale + Redis in Docker)
+Documentation=https://github.com/Panda-Dev-WEB3/BookRunner/tree/main/deploy/server
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/usr/local/lib/bookrunner-deploy
+# .env.infra (POSTGRES_PASSWORD, REDIS_PASSWORD; root:root 0600) is optional: without it the historical defaults apply
+ExecStart=/bin/sh -c 'exec /usr/bin/docker compose $( [ -f .env.infra ] && echo --env-file .env.infra ) -f docker-compose.yml up -d --wait'
+ExecReload=/bin/sh -c 'exec /usr/bin/docker compose $( [ -f .env.infra ] && echo --env-file .env.infra ) -f docker-compose.yml up -d --wait'
+ExecStop=/bin/sh -c 'exec /usr/bin/docker compose $( [ -f .env.infra ] && echo --env-file .env.infra ) -f docker-compose.yml stop'
+TimeoutStartSec=300
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

@@ -11,7 +11,15 @@ const [cmd, file] = process.argv.slice(2);
 const CHAIN_ID = Number(process.env.CHAIN_ID ?? 31337);
 const RPC = process.env.RPC_URL ?? "http://127.0.0.1:8547";
 const pub = createPublicClient({ chain: chainFor(CHAIN_ID, RPC), transport: http(RPC) });
-const roles = Object.keys(DEV_ROLE_INDEX) as DevRole[];
+// roles this env can derive (the admin key is not derivable from the service mnemonic on testnet unless
+// BKRN_ALLOW_ADMIN_KEY=1 or DEPLOYER_PRIVATE_KEY is set; without it the deployer is left out)
+const roles = (Object.keys(DEV_ROLE_INDEX) as DevRole[]).filter((r) => {
+  try {
+    return !!roleAccount(r);
+  } catch {
+    return false;
+  }
+});
 const now: Record<string, { address: string; wei: string; nonce: number; ts: number }> = {};
 const ts = Math.floor(Date.now() / 1000);
 for (const r of roles) {
@@ -27,13 +35,15 @@ if (cmd === "save") {
   let spent = 0n;
   let txs = 0;
   let protocolSpent = 0n;
-  const hours = (ts - (prev.deployer?.ts ?? ts)) / 3600;
+  const hours = (ts - (Object.values(prev)[0]?.ts ?? ts)) / 3600;
   console.log(`window ${(hours * 60).toFixed(1)} min`);
   for (const r of roles) {
+    if (!prev[r]) continue;
     const d = BigInt(prev[r]!.wei) - BigInt(now[r]!.wei);
     const n = now[r]!.nonce - prev[r]!.nonce;
     if (n === 0 && d === 0n) continue;
-    if (r !== "deployer") { spent += d; txs += n; if (!/^trader/.test(r)) protocolSpent += d; }
+    // the deployer and the funder only move gas to the other keys: not protocol spend
+    if (r !== "deployer" && r !== "funder") { spent += d; txs += n; if (!/^trader/.test(r)) protocolSpent += d; }
     console.log(`${r.padEnd(14)} txs ${String(n).padStart(5)}   spent ${formatEther(d).padStart(22)} ETH`);
   }
   const perDay = 24 / (hours || 1);

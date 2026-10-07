@@ -1,12 +1,16 @@
 # Bookrunner testnet stack: every service + one agent per book + trader-sim (scripts/dev.ts --network testnet),
 # without the vite dev server (nginx serves the built web app). Installed to /etc/systemd/system/.
 # Capped so memory pressure only ever slows / restarts Bookrunner, never the host itself.
+# Postgres + Redis are bookrunner-infra.service (root, Docker): this unit needs no docker access, so the
+# bookrunner user is not in the docker group. Sandboxed (HARDENING.md): read-only system and app tree,
+# writable state in .data/ (+ contracts/deployments for a first launch), no capabilities, IPv4/IPv6/unix
+# sockets only. MemoryDenyWriteExecute is deliberately NOT set: bun's JavaScriptCore JIT needs W+X pages.
 [Unit]
 Description=Bookrunner testnet stack (services + agents)
 Documentation=https://github.com/Panda-Dev-WEB3/BookRunner/tree/main/deploy/server
 Wants=network-online.target
-After=network-online.target docker.service
-Requires=docker.service
+Requires=bookrunner-infra.service
+After=network-online.target bookrunner-infra.service
 
 [Service]
 Type=simple
@@ -14,9 +18,13 @@ User=bookrunner
 Group=bookrunner
 WorkingDirectory=/opt/bookrunner/app
 Environment=HOME=/opt/bookrunner
-# browser origins of the web app (API CORS): the real domain + the sslip.io name that resolves without DNS setup
+# browser origins of the web app (API CORS, exactly these): the real domain + the sslip.io name
 Environment=WEB_ORIGIN=https://bookrunner.use-cert.com,https://bookrunner.141-94-203-130.sslip.io
-ExecStartPre=/usr/bin/docker compose -f deploy/server/docker-compose.yml up -d --wait
+# infra passwords (POSTGRES_PASSWORD, REDIS_PASSWORD): read by systemd as root, so the file stays root:root 0600;
+# scripts/dev.ts builds DATABASE_URL / REDIS_URL from them and never hands the raw values to a child
+EnvironmentFile=-/usr/local/lib/bookrunner-deploy/.env.infra
+# no on-disk transpiler cache (the home and app trees are read-only here)
+Environment=BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
 ExecStart=/opt/bookrunner/app/node_modules/.bin/bun scripts/dev.ts --network testnet --no-web
 StandardOutput=append:/opt/bookrunner/app/.data/testnet/dev.log
 StandardError=append:/opt/bookrunner/app/.data/testnet/dev.log
@@ -29,9 +37,35 @@ MemoryHigh=2G
 MemoryMax=2560M
 MemorySwapMax=2G
 OOMScoreAdjust=500
+
+# ---- sandbox
 NoNewPrivileges=true
-ProtectSystem=full
+UMask=0027
+ProtectSystem=strict
+# state the stack writes: mock venue snapshot, ops keys, sagas (.data/testnet); launch appends books to the
+# deployment file (first start only). Everything else, the code included, is read-only to the running stack.
+ReadWritePaths=/opt/bookrunner/app/.data
+ReadWritePaths=-/opt/bookrunner/app/contracts/deployments
+# HOME is /opt/bookrunner, outside /home: ProtectHome does not hide it
+ProtectHome=yes
 PrivateTmp=true
+PrivateDevices=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+# AF_NETLINK: glibc getaddrinfo (AI_ADDRCONFIG) and interface enumeration probe it; no raw / packet sockets
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 
 [Install]
 WantedBy=multi-user.target

@@ -14,6 +14,10 @@ BUN="$ROOT/node_modules/.bin/bun"
 [ -f .env.testnet ] || { echo ".env.testnet missing (needs BKRN_TESTNET_MNEMONIC)"; exit 1; }
 set -a; . ./.env.testnet; set +a
 : "${BKRN_TESTNET_MNEMONIC:?BKRN_TESTNET_MNEMONIC not set in .env.testnet}"
+# the oracle refuses synthetic prices on a public chain without a secret seed (services/oracle config.ts)
+: "${ORACLE_SEED:?ORACLE_SEED not set in .env.testnet: add one with  echo ORACLE_SEED=\$(openssl rand -hex 32) >> .env.testnet}"
+# the deployer (protocol admin) derives from the mnemonic only with this opt-in (packages/shared devkeys.ts)
+export BKRN_ALLOW_ADMIN_KEY=1
 RPC="${RHC_TESTNET_RPC_URL:-https://rpc.testnet.chain.robinhood.com}"
 # forge runs in Docker: for a local rehearsal chain pass FORGE_RPC_URL=http://host.docker.internal:<port>
 FORGE_RPC="${FORGE_RPC_URL:-$RPC}"
@@ -36,7 +40,7 @@ fi
 echo "==> testnet database"
 docker exec bookrunner-postgres-1 psql -U bookrunner -d bookrunner -tc "SELECT 1 FROM pg_database WHERE datname='bookrunner_testnet'" | grep -q 1 \
   || docker exec bookrunner-postgres-1 psql -U bookrunner -d bookrunner -c "CREATE DATABASE bookrunner_testnet" >/dev/null
-DATABASE_URL=postgres://bookrunner:bookrunner@127.0.0.1:54400/bookrunner_testnet "$BUN" run --cwd packages/db migrate
+DATABASE_URL="postgres://bookrunner:${POSTGRES_PASSWORD:-bookrunner}@127.0.0.1:54400/bookrunner_testnet" "$BUN" run --cwd packages/db migrate
 
 echo "==> forge build"
 bash scripts/forge.sh build >/dev/null

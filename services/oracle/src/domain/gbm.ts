@@ -1,8 +1,13 @@
 // Seeded geometric Brownian motion: S_{n+1} = S_n * exp((mu - sigma^2/2) dt + sigma sqrt(dt) Z_n),
-// Z_n = normal(hash(seed:ticker), n). Deterministic given (seed, ticker, params).
-import { hashString, normal } from "./rng";
+// Z_n = normal(hash(seed:ticker), n). Deterministic given (seed, ticker, params) — unless an entropy
+// source is given (every chain but the local devnet): then Z_n = (seeded_n + E_n) / sqrt(2) with E_n
+// a fresh CSPRNG normal per step, so the path is not reproducible from the seed (or anything else).
+import { type NormalSource, hashString, normal } from "./rng";
 
 export const SECONDS_PER_YEAR = 365 * 24 * 3600;
+
+/** Steps of an entropy path kept for backward reads (sources observe the same few recent steps). */
+export const ENTROPY_HISTORY_STEPS = 256;
 
 export interface GbmParams {
   s0: number;
@@ -21,11 +26,14 @@ export class GbmPath {
   private readonly logS0: number;
   private step = 0;
   private logS: number;
+  /** entropy paths only: logS of recent steps (a past step cannot be recomputed). */
+  private readonly history = new Map<number, number>();
 
   constructor(
     readonly seed: string,
     readonly ticker: string,
     readonly params: GbmParams,
+    private readonly entropy?: NormalSource,
   ) {
     if (!(params.s0 > 0)) throw new Error(`gbm ${ticker}: s0 must be > 0`);
     if (!(params.volAnnual >= 0)) throw new Error(`gbm ${ticker}: vol must be >= 0`);
@@ -39,18 +47,31 @@ export class GbmPath {
     this.logS = this.logS0;
   }
 
-  /** Price at step n (n = 0 -> s0). Forward access is incremental; going back recomputes from 0. */
+  /**
+   * Price at step n (n = 0 -> s0). Forward access is incremental; going back recomputes from 0 (seeded
+   * paths) or reads the recent history (entropy paths; older than that: the oldest step still kept).
+   */
   priceAt(n: number): number {
     if (!Number.isInteger(n) || n < 0) throw new Error(`gbm ${this.ticker}: bad step ${n}`);
+    if (n === 0) return this.params.s0;
     if (n < this.step) {
+      if (this.entropy) {
+        const kept = this.history.get(n) ?? this.history.get(Math.min(...this.history.keys()));
+        return Math.exp(kept ?? this.logS);
+      }
       this.step = 0;
       this.logS = this.logS0;
     }
     while (this.step < n) {
-      this.logS += this.driftPerStep + this.volPerStep * normal(this.key, this.step);
+      const z = this.entropy ? (normal(this.key, this.step) + this.entropy()) / Math.SQRT2 : normal(this.key, this.step);
+      this.logS += this.driftPerStep + this.volPerStep * z;
       this.step++;
+      if (this.entropy && this.step > n - ENTROPY_HISTORY_STEPS) {
+        this.history.set(this.step, this.logS);
+        if (this.history.size > ENTROPY_HISTORY_STEPS) this.history.delete(this.history.keys().next().value as number);
+      }
     }
-    return n === 0 ? this.params.s0 : Math.exp(this.logS);
+    return Math.exp(this.logS);
   }
 
   /** Convenience: the first `count` prices (steps 0..count-1). */

@@ -103,6 +103,7 @@ export function RedeemModal(props: { open: boolean; onClose: () => void; bookId:
             <TxRunner
               txs={red.data.txs}
               signer={red.data.signer}
+              amount={raw}
               onConfirmed={() => {
                 void refreshAfterTx(qc, utils);
               }}

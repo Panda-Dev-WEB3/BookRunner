@@ -2,7 +2,7 @@
 // signal, or MARK_WAIT_SECONDS), one BullMQ job (QUEUES.marks) -> MarkPipeline: ONE
 // MarkRegistry.commitAndApply tx carrying the signed prices + venue report it valued with (commit +
 // applyMark on a registry that predates it). Signed inputs come from Redis (oracle bundle, ops-venue reports).
-import { type MarkJob, QUEUES, createLogger, publicClientFor } from "@bookrunner/shared";
+import { type MarkJob, QUEUES, createLogger, publicClientFor, redactUrl } from "@bookrunner/shared";
 import { RedisSettlementSignals, onShutdown, retryUntil, startLoop, waitForDeployment } from "@bookrunner/waterfall";
 import { Queue, Worker } from "bullmq";
 import { Redis } from "ioredis";
@@ -24,7 +24,7 @@ export async function main() {
   });
 
   const pc = publicClientFor(cfg.CHAIN_ID, cfg.RPC_URL);
-  log.info({ chainId: cfg.CHAIN_ID, rpc: cfg.RPC_URL }, "mark service starting");
+  log.info({ chainId: cfg.CHAIN_ID, rpc: redactUrl(cfg.RPC_URL) }, "mark service starting");
   const deployment = await waitForDeployment({ file: cfg.DEPLOYMENT_FILE, log, signal: ac.signal, publicClient: pc });
   if (!deployment) return;
 

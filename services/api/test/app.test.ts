@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createTRPCClient, createTRPCUntypedClient, httpBatchLink, httpLink } from "@trpc/client";
 import superjson from "superjson";
-import { createApp } from "../src/app";
+import { MAX_TRPC_BATCH, createApp } from "../src/app";
 import { webOrigins } from "../src/config";
 import type { AppRouter } from "../src/router";
 import { ALICE, BOOK, makeWorld, sampleDraft, seedActivity, seedBook } from "./fixtures";
@@ -18,14 +18,39 @@ describe("http app", () => {
     const { app } = setup();
     const res = await app.request("/health");
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { procedures?: string[] };
+    const body = (await res.json()) as { procedures?: string[]; capabilities?: string[]; uptimeSec?: number };
     expect(body).toMatchObject({ ok: true, service: "api", chainId: 31337, deployment: true });
-    // the procedure list lets the web skip optional procedures this build does not serve (no 404 probes)
-    expect(body.procedures).toContain("book.get");
-    expect(body.procedures).toContain("tranche.position");
-    // activity feeds the web probes optionally (ActivityPanel, VerifyPanel)
-    for (const p of ["book.fills", "book.hedges", "receipts.list"]) expect(body.procedures).toContain(p);
-    expect(body.procedures).not.toContain("book.trades");
+    // the optional procedures this build serves, so the web skips absent ones (no 404 probes)
+    expect(body.capabilities).toEqual(["book.fills", "book.hedges", "receipts.list"]);
+    // no reconnaissance surface for anonymous callers: no full procedure list, no uptime
+    expect(body.procedures).toBeUndefined();
+    expect(body.uptimeSec).toBeUndefined();
+  });
+
+  test("GET /health?verbose lists every procedure and the uptime for the admin token only", async () => {
+    const { w, app } = setup();
+    const TOKEN = "health-admin-token-0123456789";
+    w.deps.settings.adminToken = TOKEN;
+    const anon = (await (await app.request("/health?verbose=1")).json()) as { procedures?: string[] };
+    expect(anon.procedures).toBeUndefined();
+    const wrong = (await (await app.request("/health?verbose=1", { headers: { authorization: "Bearer nope" } })).json()) as { procedures?: string[] };
+    expect(wrong.procedures).toBeUndefined();
+    const admin = (await (await app.request("/health?verbose=1", { headers: { authorization: `Bearer ${TOKEN}` } })).json()) as { procedures?: string[]; uptimeSec?: number };
+    expect(admin.procedures).toContain("book.get");
+    expect(admin.procedures).toContain("tranche.position");
+    expect(admin.procedures).not.toContain("book.trades");
+    expect(typeof admin.uptimeSec).toBe("number");
+  });
+
+  test("tRPC batches above MAX_TRPC_BATCH are refused; a batch at the cap runs", async () => {
+    const { app } = setup();
+    const batch = (n: number) => {
+      const paths = Array.from({ length: n }, () => "book.list").join(",");
+      const input = Object.fromEntries(Array.from({ length: n }, (_, i) => [String(i), { json: null }]));
+      return app.request(`/trpc/${paths}?batch=1&input=${encodeURIComponent(JSON.stringify(input))}`);
+    };
+    expect((await batch(MAX_TRPC_BATCH)).status).toBe(200);
+    expect((await batch(MAX_TRPC_BATCH + 1)).status).toBe(400);
   });
 
   test("CORS allows the web app origins only", async () => {
@@ -40,8 +65,13 @@ describe("http app", () => {
     expect(pre.status).toBe(204);
   });
 
-  test("webOrigins merges WEB_ORIGIN with the devnet defaults", () => {
-    expect(webOrigins("https://app.example/, http://127.0.0.1:5180")).toEqual(["https://app.example", "http://127.0.0.1:5180", "http://localhost:5180"]);
+  test("webOrigins: loopback-only WEB_ORIGIN adds the devnet defaults; a public deployment allows exactly its list", () => {
+    expect(webOrigins("http://127.0.0.1:5180")).toEqual(["http://127.0.0.1:5180", "http://localhost:5180"]);
+    expect(webOrigins("https://app.example/, http://127.0.0.1:5180")).toEqual(["https://app.example", "http://127.0.0.1:5180"]);
+    expect(webOrigins("https://bookrunner.use-cert.com,https://bookrunner.141-94-203-130.sslip.io")).toEqual([
+      "https://bookrunner.use-cert.com",
+      "https://bookrunner.141-94-203-130.sslip.io",
+    ]);
   });
 
   test("tRPC over HTTP with superjson (typed client)", async () => {

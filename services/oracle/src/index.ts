@@ -33,7 +33,12 @@ process.on("unhandledRejection", (err) => log.error({ err: err instanceof Error 
 const redis = createRedis(cfg.REDIS_URL, log);
 const database = createDb(cfg.DATABASE_URL, 3);
 const store = new DrizzlePriceStore(database.db);
-const { sources, market } = buildSources(cfg, log);
+const { sources, market, syntheticRefused } = buildSources(cfg, log);
+if (syntheticRefused) {
+  // never sign predictable synthetic prices on a public chain: fail loudly instead of running source-less
+  log.fatal({ chainId: cfg.CHAIN_ID }, `refusing to start: ${syntheticRefused}`);
+  process.exit(1);
+}
 
 const service = new OracleService({
   log,

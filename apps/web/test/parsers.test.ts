@@ -1,6 +1,6 @@
 // Tolerant parsers: activity feeds, jury verdicts, mark PnL statements, API / wallet errors.
 import { describe, expect, test } from "bun:test";
-import { procedureListed } from "../src/api/hooks";
+import { healthProcedures, procedureListed } from "../src/api/hooks";
 import { describeError, errorCode, isMissingProcedure, zodIssueText } from "../src/lib/errors";
 import type { FillsOut, HedgesOut, ReceiptListOut } from "../src/lib/api-types";
 import { hedgeQty, parseFills, parseHedges, parseReceipts } from "../src/lib/feeds";
@@ -174,5 +174,12 @@ describe("optional procedures", () => {
     expect(procedureListed(["book.get", "receipts.root"], "book.get")).toBe(true);
     expect(procedureListed(null, "book.fills")).toBeNull();
     expect(procedureListed(undefined, "receipts.list")).toBeNull();
+  });
+
+  test("/health lists the optional procedures as capabilities (older APIs: the full procedures list)", () => {
+    expect(healthProcedures({ capabilities: ["book.fills", "receipts.list", 3] })).toEqual(["book.fills", "receipts.list"]);
+    expect(healthProcedures({ procedures: ["book.get", "book.hedges"] })).toEqual(["book.get", "book.hedges"]);
+    expect(healthProcedures({ ok: true })).toBeNull();
+    expect(procedureListed(healthProcedures({ capabilities: ["book.fills"] }), "book.hedges")).toBe(false);
   });
 });

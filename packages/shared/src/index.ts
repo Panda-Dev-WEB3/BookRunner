@@ -16,3 +16,5 @@ export * from "./logger";
 export * from "./deployments";
 export * from "./clients";
 export * from "./orderly";
+export * from "./redact";
+export * from "./childenv";

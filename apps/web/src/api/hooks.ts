@@ -10,9 +10,17 @@ export interface Health {
   deployment: boolean;
   db?: string;
   redis?: string;
-  /** tRPC procedure paths the API serves (null: an older API that does not list them). */
+  /**
+   * Optional procedures the API serves (`capabilities`; an older API listed every procedure as
+   * `procedures`). Only ever asked about optional paths (useOptional). null: not listed, probe them.
+   */
   procedures: string[] | null;
 }
+
+const stringList = (v: unknown): string[] | null => (Array.isArray(v) ? v.filter((p): p is string => typeof p === "string") : null);
+
+/** The optional-procedure list of a /health body: `capabilities`, else the older full `procedures`. */
+export const healthProcedures = (j: Record<string, unknown>): string[] | null => stringList(j.capabilities) ?? stringList(j.procedures);
 
 /** GET /health of the API (chain id, deployment presence). Polls; never throws into the UI. */
 export function useHealth() {
@@ -30,7 +38,7 @@ export function useHealth() {
           deployment: j.deployment === true,
           db: typeof j.db === "string" ? j.db : undefined,
           redis: typeof j.redis === "string" ? j.redis : undefined,
-          procedures: Array.isArray(j.procedures) ? j.procedures.filter((p): p is string => typeof p === "string") : null,
+          procedures: healthProcedures(j),
         };
       } finally {
         clearTimeout(t);

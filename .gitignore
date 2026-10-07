@@ -17,6 +17,8 @@ contracts/deployments/31337.json
 .data/
 .claude/worktrees/
 .env.testnet
+# server infra passwords (deploy/server/install.sh generates it in the root-owned deploy copy)
+.env.infra
 .data/
 GITHUB_DEPLOY_KEY.txt
 contracts/broadcast/

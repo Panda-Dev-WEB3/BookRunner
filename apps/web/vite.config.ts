@@ -32,7 +32,8 @@ export default defineConfig(({ command, mode, isPreview }) => ({
   optimizeDeps: { include: ["@openzeppelin/merkle-tree"] },
   build: {
     target: "es2022",
-    sourcemap: true,
+    // no public source maps (deploy/server nginx also answers *.map with 404); `vite build --sourcemap` locally
+    sourcemap: false,
     chunkSizeWarningLimit: 1600,
   },
 }));

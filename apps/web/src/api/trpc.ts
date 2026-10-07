@@ -10,8 +10,11 @@ import { errorCode } from "../lib/errors";
 
 export const trpc = createTRPCReact<AppRouter>();
 
+/** The API refuses HTTP batches above this many calls (services/api MAX_TRPC_BATCH): split at it. */
+export const TRPC_MAX_BATCH = 10;
+
 export function createTrpcClient() {
-  return trpc.createClient({ links: [httpBatchLink({ url: trpcUrl, transformer: superjson, maxURLLength: 4000 })] });
+  return trpc.createClient({ links: [httpBatchLink({ url: trpcUrl, transformer: superjson, maxURLLength: 4000, maxItems: TRPC_MAX_BATCH })] });
 }
 
 /** Unbatched, untyped client for optional procedures (an unknown path must not fail a batch). */
