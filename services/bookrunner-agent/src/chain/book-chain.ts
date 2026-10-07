@@ -17,6 +17,7 @@ import {
 } from "@bookrunner/shared/abi";
 import type { Address, Hex, PublicClient } from "viem";
 import { type MmRecallInfo, engineWithdrawableUsd } from "../domain/hedge-planner";
+import { type MarkWindowState, capitalFlowOpen } from "../domain/mark-window";
 
 /** Orderly free-margin estimate keeps 10% of |exposure| as initial margin (VERIFY Orderly IMR per symbol). */
 const ORDERLY_IM_RESERVE_BPS = 1_000n;
@@ -88,6 +89,23 @@ export class BookChain {
     const name = BOOK_STATE[s];
     if (!name) throw new Error(`unknown book state ${s}`);
     return name;
+  }
+
+  /** Inputs of the desk's mark-window gate on capital flows (domain/mark-window.ts). */
+  async markWindow(): Promise<MarkWindowState> {
+    const [state, lastMarkPeriodEnd, subscriptionEnds, markInterval] = await Promise.all([
+      this.bookState(),
+      this.pub.readContract({ address: this.components.book, abi: bookAbi, functionName: "lastMarkPeriodEnd" }),
+      this.pub.readContract({ address: this.components.book, abi: bookAbi, functionName: "subscriptionEnds" }),
+      this.pub.readContract({ address: this.deployment.contracts.config, abi: bookrunnerConfigAbi, functionName: "markInterval" }),
+    ]);
+    return { state, lastMarkPeriodEnd: Number(lastMarkPeriodEnd), subscriptionEnds: Number(subscriptionEnds), markInterval: Number(markInterval) };
+  }
+
+  /** May a desk key move capital now (no mark pending, with a guard for the tx's inclusion delay)? Chain time. */
+  async capitalFlowOpen(): Promise<boolean> {
+    const [w, head] = await Promise.all([this.markWindow(), this.pub.getBlock({ blockTag: "latest" })]);
+    return capitalFlowOpen(w, Number(head.timestamp));
   }
 
   deskHedgeUsd(): Promise<bigint> {

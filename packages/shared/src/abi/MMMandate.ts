@@ -154,6 +154,25 @@ export const mMMandateAbi = [
   },
   {
     "type": "function",
+    "name": "bondStaking",
+    "inputs": [
+      {
+        "name": "key",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "book",
     "inputs": [],
     "outputs": [

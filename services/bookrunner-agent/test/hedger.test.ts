@@ -21,6 +21,14 @@ class FakeHedgeChain implements HedgeChain {
   floatCap = 10n ** 30n;
   vaultIdle = usd(1_000_000);
   recall: MmRecallInfo | null = null;
+  /** desk mark-window gate: true = open, false = mark pending, Error = read fails */
+  flowOpen: boolean | Error = true;
+  flowReads = 0;
+  async capitalFlowOpen() {
+    this.flowReads++;
+    if (this.flowOpen instanceof Error) throw this.flowOpen;
+    return this.flowOpen;
+  }
   async vaultDeployable() {
     return this.vaultIdle;
   }
@@ -283,5 +291,59 @@ describe("Hedger hysteresis + shutdown", () => {
     const plan = await c.hedger.cycle({ mandate: c.mandate, mode: "normal", offHours: false, netExposureUsd: -usd(40_000), allowAddHedge: true, signal: AbortSignal.abort() });
     expect(plan.reason).toBe("SHUTDOWN");
     expect(c.runner.actions.length).toBe(0);
+  });
+});
+
+describe("Hedger mark-window gate (capital-flow legs wait while a mark is pending)", () => {
+  const short = (mandate: ReturnType<typeof nvdaMandate>) => ({ mandate, mode: "normal" as const, offHours: false, netExposureUsd: -usd(40_000), allowAddHedge: true });
+
+  test("FundDesk + the buy it funds are deferred while the mark is pending, then run once it landed", async () => {
+    const { chain, runner, hedger, mandate } = setup();
+    chain.usdc = usd(10_000);
+    chain.flowOpen = false;
+    const plan = await hedger.cycle(short(mandate));
+    expect(plan.action).toBe("none");
+    expect(plan.reason).toBe("MARK_PENDING");
+    expect(runner.actions.length).toBe(0);
+    chain.flowOpen = true;
+    expect((await hedger.cycle(short(mandate))).action).toBe("buy");
+    expect(runner.actions.map((a) => a.kind)).toEqual([DESK_ACTION.FundDesk, DESK_ACTION.Hedge]);
+  });
+
+  test("engine recall -> FundDesk -> buy: the whole funded chain waits", async () => {
+    const { chain, runner, hedger, mandate } = setup();
+    chain.usdc = 0n;
+    chain.vaultIdle = 0n;
+    chain.recall = { recallableUsd: usd(90_000), inFlightUsd: 0n, sync: true };
+    chain.flowOpen = false;
+    expect((await hedger.cycle(short(mandate))).reason).toBe("MARK_PENDING");
+    expect(runner.actions.length).toBe(0);
+  });
+
+  test("Retiring: Flatten still runs, ReturnToVault waits for the mark", async () => {
+    const { chain, runner, hedger, mandate } = setup();
+    chain.balance = qtyForUsd(usd(5_000), wad(190), wad(1), 18);
+    chain.hedge = usd(5_000);
+    chain.usdc = usd(700);
+    chain.flowOpen = false;
+    const plan = await hedger.cycle({ mandate, mode: "flatten", offHours: false, netExposureUsd: -usd(1_000), allowAddHedge: true });
+    expect(plan.legs.map((l) => l.kind)).toEqual(["flatten"]);
+    expect(runner.actions.map((a) => a.kind)).toEqual([DESK_ACTION.Flatten]);
+  });
+
+  test("a buy paid from desk USDC needs no capital flow: not gated (gate not even read)", async () => {
+    const { chain, runner, hedger, mandate } = setup();
+    chain.flowOpen = false; // desk already holds 100k USDC
+    expect((await hedger.cycle(short(mandate))).action).toBe("buy");
+    expect(runner.actions.map((a) => a.kind)).toEqual([DESK_ACTION.Hedge]);
+    expect(chain.flowReads).toBe(0);
+  });
+
+  test("an unreadable gate holds the capital legs (fail closed)", async () => {
+    const { chain, runner, hedger, mandate } = setup();
+    chain.usdc = usd(10_000);
+    chain.flowOpen = new Error("rpc down");
+    expect((await hedger.cycle(short(mandate))).reason).toBe("MARK_PENDING");
+    expect(runner.actions.length).toBe(0);
   });
 });

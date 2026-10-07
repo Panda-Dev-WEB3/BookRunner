@@ -248,6 +248,7 @@ async function runOnce(
           getToken: (t) => ctx.chain.getToken(t),
           vaultDeployable: () => ctx.chain.vaultDeployable(),
           mmRecall: () => ctx.chain.mmRecall(),
+          capitalFlowOpen: () => ctx.chain.capitalFlowOpen(),
           oracleLatest: freshestOracleLatest(pullPrices, (id) => ctx.chain.oracleLatest(id), env.AGENT_PRICE_DATA_MAX_AGE_SECONDS),
         }
       : ctx.chain;

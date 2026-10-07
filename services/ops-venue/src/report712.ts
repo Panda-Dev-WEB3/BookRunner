@@ -13,7 +13,7 @@
 //
 // On-chain acceptance (same rules as OrderlyAdapter.report): signer holds OPS_VENUE; no withdrawal is
 // Requested (pendingWithdrawUsd == 0); asOf <= block.timestamp; asOf > lastReportAsOf (valuationAt);
-// asOf >= lastFlowAt; values within 128-bit ranges.
+// asOf > lastFlowAt (strictly: a same-second snapshot may predate the flow); values within 128-bit ranges.
 import {
   type Address,
   type Hex,
@@ -257,7 +257,7 @@ export function reportConsistent(r: SignedVenueReport, o: { adapter: Address; ch
   if (r.adapter.toLowerCase() !== o.adapter.toLowerCase()) return "report signed for another adapter";
   if (r.chainId !== o.chainId) return `report signed for chain ${r.chainId}`;
   if (r.asOf > o.snapshotTs) return `report asOf ${r.asOf} is after the snapshot block (${o.snapshotTs})`;
-  if (r.asOf < o.state.lastFlowAt) return `report asOf ${r.asOf} predates the last venue flow (${o.state.lastFlowAt})`;
+  if (r.asOf <= o.state.lastFlowAt) return `report asOf ${r.asOf} predates the last venue flow (${o.state.lastFlowAt}) or shares its second`;
   return null;
 }
 
@@ -266,7 +266,7 @@ export function reportIncludable(r: VenueReportValues, state: AdapterReportState
   if (state.pendingWithdrawUsd > 0n) return `withdrawal pending (${state.pendingWithdrawUsd})`;
   if (r.asOf > nowTs) return `asOf ${r.asOf} in the future (${nowTs})`;
   if (r.asOf <= state.valuationAt) return `not newer than the adapter's report (${state.valuationAt})`;
-  if (r.asOf < state.lastFlowAt) return `predates the last venue flow (${state.lastFlowAt})`;
+  if (r.asOf <= state.lastFlowAt) return `predates the last venue flow (${state.lastFlowAt}) or shares its second`;
   if (!reportInRange(r)) return "values out of range";
   return null;
 }
