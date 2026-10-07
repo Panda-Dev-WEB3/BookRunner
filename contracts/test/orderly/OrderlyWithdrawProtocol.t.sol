@@ -226,6 +226,7 @@ contract OrderlyWithdrawProtocolTest is OrderlyFixture {
             )
         );
         adapter.report(25_000e6, 68_000e6, 0, snapshotWhilePending);
+        vm.warp(block.timestamp + 1); // strictly after the cancellation
         _report(25_000e6, 68_000e6, 0);
         assertEq(adapter.deployedValueUsd(), 100_000e6);
     }

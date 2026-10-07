@@ -321,8 +321,9 @@ always allowed to an active key, the RISK role, KEEPER and the book.
 `checkQuote`: spread ≥ minQuoteWidthBps, |skew| ≤ maxSkewBps, maxNetExposure ≤ maxInventoryUsd.
 
 Keys: `registerKey` (sponsor) requires `inventoryTierUsd >= mandate.maxInventoryUsd` and locks
-`config.agentTierBond(inventoryTierUsd)` from `operator` (lockId = keccak(bookId, key)); revocation
-unlocks. `revokeKey` takes effect immediately (validation re-checks `isActiveKey` at both
+`config.agentTierBond(inventoryTierUsd)` from `operator` (lockId = keccak(bookId, key)) on
+`config.staking()`, recorded as `bondStaking[key]`; revocation unlocks on that recorded staking (a
+timelock repoint of `config.staking()` never strands a bond). `revokeKey` takes effect immediately (validation re-checks `isActiveKey` at both
 `validateUserOp` and `execute` → key-revocation race is closed). `kill(reason)` (RISK or book):
 `killed = true`, revoke all keys, set adapter reduce-only (engine), `book.onKill(reason)`.
 `remandate` (committee) replaces terms and clears kill (keys must be re-registered).
@@ -341,9 +342,19 @@ reduce-only kinds (`Flatten`, `InventoryToVault`, `ReturnToVault`). Action data 
 | SetQuote | `abi.encode(uint16 spreadBps, int16 skewBps, uint128 maxNetExposureUsd)` (engine books) |
 | Flatten | `abi.encode(address token, uint256 amountIn, uint256 minAmountOut, uint24 poolFee, bytes32 venue)` — sells token → USDC |
 
+Mark window: the capital-flow kinds (`InventoryToVenue`, `InventoryToVault`, `FundDesk`,
+`ReturnToVault`) bump `book.flowNonce`, so a key's are refused (`MarkPending`) while a mark is pending —
+book Live/Retiring and `max(lastMarkPeriodEnd, subscriptionEnds-if-unmarked) < block.timestamp rounded
+down to markInterval` (the OrderlyAdapter sweep-gate rule; view `capitalFlowOpen()`). RISK is exempt.
+A partial `ReturnToVault` must move >= 1 USDC (`MIN_RETURN_USD`); the whole balance always may.
+
 `validateUserOp`: `ECDSA.recover(MessageHashUtils.toEthSignedMessageHash(userOpHash), sig)` must be
-an active key and `bytes4(callData) == execute.selector`; pays `missingAccountFunds` to the
-EntryPoint. Hedge notional = sum over held canonical tokens of `registry.valueUsd(token, balance)`.
+an active key and `bytes4(callData) == execute.selector`. Gas policy (desk storage only, ERC-7562):
+`(verificationGasLimit + callGasLimit + preVerificationGas) * maxFeePerGas <= maxOpCostWei` (default
+0.01 ETH, else revert `OpCostTooHigh`); `missingAccountFunds` is drawn from `prefundBudgetWei`
+(default 0, timelock `setGasPolicy`, else revert `PrefundBudgetExceeded`) and paid to the EntryPoint.
+Timelock `withdrawDepositTo(to, amount)` recovers the EntryPoint deposit. Hedge notional = sum over
+held canonical tokens of `registry.valueUsd(token, balance)`.
 
 **HedgeExecutor**: `swapExactIn` for venue `UNIV3` via `ISwapRouter02.exactInputSingle`; `UNIV4`
 reverts `NotConfigured` until a v4 router is set (VERIFY). Router per venue settable by timelock.
@@ -412,7 +423,7 @@ are oracle keys published by the oracle service as the weighted index level.
   (never swept as unattributed nor forwarded as fees); `report` reverts `WithdrawalPending` while any
   request is Requested; ops-venue confirms as soon as the venue has debited the account (before the
   payout), cancels requests the venue will not execute, and reports raw venue equity (net of executed
-  withdrawals) only once the venue has credited every on-chain deposit (`asOf >= lastFlowAt`, which
+  withdrawals) only once the venue has credited every on-chain deposit (`asOf > lastFlowAt`, which
   deposit/confirm/cancel/fail set). Only principal sweeps notify the vault (`flowNonce++`).
   `sweepFees` labels are monotonic and at most `FEE_SWEEP_LOOKBACK_PERIODS` (2) intervals old; the
   earmark must precede the fee payment to the adapter.

@@ -132,6 +132,9 @@ describe("report acceptance preview (mirrors OrderlyAdapter.reportSigned / repor
     expect(reportIncludable(R, { ...ok, pendingWithdrawUsd: 1n }, R.asOf + 10n)).toMatch(/withdrawal pending/);
     expect(reportIncludable(R, { ...ok, valuationAt: R.asOf }, R.asOf + 10n)).toMatch(/not newer/); // replay of the stored report
     expect(reportIncludable(R, { ...ok, lastFlowAt: R.asOf + 1n }, R.asOf + 10n)).toMatch(/predates the last venue flow/);
+    // A3-03: a snapshot from the flow's own second may predate it (the adapter reverts asOf <= lastFlowAt)
+    expect(reportIncludable(R, { ...ok, lastFlowAt: R.asOf }, R.asOf + 10n)).toMatch(/shares its second/);
+    expect(reportIncludable(R, { ...ok, lastFlowAt: R.asOf - 1n }, R.asOf + 10n)).toBeNull();
     expect(reportIncludable(R, ok, R.asOf - 1n)).toMatch(/future/);
   });
 
@@ -143,6 +146,7 @@ describe("report acceptance preview (mirrors OrderlyAdapter.reportSigned / repor
     expect(reportConsistent(s, { ...o, chainId: 1 })).toMatch(/chain 31337/);
     expect(reportConsistent(s, { ...o, snapshotTs: R.asOf - 1n })).toMatch(/after the snapshot/);
     expect(reportConsistent(s, { ...o, state: { lastFlowAt: R.asOf + 1n } })).toMatch(/predates/);
+    expect(reportConsistent(s, { ...o, state: { lastFlowAt: R.asOf } })).toMatch(/shares its second/);
   });
 
   test("deployed value = insurance + max(margin, 0) + in-transit; newest passing candidate wins", () => {

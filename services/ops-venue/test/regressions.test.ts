@@ -155,6 +155,21 @@ describe("report-overwrites-inflight-flows", () => {
     expect(t.chain.count("report")).toBe(0);
   });
 
+  test("no report from the flow's own second, even with no settle window (A3-03: asOf must be > lastFlowAt)", async () => {
+    const t = await setupReporting();
+    t.ctx.settings.reportSettleSec = 0;
+    t.chain.adapter(ADAPTER).lastFlowAt = t.chain.headTs;
+    expect(await t.svc.reporter.holdReason(t.book(), t.chain.headTs)).toMatch(/not strictly after/);
+    await t.svc.reporter.report(t.book());
+    expect(t.chain.count("report")).toBe(0);
+    // the wall clock lagging the head cannot produce an asOf at the flow second either
+    t.tick(1);
+    expect(await t.svc.reporter.holdReason(t.book(), t.chain.headTs, t.chain.headTs - 1n)).toMatch(/not strictly after/);
+    expect(await t.svc.reporter.holdReason(t.book(), t.chain.headTs)).toBeNull();
+    await t.svc.reporter.report(t.book());
+    expect(t.chain.count("report")).toBe(1);
+  });
+
   test("report is serialised with the book's saga lock", async () => {
     const t = await setupReporting();
     let release!: () => void;

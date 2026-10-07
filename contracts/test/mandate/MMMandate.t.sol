@@ -8,7 +8,7 @@ import {BRTypes} from "../../src/interfaces/BRTypes.sol";
 import {IMMMandate} from "../../src/interfaces/IMMMandate.sol";
 import {MMMandate} from "../../src/MMMandate.sol";
 import {MandateBase} from "./utils/MandateBase.sol";
-import {MandateMockBook} from "./utils/MandateMocks.sol";
+import {MandateMockBook, MandateMockStaking} from "./utils/MandateMocks.sol";
 
 contract MMMandateTest is MandateBase {
     event KeyRegistered(
@@ -379,6 +379,35 @@ contract MMMandateTest is MandateBase {
         // an active key's bond cannot be released
         vm.expectRevert(abi.encodeWithSelector(MMMandate.NoBond.selector, key));
         mandate.releaseBond(key);
+    }
+
+    /// @dev A5-04: the bond is released on the staking that holds the lock, even after config.staking()
+    ///      was repointed, on both the revoke path and the releaseBond retry path.
+    function test_bondReleasedOnLockingStakingAfterRepoint() public {
+        bytes32 lockId = mandate.keyLockId(key);
+        assertEq(mandate.bondStaking(key), address(staking));
+        MandateMockStaking staking2 = new MandateMockStaking();
+        staking2.setLocker(address(mandate), true);
+        cfg.setStaking(address(staking2));
+
+        staking.setFailUnlock(true);
+        vm.prank(sponsor);
+        mandate.revokeKey(key, "X");
+        assertEq(mandate.bondOf(key), BOND);
+        staking.setFailUnlock(false);
+        vm.prank(stranger);
+        mandate.releaseBond(key);
+        assertEq(mandate.bondOf(key), 0);
+        assertEq(staking.lockOf(operator, lockId), 0);
+
+        // a key registered after the repoint is pinned to the new staking
+        staking2.setAvailable(operator, 1_000_000e18);
+        vm.prank(operator);
+        mandate.consentKey(key, true);
+        vm.prank(sponsor);
+        mandate.registerKey(key, operator, uint64(block.timestamp + 1 days), MAX_INV);
+        assertEq(mandate.bondStaking(key), address(staking2));
+        assertEq(staking2.lockOf(operator, lockId), BOND);
     }
 
     function test_isActiveKey_expiryAndActiveKeysFilter() public {

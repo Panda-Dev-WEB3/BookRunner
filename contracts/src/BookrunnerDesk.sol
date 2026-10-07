@@ -10,7 +10,7 @@ import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
-import {PackedUserOperation} from "@openzeppelin/contracts/interfaces/IERC4337.sol";
+import {PackedUserOperation, IEntryPointStake} from "@openzeppelin/contracts/interfaces/IERC4337.sol";
 
 import {BRTypes} from "./interfaces/BRTypes.sol";
 import {IBookrunnerDesk} from "./interfaces/IBookrunnerDesk.sol";
@@ -59,6 +59,17 @@ interface IDeskReturnVault {
 ///         per mark period is capped at `periodSlippageBudgetBps` of maxInventoryUsd (no bleeding the book
 ///         by churning in-band). RISK Flatten is bounded by `riskMaxSlippageBps` whenever the price is
 ///         fresh, and is never blocked by a stale price.
+///
+///         Mark window (A3-02 / A7-01): key-initiated capital flows (InventoryToVenue, InventoryToVault,
+///         FundDesk, ReturnToVault) bump the book's flowNonce, which voids a mark signed against the
+///         previous nonce. They are refused while a mark is pending ({capitalFlowOpen}: a Live / Retiring
+///         book whose latest ended mark period has no applied mark, the OrderlyAdapter sweep-gate rule);
+///         RISK is exempt. A partial ReturnToVault must move at least MIN_RETURN_USD.
+///
+///         Gas (A3-01): a userOp's maximum cost ((verificationGasLimit + callGasLimit + preVerificationGas)
+///         * maxFeePerGas) is capped by `maxOpCostWei`, and the ETH the desk itself pays the EntryPoint
+///         (missingAccountFunds) is drawn from a timelock-replenished `prefundBudgetWei` (desk storage
+///         only, no clock: ERC-7562). The EntryPoint deposit is recoverable with {withdrawDepositTo}.
 contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
     using EnumerableSet for EnumerableSet.AddressSet;
@@ -84,6 +95,10 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
     uint16 public constant DEFAULT_PERIOD_SLIPPAGE_BUDGET_BPS = 200;
     bytes32 public constant VENUE_UNIV3 = "UNIV3";
     bytes32 public constant VENUE_UNIV4 = "UNIV4";
+    /// @notice Default cap on a userOp's maximum gas cost (wei).
+    uint256 public constant DEFAULT_MAX_OP_COST_WEI = 0.01 ether;
+    /// @notice A ReturnToVault below this (USDC 6dp) must return the desk's whole USDC balance.
+    uint256 public constant MIN_RETURN_USD = 1e6;
 
     // ------------------------------------------------------------------ storage
 
@@ -109,6 +124,10 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
     uint16 public periodSlippageBudgetBps;
     /// @notice Key swaps' cumulative loss vs the oracle value (USD 6dp) per period (timestamp / markInterval).
     mapping(uint256 period => uint256 lossUsd) public slippageUsedUsd;
+    /// @notice Max (verificationGasLimit + callGasLimit + preVerificationGas) * maxFeePerGas of a userOp.
+    uint256 public maxOpCostWei;
+    /// @notice Remaining ETH the desk may pay the EntryPoint as missingAccountFunds (timelock-replenished).
+    uint256 public prefundBudgetWei;
 
     struct HedgeOrder {
         address token;
@@ -140,6 +159,10 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
     error SlippageBudgetExceeded(uint256 usedUsd, uint256 budgetUsd);
     error BadSlippage(uint16 bps);
     error NativeTransferFailed();
+    error MarkPending(uint64 periodStart, uint64 lastMarkPeriodEnd);
+    error ReturnBelowMin(uint256 amount, uint256 minAmount);
+    error OpCostTooHigh(uint256 maxCostWei, uint256 capWei);
+    error PrefundBudgetExceeded(uint256 missingWei, uint256 budgetWei);
 
     event SessionKeySynced(address indexed key, uint64 validUntil);
     event EntryPointSynced(address indexed entryPoint);
@@ -148,6 +171,9 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
     event HeldTokenAdded(address indexed token);
     event HeldTokenRemoved(address indexed token);
     event NativeWithdrawn(address indexed to, uint256 amount);
+    event GasPolicySet(uint256 maxOpCostWei, uint256 prefundBudgetWei);
+    event PrefundPaid(uint256 amount, uint256 budgetLeft);
+    event DepositWithdrawn(address indexed to, uint256 amount);
 
     // ------------------------------------------------------------------ init
 
@@ -181,11 +207,13 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
         maxSlippageBps = DEFAULT_MAX_SLIPPAGE_BPS;
         riskMaxSlippageBps = DEFAULT_RISK_MAX_SLIPPAGE_BPS;
         periodSlippageBudgetBps = DEFAULT_PERIOD_SLIPPAGE_BUDGET_BPS;
+        maxOpCostWei = DEFAULT_MAX_OP_COST_WEI;
         address ep = cfg.entryPoint();
         entryPoint = ep;
         emit EntryPointSynced(ep);
         emit MaxSlippageSet(DEFAULT_MAX_SLIPPAGE_BPS);
         emit RiskSlippageParamsSet(DEFAULT_RISK_MAX_SLIPPAGE_BPS, DEFAULT_PERIOD_SLIPPAGE_BUDGET_BPS);
+        emit GasPolicySet(DEFAULT_MAX_OP_COST_WEI, 0);
     }
 
     receive() external payable {}
@@ -196,8 +224,10 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
     /// @dev Only the cached EntryPoint. Returns SIG_VALIDATION_FAILED (1) when callData is neither
     ///      `execute(Action)` nor `executeWithPrices(Action,bytes)` or the signature (ECDSA over
     ///      toEthSignedMessageHash(userOpHash)) is not by a key the mandate mirrored as active; on success
-    ///      returns the key's validUntil packed per ERC-4337 (sigFailed = 0). Pays `missingAccountFunds` to
-    ///      the EntryPoint.
+    ///      returns the key's validUntil packed per ERC-4337 (sigFailed = 0). Reverts OpCostTooHigh when
+    ///      the op's maximum gas cost exceeds `maxOpCostWei` (the EntryPoint deposit is desk ETH too), and
+    ///      PrefundBudgetExceeded when `missingAccountFunds` exceeds `prefundBudgetWei`; otherwise pays it
+    ///      to the EntryPoint and draws it from the budget (desk storage only: ERC-7562).
     function validateUserOp(
         PackedUserOperation calldata userOp,
         bytes32 userOpHash,
@@ -205,8 +235,18 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
     ) external override returns (uint256 validationData) {
         address ep = entryPoint;
         if (msg.sender != ep || ep == address(0)) revert NotEntryPoint(msg.sender);
+        // EntryPoint v0.7 requiredPrefund without paymaster: the most this op can cost the desk
+        uint256 gasLimits = uint256(userOp.accountGasLimits);
+        uint256 maxCost = ((gasLimits >> 128) + uint128(gasLimits) + userOp.preVerificationGas)
+            * uint128(uint256(userOp.gasFees));
+        uint256 cap = maxOpCostWei;
+        if (maxCost > cap) revert OpCostTooHigh(maxCost, cap);
         validationData = _validateSignature(userOp, userOpHash);
         if (missingAccountFunds != 0) {
+            uint256 budget = prefundBudgetWei;
+            if (missingAccountFunds > budget) revert PrefundBudgetExceeded(missingAccountFunds, budget);
+            prefundBudgetWei = budget - missingAccountFunds;
+            emit PrefundPaid(missingAccountFunds, budget - missingAccountFunds);
             // Failure is the EntryPoint's to detect (it checks the prefund); standard account behaviour.
             (bool ok,) = payable(msg.sender).call{value: missingAccountFunds}("");
             ok;
@@ -270,6 +310,13 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
 
     function _execute(address key, bool viaRisk, Action calldata action) internal returns (bytes memory result) {
         ActionKind kind = action.kind;
+        if (
+            !viaRisk
+                && (kind == ActionKind.InventoryToVenue
+                    || kind == ActionKind.InventoryToVault
+                    || kind == ActionKind.FundDesk
+                    || kind == ActionKind.ReturnToVault)
+        ) _requireNoPendingMark();
         if (kind == ActionKind.Hedge) {
             result = _hedge(key, action.data, action.proof);
         } else if (kind == ActionKind.InventoryToVenue) {
@@ -413,6 +460,7 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
         IERC20 u = IERC20(usdc);
         uint256 bal = u.balanceOf(address(this));
         if (amount > bal) revert InsufficientBalance(amount, bal);
+        if (amount < MIN_RETURN_USD && amount != bal) revert ReturnBelowMin(amount, MIN_RETURN_USD);
         u.safeTransfer(vault, amount);
         IDeskReturnVault(vault).notifyDeskReturn(amount);
     }
@@ -446,6 +494,23 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
         emit RiskSlippageParamsSet(riskBps, periodBudgetBps);
     }
 
+    /// @notice Timelock: userOp gas policy — per-op max cost cap and the remaining prefund budget (wei).
+    function setGasPolicy(uint256 maxOpCostWei_, uint256 prefundBudgetWei_) external {
+        if (msg.sender != config.timelock()) revert Unauthorized(msg.sender);
+        maxOpCostWei = maxOpCostWei_;
+        prefundBudgetWei = prefundBudgetWei_;
+        emit GasPolicySet(maxOpCostWei_, prefundBudgetWei_);
+    }
+
+    /// @notice Timelock: withdraw the desk's deposit from the cached EntryPoint.
+    function withdrawDepositTo(address payable to, uint256 amount) external nonReentrant {
+        if (msg.sender != config.timelock()) revert Unauthorized(msg.sender);
+        address ep = entryPoint;
+        if (to == address(0) || ep == address(0)) revert ZeroAddress();
+        IEntryPointStake(ep).withdrawTo(to, amount);
+        emit DepositWithdrawn(to, amount);
+    }
+
     /// @notice Timelock: recover native gas balance held by the account.
     function withdrawNative(address payable to, uint256 amount) external nonReentrant {
         if (msg.sender != config.timelock()) revert Unauthorized(msg.sender);
@@ -456,6 +521,15 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
     }
 
     // ------------------------------------------------------------------ views
+
+    /// @notice False while a mark is pending: the book is Live / Retiring and its latest ended mark period
+    ///         (block.timestamp rounded down to config.markInterval()) has no applied mark. Before the first
+    ///         mark the reference is `subscriptionEnds` (no mark is due before the first period end after
+    ///         go-live). Key capital flows (InventoryToVenue / InventoryToVault / FundDesk / ReturnToVault)
+    ///         revert MarkPending while it is false.
+    function capitalFlowOpen() external view returns (bool open) {
+        (open,,) = _flowGate();
+    }
 
     /// @inheritdoc IBookrunnerDesk
     /// @dev Sum over held canonical tokens of registry.valueUsd(token, balance); reverts on a stale price.
@@ -546,6 +620,23 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
 
     function _registry() internal view returns (IStockTokenRegistry) {
         return IStockTokenRegistry(config.stockRegistry());
+    }
+
+    function _flowGate() internal view returns (bool open, uint64 periodStart, uint64 lastEnd) {
+        IBook b = IBook(book);
+        BRTypes.BookState st = b.state();
+        if (st != BRTypes.BookState.Live && st != BRTypes.BookState.Retiring) return (true, 0, 0);
+        uint256 interval = config.markInterval();
+        if (interval == 0) return (true, 0, 0);
+        periodStart = uint64(block.timestamp - (block.timestamp % interval));
+        lastEnd = b.lastMarkPeriodEnd();
+        uint64 ref = lastEnd == 0 ? b.subscriptionEnds() : lastEnd;
+        open = ref >= periodStart;
+    }
+
+    function _requireNoPendingMark() internal view {
+        (bool open, uint64 periodStart, uint64 lastEnd) = _flowGate();
+        if (!open) revert MarkPending(periodStart, lastEnd);
     }
 
     function _signerSlot(bytes32 callDataHash) internal pure returns (TransientSlot.AddressSlot) {

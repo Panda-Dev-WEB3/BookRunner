@@ -4,6 +4,8 @@
 // re-plans from chain state. The direction + time of the last executed trade feed the planner's
 // reversal hold (seeded from the hedges table at startup, so a restart does not reset it). On
 // shutdown (ctx.signal aborted) no new leg starts; the leg in flight finishes its receipt + record.
+// Capital-flow legs (recall / FundDesk / ReturnToVault) are skipped while a mark is pending (the desk
+// reverts MarkPending: they would void the period's mark) and retried on a later cycle.
 
 import { ACCOUNT, HEDGE_VENUES, type Logger, type Mandate, bytes32ToStr } from "@bookrunner/shared";
 import { bookrunnerDeskAbi } from "@bookrunner/shared/abi";
@@ -24,6 +26,7 @@ import {
   reversalHoldRemainingMs,
 } from "../domain/hedge-planner";
 import type { HedgeUniverse } from "../domain/hedge-universe";
+import { gateCapitalLegs, isCapitalLeg } from "../domain/mark-window";
 import { hedgeReceipt } from "../domain/receipts";
 import { errMsg } from "../util";
 
@@ -38,6 +41,11 @@ export interface HedgeChain {
   vaultDeployable(): Promise<bigint>;
   /** MM recall capacity for hedge funding (null/absent: never recall). */
   mmRecall?(): Promise<MmRecallInfo | null>;
+  /**
+   * Desk mark-window gate (BookrunnerDesk.capitalFlowOpen rule): false while a mark is pending, when
+   * capital-flow legs must not be sent. Absent: always open. A failed read counts as closed.
+   */
+  capitalFlowOpen?(): Promise<boolean>;
 }
 
 /** Offsetting perp legs on an allow-listed venue (feature flag HEDGE_PERP_ENABLED). */
@@ -100,6 +108,7 @@ export class Hedger implements HedgeCycleRunner {
   private lastReason = "";
   private warnedAllowList = false;
   private warnedValuation = false;
+  private markPendingLogged = false;
   private lastTrade: LastHedgeTrade | null = null;
   private seeded = false;
   private readonly now: () => number;
@@ -227,6 +236,32 @@ export class Hedger implements HedgeCycleRunner {
       }
       return { ...plan, action: "none", reason: "ALLOW_LIST_MISMATCH", legs: [] };
     }
+    const gated = await this.gateMarkWindow(plan, summary);
+    if (gated.action === "none") return gated;
+    return this.run(gated, comps, ctx, { ...summary, legs: gated.legs.map((l) => l.kind) });
+  }
+
+  /** Drop capital-flow legs while a mark is pending (logged once per pending window). */
+  private async gateMarkWindow(plan: HedgePlan, summary: Record<string, unknown>): Promise<HedgePlan> {
+    if (!this.d.chain.capitalFlowOpen || !plan.legs.some(isCapitalLeg)) return plan;
+    const open = await this.d.chain.capitalFlowOpen().catch((err) => {
+      this.d.log.warn({ err: errMsg(err) }, "hedge: mark-window state unavailable; capital-flow legs held this cycle");
+      return false;
+    });
+    if (open) {
+      this.markPendingLogged = false;
+      return plan;
+    }
+    const { plan: gated, skipped } = gateCapitalLegs(plan, false);
+    if (!this.markPendingLogged) {
+      this.d.log.info({ ...summary, skipped, kept: gated.legs.map((l) => l.kind) }, "hedge: mark pending; capital-flow legs deferred until it lands");
+      this.markPendingLogged = true;
+    }
+    this.lastReason = gated.reason;
+    return gated;
+  }
+
+  private async run(plan: HedgePlan, comps: HedgeComponent[], ctx: HedgeCycleContext, summary: Record<string, unknown>): Promise<HedgePlan> {
     if (ctx.signal?.aborted) {
       this.d.log.info(summary, "hedge: shutting down; plan not started");
       return { ...plan, action: "none", reason: "SHUTDOWN", legs: [] };

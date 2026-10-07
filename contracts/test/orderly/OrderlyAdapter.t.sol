@@ -705,7 +705,16 @@ contract OrderlyAdapterReportTest is OrderlyFixture {
             )
         );
         adapter.report(0, 0, 0, uint64(block.timestamp - 1));
-        _report(0, 1000e6, 0); // same-timestamp snapshot is accepted
+        // a same-second snapshot may predate the flow (A3-03): rejected too
+        vm.prank(ops);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OrderlyAdapter.ReportPredatesFlow.selector, uint64(block.timestamp), uint64(block.timestamp)
+            )
+        );
+        adapter.report(0, 0, 0, uint64(block.timestamp));
+        vm.warp(block.timestamp + 1);
+        _report(0, 1000e6, 0); // strictly after the flow is accepted
     }
 
     function test_report_boundsValues() public {

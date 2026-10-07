@@ -8,7 +8,7 @@ import { type HedgeChain, Hedger } from "../src/agent/hedger";
 import { PriceFeed } from "../src/agent/price-feed";
 import type { OraclePoint, StockTokenInfo } from "../src/chain/book-chain";
 import type { DeskRunner } from "../src/chain/desk-client";
-import { freshestVenueView } from "../src/chain/venue-report-relay";
+import { freshestVenueView, relaySkipReason } from "../src/chain/venue-report-relay";
 import { loadAgentEnv, loadSimEnv } from "../src/config";
 import { valueUsdOf } from "../src/domain/hedge-planner";
 import { buildHedgeUniverse, defaultAllowPairs } from "../src/domain/hedge-universe";
@@ -172,6 +172,12 @@ describe("Orderly books: signed venue report between marks (regression: NVDA HED
   test("fall back to the on-chain view when the report is not newer or missing", () => {
     expect(freshestVenueView({ asOf: 400n, netExposureUsd: -usd(1) }, 400n, -usd(4_661))).toEqual({ exposureUsd: -usd(4_661), valuationAt: 400 });
     expect(freshestVenueView(null, 400n, -usd(4_661))).toEqual({ exposureUsd: -usd(4_661), valuationAt: 400 });
+  });
+  test("relay only reports the adapter accepts: strictly newer AND strictly after the last flow (A3-03)", () => {
+    expect(relaySkipReason({ asOf: 1_000n }, 900n, 950n)).toBeNull();
+    expect(relaySkipReason({ asOf: 1_000n }, 1_000n, 0n)).toBe("not_newer");
+    expect(relaySkipReason({ asOf: 1_000n }, 900n, 1_000n)).toBe("predates_flow"); // same second as the flow
+    expect(relaySkipReason({ asOf: 1_000n }, 900n, 1_001n)).toBe("predates_flow");
   });
 
   const DESK = "0x00000000000000000000000000000000000000d1" as Address;

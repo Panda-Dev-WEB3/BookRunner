@@ -5,7 +5,9 @@
 //  - execution: MMMandate band-checks every hedge leg against the on-chain exposure (and a hedge-adding
 //    leg also needs valuationAt within 4 x maxPriceAge), so the agent relays the latest signed report
 //    with OrderlyAdapter.reportSigned right before each hedge leg. The relay is a no-op when the chain is
-//    already as fresh, and best-effort: a failed relay never blocks the leg (the mandate then refuses it).
+//    already as fresh or the report does not postdate the adapter's last flow (the adapter rejects
+//    asOf <= lastFlowAt: a same-second snapshot may predate the flow), and best-effort: a failed relay never
+//    blocks the leg (the mandate then refuses it).
 import { orderlyAdapterAbi } from "@bookrunner/shared/abi";
 import type { Logger } from "@bookrunner/shared";
 import { Redis } from "ioredis";
@@ -34,7 +36,7 @@ export interface VenueReportRelay {
 export function makeVenueReportRelay(d: VenueReportRelayDeps): VenueReportRelay {
   const redis = new Redis(d.redisUrl, { lazyConnect: true, maxRetriesPerRequest: 2 });
   redis.on("error", () => {});
-  const read = <T>(functionName: "valuationAt" | "netExposureUsd") =>
+  const read = <T>(functionName: "valuationAt" | "netExposureUsd" | "lastFlowAt") =>
     d.pub.readContract({ address: d.adapter, abi: orderlyAdapterAbi, functionName }) as Promise<T>;
 
   const latest = async (): Promise<SignedVenueReport | null> => {
@@ -59,7 +61,14 @@ export function makeVenueReportRelay(d: VenueReportRelayDeps): VenueReportRelay 
       try {
         const r = await latest();
         if (!r) return;
-        if (r.asOf <= (await read<bigint>("valuationAt"))) return; // already as fresh on-chain
+        const [valuationAt, lastFlowAt] = await Promise.all([read<bigint>("valuationAt"), read<bigint>("lastFlowAt")]);
+        const skip = relaySkipReason(r, valuationAt, lastFlowAt);
+        if (skip === "not_newer") return; // already as fresh on-chain
+        if (skip === "predates_flow") {
+          // expected right after a capital flow (recall / fund / confirm): wait for ops-venue's next signed report
+          d.log.info({ asOf: Number(r.asOf), lastFlowAt: Number(lastFlowAt) }, "venue report does not postdate the last capital flow: waiting for the next signed report");
+          return;
+        }
         const hash = await d.wallet.writeContract({
           address: d.adapter,
           abi: orderlyAdapterAbi,
@@ -76,6 +85,16 @@ export function makeVenueReportRelay(d: VenueReportRelayDeps): VenueReportRelay 
       }
     },
   };
+}
+
+/**
+ * Why the signed report would not be accepted by OrderlyAdapter.reportSigned (ordering rules only):
+ * not strictly newer than the stored report, or not strictly after the last on-chain flow. null = relay it.
+ */
+export function relaySkipReason(r: Pick<SignedVenueReport, "asOf">, valuationAt: bigint, lastFlowAt: bigint): "not_newer" | "predates_flow" | null {
+  if (r.asOf <= valuationAt) return "not_newer";
+  if (r.asOf <= lastFlowAt) return "predates_flow";
+  return null;
 }
 
 /** The signed report when it is strictly newer than the on-chain valuation, else the on-chain view. */

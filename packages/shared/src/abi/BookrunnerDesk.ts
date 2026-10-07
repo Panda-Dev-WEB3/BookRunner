@@ -11,6 +11,19 @@ export const bookrunnerDeskAbi = [
   },
   {
     "type": "function",
+    "name": "DEFAULT_MAX_OP_COST_WEI",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "DEFAULT_MAX_SLIPPAGE_BPS",
     "inputs": [],
     "outputs": [
@@ -70,6 +83,19 @@ export const bookrunnerDeskAbi = [
         "name": "",
         "type": "uint16",
         "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MIN_RETURN_USD",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -148,6 +174,19 @@ export const bookrunnerDeskAbi = [
         "name": "",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "capitalFlowOpen",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "open",
+        "type": "bool",
+        "internalType": "bool"
       }
     ],
     "stateMutability": "view"
@@ -319,6 +358,19 @@ export const bookrunnerDeskAbi = [
   },
   {
     "type": "function",
+    "name": "maxOpCostWei",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "maxSlippageBps",
     "inputs": [],
     "outputs": [
@@ -339,6 +391,19 @@ export const bookrunnerDeskAbi = [
         "name": "",
         "type": "uint16",
         "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "prefundBudgetWei",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -374,6 +439,24 @@ export const bookrunnerDeskAbi = [
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "setGasPolicy",
+    "inputs": [
+      {
+        "name": "maxOpCostWei_",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "prefundBudgetWei_",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -580,6 +663,24 @@ export const bookrunnerDeskAbi = [
   },
   {
     "type": "function",
+    "name": "withdrawDepositTo",
+    "inputs": [
+      {
+        "name": "to",
+        "type": "address",
+        "internalType": "address payable"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "withdrawNative",
     "inputs": [
       {
@@ -623,6 +724,25 @@ export const bookrunnerDeskAbi = [
   },
   {
     "type": "event",
+    "name": "DepositWithdrawn",
+    "inputs": [
+      {
+        "name": "to",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "EntryPointSynced",
     "inputs": [
       {
@@ -630,6 +750,25 @@ export const bookrunnerDeskAbi = [
         "type": "address",
         "indexed": true,
         "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "GasPolicySet",
+    "inputs": [
+      {
+        "name": "maxOpCostWei",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "prefundBudgetWei",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
       }
     ],
     "anonymous": false
@@ -735,6 +874,25 @@ export const bookrunnerDeskAbi = [
       },
       {
         "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PrefundPaid",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "budgetLeft",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
@@ -862,6 +1020,22 @@ export const bookrunnerDeskAbi = [
   },
   {
     "type": "error",
+    "name": "MarkPending",
+    "inputs": [
+      {
+        "name": "periodStart",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "lastMarkPeriodEnd",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "NativeTransferFailed",
     "inputs": []
   },
@@ -932,8 +1106,56 @@ export const bookrunnerDeskAbi = [
   },
   {
     "type": "error",
+    "name": "OpCostTooHigh",
+    "inputs": [
+      {
+        "name": "maxCostWei",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "capWei",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "PrefundBudgetExceeded",
+    "inputs": [
+      {
+        "name": "missingWei",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "budgetWei",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "ReentrancyGuardReentrantCall",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ReturnBelowMin",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "minAmount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
   },
   {
     "type": "error",

@@ -17,6 +17,21 @@ import {MandateBase} from "./utils/MandateBase.sol";
 import {MandateMockBook, MandateMockEntryPoint} from "./utils/MandateMocks.sol";
 import {StandardMerkle} from "./utils/StandardMerkle.sol";
 
+/// @dev EntryPoint deposit stand-in for withdrawDepositTo.
+contract DeskMockDepositEntryPoint {
+    mapping(address => uint256) public balanceOf;
+
+    function depositTo(address account) external payable {
+        balanceOf[account] += msg.value;
+    }
+
+    function withdrawTo(address payable to, uint256 amount) external {
+        balanceOf[msg.sender] -= amount;
+        (bool ok,) = to.call{value: amount}("");
+        require(ok, "withdraw failed");
+    }
+}
+
 contract DeskRejectingReceiver {
     receive() external payable {
         revert("no");
@@ -567,6 +582,8 @@ contract BookrunnerDeskTest is MandateBase {
 
     function test_validateUserOp_successPacksValidUntilAndPaysPrefund() public {
         vm.deal(address(desk), 1 ether);
+        vm.prank(timelock);
+        desk.setGasPolicy(0.01 ether, 0.15 ether);
         bytes32 h = keccak256("op1");
         PackedUserOperation memory op =
             _userOp(_act(IBookrunnerDesk.ActionKind.FundDesk, abi.encode(uint256(1))), keyPk, h);
@@ -576,10 +593,13 @@ contract BookrunnerDeskTest is MandateBase {
         assertEq(uint160(vd), 0); // sig success, no aggregator
         assertEq(entryPoint.balance, 0.1 ether);
         assertEq(address(desk).balance, 0.9 ether);
+        assertEq(desk.prefundBudgetWei(), 0.05 ether);
     }
 
     function test_validateUserOp_failures() public {
         vm.deal(address(desk), 1 ether);
+        vm.prank(timelock);
+        desk.setGasPolicy(0.01 ether, 0.2 ether);
         bytes32 h = keccak256("op");
         IBookrunnerDesk.Action memory a = _act(IBookrunnerDesk.ActionKind.FundDesk, abi.encode(uint256(1)));
 
@@ -756,5 +776,176 @@ contract BookrunnerDeskTest is MandateBase {
         vm.prank(timelock);
         desk.withdrawNative(payable(timelock), 1 ether);
         assertEq(timelock.balance, 1 ether);
+    }
+
+    // ------------------------------------------------------------------ A3-01: userOp gas policy
+
+    function _gasOp(uint128 verGas, uint128 callGas, uint256 pvg, uint128 maxFee, bytes32 h)
+        internal
+        view
+        returns (PackedUserOperation memory op)
+    {
+        op = _userOp(_act(IBookrunnerDesk.ActionKind.FundDesk, abi.encode(uint256(1))), keyPk, h);
+        op.accountGasLimits = bytes32((uint256(verGas) << 128) | callGas);
+        op.preVerificationGas = pvg;
+        op.gasFees = bytes32((uint256(maxFee) << 128) | maxFee);
+    }
+
+    function test_gasPolicy_defaults_and_timelockOnly() public {
+        assertEq(desk.maxOpCostWei(), desk.DEFAULT_MAX_OP_COST_WEI());
+        assertEq(desk.prefundBudgetWei(), 0);
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(BookrunnerDesk.Unauthorized.selector, stranger));
+        desk.setGasPolicy(1, 1);
+        vm.prank(timelock);
+        desk.setGasPolicy(0.002 ether, 0.05 ether);
+        assertEq(desk.maxOpCostWei(), 0.002 ether);
+        assertEq(desk.prefundBudgetWei(), 0.05 ether);
+    }
+
+    function test_validateUserOp_capsOpMaxCost() public {
+        vm.deal(address(desk), 1 ether);
+        vm.prank(timelock);
+        desk.setGasPolicy(0.01 ether, 1 ether);
+        bytes32 h = keccak256("gas");
+        // (200k + 300k + 500k) * 10 gwei = 0.01 ether: at the cap
+        PackedUserOperation memory op = _gasOp(200_000, 300_000, 500_000, 10 gwei, h);
+        vm.prank(entryPoint);
+        assertEq(uint160(desk.validateUserOp(op, h, 0.01 ether)), 0);
+        // one wei of fee above: (1M gas) * (10 gwei + 1) > cap — even when the deposit covers it
+        op = _gasOp(200_000, 300_000, 500_000, 10 gwei + 1, h);
+        vm.prank(entryPoint);
+        vm.expectRevert(
+            abi.encodeWithSelector(BookrunnerDesk.OpCostTooHigh.selector, uint256(1_000_000) * (10 gwei + 1), 0.01 ether)
+        );
+        desk.validateUserOp(op, h, 0);
+        // inflated preVerificationGas (charged in full by the EntryPoint) is capped the same way
+        op = _gasOp(1, 1, 1e9, 1 gwei, h);
+        vm.prank(entryPoint);
+        vm.expectRevert(
+            abi.encodeWithSelector(BookrunnerDesk.OpCostTooHigh.selector, uint256(1e9 + 2) * 1 gwei, 0.01 ether)
+        );
+        desk.validateUserOp(op, h, 0);
+    }
+
+    function test_validateUserOp_prefundBudgetIsCumulative() public {
+        vm.deal(address(desk), 1 ether);
+        vm.prank(timelock);
+        desk.setGasPolicy(0.01 ether, 0.015 ether);
+        bytes32 h = keccak256("b");
+        PackedUserOperation memory op = _gasOp(200_000, 300_000, 500_000, 10 gwei, h);
+        vm.prank(entryPoint);
+        desk.validateUserOp(op, h, 0.01 ether);
+        assertEq(desk.prefundBudgetWei(), 0.005 ether);
+        vm.prank(entryPoint);
+        vm.expectRevert(
+            abi.encodeWithSelector(BookrunnerDesk.PrefundBudgetExceeded.selector, 0.01 ether, 0.005 ether)
+        );
+        desk.validateUserOp(op, h, 0.01 ether);
+        // a deposit-funded op (missingAccountFunds == 0) does not touch the budget
+        vm.prank(entryPoint);
+        desk.validateUserOp(op, h, 0);
+        assertEq(desk.prefundBudgetWei(), 0.005 ether);
+        assertEq(address(desk).balance, 0.99 ether);
+    }
+
+    function test_withdrawDepositTo() public {
+        DeskMockDepositEntryPoint ep = new DeskMockDepositEntryPoint();
+        cfg.setEntryPoint(address(ep));
+        desk.syncEntryPoint();
+        ep.depositTo{value: 0.3 ether}(address(desk));
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(BookrunnerDesk.Unauthorized.selector, stranger));
+        desk.withdrawDepositTo(payable(stranger), 1);
+        vm.prank(timelock);
+        vm.expectRevert(BookrunnerDesk.ZeroAddress.selector);
+        desk.withdrawDepositTo(payable(address(0)), 1);
+        vm.prank(timelock);
+        desk.withdrawDepositTo(payable(timelock), 0.3 ether);
+        assertEq(timelock.balance, 0.3 ether);
+        assertEq(ep.balanceOf(address(desk)), 0);
+    }
+
+    // ------------------------------------------------------------------ A3-02 / A7-01: mark-window gate
+
+    function test_capitalFlows_blockedWhileMarkPending_riskExempt() public {
+        _fundDesk(5000e6);
+        uint256 interval = cfg.markInterval();
+        uint64 periodStart = uint64(block.timestamp - (block.timestamp % interval));
+        // Live, the period that ended at periodStart has no applied mark
+        book.setMarkState(BRTypes.BookState.Live, periodStart - uint64(interval), 1);
+        assertFalse(desk.capitalFlowOpen());
+        bytes memory pending =
+            abi.encodeWithSelector(BookrunnerDesk.MarkPending.selector, periodStart, periodStart - uint64(interval));
+        vm.startPrank(key);
+        vm.expectRevert(pending);
+        desk.execute(_act(IBookrunnerDesk.ActionKind.ReturnToVault, abi.encode(uint256(1e6))));
+        vm.expectRevert(pending);
+        desk.execute(_act(IBookrunnerDesk.ActionKind.FundDesk, abi.encode(uint256(1e6))));
+        vm.expectRevert(pending);
+        desk.execute(_act(IBookrunnerDesk.ActionKind.InventoryToVault, abi.encode(BRTypes.ACCOUNT_MM, uint256(1e6))));
+        vm.expectRevert(pending);
+        desk.execute(_act(IBookrunnerDesk.ActionKind.InventoryToVenue, abi.encode(BRTypes.ACCOUNT_MM, uint256(1e6))));
+        vm.stopPrank();
+        // RISK is exempt
+        _exec(risk, _act(IBookrunnerDesk.ActionKind.ReturnToVault, abi.encode(uint256(1000e6))));
+        // Retiring is gated the same way
+        book.setMarkState(BRTypes.BookState.Retiring, periodStart - uint64(interval), 1);
+        vm.prank(key);
+        vm.expectRevert(pending);
+        desk.execute(_act(IBookrunnerDesk.ActionKind.ReturnToVault, abi.encode(uint256(1e6))));
+        // the period's mark lands: flows reopen
+        book.setMarkState(BRTypes.BookState.Live, periodStart, 1);
+        assertTrue(desk.capitalFlowOpen());
+        _exec(key, _act(IBookrunnerDesk.ActionKind.ReturnToVault, abi.encode(uint256(1000e6))));
+        assertEq(usdc.balanceOf(address(desk)), 3000e6);
+    }
+
+    function test_capitalFlows_firstPeriodAfterGoLive() public {
+        _fundDesk(5000e6);
+        uint256 interval = cfg.markInterval();
+        uint64 periodStart = uint64(block.timestamp - (block.timestamp % interval));
+        // went live in this period, no mark yet: nothing is due before the period ends
+        book.setMarkState(BRTypes.BookState.Live, 0, periodStart + 1);
+        assertTrue(desk.capitalFlowOpen());
+        _exec(key, _act(IBookrunnerDesk.ActionKind.ReturnToVault, abi.encode(uint256(1000e6))));
+        // first period end passed, still no mark: pending
+        vm.warp(uint256(periodStart) + interval + 60);
+        _refreshPrices();
+        assertFalse(desk.capitalFlowOpen());
+        vm.prank(key);
+        vm.expectRevert(
+            abi.encodeWithSelector(BookrunnerDesk.MarkPending.selector, periodStart + uint64(interval), uint64(0))
+        );
+        desk.execute(_act(IBookrunnerDesk.ActionKind.ReturnToVault, abi.encode(uint256(1000e6))));
+        // not Live / Retiring (window, cancelled, retired): no mark cycle, gate open
+        book.setMarkState(BRTypes.BookState.Retired, 0, periodStart + 1);
+        assertTrue(desk.capitalFlowOpen());
+    }
+
+    function test_capitalFlows_nonFlowActionsNotGated() public {
+        adapter.setExposure(-50_000e6);
+        _fundDesk(20_000e6);
+        _buyNvda(10_000e6);
+        uint256 interval = cfg.markInterval();
+        uint64 periodStart = uint64(block.timestamp - (block.timestamp % interval));
+        book.setMarkState(BRTypes.BookState.Live, periodStart - uint64(interval), 1);
+        assertFalse(desk.capitalFlowOpen());
+        // hedge trading does not bump flowNonce: allowed while a mark is pending
+        uint64 nonce0 = book.flowNonce();
+        _buyNvda(5000e6);
+        assertEq(book.flowNonce(), nonce0);
+    }
+
+    function test_returnToVault_minimumUnlessWholeBalance() public {
+        _fundDesk(5e6);
+        uint256 minRet = desk.MIN_RETURN_USD();
+        vm.prank(key);
+        vm.expectRevert(abi.encodeWithSelector(BookrunnerDesk.ReturnBelowMin.selector, uint256(1), minRet));
+        desk.execute(_act(IBookrunnerDesk.ActionKind.ReturnToVault, abi.encode(uint256(1))));
+        _exec(key, _act(IBookrunnerDesk.ActionKind.ReturnToVault, abi.encode(5e6 - 1)));
+        // the remaining dust may go back as the whole balance
+        _exec(key, _act(IBookrunnerDesk.ActionKind.ReturnToVault, abi.encode(uint256(1))));
+        assertEq(usdc.balanceOf(address(desk)), 0);
     }
 }

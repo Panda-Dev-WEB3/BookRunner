@@ -14,7 +14,9 @@
 //     No report while any withdraw saga of the book is between detection and sweep, or while the adapter
 //     still has requested-but-unconfirmed amounts (a request not indexed yet, or a stuck one).
 //   - deposits: the adapter credits them at once, the venue only after its indexer / cross-chain delivery.
-//     No report within `reportSettleSec` (chain time) of the adapter's lastFlowAt.
+//     No report within `reportSettleSec` (chain time) of the adapter's lastFlowAt, and never one whose asOf
+//     is not strictly after lastFlowAt (OrderlyAdapter rejects asOf <= lastFlowAt: a snapshot from the
+//     flow's own second may predate it).
 // The whole read -> sign/post runs under the book's lock, so it cannot interleave with a withdraw saga step.
 import { computeReport, dropSuspicious, reportableState, reportedValue } from "../domain/report";
 import { isTerminal } from "../domain/withdraw";
@@ -47,14 +49,18 @@ export class Reporter {
     return this.ctx.locks.run(book.bookId, () => this.reportLocked(book));
   }
 
-  /** Why a report must not be produced now (null = clear to report). Applies to signed and on-chain reports alike. */
-  async holdReason(book: TrackedBook, headSec: bigint): Promise<string | null> {
+  /**
+   * Why a report must not be produced now (null = clear to report). Applies to signed and on-chain reports alike.
+   * `asOfSec` is the report's asOf (default: the chain head).
+   */
+  async holdReason(book: TrackedBook, headSec: bigint, asOfSec: bigint = headSec): Promise<string | null> {
     const inflight = Object.values(this.ctx.sagas.get().withdrawals).filter((w) => w.bookId === book.bookId && !isTerminal(w));
     if (inflight.length) return `withdrawal in flight (${inflight.map((w) => `${w.nonce}:${w.stage}`).join(",")})`;
     const f = await this.ctx.chain.adapterFlowState(book.adapter);
     if (f.pendingWithdrawUsd > 0n) return `adapter has ${f.pendingWithdrawUsd} requested-but-unconfirmed withdrawal`;
     const settle = BigInt(Math.max(0, Math.floor(this.ctx.settings.reportSettleSec)));
     if (f.lastFlowAt > 0n && headSec < f.lastFlowAt + settle) return `venue flow at ${f.lastFlowAt} still settling (head ${headSec})`;
+    if (asOfSec <= f.lastFlowAt) return `report asOf ${asOfSec} not strictly after the venue flow at ${f.lastFlowAt}`;
     return null;
   }
 
@@ -62,7 +68,8 @@ export class Reporter {
     const { keys, readAccount, sagas, chain, log, settings } = this.ctx;
     // asOf must not exceed block.timestamp of the simulation block (latest): clamp the wall clock to the head.
     const headSec = await chain.headTimestamp();
-    const hold = await this.holdReason(book, headSec);
+    const nowMs = Math.min(this.ctx.now(), Number(headSec) * 1000);
+    const hold = await this.holdReason(book, headSec, BigInt(Math.floor(nowMs / 1000)));
     if (hold) {
       log.debug({ bookId: book.bookId, reason: hold }, "venue report held");
       return null;
@@ -72,7 +79,7 @@ export class Reporter {
     const st = sagas.get();
     const k = book.adapter.toLowerCase();
     const lastRaw = st.lastAsOf[k];
-    const r = computeReport(ifAcct, mmAcct, book.symbol, Math.min(this.ctx.now(), Number(headSec) * 1000), lastRaw ? BigInt(lastRaw) : null);
+    const r = computeReport(ifAcct, mmAcct, book.symbol, nowMs, lastRaw ? BigInt(lastRaw) : null);
     if (!r) return null;
     // first report: compare against the charter's planned deployment (IF target + MM inventory)
     const guard = (st.reportGuard[k] ??= { value: (book.ifTargetUsd + book.mmInventoryUsd).toString(), at: 0, suspect: 0 });

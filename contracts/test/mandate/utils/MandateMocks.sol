@@ -192,11 +192,21 @@ contract MandateMockBook {
     bytes32 public lastKill;
     uint256 public killCount;
     bool public revertOnKill;
+    /// @dev Desk mark-window gate inputs. Default Subscription: the gate is open (no mark cycle).
+    BRTypes.BookState public state;
+    uint64 public lastMarkPeriodEnd;
+    uint64 public subscriptionEnds;
 
     function setUp(uint256 id, BRTypes.Charter memory c, BRTypes.BookComponents memory comps) external {
         bookId = id;
         _charter = c;
         _components = comps;
+    }
+
+    function setMarkState(BRTypes.BookState st, uint64 lastMarkPeriodEnd_, uint64 subscriptionEnds_) external {
+        state = st;
+        lastMarkPeriodEnd = lastMarkPeriodEnd_;
+        subscriptionEnds = subscriptionEnds_;
     }
 
     function setRevertOnKill(bool v) external {
