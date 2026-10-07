@@ -121,6 +121,9 @@ contract MMMandate is IMMMandate, IMMMandateDesk, Initializable, ReentrancyGuard
     /// @notice operator => key => consent to have the operator's stake bonded for that key.
     mapping(address operator => mapping(address key => bool)) public operatorConsent;
     EnumerableSet.AddressSet internal _keySet;
+    /// @notice Staking contract holding `key`'s bond lock (config.staking() at lock time): releases always
+    ///         address it, so a timelock repoint of config.staking() never strands a bond.
+    mapping(address key => address) public bondStaking;
 
     // ------------------------------------------------------------------ errors / events (extensions)
 
@@ -240,7 +243,7 @@ contract MMMandate is IMMMandate, IMMMandateDesk, Initializable, ReentrancyGuard
         if (amount == 0 || _keys[key].active) revert NoBond(key);
         address op = _keys[key].operator;
         bondOf[key] = 0;
-        uint256 released = IBkrnStaking(config.staking()).unlock(op, keyLockId(key));
+        uint256 released = _bondStakingOf(key).unlock(op, keyLockId(key));
         emit BondReleased(key, op, released);
     }
 
@@ -531,6 +534,7 @@ contract MMMandate is IMMMandate, IMMMandateDesk, Initializable, ReentrancyGuard
 
     function _lockBond(address key, address operator, uint256 bond) internal {
         IBkrnStaking st = IBkrnStaking(config.staking());
+        bondStaking[key] = address(st);
         bytes32 lockId = keyLockId(key);
         try st.lock(operator, lockId, bond) {}
         catch {
@@ -546,12 +550,18 @@ contract MMMandate is IMMMandate, IMMMandateDesk, Initializable, ReentrancyGuard
         if (amount == 0) return;
         address op = _keys[key].operator;
         bondOf[key] = 0;
-        try IBkrnStaking(config.staking()).unlock(op, keyLockId(key)) returns (uint256 released) {
+        try _bondStakingOf(key).unlock(op, keyLockId(key)) returns (uint256 released) {
             emit BondReleased(key, op, released);
         } catch {
             bondOf[key] = amount;
             emit BondReleaseFailed(key, op, amount);
         }
+    }
+
+    /// @dev The staking that holds `key`'s lock (config.staking() for a lock recorded before the pin).
+    function _bondStakingOf(address key) internal view returns (IBkrnStaking) {
+        address st = bondStaking[key];
+        return IBkrnStaking(st != address(0) ? st : config.staking());
     }
 
     function _requestReduceOnly() internal {
