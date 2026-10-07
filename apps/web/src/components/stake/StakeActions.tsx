@@ -274,7 +274,7 @@ export function StakeActions(props: StakeActionsProps) {
         </div>
       </div>
       <p className="text-[13px] text-ink-2">
-        When a keeper buys BKRN back with half of the <Term id="carry">protocol carry</Term>, the staking contract shares it across all staked BKRN at that moment, in proportion to each
+        When a keeper buys BKRN back with half of the <Term id="carry">protocol carry</Term>, the staking contract pays it out over a set period (7 days by default) to staked BKRN that is not cooling down, in proportion to each
         stake. Claiming sends your part to your wallet. It does not touch your stake.
       </p>
       {reviewBlock(["claim"])}

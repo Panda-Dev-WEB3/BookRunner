@@ -37,7 +37,7 @@ export function CooldownTimeline({ cooldownSec }: { cooldownSec: number | null }
       markerClass: "border-bkrn bg-surface text-bkrn-ink ring-4 ring-bkrn/15",
       line: "dashed",
       title: `Wait ${wait}`,
-      body: "The BKRN stays staked, so it keeps its share of any buyback. It cannot be locked as a bond meanwhile. A second request adds to the first and restarts the wait for all of it.",
+      body: "The BKRN stays staked but no longer shares in buybacks. It cannot be locked as a bond meanwhile. A second request adds to the first and restarts the wait for all of it.",
     },
     {
       marker: <IconCheck size={14} strokeWidth={2.4} />,

@@ -72,7 +72,7 @@ export function CooldownStatus(props: { pending: bigint; availableAt: number; co
       </div>
       {s.progress !== null && <ProgressBar value={s.progress} label="Cooldown elapsed" tone="backstop" className="mt-2.5" />}
       <p className="mt-2 text-[12px] text-ink-2">
-        Withdrawable from {fmtWhen(s.availableAt)}. It still counts as staked until then, so it keeps its share of any buyback.
+        Withdrawable from {fmtWhen(s.availableAt)}. It still counts as staked until then, but it no longer shares in buybacks.
       </p>
     </div>
   );

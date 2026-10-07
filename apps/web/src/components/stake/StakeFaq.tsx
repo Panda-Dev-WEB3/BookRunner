@@ -34,7 +34,8 @@ export function StakeFaq({ cooldownSec }: { cooldownSec: number | null }) {
       content: (
         <p>
           Each book pays <CarryPct /> of its fee flow, after expenses, as <Term id="carry">protocol carry</Term>. The fee router sends half to the USDC backstop pool. A keeper swaps the other half for BKRN on
-          the market and hands it to the staking contract, which shares it across all staked BKRN at that moment, in proportion to each stake. Your part waits in the contract until you claim it.
+          the market and hands it to the staking contract, which pays it out gradually over a set period (7 days by default) to all staked BKRN that is not cooling down, in proportion to each stake. Your part
+          waits in the contract until you claim it.
         </p>
       ),
     },
@@ -63,8 +64,8 @@ export function StakeFaq({ cooldownSec }: { cooldownSec: number | null }) {
       title: "How long does unstaking take?",
       content: (
         <p>
-          You request an amount, wait {wait}, then withdraw it with a second transaction. During the wait the BKRN still counts as staked, so it keeps its share of any buyback. A new request adds to
-          the one already waiting and restarts the clock for the whole amount. You can cancel a request at any time before you withdraw.
+          You request an amount, wait {wait}, then withdraw it with a second transaction. During the wait the BKRN still counts as staked, but it no longer receives a share of buybacks. A new request
+          adds to the one already waiting and restarts the clock for the whole amount. You can cancel a request at any time before you withdraw; the amount then shares in buybacks again.
         </p>
       ),
     },

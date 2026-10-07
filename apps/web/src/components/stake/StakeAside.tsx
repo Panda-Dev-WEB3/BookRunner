@@ -10,7 +10,7 @@ import type { StakingProtocol } from "./useStaking";
 
 const POINTS: Array<{ yes: boolean; title: string; body: string }> = [
   { yes: true, title: "Access and bonding", body: "Sponsors, committee members and larger agent operators lock staked BKRN as a bond for their role." },
-  { yes: true, title: "A share of any buyback", body: "When a keeper buys BKRN back with half of the protocol carry, the staking contract shares it across all stake in proportion." },
+  { yes: true, title: "A share of any buyback", body: "When a keeper buys BKRN back with half of the protocol carry, the staking contract pays it out over a set period to all stake that is not cooling down, in proportion." },
   { yes: false, title: "Not a revenue claim", body: REVENUE_CLAIM_LINE },
   { yes: false, title: "Not the backstop", body: "Book losses use the USDC backstop pool, never staked BKRN." },
 ];
