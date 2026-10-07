@@ -72,6 +72,9 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
     /// @notice Upper bound on the number of agent bond tiers (keeps `agentTierBond` O(1)-bounded).
     uint256 public constant MAX_TIERS = 16;
 
+    /// @notice Lower bound of `committeeWindow` (charter review + committee action expiry).
+    uint256 public constant MIN_COMMITTEE_WINDOW = 1 days;
+
     uint256 private constant BPS = 10_000;
 
     // ---------------------------------------------------------------------------------------------
@@ -177,8 +180,9 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
     }
 
     /// @notice Sets the numeric parameter `key` (one of the `KEY_*` parameter keys).
-    /// @dev Admin only. Range checks: bps <= 1e4; markInterval, maxPriceAge and maxTradePriceAge > 0;
-    ///      uint32 params fit uint32. Emits `ParamSet`.
+    /// @dev Admin only. Range checks: bps <= 1e4; markInterval, maxMarkAge, maxPriceAge and
+    ///      maxTradePriceAge > 0; committeeWindow >= MIN_COMMITTEE_WINDOW (1 day); uint32 params fit
+    ///      uint32. Emits `ParamSet`.
     function setParam(bytes32 key, uint256 value) external onlyRole(DEFAULT_ADMIN_ROLE) {
         _setParam(key, value);
     }
@@ -468,13 +472,16 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
             _checkNonZeroU32(key, value);
             _markInterval = uint32(value);
         } else if (key == KEY_MAX_MARK_AGE) {
-            _checkMax(key, value, type(uint32).max);
+            // 0 would make a mark committable only in the exact second its period ends (marks stop).
+            _checkNonZeroU32(key, value);
             _maxMarkAge = uint32(value);
         } else if (key == KEY_MAX_PRICE_AGE) {
             _checkNonZeroU32(key, value);
             _maxPriceAge = uint32(value);
         } else if (key == KEY_COMMITTEE_WINDOW) {
-            _checkMax(key, value, type(uint32).max);
+            // A short window makes every charter expire before review and every committee action
+            // (REVOKE_KEY / RETIRE / SLASH_SPONSOR) expire before a second member can approve it.
+            if (value < MIN_COMMITTEE_WINDOW || value > type(uint32).max) revert ParamOutOfRange(key, value);
             _committeeWindow = uint32(value);
         } else if (key == KEY_MAX_TRADE_PRICE_AGE) {
             _checkNonZeroU32(key, value);
