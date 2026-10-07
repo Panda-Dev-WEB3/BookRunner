@@ -19,6 +19,13 @@ tRPC client (types from `@bookrunner/api/router`, never bundled) + Tailwind 4 + 
 
 The API must allow the page's origin (`WEB_ORIGIN`, default `http://127.0.0.1:5180`).
 
+Builds are mounted at `/app/` (Vite `base`, `scripts/base.ts`; the public site `apps/site` owns the web
+root, see `deploy/server/README.md`): `bun run start` / `preview` serve http://127.0.0.1:5180/app/. The dev
+server stays at `/`. `WEB_BASE=/` builds for the root instead. The router's `basename` follows
+`import.meta.env.BASE_URL` (`src/lib/basePath.ts`), so in-app links are written from `/`
+(`<Link to="/books">`); links that leave the router (copy-a-link) go through `appUrl()`. The API is not
+under the mount: `VITE_API_URL=same-origin` calls `{origin}/trpc` and `{origin}/health`.
+
 ## Configuration (`VITE_*`, see `.env.example`)
 
 `VITE_CHAIN_ID` (default 31337), `VITE_RPC_URL`, `VITE_EXPLORER_URL`, `VITE_FAUCET_URL`, `VITE_API_URL`

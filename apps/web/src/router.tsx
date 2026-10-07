@@ -1,6 +1,7 @@
-import { Link, createBrowserRouter, isRouteErrorResponse, useRouteError } from "react-router";
+import { Link, type RouteObject, createBrowserRouter, isRouteErrorResponse, useRouteError } from "react-router";
 import { Layout, type RouteHandle } from "./components/Layout";
 import { Container, EmptyState, PageHeader, SkeletonRows } from "./components/ui";
+import { config } from "./lib/config";
 
 function RouteError() {
   const err = useRouteError();
@@ -53,7 +54,7 @@ function NotFound() {
 /** Investor pages lay out their own full-width Sections. */
 const bleed: RouteHandle = { bleed: true };
 
-export const router = createBrowserRouter([
+const routes: RouteObject[] = [
   {
     path: "/",
     element: <Layout />,
@@ -83,4 +84,8 @@ export const router = createBrowserRouter([
       { path: "*", element: <NotFound /> },
     ],
   },
-]);
+];
+
+// Deployed builds are mounted at /app/ (vite base "/app/"): every <Link to="/..."> and navigate() is
+// resolved under this basename, so in-app paths stay written from "/". The dev server has none.
+export const router = createBrowserRouter(routes, { basename: config.basename });

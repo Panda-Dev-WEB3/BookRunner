@@ -2,6 +2,7 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
 import { type Plugin, defineConfig, loadEnv } from "vite";
+import { appBase } from "./scripts/base";
 import { filesWithDevKeys, isDevnetBuild } from "./scripts/bundle-check";
 
 const port = Number(process.env.WEB_PORT ?? 5180);
@@ -21,7 +22,10 @@ function noDevKeysOutsideDevnet(chainId: string | undefined): Plugin {
 }
 
 // Server code is never bundled: the tRPC router is imported with `import type` only.
-export default defineConfig(({ mode }) => ({
+export default defineConfig(({ command, mode, isPreview }) => ({
+  // Builds (and `vite preview`) are served under /app/: the public site owns the web root (nginx,
+  // deploy/server). The dev server stays at /. WEB_BASE overrides the mount (WEB_BASE=/ for a root build).
+  base: appBase(command === "serve" && !isPreview, process.env.WEB_BASE),
   plugins: [react(), tailwindcss(), noDevKeysOutsideDevnet(loadEnv(mode, fileURLToPath(new URL(".", import.meta.url)), "VITE_").VITE_CHAIN_ID)],
   server: { host: "127.0.0.1", port, strictPort: true },
   preview: { host: "127.0.0.1", port, strictPort: true },

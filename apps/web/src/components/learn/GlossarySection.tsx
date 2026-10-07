@@ -1,6 +1,8 @@
 // 9. Glossary: every term from lib/glossary.ts, grouped for reading, searchable, and linkable
 // (/learn#term-senior). A term reached by a link is briefly highlighted.
 import { useEffect, useId, useMemo, useState } from "react";
+import { appUrl } from "../../lib/basePath";
+import { config } from "../../lib/config";
 import { GLOSSARY, type GlossaryId, termAnchor } from "../../lib/glossary";
 import { cx } from "../cx";
 import { IconClose } from "../icons";
@@ -13,7 +15,8 @@ const HIGHLIGHT_MS = 4_000;
 function Entry(props: { id: GlossaryId; highlighted: boolean; onJump: (id: GlossaryId) => void }) {
   const e = GLOSSARY[props.id];
   const anchor = termAnchor(props.id);
-  const link = typeof window === "undefined" ? `/learn#${anchor}` : `${window.location.origin}/learn#${anchor}`;
+  // under the app mount (/app/learn#… in a deployed build), not the host root (the public site)
+  const link = appUrl(typeof window === "undefined" ? undefined : window.location.origin, config.basename, `/learn#${anchor}`);
   return (
     <div
       id={anchor}

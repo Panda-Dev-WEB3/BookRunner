@@ -1,5 +1,6 @@
 // Runtime configuration from Vite env (VITE_*). Defaults target the local devnet (31337); build with
 // `--mode testnet` (apps/web/.env.testnet) for Robinhood Chain testnet (46630).
+import { routerBasename } from "./basePath";
 import { type AppChainConfig, explorerAddress, explorerTx, resolveChainConfig } from "./chainConfig";
 
 const env = import.meta.env as Record<string, string | boolean | undefined>;
@@ -7,7 +8,10 @@ const resolved: AppChainConfig = resolveChainConfig(env);
 const wcProjectId = typeof env.VITE_WALLETCONNECT_PROJECT_ID === "string" ? env.VITE_WALLETCONNECT_PROJECT_ID.trim() : "";
 
 export const config = {
+  /** Same-origin builds call {origin}/trpc and {origin}/health at the host root, never under the app mount. */
   apiUrl: resolved.apiUrl,
+  /** react-router basename: "/app" in a deployed build (vite base "/app/"), undefined on the dev server. */
+  basename: routerBasename(import.meta.env.BASE_URL),
   /** The single chain this build targets (wallet transport, explorer, dev-wallet gate). */
   chain: resolved,
   chainId: resolved.id,
