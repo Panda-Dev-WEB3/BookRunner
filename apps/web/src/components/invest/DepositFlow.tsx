@@ -307,7 +307,7 @@ export function ReviewStep(props: DepositContext & { amount: string; onBack: () 
               same amount before you confirm.
             </p>
           )}
-          <TxRunner txs={txs} signer={sub.data.signer} onConfirmed={onConfirmed} />
+          <TxRunner txs={txs} signer={sub.data.signer} amount={amountIn === null ? null : usdRaw(amountIn)} onConfirmed={onConfirmed} />
         </div>
       )}
 

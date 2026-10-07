@@ -160,6 +160,7 @@ dialog{border:1px solid var(--line);border-radius:16px;background:var(--paper);c
 .tx-steps li{display:grid;grid-template-columns:28px minmax(0,1fr) auto;gap:12px;align-items:start;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:#fcfdff99}
 .tx-steps p{margin:0;font-size:12px;line-height:1.6;color:var(--dark)}
 .tx-steps p small{display:block;color:var(--muted);font-size:10px}
+.tx-steps p small.tx-decoded{font-family:"IBM Plex Mono",ui-monospace,monospace;overflow-wrap:anywhere}
 .tx-steps .form-error{margin-top:6px;min-height:0}
 .tx-step-index{width:24px;height:24px;border-radius:50%;border:1px solid var(--line);display:grid;place-items:center;font-size:11px;color:var(--ink)}
 .tx-step-status{display:flex;flex-direction:column;align-items:flex-end;gap:6px;text-align:right}

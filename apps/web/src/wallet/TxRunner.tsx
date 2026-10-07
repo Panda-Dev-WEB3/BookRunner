@@ -8,6 +8,7 @@ import type { Tone } from "../lib/limits";
 import { type TxItem, type TxStatus, awaitsReceipt, callSummary, initialItems, runSequential, summarize } from "../lib/txflow";
 import { appChain, chainName } from "./chains";
 import { GasWarning, NetworkNotice } from "./network";
+import { checkTxs, useFlowTargets } from "./txVerify";
 import { useDevRoleFor } from "./useDevRoleFor";
 import { WalletButton } from "./WalletButton";
 import { sameAddress, useWallet } from "./WalletContext";
@@ -26,10 +27,17 @@ export function TxRunner(props: {
   /** Expected sender (API `signer`); null when any of several roles may sign. */
   signer?: string | null;
   signerHint?: string;
+  /** The amount the user entered (raw units): deposit / redeem / stake steps (and approvals) must match. */
+  amount?: bigint | null;
   onConfirmed?: () => void;
   className?: string;
 }) {
   const w = useWallet();
+  // verified against chain-derived contracts before any prompt (txVerify.ts); nothing is sent otherwise
+  const flowTargets = useFlowTargets();
+  const account = props.signer ?? w.active?.address ?? null;
+  const verified = useMemo(() => checkTxs(props.txs, flowTargets.data, { account, amount: props.amount }), [props.txs, flowTargets.data, account, props.amount]);
+  const blocked = verified.status !== "ok";
   const [items, setItems] = useState<TxItem<PreparedTx>[]>(() => initialItems(props.txs));
   const key = useMemo(() => props.txs.map((t) => `${t.to}:${t.data}`).join("|"), [props.txs]);
   const doneRef = useRef(false);
@@ -49,7 +57,7 @@ export function TxRunner(props: {
   const foreignChain = chainIds.find((c) => c !== appChain.id) ?? null;
 
   const run = async () => {
-    if (!w.executor) return;
+    if (!w.executor || verified.status !== "ok") return;
     const r = await runSequential(items, w.executor, setItems);
     if (r.ok && !doneRef.current) {
       doneRef.current = true;
@@ -74,6 +82,7 @@ export function TxRunner(props: {
         {items.map((it, i) => {
           const st = STATUS[it.status];
           const call = callSummary(it.tx.data);
+          const decoded = verified.status === "ok" ? verified.steps[i]?.summary : undefined;
           return (
             <li key={i} className="flex flex-col gap-1.5 px-3 py-2.5 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
               <div className="min-w-0">
@@ -85,9 +94,7 @@ export function TxRunner(props: {
                   <span className="inline-flex items-center gap-1">
                     to <Hash value={it.tx.to} kind="address" />
                   </span>
-                  <span className="num">
-                    {call.selector} · {call.bytes} bytes
-                  </span>
+                  <span className="num">{decoded ?? `${call.selector} · ${call.bytes} bytes`}</span>
                   {it.hash && (
                     <span className="inline-flex items-center gap-1">
                       tx <Hash value={it.hash} kind="tx" />
@@ -131,11 +138,18 @@ export function TxRunner(props: {
         ) : wrongChainForDev ? (
           <div className="text-[11.5px] text-critical-ink">These transactions are for another chain; connect a browser wallet.</div>
         ) : null}
+        {verified.status === "refused" ? (
+          <div className="text-[11.5px] text-critical-ink">{verified.error}</div>
+        ) : verified.status === "pending" ? (
+          <div className="text-[11.5px] text-muted">
+            {flowTargets.error ? "Could not read the contract addresses from the chain to verify these transactions; retry shortly." : "Verifying the transactions against the contracts on chain…"}
+          </div>
+        ) : null}
         {w.active?.kind === "injected" && <NetworkNotice />}
         {w.active && <GasWarning address={w.active.address} />}
         <div className="flex flex-wrap items-center gap-2">
           {w.active ? (
-            <button type="button" className="btn btn-primary" disabled={s.running || s.allConfirmed || mismatch || wrongChainForDev || foreignChain !== null || !w.executor} onClick={run}>
+            <button type="button" className="btn btn-primary" disabled={s.running || s.allConfirmed || mismatch || wrongChainForDev || foreignChain !== null || !w.executor || blocked} onClick={run}>
               {s.running ? "Sending…" : s.allConfirmed ? "All confirmed" : lostReceipt ? "Check the transaction again" : s.failed ? "Retry from the failed step" : `Sign and send ${props.txs.length > 1 ? `${props.txs.length} transactions` : "transaction"}`}
             </button>
           ) : (

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { bkrnStakingAbi } from "@bookrunner/shared/abi/BkrnStaking";
 import { bookAbi } from "@bookrunner/shared/abi/Book";
-import { type Address, type Hex, decodeFunctionData, encodeErrorResult, erc20Abi } from "viem";
+import { type Address, type Hex, decodeFunctionData, encodeErrorResult, encodeFunctionData, erc20Abi } from "viem";
 import { ERRORS_ABI, errText, revertReason } from "../src/dashboard/revert";
 import {
   MOCK_MINT_ABI,
@@ -28,17 +28,30 @@ const BOOK = "0x5555555555555555555555555555555555555555" as Address;
 const ONE = 10n ** 18n;
 
 describe("prepared transactions", () => {
-  const tx = { to: STAKING, data: "0xdeadbeef", value: "0", chainId: 46630, description: "x" };
-  test("accepts API prepared txs for this chain", () => {
+  const tx = { to: STAKING, data: encodeFunctionData({ abi: bkrnStakingAbi, functionName: "claimReward" }), value: "0", chainId: 46630, description: "x" };
+  test("accepts API prepared txs for this chain, with the decoded call", () => {
     const [s] = fromPrepared([tx, { ...tx, signer: OTHER }]).concat();
     expect(s?.value).toBe(0n);
+    expect(s?.decoded).toContain("claimReward");
     expect(fromPrepared([{ ...tx, signer: OTHER }])[0]?.signer).toBe(OTHER);
   });
-  test("refuses another chain, value, bad target or calldata", () => {
+  test("refuses another chain, value, bad target or calldata, unknown functions", () => {
     expect(() => fromPrepared([{ ...tx, chainId: 1 }])).toThrow(/chain 1/);
-    expect(() => fromPrepared([{ ...tx, value: "1" }])).toThrow(/never sends value/);
+    expect(() => fromPrepared([{ ...tx, value: "1" }])).toThrow(/never send value/);
     expect(() => fromPrepared([{ ...tx, to: "0x12" }])).toThrow(/address/);
     expect(() => fromPrepared([{ ...tx, data: "nope" }])).toThrow(/calldata/);
+    expect(() => fromPrepared([{ ...tx, data: "0xdeadbeef" }])).toThrow(/does not recognise/);
+    // an ERC-20 transfer is never a prepared step
+    const transfer = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [OTHER, 1n] });
+    expect(() => fromPrepared([{ ...tx, to: BKRN, data: transfer }])).toThrow(/does not recognise/);
+  });
+  test("with a chain-derived expectation: only the flow's contracts, the entered amount, the user's account", () => {
+    const approve = { ...tx, to: BKRN, data: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [STAKING, 5n * ONE] }) };
+    const stake = { ...tx, data: encodeFunctionData({ abi: bkrnStakingAbi, functionName: "stake", args: [5n * ONE] }) };
+    const ok = fromPrepared([approve, stake], 46630, { targets: [BKRN, STAKING], amount: 5n * ONE, labels: { [BKRN]: "BKRN", [STAKING]: "BKRN staking" }, decimals: { [BKRN]: 18 } });
+    expect(ok[0]?.decoded).toBe("BKRN.approve: let BKRN staking move 5 BKRN from your wallet (used by step 2)");
+    expect(() => fromPrepared([approve, stake], 46630, { targets: [STAKING] })).toThrow(/not a contract of this flow/);
+    expect(() => fromPrepared([approve, stake], 46630, { targets: [BKRN, STAKING], amount: ONE })).toThrow(/you entered/);
   });
 });
 

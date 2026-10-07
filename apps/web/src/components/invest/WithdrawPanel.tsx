@@ -327,7 +327,7 @@ function RedeemBox(props: { book: BookDetail; ticker: string; addrs: TrancheAddr
             />
           )}
           {!sent && <p className="text-[12.5px] text-muted">{red.data.indicative.text}.</p>}
-          <TxRunner txs={txs} signer={red.data.signer} onConfirmed={onConfirmed} />
+          <TxRunner txs={txs} signer={red.data.signer} amount={raw} onConfirmed={onConfirmed} />
           {!sent && (
             <button type="button" className="btn btn-ghost btn-sm" onClick={reset}>
               Change the amount

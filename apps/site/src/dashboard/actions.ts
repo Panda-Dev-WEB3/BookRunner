@@ -6,7 +6,7 @@ import type { Address } from "viem";
 import { getAddress, isAddress, stringToBytes } from "viem";
 import { ApiError, mutate, query } from "./api";
 import { BKRN_DECIMALS, USDC_DECIMALS, amountIssue, amountIssueText, apiAmount, formatAmountDisplay, formatAmountInput, normalizeAmount, parseAmount } from "./amount";
-import { publicClient, waitForReceipt } from "./chain";
+import { type ProtocolContracts, publicClient, readBookParts, readProtocol, waitForReceipt } from "./chain";
 import { CHAIN, txUrl } from "./config";
 import { date, dateTime, duration, esc, short, usd } from "./format";
 import { badge, notice, splitList } from "./html";
@@ -14,6 +14,7 @@ import { bookTicker, depositWindow, markRow, positionView, termsView } from "./m
 import { errText } from "./revert";
 import { type Role, ROLES, selected, store } from "./store";
 import {
+  type PreparedExpectation,
   type StepItem,
   type TxStep,
   cancelUnstakeStep,
@@ -145,7 +146,9 @@ function stepsHtml(items: StepItem[]): string {
     .map((it, i) => {
       const link = it.hash && txUrl(it.hash) ? ` <a class="hash" href="${esc(txUrl(it.hash))}" target="_blank" rel="noopener">${esc(short(it.hash))} ↗</a>` : "";
       const cls = it.status === "confirmed" ? "live" : it.status === "failed" ? "killed" : it.status === "skipped" ? "rejected" : it.status === "queued" ? "" : "queued";
-      return `<li><span class="tx-step-index">${i + 1}</span><div><p>${esc(it.step.description)}${it.step.signer ? `<small>Signed by ${esc(short(it.step.signer))}</small>` : ""}</p>${it.error ? `<p class="form-error">${esc(it.error)}</p>` : ""}</div><div class="tx-step-status">${badge(STATUS_TEXT[it.status], cls)}${link}</div></li>`;
+      // the decoded calldata (what the wallet will actually sign), under the API's description
+      const calls = it.step.decoded ? `<small class="tx-decoded">Calls ${esc(it.step.decoded)}</small>` : "";
+      return `<li><span class="tx-step-index">${i + 1}</span><div><p>${esc(it.step.description)}${calls}${it.step.signer ? `<small>Signed by ${esc(short(it.step.signer))}</small>` : ""}</p>${it.error ? `<p class="form-error">${esc(it.error)}</p>` : ""}</div><div class="tx-step-status">${badge(STATUS_TEXT[it.status], cls)}${link}</div></li>`;
     })
     .join("")}</ol>`;
 }
@@ -296,6 +299,50 @@ function needAmount(value: string, opts: { decimals?: number; balance?: bigint |
   return normalizeAmount(value, opts.decimals ?? USDC_DECIMALS) as string;
 }
 
+/**
+ * What an API-prepared flow may call, read from the CHAIN (Book.components(), the BookrunnerConfig the
+ * book points at), never from the API response: fromPrepared refuses a step to any other contract.
+ */
+async function chainExpectation(
+  bookAddress: string | null,
+  want: { tranche?: "senior" | "junior" | "both"; mandate?: boolean; protocol?: ReadonlyArray<keyof ProtocolContracts> },
+  extra: { account?: string; amount?: bigint } = {},
+): Promise<PreparedExpectation> {
+  const targets: string[] = [];
+  const labels: Record<string, string> = {};
+  const decimals: Record<string, number> = {};
+  const add = (a: Address, label: string, dec?: number) => {
+    targets.push(a);
+    labels[a] = label;
+    if (dec !== undefined) decimals[a] = dec;
+  };
+  try {
+    if (want.tranche || want.mandate) {
+      if (!bookAddress || !isAddress(bookAddress)) throw new Error("no book address");
+      const parts = await readBookParts(getAddress(bookAddress));
+      if (want.tranche === "senior" || want.tranche === "both") add(parts.senior, "Senior tranche", USDC_DECIMALS);
+      if (want.tranche === "junior" || want.tranche === "both") add(parts.junior, "Junior tranche", USDC_DECIMALS);
+      if (want.mandate) add(parts.mandate, "MMMandate");
+    }
+    if (want.protocol?.length) {
+      const first = store.books?.[0]?.components.book;
+      const p = store.protocol ?? (first && isAddress(first) ? await readProtocol(getAddress(first)) : null);
+      if (!p) throw new Error("protocol contracts unknown");
+      const names: Partial<Record<keyof ProtocolContracts, [string, number?]>> = {
+        usdc: ["USDC", USDC_DECIMALS],
+        bkrn: ["BKRN", BKRN_DECIMALS],
+        staking: ["BKRN staking", BKRN_DECIMALS],
+        charter: ["MarketCharter"],
+        committee: ["RiskCommittee"],
+      };
+      for (const k of want.protocol) add(p[k], names[k]?.[0] ?? k, names[k]?.[1]);
+    }
+  } catch (e) {
+    throw new Error(`Could not read this flow's contract addresses from the chain (${errText(e)}). Nothing was sent.`);
+  }
+  return { targets, labels, decimals, ...extra };
+}
+
 // ------------------------------------------------------------------ forms
 export function openAction(kind: string, args: Record<string, unknown>): void {
   switch (kind) {
@@ -352,7 +399,8 @@ function subscribeForm(args: Record<string, unknown>): void {
       const amountUsd = needAmount(v.amount ?? "", { balance: store.balancesOwner === me ? (store.balances?.usdc ?? null) : null });
       const tranche = asTranche(v.tranche);
       const res = await mutate("tranche.subscribe", { bookId: b.bookId, tranche, amountUsd, wallet: me });
-      const steps = fromPrepared(res.txs);
+      const expected = await chainExpectation(b.components.book, { tranche, protocol: ["usdc"] }, { account: me, amount: parseAmount(amountUsd, USDC_DECIMALS) ?? undefined });
+      const steps = fromPrepared(res.txs, CHAIN.id, expected);
       review(
         ticker,
         `Subscribe ${usd(res.amountUsd)} to ${tranche === "senior" ? "Senior" : "Junior"}`,
@@ -401,10 +449,11 @@ function redeemForm(args: Record<string, unknown>): void {
       const max = heldBy(wallet, tranche);
       const sharesStr = needAmount(v.shares ?? "", { max, symbol: "shares" });
       const res = await mutate("tranche.redeem", { bookId: b.bookId, tranche, shares: sharesStr, wallet });
+      const expected = await chainExpectation(b.components.book, { tranche }, { account: wallet, amount: parseAmount(sharesStr, USDC_DECIMALS) ?? undefined });
       review(
         ticker,
         `Redeem ${formatAmountDisplay(apiAmount(res.shares), USDC_DECIMALS, 4)} ${tranche === "senior" ? "Senior" : "Junior"} shares`,
-        fromPrepared(res.txs),
+        fromPrepared(res.txs, CHAIN.id, expected),
         splitList([
           ["Eligible after", esc(dateTime(res.eligibleAt))],
           ["Settles at the mark ending", esc(dateTime(res.settlesAtPeriodEnd))],
@@ -433,7 +482,8 @@ export async function claim(args: Record<string, unknown>): Promise<void> {
           .filter(Boolean)
           .join(", "),
       ]) as Array<[string, string]>;
-    review(bookTicker(b.symbol), "Claim", fromPrepared(res.txs), splitList(lines), res.warnings);
+    const expected = await chainExpectation(b.components.book, { tranche: "both" }, { account: me });
+    review(bookTicker(b.symbol), "Claim", fromPrepared(res.txs, CHAIN.id, expected), splitList(lines), res.warnings);
   } catch (e) {
     host.notify(e instanceof ApiError ? e.message : errText(e), true);
   }
@@ -556,10 +606,11 @@ function charterFileForm(): void {
       const res = await mutate("charter.file", draft);
       if (!res.ok) throw new Error(res.issues.map((i) => i.message).join(" · ") || "The draft did not validate.");
       if (!res.txs.length) throw new Error(res.warnings.join(" ") || "No filing transaction could be prepared yet.");
+      const expected = await chainExpectation(null, { protocol: ["usdc", "bkrn", "staking", "charter"] });
       review(
         "CHARTER",
         `File ${esc(res.charter.symbol)}`,
-        fromPrepared(res.txs),
+        fromPrepared(res.txs, CHAIN.id, expected),
         splitList([
           ["Underlying", esc(res.charter.ticker ?? res.charter.underlying)],
           ["Venue", esc(res.charter.venue)],
@@ -587,10 +638,11 @@ function charterVoteForm(args: Record<string, unknown>): void {
     async (v) => {
       const member = await requireWallet();
       const res = await mutate("charter.decide", { charterId: id, member, approve: v.approve === "true" });
+      const expected = await chainExpectation(null, { protocol: ["committee"] });
       review(
         "COMMITTEE",
         `${v.approve === "true" ? "Approve" : "Reject"} charter #${id}`,
-        fromPrepared(res.txs),
+        fromPrepared(res.txs, CHAIN.id, expected),
         splitList([
           ["Current tally", `${res.tally.approvals} approve · ${res.tally.rejections} reject`],
           ["After your vote", `${res.projected.approvals} approve · ${res.projected.rejections} reject · ${esc(res.projected.outcome)}`],
@@ -631,10 +683,11 @@ function agentRegisterForm(args: Record<string, unknown>): void {
       if (!tierUsd) throw new Error("Enter the inventory tier in USD.");
       const validUntil = Math.floor(Date.now() / 1000) + Math.round(days * 86_400);
       const res = await mutate("agent.register", { bookId: b.bookId, key, operator, validUntil, inventoryTierUsd: tierUsd });
+      const expected = await chainExpectation(b.components.book, { mandate: true });
       review(
         ticker,
         "Register desk key",
-        fromPrepared(res.txs),
+        fromPrepared(res.txs, CHAIN.id, expected),
         splitList([
           ["Desk key", `<span class="hash">${esc(res.key)}</span>`],
           ["Operator", `<span class="hash">${esc(res.operator)}</span>`],
@@ -668,7 +721,8 @@ function agentRevokeForm(args: Record<string, unknown>): void {
       if (stringToBytes(reason).length > 32) throw new Error("The reason must fit in 32 bytes.");
       if (!isAddress(key)) throw new Error("Unknown key.");
       const res = await mutate("agent.revoke", { bookId: b.bookId, key, reason });
-      review(ticker, "Revoke desk key", fromPrepared(res.txs), splitList([["Key", `<span class="hash">${esc(res.key)}</span>`], ["Reason", esc(res.reason)]]), res.warnings);
+      const expected = await chainExpectation(b.components.book, { mandate: true });
+      review(ticker, "Revoke desk key", fromPrepared(res.txs, CHAIN.id, expected), splitList([["Key", `<span class="hash">${esc(res.key)}</span>`], ["Reason", esc(res.reason)]]), res.warnings);
     },
   );
 }

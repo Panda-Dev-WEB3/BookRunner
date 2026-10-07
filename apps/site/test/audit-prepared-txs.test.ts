@@ -11,7 +11,9 @@ import { fromPrepared } from "../src/dashboard/txs";
 
 const USDC = "0x6666666666666666666666666666666666666666";
 const TRANCHE = "0x7777777777777777777777777777777777777777";
-const ATTACKER = "0xbAdbAdbAdbAdbAdbAdbAdbAdbAdbAdbAdbAdbAdb";
+// lower case: the mixed-case spelling is not a valid EIP-55 checksum, so viem refused to encode it and
+// the test threw before ever reaching fromPrepared (a false pass for any implementation)
+const ATTACKER = "0xbadbadbadbadbadbadbadbadbadbadbadbadbadb";
 const trancheAbi = [
   { type: "function", name: "deposit", stateMutability: "nonpayable", inputs: [{ name: "assets", type: "uint256" }, { name: "receiver", type: "address" }], outputs: [] },
 ] as const;

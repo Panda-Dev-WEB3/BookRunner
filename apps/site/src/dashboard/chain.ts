@@ -55,6 +55,18 @@ export async function readProtocol(book: Address): Promise<ProtocolContracts> {
   return out;
 }
 
+export interface BookParts {
+  senior: Address;
+  junior: Address;
+  mandate: Address;
+}
+
+/** A book's tranches and mandate as the BOOK reports them on chain (not as the API lists them). */
+export async function readBookParts(book: Address): Promise<BookParts> {
+  const c = (await publicClient.readContract({ address: book, abi: bookAbi, functionName: "components" })) as { senior: Address; junior: Address; mandate: Address };
+  return { senior: getAddress(c.senior), junior: getAddress(c.junior), mandate: getAddress(c.mandate) };
+}
+
 export async function readTopUp(book: Address): Promise<TopUpRound | null> {
   const raw = await soft(publicClient.readContract({ address: book, abi: bookAbi, functionName: "topUp" }));
   return raw ? parseTopUp(raw as readonly [boolean, bigint, bigint, bigint]) : null;

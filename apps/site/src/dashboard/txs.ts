@@ -3,6 +3,7 @@
 // executor (simulate / send / wait) so it is unit-tested without a wallet (test/txs.test.ts).
 import { bkrnStakingAbi } from "@bookrunner/shared/abi/BkrnStaking";
 import { bookAbi } from "@bookrunner/shared/abi/Book";
+import { type PreparedCheck, verifyPreparedTxs } from "@bookrunner/shared/preparedTx";
 import { type Address, type Hex, encodeFunctionData, erc20Abi, getAddress, isAddress } from "viem";
 import { BKRN_DECIMALS, formatAmountDisplay } from "./amount";
 import { CHAIN } from "./config";
@@ -16,6 +17,8 @@ export interface TxStep {
   description: string;
   /** Set when this step must be signed by a specific wallet (e.g. an operator's consentKey). */
   signer?: Address;
+  /** What the calldata actually does (decoded here, not the API's description). */
+  decoded?: string;
 }
 
 export interface PreparedTxLike {
@@ -27,21 +30,25 @@ export interface PreparedTxLike {
   signer?: string;
 }
 
-/** API prepared txs -> steps. Refuses txs for another chain or with a value (the API never sends value). */
-export function fromPrepared(txs: readonly PreparedTxLike[], chainId: number = CHAIN.id): TxStep[] {
-  return txs.map((t, i) => {
-    if (t.chainId !== chainId) throw new Error(`Step ${i + 1} is for chain ${t.chainId}, not ${chainId}. Nothing was sent.`);
-    if (!isAddress(t.to)) throw new Error(`Step ${i + 1} has an invalid destination address. Nothing was sent.`);
-    if (!/^0x[0-9a-fA-F]*$/.test(t.data)) throw new Error(`Step ${i + 1} has malformed calldata. Nothing was sent.`);
-    if (t.value !== "0") throw new Error(`Step ${i + 1} asks to send ETH; this desk never sends value. Nothing was sent.`);
-    return {
-      to: getAddress(t.to),
-      data: t.data as Hex,
-      value: 0n,
-      description: t.description,
-      ...(t.signer && isAddress(t.signer) ? { signer: getAddress(t.signer) } : {}),
-    };
-  });
+/** What a flow's prepared steps may do: chain-derived destinations, the user's account and amount. */
+export type PreparedExpectation = Omit<PreparedCheck, "chainId">;
+
+/**
+ * API prepared txs -> steps, verified before any wallet prompt (@bookrunner/shared/preparedTx): this
+ * chain, no value, a known protocol function, approvals only to a later step's contract and only for the
+ * amount it moves, and — with `expect` — destinations in the chain-derived set of the flow, the amount
+ * the user entered and the user's account as receiver. Throws (nothing is sent) on any mismatch.
+ */
+export function fromPrepared(txs: readonly PreparedTxLike[], chainId: number = CHAIN.id, expect: PreparedExpectation = {}): TxStep[] {
+  const decoded = verifyPreparedTxs(txs, { ...expect, chainId });
+  return txs.map((t, i) => ({
+    to: getAddress(t.to),
+    data: t.data as Hex,
+    value: 0n,
+    description: t.description,
+    decoded: decoded[i]?.summary,
+    ...(t.signer && isAddress(t.signer) ? { signer: getAddress(t.signer) } : {}),
+  }));
 }
 
 // ------------------------------------------------------------------ test USDC
