@@ -140,8 +140,11 @@ export function splitDistribution(i: SplitInput): SplitResult {
 // ---------------------------------------------------------------------------------------------
 // 3. Mark application (Book.applyMark). nav = vault.idle() - unfundedClaims + mark.deployedValueUsd
 //    Loss: Junior first, then Senior (seniorImpairment += senior loss); if Junior == 0 and Senior is
-//    impaired, the backstop covers min(seniorImpairment, backstop balance).
-//    Gain: restores seniorImpairment first, then Junior residual (Senior if Junior supply == 0).
+//    impaired, the backstop covers min(seniorImpairment, backstop balance); the cover becomes backstop
+//    debt (Book.backstopDebt()).
+//    Gain: restores seniorImpairment first, then repays backstop debt (that part leaves the tranches:
+//    S' + J' == nav + backstopCovered - backstopRepaid), then Junior residual (Senior if Junior
+//    supply == 0).
 //    Performance index moves by nav / accounted (pre-backstop); drawdown from its high-water mark.
 // ---------------------------------------------------------------------------------------------
 export interface MarkState {
@@ -150,6 +153,8 @@ export interface MarkState {
   seniorImpairment: bigint;
   perfIndex: bigint; // WAD
   highWater: bigint; // WAD
+  /** Backstop cover not yet repaid from later gains (Book.backstopDebt(); 0 when omitted). */
+  backstopDebt?: bigint;
 }
 
 export interface MarkInputs {
@@ -166,17 +171,23 @@ export interface MarkResult extends MarkState {
   seniorRestored: bigint;
   juniorGain: bigint;
   drawdownBps: bigint; // <= 0
+  /** Gain paid back to the backstop at this mark (leaves the tranches). */
+  backstopRepaid: bigint;
+  /** Debt after this mark: debt - backstopRepaid + backstopCovered. */
+  backstopDebt: bigint;
 }
 
 export function applyMarkPnl(s: MarkState, m: MarkInputs): MarkResult {
   let S = s.seniorNav;
   let J = s.juniorNav;
   let imp = s.seniorImpairment;
+  const debt = s.backstopDebt ?? 0n;
   const accounted = S + J;
   const pnl = m.nav - accounted;
   let juniorLoss = 0n;
   let seniorLoss = 0n;
   let backstopCovered = 0n;
+  let backstopRepaid = 0n;
   let seniorRestored = 0n;
   let juniorGain = 0n;
 
@@ -191,7 +202,8 @@ export function applyMarkPnl(s: MarkState, m: MarkInputs): MarkResult {
     seniorRestored = minBig(pnl, imp);
     S += seniorRestored;
     imp -= seniorRestored;
-    const rest = pnl - seniorRestored;
+    backstopRepaid = minBig(pnl - seniorRestored, debt);
+    const rest = pnl - seniorRestored - backstopRepaid;
     if (m.juniorSupply === 0n) S += rest;
     else {
       J += rest;
@@ -222,6 +234,8 @@ export function applyMarkPnl(s: MarkState, m: MarkInputs): MarkResult {
     seniorRestored,
     juniorGain,
     drawdownBps,
+    backstopRepaid,
+    backstopDebt: debt - backstopRepaid + backstopCovered,
   };
 }
 

@@ -72,6 +72,24 @@ export const bookAbi = [
   },
   {
     "type": "function",
+    "name": "backstopDebt",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "debt",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "payable_",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "bookId",
     "inputs": [],
     "outputs": [

@@ -142,7 +142,8 @@ contract CapitalCoreAuditTest is BookFixture {
         while (!senior.roundInfo(1).settled) {
             _markWithPnl(0);
         }
-        assertEq(senior.roundInfo(1).accepted, 20_000e6, "Senior top-up accepted at the impaired price");
+        // FIX (A1-03): no Senior top-up while Senior is impaired -> the Senior part is refunded in full
+        assertEq(senior.roundInfo(1).accepted, 0, "Senior top-up refused while Senior is impaired");
         assertEq(book.seniorImpairment(), 10_000e6);
 
         // the venue recovers exactly the impairment
@@ -151,11 +152,12 @@ contract CapitalCoreAuditTest is BookFixture {
 
         uint256 oldShares = 70_000e6; // alice 40k + bob 30k, bought at par
         uint256 oldValue = senior.convertToAssets(oldShares);
-        (uint256 eveShares,) = senior.claimableAllocation(eve);
+        (uint256 eveShares, uint256 eveRefund) = senior.claimableAllocation(eve);
         emit log_named_uint("old Senior value after full restoration", oldValue);
         emit log_named_uint("eve paid", 20_000e6);
-        emit log_named_uint("eve value", senior.convertToAssets(eveShares));
+        emit log_named_uint("eve value", senior.convertToAssets(eveShares) + eveRefund);
         assertGe(oldValue, oldShares - 1e6, "pre-loss Senior shares not restored to par");
+        assertEq(eveRefund, 20_000e6, "the refused Senior commitment is refunded 1:1");
     }
 
     // =========================================================================================
@@ -187,17 +189,20 @@ contract CapitalCoreAuditTest is BookFixture {
         junior.claimAllocation(carol);
         uint256 dust = senior.balanceOf(address(senior));
         emit log_named_uint("unallocatable Senior share units in escrow", dust);
-        assertGt(dust, 0);
+        // FIX (A1-05): once the whole round is claimed, the unallocatable rounding dust is burned
+        assertEq(dust, 0, "unallocatable Senior share units left in escrow");
+        assertEq(senior.totalSupply(), senior.balanceOf(alice) + senior.balanceOf(bob) + senior.balanceOf(dave));
 
         // every Senior holder exits
-        uint256 a = senior.balanceOf(alice);
-        uint256 b = senior.balanceOf(bob);
-        vm.prank(alice);
-        senior.requestRedeem(a, alice, alice);
-        vm.prank(bob);
-        senior.requestRedeem(b, bob, bob);
+        address[3] memory holders = [alice, bob, dave];
+        for (uint256 i = 0; i < 3; i++) {
+            uint256 bal = senior.balanceOf(holders[i]);
+            if (bal == 0) continue;
+            vm.prank(holders[i]);
+            senior.requestRedeem(bal, holders[i], holders[i]);
+        }
         _markWithPnl(0);
-        assertEq(senior.totalSupply(), dust, "only escrow dust left in Senior");
+        assertEq(senior.totalSupply(), 0, "no Senior share left once every holder exited");
         (uint256 sNavBefore,) = book.trancheNav();
 
         // a 10k fee distribution, split exactly as RevenueRouter does (current supplies)
@@ -243,7 +248,11 @@ contract CapitalCoreAuditTest is BookFixture {
         _markWithPnl(0);
 
         uint256 maxShares = senior.maxRedeem(alice);
-        assertGt(maxShares, 1000e6);
+        // FIX (A1-04): maxRedeem only counts the next MAX_CLAIM_BUCKETS buckets (64 griefing units here);
+        // alice's own request is reachable by calling again
+        assertGt(maxShares, 0);
+        assertLt(maxShares, 1000e6);
+        assertGt(senior.claimableAssets(alice), 1000e6, "claimableAssets still reports every settled bucket");
         vm.prank(alice);
         (bool ok, bytes memory ret) =
             address(senior).call(abi.encodeCall(Tranche.redeem, (maxShares, alice, alice)));
@@ -251,5 +260,11 @@ contract CapitalCoreAuditTest is BookFixture {
             assertEq(bytes4(ret), Tranche.ExceedsClaimable.selector, "reverts for the bucket walk, not liquidity");
         }
         assertTrue(ok, "redeem(maxRedeem(controller)) reverts ExceedsClaimable");
+        // the next call reaches the rest: the 65th griefing unit and alice's own request
+        maxShares = senior.maxRedeem(alice);
+        assertEq(maxShares, 1000e6 + 1);
+        vm.prank(alice);
+        senior.redeem(maxShares, alice, alice);
+        assertEq(senior.maxRedeem(alice), 0);
     }
 }

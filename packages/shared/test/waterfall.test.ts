@@ -195,6 +195,20 @@ describe("applyMarkPnl", () => {
       expect(r.seniorNav + r.juniorNav).toBe(nav + r.backstopCovered);
     }
   });
+
+  test("backstop cover becomes debt, repaid from gains before the Junior residual", () => {
+    // -40k: Junior wiped, Senior short 10k, the backstop covers it -> debt 10k
+    const loss = applyMarkPnl(s0, { nav: usd(60_000), juniorSupply: 1n, backstopAvailable: usd(50_000) });
+    expect(loss.backstopCovered).toBe(usd(10_000));
+    expect(loss.backstopDebt).toBe(usd(10_000));
+    expect(loss.seniorNav).toBe(usd(70_000));
+    // +40k recovery: 10k back to the backstop first, Junior gets the remaining 30k
+    const gain = applyMarkPnl(loss, { nav: usd(110_000), juniorSupply: 1n, backstopAvailable: 0n });
+    expect(gain.backstopRepaid).toBe(usd(10_000));
+    expect(gain.backstopDebt).toBe(0n);
+    expect(gain.juniorNav).toBe(usd(30_000));
+    expect(gain.seniorNav + gain.juniorNav).toBe(usd(110_000) - gain.backstopRepaid);
+  });
 });
 
 describe("buckets", () => {

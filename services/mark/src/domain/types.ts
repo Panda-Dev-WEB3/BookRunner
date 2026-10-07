@@ -60,6 +60,8 @@ export interface MarkSnapshot {
     seniorNav: bigint;
     juniorNav: bigint;
     seniorImpairment: bigint;
+    /** Book.backstopDebt() debt: backstop cover not yet repaid from gains (absent on pre-upgrade books = 0). */
+    backstopDebt?: bigint;
     perfIndex: bigint;
     highWater: bigint;
     seniorSupply: bigint;

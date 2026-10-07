@@ -238,7 +238,7 @@ export class MarkChainAdapter implements MarkChain {
     const { book, vault, adapter, desk, senior, junior, mandate } = ref.components;
     const b = { blockNumber } as const;
     const usdc = this.c.usdc;
-    const [block, state, flowNonce, unfundedClaims, trancheNav, seniorImpairment, perf, lastMarkPeriodEnd, charter] = await Promise.all([
+    const [block, state, flowNonce, unfundedClaims, trancheNav, seniorImpairment, perf, lastMarkPeriodEnd, charter, backstopDebt] = await Promise.all([
       this.pc.getBlock({ blockNumber }),
       this.pc.readContract({ address: book, abi: bookAbi, functionName: "state", ...b }),
       this.pc.readContract({ address: book, abi: bookAbi, functionName: "flowNonce", ...b }),
@@ -248,6 +248,11 @@ export class MarkChainAdapter implements MarkChain {
       this.pc.readContract({ address: book, abi: bookAbi, functionName: "perfIndex", ...b }),
       this.pc.readContract({ address: book, abi: bookAbi, functionName: "lastMarkPeriodEnd", ...b }),
       this.pc.readContract({ address: book, abi: bookAbi, functionName: "getCharter", ...b }),
+      // backstop cover owed back from gains (A5-01); a pre-upgrade book has no such view: 0
+      this.pc.readContract({ address: book, abi: bookAbi, functionName: "backstopDebt", ...b }).then(
+        (d) => d[0],
+        () => 0n,
+      ),
     ]);
     const blockTs = block.timestamp;
     // signed prices are exogenous: value at the newest one (an idle chain's head may lag the wall clock)
@@ -378,6 +383,7 @@ export class MarkChainAdapter implements MarkChain {
         seniorNav: trancheNav[0],
         juniorNav: trancheNav[1],
         seniorImpairment,
+        backstopDebt,
         perfIndex: perf[0],
         highWater: perf[1],
         seniorSupply,

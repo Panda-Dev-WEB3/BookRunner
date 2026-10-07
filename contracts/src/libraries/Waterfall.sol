@@ -193,6 +193,7 @@ library Waterfall {
         uint256 seniorImpairment;
         uint256 perfIndex; // WAD
         uint256 highWater; // WAD
+        uint256 backstopDebt; // backstop cover not yet repaid from later gains
     }
 
     struct MarkInputs {
@@ -214,12 +215,16 @@ library Waterfall {
         uint256 seniorRestored;
         uint256 juniorGain;
         int256 drawdownBps; // <= 0
+        uint256 backstopRepaid; // gain owed back to the backstop (leaves the tranches)
+        uint256 backstopDebt; // debt after this mark: debt - repaid + covered
     }
 
     /// @notice Loss: Junior first, then Senior (impairment += senior loss); if Junior == 0 and Senior is
-    ///         impaired, the backstop covers min(impairment, available). Gain: restores impairment first,
-    ///         then Junior residual (Senior if Junior supply == 0). Performance index moves by
-    ///         nav / accounted (pre-backstop); drawdown measured from its high-water mark.
+    ///         impaired, the backstop covers min(impairment, available) and the cover becomes backstop
+    ///         debt. Gain: restores impairment first, then repays backstop debt (that part leaves the
+    ///         tranches: S' + J' == nav + covered - repaid), then Junior residual (Senior if Junior
+    ///         supply == 0). Performance index moves by nav / accounted (pre-backstop); drawdown measured
+    ///         from its high-water mark.
     function applyMarkPnl(MarkState memory s, MarkInputs memory m)
         internal
         pure
@@ -244,6 +249,8 @@ library Waterfall {
             sNav += r.seniorRestored;
             imp -= r.seniorRestored;
             uint256 rest = gain - r.seniorRestored;
+            r.backstopRepaid = Math.min(rest, s.backstopDebt);
+            rest -= r.backstopRepaid;
             if (m.juniorSupply == 0) {
                 sNav += rest;
             } else {
@@ -269,6 +276,7 @@ library Waterfall {
         r.perfIndex = pi;
         r.highWater = hw;
         r.drawdownBps = dd;
+        r.backstopDebt = s.backstopDebt - r.backstopRepaid + r.backstopCovered;
     }
 
     /// @notice Kill check at mark. killAtDrawdownBps must be negative (charter validation); >= 0 disables.
