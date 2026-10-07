@@ -1,7 +1,8 @@
 # Server install (Robinhood Chain testnet stack)
 
 One Linux host runs the whole testnet stack: every service, one agent per book, the trader simulator,
-Postgres/Timescale + Redis in Docker, and nginx serving the built web app at `https://bookrunner.use-cert.com`.
+Postgres/Timescale + Redis in Docker, and nginx serving `https://bookrunner.use-cert.com`: the public site
+(`apps/site`) at `/`, the operator app (`apps/web`) at `/app/`, and the API at `/trpc` + `/health`.
 The host is shared with other services, so everything is loopback-only and memory-capped.
 
 | Piece | Where |
@@ -10,8 +11,35 @@ The host is shared with other services, so everything is loopback-only and memor
 | Secrets + state (never in git) | `.env.testnet` (mode 600), `contracts/deployments/46630.json`, `.data/testnet/` |
 | Stack | `bookrunner.service` → `scripts/dev.ts --network testnet --no-web` (cap 2.5 GB RAM) |
 | Infra | `deploy/server/docker-compose.yml` → Postgres 127.0.0.1:54400, Redis 127.0.0.1:63790 |
-| Web | built to `/var/www/bookrunner`, nginx site `bookrunner` (proxies `/trpc`, `/health` → API :4400) |
+| Web | site → `/var/www/bookrunner/`, app → `/var/www/bookrunner/app/`; nginx site `bookrunner` + snippet `/etc/nginx/snippets/bookrunner-locations.conf` |
 | Logs | `/opt/bookrunner/app/.data/testnet/dev.log` (logrotate daily, 7 kept) |
+
+## URL layout
+
+| URL | Served from | Built by | Cache |
+|---|---|---|---|
+| `/`, `/research/`, `/jobs/`, `/documents/`, `/dashboard/`, … | `/var/www/bookrunner/` (`apps/site/dist`, one `index.html` per directory) | `cd apps/site && bun run build` | HTML `no-cache`; `/assets/` (not hashed) 1 day; other files 1 hour |
+| `/app/…` | `/var/www/bookrunner/app/` (`apps/web/dist`, single-page app: unknown paths → `/app/index.html`) | `cd apps/web && WEB_BASE=/app/ bun run build:testnet` (vite `base`, react-router `basename` `/app`) | HTML `no-cache`; `/app/assets/` (hashed) immutable, 1 year |
+| `/trpc/…`, `/health` | proxy → API `127.0.0.1:4400` | — | — |
+| `*.webm`, `*.mp4` | either tree, explicit `video/*` types, byte ranges | — | 1 day |
+| `/invest`, `/books/…`, `/learn`, … (the app's old root URLs) | 301 → `/app/…` | — | — |
+
+The app is built with `VITE_API_URL=same-origin`: it calls `{origin}/trpc` and `{origin}/health` at the host
+root, never under `/app/`. The dev server (`bun run dev`) still serves the app at `/`.
+
+### nginx files
+
+- `nginx-bookrunner.conf` — the site template (`server{}` with `server_name`, `root`, security headers and
+  `include /etc/nginx/snippets/bookrunner-locations.conf;`). `install.sh` installs it only on a first install:
+  certbot rewrites that file in place (TLS listeners, port-80 redirect), so it is never overwritten later.
+- `nginx-bookrunner-locations.conf` — every `location` block. `install.sh` and `update.sh` copy it to
+  `/etc/nginx/snippets/bookrunner-locations.conf` (nginx's `www-data` cannot read `/opt/bookrunner`, mode 750),
+  validate with `nginx -t`, reload, and put the previous copy back if validation fails.
+- `patch-nginx.sh` — one-time conversion of a live site that predates the snippet: in each `server{}` block that
+  has location blocks (the 443 block certbot made), it replaces them with the `include`, keeping certbot's
+  listeners/certificates, then runs `nginx -t` and reloads, or restores the backup
+  (`/etc/nginx/bookrunner-backups/`) on failure. `--dry-run` prints the diff only. Idempotent.
+- `nginx-lib.sh` — the shared install/validate/rollback helpers.
 
 ## First install
 
@@ -43,5 +71,30 @@ sudo systemctl status bookrunner        # stack
 sudo tail -f /opt/bookrunner/app/.data/testnet/dev.log
 sudo systemctl restart bookrunner
 sudo bash /opt/bookrunner/app/deploy/server/update.sh            # deploy origin/main
-sudo bash /opt/bookrunner/app/deploy/server/update.sh --web-only # web app only, no stack restart
+sudo bash /opt/bookrunner/app/deploy/server/update.sh --web-only # site + app + nginx snippet, no stack restart
+```
+
+`update.sh` builds the app (`apps/web`, base `/app/`) and the site (`apps/site`; skipped with a message while
+`apps/site/package.json` does not exist), publishes the app with `rsync --delete` to `/var/www/bookrunner/app/`
+and the site with `rsync --delete --exclude=/app` to `/var/www/bookrunner/` (so the site's `--delete` never
+removes the app), then installs the nginx snippet. When a pull changes `update.sh` itself, it re-runs the new
+version. It warns while the live site does not include the snippet yet (run `patch-nginx.sh` once).
+
+### Moving an existing server to the site + `/app/` layout (once)
+
+```bash
+cd /opt/bookrunner/app
+# 1. pull first: the update.sh already on the server predates the re-run-on-change logic
+sudo -u bookrunner HOME=/opt/bookrunner git fetch origin main
+sudo -u bookrunner HOME=/opt/bookrunner git merge --ff-only origin/main
+# 2. build + publish site and app, install the snippet (warns that the site does not include it yet)
+sudo bash deploy/server/update.sh --web-only
+# 3. switch the certbot-managed site to the snippet: review the diff, then apply (nginx -t, reload, rollback)
+sudo bash deploy/server/patch-nginx.sh --dry-run
+sudo bash deploy/server/patch-nginx.sh
+# 4. check
+curl -sI https://bookrunner.use-cert.com/ | head -5               # site, Cache-Control: no-cache
+curl -sI https://bookrunner.use-cert.com/app/books | head -5      # app index.html (SPA fallback)
+curl -s  https://bookrunner.use-cert.com/health                   # API
+curl -sI https://bookrunner.use-cert.com/books | grep -i location # 301 -> /app/books
 ```
