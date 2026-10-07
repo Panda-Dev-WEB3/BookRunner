@@ -30,8 +30,8 @@ export interface PreparedTxLike {
 /** API prepared txs -> steps. Refuses txs for another chain or with a value (the API never sends value). */
 export function fromPrepared(txs: readonly PreparedTxLike[], chainId: number = CHAIN.id): TxStep[] {
   return txs.map((t, i) => {
-    if (t.chainId !== chainId) throw new Error(`Step ${i + 1} targets chain ${t.chainId}, not ${chainId}. Nothing was sent.`);
-    if (!isAddress(t.to)) throw new Error(`Step ${i + 1} has an invalid target address. Nothing was sent.`);
+    if (t.chainId !== chainId) throw new Error(`Step ${i + 1} is for chain ${t.chainId}, not ${chainId}. Nothing was sent.`);
+    if (!isAddress(t.to)) throw new Error(`Step ${i + 1} has an invalid destination address. Nothing was sent.`);
     if (!/^0x[0-9a-fA-F]*$/.test(t.data)) throw new Error(`Step ${i + 1} has malformed calldata. Nothing was sent.`);
     if (t.value !== "0") throw new Error(`Step ${i + 1} asks to send ETH; this desk never sends value. Nothing was sent.`);
     return {

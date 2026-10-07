@@ -5,7 +5,8 @@
 //
 // Dev: `bun run dev` serves the same tree and proxies /trpc + /health to SITE_API_ORIGIN
 // (default https://bookrunner.use-cert.com, the live testnet API; read-only queries are safe).
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Plugin, defineConfig } from "vite";
@@ -46,10 +47,25 @@ function staticTree(): Plugin {
   };
 }
 
+/** Build only: dist/dashboard/index.html loads app.js with a content hash, so a release is never served stale. */
+function versionedBundle(): Plugin {
+  return {
+    name: "bookrunner-versioned-bundle",
+    apply: "build",
+    closeBundle() {
+      const out = join(root, "dist", "dashboard");
+      const js = readFileSync(join(out, "app.js"));
+      const v = createHash("sha256").update(js).digest("hex").slice(0, 12);
+      const page = join(out, "index.html");
+      writeFileSync(page, readFileSync(page, "utf8").replace(/\/dashboard\/app\.js(\?[^"]*)?"/, `/dashboard/app.js?v=${v}"`));
+    },
+  };
+}
+
 export default defineConfig({
   root,
   publicDir,
-  plugins: [staticTree()],
+  plugins: [staticTree(), versionedBundle()],
   server: {
     host: "127.0.0.1",
     port,

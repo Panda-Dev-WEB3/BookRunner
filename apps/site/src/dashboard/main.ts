@@ -152,6 +152,7 @@ function titleAction(view: ViewKey): string {
 }
 
 let renderQueued = false;
+let last = { header: "", sidebar: "", main: "" };
 function render(): void {
   // never rebuild the page under an open <select> or a field being typed in
   const active = document.activeElement;
@@ -170,7 +171,23 @@ function render(): void {
     body = `<div class="notice error">This view could not be drawn: ${esc(e instanceof Error ? e.message : String(e))}</div>`;
   }
   const title = view === "book" ? V.bookTitle(c) : page[0];
-  app.innerHTML = `${header()}<div class="desk-grid">${sidebar(view)}<main class="desk-main"><div class="desk-title"><div><p class="eyebrow">BOOKRUNNER / ${view === "book" ? "MARKET BOOK" : view === "settings" ? "NETWORK" : esc(view.toUpperCase())}</p><h1>${title}</h1><p class="subtitle">${page[1]}</p></div>${titleAction(view)}</div>${body}</main></div>`;
+  const next = {
+    header: header(),
+    sidebar: sidebar(view),
+    main: `<div class="desk-title"><div><p class="eyebrow">BOOKRUNNER / ${view === "book" ? "MARKET BOOK" : view === "settings" ? "NETWORK" : esc(view.toUpperCase())}</p><h1>${title}</h1><p class="subtitle">${page[1]}</p></div>${titleAction(view)}</div>${body}`,
+  };
+  // only the parts whose markup changed are rebuilt, so polling does not re-create unchanged art
+  const headerEl = app.querySelector("header.desk-header");
+  const asideEl = app.querySelector("aside.sidebar");
+  const mainEl = app.querySelector("main.desk-main");
+  if (!headerEl || !asideEl || !mainEl) {
+    app.innerHTML = `${next.header}<div class="desk-grid">${next.sidebar}<main class="desk-main">${next.main}</main></div>`;
+  } else {
+    if (next.header !== last.header) headerEl.outerHTML = next.header;
+    if (next.sidebar !== last.sidebar) asideEl.outerHTML = next.sidebar;
+    if (next.main !== last.main) mainEl.innerHTML = next.main;
+  }
+  last = next;
   (document.getElementById("role-switch") as HTMLSelectElement).onchange = (e) => {
     store.role = (e.target as HTMLSelectElement).value as Role;
     savePrefs(store);
@@ -191,10 +208,11 @@ function render(): void {
 function scheduleRender(): void {
   if (renderQueued) return;
   renderQueued = true;
-  requestAnimationFrame(() => {
+  // a timer, not requestAnimationFrame: rAF is paused in hidden tabs, which would hold every update
+  setTimeout(() => {
     renderQueued = false;
     render();
-  });
+  }, 16);
 }
 
 // ------------------------------------------------------------------ data

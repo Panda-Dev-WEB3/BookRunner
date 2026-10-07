@@ -345,7 +345,7 @@ function subscribeForm(args: Record<string, unknown>): void {
     "Subscribe to the book",
     select("Tranche", "tranche", trancheChoices, t, true) +
       amountField("Capital · USDC", "amount", "1000") +
-      `<div class="notice field full">${esc(ticker)} · ${badge(b.state)}<br>${esc(windowText)}<br>Wallet USDC: ${bal == null ? (host.wallet.snapshot.address ? "reading…" : "connect a wallet") : `$${formatAmountDisplay(bal)}`}. Per-wallet cap per round: ${terms?.perWalletCapUsd ? usd(terms.perWalletCapUsd) : "none"}. Senior cap: ${terms?.seniorCapBps != null ? `${terms.seniorCapBps / 100}% of book capital` : "per charter"}.<br>Deposits stay in escrow until the first mark after the round end and cannot be cancelled before. Testnet USDC has no value.</div>`,
+      `<div class="notice field full"><strong>${esc(ticker)} · ${esc(d?.state ?? b.state)}</strong><br>${esc(windowText)}<br>Wallet USDC: ${bal == null ? (host.wallet.snapshot.address ? "reading…" : "connect a wallet") : `$${formatAmountDisplay(bal)}`}. Per-wallet cap per round: ${terms?.perWalletCapUsd ? usd(terms.perWalletCapUsd) : "none"}. Senior cap: ${terms?.seniorCapBps != null ? `${terms.seniorCapBps / 100}% of book capital` : "per charter"}.<br>Deposits stay in escrow until the first mark after the round end and cannot be cancelled before. Testnet USDC has no value.</div>`,
     "Review deposit",
     async (v) => {
       const me = await requireWallet();
@@ -491,7 +491,7 @@ function charterFileForm(): void {
       select("Venue", "venue", [["orderly", "Orderly"], ["pool_engine", "In-house pool engine"]], "orderly") +
       select("Oracle", "oracle", [["attested", "Attested multi-source"], ["chainlink", "Chainlink"]], "attested") +
       select("Trading sessions", "sessions", [["24x5", "24 hours, 5 days"], ["24x7", "24 hours, 7 days"], ["nyse_rth", "NYSE regular hours"]], "24x5") +
-      amountField("Insurance-fund target · USD", "ifTargetUsd", "30000", false) +
+      amountField("Insurance-fund size · USD", "ifTargetUsd", "30000", false) +
       amountField("MM inventory · USD", "mmInventoryUsd", "75000", false) +
       field("Senior hurdle share · bps", "seniorHurdleBps", 6000, "number", 'min="0" max="10000" required') +
       field("Senior capital cap · bps", "seniorCapBps", 7000, "number", 'min="0" max="10000" required') +
@@ -739,8 +739,9 @@ export async function verifyMark(markId: number): Promise<void> {
       r.matches ? "Receipts root matches" : "Receipts root differs",
       `<p>${r.matches ? "The root recomputed from the indexed hourly receipt roots equals the root committed with this mark." : "The root recomputed from the indexed hourly roots does not equal the committed root. The indexer may be missing an hour; the committed root on-chain is authoritative."}</p>${splitList([
         ["Mark", `#${r.markId}`],
+        ["Book", esc(bookTicker((store.books ?? []).find((x) => x.bookId === r.bookId)?.symbol ?? `#${r.bookId}`))],
         ["Period", `${esc(dateTime(r.periodStart))} to ${esc(dateTime(r.periodEnd))}`],
-        ["Hourly roots", String(r.hours.length)],
+        ["Receipt roots in the period", String(r.hours.length)],
         ["Receipt leaves", String(r.hours.reduce((a, h) => a + h.leafCount, 0))],
       ])}<div class="hash">Committed: ${esc(r.receiptsRoot)}<br>Recomputed: ${esc(r.computedRoot)}<br>Inventory root: ${esc(r.inventoryRoot)}</div>`,
     );

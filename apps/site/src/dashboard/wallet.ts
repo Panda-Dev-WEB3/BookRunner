@@ -187,7 +187,7 @@ export class WalletManager {
     if (!w || !from) throw new Error("Connect a wallet first.");
     if (this.state.chainId !== CHAIN.id) throw new Error(`Switch your wallet to ${CHAIN.name} first.`);
     const hash = await w.provider.request({ method: "eth_sendTransaction", params: [{ from, to: tx.to, data: tx.data, value: toHex(tx.value) }] });
-    if (typeof hash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(hash)) throw new Error("The wallet did not return a transaction hash.");
+    if (typeof hash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(hash)) throw new Error("The wallet gave no transaction hash.");
     return hash as Hex;
   }
 

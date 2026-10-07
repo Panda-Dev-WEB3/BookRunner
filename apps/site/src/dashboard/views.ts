@@ -123,8 +123,8 @@ export function books(ctx: ViewCtx): string {
       const c = bookCard(b);
       const art = bookArt(c.ticker);
       const w = depositWindow(b.state, b.subscriptionEnds, s.topUps[b.bookId] ?? null, nowSec, b.markSchedule?.intervalSeconds ?? null);
-      const deposits = w.kind === "subscription" ? (w.open ? `Window open until ${esc(time(w.endsAt))}` : "Window closed") : w.kind === "topup" ? `Top-up open until ${esc(dateTime(w.endsAtSec))}` : "Closed";
-      return `<article class="book-card"><div class="book-art"><img src="${art.src}" loading="lazy" decoding="async" alt="${esc(art.alt)}"><span>${esc(c.ticker)}</span></div><div class="book-card-body">${badge(c.state, statusClass(c.state))}<dl class="split-list"><dt>Book NAV · last mark</dt><dd>${usd(c.markedNav)}</dd><dt>Venue</dt><dd>${esc(c.venue)}</dd><dt>Senior share price</dt><dd>${price(c.seniorPrice)}</dd><dt>Junior share price</dt><dd>${price(c.juniorPrice)}</dd><dt>Deposits</dt><dd>${deposits}</dd></dl><div class="btn-row"><a class="btn" href="#book/${b.bookId}">View book →</a>${btn("Subscribe", "form", { kind: "subscribe", bookId: b.bookId }, "btn-outline")}</div></div></article>`;
+      const deposits = w.kind === "subscription" ? (w.open ? `Open to ${esc(time(w.endsAt))}` : "Window closed") : w.kind === "topup" ? `Top-up to ${esc(date(w.endsAtSec))}` : "Closed";
+      return `<article class="book-card"><div class="book-art"><img src="${art.src}" loading="lazy" decoding="async" alt="${esc(art.alt)}"><span>${esc(c.ticker)}</span></div><div class="book-card-body">${badge(c.state, statusClass(c.state))}<dl class="split-list"><dt>Book NAV</dt><dd>${usd(c.markedNav)}</dd><dt>Venue</dt><dd>${esc(c.venue)}</dd><dt>Senior price</dt><dd>${price(c.seniorPrice)}</dd><dt>Junior price</dt><dd>${price(c.juniorPrice)}</dd><dt>Deposits</dt><dd>${deposits}</dd></dl><div class="btn-row"><a class="btn" href="#book/${b.bookId}">View book →</a>${btn("Subscribe", "form", { kind: "subscribe", bookId: b.bookId }, "btn-outline")}</div></div></article>`;
     })
     .join("");
   return `${err(s, "books")}<div class="book-cards">${cards}</div>${notice(`${TESTNET_NOTE} Each book's NAV and share prices come from its last committed mark. A Live book takes deposits only during a sponsor top-up round; deposits stay in escrow until the first mark after the round end.`)}`;
@@ -185,7 +185,7 @@ export function bookDetail(ctx: ViewCtx): string {
         ["Venue", esc(terms.venue)],
         ["Oracle", esc(terms.oracle)],
         ["Trading sessions", esc(terms.sessions)],
-        ["Insurance-fund target", usd(terms.ifTargetUsd)],
+        ["Insurance-fund size", usd(terms.ifTargetUsd)],
         ["Market-making inventory", usd(terms.mmInventoryUsd)],
         ["Senior capital cap", bpsPct(terms.seniorCapBps)],
         ["Per-wallet cap per round", terms.perWalletCapUsd ? usd(terms.perWalletCapUsd) : "None"],
@@ -270,7 +270,7 @@ export function charters(ctx: ViewCtx): string {
   const rows = (s.charters ?? []).map((c) => {
     const v = charterRow(c, s.charterDetails[c.charterId] ?? null);
     const votes = v.committee.length
-      ? v.committee.map((m) => `${esc(short(m.member))}: ${m.voted ? "voted" : m.bonded ? "awaiting vote" : "not bonded"}`).join("<br>")
+      ? v.committee.map((m) => `${esc(short(m.member))}: ${m.voted ? "voted" : v.status !== "Filed" ? "did not vote" : m.bonded ? "awaiting vote" : "not bonded"}`).join("<br>")
       : "Committee not indexed";
     const committee = v.approvals === null ? "-" : `${v.approvals} / ${v.approveThreshold ?? 2} approve · ${v.rejections} reject<small>${votes}</small>`;
     const jury = v.juryCid ? `<span class="hash">${esc(v.juryCid)}</span><small>${v.juryRecommendApprove === null ? "" : v.juryRecommendApprove ? "Jury recommends approval" : "Jury recommends rejection"}</small>` : '<span class="hash">Awaiting jury</span>';
@@ -280,7 +280,7 @@ export function charters(ctx: ViewCtx): string {
   });
   return `${err(s, "charters")}${panel("Charter review queue", s.charters ? table(["Charter", "Venue", "State", "Committee", "Jury reference", ""], rows, "No charter filed yet.") : loading("Reading charters"), btn("File a charter +", "form", { kind: "charterFile" }, "btn"))}${panel(
     "From charter to market book",
-    '<div class="steps"><span>Sponsor bond & charter fee</span><span>Jury verdict</span><span>2-of-3 committee</span><span>Subscription window</span></div><p>Charters specify the underlying, venue, oracle, sessions, capital targets, mandate, Senior hurdle and cap, Junior notice and the per-wallet cap.</p>' +
+    '<div class="steps"><span>Sponsor bond & charter fee</span><span>Jury verdict</span><span>2-of-3 committee</span><span>Subscription window</span></div><p>Charters specify the underlying, venue, oracle, sessions, capital sizes, mandate, Senior hurdle and cap, Junior notice and the per-wallet cap.</p>' +
       notice("The flat charter fee and sponsor bond are set on-chain; the filing form validates the draft and shows the exact amounts and transactions before you sign. A rejected charter refunds the fee. Votes are RiskCommittee transactions from a bonded member wallet."),
   )}`;
 }
@@ -297,7 +297,7 @@ export function agents(ctx: ViewCtx): string {
         `<span class="hash">${esc(k.key)}</span><small>${k.registeredTx ? txLink(k.registeredTx, "registration") : ""}</small>`,
         k.operator ? addrLink(k.operator) : "-",
         k.tierUsd === null ? "-" : `${usd(k.tierUsd)}<small>Valid until ${esc(date(k.validUntil))}</small>`,
-        badge(k.status, statusClass(k.status === "active" ? "live" : k.status)),
+        badge(k.status.charAt(0).toUpperCase() + k.status.slice(1), statusClass(k.status === "active" ? "live" : k.status)),
         k.status === "active" ? btn("Revoke", "form", { kind: "agentRevoke", bookId: b.bookId, key: k.key }, "btn-small danger") : esc(k.revokedReason ?? "-"),
       ])
     : [];
@@ -392,17 +392,20 @@ export function settlements(ctx: ViewCtx): string {
   const b = selected();
   if (!b) return loading("Reading the books");
   const items = s.settlements[b.bookId];
-  const rows = (items ?? []).map(settlementRow);
+  const all = (items ?? []).map(settlementRow);
+  // the table lists distributions; venue fee-share rows are the inflows those distributions pay out
+  const rows = all.filter((r) => r.source === "Distribution");
+  const inflows = all.length - rows.length;
   const totals = settlementTotals(rows);
   const sp = s.stakingProtocol;
   return `${err(s, `settlements:${b.bookId}`)}${panel(
     `${esc(bookTicker(b.symbol))} · Fee-flow distributions`,
     items
       ? table(
-          ["Period", "Source", "Gross / expenses", "10% carry", "Senior", "Junior", "Tx"],
-          rows.map((r) => [`${esc(date(r.at))}<small>${esc(time(r.at))}</small>`, esc(r.source), `${usd(r.gross)} / ${usd(r.expenses)}`, usd(r.carry), usd(r.senior), usd(r.junior), txLink(r.txHash, "tx")]),
+          ["Period", "Gross / expenses", "10% carry", "Senior", "Junior", "Tx"],
+          rows.map((r) => [`${esc(date(r.period ?? r.at))}<small>Period ending ${esc(time(r.period ?? r.at))}</small>`, `${usd(r.gross)} / ${usd(r.expenses)}`, usd(r.carry), usd(r.senior), usd(r.junior), txLink(r.txHash, "tx")]),
           "No distribution recorded yet.",
-        )
+        ) + (inflows ? `<p>${inflows} venue fee-share inflow${inflows === 1 ? "" : "s"} in the same window fund these distributions.</p>` : "")
       : loading("Reading distributions"),
   )}<div class="two-col">${panel(
     "The fee waterfall",
@@ -459,7 +462,7 @@ export function staking(ctx: ViewCtx): string {
       ["Cover paid to books", sp ? usdc(sp.backstopCoveredUsd) : "…"],
       ["Carry spent on buybacks", sp ? usdc(sp.buybackSpentUsd) : "…"],
       ["$BKRN distributed to stakers", sp ? `${bkrnAmt(sp.distributedBkrn)} BKRN` : "…"],
-    ])}<p>Half of protocol carry funds the backstop; the other half buys $BKRN that is distributed to stakers. The backstop may cover a Senior shortfall only after Junior is exhausted, up to its balance.</p><div class="btn-row"><a class="btn-outline" href="#risk">Inspect book risk →</a></div>${notice("Coverage is not unlimited protection. Senior capital can be lost. " + TESTNET_NOTE)}`,
+    ])}<p>Half of protocol carry funds the backstop; the other half buys $BKRN that is distributed to stakers. The backstop may cover a Senior shortfall only after Junior is exhausted, up to its balance.</p><div class="btn-row"><a class="btn-outline" href="#risk">Inspect book risk →</a></div>${notice("Coverage is bounded by the backstop pool. Senior capital can be lost. " + TESTNET_NOTE)}`,
   )}</div>`;
 }
 

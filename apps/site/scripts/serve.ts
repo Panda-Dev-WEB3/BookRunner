@@ -57,7 +57,9 @@ Bun.serve({
       file = join(file, "index.html");
     }
     if (!existsSync(file)) return new Response("Not found", { status: 404 });
-    return new Response(Bun.file(file), { headers: { "content-type": TYPES[extname(file).toLowerCase()] ?? "application/octet-stream" } });
+    const type = TYPES[extname(file).toLowerCase()] ?? "application/octet-stream";
+    // pages revalidate (they carry the versioned bundle URL); assets may be cached
+    return new Response(Bun.file(file), { headers: { "content-type": type, "cache-control": type.startsWith("text/html") ? "no-cache" : "public, max-age=300" } });
   },
 });
 
