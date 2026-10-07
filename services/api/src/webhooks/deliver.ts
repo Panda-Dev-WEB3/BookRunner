@@ -4,7 +4,7 @@ import type { Logger, WebhookJob } from "@bookrunner/shared";
 import type { WebhookStore } from "../data/types";
 import { isSuccessStatus, webhookBody } from "./policy";
 import { SIGNATURE_HEADER, signatureHeader } from "./signature";
-import { type ResolveHost, checkResolvedTarget, dnsResolveHost } from "./target";
+import { type ResolveHost, checkResolvedTarget, dnsResolveHost, pinnedRequest } from "./target";
 
 export interface DeliverDeps {
   store: WebhookStore;
@@ -62,9 +62,13 @@ export async function deliverWebhook(d: DeliverDeps, job: WebhookJob, attempt: n
   let responseCode: number | null = null;
   let error: string;
   try {
-    const res = await d.fetch(sub.url, {
+    // connect to the address the SSRF check approved (no second DNS lookup), Host / SNI = the URL's name
+    const pinned = pinnedRequest(sub.url, target.address);
+    const res = await d.fetch(pinned.url, {
+      ...pinned.init,
       method: "POST",
       headers: {
+        ...pinned.headers,
         "content-type": "application/json",
         "user-agent": "bookrunner-webhooks/1",
         [SIGNATURE_HEADER]: signatureHeader(sub.secret, body, t),

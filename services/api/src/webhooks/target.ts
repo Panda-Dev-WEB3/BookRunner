@@ -8,8 +8,10 @@
 //   - WEBHOOK_ALLOW_HOSTS (explicit dev allow-list of host names / IP literals) bypasses the
 //     address rules for those hosts only.
 // The URL is checked syntactically at create/patch time and its DNS answers again right before
-// every delivery (a name can be re-pointed after creation). Redirects are never followed.
+// every delivery (a name can be re-pointed after creation); the delivery then connects to the checked
+// address (pinnedRequest), never to a second resolution. Redirects are never followed.
 import { isIP } from "node:net";
+import { type PeerCertificate, checkServerIdentity as tlsCheckServerIdentity } from "node:tls";
 
 export type TargetCheck = { ok: true } | { ok: false; reason: string };
 
@@ -120,16 +122,46 @@ export function checkWebhookUrl(raw: string, allowHosts: ReadonlySet<string>): T
 
 export type ResolveHost = (host: string) => Promise<string[]>;
 
-/** Delivery-time check: the URL again, then every DNS answer of its host. */
-export async function checkResolvedTarget(raw: string, allowHosts: ReadonlySet<string>, resolve: ResolveHost): Promise<TargetCheck> {
+/**
+ * A delivery target that passed the check. `address` is the checked IP the connection must go to (DNS
+ * pinning: connecting by name would resolve again, and a 0-TTL rebinding answer could then point at an
+ * internal address); null for an allow-listed host (dev only), which is fetched by name.
+ */
+export type ResolvedTarget = { ok: true; address: string | null } | { ok: false; reason: string };
+
+/** Delivery-time check: the URL again, then every DNS answer of its host; returns the address to pin. */
+export async function checkResolvedTarget(raw: string, allowHosts: ReadonlySet<string>, resolve: ResolveHost): Promise<ResolvedTarget> {
   const syntactic = checkWebhookUrl(raw, allowHosts);
   if (!syntactic.ok) return syntactic;
   const host = normHost(new URL(raw).hostname);
-  if (allowHosts.has(host) || isIP(host)) return { ok: true };
+  if (allowHosts.has(host)) return { ok: true, address: null };
+  if (isIP(host)) return { ok: true, address: host };
   const addrs = await resolve(host);
   if (addrs.length === 0) return { ok: false, reason: `url host ${host} did not resolve` };
   const bad = addrs.find((a) => !allowHosts.has(normHost(a)) && isBlockedAddress(a));
-  return bad ? { ok: false, reason: `url host ${host} resolves to a non-public address (${bad})` } : { ok: true };
+  return bad ? { ok: false, reason: `url host ${host} resolves to a non-public address (${bad})` } : { ok: true, address: normHost(addrs[0]!) };
+}
+
+/**
+ * The request that connects to the checked `address` while still talking to the URL's host: the URL's
+ * host is replaced by the IP, the Host header keeps the name, and for https the TLS SNI and certificate
+ * check use the name (Bun fetch `tls.serverName` + checkServerIdentity), so a certificate for the real
+ * host is still required. Connection reuse is off (a pooled socket is keyed by the IP, not the name).
+ */
+export function pinnedRequest(raw: string, address: string | null): { url: string; headers: Record<string, string>; init: Record<string, unknown> } {
+  const u = new URL(raw);
+  const name = normHost(u.hostname);
+  if (address === null || isIP(name)) return { url: u.toString(), headers: {}, init: {} };
+  const hostHeader = u.host;
+  u.hostname = isIP(address) === 6 ? `[${address}]` : address;
+  const init: Record<string, unknown> = { keepalive: false };
+  if (u.protocol === "https:") {
+    init.tls = {
+      serverName: name,
+      checkServerIdentity: (_host: string, cert: PeerCertificate) => tlsCheckServerIdentity(name, cert),
+    };
+  }
+  return { url: u.toString(), headers: { host: hostHeader }, init };
 }
 
 /** node:dns lookup of every A/AAAA answer. */
