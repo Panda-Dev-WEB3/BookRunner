@@ -1,0 +1,9 @@
+{
+  "//": "Bun-side code: unit tests of the pure dashboard modules, the static server and vite.config.ts.",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["bun"]
+  },
+  "include": ["test/**/*.ts", "scripts/**/*.ts", "vite.config.ts"]
+}

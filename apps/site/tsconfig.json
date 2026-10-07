@@ -1,0 +1,9 @@
+{
+  "//": "Browser code (src/: the live dashboard bundle). Tests, scripts and vite.config.ts are checked by tsconfig.node.json (Bun types).",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"]
+  },
+  "include": ["src/**/*.ts"]
+}

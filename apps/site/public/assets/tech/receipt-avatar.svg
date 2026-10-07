@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" role="img" aria-labelledby="title">
+  <title id="title">Signed daily mark</title>
+  <circle cx="24" cy="24" r="24" fill="#edf2fc"/>
+  <g fill="none" stroke="#1748c7" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M15 10h18v28l-5-3-4 3-4-3-5 3Z"/>
+    <path d="M19 16h10M19 21h7" stroke="#326bd0"/>
+    <path d="m19 28 3 3 7-7"/>
+  </g>
+</svg>

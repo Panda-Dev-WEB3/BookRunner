@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" role="img" aria-labelledby="title">
+  <title id="title">Market book</title>
+  <circle cx="24" cy="24" r="24" fill="#edf2fc"/>
+  <g fill="none" stroke="#1748c7" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M24 15v20M10 13c6-1 10 1 14 4 4-3 8-5 14-4v19c-6-1-10 0-14 3-4-3-8-4-14-3Z"/>
+    <path d="M14 19c3 0 5 1 7 2M14 24c3 0 5 1 7 2M27 21c2-1 4-2 7-2M27 26c2-1 4-2 7-2" stroke="#326bd0"/>
+  </g>
+</svg>

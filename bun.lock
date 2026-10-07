@@ -11,6 +11,22 @@
         "viem": "2.57.2",
       },
     },
+    "apps/site": {
+      "name": "@bookrunner/site",
+      "version": "0.1.0",
+      "dependencies": {
+        "@bookrunner/shared": "workspace:*",
+        "superjson": "2.2.6",
+        "viem": "2.57.2",
+      },
+      "devDependencies": {
+        "@bookrunner/api": "workspace:*",
+        "@trpc/server": "11.19.0",
+        "@types/bun": "1.4.2",
+        "typescript": "6.0.3",
+        "vite": "8.3.2",
+      },
+    },
     "apps/web": {
       "name": "@bookrunner/web",
       "version": "0.1.0",
@@ -257,6 +273,8 @@
     "@bookrunner/risk": ["@bookrunner/risk@workspace:services/risk"],
 
     "@bookrunner/shared": ["@bookrunner/shared@workspace:packages/shared"],
+
+    "@bookrunner/site": ["@bookrunner/site@workspace:apps/site"],
 
     "@bookrunner/waterfall": ["@bookrunner/waterfall@workspace:services/waterfall"],
 
