@@ -1,8 +1,4 @@
 @font-face{font-family:BookSerif;src:url('/assets/media/vEFF2_tTDB4M7-auWDN0ahZJW3IX2ih5nk3AucvUHf6kDXr4.woff2') format('woff2');font-weight:100 900;font-display:swap}
-@font-face{font-family:'IBM Plex Sans';src:url('/__l5e/assets-v1/aa5a29ed-785a-4200-bdc1-6a1a437cb0f2/ibm-plex-sans-400.ttf') format('truetype');font-weight:400;font-display:swap}
-@font-face{font-family:'IBM Plex Sans';src:url('/__l5e/assets-v1/f2ce1770-e003-4aa3-ac85-79ba7b19c700/ibm-plex-sans-600.ttf') format('truetype');font-weight:600 700;font-display:swap}
-@font-face{font-family:'Libre Baskerville';src:url('/__l5e/assets-v1/21174ff0-5765-4865-88d8-61c8d43dcb92/libre-baskerville-400.ttf') format('truetype');font-weight:400;font-display:swap}
-@font-face{font-family:'Libre Baskerville';src:url('/__l5e/assets-v1/7b4cff1e-45bb-4420-afeb-595f9d425e27/libre-baskerville-700.ttf') format('truetype');font-weight:700;font-display:swap}
 :root{--paper:#f5f5f3;--ink:#1748c7;--blue:#326bd0;--soft:#dce7fb;--line:#b6c9ed;--muted:#667fad;--dark:#17345f;font-family:Arial,sans-serif;color:var(--dark);background:var(--paper);font-size:14px}
 *{box-sizing:border-box}body{margin:0;background:var(--paper)}button,input,select,textarea{font:inherit}button,a,input,select,textarea{-webkit-tap-highlight-color:transparent}button{cursor:pointer}button:disabled{cursor:wait;opacity:.55}a{color:var(--ink);text-decoration:none}a:hover{text-decoration:underline}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid #0a04f4;outline-offset:3px}
 .desk-header{height:80px;position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;padding:0 32px;border-bottom:1px solid var(--line);background:#f5f5f3ed;backdrop-filter:blur(16px)}.brand{display:flex;align-items:center;gap:9px;color:var(--ink);font:20px/1 BookSerif,'Times New Roman',serif;letter-spacing:.1em}.brand img{width:64px;height:64px;object-fit:contain}.header-actions{display:flex;gap:16px;align-items:center}.header-actions a{font-size:13px}.preview-pill{font-size:10px;letter-spacing:.08em;text-transform:uppercase;border:1px solid var(--line);padding:7px 10px;border-radius:99px;color:var(--muted)}
@@ -147,3 +143,25 @@ dialog{border:1px solid var(--line);border-radius:16px;background:var(--paper);c
   .mobile-more-open .side-links{z-index:61}
 }
 @media(prefers-reduced-motion:reduce){.secondary-links{transition:none!important}}
+
+/* Live desk additions (apps/site): wallet, transaction steps, live notices. Same palette and tokens.
+   IBM Plex Sans / Libre Baskerville load from Google Fonts (dashboard + documents index.html): the
+   original @font-face rules pointed at a Lovable-hosted asset path that is not part of the export. */
+.notice.error{background:#f8e9e680;border-color:#d6afa3;color:#873f3b}
+.notice.warn{background:#efeefb80;border-color:#c8c3ea;color:#5a52a0}
+.notice .btn-small{margin-left:6px;padding:4px 10px;min-height:0}
+.preview-pill.warn{color:#873f3b;border-color:#d6afa3}
+.wallet-chip{font-family:monospace;letter-spacing:.02em}
+.wallet-list{display:grid;gap:10px;margin:8px 0 4px}
+.wallet-option{justify-content:flex-start;gap:12px;padding:12px 16px;font-size:13px}
+.wallet-option img{width:22px;height:22px;border-radius:5px;flex:none}
+.tx-review .split-list{padding-top:4px}
+.tx-steps{list-style:none;margin:16px 0 0;padding:0;display:grid;gap:10px}
+.tx-steps li{display:grid;grid-template-columns:28px minmax(0,1fr) auto;gap:12px;align-items:start;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:#fcfdff99}
+.tx-steps p{margin:0;font-size:12px;line-height:1.6;color:var(--dark)}
+.tx-steps p small{display:block;color:var(--muted);font-size:10px}
+.tx-steps .form-error{margin-top:6px;min-height:0}
+.tx-step-index{width:24px;height:24px;border-radius:50%;border:1px solid var(--line);display:grid;place-items:center;font-size:11px;color:var(--ink)}
+.tx-step-status{display:flex;flex-direction:column;align-items:flex-end;gap:6px;text-align:right}
+dialog .btn-row{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}
+@media(max-width:760px){.tx-steps li{grid-template-columns:24px minmax(0,1fr)}.tx-step-status{grid-column:2;align-items:flex-start;text-align:left}.secondary-links .operator-link{grid-column:1/-1}}

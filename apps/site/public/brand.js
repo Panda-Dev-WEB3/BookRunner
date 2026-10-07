@@ -129,8 +129,10 @@
     const text=a.textContent.replace(/\s+/g,' ').trim(),href=a.getAttribute('href')||'';
     if(/^(\.\/|\/)research\/[^#]/.test(href))return '/documents/';
     if(href.includes('research#datasets')||href.includes('research/#datasets'))return '/research/#documents';
-    if(/^(Open dashboard|Run a book|For allocators)/.test(text))return '/dashboard/';
-    if(/^(Open BookRunner|Join the syndicate|Bookrunners)/.test(text))return '/jobs/';
+    if(/^(Open dashboard|Open BookRunner)/.test(text))return '/dashboard/';
+    if(/^(Run a book|Coming Soon|File a charter)/.test(text))return '/dashboard/#charters';
+    if(/^(For allocators|Join the syndicate)/.test(text))return '/dashboard/#books';
+    if(/^Bookrunners/.test(text))return '/jobs/';
     if(text==='Robinhood Chain'||text==='01 October 2026'||text==='Run the book.')return '/documents/';
     if(text==='$BKRN access & bonding')return '/dashboard/#staking';
     if(/^Charter termss/.test(text))return null;
@@ -141,7 +143,7 @@
     if(/^(Read the spec|Read specification|Download report|View the marks|Export)/.test(text))return '/documents/';
     if(/Senior allocators|Junior allocators/.test(text))return '/dashboard/#portfolio';
     if(/Charter sponsors|Market sponsors/.test(text))return '/dashboard/#charters';
-    if(/Risk Committee/.test(text))return '/dashboard/#risk';
+    if(/Risk Committee/.test(text))return '/dashboard/#charters';
     if(/Mark signers|Receipt keepers/.test(text))return '/dashboard/#marks';
     if(/Bookrunner agents|Venue operators|Hedge operators|Oracle operators/.test(text))return '/dashboard/#agents';
     if(/calendly|bookrunner-work\.slack|bookrunner\.com\/(discover|bookrunner-network)/.test(href))return '/dashboard/';
