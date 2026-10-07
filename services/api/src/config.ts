@@ -5,7 +5,10 @@ import { z } from "zod";
 export const apiEnvShape = {
   API_PORT: z.coerce.number().int().min(1).max(65535).default(4400),
   API_HOST: z.string().default("127.0.0.1"),
-  /** Comma-separated list of allowed browser origins (in addition to the devnet defaults). */
+  /**
+   * Comma-separated list of allowed browser origins. Loopback-only (the default): the devnet web origins
+   * are added; any public origin: exactly this list (see webOrigins).
+   */
   WEB_ORIGIN: z.string().default("http://127.0.0.1:5180"),
   /** Optional charter service base URL (services/charter, port 4430). Local validation when unset. */
   CHARTER_URL: z.string().optional(),
@@ -45,12 +48,26 @@ export function loadApiConfig(source: Record<string, string | undefined> = proce
   return { ...env, webOrigins: webOrigins(env.WEB_ORIGIN) };
 }
 
-/** Allowed CORS origins: WEB_ORIGIN entries plus the devnet web app on both loopback names. */
+const isLoopbackOrigin = (o: string) => {
+  try {
+    const h = new URL(o).hostname.replace(/^\[|\]$/g, "");
+    return h === "localhost" || h === "::1" || /^127\./.test(h);
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Allowed CORS origins. A public deployment (any non-loopback WEB_ORIGIN entry, e.g. the server's
+ * https://bookrunner.use-cert.com) allows exactly its WEB_ORIGIN entries; a local setup (loopback only,
+ * the default) also gets the devnet web app on both loopback names.
+ */
 export function webOrigins(webOrigin: string): string[] {
   const defaults = ["http://127.0.0.1:5180", "http://localhost:5180"];
   const extra = webOrigin
     .split(",")
     .map((s) => s.trim().replace(/\/+$/, ""))
     .filter(Boolean);
-  return [...new Set([...extra, ...defaults])];
+  const isPublic = extra.some((o) => !isLoopbackOrigin(o));
+  return [...new Set(isPublic ? extra : [...extra, ...defaults])];
 }

@@ -111,6 +111,9 @@ export function parseHealth(j: Record<string, unknown>, httpOk = true): Health {
     deployment: j.deployment === true,
     db: typeof j.db === "string" ? j.db : null,
     redis: typeof j.redis === "string" ? j.redis : null,
-    procedures: Array.isArray(j.procedures) ? j.procedures.filter((p): p is string => typeof p === "string") : null,
+    // the API lists its optional procedures as `capabilities` (the full list only for the admin)
+    procedures: list(j.capabilities) ?? list(j.procedures),
   };
 }
+
+const list = (v: unknown): string[] | null => (Array.isArray(v) ? v.filter((p): p is string => typeof p === "string") : null);

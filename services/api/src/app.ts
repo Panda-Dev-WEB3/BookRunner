@@ -6,17 +6,31 @@ import type { ApiDeps } from "./deps";
 import { handleMcpRequest } from "./mcp";
 import { restRoutes } from "./rest";
 import { appRouter } from "./router";
+import { bearerMatches } from "./webhooks/routes";
 
 export interface AppOptions {
   origins: string[];
 }
 
+/**
+ * Most procedures one HTTP batch may carry. Every call of a batch runs its own DB / chain reads, so an
+ * unbounded GET is an amplification lever; the web client splits its batches at the same size
+ * (apps/web httpBatchLink maxItems) and nginx rate-limits /trpc/ per IP.
+ */
+export const MAX_TRPC_BATCH = 10;
+
+/**
+ * Procedures a client may find missing on an older API (apps/web useOptional): /health lists which of
+ * them this build serves as `capabilities`, so the web never probes one that is absent. The full
+ * procedure list (and uptime) is only in `/health?verbose` with the admin bearer token.
+ */
+export const OPTIONAL_PROCEDURES = ["book.fills", "book.hedges", "receipts.list"] as const;
+
 export function createApp(deps: ApiDeps, opts: AppOptions) {
   const app = new Hono();
   const started = deps.now();
-  // tRPC procedure paths this build serves, so clients can skip optional procedures it does not
-  // have instead of probing them (each probe is a 404 in the browser console).
   const procedures = Object.keys((appRouter as unknown as { _def: { procedures: Record<string, unknown> } })._def.procedures).sort();
+  const capabilities = OPTIONAL_PROCEDURES.filter((p) => procedures.includes(p));
 
   app.use(
     "*",
@@ -31,13 +45,15 @@ export function createApp(deps: ApiDeps, opts: AppOptions) {
 
   app.get("/health", async (c) => {
     const extra = deps.health ? await deps.health().catch((err) => ({ healthError: String(err) })) : {};
+    const token = deps.settings.adminToken;
+    const verbose = c.req.query("verbose") !== undefined && !!token && bearerMatches(c.req.header("authorization"), token);
     return c.json({
       ok: true,
       service: "api",
       chainId: deps.settings.chainId,
       deployment: deps.chain() !== null,
-      uptimeSec: Math.floor((deps.now() - started) / 1000),
-      procedures,
+      capabilities,
+      ...(verbose ? { uptimeSec: Math.floor((deps.now() - started) / 1000), procedures } : {}),
       ...extra,
     });
   });
@@ -47,6 +63,7 @@ export function createApp(deps: ApiDeps, opts: AppOptions) {
     trpcServer({
       router: appRouter,
       endpoint: "/trpc",
+      maxBatchSize: MAX_TRPC_BATCH,
       createContext: () => ({ deps }),
       onError: ({ error, path }) => {
         if (error.code === "INTERNAL_SERVER_ERROR") deps.log.error({ err: error.cause ?? error, path }, "tRPC procedure failed");
