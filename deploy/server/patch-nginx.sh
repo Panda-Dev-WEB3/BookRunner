@@ -3,7 +3,8 @@
 #
 # install.sh never overwrites /etc/nginx/sites-available/bookrunner once certbot added its TLS listeners,
 # so the location blocks copied there at first install would stay frozen. This script:
-#   1. installs deploy/server/nginx-bookrunner-locations.conf to /etc/nginx/snippets/bookrunner-locations.conf
+#   1. installs deploy/server/nginx-bookrunner-http.conf to /etc/nginx/conf.d/bookrunner-ratelimit.conf (the
+#      rate-limit zones) and deploy/server/nginx-bookrunner-locations.conf to /etc/nginx/snippets/bookrunner-locations.conf
 #   2. in every server{} block of the site that has location blocks (the 443 block certbot made; the
 #      port-80 redirect block has none and is left alone), replaces those location blocks (and the comment
 #      lines right above them) with `include /etc/nginx/snippets/bookrunner-locations.conf;`.
@@ -96,7 +97,7 @@ patch_site < "$SITE" > "$TMP"
 
 if cmp -s "$SITE" "$TMP"; then
   echo "==> $SITE already includes the snippet (no location blocks left): nothing to patch"
-  [ "$DRY" = 1 ] || nginx_install_snippet
+  [ "$DRY" = 1 ] || { nginx_install_http_conf && nginx_install_snippet; }
   exit 0
 fi
 grep -Fq "$INCLUDE" "$TMP" || { echo "!! no server{} block with location blocks in $SITE: patch it by hand (see README.md)" >&2; exit 1; }
@@ -105,7 +106,8 @@ echo "==> changes to $SITE"
 diff -u "$SITE" "$TMP" || true
 if [ "$DRY" = 1 ]; then echo "==> dry run: nothing written"; exit 0; fi
 
-# the snippet must exist before the site includes it (validates + reloads on its own; harmless while unused)
+# the zones + snippet must exist before the site includes it (validates + reloads on its own; harmless while unused)
+nginx_install_http_conf
 nginx_install_snippet
 
 BACKUPS=/etc/nginx/bookrunner-backups   # outside sites-enabled: never loaded by nginx

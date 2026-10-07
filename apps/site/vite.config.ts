@@ -79,7 +79,8 @@ export default defineConfig({
     outDir: "dist",
     emptyOutDir: true,
     target: "es2022",
-    sourcemap: true,
+    // no public source maps (deploy/server nginx also answers *.map with 404); `vite build --sourcemap` locally
+    sourcemap: false,
     copyPublicDir: true,
     chunkSizeWarningLimit: 1200,
     rolldownOptions: {
