@@ -1,0 +1,717 @@
+# forge: forge Version: 1.8.4
+# solc:  Version: 0.8.30+commit.73712a01.Linux.g++
+# slither: 0.11.6
+# config: contracts/foundry.toml (remappings, solc 0.8.30, evm cancun, optimizer 200)
+# filter: lib/ src/mocks/ test/ script/ excluded
+# command: slither . --foundry-ignore-compile --filter-paths 'lib/|src/mocks/|test/|script/' --exclude-dependencies (after: forge build --build-info over src only)
+# image: ghcr.io/trailofbits/eth-security-toolbox:nightly (solc-select 0.8.30)
+# aderyn: NOT RUN (no official image; cargo install aderyn 0.1.9 fails to build: svm-rs-builds duplicate SOLC_VERSION_0_8_35)
+
+
+Detector: arbitrary-send-erc20
+UnderwritingVault.returnFromDesk(uint256) (src/UnderwritingVault.sol#153-159) uses arbitrary from in transferFrom: _usdc.safeTransferFrom(desk,address(this),amount) (src/UnderwritingVault.sol#157)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#arbitrary-from-in-transferfrom
+
+Detector: weak-prng
+OrderlyAdapter._bindVenue(OrderlyAdapter.AdapterStorage,IBookrunnerConfig) (src/OrderlyAdapter.sol#875-887) uses a weak PRNG: "$.feePeriodFloor = uint64(block.timestamp - (block.timestamp % interval)) (src/OrderlyAdapter.sol#885)" 
+OrderlyAdapter._oldestFeePeriod(uint32) (src/OrderlyAdapter.sol#954-958) uses a weak PRNG: "start = block.timestamp - (block.timestamp % interval) (src/OrderlyAdapter.sol#955)" 
+OrderlyAdapter._sweepOpen(OrderlyAdapter.AdapterStorage) (src/OrderlyAdapter.sol#990-997) uses a weak PRNG: "b.lastMarkPeriodEnd() >= block.timestamp - (block.timestamp % interval) (src/OrderlyAdapter.sol#996)" 
+OrderlyAdapter._checkSweepOpen(OrderlyAdapter.AdapterStorage) (src/OrderlyAdapter.sol#999-1006) uses a weak PRNG: "revert SweepBlockedUntilMark(uint64,uint64)(uint64(block.timestamp - (block.timestamp % interval)),IBook($.book).lastMarkPeriodEnd()) (src/OrderlyAdapter.sol#1002-1004)" 
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#weak-PRNG
+
+Detector: reentrancy-balance
+Reentrancy in Tranche._ensureLiquidity(uint256) (src/Tranche.sol#756-762):
+	External call allowing reentrancy:
+	- IBook(book).fundClaims() (src/Tranche.sol#759)
+	Balance read before the call:
+	- avail = redemptionLiquidity() (src/Tranche.sol#757)
+	Possible stale balance used after the call in a condition:
+	- avail < needed (src/Tranche.sol#761)
+		- stale variable `avail`
+Reentrancy in BookrunnerDesk._fundDesk(address,bytes) (src/BookrunnerDesk.sol#399-408):
+	External call allowing reentrancy:
+	- IUnderwritingVault(vault).fundDesk(amount) (src/BookrunnerDesk.sol#405)
+	Balance read before the call:
+	- before = u.balanceOf(address(this)) (src/BookrunnerDesk.sol#404)
+	Possible stale balance used after the call in a condition:
+	- got < amount (src/BookrunnerDesk.sol#407)
+		- stale variable `got`
+Reentrancy in HedgeExecutor._routeExactIn(address,ISwapRouter02.ExactInputSingleParams) (src/HedgeExecutor.sol#119-131):
+	External call allowing reentrancy:
+	- ISwapRouter02(router).exactInputSingle(p) (src/HedgeExecutor.sol#127)
+	Balance read before the call:
+	- outBefore = tout.balanceOf(p.recipient) (src/HedgeExecutor.sol#125)
+	Possible stale balance used after the call in a condition:
+	- amountOut < p.amountOutMinimum (src/HedgeExecutor.sol#130)
+		- stale variable `amountOut`
+Reentrancy in BookrunnerDesk._swap(bytes32,address,address,uint24,uint256,uint256) (src/BookrunnerDesk.sol#478-499):
+	External call allowing reentrancy:
+	- IHedgeExecutor(exec).swapExactIn(hedgeVenue,tokenIn,tokenOut,poolFee,amountIn,minAmountOut,address(this)) (src/BookrunnerDesk.sol#493-494)
+	Balance read before the call:
+	- outBefore = tout.balanceOf(address(this)) (src/BookrunnerDesk.sol#491)
+	Possible stale balance used after the call in a condition:
+	- received < minAmountOut (src/BookrunnerDesk.sol#498)
+		- stale variable `received`
+Reentrancy in OrderlyAdapter.depositToVenue(uint8,uint256) (src/OrderlyAdapter.sol#299-334):
+	External call allowing reentrancy:
+	- ov.deposit{value: fee}(data) (src/OrderlyAdapter.sol#326)
+	Balance read before the call:
+	- balanceBefore = token.balanceOf(address(this)) (src/OrderlyAdapter.sol#324)
+	Possible stale balance used after the call in a condition:
+	- balanceBefore > balanceAfter (src/OrderlyAdapter.sol#329)
+		- stale variable `balanceBefore`
+Reentrancy in BkrnFeeRouter.executeBuyback(uint256,uint256,uint24) (src/BkrnFeeRouter.sol#104-150):
+	External call allowing reentrancy:
+	- ISwapRouter02(router).exactInputSingle(ISwapRouter02.ExactInputSingleParams({tokenIn:address(usdc),tokenOut:address(bkrn),fee:poolFee,recipient:address(this),amountIn:amountIn,amountOutMinimum:minBkrnOut,sqrtPriceLimitX96:0})) (src/BkrnFeeRouter.sol#123-134)
+	Balance read before the call:
+	- bkrnBefore = bkrn.balanceOf(address(this)) (src/BkrnFeeRouter.sol#121)
+	Possible stale balance used after the call in a condition:
+	- bkrnOut < minBkrnOut (src/BkrnFeeRouter.sol#142)
+		- stale variable `bkrnOut`
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#reentrancy-vulnerabilities
+
+Detector: uninitialized-state
+Tranche._ctrlBuckets (src/Tranche.sol#144) is never initialized. It is used in:
+	- Tranche.controllerBuckets(address) (src/Tranche.sol#338-345)
+	- Tranche._pushControllerBucket(address,uint256) (src/Tranche.sol#667-671)
+	- Tranche._consume(address,uint8,uint256) (src/Tranche.sol#691-710)
+	- Tranche._claimableTotals(address) (src/Tranche.sol#742-753)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#uninitialized-state-variables
+
+Detector: divide-before-multiply
+BkrnStaking.notifyReward(uint256) (src/BkrnStaking.sol#252-269) performs a multiplication on the result of a division:
+	- increment = unallocated / staked (src/BkrnStaking.sol#263)
+	- unallocated -= increment * staked (src/BkrnStaking.sol#265)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#divide-before-multiply
+
+Detector: incorrect-equality
+BkrnStaking.claimReward() (src/BkrnStaking.sol#272-280) uses a dangerous strict equality:
+	- reward == 0 (src/BkrnStaking.sol#275)
+OrderlyAdapter._forwardFees(OrderlyAdapter.AdapterStorage) (src/OrderlyAdapter.sol#960-974) uses a dangerous strict equality:
+	- amount == 0 (src/OrderlyAdapter.sol#964)
+OrderlyAdapter.sweepToVault() (src/OrderlyAdapter.sol#367-392) uses a dangerous strict equality:
+	- amount == 0 (src/OrderlyAdapter.sol#371)
+PoolEngine._fundingDelta(PoolEngine.Market,uint256,uint256) (src/PoolEngine.sol#855-861) uses a dangerous strict equality:
+	- net == 0 || dt == 0 || price == 0 (src/PoolEngine.sol#857)
+Tranche.requestRedeem(uint256,address,address) (src/Tranche.sol#401-429) uses a dangerous strict equality:
+	- qlen == 0 || _bucketQueue[qlen - 1] != b (src/Tranche.sol#424)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#dangerous-strict-equalities
+
+Detector: reentrancy-no-eth
+Reentrancy in MMMandate._releaseBond(address) (src/MMMandate.sol#544-555):
+	External calls:
+	- released = IBkrnStaking(config.staking()).unlock(op,keyLockId(key)) (src/MMMandate.sol#549-554)
+	State variables written after the call(s):
+	- bondOf[key] = amount (src/MMMandate.sol#552)
+	MMMandate.bondOf (src/MMMandate.sol#120) can be used in cross function reentrancies:
+	- MMMandate.bondOf (src/MMMandate.sol#120)
+Reentrancy in Tranche.deposit(uint256,address) (src/Tranche.sol#355-376):
+	External calls:
+	- _settleAllocation(receiver) (src/Tranche.sol#362)
+		- IBookTrancheHooks(book).onJuniorRedeemRequested(from) (src/Tranche.sol#780)
+	State variables written after the call(s):
+	- _rounds[r].totalCommitted += assets (src/Tranche.sol#371)
+	Tranche._rounds (src/Tranche.sol#132) can be used in cross function reentrancies:
+	- Tranche.cancelRound() (src/Tranche.sol#567-574)
+	- Tranche.claimableAllocation(address) (src/Tranche.sol#272-285)
+	- Tranche.depositsOpen() (src/Tranche.sol#220-225)
+	- Tranche.initialize(address,uint256,address,uint8) (src/Tranche.sol#163-190)
+	- Tranche.markCancelled() (src/Tranche.sol#549-555)
+	- Tranche.openRound(uint64) (src/Tranche.sol#558-564)
+	- Tranche.roundInfo(uint256) (src/Tranche.sol#235-237)
+	- Tranche.totalCommitted() (src/Tranche.sol#227-229)
+	- commitEscrow += assets (src/Tranche.sol#372)
+	Tranche.commitEscrow (src/Tranche.sol#131) can be used in cross function reentrancies:
+	- Tranche.commitEscrow (src/Tranche.sol#131)
+	- Tranche.redemptionLiquidity() (src/Tranche.sol#323-326)
+	- walletCommit[receiver] = newCommit (src/Tranche.sol#370)
+	Tranche.walletCommit (src/Tranche.sol#134) can be used in cross function reentrancies:
+	- Tranche.claimableAllocation(address) (src/Tranche.sol#272-285)
+	- Tranche.committedOf(address) (src/Tranche.sol#231-233)
+	- Tranche.maxDeposit(address) (src/Tranche.sol#240-246)
+	- Tranche.walletCommit (src/Tranche.sol#134)
+	- walletRound[receiver] = r (src/Tranche.sol#364)
+	Tranche.walletRound (src/Tranche.sol#133) can be used in cross function reentrancies:
+	- Tranche.claimableAllocation(address) (src/Tranche.sol#272-285)
+	- Tranche.committedOf(address) (src/Tranche.sol#231-233)
+	- Tranche.maxDeposit(address) (src/Tranche.sol#240-246)
+	- Tranche.walletRound (src/Tranche.sol#133)
+Reentrancy in BkrnFeeRouter.executeBuyback(uint256,uint256,uint24) (src/BkrnFeeRouter.sol#104-150):
+	External calls:
+	- ISwapRouter02(router).exactInputSingle(ISwapRouter02.ExactInputSingleParams({tokenIn:address(usdc),tokenOut:address(bkrn),fee:poolFee,recipient:address(this),amountIn:amountIn,amountOutMinimum:minBkrnOut,sqrtPriceLimitX96:0})) (src/BkrnFeeRouter.sol#123-134)
+	State variables written after the call(s):
+	- buybackPending += amountIn - spent (src/BkrnFeeRouter.sol#140)
+	BkrnFeeRouter.buybackPending (src/BkrnFeeRouter.sol#35) can be used in cross function reentrancies:
+	- BkrnFeeRouter.buybackPending (src/BkrnFeeRouter.sol#35)
+Reentrancy in RiskCommittee.slashMember(address,uint256,bytes32) (src/RiskCommittee.sol#371-380):
+	External calls:
+	- slashed = IBkrnStaking(_bondStaking[member]).slash(member,BOND_LOCK_ID,amount) (src/RiskCommittee.sol#377)
+	State variables written after the call(s):
+	- _bondOf[member] = bonded - slashed (src/RiskCommittee.sol#378)
+	RiskCommittee._bondOf (src/RiskCommittee.sol#71) can be used in cross function reentrancies:
+	- RiskCommittee.bondOf(address) (src/RiskCommittee.sol#151-153)
+	- RiskCommittee.isBonded(address) (src/RiskCommittee.sol#146-148)
+Reentrancy in MarketCharter.slashSponsor(uint256,bytes32) (src/MarketCharter.sol#268-283):
+	External calls:
+	- slashed = IBkrnStaking(e.staking).slash(sponsor,bondLockId(bookId),amount) (src/MarketCharter.sol#280)
+	State variables written after the call(s):
+	- e.bondOutstanding = amount - slashed (src/MarketCharter.sol#281)
+	MarketCharter._escrow (src/MarketCharter.sol#87) can be used in cross function reentrancies:
+	- MarketCharter.bondOutstanding(uint256) (src/MarketCharter.sol#306-308)
+	- MarketCharter.escrowOf(uint256) (src/MarketCharter.sol#311-313)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#reentrancy-vulnerabilities-2
+
+Detector: uninitialized-local
+BookrunnerDesk._flatten(address,bool,bytes).notional (src/BookrunnerDesk.sol#375) is a local variable never initialized
+MMMandate.offHours().pid (src/MMMandate.sol#435) is a local variable never initialized
+PoolEngine.withdrawLiquidity(uint256,uint256,address).price (src/PoolEngine.sol#381) is a local variable never initialized
+Waterfall.splitDistribution(Waterfall.SplitInput).senior (src/libraries/Waterfall.sol#173) is a local variable never initialized
+StockTokenRegistry.registerIndex(bytes32,bytes32,IStockTokenRegistry.IndexComponent[]).sum (src/StockTokenRegistry.sol#147) is a local variable never initialized
+Waterfall.splitDistribution(Waterfall.SplitInput).junior (src/libraries/Waterfall.sol#174) is a local variable never initialized
+PoolEngine._trade(uint256,int256,uint256).c (src/PoolEngine.sol#529) is a local variable never initialized
+Book.applyMark(uint256).sum (src/Book.sol#396) is a local variable never initialized
+Book._settleRetiredBacklog(Book.BookStorage).owed (src/Book.sol#715) is a local variable never initialized
+Book._settleAtMark(Book.BookStorage,Book.MarkSummary).seniorSupply (src/Book.sol#649) is a local variable never initialized
+BookrunnerDesk._hedge(address,bytes,bytes32[]).o (src/BookrunnerDesk.sol#312) is a local variable never initialized
+MMMandate._engineQuote().mid (src/MMMandate.sol#681) is a local variable never initialized
+PoolEngine.withdrawMargin(uint256,uint256).price (src/PoolEngine.sol#457) is a local variable never initialized
+Book.onRetiredRedeem(uint256,uint256).k (src/Book.sol#560) is a local variable never initialized
+AttestedOracle.update(bytes).maxAge (src/AttestedOracle.sol#173) is a local variable never initialized
+Book._applyPnl(Book.BookStorage,IBookrunnerConfig,Book.MarkSummary).covered (src/Book.sol#615) is a local variable never initialized
+MarkRegistry._commit(BRTypes.MarkInput,bytes).superseded (src/MarkRegistry.sol#184) is a local variable never initialized
+BookrunnerDesk._flatten(address,bool,bytes).o (src/BookrunnerDesk.sol#362) is a local variable never initialized
+HedgeExecutor._requireDesk(address).b (src/HedgeExecutor.sol#138) is a local variable never initialized
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#uninitialized-local-variables
+
+Detector: unused-return
+AttestedOracle._verify(IAttestedOracle.PriceUpdate,bytes) (src/AttestedOracle.sol#228-238) ignores return value by (recovered,err,None) = ECDSA.tryRecover(_hashPrice(u),sig) (src/AttestedOracle.sol#229)
+BkrnFeeRouter.executeBuyback(uint256,uint256,uint24) (src/BkrnFeeRouter.sol#104-150) ignores return value by ISwapRouter02(router).exactInputSingle(ISwapRouter02.ExactInputSingleParams({tokenIn:address(usdc),tokenOut:address(bkrn),fee:poolFee,recipient:address(this),amountIn:amountIn,amountOutMinimum:minBkrnOut,sqrtPriceLimitX96:0})) (src/BkrnFeeRouter.sol#123-134)
+Book.closeWindow() (src/Book.sol#333-375) ignores return value by (ifAmount,mmAmount,None) = Waterfall.initialDeployment(r.seniorAllocated + r.juniorAllocated,$.charter.ifTargetUsd,$.charter.mmInventoryUsd) (src/Book.sol#369-371)
+Book.onJuniorRedeemRequested(address) (src/Book.sol#542-554) ignores return value by (unclaimed,None) = ITranche(junior).claimableAllocation(owner) (src/Book.sol#547)
+Book._settleTranche(Book.BookStorage,Book.MarkSummary,uint8,uint256,uint256) (src/Book.sol#670-682) ignores return value by (burned,owed,acc,None) = ITranche(_tranche($,k)).settleAtMark(upTo,sum.priceWad[k],cap,$.components.vault) (src/Book.sol#676-677)
+Book._settleRetiredBacklog(Book.BookStorage) (src/Book.sol#714-727) ignores return value by (burned,owed[k],None,None) = ITranche(t).settleAtMark(RETIRED_SETTLE_INDEX,$.price[k],0,$.components.vault) (src/Book.sol#720)
+BookrunnerDesk._validateSignature(PackedUserOperation,bytes32) (src/BookrunnerDesk.sol#216-232) ignores return value by (signer,err,None) = ECDSA.tryRecoverCalldata(MessageHashUtils.toEthSignedMessageHash(userOpHash),userOp.signature) (src/BookrunnerDesk.sol#224-225)
+BookrunnerDesk._swap(bytes32,address,address,uint24,uint256,uint256) (src/BookrunnerDesk.sol#478-499) ignores return value by IHedgeExecutor(exec).swapExactIn(hedgeVenue,tokenIn,tokenOut,poolFee,amountIn,minAmountOut,address(this)) (src/BookrunnerDesk.sol#493-494)
+BookrunnerDesk._syncHeld(address) (src/BookrunnerDesk.sol#501-511) ignores return value by _held.add(token) (src/BookrunnerDesk.sol#505)
+HedgeExecutor._routeExactIn(address,ISwapRouter02.ExactInputSingleParams) (src/HedgeExecutor.sol#119-131) ignores return value by ISwapRouter02(router).exactInputSingle(p) (src/HedgeExecutor.sol#127)
+MMMandate.registerKey(address,address,uint64,uint128) (src/MMMandate.sol#196-225) ignores return value by _keySet.add(key) (src/MMMandate.sol#219)
+MMMandate._revoke(address,bytes32) (src/MMMandate.sol#514-523) ignores return value by _keySet.remove(key) (src/MMMandate.sol#516)
+MarkRegistry._commit(BRTypes.MarkInput,bytes) (src/MarkRegistry.sol#172-204) ignores return value by (signer,err,None) = ECDSA.tryRecoverCalldata(hashMark(m),sig) (src/MarkRegistry.sol#176)
+OrderlyAdapter.reportSigned(uint256,int256,int256,uint64,bytes) (src/OrderlyAdapter.sol#469-483) ignores return value by (signer,err,None) = ECDSA.tryRecoverCalldata(hashReport(insuranceUsd,marginUsd,exposureUsd,asOf),sig) (src/OrderlyAdapter.sol#476-477)
+RiskCommittee.bond() (src/RiskCommittee.sol#164-180) ignores return value by IBkrnStaking(previousStaking).unlock(m,BOND_LOCK_ID) (src/RiskCommittee.sol#178)
+StockTokenRegistry.valueUsd(address,uint256) (src/StockTokenRegistry.sol#226-231) ignores return value by (priceWad,None) = IAttestedOracle(config.oracle()).priceOf(t.priceId) (src/StockTokenRegistry.sol#229)
+Tranche._ensureLiquidity(uint256) (src/Tranche.sol#756-762) ignores return value by IBook(book).fundClaims() (src/Tranche.sol#759)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#unused-return
+
+Detector: shadowing-local
+IBook.initialize(address,uint256,BRTypes.Charter,BRTypes.BookComponents).config (src/interfaces/IBook.sol#12) shadows:
+	- IBook.config() (src/interfaces/IBook.sol#23) (function)
+IBook.initialize(address,uint256,BRTypes.Charter,BRTypes.BookComponents).bookId (src/interfaces/IBook.sol#13) shadows:
+	- IBook.bookId() (src/interfaces/IBook.sol#19) (function)
+IBook.initialize(address,uint256,BRTypes.Charter,BRTypes.BookComponents).components (src/interfaces/IBook.sol#15) shadows:
+	- IBook.components() (src/interfaces/IBook.sol#22) (function)
+IBookrunnerDesk.initialize(address,uint256,address).book (src/interfaces/IBookrunnerDesk.sol#28) shadows:
+	- IBookrunnerDesk.book() (src/interfaces/IBookrunnerDesk.sol#29) (function)
+IMMMandate.initialize(address,uint256,address).book (src/interfaces/IMMMandate.sol#40) shadows:
+	- IMMMandate.book() (src/interfaces/IMMMandate.sol#41) (function)
+IRevenueRouter.initialize(address,uint256,address).bookId (src/interfaces/IRevenueRouter.sol#17) shadows:
+	- IRevenueRouter.bookId() (src/interfaces/IRevenueRouter.sol#19) (function)
+IRevenueRouter.initialize(address,uint256,address).book (src/interfaces/IRevenueRouter.sol#17) shadows:
+	- IRevenueRouter.book() (src/interfaces/IRevenueRouter.sol#18) (function)
+ITranche.initialize(address,uint256,address,uint8).bookId (src/interfaces/ITranche.sol#19) shadows:
+	- ITranche.bookId() (src/interfaces/ITranche.sol#23) (function)
+ITranche.initialize(address,uint256,address,uint8).book (src/interfaces/ITranche.sol#19) shadows:
+	- ITranche.book() (src/interfaces/ITranche.sol#22) (function)
+ITranche.initialize(address,uint256,address,uint8).kind (src/interfaces/ITranche.sol#19) shadows:
+	- ITranche.kind() (src/interfaces/ITranche.sol#24) (function)
+IUnderwritingVault.initialize(address,uint256,address).book (src/interfaces/IUnderwritingVault.sol#8) shadows:
+	- IUnderwritingVault.book() (src/interfaces/IUnderwritingVault.sol#9) (function)
+IVenueAdapter.initialize(address,uint256,address).book (src/interfaces/IVenueAdapter.sol#7) shadows:
+	- IVenueAdapter.book() (src/interfaces/IVenueAdapter.sol#8) (function)
+IOrderlyAdapter.report(uint256,int256,int256,uint64).netExposureUsd (src/interfaces/IVenueAdapter.sol#43) shadows:
+	- IVenueAdapter.netExposureUsd() (src/interfaces/IVenueAdapter.sol#26) (function)
+IOrderlyAdapter.reportSigned(uint256,int256,int256,uint64,bytes).netExposureUsd (src/interfaces/IVenueAdapter.sol#50) shadows:
+	- IVenueAdapter.netExposureUsd() (src/interfaces/IVenueAdapter.sol#26) (function)
+IOrderlyAdapter.hashReport(uint256,int256,int256,uint64).netExposureUsd (src/interfaces/IVenueAdapter.sol#57) shadows:
+	- IVenueAdapter.netExposureUsd() (src/interfaces/IVenueAdapter.sol#26) (function)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#local-variable-shadowing
+
+Detector: missing-zero-check
+BookrunnerDesk.initialize(address,uint256,address).ep (src/BookrunnerDesk.sol#184) lacks a zero-check on :
+		- entryPoint = ep (src/BookrunnerDesk.sol#185)
+StockTokenRegistry.constructor(address,address).admin_ (src/StockTokenRegistry.sol#70) lacks a zero-check on :
+		- admin = admin_ (src/StockTokenRegistry.sol#73)
+StockTokenRegistry.setAdmin(address).newAdmin (src/StockTokenRegistry.sol#170) lacks a zero-check on :
+		- admin = newAdmin (src/StockTokenRegistry.sol#172)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#missing-zero-address-validation
+
+Detector: calls-loop
+AttestedOracle.update(bytes) (src/AttestedOracle.sol#168-181) has external calls inside a loop: maxAge = config.maxPriceAge() (src/AttestedOracle.sol#177)
+Book._settleAtMark(Book.BookStorage,Book.MarkSummary) (src/Book.sol#644-667) has external calls inside a loop: supply = IERC20(_tranche($,k)).totalSupply() (src/Book.sol#651)
+	Calls stack containing the loop:
+		Book.applyMark(uint256)
+Book._settleRetiredBacklog(Book.BookStorage) (src/Book.sol#714-727) has external calls inside a loop: supply = IERC20(t).totalSupply() (src/Book.sol#718)
+	Calls stack containing the loop:
+		Book.finalizeRetirement()
+Book._settleRetiredBacklog(Book.BookStorage) (src/Book.sol#714-727) has external calls inside a loop: (burned,owed[k],None,None) = ITranche(t).settleAtMark(RETIRED_SETTLE_INDEX,$.price[k],0,$.components.vault) (src/Book.sol#720)
+	Calls stack containing the loop:
+		Book.finalizeRetirement()
+Book._settleRetiredBacklog(Book.BookStorage) (src/Book.sol#714-727) has external calls inside a loop: supply = IERC20(t).totalSupply() (src/Book.sol#718)
+	Calls stack containing the loop:
+		Book.settleRetiredBacklog()
+Book._settleRetiredBacklog(Book.BookStorage) (src/Book.sol#714-727) has external calls inside a loop: (burned,owed[k],None,None) = ITranche(t).settleAtMark(RETIRED_SETTLE_INDEX,$.price[k],0,$.components.vault) (src/Book.sol#720)
+	Calls stack containing the loop:
+		Book.settleRetiredBacklog()
+BookrunnerDesk._hedgeValue(IStockTokenRegistry) (src/BookrunnerDesk.sol#513-520) has external calls inside a loop: bal = IERC20(token).balanceOf(address(this)) (src/BookrunnerDesk.sol#517)
+	Calls stack containing the loop:
+		BookrunnerDesk.execute(IBookrunnerDesk.Action)
+		BookrunnerDesk._execute(address,bool,IBookrunnerDesk.Action)
+		BookrunnerDesk._hedge(address,bytes,bytes32[])
+BookrunnerDesk._hedgeValue(IStockTokenRegistry) (src/BookrunnerDesk.sol#513-520) has external calls inside a loop: total += reg.valueUsd(token,bal) (src/BookrunnerDesk.sol#518)
+	Calls stack containing the loop:
+		BookrunnerDesk.execute(IBookrunnerDesk.Action)
+		BookrunnerDesk._execute(address,bool,IBookrunnerDesk.Action)
+		BookrunnerDesk._hedge(address,bytes,bytes32[])
+BookrunnerDesk._hedgeValue(IStockTokenRegistry) (src/BookrunnerDesk.sol#513-520) has external calls inside a loop: bal = IERC20(token).balanceOf(address(this)) (src/BookrunnerDesk.sol#517)
+	Calls stack containing the loop:
+		BookrunnerDesk.executeWithPrices(IBookrunnerDesk.Action,bytes)
+		BookrunnerDesk._execute(address,bool,IBookrunnerDesk.Action)
+		BookrunnerDesk._hedge(address,bytes,bytes32[])
+BookrunnerDesk._hedgeValue(IStockTokenRegistry) (src/BookrunnerDesk.sol#513-520) has external calls inside a loop: total += reg.valueUsd(token,bal) (src/BookrunnerDesk.sol#518)
+	Calls stack containing the loop:
+		BookrunnerDesk.executeWithPrices(IBookrunnerDesk.Action,bytes)
+		BookrunnerDesk._execute(address,bool,IBookrunnerDesk.Action)
+		BookrunnerDesk._hedge(address,bytes,bytes32[])
+BookrunnerDesk._hedgeValue(IStockTokenRegistry) (src/BookrunnerDesk.sol#513-520) has external calls inside a loop: bal = IERC20(token).balanceOf(address(this)) (src/BookrunnerDesk.sol#517)
+	Calls stack containing the loop:
+		BookrunnerDesk.hedgeNotionalUsd()
+BookrunnerDesk._hedgeValue(IStockTokenRegistry) (src/BookrunnerDesk.sol#513-520) has external calls inside a loop: total += reg.valueUsd(token,bal) (src/BookrunnerDesk.sol#518)
+	Calls stack containing the loop:
+		BookrunnerDesk.hedgeNotionalUsd()
+BookrunnerDesk._hedgeValue(IStockTokenRegistry) (src/BookrunnerDesk.sol#513-520) has external calls inside a loop: bal = IERC20(token).balanceOf(address(this)) (src/BookrunnerDesk.sol#517)
+	Calls stack containing the loop:
+		BookrunnerDesk.valueUsd()
+BookrunnerDesk._hedgeValue(IStockTokenRegistry) (src/BookrunnerDesk.sol#513-520) has external calls inside a loop: total += reg.valueUsd(token,bal) (src/BookrunnerDesk.sol#518)
+	Calls stack containing the loop:
+		BookrunnerDesk.valueUsd()
+MMMandate._revoke(address,bytes32) (src/MMMandate.sol#514-523) has external calls inside a loop: IDeskKeySync(desk).syncKey(key,0) (src/MMMandate.sol#518-521)
+	Calls stack containing the loop:
+		MMMandate.kill(bytes32)
+		MMMandate._revokeAll(bytes32)
+MMMandate._releaseBond(address) (src/MMMandate.sol#544-555) has external calls inside a loop: released = IBkrnStaking(config.staking()).unlock(op,keyLockId(key)) (src/MMMandate.sol#549-554)
+	Calls stack containing the loop:
+		MMMandate.kill(bytes32)
+		MMMandate._revokeAll(bytes32)
+		MMMandate._revoke(address,bytes32)
+MMMandate._revoke(address,bytes32) (src/MMMandate.sol#514-523) has external calls inside a loop: IDeskKeySync(desk).syncKey(key,0) (src/MMMandate.sol#518-521)
+	Calls stack containing the loop:
+		MMMandate.remandate(BRTypes.Mandate)
+		MMMandate._revokeAll(bytes32)
+MMMandate._releaseBond(address) (src/MMMandate.sol#544-555) has external calls inside a loop: released = IBkrnStaking(config.staking()).unlock(op,keyLockId(key)) (src/MMMandate.sol#549-554)
+	Calls stack containing the loop:
+		MMMandate.remandate(BRTypes.Mandate)
+		MMMandate._revokeAll(bytes32)
+		MMMandate._revoke(address,bytes32)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation/#calls-inside-a-loop
+
+Detector: reentrancy-benign
+Reentrancy in BookrunnerDesk._flatten(address,bool,bytes) (src/BookrunnerDesk.sol#361-389):
+	External calls:
+	- (spent,received) = _swap(o.venue,o.token,usdc,o.poolFee,o.amountIn,o.minAmountOut) (src/BookrunnerDesk.sol#372)
+		- IHedgeExecutor(exec).swapExactIn(hedgeVenue,tokenIn,tokenOut,poolFee,amountIn,minAmountOut,address(this)) (src/BookrunnerDesk.sol#493-494)
+	State variables written after the call(s):
+	- _chargeSlippage(notional,received) (src/BookrunnerDesk.sol#384)
+		- slippageUsedUsd[period] = used (src/BookrunnerDesk.sol#540)
+Reentrancy in BookrunnerDesk._hedge(address,bytes,bytes32[]) (src/BookrunnerDesk.sol#308-359):
+	External calls:
+	- (spent,received) = _swap(o.venue,usdc,o.token,o.poolFee,o.amountIn,o.minAmountOut) (src/BookrunnerDesk.sol#324-326)
+		- IHedgeExecutor(exec).swapExactIn(hedgeVenue,tokenIn,tokenOut,poolFee,amountIn,minAmountOut,address(this)) (src/BookrunnerDesk.sol#493-494)
+	- (spent,received) = _swap(o.venue,o.token,usdc,o.poolFee,o.amountIn,o.minAmountOut) (src/BookrunnerDesk.sol#324-326)
+		- IHedgeExecutor(exec).swapExactIn(hedgeVenue,tokenIn,tokenOut,poolFee,amountIn,minAmountOut,address(this)) (src/BookrunnerDesk.sol#493-494)
+	State variables written after the call(s):
+	- _chargeSlippage(spent,tokenValue) (src/BookrunnerDesk.sol#332)
+		- slippageUsedUsd[period] = used (src/BookrunnerDesk.sol#540)
+	- _chargeSlippage(tokenValue,received) (src/BookrunnerDesk.sol#333)
+		- slippageUsedUsd[period] = used (src/BookrunnerDesk.sol#540)
+Reentrancy in Tranche._requestRetired(uint256,address,address) (src/Tranche.sol#646-665):
+	External calls:
+	- _burn(address(this),shares) (src/Tranche.sol#659)
+		- IBookTrancheHooks(book).onJuniorRedeemRequested(from) (src/Tranche.sol#780)
+	State variables written after the call(s):
+	- _remaining[b][controller] += shares (src/Tranche.sol#660)
+Reentrancy in MarkRegistry.commitAndApply(BRTypes.MarkInput,bytes,bytes,bytes) (src/MarkRegistry.sol#130-145):
+	External calls:
+	- IAttestedOracleUpdate(oracle).update(priceData) (src/MarkRegistry.sol#139)
+	- _relayVenueReport(m.bookId,venueReport) (src/MarkRegistry.sol#141)
+		- IOrderlyAdapter(adapter).reportSigned(insuranceUsd,marginUsd,exposureUsd,asOf,reportSig) (src/MarkRegistry.sol#217)
+	State variables written after the call(s):
+	- (markId,book) = _commit(m,sig) (src/MarkRegistry.sol#143)
+		- mk.input = m (src/MarkRegistry.sol#196)
+		- mk.signer = signer (src/MarkRegistry.sol#197)
+		- mk.committedAt = uint64(block.timestamp) (src/MarkRegistry.sol#198)
+	- (markId,book) = _commit(m,sig) (src/MarkRegistry.sol#143)
+		- lastPeriodEnd[m.bookId] = periodEnd (src/MarkRegistry.sol#200)
+	- (markId,book) = _commit(m,sig) (src/MarkRegistry.sol#143)
+		- latestMarkId[m.bookId] = markId (src/MarkRegistry.sol#199)
+	- (markId,book) = _commit(m,sig) (src/MarkRegistry.sol#143)
+		- markId = ++ markCount (src/MarkRegistry.sol#194)
+Reentrancy in BkrnFeeRouter.executeBuyback(uint256,uint256,uint24) (src/BkrnFeeRouter.sol#104-150):
+	External calls:
+	- ISwapRouter02(router).exactInputSingle(ISwapRouter02.ExactInputSingleParams({tokenIn:address(usdc),tokenOut:address(bkrn),fee:poolFee,recipient:address(this),amountIn:amountIn,amountOutMinimum:minBkrnOut,sqrtPriceLimitX96:0})) (src/BkrnFeeRouter.sol#123-134)
+	State variables written after the call(s):
+	- totalBkrnDistributed += bkrnOut (src/BkrnFeeRouter.sol#145)
+	- totalBuybackUsdc += spent (src/BkrnFeeRouter.sol#144)
+Reentrancy in PoolEngine.liquidate(uint256,address,bytes) (src/PoolEngine.sol#594-601):
+	External calls:
+	- _pull(priceData) (src/PoolEngine.sol#599)
+		- IAttestedOracle(protocolConfig.oracle()).update(priceData) (src/PoolEngine.sol#820)
+	State variables written after the call(s):
+	- _liquidate(marketId,trader) (src/PoolEngine.sol#600)
+		- m = _markets[marketId] (src/PoolEngine.sol#786)
+		- m.lastFundingTime = uint64(block.timestamp) (src/PoolEngine.sol#876)
+		- m.fundingIndex = idx (src/PoolEngine.sol#879)
+	- _liquidate(marketId,trader) (src/PoolEngine.sol#600)
+		- p.marginUsd = margin - owed (src/PoolEngine.sol#934)
+		- p.size = 0 (src/PoolEngine.sol#979)
+		- p.entryPriceWad = 0 (src/PoolEngine.sol#980)
+		- p.fundingIndexAtEntry = m.fundingIndex (src/PoolEngine.sol#981)
+		- p.marginUsd = 0 (src/PoolEngine.sol#940)
+		- p.marginUsd = margin - feeUsd (src/PoolEngine.sol#619)
+		- p.marginUsd += paid (src/PoolEngine.sol#962)
+Reentrancy in Tranche.requestRedeem(uint256,address,address) (src/Tranche.sol#401-429):
+	External calls:
+	- _transfer(owner,address(this),shares) (src/Tranche.sol#411)
+		- IBookTrancheHooks(book).onJuniorRedeemRequested(from) (src/Tranche.sol#780)
+	State variables written after the call(s):
+	- _bucketQueue.push(b) (src/Tranche.sol#424)
+	- _buckets[b].shares += shares (src/Tranche.sol#422)
+	- _remaining[b][controller] += shares (src/Tranche.sol#425)
+Reentrancy in PoolEngine.trade(uint256,int256,uint256,bytes) (src/PoolEngine.sol#513-520):
+	External calls:
+	- _pull(priceData) (src/PoolEngine.sol#518)
+		- IAttestedOracle(protocolConfig.oracle()).update(priceData) (src/PoolEngine.sol#820)
+	State variables written after the call(s):
+	- _trade(marketId,sizeDelta,acceptablePriceWad) (src/PoolEngine.sol#519)
+		- m = _markets[marketId] (src/PoolEngine.sol#786)
+		- m.lastFundingTime = uint64(block.timestamp) (src/PoolEngine.sol#876)
+		- m.fundingIndex = idx (src/PoolEngine.sol#879)
+	- _trade(marketId,sizeDelta,acceptablePriceWad) (src/PoolEngine.sol#519)
+		- p.marginUsd = margin - owed (src/PoolEngine.sol#934)
+		- p.marginUsd = 0 (src/PoolEngine.sol#940)
+		- p.marginUsd += paid (src/PoolEngine.sol#962)
+		- p.marginUsd -= c.feeUsd (src/PoolEngine.sol#563)
+		- p.size = c.newSize (src/PoolEngine.sol#566)
+		- p.entryPriceWad = newEntryPrice (src/PoolEngine.sol#567)
+		- p.fundingIndexAtEntry = m.fundingIndex (src/PoolEngine.sol#568)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#reentrancy-vulnerabilities-3
+
+Detector: reentrancy-events
+Reentrancy in PoolEngineAdapter.applyMandate() (src/PoolEngineAdapter.sol#330-349):
+	External calls:
+	- IPoolEngineControls(address(eng)).setInventoryCap(id,md.maxInventoryUsd) (src/PoolEngineAdapter.sol#344)
+	- eng.setQuote(id,spread,skew,maxNet) (src/PoolEngineAdapter.sol#345)
+	- eng.setReduceOnly(id,true) (src/PoolEngineAdapter.sol#346)
+	Event emitted after the call(s):
+	- MandateApplied(spread,skew,maxNet,md.maxInventoryUsd) (src/PoolEngineAdapter.sol#348)
+Reentrancy in MarkRegistry.commitAndApply(BRTypes.MarkInput,bytes,bytes,bytes) (src/MarkRegistry.sol#130-145):
+	External calls:
+	- IAttestedOracleUpdate(oracle).update(priceData) (src/MarkRegistry.sol#139)
+	- _relayVenueReport(m.bookId,venueReport) (src/MarkRegistry.sol#141)
+		- IOrderlyAdapter(adapter).reportSigned(insuranceUsd,marginUsd,exposureUsd,asOf,reportSig) (src/MarkRegistry.sol#217)
+	Event emitted after the call(s):
+	- MarkCommitted(markId,m.bookId,m.periodEnd,m.navUsd,m.deployedValueUsd,m.inventoryRoot,m.pnlJsonHash,m.receiptsRoot,signer) (src/MarkRegistry.sol#238-248)
+		- (markId,book) = _commit(m,sig) (src/MarkRegistry.sol#143)
+	- MarkSuperseded(m.bookId,superseded,markId,periodEnd) (src/MarkRegistry.sol#202)
+		- (markId,book) = _commit(m,sig) (src/MarkRegistry.sol#143)
+	- VenueReportSkipped(bookId,adapter,asOf,valuationAt) (src/MarkRegistry.sol#214)
+		- _relayVenueReport(m.bookId,venueReport) (src/MarkRegistry.sol#141)
+Reentrancy in PoolEngineAdapter.initialize(address,uint256,address) (src/PoolEngineAdapter.sol#139-165):
+	External calls:
+	- id = eng.createMarket(IPoolEngine.MarketConfig({underlying:$.priceId,symbol:ch.symbol,takerFeeBps:ch.takerFeeBps,makerFeeBps:ch.makerFeeBps,initialMarginBps:DEFAULT_INITIAL_MARGIN_BPS,maintenanceMarginBps:DEFAULT_MAINTENANCE_MARGIN_BPS,liquidationFeeBps:DEFAULT_LIQUIDATION_FEE_BPS,fundingVelocityBps:DEFAULT_FUNDING_VELOCITY_BPS,maxNetExposureUsd:maxInv})) (src/PoolEngineAdapter.sol#147-159)
+	- eng.setQuote(id,spread,0,maxInv) (src/PoolEngineAdapter.sol#163)
+	Event emitted after the call(s):
+	- AdapterInitialized(bookId_,book_,address(eng),id,$.priceId) (src/PoolEngineAdapter.sol#164)
+Reentrancy in OrderlyAdapter.setDelegateSigner(address) (src/OrderlyAdapter.sol#602-610):
+	External calls:
+	- $.orderlyVault.delegateSigner(IOrderlyVault.VaultDelegate({brokerHash:$.brokerHash,delegateSigner:signer})) (src/OrderlyAdapter.sol#607-608)
+	Event emitted after the call(s):
+	- DelegateSignerSet(signer) (src/OrderlyAdapter.sol#609)
+Reentrancy in PoolEngineAdapter.setQuote(uint16,int16,uint128) (src/PoolEngineAdapter.sol#276-291):
+	External calls:
+	- $.engine.setQuote($.marketId,spreadBps,skewBps,maxNetExposureUsd) (src/PoolEngineAdapter.sol#283)
+	Event emitted after the call(s):
+	- ReduceOnlyRequested(msg.sender,false) (src/PoolEngineAdapter.sol#287)
+Reentrancy in PoolEngineAdapter.setReduceOnly(bool) (src/PoolEngineAdapter.sol#297-314):
+	External calls:
+	- $.engine.setReduceOnly($.marketId,reduceOnly) (src/PoolEngineAdapter.sol#312)
+	- _startCloseOut($) (src/PoolEngineAdapter.sol#313)
+		- IPoolEngineControls(address($.engine)).startCloseOut($.marketId,notice) (src/PoolEngineAdapter.sol#355)
+	Event emitted after the call(s):
+	- CloseOutStarted(notice) (src/PoolEngineAdapter.sol#354)
+		- _startCloseOut($) (src/PoolEngineAdapter.sol#313)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#reentrancy-vulnerabilities-4
+
+Detector: timestamp
+AttestedOracle.update(bytes) (src/AttestedOracle.sol#168-181) uses timestamp for comparisons
+	Dangerous comparisons:
+	- uint256(u.publishedAt) + maxAge < block.timestamp (src/AttestedOracle.sol#178)
+AttestedOracle._verify(IAttestedOracle.PriceUpdate,bytes) (src/AttestedOracle.sol#228-238) uses timestamp for comparisons
+	Dangerous comparisons:
+	- u.publishedAt > block.timestamp + MAX_FUTURE_DRIFT (src/AttestedOracle.sol#233)
+AttestedOracle._stale(uint64) (src/AttestedOracle.sol#247-250) uses timestamp for comparisons
+	Dangerous comparisons:
+	- publishedAt == 0 || uint256(publishedAt) + config.maxPriceAge() < block.timestamp (src/AttestedOracle.sol#249)
+BkrnStaking.unstake() (src/BkrnStaking.sol#156-168) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp < a.unstakeAvailableAt (src/BkrnStaking.sol#160)
+BkrnStaking.notifyReward(uint256) (src/BkrnStaking.sol#252-269) uses timestamp for comparisons
+	Dangerous comparisons:
+	- bal < required (src/BkrnStaking.sol#257)
+BkrnStaking.claimReward() (src/BkrnStaking.sol#272-280) uses timestamp for comparisons
+	Dangerous comparisons:
+	- reward == 0 (src/BkrnStaking.sol#275)
+Book.closeWindow() (src/Book.sol#333-375) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp < $.subscriptionEnds (src/Book.sol#336)
+MMMandate.registerKey(address,address,uint64,uint128) (src/MMMandate.sol#196-225) uses timestamp for comparisons
+	Dangerous comparisons:
+	- validUntil <= block.timestamp (src/MMMandate.sol#204)
+MMMandate.isActiveKey(address) (src/MMMandate.sol#248-251) uses timestamp for comparisons
+	Dangerous comparisons:
+	- ! killed && k.active && block.timestamp <= k.validUntil (src/MMMandate.sol#250)
+MMMandate.checkInventoryMove(address,bool,uint8,uint256) (src/MMMandate.sol#347-373) uses timestamp for comparisons
+	Dangerous comparisons:
+	- isActiveKey(key) || key == book || config.hasRole(RISK_ROLE,key) || config.hasRole(KEEPER_ROLE,key) (src/MMMandate.sol#355-356)
+	- _mandate.noNewRiskOffHours && offHours() (src/MMMandate.sol#363)
+MMMandate.checkQuote(address,uint16,int16,uint128) (src/MMMandate.sol#379-402) uses timestamp for comparisons
+	Dangerous comparisons:
+	- offHoursReduceOnly = m.noNewRiskOffHours && offHours() (src/MMMandate.sol#394)
+	- retiring || offHoursReduceOnly (src/MMMandate.sol#395)
+MMMandate.checkFundDesk(address,uint256) (src/MMMandate.sol#405-413) uses timestamp for comparisons
+	Dangerous comparisons:
+	- m.noNewRiskOffHours && offHours() (src/MMMandate.sol#409)
+MMMandate.checkFlatten(address,int256,int256) (src/MMMandate.sol#420-429) uses timestamp for comparisons
+	Dangerous comparisons:
+	- m.noNewRiskOffHours && offHours() (src/MMMandate.sol#425)
+MMMandate.offHours() (src/MMMandate.sol#434-447) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp > uint256(d.publishedAt) + config.maxPriceAge() (src/MMMandate.sol#443)
+MMMandate._canRevoke(address,address,IMMMandate.DeskKey) (src/MMMandate.sol#507-512) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp > k.validUntil (src/MMMandate.sol#509)
+MMMandate._requireActiveKey(address) (src/MMMandate.sol#564-569) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp > k.validUntil (src/MMMandate.sol#568)
+MMMandate._checkLeg(bytes32,bytes32,uint16,bytes32[],int256,int256) (src/MMMandate.sol#577-603) uses timestamp for comparisons
+	Dangerous comparisons:
+	- m.noNewRiskOffHours && offHours() (src/MMMandate.sol#594)
+	- block.timestamp > uint256(at) + maxAge (src/MMMandate.sol#600)
+MarkRegistry._commit(BRTypes.MarkInput,bytes) (src/MarkRegistry.sol#172-204) uses timestamp for comparisons
+	Dangerous comparisons:
+	- periodEnd > block.timestamp (src/MarkRegistry.sol#188)
+	- block.timestamp - periodEnd > maxAge (src/MarkRegistry.sol#190)
+MarketCharter.decide(uint256,bool,bytes32) (src/MarketCharter.sol#172-206) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp >= deadline (src/MarketCharter.sol#177)
+	- fee > 0 (src/MarketCharter.sol#196)
+	- comps.book == address(0) (src/MarketCharter.sol#203)
+MarketCharter.expire(uint256) (src/MarketCharter.sol#210-220) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp < deadline (src/MarketCharter.sol#214)
+MarketCharter.isOpen(uint256) (src/MarketCharter.sol#323-327) uses timestamp for comparisons
+	Dangerous comparisons:
+	- r.status == BRTypes.CharterStatus.Filed && block.timestamp < uint256(r.filedAt) + config.committeeWindow() (src/MarketCharter.sol#325-326)
+OrderlyAdapter.sweepFees(uint64,uint256) (src/OrderlyAdapter.sol#546-569) uses timestamp for comparisons
+	Dangerous comparisons:
+	- period > block.timestamp (src/OrderlyAdapter.sol#553)
+	- period < oldest (src/OrderlyAdapter.sol#559)
+OrderlyAdapter._storeReport(uint256,int256,int256,uint64) (src/OrderlyAdapter.sol#890-908) uses timestamp for comparisons
+	Dangerous comparisons:
+	- asOf > block.timestamp (src/OrderlyAdapter.sol#894)
+OrderlyAdapter._oldestFeePeriod(uint32) (src/OrderlyAdapter.sol#954-958) uses timestamp for comparisons
+	Dangerous comparisons:
+	- start > back (src/OrderlyAdapter.sol#957)
+OrderlyAdapter._sweepOpen(OrderlyAdapter.AdapterStorage) (src/OrderlyAdapter.sol#990-997) uses timestamp for comparisons
+	Dangerous comparisons:
+	- b.lastMarkPeriodEnd() >= block.timestamp - (block.timestamp % interval) (src/OrderlyAdapter.sol#996)
+PoolEngine.withdrawLiquidity(uint256,uint256,address) (src/PoolEngine.sol#373-398) uses timestamp for comparisons
+	Dangerous comparisons:
+	- equity < int256(required) (src/PoolEngine.sol#395)
+PoolEngine.forceClose(uint256,address) (src/PoolEngine.sol#631-643) uses timestamp for comparisons
+	Dangerous comparisons:
+	- at == 0 || block.timestamp < at (src/PoolEngine.sol#634)
+PoolEngine.marginRatioBps(uint256,address) (src/PoolEngine.sol#706-716) uses timestamp for comparisons
+	Dangerous comparisons:
+	- equity <= 0 (src/PoolEngine.sol#714)
+PoolEngine.withdrawableLiquidityUsd(uint256) (src/PoolEngine.sol#744-750) uses timestamp for comparisons
+	Dangerous comparisons:
+	- free <= 0 (src/PoolEngine.sol#748)
+PoolEngine._stale(uint64,uint256) (src/PoolEngine.sol#800-802) uses timestamp for comparisons
+	Dangerous comparisons:
+	- uint256(publishedAt) + maxAge < block.timestamp (src/PoolEngine.sol#801)
+PoolEngine._fundingDelta(PoolEngine.Market,uint256,uint256) (src/PoolEngine.sol#855-861) uses timestamp for comparisons
+	Dangerous comparisons:
+	- net == 0 || dt == 0 || price == 0 (src/PoolEngine.sol#857)
+PoolEngine._pendingIndex(PoolEngine.Market,uint256) (src/PoolEngine.sol#863-868) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp > last (src/PoolEngine.sol#866)
+PoolEngine._accrue(uint256,PoolEngine.Market,uint256) (src/PoolEngine.sol#872-882) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp <= last (src/PoolEngine.sol#874)
+	- d != 0 (src/PoolEngine.sol#877)
+PoolEngine._postTradeChecks(PoolEngine.Market,IPoolEngine.Position,PoolEngine.TradeCtx) (src/PoolEngine.sol#988-1006) uses timestamp for comparisons
+	Dangerous comparisons:
+	- poolEq < int256(poolReq) (src/PoolEngine.sol#1002)
+	- c.newSize != 0 && _isLiquidatable(m,p,c.price,m.fundingIndex) (src/PoolEngine.sol#1003)
+PoolEngine._isLiquidatable(PoolEngine.Market,IPoolEngine.Position,uint256,int256) (src/PoolEngine.sol#1014-1022) uses timestamp for comparisons
+	Dangerous comparisons:
+	- _traderEquity(p,price,index) < int256(required) (src/PoolEngine.sol#1021)
+RiskCommittee.postJuryVerdict(uint256,bytes32,bool) (src/RiskCommittee.sol#202-214) uses timestamp for comparisons
+	Dangerous comparisons:
+	- _finalized[charterId] || ! _isOpen(charterId) (src/RiskCommittee.sol#208)
+RiskCommittee.vote(uint256,bool) (src/RiskCommittee.sol#220-229) uses timestamp for comparisons
+	Dangerous comparisons:
+	- _finalized[charterId] || ! _isOpen(charterId) (src/RiskCommittee.sol#224)
+RiskCommittee.tryFinalize(uint256) (src/RiskCommittee.sol#234-237) uses timestamp for comparisons
+	Dangerous comparisons:
+	- _finalized[charterId] || ! _isOpen(charterId) (src/RiskCommittee.sol#235)
+RiskCommittee.approveAction(uint256) (src/RiskCommittee.sol#304-323) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp >= uint256(a.proposedAt) + config.committeeWindow() (src/RiskCommittee.sol#310)
+RiskCommittee._isOpen(uint256) (src/RiskCommittee.sol#387-391) uses timestamp for comparisons
+	Dangerous comparisons:
+	- r.status == BRTypes.CharterStatus.Filed && block.timestamp < uint256(r.filedAt) + config.committeeWindow() (src/RiskCommittee.sol#389-390)
+Tranche.depositsOpen() (src/Tranche.sol#220-225) uses timestamp for comparisons
+	Dangerous comparisons:
+	- ! paused && ! rd.settled && block.timestamp < rd.endsAt && ! IBookrunnerConfig(config).newBooksPaused() (src/Tranche.sol#222-224)
+Tranche.requestRedeem(uint256,address,address) (src/Tranche.sol#401-429) uses timestamp for comparisons
+	Dangerous comparisons:
+	- b <= last (src/Tranche.sol#421)
+	- qlen == 0 || _bucketQueue[qlen - 1] != b (src/Tranche.sol#424)
+Tranche.openRound(uint64) (src/Tranche.sol#558-564) uses timestamp for comparisons
+	Dangerous comparisons:
+	- endsAt <= block.timestamp (src/Tranche.sol#560)
+Tranche._settleBuckets(uint256,uint256) (src/Tranche.sol#582-605) uses timestamp for comparisons
+	Dangerous comparisons:
+	- head < end (src/Tranche.sol#589)
+	- b > upToIndex (src/Tranche.sol#591)
+Tranche._pushControllerBucket(address,uint256) (src/Tranche.sol#667-671) uses timestamp for comparisons
+	Dangerous comparisons:
+	- len == 0 || list[len - 1] != b || _ctrlHead[controller] >= len (src/Tranche.sol#670)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#block-timestamp
+
+Detector: assembly
+Book._s() (src/Book.sol#576-580) uses assembly
+	- INLINE ASM (src/Book.sol#577-579)
+MMMandate.activeKeys() (src/MMMandate.sol#260-271) uses assembly
+	- INLINE ASM (src/MMMandate.sol#268-270)
+OrderlyAdapter._s() (src/OrderlyAdapter.sol#857-861) uses assembly
+	- INLINE ASM (src/OrderlyAdapter.sol#858-860)
+PoolEngineAdapter._s() (src/PoolEngineAdapter.sol#75-79) uses assembly
+	- INLINE ASM (src/PoolEngineAdapter.sol#76-78)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#assembly-usage
+
+Detector: costly-loop
+BookrunnerConfig._setParam(bytes32,uint256) (src/BookrunnerConfig.sol#454-486) has costly operations inside a loop:
+	- _carryBps = uint16(value) (src/BookrunnerConfig.sol#457)
+	Calls stack containing the loop:
+		BookrunnerConfig.setParams(bytes32[],uint256[])
+BookrunnerConfig._setParam(bytes32,uint256) (src/BookrunnerConfig.sol#454-486) has costly operations inside a loop:
+	- _expenseCapBps = uint16(value) (src/BookrunnerConfig.sol#460)
+	Calls stack containing the loop:
+		BookrunnerConfig.setParams(bytes32[],uint256[])
+BookrunnerConfig._setParam(bytes32,uint256) (src/BookrunnerConfig.sol#454-486) has costly operations inside a loop:
+	- _charterFeeUsd = value (src/BookrunnerConfig.sol#462)
+	Calls stack containing the loop:
+		BookrunnerConfig.setParams(bytes32[],uint256[])
+BookrunnerConfig._setParam(bytes32,uint256) (src/BookrunnerConfig.sol#454-486) has costly operations inside a loop:
+	- _sponsorBondBkrn = value (src/BookrunnerConfig.sol#464)
+	Calls stack containing the loop:
+		BookrunnerConfig.setParams(bytes32[],uint256[])
+BookrunnerConfig._setParam(bytes32,uint256) (src/BookrunnerConfig.sol#454-486) has costly operations inside a loop:
+	- _committeeBondBkrn = value (src/BookrunnerConfig.sol#466)
+	Calls stack containing the loop:
+		BookrunnerConfig.setParams(bytes32[],uint256[])
+BookrunnerConfig._setParam(bytes32,uint256) (src/BookrunnerConfig.sol#454-486) has costly operations inside a loop:
+	- _markInterval = uint32(value) (src/BookrunnerConfig.sol#469)
+	Calls stack containing the loop:
+		BookrunnerConfig.setParams(bytes32[],uint256[])
+BookrunnerConfig._setParam(bytes32,uint256) (src/BookrunnerConfig.sol#454-486) has costly operations inside a loop:
+	- _maxMarkAge = uint32(value) (src/BookrunnerConfig.sol#472)
+	Calls stack containing the loop:
+		BookrunnerConfig.setParams(bytes32[],uint256[])
+BookrunnerConfig._setParam(bytes32,uint256) (src/BookrunnerConfig.sol#454-486) has costly operations inside a loop:
+	- _maxPriceAge = uint32(value) (src/BookrunnerConfig.sol#475)
+	Calls stack containing the loop:
+		BookrunnerConfig.setParams(bytes32[],uint256[])
+BookrunnerConfig._setParam(bytes32,uint256) (src/BookrunnerConfig.sol#454-486) has costly operations inside a loop:
+	- _committeeWindow = uint32(value) (src/BookrunnerConfig.sol#478)
+	Calls stack containing the loop:
+		BookrunnerConfig.setParams(bytes32[],uint256[])
+BookrunnerConfig._setParam(bytes32,uint256) (src/BookrunnerConfig.sol#454-486) has costly operations inside a loop:
+	- _maxTradePriceAge = uint32(value) (src/BookrunnerConfig.sol#481)
+	Calls stack containing the loop:
+		BookrunnerConfig.setParams(bytes32[],uint256[])
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#costly-operations-inside-a-loop
+
+Detector: cyclomatic-complexity
+MMMandate.registerKey(address,address,uint64,uint128) (src/MMMandate.sol#196-225) has a high cyclomatic complexity (12).
+PoolEngine._trade(uint256,int256,uint256) (src/PoolEngine.sol#522-579) has a high cyclomatic complexity (12).
+RiskCommittee._checkActionData(bytes32,bytes) (src/RiskCommittee.sol#416-433) has a high cyclomatic complexity (12).
+StockTokenRegistry.registerIndex(bytes32,bytes32,IStockTokenRegistry.IndexComponent[]) (src/StockTokenRegistry.sol#137-167) has a high cyclomatic complexity (12).
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#cyclomatic-complexity
+
+Detector: low-level-calls
+Low level call in BookrunnerDesk.validateUserOp(PackedUserOperation,bytes32,uint256) (src/BookrunnerDesk.sol#201-214):
+	- (ok,None) = address(msg.sender).call{value: missingAccountFunds}() (src/BookrunnerDesk.sol#211)
+Low level call in BookrunnerDesk.withdrawNative(address,uint256) (src/BookrunnerDesk.sol#450-456):
+	- (ok,None) = to.call{value: amount}() (src/BookrunnerDesk.sol#453)
+Low level call in MarketCharter._sponsorAbandoned(address) (src/MarketCharter.sol#391-395):
+	- (ok,ret) = book.staticcall(abi.encodeWithSelector(ISponsorAbandoned.sponsorAbandoned.selector)) (src/MarketCharter.sol#392-393)
+Low level call in OrderlyAdapter.rescueNative(address,uint256) (src/OrderlyAdapter.sol#624-631):
+	- (ok,None) = to.call{value: amount}() (src/OrderlyAdapter.sol#628)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#low-level-calls
+
+Detector: missing-inheritance
+BkrnStaking (src/BkrnStaking.sol#26-360) should inherit from ILockerAdmin (src/BookFactory.sol#21-23)
+Book (src/Book.sol#35-798) should inherit from ISponsorAbandoned (src/MarketCharter.sol#400-402)
+BookrunnerConfig (src/BookrunnerConfig.sol#15-514) should inherit from IBookrunnerConfigTradeAge (src/PoolEngine.sol#16-19)
+MMMandate (src/MMMandate.sol#75-699) should inherit from IMMMandateRetiring (src/Book.sol#23-25)
+PoolEngine (src/PoolEngine.sol#136-1061) should inherit from IPoolEngineControls (src/PoolEngineAdapter.sol#20-23)
+PoolEngineAdapter (src/PoolEngineAdapter.sol#31-460) should inherit from IEngineAdapterMandateHook (src/MMMandate.sol#44-47)
+UnderwritingVault (src/UnderwritingVault.sol#23-187) should inherit from IDeskReturnVault (src/BookrunnerDesk.sol#31-33)
+UnderwritingVault (src/UnderwritingVault.sol#23-187) should inherit from IVaultFlowNotify (src/OrderlyAdapter.sol#22-24)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#missing-inheritance
+
+Detector: naming-convention
+Function MarkRegistry.DOMAIN_SEPARATOR() (src/MarkRegistry.sol#108-110) is not in mixedCase
+Function OrderlyAdapter.DOMAIN_SEPARATOR() (src/OrderlyAdapter.sol#500-506) is not in mixedCase
+Variable OrderlyAdapter.DEFAULT_BROKER_HASH (src/OrderlyAdapter.sol#165) is not in mixedCase
+Variable OrderlyAdapter.DEFAULT_TOKEN_HASH (src/OrderlyAdapter.sol#168) is not in mixedCase
+Variable PoolEngineAdapter.EXPECTED_CONFIG (src/PoolEngineAdapter.sol#120) is not in mixedCase
+Function IAttestedOracle.PRICE_TYPEHASH() (src/interfaces/IAttestedOracle.sol#27) is not in mixedCase
+Function IBookrunnerConfig.MARK_SIGNER_ROLE() (src/interfaces/IBookrunnerConfig.sol#14) is not in mixedCase
+Function IBookrunnerConfig.RISK_ROLE() (src/interfaces/IBookrunnerConfig.sol#15) is not in mixedCase
+Function IBookrunnerConfig.OPS_VENUE_ROLE() (src/interfaces/IBookrunnerConfig.sol#16) is not in mixedCase
+Function IBookrunnerConfig.JURY_ROLE() (src/interfaces/IBookrunnerConfig.sol#17) is not in mixedCase
+Function IBookrunnerConfig.KEEPER_ROLE() (src/interfaces/IBookrunnerConfig.sol#18) is not in mixedCase
+Function IBookrunnerConfig.GUARDIAN_ROLE() (src/interfaces/IBookrunnerConfig.sol#19) is not in mixedCase
+Function IMarkRegistry.MARK_TYPEHASH() (src/interfaces/IMarkRegistry.sol#13) is not in mixedCase
+Function IOrderlyAdapter.REPORT_TYPEHASH() (src/interfaces/IVenueAdapter.sol#55) is not in mixedCase
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#conformance-to-solidity-naming-conventions
+
+Detector: redundant-statements
+Redundant expression "ok (src/BookrunnerDesk.sol#212)" inBookrunnerDesk (src/BookrunnerDesk.sol#62-554)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#redundant-statements
+
+Detector: unimplemented-functions
+BookrunnerConfig (src/BookrunnerConfig.sol#15-514) does not implement functions:
+	- IBookrunnerConfig.hasRole(bytes32,address) (src/interfaces/IBookrunnerConfig.sol#20)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#unimplemented-functions
+
+Detector: unindexed-event-address
+Event BkrnFeeRouter.BuybackRouterSet(address) (src/BkrnFeeRouter.sol#60) has address parameters but no indexed parameters
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#unindexed-event-address-parameters
+. analyzed (126 contracts with 102 detectors), 201 result(s) found
+--ignore-compile used, if something goes wrong, consider removing the ignore compile flag
+'forge config --json' running
