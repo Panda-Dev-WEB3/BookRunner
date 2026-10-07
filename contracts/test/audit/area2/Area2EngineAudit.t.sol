@@ -133,6 +133,48 @@ contract Area2EngineAuditTest is EngineBase {
         assertLe(out, 2 * dep, "market-neutral pair extracted the gap from the book's insurance fund");
     }
 
+    // =========================================================================================
+    // A2-03  Off-hours: reductions fill at the held close while the real (after-hours) price is known
+    // =========================================================================================
+
+    /// @dev The pair is held into the close (feed `held` at 100). After-hours news (earnings) moves the real
+    ///      price to 90 — public, but the feed keeps holding 100 until the session reopens. The long leg exits
+    ///      at the held 100 (reductions are allowed off-hours at the held price); the short rides the reopen at
+    ///      90. Any after-hours move larger than spread + fees is riskless profit taken from the pool.
+    ///      Secure behaviour: a voluntary reduction cannot fill at a held (known-stale) price, so the pair
+    ///      cannot be in profit.
+    function test_audit_heldPriceReduceAfterHoursOption() public {
+        uint256 dep = 2_000e6;
+        _deposit(longAcct, mA, dep);
+        _deposit(shortAcct, mA, dep);
+        _trade(longAcct, mA, 100e18);
+        _trade(shortAcct, mA, -100e18);
+        uint256 bookBefore = _bookSide();
+
+        vm.warp(block.timestamp + 30); // session close: the feed holds 100
+        oracle.update(_priceData(PID_A, PX, _now(), true));
+
+        vm.warp(block.timestamp + 2 hours); // after-hours earnings: real price 90, feed still held at 100
+        bytes memory heldNow = _priceData(PID_A, PX, _now(), true); // the feed's current (held) print
+        vm.prank(longAcct);
+        try engine.trade(mA, -100e18, 0, heldNow) {} catch {}
+
+        vm.warp(block.timestamp + 14 hours); // reopen at 90
+        bytes memory open = _priceData(PID_A, 90e18, _now(), false);
+        vm.prank(shortAcct);
+        engine.trade(mA, 100e18, type(uint256).max, open);
+        if (engine.positionOf(mA, longAcct).size != 0) {
+            vm.prank(longAcct);
+            engine.trade(mA, -100e18, 0, open);
+        }
+        uint256 out = _withdrawAll(longAcct) + _withdrawAll(shortAcct);
+
+        emit log_named_decimal_uint("attacker USDC out", out, 6);
+        emit log_named_decimal_uint("attacker USDC in ", 2 * dep, 6);
+        emit log_named_decimal_int("book (pool+IF+fees) delta", int256(_bookSide()) - int256(bookBefore), 6);
+        assertLe(out, 2 * dep, "market-neutral pair extracted the after-hours move via a held-price close");
+    }
+
     function _tryLiquidate(address trader, bytes memory pd) internal {
         if (engine.positionOf(mA, trader).size == 0) return;
         vm.prank(keeper);
