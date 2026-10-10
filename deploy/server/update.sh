@@ -110,7 +110,7 @@ fi
 
 # ---- systemd units (from the root-owned copy)
 units_changed=0
-for u in bookrunner.service bookrunner-infra.service; do
+for u in bookrunner.service bookrunner-infra.service bookrunner-backup.service bookrunner-backup.timer; do
   if ! cmp -s "$DEPLOY/$u" "/etc/systemd/system/$u"; then
     install -m 0644 "$DEPLOY/$u" "/etc/systemd/system/$u"
     units_changed=1
@@ -119,6 +119,9 @@ for u in bookrunner.service bookrunner-infra.service; do
 done
 install -m 0644 "$DEPLOY/logrotate-bookrunner" /etc/logrotate.d/bookrunner
 [ "$units_changed" = 0 ] || systemctl daemon-reload
+# daily backup (RESTORE.md): root runs only the root-owned $DEPLOY/backup.sh
+install -d -o root -g root -m 0700 /var/backups/bookrunner
+systemctl is-enabled --quiet bookrunner-backup.timer 2>/dev/null || { systemctl enable --now bookrunner-backup.timer >/dev/null && echo "==> enabled bookrunner-backup.timer (daily)"; }
 
 if [ "${1:-}" != "--web-only" ]; then
   echo "==> infra (applies a changed compose file; unchanged containers keep running)"

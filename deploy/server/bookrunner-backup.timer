@@ -1,0 +1,13 @@
+# Daily Bookrunner backup (bookrunner-backup.service). Persistent: a run missed while the host was down
+# happens at the next boot. Installed and enabled by install.sh / update.sh.
+#   systemctl list-timers bookrunner-backup.timer
+[Unit]
+Description=Daily Bookrunner backup
+
+[Timer]
+OnCalendar=*-*-* 03:17:00 UTC
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

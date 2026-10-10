@@ -89,6 +89,22 @@ sudo /usr/local/lib/bookrunner-deploy/update.sh            # deploy origin/main
 sudo /usr/local/lib/bookrunner-deploy/update.sh --web-only # site + app + nginx + units, no restart
 ```
 
+## Alerts, backups, status
+
+- **Alerts** (`services/alerts`, a child of `scripts/dev.ts` like every service; no signing key): every 60 s it
+  checks marks, risk / kills, supervised processes (Redis heartbeat `bkrn:supervisor:status` written by
+  dev.ts), role-key and gas-funder ETH, RPC errors / head lag, indexer lag, venue-report age, buybackPending,
+  the API's `/health` and the backup record, and sends one message per condition (and one "resolved") by
+  email and/or webhook. Configure in `.env.<network>`: `ALERT_EMAIL_TO`, `ALERT_SMTP_USER`, `ALERT_SMTP_PASS`
+  (host `mail.use-cert.com:587` STARTTLS by default), and/or `ALERT_WEBHOOK_URL` (Slack / Discord / Telegram +
+  `ALERT_TELEGRAM_CHAT_ID` / generic JSON); optional `ALERT_HEARTBEAT_URL` (dead-man's switch) and
+  `ALERT_DIGEST_HOUR_UTC`. Thresholds: `services/alerts/src/config.ts`. Test the channels:
+  `sudo -u bookrunner HOME=/opt/bookrunner sh -c 'cd /opt/bookrunner/app/services/alerts && set -a && . ../../.env.testnet && set +a && NETWORK=testnet ../../node_modules/.bin/bun src/main.ts --test'`.
+- **Backups**: `bookrunner-backup.timer` (daily, root, `backup.sh` from the root-owned copy) — see
+  [RESTORE.md](RESTORE.md) for contents, the restore drill (`backup.sh --verify`) and the restore procedure.
+- **Status**: `/status/` (site page) reads `/status.json` (nginx -> API `GET /status`: per book the latest mark
+  age, risk ok / warn / breach, last distribution; no addresses or secrets; computed at most every 15 s).
+
 `update.sh` (root-owned copy only; it refuses to run from the app tree) fetches `origin/main` into the root
 clone, refreshes `/usr/local/lib/bookrunner-deploy` (re-running itself when `update.sh` changed),
 fast-forwards the app checkout to the same commit (refusing local modifications), builds the app

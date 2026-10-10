@@ -15,12 +15,26 @@
 // Secrets are scoped per child (packages/shared/src/childenv.ts): the API, indexer, receipts and web get
 // no mnemonic / private key, only the signing services get the role mnemonic, ANTHROPIC_API_KEY goes to
 // the charter service only, and the protocol-admin opt-in to the one-shot launch script only.
+//
+// Supervisor heartbeat: the state of every child (running / backoff / exited, recent exits) is published
+// to Redis (packages/shared/src/supervisor.ts) every 15 s and on every exit, so services/alerts sees an
+// exited or crash-looping service without reading the log file.
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import type { Subprocess } from "bun";
+import { RedisClient, type Subprocess } from "bun";
 import { childEnv } from "../packages/shared/src/childenv";
-import { ADMIN_KEY_OPT_IN, hasDerivedKeys, roleAccount } from "../packages/shared/src/devkeys";
+import { ADMIN_KEY_OPT_IN, type DevRole, hasDerivedKeys, roleAccount } from "../packages/shared/src/devkeys";
 import { redactUrl } from "../packages/shared/src/redact";
+import {
+  SUPERVISOR_PUBLISH_MS,
+  SUPERVISOR_STATUS_KEY,
+  SUPERVISOR_TTL_MS,
+  type SupervisedProc,
+  newProc,
+  recordExit,
+  recordStart,
+  supervisorStatus,
+} from "../packages/shared/src/supervisor";
 import { MAINNET_EXCLUDED, deskKeyEnvFor, mainnetProfile } from "./network-profile";
 
 const ROOT = resolve(import.meta.dir, "..");
@@ -168,6 +182,8 @@ add(svc("receipts"));
 add(svc("waterfall"));
 add(svc("mark"));
 add(svc("api"));
+// read-only watcher: email / webhook alerts (marks, risk, kills, processes, gas, RPC, venue reports, API)
+add(svc("alerts"));
 // public test chains: refill the role keys' gas from the dedicated funder key (scripts/gas-keeper.ts)
 if (network === "testnet") add({ name: "gas-keeper", cwd: ROOT, cmd: [BUN, "scripts/gas-keeper.ts", "--loop"] });
 
@@ -178,6 +194,26 @@ if (env.MOCK_ORDERLY_DELEGATE_SIGNERS === undefined && hasDerivedKeys(env)) {
   } catch {
     // no derivable key: mock-orderly falls back to its own default
   }
+}
+// alerts watches the role keys' gas: hand it their ADDRESSES (derived here, so it never gets a key).
+// The protocol-admin key is never derived for this; an explicit ALERT_ROLE_ADDRESSES wins.
+const WATCHED_ROLES: DevRole[] = [
+  "markSigner", "risk", "opsVenue", "keeper", "oracleSigner", "jury", "deskKeyIndex", "deskKeyNvda", "deskKeyTsla",
+  "trader0", "trader1", "trader2", "trader3", "sponsor", "committee0", "committee1", "committee2", "agentOperator", "funder",
+];
+if (env.ALERT_ROLE_ADDRESSES === undefined && network !== "devnet") {
+  const pairs: string[] = [];
+  const noAdmin = { ...env };
+  delete noAdmin[ADMIN_KEY_OPT_IN];
+  for (const role of WATCHED_ROLES) {
+    // roles without a key on this network (e.g. traders / the gas funder on mainnet) are skipped
+    try {
+      pairs.push(`${role}=${roleAccount(role, noAdmin).address}`);
+    } catch {
+      // no key for this role here
+    }
+  }
+  if (pairs.length) env.ALERT_ROLE_ADDRESSES = pairs.join(",");
 }
 if (!noWeb) add(svc("web", "apps/web", network === "testnet" ? "dev:testnet" : "dev"));
 
@@ -196,6 +232,34 @@ if (procs.length === 0) {
 const running: Subprocess[] = [];
 let shuttingDown = false;
 const restarts = new Map<string, number>(); // service -> consecutive quick restarts (backoff)
+
+// ---- supervisor heartbeat (Redis, best effort: a Redis outage never affects the stack)
+const supervisorStarted = Date.now();
+const supervised = new Map<string, SupervisedProc>();
+let supRedis: RedisClient | null = null;
+async function publishSupervisor(): Promise<void> {
+  try {
+    if (!supRedis) {
+      const c = new RedisClient(env.REDIS_URL || "redis://127.0.0.1:63790", { connectionTimeout: 5_000, enableOfflineQueue: false, autoReconnect: false });
+      c.onclose = () => {
+        if (supRedis === c) supRedis = null; // reconnect on the next publish
+      };
+      supRedis = c;
+    }
+    if (!supRedis.connected) await supRedis.connect();
+    const status = supervisorStatus(network, supervisorStarted, supervised.values(), Date.now());
+    await supRedis.send("SET", [SUPERVISOR_STATUS_KEY, JSON.stringify(status), "PX", String(SUPERVISOR_TTL_MS)]);
+  } catch {
+    // Redis down or restarting: the next publish retries; alerts reports the heartbeat missing if it lasts
+    try {
+      supRedis?.close();
+    } catch {
+      // already closed
+    }
+    supRedis = null;
+  }
+}
+setInterval(() => void publishSupervisor(), SUPERVISOR_PUBLISH_MS);
 let colorIdx = 0;
 const width = 14;
 function start(p: Proc) {
@@ -204,6 +268,8 @@ function start(p: Proc) {
   // each child sees only the secrets on its allow-list (packages/shared/src/childenv.ts)
   const child = Bun.spawn(p.cmd, { cwd: p.cwd, env: childEnv(p.name, env, { ...p.extraEnv, FORCE_COLOR: "1" }), stdout: "pipe", stderr: "pipe" });
   running.push(child);
+  const prev = supervised.get(p.name);
+  supervised.set(p.name, prev ? recordStart(prev, Date.now()) : newProc(p.name, Date.now(), p.name === "launch"));
   const pump = async (stream: ReadableStream<Uint8Array>) => {
     const dec = new TextDecoder();
     let buf = "";
@@ -222,7 +288,13 @@ function start(p: Proc) {
     process.stdout.write(`${prefix}\x1b[2mexited with code ${code}\x1b[0m\n`);
     // supervisor: long-running services restart after an unexpected exit, with backoff (2s..60s);
     // one-shot jobs (launch) and clean exits don't
-    if (shuttingDown || code === 0 || p.name === "launch") return;
+    const restarting = !(shuttingDown || code === 0 || p.name === "launch");
+    if (!shuttingDown) {
+      const sp = supervised.get(p.name);
+      if (sp) supervised.set(p.name, recordExit(sp, code, Date.now(), restarting));
+      void publishSupervisor();
+    }
+    if (!restarting) return;
     const n = Date.now() - startedAt > 120_000 ? 0 : (restarts.get(p.name) ?? 0) + 1;
     restarts.set(p.name, n);
     const delay = Math.min(60_000, 2_000 * 2 ** n);
@@ -234,6 +306,7 @@ function start(p: Proc) {
   return child;
 }
 procs.forEach(start);
+void publishSupervisor();
 console.log(`[dev] started ${procs.length} processes: ${procs.map((p) => p.name).join(", ")}`);
 
 // Agents: one per book in the deployment file, spawned as books appear (launch-devnet appends them).

@@ -195,6 +195,15 @@ export class DrizzleReadModel implements ReadModel {
       .limit(q.limit);
   }
 
+  async latestDistributions(bookIds: number[]) {
+    if (bookIds.length === 0) return [];
+    return this.db
+      .selectDistinctOn([settlements.bookId])
+      .from(settlements)
+      .where(and(inArray(settlements.bookId, bookIds), eq(settlements.source, "distribution")))
+      .orderBy(settlements.bookId, desc(settlements.ts));
+  }
+
   listFills(bookId: number, q: { limit: number; before?: FillCursor }) {
     const conds = [
       eq(fills.bookId, bookId),

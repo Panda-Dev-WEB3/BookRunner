@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BookRunner - Status</title>
+<meta name="description" content="Live operating status of the BookRunner books: latest signed mark, risk state and last distribution.">
+<link rel="icon" href="/assets/bookrunner-logo-transparent.png">
+<link rel="stylesheet" href="/status/status.css?br=1">
+<script type="module" src="/status/app.js?br=1"></script>
+</head>
+<body>
+<header class="top"><a class="brand" href="/">BOOKRUNNER</a><nav><a href="/dashboard/">Desk</a><a href="/app/">App</a></nav></header>
+<main>
+<h1>Status</h1>
+<div id="status" aria-live="polite"><p class="empty">Reading live status…</p></div>
+<p class="foot">Machine-readable: <a href="/status.json">/status.json</a>. Refreshes every 30 seconds.</p>
+</main>
+</body>
+</html>

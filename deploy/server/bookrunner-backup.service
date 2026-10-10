@@ -1,0 +1,33 @@
+# Bookrunner backup (one run): Postgres dump, Redis snapshot, .data/<network> + deployments, rotation
+# (14 daily + 8 weekly), optional off-site copy. Started daily by bookrunner-backup.timer; installed to
+# /etc/systemd/system/ by install.sh / update.sh. Runs as ROOT the root-owned copy of backup.sh
+# (/usr/local/lib/bookrunner-deploy, HARDENING.md): it only reads the bookrunner-owned app tree.
+#   sudo systemctl start bookrunner-backup.service     # run now
+#   sudo journalctl -u bookrunner-backup -n 50          # last runs
+# Settings: /etc/bookrunner/backup.env (root:root 0600, optional; see backup.sh). Restore: RESTORE.md.
+[Unit]
+Description=Bookrunner backup (Postgres, Redis, state files)
+Documentation=https://github.com/Panda-Dev-WEB3/BookRunner/blob/main/deploy/server/RESTORE.md
+Requires=bookrunner-infra.service docker.service
+After=bookrunner-infra.service docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/bookrunner/backup.env
+ExecStart=/usr/local/lib/bookrunner-deploy/backup.sh
+TimeoutStartSec=2h
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# root (docker socket); the filesystem is read-only except the backup dir and the lock
+UMask=0077
+ProtectSystem=strict
+ReadWritePaths=/var/backups/bookrunner /run
+# read-only home: rsync / rclone read their ssh key and config from /root
+ProtectHome=read-only
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
