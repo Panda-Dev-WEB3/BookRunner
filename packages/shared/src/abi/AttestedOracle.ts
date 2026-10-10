@@ -23,6 +23,19 @@ export const attestedOracleAbi = [
   },
   {
     "type": "function",
+    "name": "ATTESTATION_TYPEHASH",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "DEFAULT_MIN_SOURCES",
     "inputs": [],
     "outputs": [
@@ -62,6 +75,53 @@ export const attestedOracleAbi = [
   },
   {
     "type": "function",
+    "name": "REPORT_DATA_TYPEHASH",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "attestationDigest",
+    "inputs": [
+      {
+        "name": "signer",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "platform",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "measurement",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "quoteHash",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "attestationOf",
     "inputs": [
       {
@@ -75,6 +135,19 @@ export const attestedOracleAbi = [
         "name": "attestation",
         "type": "bytes32",
         "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "attestationRequired",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
       }
     ],
     "stateMutability": "view"
@@ -299,6 +372,44 @@ export const attestedOracleAbi = [
   },
   {
     "type": "function",
+    "name": "measurementAllowed",
+    "inputs": [
+      {
+        "name": "measurement",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "measurementOf",
+    "inputs": [
+      {
+        "name": "signer",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "measurement",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "minSources",
     "inputs": [],
     "outputs": [
@@ -436,6 +547,78 @@ export const attestedOracleAbi = [
   },
   {
     "type": "function",
+    "name": "reportDataOf",
+    "inputs": [
+      {
+        "name": "signer",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "requireAttestations",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setAttestedSigner",
+    "inputs": [
+      {
+        "name": "signer",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "platform",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "measurement",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "quoteHash",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setMeasurement",
+    "inputs": [
+      {
+        "name": "measurement",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "allowed",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "setMinSources",
     "inputs": [
       {
@@ -485,8 +668,33 @@ export const attestedOracleAbi = [
   },
   {
     "type": "event",
+    "name": "AttestationRequiredSet",
+    "inputs": [],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "EIP712DomainChanged",
     "inputs": [],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "MeasurementSet",
+    "inputs": [
+      {
+        "name": "measurement",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "allowed",
+        "type": "bool",
+        "indexed": false,
+        "internalType": "bool"
+      }
+    ],
     "anonymous": false
   },
   {
@@ -572,6 +780,43 @@ export const attestedOracleAbi = [
   },
   {
     "type": "event",
+    "name": "SignerAttested",
+    "inputs": [
+      {
+        "name": "signer",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "platform",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "measurement",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "quoteHash",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "attestation",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "SignerSet",
     "inputs": [
       {
@@ -594,6 +839,16 @@ export const attestedOracleAbi = [
       }
     ],
     "anonymous": false
+  },
+  {
+    "type": "error",
+    "name": "AttestationRequired",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BadAttestation",
+    "inputs": []
   },
   {
     "type": "error",
@@ -667,6 +922,17 @@ export const attestedOracleAbi = [
         "name": "sigs",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "MeasurementNotAllowed",
+    "inputs": [
+      {
+        "name": "measurement",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ]
   },

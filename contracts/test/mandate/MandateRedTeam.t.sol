@@ -13,6 +13,7 @@ import {BookrunnerDesk} from "../../src/BookrunnerDesk.sol";
 import {HedgeExecutor} from "../../src/HedgeExecutor.sol";
 import {StockTokenRegistry} from "../../src/StockTokenRegistry.sol";
 import {MockERC20} from "../../src/mocks/MockERC20.sol";
+import {MockStockToken} from "../../src/mocks/MockStockToken.sol";
 import {MandateBase} from "./utils/MandateBase.sol";
 import {MandateMockEntryPoint, MandateRevoker} from "./utils/MandateMocks.sol";
 import {StandardMerkle} from "./utils/StandardMerkle.sol";
@@ -398,6 +399,47 @@ contract MandateRedTeamTest is MandateBase {
         assertEq(desk.valueUsd(), 3800e6);
         assertEq(mandate.deskHedgeNotionalUsd(), 3800e6);
         assertEq(mandate.hedgeRatioBps(), 3800e6 * 10_000 / 20_000e6);
+    }
+
+    /// @notice VERIFY C2/T2 on mainnet: the registry reads the token's ERC-8056 `uiMultiplier()` and the
+    ///         oracle signs Robinhood's per-TOKEN Chainlink price divided by that multiplier. The desk then
+    ///         values its inventory at qty x feed price: the multiplier is applied exactly once end to end.
+    function test_redteam_multiplierLiveUiMultiplier_perTokenFeed_valuedOnce() public {
+        adapter.setExposure(-20_000e6);
+        _fundDesk(1900e6);
+        _buyNvda(1900e6); // 10 whole tokens
+        // turn the devnet token into an ERC-8056 Stock Token in place (same ERC-20 storage layout)
+        vm.etch(address(nvda), address(new MockStockToken("x", "x", 1e18)).code);
+        MockStockToken st = MockStockToken(address(nvda));
+        st.updateMultiplier(1.05e18);
+        vm.startPrank(timelock);
+        registry.setMultiplier(address(nvda), 1.05e18); // anchor
+        registry.setMultiplierSource(address(nvda), true);
+        vm.stopPrank();
+
+        // Chainlink feed (per token) = 190 x 1.05 = 199.5; the oracle signs 199.5 / 1.05 = 190 per share
+        uint256 feedPerToken = 199.5e18;
+        oracle.set(NVDA_ID, feedPerToken * 1e18 / 1.05e18, uint64(block.timestamp), false);
+        assertEq(desk.hedgeNotionalUsd(), 1995e6); // 10 x 199.5: not 1900 (missing), not 2094.75 (twice)
+        assertEq(desk.valueUsd(), 1995e6);
+        assertEq(mandate.deskHedgeNotionalUsd(), 1995e6);
+
+        // reinvested dividend: multiplier 1.06 immediately, feed 190 x 1.06 = 201.4, per share still 190
+        st.updateMultiplier(1.06e18);
+        assertEq(desk.hedgeNotionalUsd(), 2014e6);
+
+        // an unexplained 10x jump fails closed (like a stale price) until governance re-anchors
+        st.updateMultiplier(10.6e18);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                StockTokenRegistry.MultiplierOutOfBand.selector, address(nvda), 10.6e18, 1.05e18
+            )
+        );
+        desk.hedgeNotionalUsd();
+        vm.prank(timelock);
+        registry.setNextMultiplierAnchor(address(nvda), 10.6e18);
+        oracle.set(NVDA_ID, 19e18, uint64(block.timestamp), false); // 201.4 / 10.6 per share post-split
+        assertEq(desk.hedgeNotionalUsd(), 2014e6);
     }
 
     // ================================================================== Orderly stale-report rule

@@ -9,7 +9,8 @@ import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 
 /// @title AttestedOracle — the protocol's single on-chain price surface.
 /// @notice Prices are produced off-chain by the oracle service (multi-source median, TEE-attested — the
-///         attestation verification flow is VERIFY) and signed as EIP-712 `Price` structs by a registered
+///         attestation flow: {setAttestedSigner}, docs/RUNBOOK.md "Oracle signer attestation", VERIFY E1)
+///         and signed as EIP-712 `Price` structs by a registered
 ///         signer. Pull oracle (docs/LOW_GAS.md §1): the transaction that needs a price carries the signed
 ///         bundle and the consumer (PoolEngine, BookrunnerDesk, MarkRegistry) calls {update} first — anyone
 ///         may relay through {update}, which never lands a print already stale on arrival (older than
@@ -42,8 +43,26 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
 
     /// @inheritdoc IAttestedOracle
     mapping(address signer => bool active) public isSigner;
-    /// @notice Last attestation hash (TEE quote digest) registered for a signer. VERIFY: verification flow.
+    /// @notice Last attestation hash registered for a signer: {attestationDigest} for signers registered
+    ///         through {setAttestedSigner}, the caller-supplied value for {setSigner} (devnet: 0).
     mapping(address signer => bytes32 attestation) public attestationOf;
+
+    // ---- TEE attestation (VERIFY E1; platform-agnostic: SGX/TDX, SEV-SNP, Nitro, ...) ----------------
+    /// @notice Tag of the 32 bytes the enclave must put at the start of its quote's report data, binding the
+    ///         quote to one signer key of this oracle on this chain: see {reportDataOf}.
+    bytes32 public constant REPORT_DATA_TYPEHASH =
+        keccak256("BookrunnerOracleSigner(uint256 chainId,address oracle,address signer)");
+    /// @notice Tag of the registered attestation digest: see {attestationDigest}.
+    bytes32 public constant ATTESTATION_TYPEHASH = keccak256(
+        "SignerAttestation(uint256 chainId,address oracle,address signer,bytes32 platform,bytes32 measurement,bytes32 quoteHash)"
+    );
+    /// @notice Enclave build measurements (a digest of the platform's launch measurement: MRENCLAVE / MRTD+RTMRs
+    ///         / SNP MEASUREMENT / Nitro PCR0-2) the timelock accepts for new signers.
+    mapping(bytes32 measurement => bool) public measurementAllowed;
+    /// @notice Measurement a signer was registered with ({setAttestedSigner}); 0 for {setSigner}.
+    mapping(address signer => bytes32 measurement) public measurementOf;
+    /// @notice Once set (one-way), signers can only be activated through {setAttestedSigner}.
+    bool public attestationRequired;
 
     mapping(bytes32 underlying => PriceData) internal _prices;
 
@@ -55,10 +74,18 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
     error LengthMismatch(uint256 updates, uint256 sigs);
     error BadMinSources(uint32 value);
     error NotRelayer(address caller);
+    error MeasurementNotAllowed(bytes32 measurement);
+    error AttestationRequired();
+    error BadAttestation();
 
     /// @notice Emitted by `pushMany` for an entry that was validly signed but not newer than stored.
     event PriceSkipped(bytes32 indexed underlying, uint64 storedPublishedAt, uint64 incomingPublishedAt);
     event MinSourcesSet(uint32 minSources);
+    event MeasurementSet(bytes32 indexed measurement, bool allowed);
+    event AttestationRequiredSet();
+    event SignerAttested(
+        address indexed signer, bytes32 indexed platform, bytes32 indexed measurement, bytes32 quoteHash, bytes32 attestation
+    );
 
     modifier onlyTimelock() {
         if (msg.sender != config.timelock()) revert NotTimelock(msg.sender);
@@ -207,11 +234,71 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
     // ------------------------------------------------------------------------------------------------
 
     /// @inheritdoc IAttestedOracle
+    /// @dev Plain registration (devnet / testnet key, or deactivation). Once {attestationRequired}, only
+    ///      deactivation is possible here: activation goes through {setAttestedSigner}.
     function setSigner(address signer, bool active, bytes32 attestation) external onlyTimelock {
         if (signer == address(0)) revert ZeroAddress();
+        if (active && attestationRequired) revert AttestationRequired();
         isSigner[signer] = active;
         attestationOf[signer] = attestation;
+        if (!active) measurementOf[signer] = bytes32(0);
         emit SignerSet(signer, active, attestation);
+    }
+
+    /// @notice Timelock: activate a TEE signer whose quote was verified off-chain (VERIFY E1). The contract
+    ///         cannot check the quote's vendor signature; it checks that `measurement` is an allowed enclave
+    ///         build and records {attestationDigest} — binding chain, oracle, signer, platform, measurement and
+    ///         the hash of the exact quote bytes — so anyone can re-verify the published quote against the
+    ///         on-chain record during the timelock delay and afterwards.
+    /// @param platform Platform tag, e.g. bytes32("INTEL_TDX"), bytes32("AMD_SEV_SNP"), bytes32("AWS_NITRO").
+    /// @param measurement Allowed enclave measurement digest ({setMeasurement}).
+    /// @param quoteHash keccak256 of the raw quote / attestation document bytes (published off-chain).
+    function setAttestedSigner(address signer, bytes32 platform, bytes32 measurement, bytes32 quoteHash)
+        external
+        onlyTimelock
+    {
+        if (signer == address(0)) revert ZeroAddress();
+        if (platform == bytes32(0) || quoteHash == bytes32(0)) revert BadAttestation();
+        if (!measurementAllowed[measurement]) revert MeasurementNotAllowed(measurement);
+        bytes32 digest = attestationDigest(signer, platform, measurement, quoteHash);
+        isSigner[signer] = true;
+        attestationOf[signer] = digest;
+        measurementOf[signer] = measurement;
+        emit SignerAttested(signer, platform, measurement, quoteHash, digest);
+        emit SignerSet(signer, true, digest);
+    }
+
+    /// @notice Timelock: allow / revoke an enclave measurement for NEW registrations. Revoking does not
+    ///         deactivate existing signers (no per-update cost on the price path): the runbook deactivates
+    ///         every signer whose `measurementOf` is the revoked value ({SignerAttested} events list them).
+    function setMeasurement(bytes32 measurement, bool allowed) external onlyTimelock {
+        if (measurement == bytes32(0)) revert BadAttestation();
+        measurementAllowed[measurement] = allowed;
+        emit MeasurementSet(measurement, allowed);
+    }
+
+    /// @notice Timelock, one-way: from now on signers are activated only through {setAttestedSigner}.
+    function requireAttestations() external onlyTimelock {
+        attestationRequired = true;
+        emit AttestationRequiredSet();
+    }
+
+    /// @notice The 32 bytes a TEE quote for `signer` must carry at the start of its report data (TDX/SNP
+    ///         REPORTDATA[0:32], Nitro `user_data`): keccak256(abi.encode(REPORT_DATA_TYPEHASH, chainid,
+    ///         this, signer)). The enclave generates the signer key inside and only ever exposes this binding.
+    function reportDataOf(address signer) public view returns (bytes32) {
+        return keccak256(abi.encode(REPORT_DATA_TYPEHASH, block.chainid, address(this), signer));
+    }
+
+    /// @notice Digest recorded in `attestationOf` by {setAttestedSigner}.
+    function attestationDigest(address signer, bytes32 platform, bytes32 measurement, bytes32 quoteHash)
+        public
+        view
+        returns (bytes32)
+    {
+        return keccak256(
+            abi.encode(ATTESTATION_TYPEHASH, block.chainid, address(this), signer, platform, measurement, quoteHash)
+        );
     }
 
     /// @notice Timelock: minimum distinct sources for a non-held price (held prices may carry fewer).

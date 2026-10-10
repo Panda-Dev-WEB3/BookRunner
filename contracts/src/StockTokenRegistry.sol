@@ -7,6 +7,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IStockTokenRegistry} from "./interfaces/IStockTokenRegistry.sol";
 import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 import {IAttestedOracle} from "./interfaces/IAttestedOracle.sol";
+import {IScaledUIAmount} from "./interfaces/external/IScaledUIAmount.sol";
 
 /// @title StockTokenRegistry — canonical Stock Token registry + multiplier-aware valuer.
 /// @notice Governance: `config.timelock()` or (devnet / launch) an `admin` set at construction, which
@@ -15,6 +16,15 @@ import {IAttestedOracle} from "./interfaces/IAttestedOracle.sol";
 ///         computed as a single floor over the full product (identical to the nested floors), with the
 ///         multiplier applied EXACTLY once. Prices are per 1 share of the equity (WAD) from
 ///         `AttestedOracle.priceOf(priceId)`, which reverts when stale.
+///         Multiplier source (mainnet: VERIFY T2/C2): either the stored `multiplierWad` (devnet, testnet
+///         mocks) or, after `setMultiplierSource(token, true)`, the token's own ERC-8056 `uiMultiplier()`
+///         (WAD, 1e18 = 1.0) read at valuation time. Robinhood's Chainlink feed already includes that
+///         multiplier (token price = share price x uiMultiplier); the oracle service divides it out with the
+///         same on-chain value before signing, so the product here is qty x feed price: applied once. In
+///         live mode the stored value is the governance ANCHOR: a live value further than
+///         `multiplierBandBps` from it (and from the optional pre-approved `nextMultiplierAnchor`, for a
+///         scheduled split) reverts MultiplierOutOfBand. The valuation then fails closed like a stale price
+///         (the risk flatten path tolerates it) until governance re-anchors with {setMultiplier}.
 /// @dev Non-upgradeable. Tokens are never deleted: deactivating a token (`setActive(false)`) removes it
 ///      from the canonical set (no new hedges, charters) while existing inventory stays valuable.
 contract StockTokenRegistry is IStockTokenRegistry {
@@ -25,6 +35,10 @@ contract StockTokenRegistry is IStockTokenRegistry {
     uint256 internal constant BPS = 10_000;
     /// @dev 1e18 (multiplier WAD) * 1e12 (WAD USD -> 6dp USD).
     uint256 internal constant SCALE = 1e30;
+    /// @notice Default live-multiplier band around the anchor (5%: years of reinvested dividends).
+    uint16 public constant DEFAULT_MULTIPLIER_BAND_BPS = 500;
+    /// @notice Widest band governance may set (50%): a split must be re-anchored, never absorbed.
+    uint16 public constant MAX_MULTIPLIER_BAND_BPS = 5000;
 
     IBookrunnerConfig public immutable config;
     /// @notice Optional non-timelock governor (devnet / launch ops). address(0) once renounced.
@@ -41,6 +55,13 @@ contract StockTokenRegistry is IStockTokenRegistry {
     mapping(bytes32 indexId => IndexData) internal _indexes;
     bytes32[] internal _indexList;
 
+    /// @notice Token whose multiplier is read live from its ERC-8056 `uiMultiplier()`.
+    mapping(address token => bool) public multiplierFromToken;
+    /// @notice Pre-approved anchor for a scheduled corporate action (0 = none), accepted besides the stored one.
+    mapping(address token => uint256) public nextMultiplierAnchor;
+    /// @notice Max distance (bps) of a live multiplier from an anchor.
+    uint16 public multiplierBandBps;
+
     error Unauthorized(address caller);
     error ZeroAddress();
     error BadPriceId();
@@ -54,6 +75,8 @@ contract StockTokenRegistry is IStockTokenRegistry {
     error BadWeights(uint256 sumBps);
     error DuplicateComponent(address token);
     error UnknownUnderlying(bytes32 underlying);
+    error MultiplierOutOfBand(address token, uint256 live, uint256 anchor);
+    error BadBand(uint16 bandBps);
 
     event AdminSet(address indexed admin);
     event TokenActiveSet(address indexed token, bool active);
@@ -71,7 +94,9 @@ contract StockTokenRegistry is IStockTokenRegistry {
         if (config_ == address(0)) revert ZeroAddress();
         config = IBookrunnerConfig(config_);
         admin = admin_;
+        multiplierBandBps = DEFAULT_MULTIPLIER_BAND_BPS;
         emit AdminSet(admin_);
+        emit MultiplierBandSet(DEFAULT_MULTIPLIER_BAND_BPS);
     }
 
     // ------------------------------------------------------------------ governance
@@ -106,12 +131,39 @@ contract StockTokenRegistry is IStockTokenRegistry {
         emit FloatCapSet(token, floatCapRaw);
     }
 
-    /// @notice Corporate action: update shares-of-equity per whole token (WAD, > 0).
+    /// @notice Corporate action: update shares-of-equity per whole token (WAD, > 0). In live mode
+    ///         ({multiplierFromToken}) this is the anchor the live `uiMultiplier()` must stay near.
     function setMultiplier(address token, uint256 multiplierWad) external override onlyGov {
         StockToken storage t = _registered(token);
         if (multiplierWad == 0) revert BadMultiplier();
         t.multiplierWad = multiplierWad;
         emit MultiplierSet(token, multiplierWad);
+    }
+
+    /// @notice Multiplier source: true = the token's live ERC-8056 `uiMultiplier()` (mainnet Stock Tokens),
+    ///         false = the stored value. Enabling reads the token once: it must implement `uiMultiplier()`
+    ///         and be within the band of the anchor (else MultiplierOutOfBand / a revert).
+    function setMultiplierSource(address token, bool fromToken) external onlyGov {
+        StockToken storage t = _registered(token);
+        multiplierFromToken[token] = fromToken;
+        if (fromToken) _multiplier(t);
+        emit MultiplierSourceSet(token, fromToken);
+    }
+
+    /// @notice Pre-approve the anchor of a scheduled corporate action (e.g. a split staged on the token with
+    ///         `updateMultiplier(m, effectiveAt)`), so live valuation does not fail closed between the
+    ///         activation and the governance re-anchor. 0 clears it.
+    function setNextMultiplierAnchor(address token, uint256 multiplierWad) external onlyGov {
+        _registered(token);
+        nextMultiplierAnchor[token] = multiplierWad;
+        emit NextMultiplierAnchorSet(token, multiplierWad);
+    }
+
+    /// @notice Band (bps, 1..MAX_MULTIPLIER_BAND_BPS) a live multiplier may drift from its anchor.
+    function setMultiplierBand(uint16 bandBps) external onlyGov {
+        if (bandBps == 0 || bandBps > MAX_MULTIPLIER_BAND_BPS) revert BadBand(bandBps);
+        multiplierBandBps = bandBps;
+        emit MultiplierBandSet(bandBps);
     }
 
     /// @notice Update the float cap (raw units) bounding any desk's inventory of `token`.
@@ -187,8 +239,17 @@ contract StockTokenRegistry is IStockTokenRegistry {
     }
 
     /// @inheritdoc IStockTokenRegistry
-    function getToken(address token) external view override returns (StockToken memory) {
-        return _tokens[token];
+    /// @dev `multiplierWad` is the EFFECTIVE multiplier ({multiplierOf}): in live mode the token's
+    ///      `uiMultiplier()` (reverts MultiplierOutOfBand outside the band), so every off-chain mirror of the
+    ///      valuation reads the value the contract applies. Unregistered tokens return a zero struct.
+    function getToken(address token) external view override returns (StockToken memory s) {
+        s = _tokens[token];
+        if (s.token != address(0)) s.multiplierWad = _multiplier(_tokens[token]);
+    }
+
+    /// @inheritdoc IStockTokenRegistry
+    function multiplierOf(address token) external view override returns (uint256) {
+        return _multiplier(_registered(token));
     }
 
     /// @inheritdoc IStockTokenRegistry
@@ -262,6 +323,25 @@ contract StockTokenRegistry is IStockTokenRegistry {
     ///      taken at 512-bit precision by Math.mulDiv.
     function _value(StockToken storage t, uint256 qtyRaw, uint256 priceWad) internal view returns (uint256) {
         if (qtyRaw == 0 || priceWad == 0) return 0;
-        return Math.mulDiv(qtyRaw * t.multiplierWad, priceWad, (10 ** uint256(t.decimals)) * SCALE);
+        return Math.mulDiv(qtyRaw * _multiplier(t), priceWad, (10 ** uint256(t.decimals)) * SCALE);
+    }
+
+    /// @dev Stored multiplier, or the token's live ERC-8056 `uiMultiplier()` (WAD) within the band of the
+    ///      stored anchor or of the pre-approved next anchor.
+    function _multiplier(StockToken storage t) internal view returns (uint256) {
+        address token = t.token;
+        if (!multiplierFromToken[token]) return t.multiplierWad;
+        uint256 live = IScaledUIAmount(token).uiMultiplier();
+        if (live == 0) revert BadMultiplier();
+        uint256 anchor = t.multiplierWad;
+        if (_inBand(live, anchor)) return live;
+        uint256 next = nextMultiplierAnchor[token];
+        if (next != 0 && _inBand(live, next)) return live;
+        revert MultiplierOutOfBand(token, live, anchor);
+    }
+
+    function _inBand(uint256 live, uint256 anchor) internal view returns (bool) {
+        uint256 diff = live > anchor ? live - anchor : anchor - live;
+        return diff * BPS <= anchor * multiplierBandBps;
     }
 }
