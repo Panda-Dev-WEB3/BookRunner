@@ -18,6 +18,19 @@ export const hedgeExecutorAbi = [
   },
   {
     "type": "function",
+    "name": "MAX_POOL_FEE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint24",
+        "internalType": "uint24"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "VENUE_UNIV3",
     "inputs": [],
     "outputs": [
@@ -57,6 +70,69 @@ export const hedgeExecutorAbi = [
   },
   {
     "type": "function",
+    "name": "pathOf",
+    "inputs": [
+      {
+        "name": "venue",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "tokenIn",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "tokenOut",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "routeOf",
+    "inputs": [
+      {
+        "name": "venue",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "fee",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "hop",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "hopFee",
+        "type": "uint24",
+        "internalType": "uint24"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "routerOf",
     "inputs": [
       {
@@ -76,6 +152,39 @@ export const hedgeExecutorAbi = [
   },
   {
     "type": "function",
+    "name": "setRoute",
+    "inputs": [
+      {
+        "name": "venue",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "fee",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "hop",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "hopFee",
+        "type": "uint24",
+        "internalType": "uint24"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "setRouter",
     "inputs": [
       {
@@ -85,6 +194,19 @@ export const hedgeExecutorAbi = [
       },
       {
         "name": "router",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setV3Factory",
+    "inputs": [
+      {
+        "name": "factory_",
         "type": "address",
         "internalType": "address"
       }
@@ -140,6 +262,56 @@ export const hedgeExecutorAbi = [
       }
     ],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "v3Factory",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "event",
+    "name": "RouteSet",
+    "inputs": [
+      {
+        "name": "venue",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "asset",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "fee",
+        "type": "uint24",
+        "indexed": false,
+        "internalType": "uint24"
+      },
+      {
+        "name": "hop",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "hopFee",
+        "type": "uint24",
+        "indexed": false,
+        "internalType": "uint24"
+      }
+    ],
+    "anonymous": false
   },
   {
     "type": "event",
@@ -210,6 +382,24 @@ export const hedgeExecutorAbi = [
     "anonymous": false
   },
   {
+    "type": "event",
+    "name": "V3FactorySet",
+    "inputs": [
+      {
+        "name": "factory",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "error",
+    "name": "BadRoute",
+    "inputs": []
+  },
+  {
     "type": "error",
     "name": "BadVenue",
     "inputs": []
@@ -254,8 +444,77 @@ export const hedgeExecutorAbi = [
   },
   {
     "type": "error",
+    "name": "NotSettlementPair",
+    "inputs": [
+      {
+        "name": "tokenIn",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "tokenOut",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "PoolFeeMismatch",
+    "inputs": [
+      {
+        "name": "requested",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "route",
+        "type": "uint24",
+        "internalType": "uint24"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "PoolNotFound",
+    "inputs": [
+      {
+        "name": "tokenA",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "tokenB",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "fee",
+        "type": "uint24",
+        "internalType": "uint24"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "ReentrancyGuardReentrantCall",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "RouteNotSet",
+    "inputs": [
+      {
+        "name": "venue",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "asset",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
   },
   {
     "type": "error",

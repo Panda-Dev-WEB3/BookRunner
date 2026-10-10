@@ -13,6 +13,47 @@ export const mockSwapRouterAbi = [
   },
   {
     "type": "function",
+    "name": "exactInput",
+    "inputs": [
+      {
+        "name": "params",
+        "type": "tuple",
+        "internalType": "struct ISwapRouter02.ExactInputParams",
+        "components": [
+          {
+            "name": "path",
+            "type": "bytes",
+            "internalType": "bytes"
+          },
+          {
+            "name": "recipient",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "amountIn",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "amountOutMinimum",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "amountOut",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "payable"
+  },
+  {
+    "type": "function",
     "name": "exactInputSingle",
     "inputs": [
       {

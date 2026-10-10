@@ -68,6 +68,35 @@ contract MockSwapRouterTest is Test {
         assertEq(nvda.balanceOf(user), 5e18);
     }
 
+    /// @dev Two-hop path USDC -> WETH -> NVDA: each hop priced by USD valuations, output to the recipient.
+    function test_exactInput_multiHop() public {
+        MockERC20 weth = new MockERC20("Wrapped Ether", "WETH", 18);
+        vm.startPrank(owner);
+        swap.setUsdPrice(address(weth), 4000e18);
+        swap.setMintOnDemand(address(weth), true);
+        vm.stopPrank();
+        bytes memory path = abi.encodePacked(address(usdc), uint24(500), address(weth), uint24(3000), address(nvda));
+        vm.prank(user);
+        uint256 out = swap.exactInput(
+            ISwapRouter02.ExactInputParams({path: path, recipient: user, amountIn: 1900e6, amountOutMinimum: 10e18})
+        );
+        assertEq(out, 10e18);
+        assertEq(nvda.balanceOf(user), 10e18);
+        assertEq(weth.balanceOf(user), 0);
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(MockSwapRouter.TooLittleReceived.selector, 10e18, 10e18 + 1));
+        swap.exactInput(
+            ISwapRouter02.ExactInputParams({path: path, recipient: user, amountIn: 1900e6, amountOutMinimum: 10e18 + 1})
+        );
+        // malformed path
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(MockSwapRouter.NoPrice.selector, address(0), address(0)));
+        swap.exactInput(
+            ISwapRouter02.ExactInputParams({path: abi.encodePacked(address(usdc)), recipient: user, amountIn: 1, amountOutMinimum: 0})
+        );
+    }
+
     function test_multiplierAppliedOnce() public {
         // Stock Token with multiplier 2.0 (2 shares per token): worth exactly 2x per token
         vm.prank(owner);

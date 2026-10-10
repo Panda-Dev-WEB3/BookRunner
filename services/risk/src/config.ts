@@ -29,8 +29,11 @@ export const riskEnvShape = {
   RISK_FLATTEN_MODE: z.enum(["net", "all"]).default("net"),
   /** minAmountOut = oracle value of the tokens sold * (1 - slippage). */
   RISK_FLATTEN_SLIPPAGE_BPS: z.coerce.number().int().min(0).max(5000).default(100),
-  /** Uniswap v3 pool fee tier for Flatten (VERIFY per Stock Token pool on RHC). */
-  RISK_FLATTEN_POOL_FEE: z.coerce.number().int().min(0).default(3000),
+  /**
+   * Pool fee for Flatten. 0 (default) = the HedgeExecutor's governance route of the token (timelock-set
+   * per Stock Token); a non-zero value must equal that route's fee or the flatten reverts PoolFeeMismatch.
+   */
+  RISK_FLATTEN_POOL_FEE: z.coerce.number().int().min(0).default(0),
   /** 0 = scan Kill logs from deployment.startBlock; otherwise only the last N blocks. */
   RISK_KILL_LOG_LOOKBACK_BLOCKS: z.coerce.number().int().min(0).default(0),
   RISK_VENUE_TIMEOUT_MS: z.coerce.number().int().positive().default(3000),

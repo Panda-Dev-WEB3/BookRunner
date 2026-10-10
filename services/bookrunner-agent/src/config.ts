@@ -99,7 +99,12 @@ export const agentEnvShape = {
    */
   HEDGE_REVERSE_HOLD_MS: num(600_000),
   HEDGE_SLIPPAGE_BPS: num(100),
-  HEDGE_POOL_FEE: num(3_000), // VERIFY Stock Token pool fee tiers on RHC
+  /**
+   * Pool fee passed with Hedge/Flatten. 0 (default) = the HedgeExecutor's governance route for the token
+   * (timelock-set per Stock Token, HedgeExecutor.routeOf); a non-zero value must equal that route's fee
+   * or the swap reverts PoolFeeMismatch.
+   */
+  HEDGE_POOL_FEE: num(0),
   HEDGE_TARGET_RATIO_BPS: z.coerce.number().optional(),
   HEDGE_PERP_ENABLED: flag(false),
   /** Retiring: desk USDC above this is returned to the vault. 0 = all of it (finalizeRetirement needs 0 deployed). */

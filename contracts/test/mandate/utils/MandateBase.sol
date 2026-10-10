@@ -133,6 +133,13 @@ abstract contract MandateBase is Test {
 
         exec = new HedgeExecutor(address(cfg), address(router));
         cfg.setHedgeExecutor(address(exec));
+        // governance routes (direct pools, 0.3% tier) for every hedge asset on both spot venues
+        vm.startPrank(timelock);
+        exec.setRoute(UNIV3, address(nvda), 3000, address(0), 0);
+        exec.setRoute(UNIV3, address(tsla), 3000, address(0), 0);
+        exec.setRoute(UNIV4, address(nvda), 3000, address(0), 0);
+        exec.setRoute(UNIV4, address(tsla), 3000, address(0), 0);
+        vm.stopPrank();
 
         mandateImpl = new MMMandate();
         deskImpl = new BookrunnerDesk();
