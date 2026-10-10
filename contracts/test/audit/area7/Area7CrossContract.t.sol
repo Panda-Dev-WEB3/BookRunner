@@ -86,6 +86,7 @@ contract Area7CrossContractTest is Test {
         factory = new BookFactory(address(config));
         registry = new MarkRegistry(address(config));
         ov = new MockOrderlyVault(address(this), address(usdc), TOKEN_HASH, BROKER_HASH);
+        ov.setStrictAccountIds(true); // real Orderly accountId check (VERIFY O6)
         A7Staking staking = new A7Staking();
 
         vm.startPrank(timelock);

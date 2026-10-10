@@ -59,12 +59,24 @@ contract OrderlyAdapterInitTest is OrderlyFixture {
         _deployAdapter(BOOK_ID, false);
     }
 
-    function test_accountIds_devnetDerivation() public view {
-        bytes32 ifId = keccak256(abi.encode(address(adapter), BROKER_HASH, uint8(0)));
-        bytes32 mmId = keccak256(abi.encode(address(adapter), BROKER_HASH, uint8(1)));
+    function test_accountIds_orderlyDerivation() public view {
+        address ifAcc = adapter.ifAccount();
+        assertTrue(ifAcc != address(0) && ifAcc.code.length != 0);
+        bytes32 ifId = keccak256(abi.encode(ifAcc, BROKER_HASH));
+        bytes32 mmId = keccak256(abi.encode(address(adapter), BROKER_HASH));
         assertEq(adapter.accountId(IF), ifId);
         assertEq(adapter.accountId(MM), mmId);
+        assertEq(adapter.accountOwner(IF), ifAcc);
+        assertEq(adapter.accountOwner(MM), address(adapter));
         assertTrue(ifId != mmId);
+    }
+
+    function test_accountIds_legacyDerivationBeforeMigration() public {
+        _makeLegacy(adapter);
+        assertEq(adapter.accountId(IF), keccak256(abi.encode(address(adapter), BROKER_HASH, uint8(0))));
+        assertEq(adapter.accountId(MM), keccak256(abi.encode(address(adapter), BROKER_HASH, uint8(1))));
+        assertEq(adapter.accountOwner(IF), address(adapter));
+        assertEq(adapter.accountOwner(MM), address(adapter));
     }
 
     function test_accountId_revertsOnInvalidAccount() public {

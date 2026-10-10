@@ -206,8 +206,16 @@ contract TrackingUSDC is MockERC20 {
         watching = true;
     }
 
+    /// @notice The adapter's OrderlyIFAccount (owner of the IF account): venue payouts land there and may only
+    ///         move on to the adapter.
+    address public ifAccount;
+
+    function setIfAccount(address ifAccount_) external {
+        ifAccount = ifAccount_;
+    }
+
     function _isAllowed(address a) internal view returns (bool) {
-        return a == adapter || a == vault || a == router || a == orderlyVault;
+        return a == adapter || a == vault || a == router || a == orderlyVault || (a != address(0) && a == ifAccount);
     }
 
     function _update(address from, address to, uint256 value) internal override {
@@ -215,6 +223,13 @@ contract TrackingUSDC is MockERC20 {
         if (!watching || value == 0) return;
         if (from == adapter) receivedFromAdapter[to] += value;
         if (_isAllowed(from) && !_isAllowed(to)) {
+            violations++;
+            lastViolationFrom = from;
+            lastViolationTo = to;
+            lastViolationAmount = value;
+        }
+        // The IF account contract only ever forwards to the adapter.
+        if (from != address(0) && from == ifAccount && to != adapter) {
             violations++;
             lastViolationFrom = from;
             lastViolationTo = to;

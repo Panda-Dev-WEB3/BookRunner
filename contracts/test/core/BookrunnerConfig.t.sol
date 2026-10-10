@@ -34,7 +34,7 @@ contract BookrunnerConfigTest is Test {
         assertEq(config.maxMarkAge(), 21_600);
         assertEq(config.maxPriceAge(), 300);
         assertEq(config.committeeWindow(), 172_800);
-        assertEq(config.venueMinIfUsd(BRTypes.VENUE_ORDERLY), 25_000e6);
+        assertEq(config.venueMinIfUsd(BRTypes.VENUE_ORDERLY), 25_001e6); // strictly above Orderly's 25,000
         assertEq(config.venueMinIfUsd(BRTypes.VENUE_POOL_ENGINE), 10_000e6);
         assertEq(config.venueMinIfUsd(7), 0);
         assertFalse(config.newBooksPaused());

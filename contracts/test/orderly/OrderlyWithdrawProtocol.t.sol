@@ -350,8 +350,9 @@ contract OrderlyWithdrawOrderingFuzzTest is OrderlyFixture {
         if (r.paid == r.amount) return;
         bytes32 id = adapter.accountId(r.account);
         if (r.fee > 0) {
+            address owner_ = adapter.accountOwner(r.account);
             vm.prank(orderlyOperator);
-            ov.operatorWithdrawWithFee(id, address(adapter), r.amount, r.fee);
+            ov.operatorWithdrawWithFee(id, owner_, r.amount, r.fee);
             r.paid = r.amount;
         } else {
             uint256 amt = bound(seed, 1, r.amount - r.paid);

@@ -51,6 +51,7 @@ abstract contract OrderlyFixture is Test {
         usdc = new TrackingUSDC();
         ov = new MockOrderlyVault(address(this), address(usdc), TOKEN_HASH, BROKER_HASH);
         ov.setOperator(orderlyOperator, true);
+        ov.setStrictAccountIds(true); // Orderly's real accountId check (VERIFY O6)
         cfg = new OrderlyMockConfig(address(usdc), address(ov), timelock, factory, MARK_INTERVAL);
         cfg.grantRole(cfg.OPS_VENUE_ROLE(), ops);
 
@@ -64,6 +65,7 @@ abstract contract OrderlyFixture is Test {
         uwVault.setAdapter(address(adapter));
 
         usdc.watch(address(adapter), address(uwVault), address(router), address(ov));
+        usdc.setIfAccount(adapter.ifAccount());
         bookMock.setState(BRTypes.BookState.Live);
         _applyCurrentMark();
         usdc.mint(address(uwVault), 1_000_000e6);
@@ -161,11 +163,22 @@ abstract contract OrderlyFixture is Test {
         adapter.confirmWithdraw(nonce);
     }
 
-    /// @dev Simulates Orderly paying a withdrawal of `amount` from `account` to the adapter.
+    /// @dev Simulates Orderly paying a withdrawal of `amount` from `account` to the account's owner (the adapter
+    ///      for MM, the OrderlyIFAccount for IF: delegate withdrawals are paid to the contract account itself).
     function _payOut(uint8 account, uint256 amount) internal {
         bytes32 id = adapter.accountId(account);
+        address owner_ = adapter.accountOwner(account);
         vm.prank(orderlyOperator);
-        ov.operatorWithdraw(id, address(adapter), amount);
+        ov.operatorWithdraw(id, owner_, amount);
+    }
+
+    /// @dev Rewinds `p` to a pre-v3 proxy (no IF account: devnet account derivation), as an upgraded testnet
+    ///      adapter looks. `ifAccount` packs into slot +26 above `lastSweptPeriod` (low 8 bytes).
+    function _makeLegacy(OrderlyAdapter p) internal {
+        bytes32 slot = bytes32(uint256(0xbfdc54f9325019c58409789152d0f65a8a6ec89934e70c876f5b37182d3b8500) + 26);
+        uint256 v = uint256(vm.load(address(p), slot));
+        vm.store(address(p), slot, bytes32(v & type(uint64).max));
+        assertEq(p.ifAccount(), address(0), "legacy slot layout");
     }
 
     /// @dev Simulates a builder fee settlement credited to `account` on Orderly (USDC minted to the venue).

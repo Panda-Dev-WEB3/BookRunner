@@ -49,8 +49,12 @@ import {IStockTokenRegistry} from "../src/interfaces/IStockTokenRegistry.sol";
 ///       --rpc-url http://host.docker.internal:8547 --broadcast
 contract Deploy is Script {
     string internal constant DEFAULT_MNEMONIC = "test test test test test test test test test test test junk";
-    bytes32 internal constant BROKER_HASH = keccak256("bookrunner"); // VERIFY: Orderly broker id
-    bytes32 internal constant TOKEN_HASH = keccak256("USDC"); // VERIFY: Orderly token hash (RHC lists USDG)
+    /// @dev Orderly broker id / deposit-token symbol hashed into the OrderlyAdapter implementation (VERIFY O7):
+    ///      keccak256(bytes(s)). Devnet/testnet defaults "bookrunner" / "USDC"; Robinhood Chain mainnet uses the
+    ///      broker id assigned at Orderly builder onboarding and "USDG" (keccak 0x50c06f78...5b02ea).
+    ///      Overridable with DEPLOY_ORDERLY_BROKER_ID / DEPLOY_ORDERLY_TOKEN (passed through by scripts/forge.sh).
+    bytes32 internal BROKER_HASH = keccak256(bytes(vm.envOr("DEPLOY_ORDERLY_BROKER_ID", string("bookrunner"))));
+    bytes32 internal TOKEN_HASH = keccak256(bytes(vm.envOr("DEPLOY_ORDERLY_TOKEN", string("USDC"))));
     uint32 internal constant TREASURY_INDEX = 22; // devkeys.ts DEV_ROLE_INDEX.treasury
     /// @dev Buyback pool fee tier pinned on BkrnFeeRouter (MockSwapRouter ignores it; mainnet: VERIFY pool).
     uint24 internal constant BUYBACK_POOL_FEE = 3000;

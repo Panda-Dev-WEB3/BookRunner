@@ -5,6 +5,7 @@ import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Ini
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -17,6 +18,7 @@ import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 import {IBook} from "./interfaces/IBook.sol";
 import {IRevenueRouter} from "./interfaces/IRevenueRouter.sol";
 import {BRTypes} from "./interfaces/BRTypes.sol";
+import {OrderlyIFAccount} from "./OrderlyIFAccount.sol";
 
 /// @dev UnderwritingVault hook: adapter pushes returned USDC, vault bumps book.flowNonce.
 interface IVaultFlowNotify {
@@ -71,10 +73,17 @@ interface IVaultFlowNotify {
 ///         bump); unattributed USDC was never part of `deployedValueUsd`, so sweeping it is a plain gain that
 ///         a mark counts once through `vault.idle()` and must not invalidate a committed mark.
 ///
-/// @dev VERIFY (see docs/VERIFY.md): Orderly validates `accountId == keccak256(abi.encode(receiver,
-///      brokerHash))` on deposit, i.e. ONE account per (address, broker). The devnet derivation used here
-///      (two accounts per adapter) is accepted only by MockOrderlyVault; mainnet requires an upgrade that
-///      maps IF/MM to real Orderly accounts. Orderly on Robinhood Chain lists USDG (not USDC) as its token.
+///         Orderly accounts (docs/VERIFY.md O6): Orderly validates `accountId == keccak256(abi.encode(owner,
+///         brokerHash))`, i.e. ONE account per (address, broker). The MM account is this adapter's own account;
+///         the IF account is owned by a per-book `OrderlyIFAccount` contract the adapter deploys at
+///         `initialize` (deposits via `Vault.depositTo(ifAccount, ...)`; payouts land there and are pulled
+///         here before any sweep/forward, so the attribution rules above see one combined balance).
+///         Proxies initialized before v3 keep the devnet derivation `keccak256(abi.encode(adapter, brokerHash,
+///         account))` (accepted only by MockOrderlyVault in non-strict mode) until the timelock calls
+///         `migrateToOrderlyAccounts` (only while nothing is venue-side).
+///
+///         Settlement token: `config.usdc()` (USDC on devnet, USDG on Robinhood Chain: any 6-decimals token the
+///         Orderly Vault lists under `tokenHash`); "USDC" in names below means that settlement token.
 /// @custom:oz-upgrades-unsafe-allow constructor state-variable-immutable
 contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
@@ -135,6 +144,8 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         uint256 totalFeesForwardedUsd;
         // appended (v2): latest fee period label accepted by `sweepFees` (monotonic)
         uint64 lastSweptPeriod;
+        // appended (v3): owner of the Orderly IF account (OrderlyIFAccount); address(0) = devnet derivation
+        address ifAccount;
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -148,6 +159,8 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     ///         forward cumulatively), so at most (1 + lookback) caps can be earmarked in a burst.
     uint64 public constant FEE_SWEEP_LOOKBACK_PERIODS = 2;
     uint256 private constant BPS = 10_000;
+    /// @notice Decimals the protocol's USD accounting assumes for the settlement token (USDC / USDG).
+    uint8 public constant SETTLEMENT_DECIMALS = 6;
 
     /// @inheritdoc IOrderlyAdapter
     bytes32 public constant REPORT_TYPEHASH =
@@ -198,6 +211,10 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     event NativeRescued(address indexed to, uint256 amount);
     event TokenRescued(address indexed token, address indexed to, uint256 amount);
     event CapitalFlowNotifyFailed(address indexed vault);
+    /// @notice The book's Orderly accounts: MM = this adapter's account, IF = `ifAccount`'s account.
+    event OrderlyAccountsBound(address indexed ifAccount, bytes32 ifAccountId, bytes32 mmAccountId);
+    /// @notice ETH added for Orderly deposit fees (`fundNative`).
+    event NativeFunded(address indexed from, uint256 amount, uint256 balance);
 
     // ---------------------------------------------------------------------------------------------
     // Errors
@@ -240,6 +257,9 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     error SweepBlockedUntilMark(uint64 periodEnd, uint64 lastAppliedPeriodEnd);
     error CannotRescueUsdc();
     error NativeTransferFailed();
+    error UnsupportedTokenDecimals(uint8 decimals);
+    error AlreadyOrderlyAccounts(address ifAccount);
+    error VenueStateNotEmpty();
 
     // ---------------------------------------------------------------------------------------------
     // Construction / initialization
@@ -272,6 +292,7 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         $.book = book_;
         _bindBook($, book_);
         _bindVenue($, cfg);
+        _deployIfAccount($);
 
         emit AdapterInitialized(
             bookId_,
@@ -285,8 +306,18 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         );
     }
 
-    /// @notice Accepts ETH used to pay Orderly/LayerZero deposit fees (and their refunds).
+    /// @notice Accepts ETH used to pay Orderly/LayerZero deposit fees and their refunds (the real Vault refunds
+    ///         any excess fee to `msg.sender`, i.e. this adapter). Ops tops up through `fundNative`.
     receive() external payable {}
+
+    /// @notice Anyone (ops-venue / gas keeper). Adds ETH for Orderly's native deposit fee
+    ///         (`depositNativeFee`); without it `depositToVenue` (e.g. inside `Book.closeWindow`) reverts
+    ///         `InsufficientNativeForFee(fee, balance)`. ETH leaves only as deposit fees or via the timelock's
+    ///         `rescueNative`.
+    function fundNative() external payable {
+        if (msg.value == 0) revert ZeroAmount();
+        emit NativeFunded(msg.sender, msg.value, address(this).balance);
+    }
 
     // ---------------------------------------------------------------------------------------------
     // Vault-facing flows
@@ -294,8 +325,10 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
 
     /// @inheritdoc IVenueAdapter
     /// @dev Only the book's vault. Pulls `amount` USDC from the vault, approves the Orderly Vault for exactly
-    ///      `amount` and deposits it into `accountId(account)`. Pays the venue's native deposit fee from this
-    ///      contract's ETH balance when `getDepositFee > 0`. Credits the venue-side balance immediately.
+    ///      `amount` and deposits it into `accountId(account)` (`deposit` for the adapter's own account,
+    ///      `depositTo(ifAccount, ...)` for the IF account). Pays the venue's native deposit fee from this
+    ///      contract's ETH balance when `getDepositFee > 0`, else reverts `InsufficientNativeForFee`. Credits the
+    ///      venue-side balance immediately.
     function depositToVenue(uint8 account, uint256 amount) external nonReentrant {
         AdapterStorage storage $ = _s();
         if (msg.sender != $.vault) revert NotVault();
@@ -319,11 +352,13 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
 
         // interactions
         token.safeTransferFrom(msg.sender, address(this), amount);
-        uint256 fee = ov.getDepositFee(address(this), data);
+        address owner_ = _accountOwner($, account);
+        uint256 fee = ov.getDepositFee(owner_, data);
         if (fee > address(this).balance) revert InsufficientNativeForFee(fee, address(this).balance);
         uint256 balanceBefore = token.balanceOf(address(this));
         token.forceApprove(address(ov), amount);
-        ov.deposit{value: fee}(data);
+        if (owner_ == address(this)) ov.deposit{value: fee}(data);
+        else ov.depositTo{value: fee}(owner_, data);
         uint256 balanceAfter = token.balanceOf(address(this));
         if (balanceAfter + amount != balanceBefore) {
             revert VenueDidNotPull(amount, balanceBefore > balanceAfter ? balanceBefore - balanceAfter : 0);
@@ -366,6 +401,7 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     ///      Only a principal sweep notifies the vault (book.flowNonce++).
     function sweepToVault() external nonReentrant returns (uint256 amount) {
         AdapterStorage storage $ = _s();
+        _pullIfAccount($);
         uint256 principal;
         (amount, principal) = _sweepable($);
         if (amount == 0) return 0;
@@ -607,7 +643,25 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         $.delegateSigner = signer;
         $.orderlyVault
             .delegateSigner(IOrderlyVault.VaultDelegate({brokerHash: $.brokerHash, delegateSigner: signer}));
+        address ifAcc = $.ifAccount;
+        if (ifAcc != address(0)) OrderlyIFAccount(ifAcc).delegateSigner(address($.orderlyVault), $.brokerHash, signer);
         emit DelegateSignerSet(signer);
+    }
+
+    /// @notice Timelock. Moves a proxy initialized before v3 (devnet account derivation) to Orderly's real
+    ///         accounts: deploys the book's `OrderlyIFAccount` and registers the current delegate signer for it.
+    ///         Only while nothing is venue-side or in flight (the account ids change; balances would strand).
+    function migrateToOrderlyAccounts() external {
+        _checkTimelock();
+        AdapterStorage storage $ = _s();
+        if ($.ifAccount != address(0)) revert AlreadyOrderlyAccounts($.ifAccount);
+        if (
+            $.insuranceUsd != 0 || $.marginUsd != 0 || $.inTransitUsd != 0
+                || $.pendingWithdrawUsd[BRTypes.ACCOUNT_IF] + $.pendingWithdrawUsd[BRTypes.ACCOUNT_MM] != 0
+        ) revert VenueStateNotEmpty();
+        address ifAcc = _deployIfAccount($);
+        address signer = $.delegateSigner;
+        if (signer != address(0)) OrderlyIFAccount(ifAcc).delegateSigner(address($.orderlyVault), $.brokerHash, signer);
     }
 
     /// @notice Timelock. Sets the per-period fee sweep cap (0 disables fee sweeps).
@@ -641,6 +695,8 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         if (token == address($.usdc)) revert CannotRescueUsdc();
         if (token == address(0) || to == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
+        address ifAcc = $.ifAccount;
+        if (ifAcc != address(0)) OrderlyIFAccount(ifAcc).forward(token);
         IERC20(token).safeTransfer(to, amount);
         emit TokenRescued(token, to, amount);
     }
@@ -660,10 +716,24 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     }
 
     /// @inheritdoc IOrderlyAdapter
-    /// @dev Devnet derivation keccak256(abi.encode(address(this), brokerHash, account)) — VERIFY.
+    /// @dev Orderly derivation keccak256(abi.encode(accountOwner(account), brokerHash)); a proxy not yet migrated
+    ///      (`ifAccount() == address(0)`) keeps the devnet keccak256(abi.encode(this, brokerHash, account)).
     function accountId(uint8 account) external view returns (bytes32) {
         _checkAccount(account);
         return _accountId(account);
+    }
+
+    /// @notice Address that owns `account`'s Orderly account: the receiver of its deposits, the
+    ///         `delegateContract` of its API keys and withdrawals, and the address Orderly pays withdrawals to.
+    ///         MM (and both accounts before migration) = this adapter; IF = `ifAccount()`.
+    function accountOwner(uint8 account) external view returns (address) {
+        _checkAccount(account);
+        return _accountOwner(_s(), account);
+    }
+
+    /// @notice The book's OrderlyIFAccount (owner of the IF account); address(0) = devnet derivation (pre-v3).
+    function ifAccount() external view returns (address) {
+        return _s().ifAccount;
     }
 
     /// @notice Native (ETH) fee the venue charges for depositing `amount` into `account` now
@@ -675,7 +745,7 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         AdapterStorage storage $ = _s();
         return $.orderlyVault
             .getDepositFee(
-                address(this),
+                _accountOwner($, account),
                 IOrderlyVault.VaultDepositFE({
                     accountId: _accountId(account),
                     brokerHash: $.brokerHash,
@@ -841,14 +911,14 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     ///         landed before `confirmWithdraw`): neither swept nor forwarded until confirmed.
     function heldForPendingWithdrawalsUsd() external view returns (uint256) {
         AdapterStorage storage $ = _s();
-        uint256 balance = $.usdc.balanceOf(address(this));
+        uint256 balance = _usdcBalance($);
         return balance - Math.min(balance, $.inTransitUsd) - _freeBalance($, balance);
     }
 
     /// @notice Preview of the next `forwardPendingFees` amount.
     function forwardableFees() external view returns (uint256) {
         AdapterStorage storage $ = _s();
-        return Math.min($.pendingFeesUsd, _freeBalance($, $.usdc.balanceOf(address(this))));
+        return Math.min($.pendingFeesUsd, _freeBalance($, _usdcBalance($)));
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -877,6 +947,8 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         address usdc_ = cfg.usdc();
         address ov = cfg.orderlyVault();
         if (usdc_ == address(0) || ov == address(0)) revert ZeroAddress();
+        uint8 dec = IERC20Metadata(usdc_).decimals();
+        if (dec != SETTLEMENT_DECIMALS) revert UnsupportedTokenDecimals(dec);
         uint32 interval = cfg.markInterval();
         if (interval == 0) revert ZeroMarkInterval();
         $.usdc = IERC20(usdc_);
@@ -909,7 +981,34 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     }
 
     function _accountId(uint8 account) private view returns (bytes32) {
-        return keccak256(abi.encode(address(this), _s().brokerHash, account));
+        AdapterStorage storage $ = _s();
+        if ($.ifAccount == address(0)) return keccak256(abi.encode(address(this), $.brokerHash, account));
+        return keccak256(abi.encode(_accountOwner($, account), $.brokerHash));
+    }
+
+    function _accountOwner(AdapterStorage storage $, uint8 account) private view returns (address) {
+        address ifAcc = $.ifAccount;
+        return (account == BRTypes.ACCOUNT_IF && ifAcc != address(0)) ? ifAcc : address(this);
+    }
+
+    /// @dev Deploys the book's OrderlyIFAccount (CREATE2 from this proxy, salt = bookId) and binds it.
+    function _deployIfAccount(AdapterStorage storage $) private returns (address ifAcc) {
+        ifAcc = address(new OrderlyIFAccount{salt: bytes32($.bookId)}());
+        $.ifAccount = ifAcc;
+        emit OrderlyAccountsBound(ifAcc, _accountId(BRTypes.ACCOUNT_IF), _accountId(BRTypes.ACCOUNT_MM));
+    }
+
+    /// @dev Settlement-token balance attributed by this adapter: its own plus whatever Orderly paid to the IF
+    ///      account contract (pulled here by `_pullIfAccount` before any transfer).
+    function _usdcBalance(AdapterStorage storage $) private view returns (uint256 bal) {
+        bal = $.usdc.balanceOf(address(this));
+        address ifAcc = $.ifAccount;
+        if (ifAcc != address(0)) bal += $.usdc.balanceOf(ifAcc);
+    }
+
+    function _pullIfAccount(AdapterStorage storage $) private {
+        address ifAcc = $.ifAccount;
+        if (ifAcc != address(0)) OrderlyIFAccount(ifAcc).forward(address($.usdc));
     }
 
     function _confirm(uint256 requestNonce, uint256 venueFee) private {
@@ -938,7 +1037,7 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     ///        free - fees                                           -> vault (unattributed)
     ///      where free = balance - principal - held.
     function _sweepable(AdapterStorage storage $) private view returns (uint256 amount, uint256 principal) {
-        uint256 balance = $.usdc.balanceOf(address(this));
+        uint256 balance = _usdcBalance($); // == own balance once _pullIfAccount ran (sweepToVault)
         principal = Math.min(balance, $.inTransitUsd);
         uint256 free = _freeBalance($, balance);
         amount = principal + free - Math.min($.pendingFeesUsd, free);
@@ -961,6 +1060,7 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     function _forwardFees(AdapterStorage storage $) private returns (uint256 amount) {
         uint256 pending = $.pendingFeesUsd;
         if (pending == 0) return 0;
+        _pullIfAccount($);
         amount = Math.min(pending, _freeBalance($, $.usdc.balanceOf(address(this))));
         if (amount == 0) return 0;
 

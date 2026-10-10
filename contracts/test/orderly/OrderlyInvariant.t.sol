@@ -311,8 +311,9 @@ contract OrderlyHandler is Test {
         uint256 bal = ov.balanceOf(id);
         if (bal == 0) return;
         amount = bound(amount, 1, bal);
+        address owner_ = adapter.accountOwner(account);
         vm.prank(orderlyOperator);
-        ov.operatorWithdraw(id, address(adapter), amount);
+        ov.operatorWithdraw(id, owner_, amount);
     }
 
     /// @dev Builder fee settlement / PnL credited to a book account on the venue.
@@ -387,7 +388,7 @@ contract OrderlyInvariantTest is OrderlyFixture {
 
     /// @notice Every USDC unit in existence is held by the vault, the adapter, the venue or the router.
     function invariant_noLeakage() public view {
-        uint256 held = usdc.balanceOf(address(uwVault)) + usdc.balanceOf(address(adapter))
+        uint256 held = usdc.balanceOf(address(uwVault)) + usdc.balanceOf(address(adapter)) + usdc.balanceOf(adapter.ifAccount())
             + usdc.balanceOf(address(ov)) + usdc.balanceOf(address(router));
         assertEq(usdc.totalSupply(), held);
     }
@@ -531,7 +532,7 @@ contract OrderlyRandomSequenceFuzzTest is OrderlyFixture {
         }
         assertEq(usdc.violations(), 0);
         assertEq(handler.ok("adapter.reportSigned.forged"), 0);
-        uint256 held = usdc.balanceOf(address(uwVault)) + usdc.balanceOf(address(adapter))
+        uint256 held = usdc.balanceOf(address(uwVault)) + usdc.balanceOf(address(adapter)) + usdc.balanceOf(adapter.ifAccount())
             + usdc.balanceOf(address(ov)) + usdc.balanceOf(address(router));
         assertEq(usdc.totalSupply(), held);
         assertEq(usdc.receivedFromAdapter(address(router)), adapter.totalFeesForwardedUsd());

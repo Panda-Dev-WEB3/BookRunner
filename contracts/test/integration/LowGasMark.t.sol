@@ -235,6 +235,7 @@ abstract contract LowGasMarkBase is Test {
         registry = new MarkRegistry(address(config));
         factory = new LowGasFactory();
         ov = new MockOrderlyVault(address(this), address(usdc), TOKEN_HASH, BROKER_HASH);
+        ov.setStrictAccountIds(true); // real Orderly accountId check (VERIFY O6)
         ov.setOperator(orderlyOperator, true);
         oracle = new LowGasOracleStub(vm.addr(ORACLE_PK));
         backstop = new MockBackstop(IERC20(address(usdc)));
