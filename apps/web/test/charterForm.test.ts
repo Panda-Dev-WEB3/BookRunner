@@ -41,7 +41,7 @@ describe("charter form", () => {
       underlying: { ticker: "NVDA" },
       venue: "orderly",
       sessions: "24x5",
-      ifTargetUsd: "25000",
+      ifTargetUsd: "30000",
       seniorHurdleBps: 6000,
       seniorCapBps: 7000,
       subscriptionWindowSeconds: 600,

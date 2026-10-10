@@ -52,7 +52,7 @@ describe("prepared transactions", () => {
     expect(d.functionName).toBe("file");
     const got = (d.args as readonly [typeof c])[0];
     expect(got.underlying).toBe(c.underlying);
-    expect(got.ifTargetUsd).toBe(25_000_000_000n);
+    expect(got.ifTargetUsd).toBe(30_000_000_000n);
     expect(got.mmInventoryUsd).toBe(75_000_000_000n);
     expect(got.mandate.maxInventoryUsd).toBe(50_000_000_000n);
     expect(got.mandate.killAtDrawdownBps).toBe(-800);

@@ -28,7 +28,7 @@ export function sampleDraft(over: Partial<CharterDraftInput> = {}): CharterDraft
     venue: "orderly",
     oracle: "attested",
     sessions: "24x5",
-    ifTargetUsd: "25000",
+    ifTargetUsd: "30000",
     mmInventoryUsd: "75000",
     mandate: {
       maxInventoryUsd: "50000",

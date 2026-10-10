@@ -336,7 +336,7 @@ export const defaultParams = (): ProtocolParams => ({
   markInterval: 300,
   maxPriceAge: 300,
   newBooksPaused: false,
-  venueMinIfUsd: [25_000_000_000n, 10_000_000_000n],
+  venueMinIfUsd: [25_001_000_000n, 10_000_000_000n],
 });
 
 export const emptyWallet = (): TrancheWalletState => ({
