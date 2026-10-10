@@ -6,7 +6,7 @@
 import { ADMIN_KEY_OPT_IN } from "./devkeys";
 
 /** Env names treated as secrets: stripped unless the process's allow-list names them. */
-export const SECRET_ENV = /MNEMONIC|PRIVATE_KEY|_PK$|API_KEY|SECRET|PASSWORD|(^|_)TOKEN$|^ORACLE_SEED$/;
+export const SECRET_ENV = /MNEMONIC|PRIVATE_KEY|_PK$|API_KEY|SECRET|PASSWORD|_PASS$|(^|_)TOKEN$|^ORACLE_SEED$|^ALERT_(SMTP_USER|WEBHOOK_URL|HEARTBEAT_URL|TELEGRAM_CHAT_ID)$/;
 
 const MNEMONIC = ["BKRN_TESTNET_MNEMONIC", "DEV_MNEMONIC"] as const;
 
@@ -30,6 +30,9 @@ export const SECRET_ALLOW: Readonly<Record<string, readonly string[]>> = {
   launch: [...MNEMONIC, "DEPLOYER_PRIVATE_KEY", ADMIN_KEY_OPT_IN],
   agent: [...MNEMONIC, "DESK_KEY_PRIVATE_KEY"],
   "trader-sim": [...MNEMONIC],
+  // read-only watcher: no signing material, only its delivery credentials (SMTP mailbox, webhook / ping
+  // URLs, which embed tokens)
+  alerts: ["ALERT_SMTP_USER", "ALERT_SMTP_PASS", "ALERT_WEBHOOK_URL", "ALERT_HEARTBEAT_URL", "ALERT_TELEGRAM_CHAT_ID"],
 };
 
 /** Infrastructure URLs (they carry the DB / Redis passwords): every process but the web dev server. */

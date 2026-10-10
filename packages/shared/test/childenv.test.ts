@@ -25,9 +25,16 @@ const PARENT = {
   [ADMIN_KEY_OPT_IN]: "1",
   JURY_MAX_TOKENS: "16000",
   MARK_INTERVAL_SECONDS: "3600",
+  ALERT_SMTP_USER: "alerts@bookrunner.tech",
+  ALERT_SMTP_PASS: "smtp",
+  ALERT_WEBHOOK_URL: "https://hooks.slack.com/services/T/B/x",
+  ALERT_HEARTBEAT_URL: "https://hc-ping.com/uuid",
+  ALERT_TELEGRAM_CHAT_ID: "-100",
+  ALERT_EMAIL_TO: "ops@bookrunner.tech",
+  ALERT_ROLE_ADDRESSES: "markSigner=0x00000000000000000000000000000000000000aa",
 };
 
-const SECRETS = ["BKRN_TESTNET_MNEMONIC", "DEV_MNEMONIC", "ANTHROPIC_API_KEY", "ORACLE_SEED", "API_ADMIN_TOKEN", "MARK_SIGNER_PRIVATE_KEY", "DEPLOYER_PRIVATE_KEY", "BKRN_TESTNET_FUNDER_PK", "ORDERLY_TRADE_KEY_SECRET_7", "RISK_ORDERLY_SECRET", "POSTGRES_PASSWORD", "REDIS_PASSWORD", ADMIN_KEY_OPT_IN];
+const SECRETS = ["BKRN_TESTNET_MNEMONIC", "DEV_MNEMONIC", "ANTHROPIC_API_KEY", "ORACLE_SEED", "API_ADMIN_TOKEN", "MARK_SIGNER_PRIVATE_KEY", "DEPLOYER_PRIVATE_KEY", "BKRN_TESTNET_FUNDER_PK", "ORDERLY_TRADE_KEY_SECRET_7", "RISK_ORDERLY_SECRET", "POSTGRES_PASSWORD", "REDIS_PASSWORD", ADMIN_KEY_OPT_IN, "ALERT_SMTP_USER", "ALERT_SMTP_PASS", "ALERT_WEBHOOK_URL", "ALERT_HEARTBEAT_URL", "ALERT_TELEGRAM_CHAT_ID"];
 const secretsOf = (proc: string) => SECRETS.filter((k) => k in childEnv(proc, PARENT)).sort();
 
 describe("per-process secrets (scripts/dev.ts)", () => {
@@ -71,6 +78,17 @@ describe("per-process secrets (scripts/dev.ts)", () => {
     expect(api.FORCE_COLOR).toBe("1");
     expect(childEnv("web", PARENT).DATABASE_URL).toBeUndefined();
     expect(childEnv("web", PARENT).REDIS_URL).toBeUndefined();
+  });
+
+  test("alerts: its delivery credentials + the infra URLs, nothing that signs; nobody else gets them", () => {
+    expect(secretsOf("alerts")).toEqual(["ALERT_HEARTBEAT_URL", "ALERT_SMTP_PASS", "ALERT_SMTP_USER", "ALERT_TELEGRAM_CHAT_ID", "ALERT_WEBHOOK_URL"]);
+    const env = childEnv("alerts", PARENT);
+    expect(env.DATABASE_URL).toBe(PARENT.DATABASE_URL);
+    expect(env.ALERT_EMAIL_TO).toBe("ops@bookrunner.tech"); // not a secret: every child may see it
+    expect(env.ALERT_ROLE_ADDRESSES).toBe(PARENT.ALERT_ROLE_ADDRESSES);
+    for (const p of ["api", "oracle", "mark", "risk", "ops-venue", "waterfall", "charter", "indexer", "receipts", "agent:NVDA", "trader-sim", "gas-keeper", "launch", "web"]) {
+      for (const k of ["ALERT_SMTP_PASS", "ALERT_SMTP_USER", "ALERT_WEBHOOK_URL", "ALERT_HEARTBEAT_URL"]) expect(secretsOf(p)).not.toContain(k);
+    }
   });
 
   test("unknown processes get no secrets", () => {

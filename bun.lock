@@ -80,6 +80,17 @@
         "zod": "4.6.5",
       },
     },
+    "services/alerts": {
+      "name": "@bookrunner/alerts",
+      "version": "0.1.0",
+      "dependencies": {
+        "@bookrunner/shared": "workspace:*",
+        "ioredis": "6.0.0",
+        "postgres": "3.4.9",
+        "viem": "2.57.2",
+        "zod": "4.6.5",
+      },
+    },
     "services/api": {
       "name": "@bookrunner/api",
       "version": "0.1.0",
@@ -249,6 +260,8 @@
     "@babel/runtime": ["@babel/runtime@7.29.7", "", {}, "sha512-Nq8OhGWiZIZGV6hLHoyAKLLcJihP/xFeBMGJoUrxTX2psI8dCifzLhZISFb+VWS3wFMRDmCGw5R+dOySCqPLhw=="],
 
     "@base-org/account": ["@base-org/account@2.4.0", "", { "dependencies": { "@coinbase/cdp-sdk": "^1.0.0", "@noble/hashes": "1.4.0", "clsx": "1.2.1", "eventemitter3": "5.0.1", "idb-keyval": "6.2.1", "ox": "0.6.9", "preact": "10.24.2", "viem": "^2.31.7", "zustand": "5.0.3" } }, "sha512-A4Umpi8B9/pqR78D1Yoze4xHyQaujioVRqqO3d6xuDFw9VRtjg6tK3bPlwE0aW+nVH/ntllCpPa2PbI8Rnjcug=="],
+
+    "@bookrunner/alerts": ["@bookrunner/alerts@workspace:services/alerts"],
 
     "@bookrunner/api": ["@bookrunner/api@workspace:services/api"],
 
