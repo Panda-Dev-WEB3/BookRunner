@@ -25,6 +25,7 @@ import {
   loadPositions,
   loadProtocol,
   loadRisk,
+  loadSettlementSymbol,
   loadSettlements,
   loadStakePosition,
   loadStakingProtocol,
@@ -226,7 +227,8 @@ async function refreshView(): Promise<void> {
     await loadProtocol();
     const me = wallet.snapshot.address as Address | null;
     const b = selected();
-    const jobs: Array<Promise<void>> = [];
+    // the settlement token's symbol (USDC / USDG) labels every amount: read once, re-render on arrival
+    const jobs: Array<Promise<void>> = [loadSettlementSymbol()];
     const wantPositions = ["overview", "book", "portfolio"].includes(view);
     if (me && wantPositions) jobs.push(loadPositions(me));
     if (me && ["portfolio", "staking", "book"].includes(view)) jobs.push(loadBalances(me));

@@ -3,6 +3,7 @@
 import type { ReactNode } from "react";
 import { cx } from "../cx";
 import { IconCheck, IconCoin, IconLayers, IconSwap } from "../icons";
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { Term } from "../Term";
 
 interface Step {
@@ -13,12 +14,13 @@ interface Step {
   shownAs: string;
 }
 
-const STEPS: Step[] = [
+/** The steps, worded with the settlement token's symbol. */
+const stepsFor = (sym: string): Step[] => [
   {
-    title: "Deposit USDC",
+    title: `Deposit ${sym}`,
     body: (
       <>
-        Into the Senior or Junior <Term id="tranche">tranche</Term> of a book, while a <Term id="topUpRound">top-up round</Term> or a subscription window is open. The USDC waits in escrow and cannot be cancelled before the round settles.
+        Into the Senior or Junior <Term id="tranche">tranche</Term> of a book, while a <Term id="topUpRound">top-up round</Term> or a subscription window is open. The {sym} waits in escrow and cannot be cancelled before the round settles.
       </>
     ),
     icon: <IconCoin size={18} />,
@@ -60,10 +62,10 @@ const STEPS: Step[] = [
     shownAs: "In redemption",
   },
   {
-    title: "Claim your USDC",
+    title: `Claim your ${sym}`,
     body: (
       <>
-        Once a mark settles the request at its share price, you collect the USDC in a separate transaction. If the book's cash is still on the venue, collecting waits until the keeper
+        Once a mark settles the request at its share price, you collect the {sym} in a separate transaction. If the book's cash is still on the venue, collecting waits until the keeper
         brings it back. Claims are never blocked by a pause or a kill.
       </>
     ),
@@ -74,9 +76,10 @@ const STEPS: Step[] = [
 
 /** Five steps in a row on wide screens; `compact` keeps two columns (for narrow containers). */
 export function PositionLifecycle({ className, compact }: { className?: string; compact?: boolean }) {
+  const steps = stepsFor(useSettlementSymbol());
   return (
     <ol className={cx("grid gap-3 sm:grid-cols-2", !compact && "lg:grid-cols-5", className)} aria-label="How a position moves">
-      {STEPS.map((s, i) => (
+      {steps.map((s, i) => (
         <li key={s.title} className={cx("relative flex gap-3 rounded-card border border-line bg-surface p-4 shadow-card", !compact && "lg:flex-col")}>
           <div className={cx("flex shrink-0 items-center gap-2", !compact && "lg:justify-between")}>
             <span className="inline-flex size-9 items-center justify-center rounded-full bg-accent-soft text-accent-text" aria-hidden>
@@ -96,7 +99,7 @@ export function PositionLifecycle({ className, compact }: { className?: string; 
               Shown as <span className="font-medium text-ink-2">{s.shownAs}</span>
             </p>
           </div>
-          {!compact && i < STEPS.length - 1 && (
+          {!compact && i < steps.length - 1 && (
             <svg className="absolute top-1/2 -right-[11px] z-[1] hidden -translate-y-1/2 text-line-strong lg:block" width="10" height="16" viewBox="0 0 10 16" aria-hidden>
               <path d="M2 2l6 6-6 6" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
             </svg>

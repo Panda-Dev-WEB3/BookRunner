@@ -11,7 +11,9 @@ import { USDC_DECIMALS, amountIssue, amountIssueText, formatAmountDisplay, forma
 import { CASH_WAIT_LINE, NOTICE_LINE } from "../../lib/copy";
 import { fmtDuration, fmtSharePrice, fmtUsd, fmtWhen, isoToSec, usdRaw } from "../../lib/format";
 import { redeemSettlesAt } from "../../lib/lowgas";
+import { getSettlementSymbol } from "../../lib/settlementToken";
 import { invalidateWalletBalances } from "../../wallet/balances";
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { TxRunner } from "../../wallet/TxRunner";
 import { WalletButton } from "../../wallet/WalletButton";
 import { AmountInput, Callout, EmptyState, ErrorState, Segmented, SkeletonRows, Spinner, Term, ValueKind, cx } from "../ui";
@@ -21,7 +23,7 @@ import { type TrancheAddresses, invalidateInvestReads } from "./useInvestChain";
 
 type TranchePosition = PositionOut["tranches"][number];
 
-const usdc = (raw: bigint | null | undefined, dp = 2) => (raw == null ? "—" : `${formatAmountDisplay(raw, USDC_DECIMALS, dp)} USDC`);
+const usdc = (raw: bigint | null | undefined, dp = 2) => (raw == null ? "—" : `${formatAmountDisplay(raw, USDC_DECIMALS, dp)} ${getSettlementSymbol()}`);
 const sharesText = (v: string | null | undefined) => (v == null ? "—" : `${fmtUsd(v)} shares`);
 const isPositive = (v: string | null | undefined) => (usdRaw(v) ?? 0n) > 0n;
 
@@ -94,6 +96,7 @@ export function WithdrawPanel(props: {
 
 function PositionCard({ t }: { t: TranchePosition }) {
   const name = TRANCHE_NAME[t.tranche];
+  const sym = useSettlementSymbol();
   const toClaim = hasClaimableAllocation(t);
   return (
     <div className={cx("rounded-card border bg-surface p-4", t.tranche === "senior" ? "border-senior/40" : "border-junior/45")}>
@@ -111,7 +114,7 @@ function PositionCard({ t }: { t: TranchePosition }) {
       <ul className="mt-3 space-y-1 text-[12.5px]">
         {pendingCommitment(t) && (
           <li className="text-ink-2">
-            <span className="num font-medium text-ink">{fmtUsd(t.committedUsd)} USDC</span> waiting in the current round
+            <span className="num font-medium text-ink">{fmtUsd(t.committedUsd)} {sym}</span> waiting in the current round
           </li>
         )}
         {toClaim && t.claimableAllocation && (
@@ -120,14 +123,14 @@ function PositionCard({ t }: { t: TranchePosition }) {
             {isPositive(t.claimableAllocation.refundUsd) ? (
               <>
                 {" "}
-                + <span className="num">{fmtUsd(t.claimableAllocation.refundUsd)}</span> USDC refund
+                + <span className="num">{fmtUsd(t.claimableAllocation.refundUsd)}</span> {sym} refund
               </>
             ) : null}
           </li>
         )}
         {isPositive(t.claimableRedemptionUsd) && (
           <li className="text-good-ink">
-            Ready to collect: <span className="num">{fmtUsd(t.claimableRedemptionUsd)}</span> USDC from withdrawals
+            Ready to collect: <span className="num">{fmtUsd(t.claimableRedemptionUsd)}</span> {sym} from withdrawals
           </li>
         )}
       </ul>
@@ -137,6 +140,7 @@ function PositionCard({ t }: { t: TranchePosition }) {
 
 function ClaimBox(props: { book: BookDetail; ticker: string; addrs: TrancheAddresses; wallet: Address | null; p: PositionOut; cancelled: boolean; onUsed: () => void }) {
   const claim = trpc.tranche.claim.useMutation();
+  const sym = useSettlementSymbol();
   const utils = trpc.useUtils();
   const qc = useQueryClient();
   const [done, setDone] = useState(false);
@@ -157,11 +161,11 @@ function ClaimBox(props: { book: BookDetail; ticker: string; addrs: TrancheAddre
       <p className="mt-1 text-[13px] text-ink-2">
         {props.cancelled
           ? "This book was cancelled at the end of its subscription window, so every commitment can be taken back in full."
-          : `A round or a withdrawal has settled. Collecting is a separate transaction that sends the shares, any refund and any withdrawn USDC to your wallet. ${CASH_WAIT_LINE} Claims are never blocked by a pause or a kill.`}
+          : `A round or a withdrawal has settled. Collecting is a separate transaction that sends the shares, any refund and any withdrawn ${sym} to your wallet. ${CASH_WAIT_LINE} Claims are never blocked by a pause or a kill.`}
       </p>
       {done ? (
         <Callout tone="success" compact className="mt-3" title="Collected">
-          The shares and USDC are in your wallet now.
+          The shares and {sym} are in your wallet now.
         </Callout>
       ) : !claim.data ? (
         <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -202,6 +206,7 @@ function ClaimBox(props: { book: BookDetail; ticker: string; addrs: TrancheAddre
 function RedeemBox(props: { book: BookDetail; ticker: string; addrs: TrancheAddresses; wallet: Address | null; p: PositionOut; now: number }) {
   const withShares = props.p.tranches.filter((t) => isPositive(t.shares));
   const [tranche, setTranche] = useState<TrancheId>(withShares[0]?.tranche ?? "senior");
+  const sym = useSettlementSymbol();
   const [value, setValue] = useState("");
   const [sent, setSent] = useState(false);
   const red = trpc.tranche.redeem.useMutation();
@@ -254,7 +259,7 @@ function RedeemBox(props: { book: BookDetail; ticker: string; addrs: TrancheAddr
       <div>
         <h3 className="text-[15px] font-semibold">Request a withdrawal</h3>
         <p className="mt-1 text-[13px] text-ink-2">
-          You give back shares and receive USDC at the share price of the <Term id="mark">mark</Term> that settles your request. {NOTICE_LINE}
+          You give back shares and receive {sym} at the share price of the <Term id="mark">mark</Term> that settles your request. {NOTICE_LINE}
         </p>
       </div>
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,22rem)]">
@@ -305,7 +310,7 @@ function RedeemBox(props: { book: BookDetail; ticker: string; addrs: TrancheAddr
             {tranche === "senior" || notice <= 0
               ? `${TRANCHE_NAME[tranche]} has no notice period. A request sent now settles at the mark of ${fmtWhen(redeemSettlesAt(nowSec, props.book.markSchedule))}.`
               : `Junior has a ${fmtDuration(notice)} notice period. A request becomes eligible ${fmtDuration(notice)} after you send it, then settles at the first mark after that (${fmtWhen(redeemSettlesAt(nowSec + notice, props.book.markSchedule))} for a request sent now).`}{" "}
-            After it settles, collect the USDC here in a separate transaction. {CASH_WAIT_LINE}
+            After it settles, collect the {sym} here in a separate transaction. {CASH_WAIT_LINE}
           </p>
         </aside>
       </div>
@@ -314,7 +319,7 @@ function RedeemBox(props: { book: BookDetail; ticker: string; addrs: TrancheAddr
         <div className="space-y-3">
           {sent ? (
             <Callout tone="success" title="Withdrawal requested" action={<button type="button" className="btn btn-sm" onClick={() => (setValue(""), reset())}>Request another</button>}>
-              It settles at the mark of {fmtWhen(settlesSec)}. Come back to this tab after that to collect the USDC.
+              It settles at the mark of {fmtWhen(settlesSec)}. Come back to this tab after that to collect the {sym}.
             </Callout>
           ) : (
             <InfoList

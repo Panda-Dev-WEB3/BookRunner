@@ -24,6 +24,7 @@ import {
 } from "../lib/charterForm";
 import { TRANCHE_COPY } from "../lib/copy";
 import { bpsPct, fmtBps, fmtDuration, fmtNum, fmtUsd } from "../lib/format";
+import { useSettlementSymbol } from "../wallet/settlementSymbol";
 import { TxRunner } from "../wallet/TxRunner";
 import { WalletButton } from "../wallet/WalletButton";
 import { useWallet } from "../wallet/WalletContext";
@@ -87,6 +88,7 @@ function DurationInput(props: { id: string; seconds: string; onChange: (s: strin
 
 export function FileCharterPage() {
   const w = useWallet();
+  const sym = useSettlementSymbol();
   const [form, setForm] = useState<CharterForm>(loadDraft);
   const [step, setStep] = useState<StepId>("market");
   const file = trpc.charter.file.useMutation();
@@ -236,10 +238,10 @@ export function FileCharterPage() {
   } else if (step === "capital") {
     body = (
       <div className="grid gap-4 md:grid-cols-2">
-        <Field label="IF size (USDC)" help={FIELD_HELP.ifSizeUsd} error={err("ifSizeUsd")} htmlFor="f-if">
+        <Field label={`IF size (${sym})`} help={FIELD_HELP.ifSizeUsd} error={err("ifSizeUsd")} htmlFor="f-if">
           <input id="f-if" className="field num" inputMode="decimal" value={form.ifSizeUsd} aria-invalid={!!err("ifSizeUsd")} onChange={(e) => set("ifSizeUsd", e.currentTarget.value.replace(/[^\d.]/g, ""))} />
         </Field>
-        <Field label="MM inventory (USDC)" help={FIELD_HELP.mmInventoryUsd} error={err("mmInventoryUsd")} htmlFor="f-mm">
+        <Field label={`MM inventory (${sym})`} help={FIELD_HELP.mmInventoryUsd} error={err("mmInventoryUsd")} htmlFor="f-mm">
           <input id="f-mm" className="field num" inputMode="decimal" value={form.mmInventoryUsd} aria-invalid={!!err("mmInventoryUsd")} onChange={(e) => set("mmInventoryUsd", e.currentTarget.value.replace(/[^\d.]/g, ""))} />
         </Field>
         <div className="rounded-card border border-line bg-surface-2 p-3 md:col-span-2">
@@ -372,7 +374,7 @@ export function FileCharterPage() {
           <Field label="Senior share of fee flow (bps)" help={`${FIELD_HELP.seniorShareBps}: ${bpsPct(Number(form.seniorShareBps))}`} error={err("seniorShareBps")} htmlFor="t-share">
             <input id="t-share" className="field num" inputMode="numeric" value={form.seniorShareBps} onChange={(e) => set("seniorShareBps", e.currentTarget.value.replace(/[^\d]/g, ""))} />
           </Field>
-          <Field label="Per-wallet cap (USDC)" help={FIELD_HELP.perWalletCapUsd} error={err("perWalletCapUsd")} htmlFor="t-wallet">
+          <Field label={`Per-wallet cap (${sym})`} help={FIELD_HELP.perWalletCapUsd} error={err("perWalletCapUsd")} htmlFor="t-wallet">
             <input id="t-wallet" className="field num" inputMode="decimal" value={form.perWalletCapUsd} onChange={(e) => set("perWalletCapUsd", e.currentTarget.value.replace(/[^\d.]/g, ""))} />
           </Field>
           <Field label="Subscription window" help={`${FIELD_HELP.windowSeconds} · ${fmtDuration(Number(form.windowSeconds))}`} error={err("windowSeconds")} htmlFor="t-window">

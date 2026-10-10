@@ -7,7 +7,9 @@ import { describeError } from "../../lib/errors";
 import { tickerOf } from "../../lib/format";
 import type { SeriesKey } from "../../lib/palette";
 import { SERIES_CLASS } from "../../lib/palette";
+import { getSettlementSymbol } from "../../lib/settlementToken";
 import { useBackstopBalance } from "../../wallet/backstop";
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { cx } from "../cx";
 import { Term } from "../Term";
 import { Badge, Callout, Card, Segmented, ValueKind } from "../ui";
@@ -31,10 +33,12 @@ import {
 } from "./sim";
 import { markedBooks, useLiveBooks } from "./useLearnData";
 
-const USDC = (raw: bigint, dp = 2) => `${usdText(raw, dp)} USDC`;
+/** The settlement token's symbol (WaterfallSimulator subscribes, so every part re-renders with it). */
+const sym = () => getSettlementSymbol();
+const amt = (raw: bigint, dp = 2) => `${usdText(raw, dp)} ${sym()}`;
 const whole = (n: number) => n.toLocaleString("en-US", { maximumFractionDigits: 2 });
 /** A deduction: "-20.00 USDC", or "0.00 USDC" when nothing is taken. */
-const minus = (raw: bigint) => (raw > 0n ? `-${USDC(raw)}` : USDC(0n));
+const minus = (raw: bigint) => (raw > 0n ? `-${amt(raw)}` : amt(0n));
 
 // ------------------------------------------------------------------ controls
 function SimField(props: {
@@ -63,7 +67,7 @@ function SimField(props: {
         {props.editable ? (
           <span className="flex items-center gap-1.5">
             <input
-              aria-label={`${props.name}, exact amount in USDC`}
+              aria-label={`${props.name}, exact amount in ${sym()}`}
               className="field num !min-h-8 w-28 !px-2 !py-1 text-right !text-[13px]"
               inputMode="numeric"
               autoComplete="off"
@@ -77,7 +81,7 @@ function SimField(props: {
               }}
               onBlur={() => setText(null)}
             />
-            <span className="text-[12px] text-muted">USDC</span>
+            <span className="text-[12px] text-muted">{sym()}</span>
           </span>
         ) : (
           <output htmlFor={props.id} className="num text-[13px] font-medium text-ink">
@@ -211,12 +215,12 @@ function FeeResult({ o, hurdleBps, carryBps, expenseCapBps }: { o: FeeOutcome; h
         : `${pctText(hurdleBps)} of what is left after carry, set in the charter as Senior's hurdle share.`;
   return (
     <>
-      <div className="text-[12.5px] font-medium text-ink-2">Split of {USDC(o.gross)} of fee flow</div>
+      <div className="text-[12.5px] font-medium text-ink-2">Split of {amt(o.gross)} of fee flow</div>
       <StackBar
         className="mt-2"
         segs={segs}
         total={o.gross}
-        label={`Expenses ${USDC(o.expenses)}, carry ${USDC(o.carry)}, Senior ${USDC(o.senior)}, Junior ${USDC(o.junior)}`}
+        label={`Expenses ${amt(o.expenses)}, carry ${amt(o.carry)}, Senior ${amt(o.senior)}, Junior ${amt(o.junior)}`}
       />
       <LegendRow segs={segs} />
 
@@ -225,7 +229,7 @@ function FeeResult({ o, hurdleBps, carryBps, expenseCapBps }: { o: FeeOutcome; h
         <Step
           n={1}
           title="Fee flow comes in"
-          amount={USDC(o.gross)}
+          amount={amt(o.gross)}
           from={0n}
           to={o.gross}
           scale={o.gross}
@@ -243,8 +247,8 @@ function FeeResult({ o, hurdleBps, carryBps, expenseCapBps }: { o: FeeOutcome; h
           badge={o.expensesCapped ? <Badge tone="warn" size="sm">Capped</Badge> : undefined}
           note={
             o.expensesCapped
-              ? `${USDC(o.expensesRequested)} was asked for, but expenses are capped at ${pctText(expenseCapBps)} of fee flow (${USDC(o.expenseCap)}).`
-              : `Oracle and keeper costs, capped at ${pctText(expenseCapBps)} of fee flow. ${USDC(o.net)} is left.`
+              ? `${amt(o.expensesRequested)} was asked for, but expenses are capped at ${pctText(expenseCapBps)} of fee flow (${amt(o.expenseCap)}).`
+              : `Oracle and keeper costs, capped at ${pctText(expenseCapBps)} of fee flow. ${amt(o.net)} is left.`
           }
         />
         <Step
@@ -255,19 +259,19 @@ function FeeResult({ o, hurdleBps, carryBps, expenseCapBps }: { o: FeeOutcome; h
           to={o.net}
           scale={o.gross}
           seg={{ key: "carry", series: "bkrn", amount: o.carry, label: "" }}
-          note={`${pctText(carryBps)} of what is left after expenses. ${USDC(o.carryToBuyback)} buys BKRN for stakers and ${USDC(o.carryToBackstop)} goes to the backstop pool.`}
+          note={`${pctText(carryBps)} of what is left after expenses. ${amt(o.carryToBuyback)} buys BKRN for stakers and ${amt(o.carryToBackstop)} goes to the backstop pool.`}
         />
         <Step
           n={4}
           title={<Term id="hurdle">Senior's share of fee flow</Term>}
-          amount={USDC(o.senior)}
+          amount={amt(o.senior)}
           from={o.junior}
           to={o.toTranches}
           scale={o.gross}
           seg={segs[3] as Seg}
           note={seniorNote}
         />
-        <Step n={5} title="Junior residual" amount={USDC(o.junior)} from={0n} to={o.junior} scale={o.gross} seg={segs[4] as Seg} note="Everything left after Senior's share goes to Junior." />
+        <Step n={5} title="Junior residual" amount={amt(o.junior)} from={0n} to={o.junior} scale={o.gross} seg={segs[4] as Seg} note="Everything left after Senior's share goes to Junior." />
       </ol>
       <BeforeAfter
         rows={[
@@ -293,12 +297,12 @@ function LossResult({ o }: { o: LossOutcome }) {
   const legend: Seg[] = [{ key: "loss", series: "loss", amount: o.loss, label: "Loss" }, segs[1] as Seg, segs[4] as Seg, segs[3] as Seg];
   return (
     <>
-      <div className="text-[12.5px] font-medium text-ink-2">Book capital of {USDC(capital, 0)}, Junior first in line</div>
+      <div className="text-[12.5px] font-medium text-ink-2">Book capital of {amt(capital, 0)}, Junior first in line</div>
       <StackBar
         className="mt-2"
         segs={segs}
         total={capital}
-        label={`Loss ${USDC(o.loss)}: Junior absorbs ${USDC(o.juniorLoss)}, Senior absorbs ${USDC(o.seniorLoss)}, backstop covers ${USDC(o.backstopCovered)}`}
+        label={`Loss ${amt(o.loss)}: Junior absorbs ${amt(o.juniorLoss)}, Senior absorbs ${amt(o.seniorLoss)}, backstop covers ${amt(o.backstopCovered)}`}
       />
       <LegendRow segs={legend} />
 
@@ -322,7 +326,7 @@ function LossResult({ o }: { o: LossOutcome }) {
           to={o.juniorLoss}
           scale={o.juniorNav > 0n ? o.juniorNav : 1n}
           seg={{ key: "j", series: "junior", amount: o.juniorLoss, label: "" }}
-          note={o.juniorNav === 0n ? "The book has no Junior, so nothing stands in front of Senior." : `Junior NAV goes from ${USDC(o.juniorNav, 0)} to ${USDC(o.juniorAfter, 0)}.`}
+          note={o.juniorNav === 0n ? "The book has no Junior, so nothing stands in front of Senior." : `Junior NAV goes from ${amt(o.juniorNav, 0)} to ${amt(o.juniorAfter, 0)}.`}
         />
         <Step
           n={3}
@@ -337,7 +341,7 @@ function LossResult({ o }: { o: LossOutcome }) {
         <Step
           n={4}
           title={<Term id="backstop">Backstop covers, up to the pool</Term>}
-          amount={USDC(o.backstopCovered)}
+          amount={amt(o.backstopCovered)}
           from={0n}
           to={o.backstopCovered}
           scale={o.backstopPool > 0n ? o.backstopPool : 1n}
@@ -347,7 +351,7 @@ function LossResult({ o }: { o: LossOutcome }) {
               ? "Not needed: the backstop only steps in once Junior is used up."
               : o.backstopPool === 0n
                 ? "The pool is empty, so it covers nothing."
-                : `Pays Senior's shortfall from the shared pool, never more than the ${USDC(o.backstopPool, 0)} it holds.`
+                : `Pays Senior's shortfall from the shared pool, never more than the ${amt(o.backstopPool, 0)} it holds.`
           }
         />
         <Step
@@ -381,6 +385,7 @@ function LossResult({ o }: { o: LossOutcome }) {
 type PresetStatus = { kind: "example" } | { kind: "loading"; bookId: number } | { kind: "book"; bookId: number; label: string } | { kind: "error"; message: string };
 
 export function WaterfallSimulator() {
+  useSettlementSymbol();
   const id = useId();
   const [input, setInput] = useState<SimInput>(DEFAULT_SIM);
   const [mode, setMode] = useState<SimMode>("fees");
@@ -441,7 +446,7 @@ export function WaterfallSimulator() {
               }}
             />
             <p className="mt-1.5 text-[12px] leading-snug text-muted" aria-live="polite">
-              {preset.kind === "example" && "A round 100,000 USDC book with the testnet charter terms."}
+              {preset.kind === "example" && `A round 100,000 ${sym()} book with the testnet charter terms.`}
               {preset.kind === "loading" && "Loading the book's latest mark and charter terms..."}
               {preset.kind === "book" && (
                 <>
@@ -461,7 +466,7 @@ export function WaterfallSimulator() {
             min={1_000}
             max={2_000_000}
             step={1_000}
-            format={(v) => `${whole(v)} USDC`}
+            format={(v) => `${whole(v)} ${sym()}`}
             onChange={(v) => set({ capitalUsd: v, lossUsd: Math.min(input.lossUsd, v) })}
           />
           <SimField
@@ -506,7 +511,7 @@ export function WaterfallSimulator() {
                 min={0}
                 max={100_000}
                 step={50}
-                format={(v) => `${whole(v)} USDC`}
+                format={(v) => `${whole(v)} ${sym()}`}
                 onChange={(v) => set({ feeFlowUsd: v })}
               />
               <SimField
@@ -518,7 +523,7 @@ export function WaterfallSimulator() {
                 min={0}
                 max={10_000}
                 step={5}
-                format={(v) => `${whole(v)} USDC`}
+                format={(v) => `${whole(v)} ${sym()}`}
                 onChange={(v) => set({ expensesUsd: v })}
                 help={`Oracle and keeper gas. Never more than ${pctText(terms.expenseCapBps)} of the fee flow is paid.`}
               />
@@ -546,7 +551,7 @@ export function WaterfallSimulator() {
                 min={0}
                 max={input.capitalUsd}
                 step={Math.max(100, Math.round(input.capitalUsd / 200 / 100) * 100)}
-                format={(v) => `${whole(v)} USDC`}
+                format={(v) => `${whole(v)} ${sym()}`}
                 onChange={(v) => set({ lossUsd: v })}
               />
               <SimField
@@ -558,12 +563,12 @@ export function WaterfallSimulator() {
                 min={0}
                 max={1_000_000}
                 step={500}
-                format={(v) => `${whole(v)} USDC`}
+                format={(v) => `${whole(v)} ${sym()}`}
                 onChange={(v) => set({ backstopUsd: v })}
                 help={
                   poolRaw !== null ? (
                     <>
-                      The testnet pool holds {USDC(poolRaw)} right now.{" "}
+                      The testnet pool holds {amt(poolRaw)} right now.{" "}
                       <button type="button" className="link" onClick={() => set({ backstopUsd: Number(poolRaw) / 1e6 })}>
                         Use it
                       </button>

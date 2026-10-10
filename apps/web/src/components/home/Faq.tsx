@@ -8,6 +8,7 @@ import { LEGAL } from "../../lib/copy";
 import { nextMarkLabel } from "../../lib/lowgas";
 import { appChain } from "../../wallet/chains";
 import { isTestChain } from "../../wallet/network";
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { IconArrowRight } from "../icons";
 import { Accordion, type AccordionItem, Callout, Card, ExternalLink, Section, Term } from "../ui";
 import { useMarkCadence, useProtocolTerms } from "../ProtocolTerms";
@@ -17,7 +18,8 @@ import { summarizeBooks } from "./model";
 export function Faq() {
   const terms = useProtocolTerms();
   const cadence = useMarkCadence();
-  const items = faqItems({ testnet: isTestChain, chainName: appChain.name, chainId: appChain.id, carryPct: terms.carry, cadence });
+  const settlementSymbol = useSettlementSymbol();
+  const items = faqItems({ testnet: isTestChain, chainName: appChain.name, chainId: appChain.id, carryPct: terms.carry, cadence, settlementSymbol });
   const accordion: AccordionItem[] = items.map((f) => ({ id: f.id, title: f.question, content: <FaqAnswer item={f} /> }));
   return (
     <Section id="faq" eyebrow="FAQ" title="Questions, answered" lead="Short answers to what people ask first. Every term with a dotted underline opens its definition." bodyClassName="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_340px] lg:gap-8">

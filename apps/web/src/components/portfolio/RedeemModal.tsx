@@ -8,6 +8,7 @@ import { trpc } from "../../api/trpc";
 import { USDC_DECIMALS, amountIssue, formatAmountInput, parseAmount } from "../../lib/amount";
 import { COLLECT_LINE, NOTICE_LINE } from "../../lib/copy";
 import { fmtDuration, fmtSharePrice, fmtWhen, isoToSec, usdRaw } from "../../lib/format";
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { TxRunner } from "../../wallet/TxRunner";
 import { Term } from "../Term";
 import { AmountInput, Callout, ErrorState, KV, Modal, TrancheBadge } from "../ui";
@@ -17,6 +18,7 @@ import { type TrancheHolding, sharesValue } from "./model";
 
 export function RedeemModal(props: { open: boolean; onClose: () => void; bookId: number; ticker: string; holding: TrancheHolding | null; wallet: Address }) {
   const { open, bookId, wallet, holding } = props;
+  const sym = useSettlementSymbol();
   const [amount, setAmount] = useState("");
   const red = trpc.tranche.redeem.useMutation();
   const utils = trpc.useUtils();
@@ -111,7 +113,7 @@ export function RedeemModal(props: { open: boolean; onClose: () => void; bookId:
           </div>
         )}
         <Callout tone="info" compact title={<Term id="redemptionNotice">Redemption notice</Term>}>
-          {NOTICE_LINE} Once settled, the USDC shows here as ready to claim.
+          {NOTICE_LINE} Once settled, the {sym} shows here as ready to claim.
         </Callout>
       </div>
     </Modal>

@@ -21,6 +21,7 @@ import { termAnchor } from "../lib/glossary";
 import { cadenceTitle } from "../lib/lowgas";
 import { appChain } from "../wallet/chains";
 import { isTestChain } from "../wallet/network";
+import { useSettlementSymbol } from "../wallet/settlementSymbol";
 import { useTopUpRounds } from "../wallet/topUp";
 import { useOnboarding } from "../wallet/useOnboarding";
 import { useWallet } from "../wallet/WalletContext";
@@ -35,6 +36,7 @@ export function InvestPage() {
   const rounds = useTrancheRounds(books);
   const w = useWallet();
   const ob = useOnboarding();
+  const sym = useSettlementSymbol();
   const carry = proto.data?.carryBps != null ? pctOfBps(proto.data.carryBps) : null;
   const cadence = list.data?.[0]?.markSchedule.cadence ?? null;
   const cadenceLine = `Live data from ${appChain.name}${cadence ? ` · ${cadenceTitle(cadence).toLowerCase()}` : ""}`;
@@ -47,17 +49,17 @@ export function InvestPage() {
         <p>
           A deposit made during a <Term id="topUpRound">top-up round</Term> waits in the tranche's escrow. At the first <Term id="mark">mark</Term> after the round ends, the round settles at that
           mark's share price and you collect your shares, and any refund, from the book's Withdraw tab. In a new book's <Term id="subscriptionWindow">subscription window</Term>, shares start at
-          1.00 USDC each when the window closes.
+          1.00 {sym} each when the window closes.
         </p>
       ),
     },
     {
       id: "over",
-      title: "What if more USDC is committed than a round can take?",
+      title: `What if more ${sym} is committed than a round can take?`,
       content: (
         <p>
           Each tranche has a capacity for the round, and Senior must also stay under the book's Senior cap. If commitments exceed the room, every deposit is accepted pro-rata and the rest is
-          refunded in USDC when you collect.
+          refunded in {sym} when you collect.
         </p>
       ),
     },
@@ -66,7 +68,7 @@ export function InvestPage() {
       title: "Can I cancel a deposit?",
       content: (
         <p>
-          No. A deposit cannot be cancelled or withdrawn before its round settles at the first <Term id="mark">mark</Term> after the round ends; rounds cannot be closed early, so the USDC stays in
+          No. A deposit cannot be cancelled or withdrawn before its round settles at the first <Term id="mark">mark</Term> after the round ends; rounds cannot be closed early, so the {sym} stays in
           escrow until then. Withdrawals apply to shares after settlement. If the book retires first, the round is cancelled and every deposit is refunded in full.
         </p>
       ),
@@ -77,7 +79,7 @@ export function InvestPage() {
       content: (
         <p>
           Once you hold shares, you can ask at any time, and the request is always accepted: <Term id="redemptionNotice">notice is not a gate</Term>. Senior settles at the next mark. Junior settles at the first mark
-          after its notice period, which each book sets in its charter. You receive the share price of the mark that settles your request, which can be higher or lower than today's. Settling fixes what you are owed; you then collect the USDC in a separate
+          after its notice period, which each book sets in its charter. You receive the share price of the mark that settles your request, which can be higher or lower than today's. Settling fixes what you are owed; you then collect the {sym} in a separate
           transaction, which waits if the book's cash is still on the venue.
         </p>
       ),
@@ -129,7 +131,7 @@ export function InvestPage() {
         headerSize="lg"
         eyebrow="Invest"
         title="Underwrite a market's book"
-        lead="Each book funds one perp market's insurance fund and market-making inventory, and receives that market's fee flow. Pick a book, choose Senior or Junior, and deposit USDC while a deposit round is open."
+        lead={`Each book funds one perp market's insurance fund and market-making inventory, and receives that market's fee flow. Pick a book, choose Senior or Junior, and deposit ${sym} while a deposit round is open.`}
       >
         <ol className="grid gap-3 sm:grid-cols-3">
           {INVEST_STEPS.map((s) => (

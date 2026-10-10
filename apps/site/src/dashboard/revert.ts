@@ -10,6 +10,7 @@ import { riskCommitteeAbi } from "@bookrunner/shared/abi/RiskCommittee";
 import { trancheAbi } from "@bookrunner/shared/abi/Tranche";
 import { type Abi, type Hex, decodeErrorResult } from "viem";
 import { BKRN_DECIMALS, USDC_DECIMALS, formatAmountDisplay } from "./amount";
+import { settlementSymbol } from "./token";
 import { dateTime } from "./format";
 
 type AbiItem = Abi[number];
@@ -45,14 +46,14 @@ export function findRevertData(e: unknown, depth = 0): Hex | null {
   return null;
 }
 
-const usdc = (v: unknown) => `${formatAmountDisplay(typeof v === "bigint" ? v : 0n, USDC_DECIMALS)} USDC`;
+const usdc = (v: unknown) => `${formatAmountDisplay(typeof v === "bigint" ? v : 0n, USDC_DECIMALS)} ${settlementSymbol()}`;
 const bkrn = (v: unknown) => `${formatAmountDisplay(typeof v === "bigint" ? v : 0n, BKRN_DECIMALS)} BKRN`;
 
 /** Plain-language reason for a decoded custom error (null for one without a dedicated message). */
 export function revertMessage(name: string, args: readonly unknown[] = []): string | null {
   switch (name) {
     case "InsufficientLiquidity":
-      return `The book has not moved enough USDC to the tranche yet (${usdc(args[0])} needed, ${usdc(args[1])} available): its cash is still on the venue. Try again after the next mark.`;
+      return `The book has not moved enough ${settlementSymbol()} to the tranche yet (${usdc(args[0])} needed, ${usdc(args[1])} available): its cash is still on the venue. Try again after the next mark.`;
     case "DepositsClosed":
       return "Deposits into this tranche are closed: no subscription window or top-up round is open, or deposits are paused.";
     case "WalletCapExceeded":

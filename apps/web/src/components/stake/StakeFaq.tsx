@@ -33,7 +33,7 @@ export function StakeFaq({ cooldownSec }: { cooldownSec: number | null }) {
       title: "Where does the BKRN I can claim come from?",
       content: (
         <p>
-          Each book pays <CarryPct /> of its fee flow, after expenses, as <Term id="carry">protocol carry</Term>. The fee router sends half to the USDC backstop pool. A keeper swaps the other half for BKRN on
+          Each book pays <CarryPct /> of its fee flow, after expenses, as <Term id="carry">protocol carry</Term>. The fee router sends half to the backstop pool. A keeper swaps the other half for BKRN on
           the market and hands it to the staking contract, which pays it out gradually over a set period (7 days by default) to all staked BKRN that is not cooling down, in proportion to each stake. Your part
           waits in the contract until you claim it.
         </p>
@@ -54,7 +54,7 @@ export function StakeFaq({ cooldownSec }: { cooldownSec: number | null }) {
       title: "Can I lose staked BKRN?",
       content: (
         <p>
-          Book losses never use staked BKRN: they fall on Junior, then Senior, then the USDC <Term id="backstop">backstop</Term> pool. Only stake locked as a bond can be slashed, and only by the
+          Book losses never use staked BKRN: they fall on Junior, then Senior, then the <Term id="backstop">backstop</Term> pool. Only stake locked as a bond can be slashed, and only by the
           contract that locked it. Plain stake cannot be slashed. The market price of BKRN can still fall, which is a separate risk.
         </p>
       ),

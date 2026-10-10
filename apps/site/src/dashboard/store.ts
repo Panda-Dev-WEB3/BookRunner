@@ -2,8 +2,22 @@
 // Loaders record their own error and never throw; a re-render is requested only when data changed.
 import type { Address } from "viem";
 import { health, query } from "./api";
-import { type Balances, type ProtocolContracts, type StakePosition, type StakingProtocol, canMintTestUsdc, readBalances, readMaxTopUpWindow, readProtocol, readStakePosition, readStakingProtocol, readTopUp } from "./chain";
+import {
+  type Balances,
+  type ProtocolContracts,
+  type StakePosition,
+  type StakingProtocol,
+  canMintTestUsdc,
+  readBalances,
+  readMaxTopUpWindow,
+  readProtocol,
+  readStakePosition,
+  readStakingProtocol,
+  readTokenSymbol,
+  readTopUp,
+} from "./chain";
 import type { TopUpRound } from "./model";
+import { setSettlementSymbol } from "./token";
 import type {
   AgentListOut,
   BookDetail,
@@ -42,6 +56,8 @@ export interface Store {
   charterDetails: Record<number, CharterDetail>;
   events: EventItem[] | null;
   protocol: ProtocolContracts | null;
+  /** symbol() of the settlement token (protocol.usdc), sanitized; null until read (labels show "USDC"). */
+  settlementSymbol: string | null;
   topUps: Record<number, TopUpRound | null>;
   maxTopUpWindow: Record<number, number | null>;
   /** Positions of `positionsOwner` per book. */
@@ -93,6 +109,7 @@ export const store: Store = {
   charterDetails: {},
   events: null,
   protocol: null,
+  settlementSymbol: null,
   topUps: {},
   maxTopUpWindow: {},
   positions: {},
@@ -175,6 +192,13 @@ export const loadProtocol = () => {
   const first = store.books?.[0]?.components.book;
   if (!first) return Promise.resolve();
   return load("protocol", () => readProtocol(first as Address), (v) => (store.protocol = v));
+};
+
+/** Reads the settlement token's symbol() once; every label then shows it (token.ts). */
+export const loadSettlementSymbol = () => {
+  const token = store.protocol?.usdc;
+  if (!token || store.settlementSymbol !== null) return Promise.resolve();
+  return load("settlementSymbol", () => readTokenSymbol(token), (v) => (store.settlementSymbol = setSettlementSymbol(v)));
 };
 
 export const loadTopUp = (b: BookListItem) => load(`topup:${b.bookId}`, () => readTopUp(b.components.book as Address), (v) => (store.topUps[b.bookId] = v));

@@ -5,6 +5,7 @@ import { useNow } from "../../api/hooks";
 import { LIVE_VS_MARKED } from "../../lib/copy";
 import { DASH, fmtDateTime, fmtUsd, tickerOf } from "../../lib/format";
 import { cadenceTitle, nextMarkLabel } from "../../lib/lowgas";
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { cx } from "../cx";
 import { IconArrowRight, IconCheck } from "../icons";
 import { Term } from "../Term";
@@ -76,6 +77,7 @@ function MerkleDiagram() {
 function LatestMark() {
   const { list, book, detail } = useShowcaseBook();
   const now = useNow(1_000);
+  const sym = useSettlementSymbol();
   if (list.isLoading || (book && detail.isLoading)) return <SkeletonRows rows={6} />;
   if (list.error && !list.data) return <ErrorState error={list.error} onRetry={() => void list.refetch()} compact />;
   if (!book) return <p className="text-[13px] text-muted">No book has a signed mark yet.</p>;
@@ -93,11 +95,11 @@ function LatestMark() {
             <span key="nav">
               <Term id="nav">NAV</Term>
             </span>,
-            m ? `${fmtUsd(m.navUsd)} USDC` : DASH,
+            m ? `${fmtUsd(m.navUsd)} ${sym}` : DASH,
           ],
-          ["Senior NAV", m ? `${fmtUsd(m.seniorNavUsd)} USDC` : DASH],
-          ["Junior NAV", m ? `${fmtUsd(m.juniorNavUsd)} USDC` : DASH],
-          ["P&L over the period", m?.pnlUsd ? `${fmtUsd(m.pnlUsd, { signed: true })} USDC` : DASH],
+          ["Senior NAV", m ? `${fmtUsd(m.seniorNavUsd)} ${sym}` : DASH],
+          ["Junior NAV", m ? `${fmtUsd(m.juniorNavUsd)} ${sym}` : DASH],
+          ["P&L over the period", m?.pnlUsd ? `${fmtUsd(m.pnlUsd, { signed: true })} ${sym}` : DASH],
           [
             <span key="root">
               <Term id="merkleReceipt">Receipts</Term> root

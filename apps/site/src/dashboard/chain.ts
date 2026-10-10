@@ -8,6 +8,7 @@ import { bookAbi } from "@bookrunner/shared/abi/Book";
 import { type Address, type Hex, createPublicClient, defineChain, encodeFunctionData, erc20Abi, getAddress, http } from "viem";
 import { CHAIN } from "./config";
 import { type TopUpRound, parseTopUp } from "./model";
+import { sanitizeTokenSymbol } from "./token";
 import { MOCK_MINT_ABI, TEST_USDC_AMOUNT } from "./txs";
 
 export const appChain = defineChain({
@@ -87,6 +88,11 @@ export async function readBalances(me: Address, usdc: Address | null, bkrn: Addr
   const bal = (t: Address | null) => (t ? soft(publicClient.readContract({ address: t, abi: erc20Abi, functionName: "balanceOf", args: [me] })) : Promise.resolve(null));
   const [eth, u, b] = await Promise.all([soft(publicClient.getBalance({ address: me })), bal(usdc), bal(bkrn)]);
   return { eth, usdc: u, bkrn: b };
+}
+
+/** ERC-20 symbol() of the settlement token (BookrunnerConfig.usdc()), sanitized for display. */
+export async function readTokenSymbol(token: Address): Promise<string> {
+  return sanitizeTokenSymbol(await publicClient.readContract({ address: token, abi: erc20Abi, functionName: "symbol" }));
 }
 
 /** eth_call of MockERC20.mint(self, 10,000e6): true only where the token's mint is open (test networks). */

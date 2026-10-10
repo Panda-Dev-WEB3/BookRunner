@@ -1,6 +1,7 @@
 // "File a charter" form model: human-unit form state -> charter.file draft input, with client-side
 // hints that mirror MarketCharter.validate (the API and the chain stay authoritative).
 import type { CharterDraftInput } from "./api-types";
+import { getSettlementSymbol } from "./settlementToken";
 
 export type HedgeVenue = "UNIV3" | "UNIV4" | "ORDERLY" | "ENGINE";
 export type SessionsPreset = "24x5" | "nyse_rth" | "24x7";
@@ -179,7 +180,7 @@ export function formIssues(f: CharterForm): FieldIssue[] {
   usdField("ifSizeUsd", f.ifSizeUsd, "Insurance fund size", true);
   usdField("mmInventoryUsd", f.mmInventoryUsd, "MM inventory");
   if (USD_RE.test(f.ifSizeUsd.trim()) && Number(f.ifSizeUsd) < VENUE_MIN_IF_USD[f.venue]) {
-    add("ifSizeUsd", `Below the venue minimum of ${VENUE_MIN_IF_USD[f.venue].toLocaleString("en-US")} USDC (devnet default; the chain value applies)`);
+    add("ifSizeUsd", `Below the venue minimum of ${VENUE_MIN_IF_USD[f.venue].toLocaleString("en-US")} ${getSettlementSymbol()} (devnet default; the chain value applies)`);
   }
 
   const m = f.mandate;

@@ -5,6 +5,7 @@
 import { type Hex, decodeErrorResult, parseAbi } from "viem";
 import { BKRN_DECIMALS, USDC_DECIMALS, formatAmountDisplay } from "./amount";
 import { fmtWhen } from "./format";
+import { getSettlementSymbol } from "./settlementToken";
 
 export const REVERT_ABI = parseAbi([
   "error InsufficientLiquidity(uint256 needed, uint256 available)",
@@ -38,14 +39,14 @@ export function findRevertData(e: unknown, depth = 0): Hex | null {
   return null;
 }
 
-const usdc = (v: unknown) => `${formatAmountDisplay(typeof v === "bigint" ? v : 0n, USDC_DECIMALS)} USDC`;
+const usdc = (v: unknown) => `${formatAmountDisplay(typeof v === "bigint" ? v : 0n, USDC_DECIMALS)} ${getSettlementSymbol()}`;
 const bkrn = (v: unknown) => `${formatAmountDisplay(typeof v === "bigint" ? v : 0n, BKRN_DECIMALS)} BKRN`;
 
 /** Plain-language reason for a decoded custom error (null for an unknown one). */
 export function revertMessage(name: string, args: readonly unknown[] = []): string | null {
   switch (name) {
     case "InsufficientLiquidity":
-      return `The book has not moved enough USDC to the tranche yet (${usdc(args[0])} needed, ${usdc(args[1])} available): its cash is still on the venue. Collecting waits until the keeper brings it back; try again after the next mark.`;
+      return `The book has not moved enough ${getSettlementSymbol()} to the tranche yet (${usdc(args[0])} needed, ${usdc(args[1])} available): its cash is still on the venue. Collecting waits until the keeper brings it back; try again after the next mark.`;
     case "DepositsClosed":
       return "Deposits into this tranche are closed right now: the round has ended or deposits are paused. Review the deposit again.";
     case "WalletCapExceeded":

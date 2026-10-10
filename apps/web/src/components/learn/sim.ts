@@ -6,6 +6,7 @@ import { checkQuote } from "@bookrunner/shared/mandate";
 import type { Mandate } from "@bookrunner/shared/types";
 import { BPS, USD, WAD } from "@bookrunner/shared/units";
 import { applyMarkPnl, drawdownKill, splitDistribution } from "@bookrunner/shared/waterfall";
+import { getSettlementSymbol } from "../../lib/settlementToken";
 
 /** Protocol defaults on BookrunnerConfig (ARCHITECTURE.md §2.1): carry 10% of net fee flow, expenses capped at 20%. */
 export const PROTOCOL_DEFAULTS = { carryBps: 1_000, expenseCapBps: 2_000 } as const;
@@ -214,25 +215,25 @@ export function pctText(bps: number): string {
 }
 
 /** Plain-language summary of a fee-flow period (the simulator's headline). */
-export function feeSentence(o: FeeOutcome): string {
+export function feeSentence(o: FeeOutcome, sym: string = getSettlementSymbol()): string {
   if (o.gross === 0n) return "No fee flow this period, so nothing moves down the waterfall.";
-  const base = `From ${usdText(o.gross)} USDC of fee flow, Senior earned ${usdText(o.senior)} USDC and Junior earned ${usdText(o.junior)} USDC.`;
-  const protocol = ` Expenses took ${usdText(o.expenses)} USDC and the protocol carry ${usdText(o.carry)} USDC.`;
+  const base = `From ${usdText(o.gross)} ${sym} of fee flow, Senior earned ${usdText(o.senior)} ${sym} and Junior earned ${usdText(o.junior)} ${sym}.`;
+  const protocol = ` Expenses took ${usdText(o.expenses)} ${sym} and the protocol carry ${usdText(o.carry)} ${sym}.`;
   if (o.rule === "all-junior") return `${base}${protocol} With no Senior shares in the book, Junior receives everything left.`;
   if (o.rule === "all-senior") return `${base}${protocol} With no Junior shares in the book, Senior receives everything left.`;
   return `${base}${protocol}`;
 }
 
 /** Plain-language summary of a loss at the mark. */
-export function lossSentence(o: LossOutcome): string {
+export function lossSentence(o: LossOutcome, sym: string = getSettlementSymbol()): string {
   if (o.loss === 0n) return "No loss this period, so every tranche keeps its NAV.";
-  let s = `Junior absorbed ${usdText(o.juniorLoss)} USDC of the ${usdText(o.loss)} USDC loss.`;
+  let s = `Junior absorbed ${usdText(o.juniorLoss)} ${sym} of the ${usdText(o.loss)} ${sym} loss.`;
   if (o.seniorLoss === 0n) s += " Senior lost nothing, because Junior still had NAV left.";
   else {
-    s += ` Junior is used up, so Senior absorbed ${usdText(o.seniorLoss)} USDC.`;
+    s += ` Junior is used up, so Senior absorbed ${usdText(o.seniorLoss)} ${sym}.`;
     s +=
       o.backstopCovered > 0n
-        ? ` The backstop covered ${usdText(o.backstopCovered)} USDC of that, up to what the pool holds.`
+        ? ` The backstop covered ${usdText(o.backstopCovered)} ${sym} of that, up to what the pool holds.`
         : " The backstop pool was empty, so it covered nothing.";
   }
   return s;

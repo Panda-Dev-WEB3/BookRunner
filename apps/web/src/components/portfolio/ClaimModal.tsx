@@ -7,6 +7,7 @@ import type { Address } from "viem";
 import { trpc } from "../../api/trpc";
 import { CASH_WAIT_LINE } from "../../lib/copy";
 import { usdRaw } from "../../lib/format";
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { TxRunner } from "../../wallet/TxRunner";
 import { Callout, ErrorState, KV, Modal, SkeletonRows } from "../ui";
 import { TRANCHE_NAME, shares, usd } from "./display";
@@ -14,6 +15,7 @@ import { refreshAfterTx } from "./hooks";
 
 export function ClaimModal(props: { open: boolean; onClose: () => void; bookId: number | null; ticker: string; wallet: Address }) {
   const claim = trpc.tranche.claim.useMutation();
+  const sym = useSettlementSymbol();
   const utils = trpc.useUtils();
   const qc = useQueryClient();
   const { bookId, open, wallet } = props;
@@ -35,7 +37,7 @@ export function ClaimModal(props: { open: boolean; onClose: () => void; bookId: 
     if (cancelled > 0n) out.push([`${name}: refund of a cancelled round`, usd(cancelled)]);
     if (allocShares > 0n) out.push([`${name}: allocated shares`, shares(allocShares)]);
     if (refund > 0n) out.push([`${name}: refund of the part not accepted`, usd(refund)]);
-    if (redeemed > 0n) out.push([`${name}: USDC from settled redemptions`, usd(redeemed)]);
+    if (redeemed > 0n) out.push([`${name}: ${sym} from settled redemptions`, usd(redeemed)]);
     return out;
   });
 

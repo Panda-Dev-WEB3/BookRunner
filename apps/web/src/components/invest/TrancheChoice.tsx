@@ -6,6 +6,7 @@ import type { BookDetail } from "../../lib/api-types";
 import { SPLIT_LINE, SPONSOR_SKIN_SHORT } from "../../lib/copy";
 import { fmtDuration, fmtSharePrice } from "../../lib/format";
 import { cadenceTitle } from "../../lib/lowgas";
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { IconCheck } from "../icons";
 import { ProgressBar, Term, cx } from "../ui";
 import { TrancheSwatch } from "./InvestBits";
@@ -45,6 +46,7 @@ export interface TrancheChoiceProps {
 
 export function TrancheChoice(props: TrancheChoiceProps) {
   const c = props.book.charter;
+  const sym = useSettlementSymbol();
   const split = c ? distributionShares(c.seniorHurdleBps) : null;
   const cadence = cadenceTitle(props.book.markSchedule.cadence).toLowerCase();
   const notice = c ? fmtDuration(c.juniorNoticeSeconds) : null;
@@ -63,14 +65,14 @@ export function TrancheChoice(props: TrancheChoiceProps) {
         <Term key="t" id="redemptionNotice">
           Withdrawals
         </Term>,
-        `No notice period: settles at the next mark (${cadence}), then you collect the USDC`,
+        `No notice period: settles at the next mark (${cadence}), then you collect the ${sym}`,
       ],
       [
         <Term key="t" id="sharePrice">
           Share price
         </Term>,
         <span key="v" className="num">
-          {fmtSharePrice(props.book.seniorSharePrice, 6)} USDC <span className="text-muted">at the last mark</span>
+          {fmtSharePrice(props.book.seniorSharePrice, 6)} {sym} <span className="text-muted">at the last mark</span>
         </span>,
       ],
     ],
@@ -87,14 +89,14 @@ export function TrancheChoice(props: TrancheChoiceProps) {
         <Term key="t" id="redemptionNotice">
           Withdrawals
         </Term>,
-        notice && notice !== "none" ? `${notice} notice, then settles at the next mark (${cadence}); you then collect the USDC` : `Settles at the next mark (${cadence}); you then collect the USDC`,
+        notice && notice !== "none" ? `${notice} notice, then settles at the next mark (${cadence}); you then collect the ${sym}` : `Settles at the next mark (${cadence}); you then collect the ${sym}`,
       ],
       [
         <Term key="t" id="sharePrice">
           Share price
         </Term>,
         <span key="v" className="num">
-          {fmtSharePrice(props.book.juniorSharePrice, 6)} USDC <span className="text-muted">at the last mark</span>
+          {fmtSharePrice(props.book.juniorSharePrice, 6)} {sym} <span className="text-muted">at the last mark</span>
         </span>,
       ],
     ],

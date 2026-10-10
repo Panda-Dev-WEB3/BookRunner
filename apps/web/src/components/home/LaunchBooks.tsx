@@ -13,6 +13,7 @@ import { ageOf } from "../../lib/lowgas";
 import { bookState, limitState } from "../../lib/limits";
 import { SERIES_CLASS } from "../../lib/palette";
 import { isTestChain } from "../../wallet/network";
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { type TopUpRound, isTopUpOpen, useTopUpRounds } from "../../wallet/topUp";
 import { cx } from "../cx";
 import { IconArrowRight } from "../icons";
@@ -205,6 +206,7 @@ function DepositRow({ deposit, rooms, capBps, markIntervalSec }: { deposit: Depo
 
 function TrancheRound({ tranche, capacity, room, capBps }: { tranche: TrancheId; capacity: bigint; room: TrancheRoom | null; capBps: number | null }) {
   const name = tranche === "senior" ? "Senior" : "Junior";
+  const sym = useSettlementSymbol();
   if (capacity === 0n) {
     return (
       <div className="text-[12.5px] text-ink-2">
@@ -217,7 +219,7 @@ function TrancheRound({ tranche, capacity, room, capBps }: { tranche: TrancheId;
     <div>
       <div className="flex items-baseline justify-between gap-2 text-[12.5px]">
         <span className={cx("font-medium", SERIES_CLASS[tranche].text)}>{name}</span>
-        <span className="num text-ink-2">{room ? roomFigure(room) : `${formatAmountDisplay(capacity, 6, 0)} USDC capacity`}</span>
+        <span className="num text-ink-2">{room ? roomFigure(room) : `${formatAmountDisplay(capacity, 6, 0)} ${sym} capacity`}</span>
       </div>
       <ProgressBar className="mt-1.5" tone={tranche} value={room?.filled ?? 0} label={`${name} capacity committed`} />
       {note && <div className={cx("mt-1 text-[11.5px]", room?.oversubscribed ? "text-warn-ink" : "text-ink-2")}>{note}</div>}

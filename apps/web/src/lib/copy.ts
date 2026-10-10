@@ -49,7 +49,7 @@ export const SPONSOR_SKIN_SHORT = "holds at least 10% of Junior when the subscri
  * A mark only settles a redemption: the USDC moves in a separate claim, which Tranche._claim pays
  * from escrow and reverts InsufficientLiquidity while the book's cash is still deployed on the venue.
  */
-export const COLLECT_LINE = "A mark settles a request; you then collect the USDC in a separate transaction.";
+export const COLLECT_LINE = "A mark settles a request; you then collect the proceeds in a separate transaction.";
 export const CASH_WAIT_LINE = "If the book's cash is still on the venue, collecting waits until the keeper brings it back.";
 export const NOTICE_LINE = "Notice is not a gate: a redemption request is always accepted and settles at the first mark on or after its eligible time.";
 

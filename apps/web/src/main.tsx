@@ -8,6 +8,7 @@ import { router } from "./router";
 import "./styles.css";
 import { wagmiConfig } from "./wallet/chains";
 import { ConnectModalProvider } from "./wallet/ConnectModal";
+import { SettlementSymbolSync } from "./wallet/settlementSymbol";
 import { WalletProvider } from "./wallet/WalletContext";
 
 function Root() {
@@ -17,6 +18,7 @@ function Root() {
     <WagmiProvider config={wagmiConfig}>
       <trpc.Provider client={trpcClient} queryClient={queryClient}>
         <QueryClientProvider client={queryClient}>
+          <SettlementSymbolSync />
           <WalletProvider>
             <ConnectModalProvider>
               <RouterProvider router={router} />

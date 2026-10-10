@@ -3,6 +3,7 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router";
 import { SERIES_CLASS } from "../../lib/palette";
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { cx } from "../cx";
 import { IconArrowRight, IconBook, IconCoin, IconShield } from "../icons";
 import { Section, Term, TrancheBadge } from "../ui";
@@ -26,7 +27,7 @@ const ROLES: Role[] = [
     iconClass: "bg-accent-soft text-accent-text",
     body: (
       <>
-        Charter a new market. File its terms, pay a flat USDC fee (refunded if rejected), lock a BKRN bond and hold at least 10% of its{" "}
+        Charter a new market. File its terms, pay a flat fee (refunded if rejected), lock a BKRN bond and hold at least 10% of its{" "}
         <Term id="junior">Junior</Term> tranche when the subscription window closes.
       </>
     ),
@@ -91,11 +92,12 @@ export function Roles() {
 }
 
 function AllocatorCard() {
+  const sym = useSettlementSymbol();
   return (
     <article className="flex flex-col rounded-card border border-accent/30 bg-surface p-5 shadow-card sm:p-6 md:col-span-2" aria-labelledby="role-allocator">
       <RoleHead id="role-allocator" title="Allocator" icon={<IconCoin size={18} />} iconClass="bg-accent-soft text-accent-text" tag="Start here" />
       <p className="mt-3 text-[14px] leading-relaxed text-ink-2">
-        Fund a book with USDC and hold its tranche shares, valued at <Term id="nav">NAV</Term> at every mark. Choose the place in line that suits you:
+        Fund a book with {sym} and hold its tranche shares, valued at <Term id="nav">NAV</Term> at every mark. Choose the place in line that suits you:
       </p>
       <div className="mt-4 grid gap-3 sm:grid-cols-2">
         <div className={cx("rounded-[10px] border p-4", SERIES_CLASS.senior.border, SERIES_CLASS.senior.soft)}>

@@ -1,5 +1,6 @@
 // 1. The problem: a new perp market needs capital and risk-taking behind it, and today one party carries
 // it alone. Diagram: allocators -> book (Senior / Junior) -> market, fee flow back into the book.
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { Term } from "../Term";
 import { IconLayers, IconShield, IconSpark } from "../icons";
 import { Card } from "../ui";
@@ -27,6 +28,7 @@ const NEEDS = [
 ];
 
 export function ProblemSection(props: { index: number }) {
+  const sym = useSettlementSymbol();
   return (
     <LearnSection
       id="problem"
@@ -71,13 +73,13 @@ export function ProblemSection(props: { index: number }) {
       <Figure
         className="mt-8"
         label="How a book connects allocators to one market"
-        caption="One book per market. Allocators fund it in USDC, the book funds the market's insurance fund first and then the market-making inventory, and the market's fees flow back into the book."
+        caption={`One book per market. Allocators fund it in ${sym}, the book funds the market's insurance fund first and then the market-making inventory, and the market's fees flow back into the book.`}
       >
         <div className="flex flex-col items-stretch sm:flex-row sm:items-center">
           <FlowNode title="Allocators" className="sm:w-[26%]">
-            You and others deposit USDC and choose Senior or Junior.
+            You and others deposit {sym} and choose Senior or Junior.
           </FlowNode>
-          <FlowArrow label="USDC" />
+          <FlowArrow label={sym} />
           <div className="min-w-0 rounded-control border border-line-strong bg-surface p-3 sm:w-[30%]">
             <div className="text-[13.5px] font-semibold text-ink">Book</div>
             <div className="mt-2 grid gap-1.5">

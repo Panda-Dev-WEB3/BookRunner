@@ -2,7 +2,7 @@
 // primitives (Container, Section, Card, Callout, Stepper, Tabs, Accordion, AmountInput, ...) follow
 // the same tokens: 8px grid, 12px cards, 1px hairlines, soft shadows in light mode only, tabular
 // numerals for figures. Series colours are fixed (lib/palette.ts).
-import { type KeyboardEvent, type ReactNode, useId, useRef, useState } from "react";
+import { type KeyboardEvent, type ReactNode, useId, useRef, useState, useSyncExternalStore } from "react";
 import { useQueryError } from "../api/hooks";
 import { type AmountIssue, USDC_DECIMALS, amountIssueText, formatAmountDisplay, formatAmountInput, sanitizeAmountInput } from "../lib/amount";
 import { addressUrl, txUrl } from "../lib/config";
@@ -10,6 +10,7 @@ import { describeError } from "../lib/errors";
 import { DASH, shortHex } from "../lib/format";
 import type { GlossaryId } from "../lib/glossary";
 import type { Meter, StateMeta, Tone } from "../lib/limits";
+import { getSettlementSymbol, subscribeSettlementSymbol } from "../lib/settlementToken";
 import { SERIES_CLASS } from "../lib/palette";
 import { cx } from "./cx";
 import { IconCheck, IconChevronDown, IconCopy, IconExternal, IconInfo, IconShield, IconWarn } from "./icons";
@@ -955,7 +956,9 @@ export function AmountInput(props: {
   placeholder?: string;
 }) {
   const decimals = props.decimals ?? USDC_DECIMALS;
-  const symbol = props.symbol ?? "USDC";
+  // default unit: the settlement token's on-chain symbol (wallet/settlementSymbol.ts)
+  const settlementSymbol = useSyncExternalStore(subscribeSettlementSymbol, getSettlementSymbol, getSettlementSymbol);
+  const symbol = props.symbol ?? settlementSymbol;
   const errText = props.error ?? amountIssueText(props.issue ?? null, symbol);
   const helpId = `${props.id}-help`;
   const maxRaw = props.max ?? props.balance ?? null;

@@ -10,6 +10,7 @@ import type { PreparedTx } from "../lib/api-types";
 import { type FlowTargets, type TxCheck, checkTxs } from "../lib/txcheck";
 import { appChain, publicClient } from "./chains";
 import { useAppContracts } from "./contracts";
+import { useSettlementSymbol } from "./settlementSymbol";
 
 const BOOK_COMPONENTS_ABI = [
   {
@@ -41,6 +42,7 @@ export type { FlowTargets, TxCheck };
 /** Contracts a prepared step may call, from the chain (null while loading or when the reads failed). */
 export function useFlowTargets(): { data: FlowTargets | null; error: unknown } {
   const app = useAppContracts();
+  const settlementSymbol = useSettlementSymbol();
   const bookAddrs = useMemo(() => app.books.map((b) => ({ id: b.bookId, book: b.book })), [app.books]);
   const parts = useQuery({
     queryKey: ["book-parts", appChain.id, bookAddrs.map((b) => b.book).join(",")],
@@ -66,7 +68,7 @@ export function useFlowTargets(): { data: FlowTargets | null; error: unknown } {
       labels[a] = label;
       if (dec !== undefined) decimals[a] = dec;
     };
-    add(p.usdc, "USDC", 6);
+    add(p.usdc, settlementSymbol, 6);
     add(p.bkrn, "BKRN", 18);
     add(p.staking, "BKRN staking", 18);
     add(p.charter, "MarketCharter");
@@ -77,7 +79,7 @@ export function useFlowTargets(): { data: FlowTargets | null; error: unknown } {
       add(b.mandate, `MMMandate (book #${b.id})`);
     }
     return { targets, labels, decimals };
-  }, [app.data, parts.data]);
+  }, [app.data, parts.data, settlementSymbol]);
   return { data, error: app.error ?? parts.error ?? null };
 }
 

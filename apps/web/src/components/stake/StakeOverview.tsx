@@ -1,6 +1,7 @@
 // Protocol-wide staking figures for the top of the Stake page, read live from the chain.
 import type { ReactNode } from "react";
 import { fmtDuration, fmtUsd } from "../../lib/format";
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { ErrorState, Skeleton, Stat, StatGrid } from "../ui";
 import { fmtBkrn, fmtBkrnCompact, fmtShare, ratio } from "./stakeLogic";
 import type { StakingProtocol } from "./useStaking";
@@ -17,6 +18,7 @@ export function WithUnit(props: { value: ReactNode; unit: string }) {
 
 export function StakeOverview(props: { data: StakingProtocol | undefined; isLoading: boolean; error: unknown; onRetry: () => void; noBooks: boolean }) {
   const d = props.data;
+  const sym = useSettlementSymbol();
   if (!d) {
     if (props.noBooks) return null;
     if (props.error && !props.isLoading) return <ErrorState error={props.error} onRetry={props.onRetry} />;
@@ -59,8 +61,8 @@ export function StakeOverview(props: { data: StakingProtocol | undefined; isLoad
         series="backstop"
         label="Backstop pool"
         term="backstop"
-        value={<WithUnit value={fmtUsd(d.backstopBalanceUsd)} unit="USDC" />}
-        sub="Held in USDC, apart from stake"
+        value={<WithUnit value={fmtUsd(d.backstopBalanceUsd)} unit={sym} />}
+        sub={`Held in ${sym}, apart from stake`}
       />
     </StatGrid>
   );

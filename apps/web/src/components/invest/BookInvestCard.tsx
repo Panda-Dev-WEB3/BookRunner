@@ -11,6 +11,7 @@ import { venueLabel } from "../../lib/copy";
 import { DASH, ageMs, fmtAgo, fmtDuration, fmtSharePrice, fmtUsd, fmtWhen, isoToSec, tickerOf, usdRaw } from "../../lib/format";
 import { bookState } from "../../lib/limits";
 import type { TopUpRound } from "../../lib/topup";
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { IconArrowRight } from "../icons";
 import { Card, ProgressBar, Stat, StateChip, Term, cx } from "../ui";
 import { TrancheSwatch, WindowBadge } from "./InvestBits";
@@ -26,6 +27,7 @@ export function BookInvestCard(props: {
   now: number;
 }) {
   const b = props.item;
+  const sym = useSettlementSymbol();
   const ticker = tickerOf(b.symbol);
   const nowSec = Math.floor(props.now / 1000);
   const detail = trpc.book.get.useQuery({ bookId: b.bookId }, { refetchInterval: POLL.slow, staleTime: 15_000 });
@@ -88,8 +90,8 @@ export function BookInvestCard(props: {
             sub={b.lastMark ? `mark #${b.lastMark.markId} · ${markAge === null ? DASH : `${fmtAgo(markAge)}`}` : "before the first mark"}
             className="col-span-2 sm:col-span-1"
           />
-          <Stat label="Senior share price" series="senior" value={fmtSharePrice(d?.seniorSharePrice ?? b.seniorSharePrice, 4)} sub="USDC per share" />
-          <Stat label="Junior share price" series="junior" value={fmtSharePrice(d?.juniorSharePrice ?? b.juniorSharePrice, 4)} sub="USDC per share" />
+          <Stat label="Senior share price" series="senior" value={fmtSharePrice(d?.seniorSharePrice ?? b.seniorSharePrice, 4)} sub={`${sym} per share`} />
+          <Stat label="Junior share price" series="junior" value={fmtSharePrice(d?.juniorSharePrice ?? b.juniorSharePrice, 4)} sub={`${sym} per share`} />
         </div>
 
         <div className="mt-5 rounded-card border border-line bg-surface-2/50 p-4">
@@ -128,7 +130,7 @@ export function BookInvestCard(props: {
             </ul>
           )}
           {w.status === "open" && w.kind === "subscription" && (
-            <p className="mt-2 text-[12.5px] text-ink-2">Commitments are allocated pro-rata when the window closes; shares start at 1.00 USDC each.</p>
+            <p className="mt-2 text-[12.5px] text-ink-2">Commitments are allocated pro-rata when the window closes; shares start at 1.00 {sym} each.</p>
           )}
         </div>
 
@@ -163,6 +165,7 @@ function Term2(props: { label: ReactNode; value: ReactNode }) {
 
 function RoomRow(props: { t: TrancheId; ticker: string; capacity: bigint; room: TrancheRoom | null; capBps: number | null; paused: boolean | null; href: string }) {
   const { capacity, room } = props;
+  const sym = useSettlementSymbol();
   const name = TRANCHE_NAME[props.t];
   const note = room && !props.paused ? roomNote(room, props.capBps) : null;
   return (
@@ -182,7 +185,7 @@ function RoomRow(props: { t: TrancheId; ticker: string; capacity: bigint; room: 
         ) : room ? (
           roomFigure(room)
         ) : (
-          `${formatAmountDisplay(capacity, USDC_DECIMALS, 0)} USDC capacity`
+          `${formatAmountDisplay(capacity, USDC_DECIMALS, 0)} ${sym} capacity`
         )}
       </span>
       {note && <span className={cx("col-span-2 text-[12px] sm:order-5 sm:col-span-4", room?.oversubscribed ? "text-warn-ink" : "text-ink-2")}>{note}</span>}

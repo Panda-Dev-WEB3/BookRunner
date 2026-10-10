@@ -2,6 +2,7 @@
 // the original dashboard so dashboard.css, the art and the animations apply unchanged.
 import type { Address } from "viem";
 import { BKRN_DECIMALS, USDC_DECIMALS, formatAmountDisplay } from "./amount";
+import { settlementSymbol } from "./token";
 import { CHAIN, OPERATOR_APP_URL } from "./config";
 import { ago, bpsPct, date, dateTime, duration, esc, num, pct, price, short, signedUsd, time, toNum, usd } from "./format";
 import { addrLink, badge, btn, empty, errorBox, loading, metric, navChart, notice, panel, splitList, table, txLink } from "./html";
@@ -205,7 +206,7 @@ export function bookDetail(ctx: ViewCtx): string {
 // ------------------------------------------------------------------ portfolio
 export function portfolio(ctx: ViewCtx): string {
   const { s } = ctx;
-  if (!ctx.me) return `${panel("Your capital", connectPrompt("Connect a wallet to see its USDC, ETH and $BKRN balances, tranche positions, pending deposits and redemption requests."))}${notice(`Positions are read per wallet from the tranches on ${esc(CHAIN.name)}. ${TESTNET_NOTE}`)}`;
+  if (!ctx.me) return `${panel("Your capital", connectPrompt(`Connect a wallet to see its ${settlementSymbol()}, ETH and $BKRN balances, tranche positions, pending deposits and redemption requests.`))}${notice(`Positions are read per wallet from the tranches on ${esc(CHAIN.name)}. ${TESTNET_NOTE}`)}`;
   const mine = s.positionsOwner === ctx.me;
   const views = mine ? Object.values(s.positions).map(positionView) : [];
   const booksById = new Map((s.books ?? []).map((b) => [b.bookId, b]));
@@ -249,14 +250,15 @@ export function portfolio(ctx: ViewCtx): string {
   const bal = s.balancesOwner === ctx.me ? s.balances : null;
   const total = mine ? portfolioTotal(views) : null;
   const pending = views.reduce((a, v) => a + v.pendingDepositUsd, 0n);
-  const mintBtn = s.mintable ? btn("Mint 10,000 test USDC", "mint", {}, "btn") : "";
-  return `${wrongChainBanner(ctx)}${err(s, "positions")}${err(s, "balances")}<div class="metrics">${metric("Wallet USDC", bal ? usdc(bal.usdc) : "…", "Testnet USDC (mock token)")}${metric("Gas balance", bal ? ethAmt(bal.eth) : "…", `${CHAIN.nativeSymbol} on ${esc(CHAIN.name)}`)}${metric("Position value", mine ? usdc(total) : "…", "Shares at the last share price")}${metric("Pending deposits", mine ? usdc(pending) : "…", "In escrow until the round settles")}</div>${panel(
+  const sym = settlementSymbol();
+  const mintBtn = s.mintable ? btn(`Mint 10,000 test ${sym}`, "mint", {}, "btn") : "";
+  return `${wrongChainBanner(ctx)}${err(s, "positions")}${err(s, "balances")}<div class="metrics">${metric(`Wallet ${sym}`, bal ? usdc(bal.usdc) : "…", `Testnet ${sym} (mock token)`)}${metric("Gas balance", bal ? ethAmt(bal.eth) : "…", `${CHAIN.nativeSymbol} on ${esc(CHAIN.name)}`)}${metric("Position value", mine ? usdc(total) : "…", "Shares at the last share price")}${metric("Pending deposits", mine ? usdc(pending) : "…", "In escrow until the round settles")}</div>${panel(
     "Your wallet",
     `${splitList([
       ["Account", addrLink(ctx.me, ctx.me)],
       ["$BKRN", bal ? `${bkrnAmt(bal.bkrn)} BKRN` : "…"],
       ["Network", ctx.rightChain ? esc(CHAIN.name) : "Another network"],
-    ])}<div class="btn-row">${mintBtn}<a class="btn-outline" href="#books">Subscribe to a book →</a><a class="btn-outline" href="#staking">Stake $BKRN →</a></div>${s.mintable === false ? `<p>The USDC this deployment uses is not mintable from a wallet.</p>` : ""}`,
+    ])}<div class="btn-row">${mintBtn}<a class="btn-outline" href="#books">Subscribe to a book →</a><a class="btn-outline" href="#staking">Stake $BKRN →</a></div>${s.mintable === false ? `<p>The ${sym} this deployment uses is not mintable from a wallet.</p>` : ""}`,
   )}${panel("Your tranche positions", mine ? table(["Book", "Tranche", "Shares", "Value at NAV", "Pending deposit", "Claimable", ""], rows, "No position yet. Subscribe to a book during its window or a top-up round.") : loading("Reading your positions"))}${panel(
     "Redemption requests",
     mine ? table(["Request", "Book / tranche", "Shares", "Eligible after", "Settles at", "Status", ""], reqs, "No redemption request yet.") : loading("Reading your requests"),
@@ -476,7 +478,7 @@ export function settings(ctx: ViewCtx): string {
     ? (
         [
           ["BookrunnerConfig", p.config],
-          ["USDC", p.usdc],
+          [settlementSymbol(), p.usdc],
           ["$BKRN", p.bkrn],
           ["BkrnStaking", p.staking],
           ["BkrnFeeRouter", p.feeRouter],
