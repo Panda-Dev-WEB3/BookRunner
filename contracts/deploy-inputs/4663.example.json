@@ -1,0 +1,107 @@
+{
+  "network": "mainnet",
+  "chainId": 4663,
+  "deployer": "0x000000000000000000000000000000000000d001",
+  "governance": {
+    "multisig": "0x000000000000000000000000000000000000a001",
+    "timelockMinDelay": 172800,
+    "guardian": "0x000000000000000000000000000000000000a002"
+  },
+  "treasury": {
+    "expenseRecipient": "0x000000000000000000000000000000000000a003",
+    "slashRecipient": "0x000000000000000000000000000000000000a003"
+  },
+  "roles": {
+    "markSigner": ["0x000000000000000000000000000000000000b001"],
+    "risk": ["0x000000000000000000000000000000000000b002"],
+    "opsVenue": ["0x000000000000000000000000000000000000b003"],
+    "jury": ["0x000000000000000000000000000000000000b004"],
+    "keeper": ["0x000000000000000000000000000000000000b005"]
+  },
+  "committee": [
+    "0x000000000000000000000000000000000000c001",
+    "0x000000000000000000000000000000000000c002",
+    "0x000000000000000000000000000000000000c003"
+  ],
+  "oracle": {
+    "signers": [
+      {
+        "signer": "0x000000000000000000000000000000000000b006",
+        "attestation": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    ]
+  },
+  "externals": {
+    "settlementToken": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+    "settlementSymbol": "USDG",
+    "orderlyVault": "0x816f722424b49cf1275cc86da9840fbd5a6167e9",
+    "orderlyBrokerId": "bookrunner",
+    "orderlyTokenSymbol": "USDG",
+    "uniswapV3SwapRouter02": "0xcaf681a66d020601342297493863e78c959e5cb2",
+    "uniswapV4Router": "0x0000000000000000000000000000000000000000",
+    "entryPoint": "0x0000000071727de22e5e9d8baf0edac6f37da032",
+    "chainlinkFeeds": [
+      { "symbol": "NVDA", "feed": "0x000000000000000000000000000000000000f001" },
+      { "symbol": "TSLA", "feed": "0x000000000000000000000000000000000000f002" },
+      { "symbol": "AAPL", "feed": "0x000000000000000000000000000000000000f003" },
+      { "symbol": "MSFT", "feed": "0x000000000000000000000000000000000000f004" },
+      { "symbol": "AMZN", "feed": "0x000000000000000000000000000000000000f005" }
+    ]
+  },
+  "bkrn": {
+    "token": "0x0000000000000000000000000000000000000000",
+    "community": "0x000000000000000000000000000000000000a004",
+    "studio": "0x000000000000000000000000000000000000a005",
+    "liquidity": "0x000000000000000000000000000000000000a006",
+    "contributors": "0x000000000000000000000000000000000000a007"
+  },
+  "stockTokens": [
+    { "symbol": "NVDA", "token": "0x000000000000000000000000000000000000e001", "priceId": "NVDA", "multiplierWad": "1000000000000000000", "floatCapRaw": "1000000000000000000000000" },
+    { "symbol": "TSLA", "token": "0x000000000000000000000000000000000000e002", "priceId": "TSLA", "multiplierWad": "1000000000000000000", "floatCapRaw": "1000000000000000000000000" },
+    { "symbol": "AAPL", "token": "0x000000000000000000000000000000000000e003", "priceId": "AAPL", "multiplierWad": "1000000000000000000", "floatCapRaw": "1000000000000000000000000" },
+    { "symbol": "MSFT", "token": "0x000000000000000000000000000000000000e004", "priceId": "MSFT", "multiplierWad": "1000000000000000000", "floatCapRaw": "1000000000000000000000000" },
+    { "symbol": "AMZN", "token": "0x000000000000000000000000000000000000e005", "priceId": "AMZN", "multiplierWad": "1000000000000000000", "floatCapRaw": "1000000000000000000000000" }
+  ],
+  "indexes": [
+    {
+      "name": "BKRN.INDEX.RHX5",
+      "priceId": "RHX5",
+      "components": [
+        { "symbol": "NVDA", "weightBps": 2000 },
+        { "symbol": "TSLA", "weightBps": 2000 },
+        { "symbol": "AAPL", "weightBps": 2000 },
+        { "symbol": "MSFT", "weightBps": 2000 },
+        { "symbol": "AMZN", "weightBps": 2000 }
+      ]
+    }
+  ],
+  "params": {
+    "markInterval": 86400,
+    "maxMarkAge": 21600,
+    "maxPriceAge": 300,
+    "maxTradePriceAge": 15,
+    "committeeWindow": 172800,
+    "carryBps": 1000,
+    "expenseCapBps": 2000,
+    "charterFeeUsd": "5000000000",
+    "sponsorBondBkrn": "100000000000000000000000",
+    "committeeBondBkrn": "250000000000000000000000",
+    "venueMinIfOrderly": "25001000000",
+    "venueMinIfPoolEngine": "10000000000",
+    "tiers": {
+      "thresholds": ["50000000000", "250000000000", "1000000000000"],
+      "bonds": ["25000000000000000000000", "100000000000000000000000", "400000000000000000000000"]
+    },
+    "backstopMaxCoverBps": 10000,
+    "stakingCooldown": 604800,
+    "stakingRewardsDuration": 604800,
+    "oracleMinSources": 3
+  },
+  "buyback": {
+    "poolFee": 3000,
+    "refBkrnPerUsdcWad": "20000000000000000000",
+    "maxSlippageBps": 500,
+    "maxPerCall": "250000000000",
+    "bkrnPriceId": ""
+  }
+}

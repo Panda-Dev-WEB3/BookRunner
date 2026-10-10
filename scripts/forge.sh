@@ -22,6 +22,8 @@ fi
 
 TTY_FLAGS=()
 if [ -t 1 ]; then TTY_FLAGS=(-t); fi
+# stdin attached when interactive: `forge script ... --interactive` (deploy-mainnet.sh) prompts for the key
+if [ -t 0 ] && [ -t 1 ]; then TTY_FLAGS=(-i -t); fi
 
 MSYS_NO_PATHCONV=1 exec docker run --rm "${TTY_FLAGS[@]}" \
   -v "$MOUNT:/repo" \
@@ -31,6 +33,6 @@ MSYS_NO_PATHCONV=1 exec docker run --rm "${TTY_FLAGS[@]}" \
   --add-host=host.docker.internal:host-gateway \
   -e FOUNDRY_PROFILE="${FOUNDRY_PROFILE:-default}" \
   -e ETH_RPC_URL -e PRIVATE_KEY -e DEPLOY_OUT \
-  -e DEV_MNEMONIC -e NETWORK -e MARK_INTERVAL_SECONDS -e TREASURY_ADDRESS -e SLASH_RECIPIENT_ADDRESS \
+  -e DEV_MNEMONIC -e NETWORK -e MARK_INTERVAL_SECONDS -e TREASURY_ADDRESS -e SLASH_RECIPIENT_ADDRESS   -e DEPLOY_INPUT -e REHEARSAL \
   --entrypoint "$TOOL" \
   "$IMAGE" "$@"

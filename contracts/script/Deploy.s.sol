@@ -32,8 +32,8 @@ import {IStockTokenRegistry} from "../src/interfaces/IStockTokenRegistry.sol";
 
 /// @title Deploy — devnet (anvil 31337) and Robinhood Chain TESTNET (46630) deployment of the Bookrunner core.
 /// @notice Mainnet (RHC 4663) deployment is NOT done by this script (it refuses any chain but 31337 / 46630
-///         and deploys mocks): see docs/RUNBOOK.md (TimelockController 48h, multisig admin, VERIFY register,
-///         handover post-conditions). Governance after this script: the deployer is `config.timelock()`
+///         and deploys mocks): DeployMainnet.s.sol + VerifyHandover.s.sol (scripts/deploy-mainnet.sh,
+///         docs/RUNBOOK.md: TimelockController 48h, multisig admin, VERIFY register, handover post-conditions). Governance after this script: the deployer is `config.timelock()`
 ///         (0s delay); StockTokenRegistry has NO separate admin (it follows `config.timelock()`, so a
 ///         timelock handover also hands over the registry); charter fees (`expenseRecipient`) and slashed
 ///         BKRN (`slashRecipient`) go to an explicit treasury, never to the deployer key: TREASURY_ADDRESS /
