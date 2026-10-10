@@ -3,15 +3,20 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type Env, MAINNET_EXCLUDED, MAINNET_REQUIRED_ENV, deskKeyEnvFor, mainnetProfile } from "./network-profile";
+import { privateKeyToAccount } from "viem/accounts";
+import { type Env, MAINNET_EXCLUDED, MAINNET_REQUIRED_ENV, deskKeyEnvFor, mainnetProfile, watchedRoleAddresses } from "./network-profile";
 
 const keys = Array.from({ length: 6 }, (_, i) => `0x${(i + 1).toString(16).padStart(64, "0")}`);
 
-function hostRoot(dep: object | null): string {
+function hostRoot(dep: object | null, chainConfig: object | null = null): string {
   const root = mkdtempSync(join(tmpdir(), "bkrn-mainnet-"));
   if (dep) {
     mkdirSync(join(root, "contracts/deployments"), { recursive: true });
     writeFileSync(join(root, "contracts/deployments/4663.json"), JSON.stringify(dep));
+  }
+  if (chainConfig) {
+    mkdirSync(join(root, "config/chains"), { recursive: true });
+    writeFileSync(join(root, "config/chains/4663.json"), JSON.stringify(chainConfig));
   }
   roots.push(root);
   return root;
@@ -34,7 +39,8 @@ function goodEnv(): Env {
     ORDERLY_BROKER_ID: "bookrunner",
     ORDERLY_BUILDER_KEY_SECRET: "seed",
     ANTHROPIC_API_KEY: "sk",
-    ORACLE_CHAINLINK_FEEDS: JSON.stringify({ NVDA: "0x0000000000000000000000000000000000000f01" }),
+    ORACLE_CHAINLINK_FEEDS: JSON.stringify({ NVDA: { proxy: "0x0000000000000000000000000000000000000f01", basis: "per-token" } }),
+    ORACLE_HTTP_SOURCES: JSON.stringify([{ name: "vendor", url: "https://prices.example/{ticker}", pricePath: "price" }]),
     MARK_SIGNER_KMS_KEY_ID: "alias/bkrn-mark",
     RISK_KMS_KEY_ID: "alias/bkrn-risk",
     OPS_VENUE_KMS_KEY_ID: "alias/bkrn-ops",
@@ -111,6 +117,42 @@ describe("mainnet profile (scripts/dev.ts --network mainnet)", () => {
     expect(mainnetProfile(goodEnv(), hostRoot(null)).errors).toEqual([expect.stringMatching(/4663.json not found/)]);
     const testnetDep = { ...GOOD_DEP, chainId: 46630, network: undefined };
     expect(mainnetProfile(goodEnv(), hostRoot(testnetDep)).errors).toHaveLength(2);
+  });
+
+  test("Chainlink feeds come from the chain price config the oracle loads (config/chains/4663.json)", () => {
+    const e = { ...goodEnv(), ORACLE_CHAINLINK_FEEDS: "{}" };
+    const cfg = { chainId: 4663, stockTokens: {}, chainlink: { feeds: { NVDA: { proxy: "0x0000000000000000000000000000000000000f01", basis: "per-token" } } } };
+    expect(mainnetProfile(e, hostRoot(GOOD_DEP, cfg)).errors).toEqual([]);
+    expect(mainnetProfile(e, hostRoot(GOOD_DEP)).errors).toEqual([expect.stringMatching(/no Chainlink feed/)]);
+    expect(mainnetProfile(e, hostRoot(GOOD_DEP, { ...cfg, chainId: 46630 })).errors).toEqual([
+      expect.stringMatching(/not 4663/),
+      expect.stringMatching(/no Chainlink feed/),
+    ]);
+    expect(mainnetProfile({ ...e, ORACLE_CHAIN_CONFIG: "config/chains/missing.json" }, hostRoot(GOOD_DEP, cfg)).errors).toEqual([
+      expect.stringMatching(/ORACLE_CHAIN_CONFIG config\/chains\/missing.json not found/),
+      expect.stringMatching(/no Chainlink feed/),
+    ]);
+  });
+
+  test("oracle production rules: feeds state their basis, and an independent source exists", () => {
+    const plain = { ...goodEnv(), ORACLE_CHAINLINK_FEEDS: JSON.stringify({ NVDA: "0x0000000000000000000000000000000000000f01" }) };
+    expect(mainnetProfile(plain, hostRoot(GOOD_DEP)).errors).toEqual([expect.stringMatching(/plain addresses for NVDA/)]);
+    const chainlinkOnly = { ...goodEnv(), ORACLE_HTTP_SOURCES: "[]" };
+    expect(mainnetProfile(chainlinkOnly, hostRoot(GOOD_DEP)).errors).toEqual([expect.stringMatching(/no independent oracle source/)]);
+    expect(mainnetProfile({ ...chainlinkOnly, ORACLE_HTTP_FINNHUB: "1" }, hostRoot(GOOD_DEP)).errors).toEqual([]);
+  });
+
+  test("alerts watch role ADDRESSES: local keys and per-book desk keys derived, KMS roles left to dev.ts", () => {
+    const env: Env = { ...goodEnv(), CHAIN_ID: "4663", DESK_KEY_PRIVATE_KEY_7: keys[2], DESK_KEY_PRIVATE_KEY_x: keys[3] };
+    const { pairs, kmsRoles } = watchedRoleAddresses(env, ["markSigner", "risk", "opsVenue", "jury", "keeper", "oracleSigner", "funder", "trader0"]);
+    expect(kmsRoles).toEqual(["markSigner", "risk", "opsVenue", "oracleSigner"]);
+    expect(pairs).toEqual([
+      `jury=${privateKeyToAccount(keys[0] as `0x${string}`).address}`,
+      `keeper=${privateKeyToAccount(keys[1] as `0x${string}`).address}`,
+      `deskKeyBook7=${privateKeyToAccount(keys[2] as `0x${string}`).address}`,
+    ]);
+    // never a key in the output
+    for (const k of keys) expect(pairs.join(",")).not.toContain(k.slice(2));
   });
 
   test("a per-book desk key reaches that book's agent only", () => {

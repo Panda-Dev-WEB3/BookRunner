@@ -91,6 +91,38 @@ describe("per-process secrets (scripts/dev.ts)", () => {
     }
   });
 
+  test("mainnet-style host: per-role KMS ids + AWS secrets, ALERT_* to alerts, desk keys and price API specs scoped", () => {
+    const host = {
+      CHAIN_ID: "4663",
+      AWS_REGION: "eu-west-1",
+      AWS_SECRET_ACCESS_KEY: "aws-secret",
+      MARK_SIGNER_KMS_KEY_ID: "alias/bkrn-mark",
+      RISK_KMS_KEY_ID: "alias/bkrn-risk",
+      OPS_VENUE_KMS_KEY_ID: "alias/bkrn-ops",
+      JURY_KMS_KEY_ID: "alias/bkrn-jury",
+      KEEPER_KMS_KEY_ID: "alias/bkrn-keeper",
+      ORACLE_SIGNER_KMS_KEY_ID: "alias/bkrn-oracle",
+      DESK_KEY_PRIVATE_KEY_7: "0x07",
+      ORACLE_HTTP_SOURCES: '[{"name":"v","url":"https://x/{ticker}","pricePath":"p","headers":{"X-Api-Key":"k"}}]',
+      ALERT_SMTP_USER: "alerts@bookrunner.tech",
+      ALERT_SMTP_PASS: "smtp",
+      ALERT_ROLE_ADDRESSES: "markSigner=0x00000000000000000000000000000000000000aa",
+    };
+    const secrets = (proc: string) => Object.keys(childEnv(proc, host)).filter((k) => k !== "CHAIN_ID" && k !== "AWS_REGION" && k !== "ALERT_ROLE_ADDRESSES").sort();
+    expect(secrets("mark")).toEqual(["AWS_SECRET_ACCESS_KEY", "MARK_SIGNER_KMS_KEY_ID"]);
+    expect(secrets("risk")).toEqual(["AWS_SECRET_ACCESS_KEY", "RISK_KMS_KEY_ID"]);
+    expect(secrets("ops-venue")).toEqual(["AWS_SECRET_ACCESS_KEY", "OPS_VENUE_KMS_KEY_ID"]);
+    expect(secrets("charter")).toEqual(["AWS_SECRET_ACCESS_KEY", "JURY_KMS_KEY_ID"]);
+    expect(secrets("waterfall")).toEqual(["AWS_SECRET_ACCESS_KEY", "KEEPER_KMS_KEY_ID"]);
+    expect(secrets("oracle")).toEqual(["AWS_SECRET_ACCESS_KEY", "ORACLE_HTTP_SOURCES", "ORACLE_SIGNER_KMS_KEY_ID"]);
+    expect(secrets("alerts")).toEqual(["ALERT_SMTP_PASS", "ALERT_SMTP_USER"]);
+    for (const p of ["api", "indexer", "receipts"]) expect(secrets(p)).toEqual([]);
+    // the per-book desk key is stripped from every child; dev.ts hands it to agent:<book> as DESK_KEY_PRIVATE_KEY
+    expect(secrets("agent:NVDA")).toEqual([]);
+    expect(childEnv("agent:NVDA", host, { DESK_KEY_PRIVATE_KEY: "0x07" }).DESK_KEY_PRIVATE_KEY).toBe("0x07");
+    expect(childEnv("alerts", host).ALERT_ROLE_ADDRESSES).toBe(host.ALERT_ROLE_ADDRESSES);
+  });
+
   test("unknown processes get no secrets", () => {
     expect(secretsOf("something-new")).toEqual([]);
     expect(secretAllowed("something-new", "BKRN_TESTNET_MNEMONIC")).toBe(false);

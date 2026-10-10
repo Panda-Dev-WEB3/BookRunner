@@ -3,8 +3,10 @@
 // no mock venue, no gas keeper, no launch script (books are chartered by the sponsor through MarketCharter,
 // docs/RUNBOOK.md), and a preflight that refuses to start while anything required is missing.
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { MAINNET_CHAIN_ID, assertDistinctRoleKeys, assertNoMnemonicOnMainnet } from "../packages/shared/src/devkeys";
+import { isAbsolute, resolve } from "node:path";
+import type { Hex } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { ADMIN_KEY_OPT_IN, type DevRole, MAINNET_CHAIN_ID, assertDistinctRoleKeys, assertNoMnemonicOnMainnet, roleAccount } from "../packages/shared/src/devkeys";
 import { KMS_ENV_FOR_ROLE, SERVICE_ROLES, roleSignerSource } from "../packages/shared/src/signer";
 
 export type Env = Record<string, string | undefined>;
@@ -58,8 +60,15 @@ export interface ProfileResult {
 
 const isLocal = (url: string) => /(^|\/\/|@)(127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\])(:|\/|$)/.test(url);
 
-/** Oracle sources that are real: at least one Chainlink feed or one HTTP source. */
-function oracleSourcesProblem(env: Env): string | null {
+/**
+ * Oracle sources (mirrors services/oracle/src/production.ts so the stack refuses before the oracle crash-loops):
+ * Chainlink feeds come from the chain price config the oracle loads on 4663 (ORACLE_CHAIN_CONFIG, else
+ * config/chains/4663.json under `root`) overlaid by ORACLE_CHAINLINK_FEEDS, whose entries must state their basis
+ * ({"proxy","basis","token"}: a plain address is refused, VERIFY C2); the median also needs at least one
+ * independent per-share source (ORACLE_HTTP_SOURCES or ORACLE_HTTP_FINNHUB).
+ */
+function oracleSourcesProblems(env: Env, root: string): string[] {
+  const problems: string[] = [];
   const parse = (v: string | undefined, d: unknown) => {
     try {
       return v ? JSON.parse(v) : d;
@@ -69,11 +78,36 @@ function oracleSourcesProblem(env: Env): string | null {
   };
   const feeds = parse(env.ORACLE_CHAINLINK_FEEDS, {});
   const http = parse(env.ORACLE_HTTP_SOURCES, []);
-  if (feeds === null) return "ORACLE_CHAINLINK_FEEDS is not valid JSON";
-  if (http === null) return "ORACLE_HTTP_SOURCES is not valid JSON";
-  const nFeeds = typeof feeds === "object" && !Array.isArray(feeds) ? Object.keys(feeds).length : 0;
-  const nHttp = Array.isArray(http) ? http.length : 0;
-  return nFeeds + nHttp > 0 ? null : "no real oracle source: set ORACLE_CHAINLINK_FEEDS (from deployments/4663.json chainlinkFeeds) and/or ORACLE_HTTP_SOURCES";
+  if (feeds === null || typeof feeds !== "object" || Array.isArray(feeds)) problems.push("ORACLE_CHAINLINK_FEEDS is not a JSON object");
+  if (http === null || !Array.isArray(http)) problems.push("ORACLE_HTTP_SOURCES is not a JSON array");
+  const envFeeds = feeds && typeof feeds === "object" && !Array.isArray(feeds) ? (feeds as Record<string, unknown>) : {};
+  const plain = Object.entries(envFeeds)
+    .filter(([, v]) => typeof v === "string")
+    .map(([k]) => k);
+  if (plain.length > 0) problems.push(`ORACLE_CHAINLINK_FEEDS gives plain addresses for ${plain.join(", ")}: give {"proxy","basis","token"} (VERIFY C2)`);
+
+  const cfgName = env.ORACLE_CHAIN_CONFIG?.trim() || "config/chains/4663.json";
+  const cfgPath = isAbsolute(cfgName) ? cfgName : resolve(root, cfgName);
+  let cfgFeeds = 0;
+  if (existsSync(cfgPath)) {
+    try {
+      const c = JSON.parse(readFileSync(cfgPath, "utf8")) as { chainId?: number; chainlink?: { feeds?: Record<string, unknown> } };
+      if (c.chainId !== MAINNET_CHAIN_ID) problems.push(`${cfgName} is for chain ${c.chainId}, not 4663`);
+      else cfgFeeds = Object.keys(c.chainlink?.feeds ?? {}).length;
+    } catch {
+      problems.push(`${cfgName} is not valid JSON`);
+    }
+  } else if (env.ORACLE_CHAIN_CONFIG?.trim()) {
+    problems.push(`ORACLE_CHAIN_CONFIG ${cfgName} not found`);
+  }
+  if (cfgFeeds + Object.keys(envFeeds).length === 0) {
+    problems.push("no Chainlink feed: config/chains/4663.json (ORACLE_CHAIN_CONFIG) or ORACLE_CHAINLINK_FEEDS");
+  }
+  const finnhub = ["1", "true"].includes((env.ORACLE_HTTP_FINNHUB ?? "").toLowerCase());
+  if ((Array.isArray(http) ? http.length : 0) === 0 && !finnhub) {
+    problems.push("no independent oracle source besides Chainlink: set ORACLE_HTTP_SOURCES (per-share US-equity prices) or ORACLE_HTTP_FINNHUB=1");
+  }
+  return problems;
 }
 
 /**
@@ -96,8 +130,7 @@ export function mainnetProfile(inherited: Env, root: string, only: readonly stri
   if (inherited.ORDERLY_BASE_URL && (isLocal(inherited.ORDERLY_BASE_URL) || !inherited.ORDERLY_BASE_URL.startsWith("https://"))) {
     errors.push("ORDERLY_BASE_URL must be the live Orderly API (https, not the mock)");
   }
-  const oracle = oracleSourcesProblem(inherited);
-  if (oracle) errors.push(oracle);
+  errors.push(...oracleSourcesProblems(inherited, root));
 
   const merged: Env = { ...inherited, ...MAINNET_FIXED };
   for (const role of SERVICE_ROLES) {
@@ -149,4 +182,37 @@ export function mainnetProfile(inherited: Env, root: string, only: readonly stri
 export function deskKeyEnvFor(env: Env, bookId: number): Record<string, string> {
   const v = env[`DESK_KEY_PRIVATE_KEY_${bookId}`];
   return v ? { DESK_KEY_PRIVATE_KEY: v } : {};
+}
+
+/**
+ * Role-key ADDRESSES services/alerts watches for gas (ALERT_ROLE_ADDRESSES = "role=0x..,role=0x.."): never keys.
+ * Local keys (explicit *_PRIVATE_KEY, or the devnet / testnet mnemonic) are derived here; roles signed by KMS are
+ * returned in `kmsRoles` (their address needs a KMS GetPublicKey: scripts/dev.ts resolves them); per-book desk
+ * keys (DESK_KEY_PRIVATE_KEY_<bookId>) are watched as `deskKeyBook<bookId>`. The protocol-admin key is never
+ * derived for this, and roles without a key on this network (e.g. the gas funder on mainnet) are skipped.
+ */
+export function watchedRoleAddresses(env: Env, roles: readonly DevRole[]): { pairs: string[]; kmsRoles: DevRole[] } {
+  const noAdmin: Env = { ...env };
+  delete noAdmin[ADMIN_KEY_OPT_IN];
+  const pairs: string[] = [];
+  const kmsRoles: DevRole[] = [];
+  for (const role of roles) {
+    try {
+      const source = roleSignerSource(role, noAdmin);
+      if (source === "kms") kmsRoles.push(role);
+      else if (source !== "missing") pairs.push(`${role}=${roleAccount(role, noAdmin).address}`);
+    } catch {
+      // no usable key for this role here
+    }
+  }
+  for (const [k, v] of Object.entries(env)) {
+    const m = k.match(/^DESK_KEY_PRIVATE_KEY_(\d+)$/);
+    if (!m || !v) continue;
+    try {
+      pairs.push(`deskKeyBook${m[1]}=${privateKeyToAccount(v as Hex).address}`);
+    } catch {
+      // malformed key: the agent reports it
+    }
+  }
+  return { pairs, kmsRoles };
 }

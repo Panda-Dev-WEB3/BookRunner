@@ -35,7 +35,8 @@ import {
   recordStart,
   supervisorStatus,
 } from "../packages/shared/src/supervisor";
-import { MAINNET_EXCLUDED, deskKeyEnvFor, mainnetProfile } from "./network-profile";
+import { roleSigner } from "../packages/shared/src/signer";
+import { MAINNET_EXCLUDED, deskKeyEnvFor, mainnetProfile, watchedRoleAddresses } from "./network-profile";
 
 const ROOT = resolve(import.meta.dir, "..");
 const BUN = process.execPath; // the bun running this script
@@ -196,21 +197,21 @@ if (env.MOCK_ORDERLY_DELEGATE_SIGNERS === undefined && hasDerivedKeys(env)) {
   }
 }
 // alerts watches the role keys' gas: hand it their ADDRESSES (derived here, so it never gets a key).
-// The protocol-admin key is never derived for this; an explicit ALERT_ROLE_ADDRESSES wins.
+// Local keys and per-book desk keys (DESK_KEY_PRIVATE_KEY_<bookId>) are derived; KMS-signed roles (mainnet) are
+// resolved through the role signer (one GetPublicKey each, best effort). The protocol-admin key is never derived
+// for this; an explicit ALERT_ROLE_ADDRESSES wins.
 const WATCHED_ROLES: DevRole[] = [
   "markSigner", "risk", "opsVenue", "keeper", "oracleSigner", "jury", "deskKeyIndex", "deskKeyNvda", "deskKeyTsla",
   "trader0", "trader1", "trader2", "trader3", "sponsor", "committee0", "committee1", "committee2", "agentOperator", "funder",
 ];
-if (env.ALERT_ROLE_ADDRESSES === undefined && network !== "devnet") {
-  const pairs: string[] = [];
-  const noAdmin = { ...env };
-  delete noAdmin[ADMIN_KEY_OPT_IN];
-  for (const role of WATCHED_ROLES) {
-    // roles without a key on this network (e.g. traders / the gas funder on mainnet) are skipped
+if (env.ALERT_ROLE_ADDRESSES === undefined && network !== "devnet" && procs.some((p) => p.name === "alerts")) {
+  const { pairs, kmsRoles } = watchedRoleAddresses(env, WATCHED_ROLES);
+  for (const role of kmsRoles) {
     try {
-      pairs.push(`${role}=${roleAccount(role, noAdmin).address}`);
-    } catch {
-      // no key for this role here
+      const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), 10_000));
+      pairs.push(`${role}=${(await Promise.race([roleSigner(role, env), timeout])).address}`);
+    } catch (err) {
+      console.warn(`[dev] alerts: no address for KMS role ${role} (${(err as Error).message}); set ALERT_ROLE_ADDRESSES to watch its gas`);
     }
   }
   if (pairs.length) env.ALERT_ROLE_ADDRESSES = pairs.join(",");

@@ -12,7 +12,8 @@ never on a developer PC. Same layout and hardening as the testnet host ([README.
 | Deployer | devkeys index 0, stays `config.timelock()` | one-shot EOA used by `scripts/deploy-mainnet.sh` from the operator machine; holds nothing afterwards |
 | Processes | all services + agents + trader-sim + mock-orderly + gas-keeper + launch | services + agents only: no trader-sim, mock-orderly, gas-keeper, launch, web dev server |
 | Cadence | marks hourly (3600) | marks daily (86400, the on-chain `markInterval`) |
-| Oracle | synthetic GBM (secret seed) | real sources only (`ORACLE_CHAINLINK_FEEDS`, `ORACLE_HTTP_SOURCES`), `ORACLE_SYNTHETIC=0` |
+| Oracle | synthetic GBM (secret seed) | real sources only: Chainlink feeds of `config/chains/4663.json` (or `ORACLE_CHAIN_CONFIG`) + at least one independent per-share source (`ORACLE_HTTP_SOURCES`), `ORACLE_SYNTHETIC=0` (services/oracle production rules) |
+| Alerts | `services/alerts` (role addresses derived from the mnemonic) | `services/alerts` (role addresses: local keys derived, KMS roles resolved by dev.ts, or `ALERT_ROLE_ADDRESSES`); delivery credentials reach the alerts process only |
 | Orderly | mock | live (`ORDERLY_MODE=live`, builder key from the env file) |
 | Deployment record | `contracts/deployments/46630.json` (launch appends books) | `contracts/deployments/4663.json` (copied from the deploy machine; `scripts/record-books.ts` appends chartered books; read-only to the stack) |
 | Database / Redis | `bookrunner_testnet`, Redis db 1 | `bookrunner_mainnet`, Redis db 0, passwords required |
@@ -75,7 +76,18 @@ ORDERLY_BASE_URL=https://api.orderly.org               # VERIFY: RHC endpoint
 ORDERLY_BROKER_ID=<builder broker id>                  # == deploy input externals.orderlyBrokerId
 ORDERLY_BUILDER_KEY_SECRET=<base58 ed25519 seed>
 ANTHROPIC_API_KEY=<key>                                # charter jury
-ORACLE_CHAINLINK_FEEDS='{"NVDA":"0x...",...}'          # = chainlinkFeeds of 4663.json; single quotes (systemd + sh)
+# oracle (RUNBOOK "Real prices"): Chainlink feeds come from config/chains/4663.json in the app tree (the
+# DeployMainnet input was checked against it); ORACLE_CHAINLINK_FEEDS only overrides, and only in the
+# {"proxy","basis","token"} form (a plain address is refused). At least one independent per-share source:
+ORACLE_HTTP_SOURCES='[{"name":"<vendor>","url":"https://.../{ticker}","pricePath":"...","headers":{"X-Api-Key":"..."}}]'
+ORACLE_MIN_SOURCES=2                                    # >= 2 on mainnet; AttestedOracle.minSources() may raise it
+ORACLE_ATTESTATION_FILE=/etc/bookrunner/attestation.json   # served at GET /attestation (VERIFY E1)
+# alerts (services/alerts): delivery + optional explicit role addresses (default: derived / resolved by dev.ts)
+ALERT_EMAIL_TO=<ops address>
+ALERT_SMTP_USER=<mailbox>
+ALERT_SMTP_PASS=<password>
+# ALERT_WEBHOOK_URL=<slack / discord / telegram webhook>
+# ALERT_ROLE_ADDRESSES=markSigner=0x...,risk=0x...,...  # = the deploy input's role addresses
 AWS_REGION=<region>
 MARK_SIGNER_KMS_KEY_ID=alias/bkrn-mark
 RISK_KMS_KEY_ID=alias/bkrn-risk

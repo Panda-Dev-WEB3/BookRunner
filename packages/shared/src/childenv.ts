@@ -7,9 +7,13 @@
 // a role's remote signer (`<ROLE>_KMS_KEY_ID`, signer.ts) reaches only the process signing for that role.
 import { ADMIN_KEY_OPT_IN, assertNoMnemonicOnMainnet } from "./devkeys";
 
-/** Env names treated as secrets: stripped unless the process's allow-list names them. */
+/**
+ * Env names treated as secrets: stripped unless the process's allow-list names them. Besides the obvious names:
+ * `<ROLE>_KMS_KEY_ID` (a role's remote signer), the alerts delivery credentials (webhook / ping URLs embed tokens)
+ * and ORACLE_HTTP_SOURCES (licensed price API specs whose headers carry API keys).
+ */
 export const SECRET_ENV =
-  /MNEMONIC|PRIVATE_KEY|_PK$|API_KEY|SECRET|PASSWORD|_PASS$|(^|_)TOKEN$|^ORACLE_SEED$|KMS_KEY_ID$|^ALERT_(SMTP_USER|WEBHOOK_URL|HEARTBEAT_URL|TELEGRAM_CHAT_ID)$/;
+  /MNEMONIC|PRIVATE_KEY|_PK$|API_KEY|SECRET|PASSWORD|_PASS$|(^|_)TOKEN$|^ORACLE_SEED$|KMS_KEY_ID$|^ALERT_(SMTP_USER|WEBHOOK_URL|HEARTBEAT_URL|TELEGRAM_CHAT_ID)$|^ORACLE_HTTP_SOURCES$/;
 
 const MNEMONIC = ["BKRN_TESTNET_MNEMONIC", "DEV_MNEMONIC"] as const;
 /** AWS credentials for a KMS signer (prefer the host's instance role: then none of these is set). */
@@ -21,7 +25,7 @@ const AWS_SIGNING = ["AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"] as const;
  */
 export const SECRET_ALLOW: Readonly<Record<string, readonly string[]>> = {
   "mock-orderly": [],
-  oracle: [...MNEMONIC, "ORACLE_SIGNER_PRIVATE_KEY", "ORACLE_SIGNER_KMS_KEY_ID", ...AWS_SIGNING, "ORACLE_SEED", "ORACLE_FINNHUB_API_KEY"],
+  oracle: [...MNEMONIC, "ORACLE_SIGNER_PRIVATE_KEY", "ORACLE_SIGNER_KMS_KEY_ID", ...AWS_SIGNING, "ORACLE_SEED", "ORACLE_FINNHUB_API_KEY", "ORACLE_HTTP_SOURCES"],
   indexer: [],
   charter: [...MNEMONIC, "JURY_PRIVATE_KEY", "JURY_KMS_KEY_ID", ...AWS_SIGNING, "ANTHROPIC_API_KEY"],
   "ops-venue": [...MNEMONIC, "OPS_VENUE_PRIVATE_KEY", "OPS_VENUE_KMS_KEY_ID", ...AWS_SIGNING, "ORDERLY_BUILDER_KEY_SECRET", "ORDERLY_TRADE_KEY_SECRET*"],
@@ -33,6 +37,8 @@ export const SECRET_ALLOW: Readonly<Record<string, readonly string[]>> = {
   "gas-keeper": [...MNEMONIC, "BKRN_TESTNET_FUNDER_PK"],
   web: [],
   launch: [...MNEMONIC, "DEPLOYER_PRIVATE_KEY", ADMIN_KEY_OPT_IN],
+  // per-book desk keys (DESK_KEY_PRIVATE_KEY_<bookId>) are stripped here and handed to that book's agent only
+  // as DESK_KEY_PRIVATE_KEY (scripts/network-profile.ts deskKeyEnvFor)
   agent: [...MNEMONIC, "DESK_KEY_PRIVATE_KEY"],
   "trader-sim": [...MNEMONIC],
   // read-only watcher: no signing material, only its delivery credentials (SMTP mailbox, webhook / ping
