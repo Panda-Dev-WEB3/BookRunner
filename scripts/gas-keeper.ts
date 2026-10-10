@@ -10,8 +10,9 @@
 //   bun scripts/gas-keeper.ts --address    # print the funder address (fund it from the faucet)
 //   BKRN_ALLOW_ADMIN_KEY=1 bun scripts/gas-keeper.ts --seed-funder 0.2
 //                                          # operator, once: move 0.2 test ETH from the deployer to the funder
-import { type Address, createPublicClient, createWalletClient, formatEther, http, parseEther } from "viem";
+import { type Account, type Address, type Chain, createPublicClient, createWalletClient, formatEther, http, type PublicClient, parseAbi, parseEther, type Transport, type WalletClient } from "viem";
 import { chainFor } from "../packages/shared/src/chains";
+import { tryLoadDeployment } from "../packages/shared/src/deployments";
 import { type DevRole, roleAccount } from "../packages/shared/src/devkeys";
 
 const RPC = process.env.RPC_URL ?? "http://127.0.0.1:8547";
@@ -72,6 +73,44 @@ async function pass(): Promise<void> {
     log("info", "key topped up", { role: g.role, key: g.to, fromEth: formatEther(g.bal), addedEth: formatEther(g.value), tx: hash });
   }
   if (!gaps.length) log("info", "all keys above their trigger", { funderEth: formatEther(have) });
+  await topUpOrderlyAdapters(pub, wallet, have);
+}
+
+const adapterFeeAbi = parseAbi(["function depositNativeFee(uint8 account, uint256 amount) view returns (uint256)"]);
+
+/**
+ * Orderly adapters pay the venue's native deposit fee from their own ETH (VERIFY O5; OrderlyAdapter reverts
+ * InsufficientNativeForFee, e.g. inside Book.closeWindow). When the (mock) Vault charges one, keep each Orderly
+ * adapter at 2x the fee of one IF + one MM deposit. A plain transfer works for every adapter version (receive());
+ * v3 also has fundNative(). No-op while the fee is 0 (the devnet/testnet mock default). Mainnet: ops-venue's
+ * NativeFeeKeeper (OPS_NATIVE_TOPUP_MAX_WEI) does this, not the gas keeper.
+ */
+async function topUpOrderlyAdapters(pub: PublicClient, wallet: WalletClient<Transport, Chain, Account>, funderEth: bigint): Promise<void> {
+  const dep = tryLoadDeployment(process.env.DEPLOYMENT_FILE ?? `contracts/deployments/${CHAIN_ID}.json`);
+  if (!dep) return;
+  let have = funderEth;
+  for (const b of dep.books.filter((x) => x.venue === 0)) {
+    const adapter = b.components.adapter;
+    try {
+      const fees = await Promise.all([0, 1].map((account) => pub.readContract({ address: adapter, abi: adapterFeeAbi, functionName: "depositNativeFee", args: [account, 1_000_000n] })));
+      const need = 2n * fees.reduce((x, y) => x + y, 0n);
+      if (need === 0n) continue;
+      const bal = await pub.getBalance({ address: adapter });
+      if (bal >= need) continue;
+      const value = need - bal;
+      if (have - value < FUNDER_RESERVE) {
+        log("error", "funder cannot cover an Orderly adapter deposit-fee top-up", { bookId: b.bookId, adapter, needEth: formatEther(value) });
+        continue;
+      }
+      const hash = await wallet.sendTransaction({ to: adapter, value });
+      const r = await pub.waitForTransactionReceipt({ hash });
+      if (r.status !== "success") throw new Error(`adapter top-up reverted (${hash})`);
+      have -= value + r.gasUsed * r.effectiveGasPrice;
+      log("info", "Orderly adapter topped up for deposit fees", { bookId: b.bookId, adapter, addedEth: formatEther(value), tx: hash });
+    } catch (err) {
+      log("warn", "Orderly adapter deposit-fee check failed", { bookId: b.bookId, adapter, err: (err as Error).message.split("\n")[0] });
+    }
+  }
 }
 
 /** Operator, once: the deployer (needs BKRN_ALLOW_ADMIN_KEY=1 or DEPLOYER_PRIVATE_KEY) funds the funder. */

@@ -154,7 +154,9 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
         _setParam(KEY_COMMITTEE_WINDOW, 172_800);
         _setParam(KEY_MAX_TRADE_PRICE_AGE, 15);
 
-        _setVenueMinIf(BRTypes.VENUE_ORDERLY, 25_000e6); // VERIFY: Orderly minimum IF per symbol on RHC
+        // Orderly requires IF balance STRICTLY greater than 25,000 per effective symbol (VERIFY O10): the
+        // charter rule is ifTargetUsd >= venueMinIf, so the minimum sits 1 USDC above the venue requirement.
+        _setVenueMinIf(BRTypes.VENUE_ORDERLY, 25_001e6);
         _setVenueMinIf(BRTypes.VENUE_POOL_ENGINE, 10_000e6);
 
         uint256[] memory thresholds = new uint256[](3);

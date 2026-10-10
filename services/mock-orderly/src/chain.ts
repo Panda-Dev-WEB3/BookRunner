@@ -109,7 +109,7 @@ export class DepositIndexer {
     return this.client;
   }
 
-  /** Register Orderly adapters' IF/MM accounts with the simulator (owner = adapter). */
+  /** Register Orderly adapters' IF/MM accounts with the simulator (owner = adapter.accountOwner). */
   async discover(dep: Deployment): Promise<void> {
     const pc = this.pc();
     const comps = new Map<number, Address>();
@@ -133,7 +133,10 @@ export class DepositIndexer {
           pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "accountId", args: [ACCOUNT.IF] }),
           pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "accountId", args: [ACCOUNT.MM] }),
         ]);
-        this.o.venue.ensureAccount(ifId, { kind: "if", owner: adapter });
+        // v3 adapters: the IF account belongs to the book's OrderlyIFAccount (accountOwner); pre-v3: the adapter
+        const ifOwnerRaw: unknown = await pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "accountOwner", args: [ACCOUNT.IF] }).catch(() => adapter);
+        const ifOwner = typeof ifOwnerRaw === "string" && /^0x[0-9a-fA-F]{40}$/.test(ifOwnerRaw) ? ifOwnerRaw : adapter;
+        this.o.venue.ensureAccount(ifId, { kind: "if", owner: ifOwner });
         this.o.venue.ensureAccount(mmId, { kind: "mm", owner: adapter });
         this.adapters.set(key, { if: ifId.toLowerCase(), mm: mmId.toLowerCase(), bookId });
         this.o.log.info({ bookId, adapter, ifAccountId: ifId, mmAccountId: mmId }, "registered book venue accounts");

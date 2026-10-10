@@ -100,6 +100,19 @@ export const orderlyAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "SETTLEMENT_DECIMALS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "UPGRADE_INTERFACE_VERSION",
     "inputs": [],
     "outputs": [
@@ -126,6 +139,25 @@ export const orderlyAdapterAbi = [
         "name": "",
         "type": "bytes32",
         "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "accountOwner",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "view"
@@ -423,6 +455,13 @@ export const orderlyAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "fundNative",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "payable"
+  },
+  {
+    "type": "function",
     "name": "hashReport",
     "inputs": [
       {
@@ -464,6 +503,19 @@ export const orderlyAdapterAbi = [
         "name": "",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "ifAccount",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "view"
@@ -568,6 +620,13 @@ export const orderlyAdapterAbi = [
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "migrateToOrderlyAccounts",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -1226,6 +1285,31 @@ export const orderlyAdapterAbi = [
   },
   {
     "type": "event",
+    "name": "NativeFunded",
+    "inputs": [
+      {
+        "name": "from",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "balance",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "NativeRescued",
     "inputs": [
       {
@@ -1239,6 +1323,31 @@ export const orderlyAdapterAbi = [
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "OrderlyAccountsBound",
+    "inputs": [
+      {
+        "name": "ifAccount",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "ifAccountId",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "mmAccountId",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
       }
     ],
     "anonymous": false
@@ -1531,6 +1640,17 @@ export const orderlyAdapterAbi = [
     "inputs": [
       {
         "name": "target",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "AlreadyOrderlyAccounts",
+    "inputs": [
+      {
+        "name": "ifAccount",
         "type": "address",
         "internalType": "address"
       }
@@ -1951,6 +2071,17 @@ export const orderlyAdapterAbi = [
   },
   {
     "type": "error",
+    "name": "UnsupportedTokenDecimals",
+    "inputs": [
+      {
+        "name": "decimals",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "VenueDidNotPull",
     "inputs": [
       {
@@ -1980,6 +2111,11 @@ export const orderlyAdapterAbi = [
         "internalType": "uint256"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "VenueStateNotEmpty",
+    "inputs": []
   },
   {
     "type": "error",

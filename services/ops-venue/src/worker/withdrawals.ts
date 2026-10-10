@@ -8,7 +8,7 @@
 import { ACCOUNT } from "@bookrunner/shared";
 import type { Hex } from "viem";
 import { type AdapterLog, WITHDRAW_STATUS, withdrawStatusName, type WriteOpts } from "../chain";
-import { isTerminal, matchPriorWithdrawal, newWithdrawSaga, nextStep, retryDelayMs, sagaKey, shortfall, transition, type WithdrawEvent, type WithdrawSaga, type WithdrawTxSlot } from "../domain/withdraw";
+import { isTerminal, matchPriorWithdrawal, newWithdrawSaga, nextStep, retryDelayMs, sagaKey, sagaReceiver, shortfall, transition, type WithdrawEvent, type WithdrawSaga, type WithdrawTxSlot } from "../domain/withdraw";
 import { OrderlyHttpError } from "../orderly/http";
 import { errMsg } from "../util";
 import type { BookRegistry } from "./books";
@@ -51,7 +51,7 @@ export class WithdrawProcessor {
     } catch (err) {
       this.ctx.log.warn({ bookId: book.bookId, nonce: l.nonce.toString(), err: errMsg(err) }, "withdraw status read failed; the request step re-checks it");
     }
-    const s = newWithdrawSaga({ bookId: book.bookId, adapter: l.adapter, account: l.account, accountId: l.account === ACCOUNT.IF ? book.accounts.if : book.accounts.mm, amount: l.amount, nonce: l.nonce, txHash: l.txHash }, this.ctx.now());
+    const s = newWithdrawSaga({ bookId: book.bookId, adapter: l.adapter, account: l.account, accountId: l.account === ACCOUNT.IF ? book.accounts.if : book.accounts.mm, owner: l.account === ACCOUNT.IF ? book.owners.if : book.owners.mm, amount: l.amount, nonce: l.nonce, txHash: l.txHash }, this.ctx.now());
     if (this.all()[s.key]) return this.all()[s.key] ?? null; // recorded meanwhile
     this.all()[s.key] = s;
     this.ctx.sagas.save();
@@ -224,7 +224,7 @@ export class WithdrawProcessor {
           log.info({ bookId: s.bookId, accountId: s.accountId, amount: need.toString(), tx: c.hash }, "mock vault: materialised venue PnL before payout");
         }
       }
-      const p = await this.once(key, "pay", (o) => chain.vaultOperatorWithdraw(s.accountId, s.adapter, amount, o));
+      const p = await this.once(key, "pay", (o) => chain.vaultOperatorWithdraw(s.accountId, sagaReceiver(s), amount, o));
       if (!p) return null;
       s = this.patch(key, { payTx: p.hash as Hex });
     }
@@ -242,12 +242,12 @@ export class WithdrawProcessor {
         .filter((x) => x.key !== s.key && x.withdrawId)
         .map((x) => x.withdrawId as string),
     );
-    const prior = matchPriorWithdrawal(await builder.withdrawals(s.accountId), { ref, amount, receiver: s.adapter, sinceMs: Number(requestedAtSec) * 1000, claimed });
+    const prior = matchPriorWithdrawal(await builder.withdrawals(s.accountId), { ref, amount, receiver: sagaReceiver(s), sinceMs: Number(requestedAtSec) * 1000, claimed });
     if (prior) {
       log.info({ bookId: s.bookId, nonce: s.nonce, withdrawId: String(prior.id), status: prior.status }, "venue withdrawal already requested by an earlier attempt — adopting it");
       return String(prior.id);
     }
-    const r = await builder.requestWithdraw({ accountId: s.accountId, amountUsd: amount, to: s.adapter, nonce: ref, delegateContract: s.adapter });
+    const r = await builder.requestWithdraw({ accountId: s.accountId, amountUsd: amount, to: sagaReceiver(s), nonce: ref, delegateContract: sagaReceiver(s) });
     return r.withdrawId;
   }
 

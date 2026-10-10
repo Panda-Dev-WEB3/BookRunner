@@ -122,6 +122,6 @@ export function staticValidationContext(p: {
 
 /** Mainnet defaults from ARCHITECTURE §2.1 (used when the chain is unreachable). */
 export const DEFAULT_VENUE_MIN_IF_USD: Record<number, bigint> = {
-  [VENUE.ORDERLY]: 25_000n * 10n ** 6n, // VERIFY Orderly minimum IF per symbol
+  [VENUE.ORDERLY]: 25_001n * 10n ** 6n, // Orderly requires IF > 25,000 per symbol (strict, VERIFY O10)
   [VENUE.POOL_ENGINE]: 10_000n * 10n ** 6n,
 };

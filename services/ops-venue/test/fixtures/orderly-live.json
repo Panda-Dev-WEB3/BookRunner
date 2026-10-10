@@ -1,0 +1,148 @@
+{
+  "_source": "Response bodies copied from the examples in Orderly's REST API reference (https://orderly.network/docs/build-on-omnichain/evm-api/restful-api/ and orderly.openapi.yaml in github.com/OrderlyNetwork/documentation-public), researched 2026-10. `holding_usdg` and `daily_fee_revenue_two_days` are derived from the documented shapes (USDG row / a second date) for the Robinhood Chain settlement token; everything else is verbatim apart from JSON formatting.",
+  "positions": {
+    "success": true,
+    "timestamp": 1702989203989,
+    "data": {
+      "current_margin_ratio_with_orders": 1.2385,
+      "free_collateral": 450315.09115,
+      "initial_margin_ratio": 0.1,
+      "initial_margin_ratio_with_orders": 0.1,
+      "maintenance_margin_ratio": 0.05,
+      "maintenance_margin_ratio_with_orders": 0.05,
+      "margin_ratio": 1.2385,
+      "open_margin_ratio": 1.2102,
+      "total_collateral_value": 489865.71329,
+      "total_pnl_24_h": 0,
+      "account_value": 40.63345663,
+      "rows": [
+        {
+          "IMR_withdraw_orders": 0.1,
+          "MMR_with_orders": 0.05,
+          "average_open_price": 27908.14386047,
+          "cost_position": -139329.358492,
+          "est_liq_price": 117335.92899428,
+          "fee_24_h": 0,
+          "imr": 0.1,
+          "last_sum_unitary_funding": 70.38,
+          "mark_price": 27794.9,
+          "mmr": 0.05,
+          "pending_long_qty": 0,
+          "pending_short_qty": 0,
+          "pnl_24_h": 0,
+          "position_qty": -5,
+          "settle_price": 27865.8716984,
+          "symbol": "PERP_BTC_USDC",
+          "seq": 1730181536341943600,
+          "timestamp": 1685429350571,
+          "updated_time": 1685429350571,
+          "unsettled_pnl": 354.858492,
+          "leverage": 10,
+          "margin_mode": "CROSS",
+          "margin": 0,
+          "accrued_funding_fee": 0.005202
+        }
+      ]
+    }
+  },
+  "holding": {
+    "success": true,
+    "timestamp": 1702989203989,
+    "data": {
+      "holding": [
+        { "updated_time": 1580794149000, "token": "USDT", "holding": 282485.071904, "frozen": 0, "pending_short": -2000, "isolated_margin": 0, "isolated_order_frozen": 0 }
+      ]
+    }
+  },
+  "holding_usdg": {
+    "success": true,
+    "timestamp": 1702989203989,
+    "data": {
+      "holding": [
+        { "updated_time": 1580794149000, "token": "USDG", "holding": 74000.5, "frozen": 0, "pending_short": 0, "isolated_margin": 1250.25, "isolated_order_frozen": 0 },
+        { "updated_time": 1580794149000, "token": "USDC", "holding": 9, "frozen": 0, "pending_short": 0, "isolated_margin": 0, "isolated_order_frozen": 0 }
+      ]
+    }
+  },
+  "client_info": {
+    "success": true,
+    "timestamp": 1702989203989,
+    "data": {
+      "account_id": "<string>",
+      "email": "test@test.com",
+      "account_mode": "FUTURES",
+      "max_leverage": 20,
+      "taker_fee_rate": 0,
+      "maker_fee_rate": 0,
+      "rwa_taker_fee_rate": 0,
+      "rwa_maker_fee_rate": 0,
+      "futures_taker_fee_rate": 0,
+      "futures_maker_fee_rate": 0,
+      "maintenance_cancel_orders": true,
+      "imr_factor": { "PERP_BTC_USDC": 9.1e-8, "PERP_ETH_USDC": 0.0000012345 },
+      "max_notional": { "PERP_BTC_USDC": 10000000, "PERP_ETH_USDC": 2000000 }
+    }
+  },
+  "get_account": {
+    "success": true,
+    "timestamp": 1702989203989,
+    "data": { "user_id": 24, "account_id": "0xb129e074a17dfba8d652ae1eca21c7d6bb6904f1aa693f4886d50db170933a46" }
+  },
+  "daily_fee_revenue": {
+    "success": true,
+    "data": {
+      "rows": [
+        { "date": "2026-08-18", "permissionless_listing_fee_share": 0, "distributor_fee_share": 0, "builder_fee_revenue": 0, "cross_broker_fee": 0, "total_revenue": 0 }
+      ]
+    },
+    "timestamp": 1787068800000
+  },
+  "daily_fee_revenue_two_days": {
+    "success": true,
+    "data": {
+      "rows": [
+        { "date": "2026-08-19", "permissionless_listing_fee_share": 125.5, "distributor_fee_share": 0, "builder_fee_revenue": 3, "cross_broker_fee": 0, "total_revenue": 128.5 },
+        { "date": "2026-08-18", "permissionless_listing_fee_share": 0.000001, "distributor_fee_share": 0, "builder_fee_revenue": 0, "cross_broker_fee": 0, "total_revenue": 0.000001 }
+      ]
+    },
+    "timestamp": 1787155200000
+  },
+  "daily_fee_revenue_error_blank": { "success": false, "code": -1103, "message": "start_date and end_date can't be blank" },
+  "daily_fee_revenue_error_range": { "success": false, "code": -1103, "message": "error date interval greater than 180 days" },
+  "asset_history": {
+    "success": true,
+    "timestamp": 1702989203989,
+    "data": {
+      "meta": { "total": 9, "records_per_page": 25, "current_page": 1 },
+      "rows": [
+        {
+          "id": "230707030600002",
+          "tx_id": "0x4b0714c63cc7abae72bf68e84e25860b88ca651b7d27dad1e32bf4c027fa5326",
+          "side": "WITHDRAW",
+          "token": "USDC",
+          "amount": 555,
+          "fee": 0,
+          "trans_status": "FAILED",
+          "created_time": 1688699193034,
+          "updated_time": 1688699193096,
+          "chain_id": "986532"
+        }
+      ]
+    }
+  },
+  "withdraw_nonce": { "success": true, "timestamp": 1702989203989, "data": { "withdraw_nonce": 1 } },
+  "withdraw_request": { "success": true, "timestamp": 1702989203989, "data": { "withdraw_id": 123 } },
+  "registration_nonce": { "success": true, "timestamp": 1702989203989, "data": { "registration_nonce": "194528949540" } },
+  "delegate_signer": {
+    "success": true,
+    "timestamp": 1702989203989,
+    "data": { "user_id": 100338, "account_id": "0xd890c9b8b86fba7312b919e32bbabd619228b32d59f6d0f68fdf4451a684a654", "valid_signer": "0xc6c4c5c41efa74ebc63c675dcf7034e8382f3a42" }
+  },
+  "orderly_key": { "success": true, "timestamp": 1702989203989, "data": { "id": 123, "orderly_key": "ed25519:FRXntsPJBCy6dzKv9WPw4eYSw3rKU9Npz3T6UmvvJc9Z" } },
+  "get_orderly_key": { "success": true, "timestamp": 1702989203989, "data": { "orderly_key": "ed25519:7tEoJo5hMBKBrQsqmc8yw1xNfoQCFQBVwQT1eFafRNRf", "scope": "read,trading", "expiration": 1689086651947 } },
+  "error_order_price": { "success": false, "code": -1005, "message": "order_price must be a positive number" },
+  "auth_example": {
+    "orderly_key": "ed25519:8tm7dnKYkSc3FzgPuJaw1wztr79eeZpN35nHW5pL5XhX",
+    "message": "1649920583000POST/v1/order{\"symbol\": \"PERP_ETH_USDC\", \"order_type\": \"LIMIT\", \"order_price\": 1521.03, \"order_quantity\": 2.11, \"side\": \"BUY\"}"
+  }
+}

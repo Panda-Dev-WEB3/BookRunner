@@ -33,7 +33,7 @@ const DRAFT = {
   sponsor: SPONSOR,
   underlying: { ticker: "NVDA" },
   venue: "orderly",
-  ifTargetUsd: "25000",
+  ifTargetUsd: "30000",
   mmInventoryUsd: "75000",
   mandate: { maxInventoryUsd: "50000", maxSkewBps: 25, minQuoteWidthBps: 8, hedgeRatioMinBps: 5000, hedgeRatioMaxBps: 12000, killAtDrawdownBps: -800 },
   seniorHurdleBps: 6000,
@@ -63,7 +63,7 @@ describe("charter HTTP API", () => {
     expect(body.chainChecked).toBe(false);
     expect(body.transactions).toEqual([]);
     expect(String(body.encoded)).toMatch(/^0x[0-9a-f]+$/);
-    expect((body.charter as Record<string, unknown>).ifTargetUsd).toBe("25000000000");
+    expect((body.charter as Record<string, unknown>).ifTargetUsd).toBe("30000000000");
   });
 
   test("POST /charters/draft reports on-chain reason codes for rule violations", async () => {

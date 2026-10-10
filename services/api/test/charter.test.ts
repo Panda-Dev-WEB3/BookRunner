@@ -35,7 +35,7 @@ describe("charter draft -> Charter", () => {
     const { charter: c, issues } = draftToCharter(charterDraftSchema.parse(sampleDraft()), { stockTokens });
     expect(issues).toEqual([]);
     expect(c.underlying).toBe(tokenUnderlying(stockTokens.NVDA!.token));
-    expect(c.ifTargetUsd).toBe(25_000_000_000n);
+    expect(c.ifTargetUsd).toBe(30_000_000_000n);
     expect(c.mandate.maxHedgeLeverage).toBe(100);
     expect(c.sessions).toBe(encodeSessions(SESSIONS_24X5));
     expect(c.symbol).toBe(strToBytes32("PERP_NVDA_USDC"));
@@ -68,7 +68,7 @@ describe("charter draft -> Charter", () => {
     expect(back).toEqual(c);
     const v = charterToView(c, { stockTokens });
     expect(v.ticker).toBe("NVDA");
-    expect(v.ifTargetUsd).toBe("25000.000000");
+    expect(v.ifTargetUsd).toBe("30000.000000");
     expect(v.mandate.maxHedgeLeverage).toBe(1);
     expect(v.sessionsPreset).toBe("24x5");
     expect(v.symbol).toBe("PERP_NVDA_USDC");
@@ -84,7 +84,7 @@ describe("validateCharterLocal mirrors MarketCharter.validate", () => {
   test("each rule reports its reason code", () => {
     const base = sampleCharter();
     const cases: Array<[string, (c: ReturnType<typeof sampleCharter>) => void]> = [
-      ["IF_BELOW_VENUE_MIN", (c) => (c.ifTargetUsd = 24_999_999_999n)],
+      ["IF_BELOW_VENUE_MIN", (c) => (c.ifTargetUsd = 25_000_000_000n)], // Orderly needs IF > 25,000 (VERIFY O10)
       ["BAD_VENUE", (c) => (c.venue = 7 as never)],
       ["BAD_ORACLE", (c) => (c.oracle = 3 as never)],
       ["BAD_BPS", (c) => (c.seniorCapBps = 0)],
@@ -115,6 +115,7 @@ describe("validateCharterLocal mirrors MarketCharter.validate", () => {
     c.juniorNoticeSeconds = BigInt(30 * 86_400);
     c.mandate.killAtDrawdownBps = -5000;
     c.seniorCapBps = 10_000;
+    c.ifTargetUsd = 25_001_000_000n; // smallest Orderly IF strictly above the venue's 25,000
     expect(validateCharterLocal(c)).toEqual([]);
     const e = structuredClone(sampleCharter());
     e.venue = 1;
@@ -126,7 +127,7 @@ describe("validateCharterLocal mirrors MarketCharter.validate", () => {
   test("registry and pause context", () => {
     expect(codes(validateCharterLocal(sampleCharter(), { underlyingKnown: false }))).toEqual(["BAD_UNDERLYING"]);
     expect(codes(validateCharterLocal(sampleCharter(), { newBooksPaused: true }))).toEqual(["NEW_BOOKS_PAUSED"]);
-    expect(codes(validateCharterLocal(sampleCharter(), { venueMinIfUsd: [30_000_000_000n, 0n] }))).toEqual(["IF_BELOW_VENUE_MIN"]);
+    expect(codes(validateCharterLocal(sampleCharter(), { venueMinIfUsd: [35_000_000_000n, 0n] }))).toEqual(["IF_BELOW_VENUE_MIN"]);
   });
 
   test("mergeIssues drops a chain reason already reported locally", () => {
