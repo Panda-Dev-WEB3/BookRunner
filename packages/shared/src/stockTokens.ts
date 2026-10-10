@@ -16,10 +16,10 @@ import { isAbsolute, resolve } from "node:path";
 import { type Address, getAddress } from "viem";
 import { z } from "zod";
 import { REPO_ROOT } from "./deployments";
+// Robinhood Chain mainnet (4663, devkeys.ts — one constant for the key policy and the price rules): synthetic
+// prices are impossible there; the oracle enforces production rules.
+import { MAINNET_CHAIN_ID } from "./devkeys";
 import { WAD } from "./units";
-
-/** Robinhood Chain mainnet (testnet: TESTNET_CHAIN_ID 46630 in devkeys.ts): synthetic prices are impossible here; the oracle enforces production rules. */
-export const MAINNET_CHAIN_ID = 4663;
 
 export const isMainnet = (chainId: number): boolean => chainId === MAINNET_CHAIN_ID;
 
