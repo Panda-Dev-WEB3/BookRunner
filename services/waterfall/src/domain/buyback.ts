@@ -3,11 +3,15 @@
 //   keeper swaps it to BKRN (executeBuyback), which BkrnStaking streams to stakers.
 //   The router enforces the price bound on-chain (A5-02): the pool fee tier is pinned by the timelock,
 //   each call is capped at maxBuybackPerCall, and the swap minimum is at least buybackFloor(amountIn) =
-//   amountIn x reference price x (1 - maxSlippageBps). The keeper only TIGHTENS that bound:
-//   minBkrnOut = max(quote * (1 - slippage), floor), quote = the buyback router's own quote
-//   (MockSwapRouter.quote: the deploy-time fixed BKRN/USDC price), else a configured BKRN-per-USDC price,
-//   else the on-chain floor itself. A quote below the floor means the pool is off-market or the reference
-//   is stale: the keeper skips (the tx would revert) and warns.
+//   amountIn x reference price x (1 - maxSlippageBps). The reference source is governance-chosen on the
+//   router (referenceSource): FIXED (timelock price), TWAP (Uniswap v3 mean tick of the BKRN pool over
+//   twapWindow, refused while spot deviates from it) or ATTESTED (AttestedOracle BKRN price). The keeper
+//   only TIGHTENS that bound: minBkrnOut = max(quote * (1 - slippage), floor), quote = the buyback
+//   router's own quote (devnet MockSwapRouter.quote) or, on a real SwapRouter02, Uniswap QuoterV2
+//   quoteExactInputSingle on the pinned tier; else a configured BKRN-per-USDC price, else the on-chain
+//   floor itself. A quote below the floor means the pool is off-market or the reference is stale /
+//   manipulated: the keeper skips (the tx would revert) and warns. "USDC" = the settlement token
+//   (config.usdc(): USDG on Robinhood Chain, 6 decimals).
 
 const BPS = 10_000n;
 const USDC_SCALE = 10n ** 6n;
@@ -34,6 +38,13 @@ export interface BuybackBound {
 export type BuybackPlan =
   | { kind: "skip"; reason: string }
   | { kind: "buy"; amountIn: bigint; quote: bigint; minOut: bigint; floor: bigint; priceSource: "router" | "config" | "reference" };
+
+/** BkrnFeeRouter.referenceSource (REF_FIXED 0 / REF_TWAP 1 / REF_ATTESTED 2); "legacy" = a router without it. */
+export type BuybackReferenceSource = "fixed" | "twap" | "attested" | "legacy" | "unknown";
+
+export function referenceSourceName(source: number): BuybackReferenceSource {
+  return source === 0 ? "fixed" : source === 1 ? "twap" : source === 2 ? "attested" : "unknown";
+}
 
 export function buybackDue(pending: bigint, thresholdUsd: bigint): boolean {
   return pending > 0n && pending >= thresholdUsd;

@@ -41,6 +41,14 @@ export const waterfallEnvShape = {
   WATERFALL_BUYBACK_POOL_FEE: z.coerce.number().int().min(0).max(1_000_000).default(3000),
   /** Whole BKRN per whole USDC used when the buyback router has no quote (a real SwapRouter02); 0 = use the router's on-chain floor. */
   WATERFALL_BUYBACK_BKRN_PER_USDC: zWad("0"),
+  /**
+   * Uniswap v3 QuoterV2 for buyback quotes on a real SwapRouter02. Empty = the chain's known QuoterV2
+   * (Robinhood Chain 4663: docs/VERIFY.md U1), none on devnet/testnet (MockSwapRouter quotes itself).
+   */
+  WATERFALL_UNIV3_QUOTER: z
+    .string()
+    .regex(/^(0x[0-9a-fA-F]{40})?$/, "an address or empty")
+    .default(""),
   WATERFALL_LOG_CHUNK_BLOCKS: z.coerce.bigint().positive().default(10_000n),
   /** 0 = scan logs from deployment.startBlock. */
   WATERFALL_LOG_LOOKBACK_BLOCKS: z.coerce.bigint().min(0n).default(0n),

@@ -2,6 +2,7 @@
 // (adapters/chain.ts, adapters/store.ts, adapters/venue-ops.ts). Tests use in-memory fakes.
 import type { BookState, SplitResult } from "@bookrunner/shared";
 import type { Hex } from "viem";
+import type { BuybackReferenceSource } from "./domain/buyback";
 import type { LastMarkInfo } from "./domain/keeper";
 import type { BookRef } from "./kit/books";
 
@@ -130,6 +131,8 @@ export interface BuybackChain {
   buybackBounds(): Promise<{ legacy: boolean; maxPerCall: bigint }>;
   /** BkrnFeeRouter.buybackFloor(amountIn) (BKRN 18dp); reverts when the reference price is unset / stale. */
   buybackFloor(amountIn: bigint): Promise<bigint>;
+  /** BkrnFeeRouter.referenceSource (fixed / twap / attested); optional, for logs and receipts. */
+  buybackReferenceSource?(): Promise<BuybackReferenceSource>;
   /** BkrnFeeRouter.executeBuyback(amountIn, minBkrnOut) (KEEPER); `legacyPoolFee` only for a legacy router. */
   executeBuyback(amountIn: bigint, minBkrnOut: bigint, legacyPoolFee?: number): Promise<{ hash: Hex; usdcIn: bigint | null; bkrnOut: bigint | null }>;
 }

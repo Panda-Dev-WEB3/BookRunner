@@ -9,11 +9,13 @@ import {
   publicClientFor,
   redactUrl,
   roleAccount,
+  uniswapV3For,
   walletClientFor,
 } from "@bookrunner/shared";
 import { bookrunnerConfigAbi } from "@bookrunner/shared/abi";
 import { Queue, Worker } from "bullmq";
 import { Redis } from "ioredis";
+import type { Address } from "viem";
 import { WaterfallChainAdapter } from "./adapters/chain";
 import { RedeemLogIndex, UnionCandidates } from "./adapters/redemptions";
 import { DbRedeemCandidates, PgSettlementStore } from "./adapters/store";
@@ -79,7 +81,8 @@ export async function main() {
   const events = new PgRedisEventSink(db, redis, log);
   const books = new BookDirectory(pc, deployment, log);
   const candidates = new UnionCandidates([new RedeemLogIndex(pc, BigInt(deployment.startBlock ?? 0), cfg.WATERFALL_LOG_CHUNK_BLOCKS, log), new DbRedeemCandidates(db)], log);
-  const chain = new WaterfallChainAdapter({ pc, sender, deployment, candidates, logChunk: cfg.WATERFALL_LOG_CHUNK_BLOCKS, logLookback: cfg.WATERFALL_LOG_LOOKBACK_BLOCKS });
+  const univ3Quoter = cfg.WATERFALL_UNIV3_QUOTER ? (cfg.WATERFALL_UNIV3_QUOTER as Address) : (uniswapV3For(cfg.CHAIN_ID)?.quoterV2 ?? null);
+  const chain = new WaterfallChainAdapter({ pc, sender, deployment, candidates, logChunk: cfg.WATERFALL_LOG_CHUNK_BLOCKS, logLookback: cfg.WATERFALL_LOG_LOOKBACK_BLOCKS, univ3Quoter });
   const expenseCfg = { mode: cfg.WATERFALL_EXPENSE_MODE, fixedUsd: cfg.WATERFALL_EXPENSES_USD, oracleCostUsd: cfg.WATERFALL_ORACLE_COST_USD, ethUsdWad: cfg.WATERFALL_ETH_USD };
 
   const runner = new SettlementRunner({
