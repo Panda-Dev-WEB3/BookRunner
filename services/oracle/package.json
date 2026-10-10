@@ -8,6 +8,8 @@
     "start": "bun src/index.ts",
     "dev": "bun --watch src/index.ts",
     "test": "bun test",
+    "source-check": "bun src/cli/source-check.ts",
+    "attest": "bun src/cli/attest.ts",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {

@@ -14,7 +14,7 @@ import { type ComponentPrice, indexAsAggregate, indexLevel } from "./domain/inde
 import { roundPrice, toPriceWad } from "./domain/price";
 import { type PushedState, pushReason, publishTimestamp } from "./domain/push-policy";
 import { canonicalSources, sourcesHash } from "./domain/sources-hash";
-import type { PriceSource, UniverseEntry } from "./domain/types";
+import { type PriceSource, type UniverseEntry, sourceKind } from "./domain/types";
 import type { PriceSigner } from "./signing";
 
 export interface OracleSettings {
@@ -30,6 +30,11 @@ export interface OracleSettings {
   pushMode: PushMode;
   /** price ids whose latest signed update is older than this are left out of the bundle */
   bundleMaxAgeMs: number;
+  /**
+   * Mainnet rules (production.ts): no synthetic source may be wired in (the constructor throws), and no
+   * price — held or not, off-hours seeding included — is signed with fewer than the minimum sources.
+   */
+  production?: boolean;
 }
 
 export type PushMode = "pull" | "heartbeat";
@@ -139,6 +144,10 @@ export class OracleService {
   constructor(private readonly deps: OracleServiceDeps) {
     this.log = deps.log;
     this.now = deps.now ?? Date.now;
+    if (deps.settings.production) {
+      const synthetic = deps.sources.filter((src) => sourceKind(src) === "synthetic").map((src) => src.name);
+      if (synthetic.length > 0) throw new Error(`production oracle refuses synthetic sources: ${synthetic.join(", ")}`);
+    }
   }
 
   // ------------------------------------------------------------------ lifecycle
@@ -275,7 +284,11 @@ export class OracleService {
           ? aggregate(quotes.get(e.priceId) ?? [], { nowMs, outlierBps: s.outlierBps, minSources, maxAgeMs: s.maxSourceAgeMs })
           : indexAsAggregate(indexLevel(e.components, componentPrices), minSources);
       const open = marketOpen(e.sessions, at, s.sessionsMode);
-      const d = decide({ open, agg, lastOpen: this.lastOpen.get(e.priceId) ?? null, nowMs });
+      let d = decide({ open, agg, lastOpen: this.lastOpen.get(e.priceId) ?? null, nowMs, minSeedSources: s.production ? minSources : 1 });
+      if (d.kind === "publish" && s.production && d.sourceCount < minSources) {
+        // never sign below the minimum on mainnet (a held price restored from fewer sources included)
+        d = { kind: "skip", reason: `refused: ${d.sourceCount} of ${minSources} required sources (production)`, lastOpen: this.lastOpen.get(e.priceId) ?? null };
+      }
       if (d.kind === "skip") {
         summary.skipped.push({ priceId: e.priceId, reason: d.reason });
         this.noteSkip(e.priceId, d.reason, nowMs, agg);
@@ -330,7 +343,8 @@ export class OracleService {
           ]);
           if (!r) return null;
           const q: CollectedQuote = { name: src.name, price: Number.isFinite(r.price) && r.price > 0 ? roundPrice(r.price) : r.price, ts: r.ts };
-          if (src.maxAgeMs !== undefined) q.maxAgeMs = src.maxAgeMs;
+          const maxAge = r.maxAgeMs ?? src.maxAgeMs;
+          if (maxAge !== undefined) q.maxAgeMs = maxAge;
           return q;
         } catch (e) {
           this.log.debug({ source: src.name, ticker, err: errMsg(e) }, "source fetch failed");

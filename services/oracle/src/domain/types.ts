@@ -7,13 +7,28 @@ export interface SourceQuote {
   ts: number;
 }
 
+/** One fetched observation: USD per SHARE of the equity (never per Stock Token), `ts` unix ms. */
+export interface SourceObservation {
+  price: number;
+  ts: number;
+  /** Per-observation freshness bound (e.g. a Chainlink feed's heartbeat); overrides the source's. */
+  maxAgeMs?: number;
+}
+
+/** synthetic = devnet / testnet GBM (impossible on mainnet); live = market data. */
+export type SourceKind = "synthetic" | "chainlink" | "http";
+
 /** Pluggable price source. Returns null when the source has no (usable) observation. */
 export interface PriceSource {
   readonly name: string;
+  /** Unset = treated as "http" (a live, non-Chainlink source). */
+  readonly kind?: SourceKind;
   /** Observations older than this are ignored by the aggregator (default ORACLE_MAX_SOURCE_AGE_MS). */
   readonly maxAgeMs?: number;
-  fetch(ticker: string): Promise<{ price: number; ts: number } | null>;
+  fetch(ticker: string): Promise<SourceObservation | null>;
 }
+
+export const sourceKind = (s: Pick<PriceSource, "kind">): SourceKind => s.kind ?? "http";
 
 export interface IndexComponent {
   priceId: string; // component price id label, e.g. "NVDA"

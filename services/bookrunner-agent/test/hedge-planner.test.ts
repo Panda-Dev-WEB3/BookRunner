@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { BPS, absBig, checkHedgeLeg, hedgeInBand, hedgeRatioBps, usd, usdToNumber, wad } from "@bookrunner/shared";
+import { BPS, MULTIPLIER_VECTOR as V, absBig, checkHedgeLeg, hedgeInBand, hedgeRatioBps, usd, usdToNumber, wad } from "@bookrunner/shared";
 import type { Address, Hex } from "viem";
 import {
   type HedgeComponent,
@@ -66,6 +66,12 @@ describe("valuation helpers", () => {
     const two = valueUsdOf(10n ** 18n, wad(190), wad(2), 18);
     expect(one).toBe(usd(190));
     expect(two).toBe(2n * one);
+  });
+  test("pinned convention (VERIFY C2): per-share price x live uiMultiplier = qty x per-token feed", () => {
+    expect(valueUsdOf(V.qtyRaw, V.perSharePriceWad, V.uiMultiplierWad, V.decimals)).toBe(V.valueUsd6);
+    // buying the vector's value back gives (at most one raw unit less than) the vector's quantity
+    const q = qtyForUsd(V.valueUsd6, V.perSharePriceWad, V.uiMultiplierWad, V.decimals);
+    expect(V.qtyRaw - q >= 0n && V.qtyRaw - q < 10n ** 12n).toBe(true);
   });
   test("qtyForUsd inverts valueUsdOf (floor)", () => {
     for (const dec of [6, 8, 18]) {

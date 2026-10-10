@@ -1,0 +1,28 @@
+{
+  "chainId": 4663,
+  "name": "Robinhood Chain mainnet",
+  "researchedAt": "2026-10-10",
+  "sources": {
+    "stockTokens": "https://api.robinhood.com/rhj/assets (deployments[chainId=4663].contractAddress, tokenDecimals) — generated from Robinhood's on-chain asset registry, listed at https://docs.robinhood.com/chain/contracts",
+    "feeds": "https://reference-data-directory.vercel.app/feeds-robinhood-mainnet.json (the data behind https://docs.chain.link/data-feeds/price-feeds/addresses?network=robinhood): proxyAddress, decimals, heartbeat, threshold",
+    "multiplier": "https://docs.robinhood.com/chain/building-with-stock-tokens (uiMultiplier 18 decimals, 1e18 = 1.0); https://docs.chain.link/data-feeds/tokenized-equity-feeds/robinhood (token price = equity price x uiMultiplier)"
+  },
+  "note": "Copied from the sources above, not yet read on-chain. Run `bun run --cwd services/oracle source-check --chain 4663 --rpc <RHC_RPC_URL>` against a mainnet RPC before launch (VERIFY T3, C4).",
+  "stockTokens": {
+    "NVDA": { "token": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC", "decimals": 18, "multiplierSource": "uiMultiplier" },
+    "TSLA": { "token": "0x322F0929c4625eD5bAd873c95208D54E1c003b2d", "decimals": 18, "multiplierSource": "uiMultiplier" },
+    "AAPL": { "token": "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9", "decimals": 18, "multiplierSource": "uiMultiplier" },
+    "MSFT": { "token": "0xe93237C50D904957Cf27E7B1133b510C669c2e74", "decimals": 18, "multiplierSource": "uiMultiplier" },
+    "AMZN": { "token": "0x12f190a9F9d7D37a250758b26824B97CE941bF54", "decimals": 18, "multiplierSource": "uiMultiplier" }
+  },
+  "chainlink": {
+    "sequencerUptimeFeed": null,
+    "feeds": {
+      "NVDA": { "proxy": "0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15", "basis": "per-token", "decimals": 8, "heartbeatSec": 86400, "deviationBps": 50, "description": "Robinhood NVDA / USD", "marketHours": "us_equities_24/5" },
+      "TSLA": { "proxy": "0x4A1166a659A55625345e9515b32adECea5547C38", "basis": "per-token", "decimals": 8, "heartbeatSec": 86400, "deviationBps": 50, "description": "Robinhood TSLA / USD", "marketHours": "us_equities_24/5" },
+      "AAPL": { "proxy": "0x6B22A786bAa607d76728168703a39Ea9C99f2cD0", "basis": "per-token", "decimals": 8, "heartbeatSec": 86400, "deviationBps": 50, "description": "Robinhood AAPL / USD", "marketHours": "us_equities_24/5" },
+      "MSFT": { "proxy": "0x45C3C877C15E6BA2EBB19eA114Ea508d14C1Af2E", "basis": "per-token", "decimals": 8, "heartbeatSec": 86400, "deviationBps": 50, "description": "Robinhood MSFT / USD", "marketHours": "us_equities_24/5" },
+      "AMZN": { "proxy": "0xD5a1508ceD74c084eBf3cBe853e2C968fB2a651C", "basis": "per-token", "decimals": 8, "heartbeatSec": 86400, "deviationBps": 50, "description": "Robinhood AMZN / USD", "marketHours": "us_equities_24/5" }
+    }
+  }
+}

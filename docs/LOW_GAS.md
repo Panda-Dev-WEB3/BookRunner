@@ -20,6 +20,10 @@ function update(bytes calldata priceData) external;          // priceData = abi.
 function priceOf(bytes32 underlying) external view returns (uint256 priceWad, bool held); // unchanged
 ```
 
+- What is signed is USD per **share** (VERIFY C2). Robinhood's per-token Chainlink answers are divided by
+  the token's `uiMultiplier()` off-chain, inside the oracle service: no feed or token read on the price
+  path. The only on-chain addition is in valuation: a registry token in live-multiplier mode costs one
+  `uiMultiplier()` STATICCALL per `valueUsd` (desk hedge valuation loops over held tokens).
 - `update` also skips entries that are already stale on arrival (`publishedAt + maxPriceAge < now`), so
   nobody can land an old, favourable print that happens to be newer than the stored one.
 - `pushMany` stays (backwards compatible) but **the oracle service no longer pushes on a timer** by

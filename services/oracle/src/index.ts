@@ -5,12 +5,14 @@ import { createDb } from "@bookrunner/db";
 import { createLogger, roleAccount } from "@bookrunner/shared";
 import type { LocalAccount } from "viem";
 import { DrizzlePriceStore } from "./adapters/db";
+import { type AttestationDocument, loadAttestationDocument } from "./attestation";
 import { RedisPricePublisher, createRedis } from "./adapters/redis";
 import { builderPriceClient } from "./adapters/venue";
 import { loadOracleConfig } from "./config";
 import { MAX_SAFE_PUSH_DEVIATION_BPS, createApp, serveOptions } from "./http";
 import { startLoop } from "./loop";
 import { Runtime } from "./runtime";
+import { isProductionChain, productionProblems } from "./production";
 import { OracleService } from "./service";
 import { accountSigner } from "./signing";
 import { buildSources } from "./sources/index";
@@ -39,6 +41,13 @@ if (syntheticRefused) {
   log.fatal({ chainId: cfg.CHAIN_ID }, `refusing to start: ${syntheticRefused}`);
   process.exit(1);
 }
+const production = isProductionChain(cfg.CHAIN_ID);
+const problems = productionProblems(cfg, sources);
+if (problems.length > 0) {
+  // mainnet: Chainlink + an independent source, >= the minimum sources, no synthetic prices, calendar holds
+  log.fatal({ chainId: cfg.CHAIN_ID, problems }, "refusing to start: mainnet oracle configuration is not production-ready");
+  process.exit(1);
+}
 
 const service = new OracleService({
   log,
@@ -58,6 +67,7 @@ const service = new OracleService({
     venuePrices: cfg.ORACLE_VENUE_PRICES,
     pushMode: cfg.ORACLE_PUSH_MODE,
     bundleMaxAgeMs: cfg.ORACLE_BUNDLE_MAX_AGE_MS,
+    production,
   },
 });
 
@@ -67,7 +77,18 @@ const loops = [
   startLoop("tick", cfg.ORACLE_TICK_MS, async () => void (await service.tick()), log),
 ];
 
-const server = Bun.serve(serveOptions(cfg, createApp(service).fetch));
+let attestation: AttestationDocument | null = null;
+if (cfg.ORACLE_ATTESTATION_FILE) {
+  try {
+    attestation = loadAttestationDocument(cfg.ORACLE_ATTESTATION_FILE);
+  } catch (err) {
+    log.fatal({ err: (err as Error).message }, "ORACLE_ATTESTATION_FILE unreadable");
+    process.exit(1);
+  }
+} else if (production) {
+  log.warn("no ORACLE_ATTESTATION_FILE: GET /attestation serves no quote (the signer must be registered with AttestedOracle.setAttestedSigner)");
+}
+const server = Bun.serve(serveOptions(cfg, createApp(service, attestation).fetch));
 log.info(
   {
     host: cfg.ORACLE_HOST,

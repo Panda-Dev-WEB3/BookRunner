@@ -79,6 +79,7 @@ export class SyntheticMarket {
 }
 
 export class SyntheticSource implements PriceSource {
+  readonly kind = "synthetic" as const;
   constructor(
     readonly name: string,
     private readonly market: SyntheticMarket,

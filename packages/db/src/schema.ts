@@ -217,8 +217,8 @@ export const hedges = pgTable(
     ts: ts("ts").notNull(),
     asset: text("asset").notNull(),
     qtyRaw: raw("qty_raw").notNull(), // signed: + buy, - sell
-    px: doublePrecision("px").notNull(),
-    mult: doublePrecision("mult").notNull(),
+    px: doublePrecision("px").notNull(), // USD per whole TOKEN = per-share oracle price x mult (display only)
+    mult: doublePrecision("mult").notNull(), // shares per whole token (registry effective multiplier)
     txHash: text("tx_hash").notNull(),
     // extensions
     venue: text("venue").notNull().default("UNIV3"),

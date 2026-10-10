@@ -1,5 +1,6 @@
 // Optional HTTP price sources (disabled by default). VERIFY each provider's endpoint, symbols,
-// timestamps, rate limits and licensing before enabling outside devnet.
+// timestamps, rate limits and licensing before enabling outside devnet. They must quote USD per SHARE of
+// the equity (the oracle's unit; Robinhood per-token prices are converted in sources/chainlink.ts only).
 //   - GenericHttpSource: ORACLE_HTTP_SOURCES='[{"name":"x","url":"https://.../{ticker}","pricePath":"data.price","tsPath":"data.ts","tsUnit":"ms"}]'
 //   - Finnhub preset:    ORACLE_HTTP_FINNHUB=1 + ORACLE_FINNHUB_API_KEY (GET /api/v1/quote -> {c, t}) — VERIFY
 import type { HttpSourceSpec } from "../config";
@@ -26,6 +27,7 @@ const toNumber = (x: unknown): number | null => {
 
 export class GenericHttpSource implements PriceSource {
   readonly name: string;
+  readonly kind = "http" as const;
   readonly maxAgeMs?: number;
 
   constructor(

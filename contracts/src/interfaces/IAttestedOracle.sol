@@ -2,7 +2,7 @@
 pragma solidity ^0.8.30;
 
 /// @title IAttestedOracle — single on-chain price surface. Prices are produced by the oracle service
-///        (multi-source median inside an attested TEE; attestation registry is VERIFY) and signed by a
+///        (multi-source median inside an attested TEE; AttestedOracle.setAttestedSigner, VERIFY E1) and signed by a
 ///        registered signer. `held` = feed holding off-hours (session closed): engine + mandate go
 ///        reduce-only; liquidations still run on margin at the held price.
 /// @notice EIP-712 domain: name "Bookrunner AttestedOracle", version "1".
@@ -43,7 +43,7 @@ interface IAttestedOracle {
     function priceOf(bytes32 underlying) external view returns (uint256 priceWad, bool held);
     function isStale(bytes32 underlying) external view returns (bool);
     function isSigner(address signer) external view returns (bool);
-    /// @notice Timelock: register / remove signer; `attestation` = hash of the TEE quote (VERIFY flow).
+    /// @notice Timelock: register / remove signer; `attestation` = recorded hash (TEE signers: AttestedOracle.setAttestedSigner).
     function setSigner(address signer, bool active, bytes32 attestation) external;
     /// @notice Minimum distinct sources required for a non-held price.
     function minSources() external view returns (uint32);

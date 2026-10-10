@@ -1,5 +1,6 @@
-// Source assembly from config: synthetic GBM (devnet only), optional HTTP and AggregatorV3 sources.
-import type { Logger } from "@bookrunner/shared";
+// Source assembly from config: synthetic GBM (devnet; testnet with a secret seed; never on mainnet),
+// HTTP sources and Chainlink feeds (config/chains/<chainId>.json + ORACLE_CHAINLINK_FEEDS).
+import { type Logger, isMainnet } from "@bookrunner/shared";
 import { createPublicClient, http, type PublicClient } from "viem";
 import { type OracleConfig, syntheticSeedProblem } from "../config";
 import { csprngNormal } from "../domain/rng";
@@ -29,7 +30,11 @@ export function buildSources(cfg: OracleConfig, log: Logger, now: () => number =
 
   if (cfg.ORACLE_SYNTHETIC) {
     const seedProblem = syntheticSeedProblem(cfg.CHAIN_ID, cfg.ORACLE_SEED);
-    if (cfg.CHAIN_ID !== 31337 && cfg.CHAIN_ID !== 46630) {
+    if (isMainnet(cfg.CHAIN_ID)) {
+      // never even construct them: the service refuses to start (index.ts) rather than run without them
+      syntheticRefused = "synthetic sources are impossible on Robinhood Chain mainnet (4663): set ORACLE_SYNTHETIC=0";
+      log.error({ chainId: cfg.CHAIN_ID }, syntheticRefused);
+    } else if (cfg.CHAIN_ID !== 31337 && cfg.CHAIN_ID !== 46630) {
       log.error({ chainId: cfg.CHAIN_ID }, "synthetic sources are devnet/testnet-only; disabled on this chain (set ORACLE_SYNTHETIC=0 to silence)");
     } else if (seedProblem) {
       // signed prices from a public seed are computable in advance by anyone: never sign them on a public chain
@@ -67,9 +72,15 @@ export function buildSources(cfg: OracleConfig, log: Logger, now: () => number =
 
   const feeds = cfg.chainlinkFeeds;
   if (Object.keys(feeds).length > 0) {
-    const pub = createPublicClient({ transport: http(cfg.ORACLE_CHAINLINK_RPC_URL ?? cfg.RPC_URL) }) as PublicClient;
-    sources.push(new ChainlinkSource(feeds, viemAggregatorReader(pub), cfg.ORACLE_CHAINLINK_MAX_AGE_MS));
-    log.info({ tickers: Object.keys(feeds) }, "AggregatorV3 source enabled (VERIFY feed addresses)");
+    // concurrent reads of one tick (round + token state per feed) share one JSON-RPC batch request
+    const pub = createPublicClient({ transport: http(cfg.ORACLE_CHAINLINK_RPC_URL ?? cfg.RPC_URL, { batch: true }) }) as PublicClient;
+    sources.push(
+      new ChainlinkSource(feeds, viemAggregatorReader(pub), { sequencerFeed: cfg.sequencerUptimeFeed, sequencerGraceMs: cfg.ORACLE_SEQUENCER_GRACE_MS }),
+    );
+    log.info(
+      { feeds: Object.fromEntries(Object.entries(feeds).map(([t, f]) => [t, { proxy: f.proxy, basis: f.basis, token: f.token, maxAgeMs: f.maxAgeMs }])) },
+      "Chainlink source enabled (per-token feeds divided by uiMultiplier; run source-check before mainnet)",
+    );
   }
 
   if (sources.length === 0) log.error("no price sources configured; nothing will be published");
