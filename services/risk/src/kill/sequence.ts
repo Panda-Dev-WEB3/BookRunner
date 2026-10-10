@@ -233,7 +233,9 @@ async function recordFlatten(ctx: KillContext, ports: KillPorts, o: FlattenOrder
     ts: new Date(nowSec * 1000),
     asset: o.token.toLowerCase(),
     qtyRaw: (-o.amountIn).toString(),
-    px: Number(o.priceWad) / 1e18,
+    // hedges.px = USD per whole TOKEN (per-share oracle price x multiplier), as the agent writes it;
+    // informational only (valueUsd is the registry valuation, multiplier applied once)
+    px: (Number(o.priceWad) / 1e18) * (Number(o.multiplierWad) / 1e18),
     mult: Number(o.multiplierWad) / 1e18,
     txHash: tx,
     venue: "UNIV3",

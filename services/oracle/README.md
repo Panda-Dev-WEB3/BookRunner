@@ -68,11 +68,32 @@ BKRN_IT=1 ORACLE_IT_ANVIL_PORT=8622 bun test test/pull.chain.it.test.ts
 
 ## Sources
 
+Every source reports USD per **share** of the equity (the AttestedOracle unit).
+
 | Source | Enabled by | Notes |
 |---|---|---|
-| `synthetic-a/b/c` | `ORACLE_SYNTHETIC=1` (default, chain 31337 only) | one seeded GBM path per ticker (`ORACLE_SEED`, vols NVDA 45% TSLA 60% AAPL 25% MSFT 25% AMZN 30%, `ORACLE_VOL_SCALE`), per-source noise, dropouts, rare spikes |
-| HTTP JSON | `ORACLE_HTTP_SOURCES` JSON array, `ORACLE_HTTP_FINNHUB=1` + key | VERIFY endpoints, symbols, licensing |
-| AggregatorV3 | `ORACLE_CHAINLINK_FEEDS={"NVDA":"0x…"}` | VERIFY feed addresses; none on devnet |
+| `synthetic-a/b/c` | `ORACLE_SYNTHETIC=1` (default; 31337, or 46630 with a secret `ORACLE_SEED`) | one seeded GBM path per ticker (`ORACLE_SEED`, vols NVDA 45% TSLA 60% AAPL 25% MSFT 25% AMZN 30%, `ORACLE_VOL_SCALE`), per-source noise, dropouts, rare spikes. **Impossible on 4663**: never constructed, the service refuses to start |
+| HTTP JSON | `ORACLE_HTTP_SOURCES` JSON array, `ORACLE_HTTP_FINNHUB=1` + key | must quote per share; VERIFY endpoints, symbols, licensing |
+| `chainlink` | `config/chains/<CHAIN_ID>.json` (`ORACLE_CHAIN_CONFIG`) + `ORACLE_CHAINLINK_FEEDS` overlay | per feed: `proxy`, `basis` (`per-token`: Robinhood tokenized-equity feed = share price × `uiMultiplier()`, divided by the token's on-chain `uiMultiplier()`; `per-share`: used as is), `token`, pinned `decimals` (checked against `decimals()`), `heartbeatSec` (in-session max age = heartbeat + `ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS`). A multiplier that became effective after the feed's last round is undone with the multiplier observed with that round (no observation if that round was never seen). No observation while the token's `oraclePaused()` is set, or when the L2 sequencer feed (if configured) is down / in its grace period. `held` never comes from the feed (session calendar only). Reads of one tick are JSON-RPC batched. None on devnet |
+
+### Mainnet (4663) production rules (`src/production.ts`)
+
+The service refuses to start unless: `ORACLE_SYNTHETIC=0`; Chainlink feeds **and** at least one other
+live source; distinct live sources ≥ `ORACLE_MIN_SOURCES` ≥ 2; every feed has an explicit basis (a plain
+address in `ORACLE_CHAINLINK_FEEDS` is refused); every `ORACLE_TICKERS` entry has a feed;
+`SESSIONS_MODE` is not `24x7`. At runtime (`settings.production`) no synthetic source can be wired in and
+no price — held, restored or seeded off-hours — is signed with fewer than
+`max(ORACLE_MIN_SOURCES, AttestedOracle.minSources())` sources.
+
+### Operator CLIs (read-only / offline, no key)
+
+```
+# every configured feed + Stock Token read live, pass/fail table, exit 1 on FAIL (VERIFY C4/T2/T3)
+bun run source-check --chain 4663 --rpc $RHC_RPC_URL [--registry 0x…] [--config file] [--json] [--no-service-config]
+# TEE signer registration (VERIFY E1; docs/RUNBOOK.md "Oracle signer attestation")
+bun run attest report-data --chain 4663 --oracle 0x… --signer 0x…
+bun run attest register    --chain 4663 --oracle 0x… --doc attestation.json
+```
 
 ## HTTP
 
@@ -86,8 +107,9 @@ Bound to `ORACLE_HOST` (default `127.0.0.1`, set `0.0.0.0` only behind a proxy /
 - `GET /prices/signed` — the signed bundle (503 before the first live tick). Public by design in pull
   mode: every trade carries its own price and PoolEngine only accepts one published within
   `maxTradePriceAge` (default 15 s) of the block; the spread covers the residual.
-- `GET /attestation` — signer address + `{type: "devnet-plain-key", quote: null}` (TEE quote
-  verification is VERIFY).
+- `GET /attestation` — signer address, the `reportData` its TEE quote must carry
+  (`AttestedOracle.reportDataOf`), and the attestation document from `ORACLE_ATTESTATION_FILE` with its
+  `quoteHash`, on-chain `digest` and binding checks (`{type: "devnet-plain-key", quote: null}` without one).
 
 ## Venue builder prices
 

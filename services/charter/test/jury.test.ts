@@ -1,6 +1,6 @@
 // Rule checks + deterministic rule-based jury + verdict assembly.
 import { describe, expect, test } from "bun:test";
-import { ORACLE, SESSIONS_24X7, VENUE, checkCopy, encodeSessions, usd } from "@bookrunner/shared";
+import { MULTIPLIER_VECTOR as V, ORACLE, SESSIONS_24X7, VENUE, checkCopy, encodeSessions, usd } from "@bookrunner/shared";
 import { cidOfJson } from "../src/domain/cid";
 import { sanitizeCopy } from "../src/domain/copyFilter";
 import { PERSONAS, ruleJury } from "../src/domain/jurors";
@@ -25,6 +25,11 @@ describe("rule checks", () => {
     const t = nvdaToken({ multiplierWad: 2n * 10n ** 18n, floatCapRaw: 10n ** 18n, priceWad: 100n * 10n ** 18n });
     expect(tokenValueUsd(10n ** 18n, t, 100n * 10n ** 18n)).toBe(usd("200"));
     expect(hedgeFloatCapacityUsd({ kind: "token", token: t })).toBe(usd("200"));
+  });
+
+  test("pinned convention (VERIFY C2): per-share price x live uiMultiplier = qty x per-token feed", () => {
+    const t = nvdaToken({ multiplierWad: V.uiMultiplierWad, decimals: V.decimals });
+    expect(tokenValueUsd(V.qtyRaw, t, V.perSharePriceWad)).toBe(V.valueUsd6);
   });
 
   test("float cap below the band minimum blocks; between min and max warns", () => {

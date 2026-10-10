@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { INVENTORY_LEAF, WAD, canonicalJson, devAccount, inventoryTree, markTypedData, payloadHash, proofFor, usd, verifyProof } from "@bookrunner/shared";
+import { INVENTORY_LEAF, MULTIPLIER_VECTOR as V, WAD, canonicalJson, devAccount, inventoryTree, markTypedData, payloadHash, proofFor, usd, verifyProof } from "@bookrunner/shared";
 import { getAddress, hashTypedData, keccak256, stringToHex } from "viem";
 import {
   LOCATION,
@@ -44,6 +44,13 @@ describe("NAV composition", () => {
     const pos = { ...s.desk.positions[0]!, multiplierWad: 2n * WAD, valueUsd: usd("15200") }; // registry already applied 2x
     const nav = composeNav({ ...s, desk: { ...s.desk, positions: [pos] } });
     expect(nav.deskHedgeValueUsd).toBe(usd("15200"));
+  });
+
+  test("pinned convention (VERIFY C2): the registry value of a live-uiMultiplier position is taken as is", () => {
+    const s = snapshot();
+    const pos = { ...s.desk.positions[0]!, qtyRaw: V.qtyRaw, priceWad: V.perSharePriceWad, multiplierWad: V.uiMultiplierWad, valueUsd: V.valueUsd6 };
+    const nav = composeNav({ ...s, desk: { ...s.desk, positions: [pos] } });
+    expect(nav.deskHedgeValueUsd).toBe(V.valueUsd6); // = qty x Chainlink per-token feed, never x multiplier again
   });
 
   test("cross-checks flag adapter / desk / vault disagreements", () => {

@@ -164,23 +164,25 @@ describe("optional sources", () => {
     let decCalls = 0;
     let answer = 19_012_345_678n;
     const src = new ChainlinkSource(
-      { NVDA: "0x00000000000000000000000000000000000000c1" },
+      { NVDA: { proxy: "0x00000000000000000000000000000000000000c1", basis: "per-share", token: null, maxAgeMs: 3_600_000 } },
       {
         decimals: async () => {
           decCalls++;
           return 8;
         },
-        latestRoundData: async () => ({ answer, updatedAt: 1_790_000_000n }),
+        latestRoundData: async () => ({ answer, startedAt: 1_790_000_000n, updatedAt: 1_790_000_000n }),
+        tokenState: async () => {
+          throw new Error("per-share feeds never read the token");
+        },
       },
-      3_600_000,
+      { now: () => 1_790_000_010_000 },
     );
-    expect(await src.fetch("NVDA")).toEqual({ price: 190.12345678, ts: 1_790_000_000_000 });
+    expect(await src.fetch("NVDA")).toEqual({ price: 190.12345678, ts: 1_790_000_000_000, maxAgeMs: 3_600_000 });
     expect(await src.fetch("NVDA")).not.toBeNull();
     expect(decCalls).toBe(1);
     expect(await src.fetch("TSLA")).toBeNull();
     answer = 0n;
     expect(await src.fetch("NVDA")).toBeNull();
-    expect(src.maxAgeMs).toBe(3_600_000);
   });
 
   test("generic HTTP source: url template, symbol map, json paths, units", async () => {

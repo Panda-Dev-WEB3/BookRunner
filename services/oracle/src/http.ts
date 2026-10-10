@@ -5,16 +5,21 @@
 // of every live price id, the `priceData` consumers carry in their own transaction — public by design, the
 // latency arbitrage is bounded on-chain by PoolEngine's maxTradePriceAge.
 import { Hono } from "hono";
+import { type AttestationDocument, checkAttestation, reportDataFor } from "./attestation";
 import type { OracleService } from "./service";
 
 export type OracleView = Pick<OracleService, "health" | "publicPrices" | "publicPrice" | "signerInfo" | "signedBundle">;
 
 export const ATTESTATION_NOTE =
-  "VERIFY: devnet signs with a plain key. Production runs the aggregator inside a TEE; the quote is " +
-  "hashed into AttestedOracle.setSigner(signer, active, attestation) by the timelock, and quote " +
-  "verification (vendor collateral, measurement allow-list) is not implemented yet.";
+  "Devnet and testnet sign with a plain key. Production runs the aggregator inside a TEE whose quote " +
+  "carries reportData (keccak256 of chain, oracle, signer). The operator verifies the quote with the " +
+  "platform verifier and the timelock records it with AttestedOracle.setAttestedSigner (allow-listed " +
+  "measurement, keccak256 of the quote); see docs/RUNBOOK.md, Oracle signer attestation.";
 
-export function createApp(svc: OracleView): Hono {
+/**
+ * @param attestation the enclave's attestation document (ORACLE_ATTESTATION_FILE); null = plain key.
+ */
+export function createApp(svc: OracleView, attestation: AttestationDocument | null = null): Hono {
   const app = new Hono();
 
   app.get("/health", (c) => {
@@ -39,12 +44,28 @@ export function createApp(svc: OracleView): Hono {
 
   app.get("/attestation", (c) => {
     const s = svc.signerInfo();
+    const bound = s.chainId !== null && s.oracle !== null ? { chainId: s.chainId, oracle: s.oracle, signer: s.address } : null;
+    let body: Record<string, unknown> = { type: "devnet-plain-key", quote: null };
+    if (attestation) {
+      const check = bound ? checkAttestation(attestation, bound) : null;
+      body = {
+        type: attestation.platform,
+        measurement: attestation.measurement,
+        quote: attestation.quote,
+        quoteHash: check?.quoteHash ?? null,
+        digest: check?.digest ?? null,
+        problems: check?.problems ?? ["deployment not loaded"],
+        notes: attestation.notes ?? null,
+      };
+    }
     return c.json({
       signer: s.address,
       chainId: s.chainId,
       oracle: s.oracle,
       registered: s.registered,
-      attestation: { type: "devnet-plain-key", quote: null },
+      // the 32 bytes the enclave's quote must carry for this signer (AttestedOracle.reportDataOf)
+      reportData: bound ? reportDataFor(bound.chainId, bound.oracle, bound.signer) : null,
+      attestation: body,
       note: ATTESTATION_NOTE,
     });
   });

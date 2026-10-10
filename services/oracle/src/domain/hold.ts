@@ -42,7 +42,11 @@ function decodeSafe(s: Hex): Sessions {
   }
 }
 
-export function decide(p: { open: boolean; agg: AggregateResult; lastOpen: LastOpen | null; nowMs: number }): Decision {
+/**
+ * `minSeedSources` (default 1): sources needed to seed an off-hours hold without history. Mainnet passes
+ * the full minimum (a held price is never signed from fewer sources there, production.ts).
+ */
+export function decide(p: { open: boolean; agg: AggregateResult; lastOpen: LastOpen | null; nowMs: number; minSeedSources?: number }): Decision {
   const { open, agg, lastOpen } = p;
   if (open) {
     if (agg.ok && agg.price !== null) {
@@ -56,12 +60,14 @@ export function decide(p: { open: boolean; agg: AggregateResult; lastOpen: LastO
     return { kind: "publish", price: lastOpen.price, held: true, sources: lastOpen.sources, sourceCount: lastOpen.sourceCount, lastOpen };
   }
   // Started off-hours with no history: seed the hold from whatever is observable now (>= 1 source).
-  if (agg.accepted.length > 0) {
+  const seedMin = Math.max(1, p.minSeedSources ?? 1);
+  if (agg.accepted.length > 0 && sourceCountOf(agg) >= seedMin) {
     // an index level is a weighted sum, not a median of its components
     const price = agg.sourceCount !== undefined && agg.price !== null ? agg.price : median(agg.accepted.map((s) => s.price));
     const sourceCount = sourceCountOf(agg);
     const lo: LastOpen = { price, sources: agg.accepted, sourceCount, ts: p.nowMs };
     return { kind: "publish", price, held: true, sources: agg.accepted, sourceCount, lastOpen: lo, seeded: true };
   }
-  return { kind: "skip", reason: "off-hours with no price history", lastOpen: null };
+  const seen = agg.accepted.length > 0 ? ` (${sourceCountOf(agg)} of ${seedMin} sources needed to seed a hold)` : "";
+  return { kind: "skip", reason: `off-hours with no price history${seen}`, lastOpen: null };
 }

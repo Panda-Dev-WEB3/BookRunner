@@ -366,7 +366,10 @@ reverts `NotConfigured` until a v4 router is set (VERIFY). Router per venue sett
 **StockTokenRegistry**: per `IStockTokenRegistry`. `valueUsd = qtyRaw * multiplierWad * priceWad /
 (10**decimals * 1e18) / 1e12` (WAD USD → 6dp). Prices from `AttestedOracle.priceOf(priceId)` per
 share of the equity — **the multiplier is applied exactly once** (red-team test). Index price ids
-are oracle keys published by the oracle service as the weighted index level.
+are oracle keys published by the oracle service as the weighted index level. Multiplier source per
+token: stored, or (mainnet) the token's ERC-8056 `uiMultiplier()` read live within `multiplierBandBps`
+of the stored anchor (`setMultiplierSource`, `setNextMultiplierAnchor`); Robinhood's per-token Chainlink
+prices are divided by that same value in the oracle service (VERIFY C2/T2, `packages/shared/src/stockTokens.ts`).
 
 ### 2.8 AttestedOracle, PoolEngine, PoolEngineAdapter [A-engine]
 
@@ -444,7 +447,8 @@ guardian pause) · mandate escalation (key cannot raise its own limits / call no
 key revocation race (revoke then execute in same block → revert) · off-hours quoting blocked
 (engine trades incl. closes + desk SetQuote widening + hedge adding risk) · oracle staleness → engine
 pause for every trade (liquidate still works) · Stock Tokens not borrowable (sell > held
-reverts) · float caps · multiplier double-apply (valuation with multiplier 2e18 equals exactly 2×).
+reverts) · float caps · multiplier double-apply (valuation with multiplier 2e18 equals exactly 2×;
+live `uiMultiplier` + per-token feed ⇒ value = qty × feed, `MULTIPLIER_VECTOR`).
 Plus A10 invariants: redemption never permission-gated; waterfall conservation (S + J == marked
 NAV + backstop cover after every applyMark, modulo credited flows); mandate bounds (engine pool
 |net exposure| ≤ maxInventoryUsd always).

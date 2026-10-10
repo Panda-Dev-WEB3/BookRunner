@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { usd, wad } from "@bookrunner/shared";
+import { MULTIPLIER_VECTOR as V, usd, wad } from "@bookrunner/shared";
 import { planFlatten, stockValueUsd } from "../src/domain/flatten";
 import { NVDA_TOKEN, TSLA_TOKEN, holding } from "./fakes";
 
@@ -59,5 +59,13 @@ describe("stockValueUsd (registry fallback)", () => {
     expect(stockValueUsd(qty, wad(1), wad(190), 18)).toBe(usd(1_900));
     expect(stockValueUsd(qty, wad(2), wad(190), 18)).toBe(usd(3_800)); // exactly 2x
     expect(stockValueUsd(10_000_000n, wad(1), wad(190), 6)).toBe(usd(1_900)); // 6-decimals token
+  });
+
+  test("pinned convention (VERIFY C2): per-share oracle price x live uiMultiplier = qty x Chainlink per-token feed", () => {
+    // the multiplier comes from registry.getToken (the token's live uiMultiplier on mainnet), the price is
+    // the oracle's per-share price (feed / uiMultiplier): applied once, never twice
+    expect(stockValueUsd(V.qtyRaw, V.uiMultiplierWad, V.perSharePriceWad, V.decimals)).toBe(V.valueUsd6);
+    const perTokenWad = V.feedAnswer * 10n ** 10n;
+    expect(stockValueUsd(V.qtyRaw, V.uiMultiplierWad, perTokenWad, V.decimals)).toBe(V.doubleAppliedUsd6);
   });
 });

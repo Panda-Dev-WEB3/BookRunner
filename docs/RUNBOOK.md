@@ -24,7 +24,8 @@ Preconditions (all must be checked off in `docs/VERIFY.md` with sources):
 2. Uniswap v3 SwapRouter02 (and v4 UniversalRouter if used) on RHC and the Stock Token pools for each
    hedge asset; EntryPoint v0.7; USDC/USDG addresses; canonical Stock Token addresses + multipliers;
    Chainlink equity feed addresses; Dwellir archive RPC.
-3. TEE attestation for the oracle signer verified and the attestation hash registered.
+3. TEE attestation for the oracle signer verified and registered ("Oracle signer attestation" below);
+   `source-check` green against a mainnet RPC ("Real prices" below).
 
 Deployment (fresh deployer, multisig admin, unlinked from other studio deployers):
 
@@ -67,11 +68,74 @@ Deployment (fresh deployer, multisig admin, unlinked from other studio deployers
    not the deployer.
 3. Grant roles: MARK_SIGNER, RISK, OPS_VENUE, JURY, KEEPER to service keys held in a secret manager
    (never the test mnemonic; `devkeys.ts` refuses non-local chains without explicit keys).
-4. Register oracle signer(s) with the attestation hash; register Stock Tokens and indices with
-   multipliers and float caps; set venue minimum IF per venue; set agent tier bonds.
+4. Register oracle signer(s) through the attestation flow below; register Stock Tokens (below) and
+   indices with float caps; set venue minimum IF per venue; set agent tier bonds.
 5. Seat the three committee members; each calls `bond()`.
 6. Charter the three launch books (NVDA, TSLA, Stock-Token index) from the studio treasury
    (sponsor), committee approves, subscription windows open at launch, first marks the same day.
+
+### Real prices (VERIFY T2-T4, C1-C6)
+
+Units: AttestedOracle prices are USD per **share**; a Robinhood Chainlink feed quotes per **token**
+(share price × `uiMultiplier()`); the registry multiplies once by the token's live `uiMultiplier()`.
+The oracle divides per-token feeds by that same on-chain value before the median
+(`packages/shared/src/stockTokens.ts`). Never configure an HTTP source that quotes the Stock Token
+price: every non-Chainlink source must be a per-share US-equity price.
+
+1. **Source check** (read-only, before anything is registered and again before launch):
+   `bun run --cwd services/oracle source-check --chain 4663 --rpc $RHC_RPC_URL [--registry 0x<registry>]`
+   reads every feed and token in `config/chains/4663.json` (proxy code, `decimals()`, `description()`,
+   `latestRoundData()` age vs heartbeat in session, token code / `decimals() == 18` / `uiMultiplier()` /
+   `oraclePaused()` / pending multiplier, per-share price, the HTTP sources from `ORACLE_HTTP_SOURCES`
+   against Chainlink, the mainnet production rules of the current `ORACLE_*` environment, and with
+   `--registry` the registration + live-multiplier mode). Exit code 1 on any FAIL; fix every FAIL.
+2. **Stock Tokens** (timelock, per token of `config/chains/4663.json`):
+   `register(token, bytes32(<TICKER>), <current uiMultiplier()>, floatCapRaw)` then
+   `setMultiplierSource(token, true)`. The stored value is the anchor; the live multiplier may drift
+   `multiplierBandBps` (default 500 = 5%) from it before valuations fail closed.
+3. **Oracle environment** (`services/oracle`, chain 4663): `ORACLE_SYNTHETIC=0`, `SESSIONS_MODE=charter`,
+   `ORACLE_MIN_SOURCES>=2` (the service also applies `AttestedOracle.minSources()`, default 3),
+   `ORACLE_CHAINLINK_RPC_URL` (or `RPC_URL`), at least one licensed per-share source in
+   `ORACLE_HTTP_SOURCES`, `ORACLE_ATTESTATION_FILE`. The service refuses to start on 4663 when any
+   production rule fails (`services/oracle/src/production.ts`) and never signs a price, held or not, with
+   fewer than the minimum sources. Synthetic sources cannot be constructed on 4663.
+
+### Oracle signer attestation (VERIFY E1)
+
+What the contract checks: only the timelock registers; the measurement must be allow-listed; the
+recorded `attestationOf(signer)` = `keccak256(abi.encode(ATTESTATION_TYPEHASH, chainid, oracle, signer,
+platform, measurement, keccak256(quote)))`; after `requireAttestations()` no signer can be activated
+without it. What it cannot check: the quote's vendor signature — that is the operator's job, and anyone
+can redo it during the timelock delay from the published quote.
+
+1. Build the oracle enclave reproducibly; publish the source tag and the expected measurement (TDX
+   MRTD/RTMRs, SEV-SNP MEASUREMENT, Nitro PCR0-2, hashed to 32 bytes).
+2. The enclave generates its signer key inside, then gets
+   `bun run --cwd services/oracle attest report-data --chain 4663 --oracle <AttestedOracle> --signer <key>`
+   (= `AttestedOracle.reportDataOf(signer)`) into the first 32 bytes of its quote's report data.
+3. Write `attestation.json` `{platform, measurement, quote, signer, chainId, oracle}`; verify the quote
+   with the platform verifier (Intel DCAP QVL / AMD SEV-SNP VCEK chain / AWS Nitro root certificate):
+   signature chain, TCB status, measurement == published build.
+4. `bun run --cwd services/oracle attest register --chain 4663 --oracle <AttestedOracle> --doc attestation.json`
+   checks the binding (chain, oracle, signer, reportData inside the quote) and prints the digest and the
+   two timelock calls: `setMeasurement(measurement, true)`, `setAttestedSigner(signer, platform,
+   measurement, quoteHash)`. Propose both; publish `attestation.json` (the oracle serves it at
+   `GET /attestation` with `ORACLE_ATTESTATION_FILE`).
+5. After execution: `attestationOf(signer)` equals the printed digest, `measurementOf(signer)` the
+   measurement. Then `requireAttestations()` and `setSigner(<bootstrap signer>, false, 0)`.
+6. Revoking a build: `setMeasurement(m, false)` (blocks new registrations) and `setSigner(s, false, 0)`
+   for every signer whose `SignerAttested` event carries `m`.
+
+### Corporate actions (Stock Token multiplier)
+
+- Dividends (small, immediate `uiMultiplier` moves): nothing to do while within the band; re-anchor
+  (`setMultiplier(token, <current uiMultiplier>)`) when `source-check` / drift approaches it.
+- Splits / large changes (Robinhood stages `newUIMultiplier()` + `effectiveAt()` and pauses the feed with
+  `oraclePaused()`): `source-check` warns "pending multiplier". Before `effectiveAt`, propose
+  `setNextMultiplierAnchor(token, newUIMultiplier)` so valuations keep working across the change; after
+  it, `setMultiplier(token, new)` and `setNextMultiplierAnchor(token, 0)`. While `oraclePaused()` is set
+  the oracle drops the Chainlink observation for that ticker (the other sources keep the price, or
+  nothing is signed below the minimum and consumers see a stale price: reduce-only).
 
 ## Operations
 

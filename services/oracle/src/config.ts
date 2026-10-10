@@ -1,6 +1,8 @@
 // Oracle service configuration: shared base env (baseEnvSchema) + oracle-specific fields.
-import { baseEnvSchema } from "@bookrunner/shared";
+import { type ChainPriceConfig, type FeedConfig, baseEnvSchema, feedConfigSchema, feedToken, loadChainPriceConfig } from "@bookrunner/shared";
+import { getAddress } from "viem";
 import { z } from "zod";
+import type { ResolvedFeed } from "./sources/chainlink";
 
 /** Devnet demo prices (ARCHITECTURE §7) — USD per share, devnet only. */
 export const DEFAULT_DEMO_PRICES: Record<string, number> = { NVDA: 190, TSLA: 440, AAPL: 255, MSFT: 520, AMZN: 230 };
@@ -94,11 +96,28 @@ export const oracleEnvShape = {
   ORACLE_VOLS: z.string().optional(), // JSON {"NVDA":0.45,...}
   ORACLE_INDEXES: z.string().optional(), // JSON {"RHX5":{"NVDA":2000,...}}
 
-  // ---- optional live sources (VERIFY, disabled by default) ----
-  /** JSON map ticker -> AggregatorV3 address. VERIFY: no equity feeds on devnet. */
+  /** TEE attestation document served at GET /attestation (attestation.ts; docs/RUNBOOK.md). */
+  ORACLE_ATTESTATION_FILE: z.string().optional(),
+
+  // ---- live sources ----
+  /**
+   * Per-chain price config (canonical Stock Tokens + Chainlink feeds): default
+   * config/chains/<CHAIN_ID>.json when it exists (mainnet 4663 ships one; VERIFY T3 / C4 before launch).
+   */
+  ORACLE_CHAIN_CONFIG: z.string().optional(),
+  /**
+   * JSON map ticker -> feed, merged over the chain config's feeds: either a full feed object
+   * ({"proxy","basis":"per-token"|"per-share","token"?,"decimals"?,"heartbeatSec"?,"maxAgeSec"?}) or a plain
+   * AggregatorV3 address (legacy: per-share, refused on mainnet). No equity feeds exist on devnet.
+   */
   ORACLE_CHAINLINK_FEEDS: z.string().default("{}"),
   ORACLE_CHAINLINK_RPC_URL: z.string().optional(),
+  /** In-session max age of a feed observation when the feed has neither maxAgeSec nor heartbeatSec. */
   ORACLE_CHAINLINK_MAX_AGE_MS: z.coerce.number().int().positive().default(3_600_000),
+  /** Added to a feed's heartbeat to form its in-session staleness bound. */
+  ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS: z.coerce.number().int().nonnegative().default(600_000),
+  /** Time the L2 sequencer must have been up before feeds are trusted (Chainlink's example: 3600 s). */
+  ORACLE_SEQUENCER_GRACE_MS: z.coerce.number().int().nonnegative().default(3_600_000),
   ORACLE_HTTP_FINNHUB: flag(false),
   ORACLE_FINNHUB_API_KEY: z.string().optional(),
   /** JSON array of generic HTTP JSON sources (see sources/http.ts). */
@@ -157,20 +176,65 @@ export function loadOracleConfig(source: Record<string, string | undefined> = pr
   const tickers = env.ORACLE_TICKERS.split(",")
     .map((t) => t.trim())
     .filter(Boolean);
+  const chainConfig = loadChainPriceConfig(env.CHAIN_ID, env.ORACLE_CHAIN_CONFIG);
+  const envFeeds = parseJson("ORACLE_CHAINLINK_FEEDS", env.ORACLE_CHAINLINK_FEEDS, envFeedsSchema, {});
+  const { feeds: chainlinkFeeds, legacy: legacyChainlinkFeeds } = resolveFeeds(chainConfig, envFeeds, {
+    defaultMaxAgeMs: env.ORACLE_CHAINLINK_MAX_AGE_MS,
+    heartbeatGraceMs: env.ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS,
+  });
   return {
     ...env,
     tickers,
     demoPrices: { ...DEFAULT_DEMO_PRICES, ...parseJson("ORACLE_DEMO_PRICES", env.ORACLE_DEMO_PRICES, numberMap, {}) },
     vols: { ...DEFAULT_VOLS, ...parseJson("ORACLE_VOLS", env.ORACLE_VOLS, numberMap, {}) },
     indexes: parseJson("ORACLE_INDEXES", env.ORACLE_INDEXES, indexMap, DEFAULT_INDEXES),
-    chainlinkFeeds: parseJson(
-      "ORACLE_CHAINLINK_FEEDS",
-      env.ORACLE_CHAINLINK_FEEDS,
-      z.record(z.string(), z.string().regex(/^0x[0-9a-fA-F]{40}$/)),
-      {},
-    ) as Record<string, `0x${string}`>,
+    chainConfig,
+    chainlinkFeeds,
+    /** feed ids given as a plain address in ORACLE_CHAINLINK_FEEDS (basis assumed per-share) */
+    legacyChainlinkFeeds,
+    sequencerUptimeFeed: chainConfig?.chainlink.sequencerUptimeFeed ? getAddress(chainConfig.chainlink.sequencerUptimeFeed) : null,
     httpSources: parseJson("ORACLE_HTTP_SOURCES", env.ORACLE_HTTP_SOURCES, z.array(httpSourceSpecSchema), []),
   };
 }
 
 export type OracleConfig = ReturnType<typeof loadOracleConfig>;
+
+const envFeedsSchema = z.record(
+  z.string(),
+  z.union([z.string().regex(/^0x[0-9a-fA-F]{40}$/, "expected an address or a feed object"), feedConfigSchema]),
+);
+
+/**
+ * Chain-config feeds overlaid with ORACLE_CHAINLINK_FEEDS, resolved to {proxy, basis, token, maxAgeMs}.
+ * In-session max age: maxAgeSec, else heartbeatSec + grace, else ORACLE_CHAINLINK_MAX_AGE_MS. A per-token
+ * feed must resolve its Stock Token (explicit `token`, else the chain config's stockTokens entry).
+ */
+export function resolveFeeds(
+  chainConfig: ChainPriceConfig | null,
+  envFeeds: Record<string, string | FeedConfig>,
+  o: { defaultMaxAgeMs: number; heartbeatGraceMs: number },
+): { feeds: Record<string, ResolvedFeed>; legacy: string[] } {
+  const merged: Record<string, FeedConfig> = { ...(chainConfig?.chainlink.feeds ?? {}) };
+  const legacy: string[] = [];
+  for (const [id, f] of Object.entries(envFeeds)) {
+    if (typeof f === "string") {
+      merged[id] = { proxy: f, basis: "per-share" };
+      legacy.push(id);
+    } else merged[id] = f;
+  }
+  const stock = { stockTokens: chainConfig?.stockTokens ?? {} };
+  const feeds: Record<string, ResolvedFeed> = {};
+  for (const [id, f] of Object.entries(merged)) {
+    const token = feedToken(stock, id, f);
+    if (f.basis === "per-token" && !token) {
+      throw new Error(`invalid environment: chainlink feed ${id}: a per-token feed needs its Stock Token (token, or stockTokens.${id} in the chain config)`);
+    }
+    const maxAgeMs =
+      f.maxAgeSec !== undefined ? f.maxAgeSec * 1000 : f.heartbeatSec !== undefined ? f.heartbeatSec * 1000 + o.heartbeatGraceMs : o.defaultMaxAgeMs;
+    const r: ResolvedFeed = { proxy: getAddress(f.proxy), basis: f.basis, token: f.basis === "per-token" ? token : null, maxAgeMs };
+    if (f.decimals !== undefined) r.decimals = f.decimals;
+    if (f.description !== undefined) r.description = f.description;
+    feeds[id] = r;
+  }
+  return { feeds, legacy };
+}
