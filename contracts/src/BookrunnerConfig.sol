@@ -75,6 +75,10 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
     /// @notice Lower bound of `committeeWindow` (charter review + committee action expiry).
     uint256 public constant MIN_COMMITTEE_WINDOW = 1 days;
 
+    /// @notice Decimals the settlement token (`usdc`: USDC on devnet/testnet, USDG on Robinhood Chain
+    ///         mainnet) must have; `setAddress("usdc", t)` reverts `BadSettlementToken` otherwise.
+    uint8 public constant SETTLEMENT_DECIMALS = 6;
+
     uint256 private constant BPS = 10_000;
 
     // ---------------------------------------------------------------------------------------------
@@ -115,6 +119,9 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
     error TiersNotAscending(uint256 index);
     error NotAdminOrGuardian(address caller);
     error TimelockNotAdmin(address timelock);
+    /// @notice `usdc` (settlement token) is not a contract returning `decimals() == 6` (`decimals` = what
+    ///         it returned, 0 when the call failed / the address has no code).
+    error BadSettlementToken(address token, uint256 decimals);
 
     /// @notice Minimum insurance-fund size for `venue` changed.
     event VenueMinIfSet(uint8 indexed venue, uint256 amountUsd);
@@ -446,6 +453,7 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
         if (!isAddressKey(key)) revert UnknownKey(key);
         if (value == address(0)) revert ZeroAddress();
         if (key == KEY_TIMELOCK && !hasRole(DEFAULT_ADMIN_ROLE, value)) revert TimelockNotAdmin(value);
+        if (key == KEY_USDC) _checkSettlementToken(value);
         _addresses[key] = value;
         emit AddressSet(key, value);
     }
@@ -509,6 +517,17 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
             _tiers.push(Tier({threshold: thresholds[i], bond: bonds[i]}));
         }
         emit TiersSet(thresholds, bonds);
+    }
+
+    /// @dev The settlement token must be a contract whose `decimals()` returns exactly
+    ///      SETTLEMENT_DECIMALS: every USD amount in the protocol (tranches, vaults, marks, fees, bonds
+    ///      tiers, engine margin) is 6-decimal and valued 1:1 in USD.
+    function _checkSettlementToken(address token) private view {
+        if (token.code.length == 0) revert BadSettlementToken(token, 0);
+        (bool ok, bytes memory ret) = token.staticcall(abi.encodeWithSignature("decimals()"));
+        if (!ok || ret.length < 32) revert BadSettlementToken(token, 0);
+        uint256 dec = abi.decode(ret, (uint256));
+        if (dec != SETTLEMENT_DECIMALS) revert BadSettlementToken(token, dec);
     }
 
     function _checkMax(bytes32 key, uint256 value, uint256 max) private pure {
