@@ -4,7 +4,13 @@
 //   bun scripts/dev.ts api web         # only some
 //   bun scripts/dev.ts --no-sim        # without trader-sim
 //   bun scripts/dev.ts --network testnet   # Robinhood Chain testnet profile (.env.testnet)
+//   bun scripts/dev.ts --network mainnet   # Robinhood Chain MAINNET (4663): scripts/network-profile.ts
 //   bun scripts/dev.ts --no-web            # without the vite dev server (a server serves the built web app)
+//
+// Mainnet: env from the process only (systemd EnvironmentFile, deploy/server/MAINNET.md), never .env files;
+// daily marks, live Orderly, real oracle sources, no trader-sim / mock-orderly / gas-keeper / launch / web;
+// refuses to start while any required env, role signer or the DeployMainnet record is missing, or while a
+// mnemonic is present.
 //
 // Secrets are scoped per child (packages/shared/src/childenv.ts): the API, indexer, receipts and web get
 // no mnemonic / private key, only the signing services get the role mnemonic, ANTHROPIC_API_KEY goes to
@@ -15,6 +21,7 @@ import type { Subprocess } from "bun";
 import { childEnv } from "../packages/shared/src/childenv";
 import { ADMIN_KEY_OPT_IN, hasDerivedKeys, roleAccount } from "../packages/shared/src/devkeys";
 import { redactUrl } from "../packages/shared/src/redact";
+import { MAINNET_EXCLUDED, deskKeyEnvFor, mainnetProfile } from "./network-profile";
 
 const ROOT = resolve(import.meta.dir, "..");
 const BUN = process.execPath; // the bun running this script
@@ -22,9 +29,14 @@ const args = process.argv.slice(2);
 const netIdx = args.indexOf("--network");
 const network = (netIdx >= 0 ? args[netIdx + 1] : process.env.NETWORK) ?? "devnet";
 if (netIdx >= 0) args.splice(netIdx, 2);
+if (!["devnet", "testnet", "mainnet"].includes(network)) {
+  console.error(`[dev] unknown network "${network}" (devnet | testnet | mainnet)`);
+  process.exit(1);
+}
+const mainnet = network === "mainnet";
 const only = args.filter((a) => !a.startsWith("--"));
-const noSim = args.includes("--no-sim");
-const noWeb = args.includes("--no-web");
+const noSim = mainnet || args.includes("--no-sim");
+const noWeb = mainnet || args.includes("--no-web");
 
 const env: Record<string, string> = { ...(process.env as Record<string, string>) };
 /** Loads KEY=VALUE lines; returns the keys it defined (null when the file is missing). */
@@ -103,7 +115,18 @@ if (network === "testnet") {
   }
   console.log(`[dev] network: Robinhood Chain testnet (46630) via ${redactUrl(env.RPC_URL ?? "")}`);
 }
-loadEnvFile(".env", false);
+if (mainnet) {
+  const profile = mainnetProfile(env, ROOT, only);
+  if (profile.errors.length > 0) {
+    console.error(`[dev] refusing to start the MAINNET stack (${profile.errors.length} problem(s)):`);
+    for (const e of profile.errors) console.error(`[dev]   - ${e}`);
+    process.exit(1);
+  }
+  Object.assign(env, profile.env);
+  console.log(`[dev] network: Robinhood Chain MAINNET (4663) via ${redactUrl(env.RPC_URL ?? "")}`);
+} else {
+  loadEnvFile(".env", false);
+}
 env.DEPLOYMENT_FILE ??= "contracts/deployments/31337.json";
 
 interface Proc {
@@ -130,6 +153,7 @@ const svc = (name: string, dir = `services/${name}`, script = "start"): Proc | n
 
 const procs: Proc[] = [];
 const add = (p: Proc | null) => {
+  if (p && mainnet && MAINNET_EXCLUDED.has(p.name)) return; // simulators / mocks / testnet helpers
   if (p && (only.length === 0 || only.includes(p.name) || only.some((o) => p.name.startsWith(`${o}:`)))) procs.push(p);
 };
 
@@ -160,7 +184,8 @@ if (!noWeb) add(svc("web", "apps/web", network === "testnet" ? "dev:testnet" : "
 const depPath = resolve(ROOT, env.DEPLOYMENT_FILE);
 const agentDir = resolve(ROOT, "services/bookrunner-agent");
 const hasAgent = existsSync(resolve(agentDir, "package.json"));
-const noLaunch = args.includes("--no-launch");
+// mainnet books are chartered by the sponsor through MarketCharter (docs/RUNBOOK.md), never by launch-devnet
+const noLaunch = mainnet || args.includes("--no-launch");
 if (!existsSync(depPath)) console.warn(`[dev] ${env.DEPLOYMENT_FILE} not found — run \`bun run deploy:local\` first; agents start once books exist`);
 
 if (procs.length === 0) {
@@ -237,7 +262,8 @@ setInterval(() => {
   for (const b of books) {
     if (agentsStarted.has(b.bookId)) continue;
     agentsStarted.add(b.bookId);
-    start({ name: `agent:${b.name}`, cwd: agentDir, cmd: scriptCmd("services/bookrunner-agent", "start"), extraEnv: { BOOK_ID: String(b.bookId) } });
+    // a per-book desk key (DESK_KEY_PRIVATE_KEY_<bookId>) reaches that book's agent only
+    start({ name: `agent:${b.name}`, cwd: agentDir, cmd: scriptCmd("services/bookrunner-agent", "start"), extraEnv: { BOOK_ID: String(b.bookId), ...deskKeyEnvFor(env, b.bookId) } });
   }
   if (books.length > 0 && !simStarted && !noSim) {
     simStarted = true;

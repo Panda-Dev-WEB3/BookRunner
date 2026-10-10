@@ -12,6 +12,11 @@ Status values:
 - **Divergent**: confirmed, and it differs from what the devnet code or the spec assumes. Action needed.
 - **Unconfirmed**: no primary source found, or only third-party sources.
 
+Every address / parameter below that the deployment consumes is an input field of
+`contracts/deploy-inputs/4663.json` (schema and row mapping: `contracts/deploy-inputs/README.md`);
+`DeployMainnet.checkExternals` re-checks code, USDG decimals and the vault's token on-chain before any
+transaction.
+
 Research date: 2026-10-02 (A-orderly cluster). Sources were read through a summarising web fetch, so
 every address below must be re-verified on-chain before use. The owner is the cluster that must act.
 

@@ -8,6 +8,10 @@ The host is shared with other services, so everything is loopback-only and memor
 Hardening (root-owned deploy copy, infra unit, sandbox, passwords, secrets per process) and the exact
 operator steps to move an existing server: [HARDENING.md](HARDENING.md).
 
+Mainnet (Robinhood Chain 4663) runs on a separate host with the network-parametrised unit
+[`bookrunner@.service`](bookrunner@.service) (`bookrunner@mainnet`), KMS role keys and no simulators:
+[MAINNET.md](MAINNET.md). This testnet host keeps `bookrunner.service`.
+
 | Piece | Where |
 |---|---|
 | Code | `/opt/bookrunner/app` (git clone of this repo, user `bookrunner`; built and run as that user) |
