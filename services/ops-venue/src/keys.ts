@@ -29,6 +29,8 @@ export interface BookKeyFile {
   trade: StoredKey | null;
   ops: { if: StoredKey | null; mm: StoredKey | null };
   history: Array<{ orderlyKey: string; prefix: string; revokedAt: number; reason: string }>;
+  /** Live: contract accounts whose delegate signer Orderly confirmed (POST /v1/delegate_signer), lowercase -> ms. */
+  delegates?: Record<string, number>;
 }
 
 export interface BuilderKeyFile {
@@ -126,6 +128,17 @@ export class KeyStore {
       k.registeredAt = at;
       this.saveBook(f);
     }
+  }
+
+  delegateRegistered(bookId: number, delegateContract: string): boolean {
+    return !!this.loadBook(bookId)?.delegates?.[delegateContract.toLowerCase()];
+  }
+
+  markDelegateRegistered(bookId: number, delegateContract: string, at = Date.now()) {
+    const f = this.loadBook(bookId);
+    if (!f) return;
+    f.delegates = { ...(f.delegates ?? {}), [delegateContract.toLowerCase()]: at };
+    this.saveBook(f);
   }
 
   markTradeRevoked(bookId: number, reason: string, at = Date.now()): StoredKey | null {

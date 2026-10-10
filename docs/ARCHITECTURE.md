@@ -121,7 +121,7 @@ to hold it, so every timelock-gated power follows the admin role across the hand
 `agentTierBond(inventoryUsd)`: step function over sorted tiers `[(inventoryUsdThreshold, bond)]`;
 returns 0 below the entry tier. Defaults (mainnet): carryBps 1000, expenseCapBps 2000, charterFee
 5,000 USDC, sponsorBond 100,000 BKRN, committeeBond 250,000 BKRN, markInterval 86400, maxMarkAge
-21600, maxPriceAge 300, committeeWindow 172800, venueMinIf[Orderly] 25,000 USDC (VERIFY),
+21600, maxPriceAge 300, committeeWindow 172800, venueMinIf[Orderly] 25,001 USDC (Orderly needs IF > 25,000),
 venueMinIf[PoolEngine] 10,000 USDC, tiers: entry 50k USD → 0, ≥50k → 25k BKRN, ≥250k → 100k BKRN,
 ≥1M → 400k BKRN. Devnet overrides markInterval 300, maxMarkAge 3600, committeeWindow 172800.
 
@@ -412,16 +412,24 @@ are oracle keys published by the oracle service as the weighted index level.
 
 ### 2.9 OrderlyAdapter, MockOrderlyVault [A-orderly]
 
-- `OrderlyAdapter` (UUPS): holds the book's two Orderly accounts (`accountId(IF)`, `accountId(MM)`;
-  derivation VERIFY — devnet uses `keccak256(abi.encode(address(this), brokerHash, account))`).
-  `depositToVenue` → `IOrderlyVault.deposit` (approve exact amount; LayerZero fee from adapter ETH
-  balance if `getDepositFee > 0`). `requestWithdraw` emits `WithdrawRequested(nonce)` and tracks
+- `OrderlyAdapter` (UUPS): holds the book's two Orderly accounts. Orderly allows one account per (address,
+  broker) (`keccak256(abi.encode(owner, brokerHash))`), so MM = the adapter's own account and IF = the account
+  of a per-book `OrderlyIFAccount` contract the adapter deploys at `initialize` (CREATE2, salt = bookId);
+  `accountOwner(account)` returns the owner (deposit receiver, `delegateContract` of keys and withdrawals, payout
+  address). The IF contract only registers the delegate signer and forwards its balance to the adapter, which
+  pulls it before every sweep / fee forward. Pre-v3 proxies keep the devnet derivation
+  `keccak256(abi.encode(adapter, brokerHash, account))` until `migrateToOrderlyAccounts()` (timelock).
+  `depositToVenue` → `IOrderlyVault.deposit` (MM) / `depositTo(ifAccount, ...)` (IF) (approve exact amount;
+  native fee `getDepositFee(owner, ...)` from the adapter's ETH, topped up via `fundNative`, else
+  `InsufficientNativeForFee`). The settlement token is `config.usdc()` (USDC devnet, USDG on RHC; 6 decimals
+  enforced, listed by the Vault under `tokenHash`). `requestWithdraw` emits `WithdrawRequested(nonce)` and tracks
   `inTransit`; ops-venue executes it on Orderly then `confirmWithdraw(nonce)`; returned USDC is swept
   by `sweepToVault`. **No function can send USDC anywhere except the vault and the RevenueRouter.**
   `report` (OPS_VENUE) stores IF/MM equity + exposure + asOf (monotonic). `sweepFees(period,
   amount)` (OPS_VENUE): once per period, `amount <= maxFeeSweepPerPeriodUsd` (default 2% of
   `ifTargetUsd + mmInventoryUsd` per period, settable by timelock) → RevenueRouter
-  (`SRC_VENUE_TAKER_SHARE`). `setDelegateSigner` (timelock) → `IOrderlyVault.delegateSigner`.
+  (`SRC_VENUE_TAKER_SHARE`). `setDelegateSigner` (timelock) → `IOrderlyVault.delegateSigner` for the
+  adapter and its IF account (one EOA signs for both; Orderly pays contract accounts only to themselves).
   **[ext] Withdrawal/report protocol** (each USDC counted once in any payout/confirm order):
   Requested = still venue-side; a payout landing before `confirmWithdraw` is *held* on the adapter
   (never swept as unattributed nor forwarded as fees); `report` reverts `WithdrawalPending` while any

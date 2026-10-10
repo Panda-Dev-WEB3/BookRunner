@@ -61,7 +61,7 @@ export const DEFAULT_FORM: CharterForm = {
   symbol: "PERP_NVDA_USDC",
   takerFeeBps: "0",
   makerFeeBps: "0",
-  ifSizeUsd: "25000",
+  ifSizeUsd: "30000",
   mmInventoryUsd: "75000",
   mandate: {
     maxInventoryUsd: "50000",
@@ -122,7 +122,8 @@ export interface FieldIssue {
 const USD_RE = /^\d+(\.\d{1,6})?$/;
 const INT_RE = /^-?\d+$/;
 const THIRTY_DAYS = 30 * 86_400;
-export const VENUE_MIN_IF_USD: Record<CharterForm["venue"], number> = { orderly: 25_000, pool_engine: 10_000 };
+// Orderly: IF must be strictly above 25,000 per symbol (VERIFY O10) -> inclusive minimum 25,001
+export const VENUE_MIN_IF_USD: Record<CharterForm["venue"], number> = { orderly: 25_001, pool_engine: 10_000 };
 
 export function stepOf(field: string): StepId {
   if (field.startsWith("mandate")) return "mandate";

@@ -2,7 +2,9 @@
 // key for the MM account, ops keys for IF/MM), key registration via the delegate signer, symbol
 // creation under the builder account with the IF account assigned, venue_accounts rows (key PREFIX
 // only). Re-run on state changes; Retiring books go REDUCE_ONLY. Trade keys are re-issued only after
-// a re-mandate (rotateTradeKey).
+// a re-mandate (rotateTradeKey). Keys and withdrawals of a contract account name its owner as
+// delegateContract (v3: the adapter for MM, the OrderlyIFAccount for IF; see chain.accountOwners).
+import type { Address } from "viem";
 import { OrderlyHttpError } from "../orderly/http";
 import { BUILDER_SCOPE, type KeyStore, newStoredKey, prefixOf, type StoredKey } from "../keys";
 import type { Ed25519Key } from "../orderly/auth";
@@ -47,18 +49,20 @@ export class Provisioner {
         await store.upsertVenueAccount({ bookId: book.bookId, kind: "mm", accountId: book.accounts.mm, keyPrefix: f.trade ? prefixOf(f.trade) : null, status: tradeRevoked ? "revoked" : "pending" });
       }
       if (settings.mode === "mock") {
-        await builder.mockRegisterAccount({ accountId: book.accounts.if, owner: book.adapter, kind: "if", delegateSigner: chain.opsAddress });
-        await builder.mockRegisterAccount({ accountId: book.accounts.mm, owner: book.adapter, kind: "mm", delegateSigner: chain.opsAddress });
+        await builder.mockRegisterAccount({ accountId: book.accounts.if, owner: book.owners.if, kind: "if", delegateSigner: chain.opsAddress });
+        await builder.mockRegisterAccount({ accountId: book.accounts.mm, owner: book.owners.mm, kind: "mm", delegateSigner: chain.opsAddress });
+      } else {
+        await this.ensureDelegates(book);
       }
       for (const which of ["if", "mm"] as const) {
         const k = f.ops[which];
         if (k && !k.registeredAt) {
-          await builder.addKey({ accountId: k.accountId, orderlyKey: k.orderlyKey, scope: k.scope, expirationMs: k.expiration, delegateContract: book.adapter });
+          await builder.addKey({ accountId: k.accountId, orderlyKey: k.orderlyKey, scope: k.scope, expirationMs: k.expiration, delegateContract: book.owners[which] });
           keys.markRegistered(book.bookId, which, this.ctx.now());
         }
       }
       if (f.trade && !tradeRevoked && !f.trade.registeredAt) {
-        await builder.addKey({ accountId: f.trade.accountId, orderlyKey: f.trade.orderlyKey, scope: f.trade.scope, expirationMs: f.trade.expiration, delegateContract: book.adapter });
+        await builder.addKey({ accountId: f.trade.accountId, orderlyKey: f.trade.orderlyKey, scope: f.trade.scope, expirationMs: f.trade.expiration, delegateContract: book.owners.mm });
         keys.markRegistered(book.bookId, "trade", this.ctx.now());
       }
       let sym: { symbol: string; status?: string };
@@ -84,6 +88,25 @@ export class Provisioner {
     });
   }
 
+  /**
+   * Live: confirm the delegate signer of each contract account with Orderly (POST /v1/delegate_signer), which also
+   * creates the account. Needs the on-chain `Vault.delegateSigner` tx of that contract naming the ops EOA, i.e. the
+   * timelock's `adapter.setDelegateSigner(ops)` (v3 registers the adapter and its OrderlyIFAccount in one call).
+   * Recorded per contract in the book's key file, so it runs once.
+   */
+  private async ensureDelegates(book: TrackedBook): Promise<void> {
+    const { builder, keys, chain, log } = this.ctx;
+    const owners = [...new Set([book.owners.mm, book.owners.if].map((a) => a.toLowerCase()))] as Address[];
+    for (const owner of owners) {
+      if (keys.delegateRegistered(book.bookId, owner)) continue;
+      const txHash = await chain.delegateTx(owner, chain.opsAddress);
+      if (!txHash) throw new Error(`book ${book.bookId}: no on-chain Orderly delegate for ${owner} naming ${chain.opsAddress} — the timelock must call adapter.setDelegateSigner(${chain.opsAddress})`);
+      const r = await builder.registerDelegateSigner({ delegateContract: owner, txHash });
+      keys.markDelegateRegistered(book.bookId, owner, this.ctx.now());
+      log.info({ bookId: book.bookId, delegateContract: owner, accountId: r.accountId, tx: txHash }, "Orderly delegate signer confirmed");
+    }
+  }
+
   /** After a re-mandate: replace a revoked trade key (only while the mandate is not killed). */
   async rotateTradeKey(book: TrackedBook): Promise<string | null> {
     return this.ctx.locks.run(book.bookId, async () => {
@@ -94,7 +117,7 @@ export class Provisioner {
       const next = await keys.rotateTrade(book.bookId, settings.tradeKeyTtlMs);
       const t = next.trade;
       if (!t) return null;
-      await builder.addKey({ accountId: t.accountId, orderlyKey: t.orderlyKey, scope: t.scope, expirationMs: t.expiration, delegateContract: book.adapter });
+      await builder.addKey({ accountId: t.accountId, orderlyKey: t.orderlyKey, scope: t.scope, expirationMs: t.expiration, delegateContract: book.owners.mm });
       keys.markRegistered(book.bookId, "trade", this.ctx.now());
       const prefix = prefixOf(t);
       await store.upsertVenueAccount({ bookId: book.bookId, kind: "mm", accountId: t.accountId, keyPrefix: prefix, status: "active" });

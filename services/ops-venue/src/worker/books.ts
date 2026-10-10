@@ -41,8 +41,8 @@ export class BookRegistry {
           this.skipped.add(id);
           continue;
         }
-        const [state, accounts] = await Promise.all([this.ctx.chain.bookState(b.book), this.ctx.chain.accountIds(b.adapter)]);
-        const tb: TrackedBook = { ...b, state, accounts };
+        const [state, accounts, owners] = await Promise.all([this.ctx.chain.bookState(b.book), this.ctx.chain.accountIds(b.adapter), this.ctx.chain.accountOwners(b.adapter)]);
+        const tb: TrackedBook = { ...b, state, accounts, owners };
         this.books.set(id, tb);
         delta.added.push(tb);
         this.ctx.log.info({ bookId: id, symbol: b.symbol, state, adapter: b.adapter }, "tracking Orderly book");

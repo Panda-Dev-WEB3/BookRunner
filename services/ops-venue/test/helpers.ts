@@ -43,6 +43,8 @@ export const ADAPTER = "0x00000000000000000000000000000000000a0a01" as Address;
 export const MANDATE = "0x00000000000000000000000000000000000a0a02" as Address;
 export const VAULT = "0x00000000000000000000000000000000000a0a03" as Address;
 export const ROUTER = "0x00000000000000000000000000000000000a0a04" as Address;
+/** The book's OrderlyIFAccount (owner of the IF Orderly account; v3 adapters). */
+export const IF_OWNER = "0x00000000000000000000000000000000000a0a05" as Address;
 export const IF_ID = `0x${"a1".repeat(32)}` as Hex;
 export const MM_ID = `0x${"b2".repeat(32)}` as Hex;
 export const BUILDER_ID = orderlyAccountId(OPS.address, BROKER).toLowerCase();
@@ -64,6 +66,7 @@ export function trackedBook(state: BookState = "Live"): TrackedBook {
     mmInventoryUsd: 75_000_000_000n,
     state,
     accounts: { if: IF_ID, mm: MM_ID },
+    owners: { if: IF_OWNER, mm: ADAPTER },
   };
 }
 
@@ -111,6 +114,12 @@ export class FakeChain implements ChainPort {
   txStates = new Map<string, TxState>();
   books: OrderlyBook[] = [];
   states = new Map<string, BookState>();
+  /** adapter -> its OrderlyIFAccount (IF payouts land there; the adapter pulls them before sweeping/forwarding). */
+  ifOwners = new Map<string, Address>([[ADAPTER.toLowerCase(), IF_OWNER]]);
+  /** adapter ETH (Orderly deposit fees) and the venue's per-deposit native fee. */
+  native = new Map<string, bigint>();
+  depositFee = 0n;
+  delegateTxs = new Map<string, Hex>();
   /** far-future head so tests' injected clock wins the min(now, head) clamp */
   headTs = 1n << 40n;
   private seq = 0;
@@ -180,9 +189,20 @@ export class FakeChain implements ChainPort {
   thirdPartySweep(adapter: Address): bigint {
     return this.applySweep(adapter);
   }
+  /** OrderlyAdapter._pullIfAccount: USDC paid to the IF account contract moves to the adapter. */
+  private pull(adapter: Address) {
+    const ifo = this.ifOwners.get(adapter.toLowerCase());
+    if (ifo && this.bal(ifo) > 0n) this.move(ifo, adapter, this.bal(ifo));
+  }
+  /** Adapter USDC incl. payouts parked on its IF account contract. */
+  attributed(adapter: Address): bigint {
+    const ifo = this.ifOwners.get(adapter.toLowerCase());
+    return this.bal(adapter) + (ifo ? this.bal(ifo) : 0n);
+  }
   private applySweep(adapter: Address, dry = false): bigint {
+    if (!dry) this.pull(adapter);
     const a = this.adapter(adapter);
-    const bal = this.bal(adapter);
+    const bal = this.attributed(adapter);
     const principal = bal < a.inTransit ? bal : a.inTransit;
     const pend = this.strictReserve ? a.pendingWithdraw[0] + a.pendingWithdraw[1] : 0n;
     const held = bal - principal < pend ? bal - principal : pend;
@@ -198,7 +218,7 @@ export class FakeChain implements ChainPort {
   }
   private forwardable(adapter: Address): bigint {
     const a = this.adapter(adapter);
-    const bal = this.bal(adapter);
+    const bal = this.attributed(adapter);
     const reserved = a.inTransit + (this.strictReserve ? a.pendingWithdraw[0] + a.pendingWithdraw[1] : 0n);
     const avail = bal - (bal < reserved ? bal : reserved);
     return a.pendingFees < avail ? a.pendingFees : avail;
@@ -207,6 +227,7 @@ export class FakeChain implements ChainPort {
     const a = this.adapter(adapter);
     const amt = this.forwardable(adapter);
     if (amt === 0n) return 0n;
+    this.pull(adapter);
     a.pendingFees -= amt;
     this.move(adapter, a.router, amt);
     return amt;
@@ -224,6 +245,20 @@ export class FakeChain implements ChainPort {
   }
   async accountIds() {
     return { if: IF_ID, mm: MM_ID };
+  }
+  async accountOwners(adapter: Address) {
+    return { if: this.ifOwners.get(adapter.toLowerCase()) ?? adapter, mm: adapter };
+  }
+  async nativeFeeState(adapter: Address, deposits: Array<{ account: number; amount: bigint }>) {
+    return { balance: this.native.get(adapter.toLowerCase()) ?? 0n, required: this.depositFee * BigInt(deposits.length) };
+  }
+  async fundNative(adapter: Address, value: bigint, opts?: WriteOpts) {
+    const h = this.begin("fundNative", [adapter, value], opts);
+    this.native.set(adapter.toLowerCase(), (this.native.get(adapter.toLowerCase()) ?? 0n) + value);
+    return this.end("fundNative", h);
+  }
+  async delegateTx(delegateContract: Address) {
+    return this.delegateTxs.get(delegateContract.toLowerCase()) ?? null;
   }
   async mandateKilled() {
     return this.killed;
@@ -255,7 +290,7 @@ export class FakeChain implements ChainPort {
   }
   async adapterFlowState(adapter: Address): Promise<AdapterFlowState> {
     const a = this.adapter(adapter);
-    return { lastFlowAt: a.lastFlowAt, pendingWithdrawUsd: a.pendingWithdraw[0] + a.pendingWithdraw[1], inTransitUsd: a.inTransit, pendingFeesUsd: a.pendingFees, usdcBalance: this.bal(adapter) };
+    return { lastFlowAt: a.lastFlowAt, pendingWithdrawUsd: a.pendingWithdraw[0] + a.pendingWithdraw[1], inTransitUsd: a.inTransit, pendingFeesUsd: a.pendingFees, usdcBalance: this.attributed(adapter) };
   }
   async feeSweptForPeriod(adapter: Address, period: bigint) {
     return this.adapter(adapter).feeSwept.get(period.toString()) ?? 0n;
@@ -315,9 +350,9 @@ export class FakeChain implements ChainPort {
     return this.end("failWithdraw", h);
   }
   async sweepToVault(adapter: Address, opts?: WriteOpts) {
-    if (this.bal(adapter) === 0n) return null;
+    if (this.attributed(adapter) === 0n) return null;
     this.applySweep(adapter, true); // simulation: a closed mark-window gate reverts before broadcast
-    const h = this.begin("sweepToVault", [adapter, this.bal(adapter)], opts);
+    const h = this.begin("sweepToVault", [adapter, this.attributed(adapter)], opts);
     this.applySweep(adapter);
     return this.end("sweepToVault", h);
   }
@@ -510,8 +545,8 @@ export async function makeCtx(o: { mode?: "mock" | "live"; authMode?: "strict" |
 const provisioner = async (t: Awaited<ReturnType<typeof makeCtx>>) => new Provisioner(t.ctx, await loadOrCreateBuilderKey(t.keys, BUILDER_ID, undefined, 86_400_000, keyFromSecret));
 
 /** Withdraw saga fixture: provisioned book (IF 25k / MM 75k on the venue and in the mock vault ledger). */
-export async function setupWithdraw(state: "Live" | "Retiring" = "Live") {
-  const t = await makeCtx();
+export async function setupWithdraw(state: "Live" | "Retiring" = "Live", authMode: "strict" | "permissive" = "permissive") {
+  const t = await makeCtx({ authMode });
   const reg = new BookRegistry(t.ctx);
   t.chain.books = [trackedBook(state)];
   t.chain.states.set(trackedBook().book.toLowerCase(), state);

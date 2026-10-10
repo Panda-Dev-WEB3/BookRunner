@@ -7,11 +7,12 @@ import type { Ed25519Key } from "../orderly/auth";
 import type { SignedVenueReportJson, VenueReportValues } from "../report712";
 import type { OpsStore, SagaStore } from "../store";
 import type { KeyedMutex } from "../util";
+import type { NativeFeeSettings } from "./native";
 
 /** Builder/ops venue operations the workers use (OrderlyBuilderClient satisfies it; tests fake it). */
 export type BuilderPort = Pick<
   OrderlyBuilderClient,
-  "createSymbol" | "setSymbolStatus" | "insuranceFund" | "addKey" | "keyInfo" | "revokeTradeKey" | "requestWithdraw" | "withdrawal" | "withdrawals" | "mockCompleteWithdraw" | "mockRegisterAccount"
+  "createSymbol" | "setSymbolStatus" | "insuranceFund" | "addKey" | "keyInfo" | "revokeTradeKey" | "requestWithdraw" | "withdrawal" | "withdrawals" | "mockCompleteWithdraw" | "mockRegisterAccount" | "registerDelegateSigner"
 > & { feeSettlements(sinceMs: number): Promise<FeeSettlement[]> };
 
 /** Venue account read for (accountId, symbol) authenticated with `key` (ops key). */
@@ -39,6 +40,8 @@ export interface OpsSettings {
   reportSettleSec: number;
   /** OPS_REPORT_MODE (service default: signed). */
   reportMode: ReportMode;
+  /** Orderly native deposit-fee keeper (worker/native.ts); default: warn only. */
+  native?: NativeFeeSettings;
 }
 
 /** OPS_VENUE key signing VenueReport typed data (domain verifyingContract = the book's adapter). */
@@ -72,6 +75,8 @@ export interface OpsContext {
 export interface TrackedBook extends OrderlyBook {
   state: BookState;
   accounts: { if: Hex; mm: Hex };
+  /** Owner (deposit receiver / delegateContract / payout address) of each Orderly account (chain.accountOwners). */
+  owners: { if: Address; mm: Address };
 }
 
 export const lc = (a: Address | string) => a.toLowerCase();

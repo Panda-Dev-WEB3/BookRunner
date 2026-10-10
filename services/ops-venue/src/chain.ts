@@ -16,6 +16,7 @@ import {
   type Hex,
   type LocalAccount,
   parseAbi,
+  parseAbiItem,
   type PublicClient,
   TransactionNotFoundError,
   TransactionReceiptNotFoundError,
@@ -35,6 +36,10 @@ export const mockVaultExtraAbi = parseAbi([
   "struct VaultDepositFE { bytes32 accountId; bytes32 brokerHash; bytes32 tokenHash; uint128 tokenAmount; }",
   "function deposit(VaultDepositFE data) payable",
 ]);
+/** Orderly Vault event (contract-evm src/interface/IVault.sol; MockOrderlyVault emits the same signature). */
+export const accountDelegateEvent = parseAbiItem(
+  "event AccountDelegate(address indexed delegateContract, bytes32 indexed brokerHash, address indexed delegateSigner, uint256 chainId, uint256 blockNumber)",
+);
 const LEDGER_VIEW_CANDIDATES = ["balanceOf", "balances", "ledger", "accountBalance"] as const;
 const ledgerViewAbi = (name: string) => parseAbi([`function ${name}(bytes32 accountId) view returns (uint256)`]) as Abi;
 
@@ -118,6 +123,18 @@ export interface ChainPort {
   loadOrderlyBook(bookId: number): Promise<OrderlyBook | null>;
   bookState(book: Address): Promise<BookState>;
   accountIds(adapter: Address): Promise<{ if: Hex; mm: Hex }>;
+  /**
+   * Owner address of each Orderly account (adapter.accountOwner): deposit receiver, `delegateContract` of keys and
+   * withdrawals, and the address Orderly pays withdrawals to. v3 adapters: IF = the book's OrderlyIFAccount,
+   * MM = the adapter. Pre-v3 adapters (no accountOwner): the adapter for both.
+   */
+  accountOwners(adapter: Address): Promise<{ if: Address; mm: Address }>;
+  /** Adapter ETH vs the Orderly native deposit fee for the given deposits (adapter.depositNativeFee). */
+  nativeFeeState(adapter: Address, deposits: Array<{ account: number; amount: bigint }>): Promise<{ balance: bigint; required: bigint }>;
+  /** adapter.fundNative{value}() from the ops account. */
+  fundNative(adapter: Address, value: bigint, opts?: WriteOpts): Promise<Hex>;
+  /** Tx hash of the latest Orderly Vault `AccountDelegate(delegateContract, brokerHash, signer)` (null if none). */
+  delegateTx(delegateContract: Address, signer: Address): Promise<Hex | null>;
   mandateKilled(mandate: Address): Promise<boolean>;
   maxFeeSweepPerPeriod(adapter: Address): Promise<bigint>;
   markInterval(): Promise<number>;
@@ -269,6 +286,42 @@ export class ViemChain implements ChainPort {
     return { if: ifId.toLowerCase() as Hex, mm: mmId.toLowerCase() as Hex };
   }
 
+  async accountOwners(adapter: Address): Promise<{ if: Address; mm: Address }> {
+    try {
+      const [ifOwner, mmOwner] = await Promise.all([
+        this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "accountOwner", args: [0] }),
+        this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "accountOwner", args: [1] }),
+      ]);
+      return { if: ifOwner, mm: mmOwner };
+    } catch {
+      return { if: adapter, mm: adapter }; // pre-v3 implementation: both accounts belong to the adapter
+    }
+  }
+
+  async nativeFeeState(adapter: Address, deposits: Array<{ account: number; amount: bigint }>): Promise<{ balance: bigint; required: bigint }> {
+    const [balance, ...fees] = await Promise.all([
+      this.pc.getBalance({ address: adapter }),
+      ...deposits.map((d) => this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "depositNativeFee", args: [d.account, d.amount] })),
+    ]);
+    return { balance, required: fees.reduce((a, b) => a + b, 0n) };
+  }
+
+  async fundNative(adapter: Address, value: bigint, opts?: WriteOpts): Promise<Hex> {
+    return (await this.send("adapter.fundNative", { address: adapter, abi: orderlyAdapterAbi, functionName: "fundNative", args: [], value }, opts)).txHash;
+  }
+
+  async delegateTx(delegateContract: Address, signer: Address): Promise<Hex | null> {
+    const logs = await this.pc.getLogs({
+      address: this.dep.contracts.orderlyVault,
+      event: accountDelegateEvent,
+      args: { delegateContract, delegateSigner: signer },
+      fromBlock: this.startBlock,
+      toBlock: "latest",
+    });
+    const last = logs.at(-1);
+    return last?.transactionHash ?? null;
+  }
+
   mandateKilled(mandate: Address): Promise<boolean> {
     return this.pc.readContract({ address: mandate, abi: mMMandateAbi, functionName: "killed" });
   }
@@ -339,15 +392,18 @@ export class ViemChain implements ChainPort {
 
   async adapterFlowState(adapter: Address): Promise<AdapterFlowState> {
     const read = (functionName: string, args: readonly unknown[] = []) => this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName, args } as never) as Promise<bigint>;
-    const [lastFlowAt, pIf, pMm, inTransitUsd, pendingFeesUsd, usdcBalance] = await Promise.all([
+    const [lastFlowAt, pIf, pMm, inTransitUsd, pendingFeesUsd, usdcBalance, owners] = await Promise.all([
       read("lastFlowAt"),
       read("pendingWithdrawUsd", [0]),
       read("pendingWithdrawUsd", [1]),
       read("inTransitUsd"),
       read("pendingFeesUsd"),
       this.usdcBalance(adapter),
+      this.accountOwners(adapter),
     ]);
-    return { lastFlowAt: BigInt(lastFlowAt), pendingWithdrawUsd: pIf + pMm, inTransitUsd, pendingFeesUsd, usdcBalance };
+    // USDC the adapter attributes: its own plus payouts parked on the OrderlyIFAccount (v3)
+    const parked = owners.if.toLowerCase() === adapter.toLowerCase() ? 0n : await this.usdcBalance(owners.if);
+    return { lastFlowAt: BigInt(lastFlowAt), pendingWithdrawUsd: pIf + pMm, inTransitUsd, pendingFeesUsd, usdcBalance: usdcBalance + parked };
   }
 
   feeSweptForPeriod(adapter: Address, period: bigint): Promise<bigint> {
@@ -383,7 +439,7 @@ export class ViemChain implements ChainPort {
   }
 
   // ------------------------------------------------------------------ writes
-  private async send(label: string, req: { address: Address; abi: Abi; functionName: string; args: readonly unknown[] }, opts?: WriteOpts): Promise<TxResult> {
+  private async send(label: string, req: { address: Address; abi: Abi; functionName: string; args: readonly unknown[]; value?: bigint }, opts?: WriteOpts): Promise<TxResult> {
     return this.txMutex.run(async () => {
       const { request } = await this.pc.simulateContract({ ...req, account: this.account } as never);
       const nonce = opts?.nonce ?? (await this.pc.getTransactionCount({ address: this.account.address, blockTag: "pending" }));
@@ -414,7 +470,10 @@ export class ViemChain implements ChainPort {
   }
 
   async sweepToVault(adapter: Address, opts?: WriteOpts): Promise<Hex | null> {
-    if ((await this.usdcBalance(adapter)) === 0n) return null;
+    // v3: IF payouts land on the book's OrderlyIFAccount, not the adapter, so the adapter's own balance can be 0
+    // while there is principal to sweep. sweepableToVault counts both (and is 0 when nothing would move).
+    const sweepable = await this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "sweepableToVault" }).catch(() => null);
+    if ((sweepable ?? (await this.usdcBalance(adapter))) === 0n) return null;
     return (await this.send("adapter.sweepToVault", { address: adapter, abi: orderlyAdapterAbi, functionName: "sweepToVault", args: [] }, opts)).txHash;
   }
 

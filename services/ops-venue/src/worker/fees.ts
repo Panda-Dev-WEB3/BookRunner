@@ -9,7 +9,7 @@
 // auto loop resumes every unfinished saga.
 import type { Address, Hex } from "viem";
 import type { WriteOpts } from "../chain";
-import { advanceFee, completedPeriods, type FeeSaga, type FeeTxSlot, feeInFlight, feeSagaKey, isFeeTerminal, periodReady, planFeeSweep, type SettlementRow, unpaidEarmarks } from "../domain/fees";
+import { advanceFee, attributeBrokerWide, completedPeriods, type FeeSaga, type FeeTxSlot, feeInFlight, feeSagaKey, isFeeTerminal, periodReady, planFeeSweep, type SettlementRow, unpaidEarmarks } from "../domain/fees";
 import { reportableState } from "../domain/report";
 import { matchPriorWithdrawal } from "../domain/withdraw";
 import { errMsg, nowSec } from "../util";
@@ -97,7 +97,7 @@ export class FeeSweeper {
       const periods = completedPeriods(now, interval, Math.max(lastDone, now - interval * 2));
       const period = periods[periods.length - 1];
       if (period === undefined || this.sagas()[feeSagaKey(book.bookId, period)]) continue;
-      settlements ??= await this.ctx.builder.feeSettlements(0);
+      settlements ??= await this.settlements();
       if (!periodReady({ period, nowSec: now, graceSec: this.ctx.settings.feeGraceSec, settlements, symbol: book.symbol })) continue;
       try {
         await this.sweep(book.bookId, period, settlements);
@@ -131,6 +131,23 @@ export class FeeSweeper {
     });
   }
 
+  private warnedBrokerWide = false;
+
+  /** Venue settlements, broker-wide (live) rows attributed to the only live Orderly book (see attributeBrokerWide). */
+  private async settlements(): Promise<SettlementRow[]> {
+    const raw = await this.ctx.builder.feeSettlements(0);
+    const symbols = this.registry
+      .list()
+      .filter((b) => reportableState(b.state))
+      .map((b) => b.symbol);
+    const { rows, dropped } = attributeBrokerWide(raw, symbols);
+    if (dropped > 0 && !this.warnedBrokerWide) {
+      this.warnedBrokerWide = true;
+      this.ctx.log.error({ dropped, symbols }, "broker-wide builder fee revenue cannot be attributed to one of several Orderly books — no fee sweeps from it (VERIFY O11: per-symbol revenue source)");
+    }
+    return rows;
+  }
+
   private save(s: FeeSaga) {
     this.sagas()[s.key] = s;
     this.ctx.sagas.save();
@@ -161,7 +178,7 @@ export class FeeSweeper {
       log.info({ bookId: book.bookId, period }, "fees already swept for period");
       return { ...base, amount: "0", stage: "swept" };
     }
-    const settlements = settlementsIn ?? (await builder.feeSettlements(0));
+    const settlements = settlementsIn ?? (await this.settlements());
     let cap: bigint;
     try {
       cap = await chain.maxFeeSweepPerPeriod(book.adapter);

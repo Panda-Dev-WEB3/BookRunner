@@ -8,6 +8,7 @@ import type { OpsContext, TrackedBook } from "./context";
 import { FeeSweeper } from "./fees";
 import { handleVenueOpsJob } from "./jobs";
 import { LogWatcher } from "./logs";
+import { NativeFeeKeeper } from "./native";
 import type { Provisioner } from "./provision";
 import { Reporter } from "./reporter";
 import { Revoker } from "./revoke";
@@ -27,6 +28,7 @@ export class OpsService {
   readonly fees: FeeSweeper;
   readonly revoker: Revoker;
   readonly logs: LogWatcher;
+  readonly native: NativeFeeKeeper;
 
   constructor(
     readonly ctx: OpsContext,
@@ -37,6 +39,7 @@ export class OpsService {
     this.withdrawals = new WithdrawProcessor(ctx, this.registry);
     this.fees = new FeeSweeper(ctx, this.registry);
     this.revoker = new Revoker(ctx, this.registry);
+    this.native = new NativeFeeKeeper(ctx, ctx.settings.native ?? { topUpMaxWei: 0n, headroom: 2n, cooldownMs: 3_600_000 });
     this.logs = new LogWatcher(ctx, this.registry, {
       onAdapterLog: (l) => this.onAdapterLog(l),
       onMandateLog: (l, b) => this.onMandateLog(l, b),
@@ -108,7 +111,16 @@ export class OpsService {
   run(signal: AbortSignal, iv: LoopIntervals): Promise<void[]> {
     const { log } = this.ctx;
     return Promise.all([
-      runLoop("books", iv.bookPollMs, () => this.syncBooks(), signal, log),
+      runLoop(
+        "books",
+        iv.bookPollMs,
+        async () => {
+          await this.syncBooks();
+          await this.native.checkAll(this.registry.list());
+        },
+        signal,
+        log,
+      ),
       runLoop(
         "logs+withdrawals",
         iv.logPollMs,

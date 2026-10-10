@@ -23,6 +23,29 @@ export interface SettlementRow {
   ts: number;
 }
 
+/**
+ * Symbol of a broker-wide settlement row. Orderly's GET /v1/broker/daily_fee_revenue reports the builder's
+ * daily revenue per broker, not per symbol (VERIFY O11): such a row can only be attributed to a book when the
+ * builder runs exactly one Orderly market.
+ */
+export const BROKER_WIDE = "*";
+
+/**
+ * Assigns broker-wide rows to the only symbol when exactly one is live; otherwise drops them (`dropped` > 0:
+ * per-symbol attribution needs a per-symbol revenue source, so nothing is swept from them).
+ */
+export function attributeBrokerWide(rows: SettlementRow[], symbols: readonly string[]): { rows: SettlementRow[]; dropped: number } {
+  const unique = [...new Set(symbols)];
+  const out: SettlementRow[] = [];
+  let dropped = 0;
+  for (const r of rows) {
+    if (r.symbol !== BROKER_WIDE) out.push(r);
+    else if (unique.length === 1) out.push({ ...r, symbol: unique[0] as string });
+    else dropped++;
+  }
+  return { rows: out, dropped };
+}
+
 export interface FeePlanInput {
   symbol: string;
   period: number;

@@ -40,6 +40,14 @@ export const opsEnvSchema = baseEnvSchema.extend({
   ORDERLY_LEDGER_ADDRESS: z.string().optional(), // Withdraw domain verifyingContract (default mainnet Ledger)
   ORDERLY_ORACLE_WS_URL: z.string().optional(),
   ORDERLY_SYMBOL_PRICE_SOURCE: z.enum(["builder", "chainlink"]).default("builder"),
+  // Settlement token symbol on Orderly (holding rows, withdraw / transfer messages): USDC on devnet, USDG on
+  // Robinhood Chain (VERIFY O3/O7). Must match the OrderlyAdapter tokenHash (keccak256 of this symbol).
+  ORDERLY_TOKEN: z.string().default("USDC"),
+  // Orderly native deposit fee (VERIFY O5): adapter ETH is checked every book poll; > 0 lets ops-venue top an
+  // adapter up (adapter.fundNative, from the OPS_VENUE key) by at most this many wei, to headroom x the fee.
+  OPS_NATIVE_TOPUP_MAX_WEI: z.coerce.bigint().default(0n),
+  OPS_NATIVE_FEE_HEADROOM: z.coerce.bigint().default(2n),
+  OPS_NATIVE_TOPUP_COOLDOWN_MS: z.coerce.number().default(3_600_000),
 });
 
 export type OpsEnv = z.infer<typeof opsEnvSchema>;

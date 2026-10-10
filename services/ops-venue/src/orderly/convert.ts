@@ -16,13 +16,18 @@ export interface PositionsData {
 }
 
 export interface HoldingData {
-  holding?: Array<{ token?: string; holding?: number; frozen?: number }>;
+  holding?: Array<{ token?: string; holding?: number; frozen?: number; isolated_margin?: number }>;
 }
 
-/** Equity = USDC holding + Σ unsettled pnl (all symbols); the position is the one for `symbol`. */
-export function toVenueAccount(symbol: string, pos: PositionsData, hold: HoldingData): VenueAccount {
-  const usdc = (hold.holding ?? []).find((h) => String(h.token ?? "").toUpperCase() === "USDC");
-  const holding = Number(usdc?.holding ?? 0);
+/**
+ * Equity = settlement-token holding + isolated margin (Perp Anything markets are isolated-only; Orderly's
+ * GET /v1/client/holding row carries `isolated_margin`) + Σ unsettled pnl (all symbols); the position is the one
+ * for `symbol`. `token` is the settlement token symbol on Orderly ("USDC"; "USDG" on Robinhood Chain).
+ */
+export function toVenueAccount(symbol: string, pos: PositionsData, hold: HoldingData, token = "USDC"): VenueAccount {
+  const want = token.toUpperCase();
+  const usdc = (hold.holding ?? []).find((h) => String(h.token ?? "").toUpperCase() === want);
+  const holding = Number(usdc?.holding ?? 0) + Number(usdc?.isolated_margin ?? 0);
   const frozen = Number(usdc?.frozen ?? 0);
   const rows = pos.rows ?? [];
   const upnlAll = rows.reduce((x, r) => x + Number(r.unsettled_pnl ?? 0), 0);
@@ -100,7 +105,82 @@ export function quoteOrders(
   return out;
 }
 
-/** Orderly account id (VERIFY): keccak256(abi.encode(address user, keccak256(bytes(brokerId)))). */
+// ------------------------------------------------------------------ live builder / asset endpoints
+
+/** GET /v1/broker/daily_fee_revenue accepts at most this many days per query (error -1103 beyond). */
+export const FEE_REVENUE_MAX_DAYS = 180;
+
+export interface DailyFeeRevenueData {
+  rows?: Array<{
+    date?: string;
+    permissionless_listing_fee_share?: number | string;
+    distributor_fee_share?: number | string;
+    builder_fee_revenue?: number | string;
+    cross_broker_fee?: number | string;
+    total_revenue?: number | string;
+  }>;
+}
+
+/** Broker-wide row (no symbol in Orderly's revenue report): see domain/fees.ts BROKER_WIDE. */
+const BROKER_WIDE_SYMBOL = "*";
+
+/**
+ * Orderly daily builder revenue -> settlement rows. `date` is the settlement date (00:00 UTC of the day after
+ * the revenue day), i.e. the end of the revenue day: the row's period label. Only the Perp Anything share
+ * (`permissionless_listing_fee_share`, 50% of base taker fees on the builder's markets) is protocol revenue.
+ */
+export function parseDailyFeeRevenue(d: DailyFeeRevenueData): Array<{ id: string; symbol: string; amountUsd: bigint; period: number; ts: number }> {
+  const out: Array<{ id: string; symbol: string; amountUsd: bigint; period: number; ts: number }> = [];
+  for (const r of d.rows ?? []) {
+    const ms = Date.parse(`${String(r.date ?? "")}T00:00:00Z`);
+    if (!Number.isFinite(ms)) continue;
+    out.push({ id: `fee-revenue:${r.date}`, symbol: BROKER_WIDE_SYMBOL, amountUsd: usdRaw(r.permissionless_listing_fee_share ?? 0), period: Math.floor(ms / 1000), ts: ms });
+  }
+  return out;
+}
+
+/** Inclusive [from, to] YYYY-MM-DD windows of at most `maxDays` days covering [startMs, endMs]. */
+export function dateWindows(startMs: number, endMs: number, maxDays: number): Array<[string, string]> {
+  const DAY = 86_400_000;
+  const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+  let from = Math.floor(startMs / DAY) * DAY;
+  const last = Math.floor(endMs / DAY) * DAY;
+  const out: Array<[string, string]> = [];
+  while (from <= last) {
+    const to = Math.min(last, from + (maxDays - 1) * DAY);
+    out.push([day(from), day(to)]);
+    from = to + DAY;
+  }
+  return out;
+}
+
+export interface AssetHistoryRow {
+  id: string;
+  status: string;
+  txHash: string | null;
+  amountUsd: bigint;
+  clientRef: string | null;
+  receiver: string | null;
+  createdAt: number | null;
+}
+
+/**
+ * GET /v1/asset/history rows -> withdrawal records. Orderly: {id (string), tx_id, side, token, amount (token
+ * units, decimal), fee, trans_status, created_time, updated_time, chain_id}; the mock adds client_ref / receiver.
+ */
+export function parseAssetHistory(d: { rows?: Array<Record<string, unknown>> }): AssetHistoryRow[] {
+  return (d.rows ?? []).map((w) => ({
+    id: String(w.id),
+    status: String(w.trans_status ?? w.status ?? ""),
+    txHash: w.tx_id ? String(w.tx_id) : null,
+    amountUsd: usdRaw(w.amount),
+    clientRef: w.client_ref ? String(w.client_ref) : null,
+    receiver: w.receiver ? String(w.receiver) : null,
+    createdAt: w.created_time == null || !Number.isFinite(Number(w.created_time)) ? null : Number(w.created_time),
+  }));
+}
+
+/** Orderly account id (confirmed, contract-evm Utils.calculateAccountId): keccak256(abi.encode(address user, keccak256(bytes(brokerId)))). */
 export function orderlyAccountId(user: Address, brokerId: string): Hex {
   return keccak256(encodeAbiParameters([{ type: "address" }, { type: "bytes32" }], [user, keccak256(stringToHex(brokerId))]));
 }

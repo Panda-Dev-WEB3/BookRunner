@@ -113,7 +113,8 @@ const MIN_WINDOW = 60;
 const MAX_IN_HOUSE_TAKER_FEE_BPS = 100;
 
 /** Devnet/mainnet defaults (ARCHITECTURE §2.1) used when the chain is not reachable. */
-export const DEFAULT_VENUE_MIN_IF_USD: [bigint, bigint] = [25_000_000_000n, 10_000_000_000n];
+// Orderly: strictly above the venue's 25,000 per-symbol IF requirement (VERIFY O10), so the inclusive minimum is 25,001.
+export const DEFAULT_VENUE_MIN_IF_USD: [bigint, bigint] = [25_001_000_000n, 10_000_000_000n];
 
 const venueId = (v: CharterDraft["venue"]): number => (v === "orderly" ? VENUE.ORDERLY : v === "pool_engine" ? VENUE.POOL_ENGINE : v);
 const oracleId = (v: CharterDraft["oracle"]): number => (v === "chainlink" ? ORACLE.CHAINLINK : v === "attested" ? ORACLE.ATTESTED : v);

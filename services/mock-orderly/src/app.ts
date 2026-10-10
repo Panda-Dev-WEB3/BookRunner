@@ -179,6 +179,17 @@ export function createApp(opts: AppOptions) {
     return ok(c, { id: accountId, orderly_key: k.orderlyKey });
   });
 
+  // public: registration nonce for Registration / DelegateSigner messages (Orderly: string, single use, 2 min)
+  app.get("/v1/registration_nonce", (c) => ok(c, { registration_nonce: String(100_000_000_000 + Math.floor(Math.random() * 899_999_999_999)) }));
+
+  // public: account of (address, broker_id); 400 when the simulator has none (Orderly: "account not exist")
+  app.get("/v1/get_account", (c) => {
+    const q = new URL(c.req.url).searchParams;
+    const id = orderlyAccountId(str(q.get("address"), "address") as Address, str(q.get("broker_id"), "broker_id")).toLowerCase();
+    if (!venue.accounts.has(id)) throw new VenueError(400, ERR.INVALID_PARAM, "account not exist");
+    return ok(c, { user_id: null, account_id: id });
+  });
+
   app.post("/v1/delegate_signer", async (c) => {
     const b = parseJson(await c.req.text());
     const msg = b.message as DelegateSignerMessageJson | undefined;
@@ -190,8 +201,12 @@ export function createApp(opts: AppOptions) {
     const header = c.req.header("orderly-account-id");
     const ids = new Set<string>([...venue.accounts.values()].filter((a) => a.owner === owner).map((a) => a.accountId));
     if (header) ids.add(normalizeAccountId(header));
+    // like Orderly: the contract's own account (keccak256(abi.encode(contract, brokerHash))) is created if missing
+    const own = orderlyAccountId(msg.delegateContract as Address, msg.brokerId).toLowerCase();
+    ids.add(own);
     for (const id of ids) venue.ensureAccount(id, { owner, delegateSigner: recovered });
-    return ok(c, { account_ids: [...ids], delegate_signer: recovered });
+    // Orderly's response: {user_id, account_id, valid_signer}; account_ids / delegate_signer kept for older callers
+    return ok(c, { user_id: null, account_id: own, valid_signer: recovered.toLowerCase(), account_ids: [...ids], delegate_signer: recovered });
   });
 
   app.get("/v1/client/key_info", async (c) => {
@@ -330,7 +345,8 @@ export function createApp(opts: AppOptions) {
     return ok(c, { withdraw_id: w.id });
   };
   app.post("/v1/withdraw_request", withdraw(false));
-  app.post("/v1/delegate_signer_withdraw_request", withdraw(true));
+  app.post("/v1/delegate_withdraw_request", withdraw(true)); // Orderly's path (docs, 2026-10)
+  app.post("/v1/delegate_signer_withdraw_request", withdraw(true)); // legacy alias (earlier ops-venue builds)
 
   app.get("/v1/asset/history", async (c) => {
     const a = await auth(c, "read");
@@ -438,20 +454,31 @@ export function createApp(opts: AppOptions) {
     return ok(c, { rows: venue.settlementsSince(start, end).map((s) => venue.settlementView(s)) });
   });
 
-  // live alias (VERIFY shape): GET /v1/broker/daily_fee_revenue -> permissionless_listing_fee_share rows
+  // live shape (confirmed, docs 2026-10): GET /v1/broker/daily_fee_revenue?start_date&end_date (YYYY-MM-DD, required,
+  // <= 180 days) -> rows[{date, permissionless_listing_fee_share, distributor_fee_share, builder_fee_revenue,
+  // cross_broker_fee, total_revenue}] newest first, broker-wide. `date` = settlement date = end of the revenue day
+  // (here: the mock settlement's period label).
   app.get("/v1/broker/daily_fee_revenue", async (c) => {
     const a = await auth(c, "read");
     requireBuilder(a, false);
     const q = new URL(c.req.url).searchParams;
-    const start = q.get("start_date") ? Date.parse(q.get("start_date") as string) : Number(q.get("start_t") ?? 0);
-    const rows = venue.settlementsSince(Number.isFinite(start) ? start : 0).map((s) => ({
-      id: s.id,
-      date: new Date(s.period * 1000).toISOString().slice(0, 10),
-      symbol: s.symbol,
-      period: s.period,
-      timestamp: s.ts,
-      permissionless_listing_fee_share: s.amount / 1e6,
-    }));
+    const sd = q.get("start_date");
+    const ed = q.get("end_date");
+    if (!sd || !ed) throw new VenueError(400, ERR.INVALID_PARAM, "start_date and end_date can't be blank");
+    const from = Date.parse(`${sd}T00:00:00Z`);
+    const to = Date.parse(`${ed}T00:00:00Z`);
+    if (!Number.isFinite(from) || !Number.isFinite(to) || from > to) throw new VenueError(400, ERR.INVALID_PARAM, "invalid date interval");
+    if ((to - from) / 86_400_000 >= 180) throw new VenueError(400, ERR.INVALID_PARAM, "error date interval greater than 180 days");
+    const byDate = new Map<string, number>();
+    for (const st of venue.settlementsSince(0)) {
+      const date = new Date(st.period * 1000).toISOString().slice(0, 10);
+      const ms = Date.parse(`${date}T00:00:00Z`);
+      if (ms < from || ms > to) continue;
+      byDate.set(date, (byDate.get(date) ?? 0) + st.amount);
+    }
+    const rows = [...byDate.entries()]
+      .sort((x, y) => (x[0] < y[0] ? 1 : -1))
+      .map(([date, micro]) => ({ date, permissionless_listing_fee_share: micro / 1e6, distributor_fee_share: 0, builder_fee_revenue: 0, cross_broker_fee: 0, total_revenue: micro / 1e6 }));
     return ok(c, { rows });
   });
 

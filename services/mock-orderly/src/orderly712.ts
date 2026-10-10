@@ -7,8 +7,8 @@
 //   Withdraw(brokerId string, chainId uint256, receiver address, token string, amount uint256, withdrawNonce uint64, timestamp uint64)
 //   AddOrderlyKey(brokerId string, chainId uint256, orderlyKey string, scope string, timestamp uint64, expiration uint64)
 //   DelegateAddOrderlyKey(delegateContract address, brokerId string, chainId uint256, orderlyKey string, scope string, timestamp uint64, expiration uint64)
-// VERIFY: DelegateWithdraw field list (assumed = Withdraw with a leading delegateContract), and the
-//         domain used for the delegate withdraw (assumed on-chain/Ledger like Withdraw).
+// Confirmed (contract-evm src/library/Signature.sol): DelegateWithdraw = Withdraw with a leading delegateContract,
+//   on the Ledger (on-chain) domain like Withdraw; DelegateSigner on the off-chain domain.
 import { type Address, encodeAbiParameters, type Hex, keccak256, recoverTypedDataAddress, stringToHex } from "viem";
 
 export const ORDERLY_OFFCHAIN_VERIFYING_CONTRACT = "0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC" as const;

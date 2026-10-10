@@ -7,12 +7,14 @@
 //   requested|confirmed --cancelled--> cancelled   (venue rejected/failed it; adapter.cancel/failWithdraw)
 //
 //   request : on-chain withdrawRequest(nonce).status must still be Requested, then POST the Orderly
-//             withdraw request (delegate signer, receiver = adapter); the venue debits the account here
+//             withdraw request (delegate signer, receiver = delegateContract = the account owner: the adapter
+//             for MM, the OrderlyIFAccount for IF; Orderly rejects any other receiver); the venue debits here
 //   confirm : adapter.confirmWithdraw(nonce) right after the venue accepted it, BEFORE any USDC can reach
 //             the adapter: from here the amount is in-transit principal (a sweep can never take it as
 //             unattributed, and the venue debit and the adapter debit happen back to back)
-//   pay     : mock -> MockOrderlyVault.operatorWithdraw(accountId, adapter, amount) (+ creditFees to
-//             materialise venue PnL the mock vault never received); live -> wait for Orderly to pay (VERIFY)
+//   pay     : mock -> MockOrderlyVault.operatorWithdraw(accountId, owner, amount) (+ creditFees to
+//             materialise venue PnL the mock vault never received); live -> wait for Orderly to pay
+//             (asset history COMPLETED). IF payouts land on the OrderlyIFAccount; sweepToVault pulls them.
 //   sweep   : adapter.sweepToVault() (waits while the mark-window gate is closed)
 // Every on-chain write is recorded (hash + nonce) before its receipt is awaited and inspected on retry.
 import type { Address, Hex } from "viem";
@@ -28,6 +30,8 @@ export interface WithdrawSaga {
   adapter: Address;
   account: number; // ACCOUNT.IF | ACCOUNT.MM
   accountId: Hex;
+  /** Owner of the Orderly account (v3 IF = OrderlyIFAccount): withdraw receiver + delegateContract. Absent = adapter. */
+  owner?: Address;
   amount: string; // raw 6dp decimal string
   nonce: string;
   stage: WithdrawStage;
@@ -59,15 +63,19 @@ export type WithdrawEvent =
 
 export type WithdrawStep = "request" | "confirm" | "pay" | "sweep";
 
+/** Orderly pays a contract account's withdrawal to the contract itself (LedgerImplA: receiver == sender). */
+export const sagaReceiver = (s: Pick<WithdrawSaga, "adapter" | "owner">): Address => s.owner ?? s.adapter;
+
 export const sagaKey = (adapter: Address, nonce: bigint | string) => `${adapter.toLowerCase()}:${nonce.toString()}`;
 
-export function newWithdrawSaga(p: { bookId: number; adapter: Address; account: number; accountId: Hex; amount: bigint; nonce: bigint; txHash?: Hex }, now: number): WithdrawSaga {
+export function newWithdrawSaga(p: { bookId: number; adapter: Address; account: number; accountId: Hex; owner?: Address; amount: bigint; nonce: bigint; txHash?: Hex }, now: number): WithdrawSaga {
   return {
     key: sagaKey(p.adapter, p.nonce),
     bookId: p.bookId,
     adapter: p.adapter,
     account: p.account,
     accountId: p.accountId,
+    ...(p.owner && p.owner.toLowerCase() !== p.adapter.toLowerCase() ? { owner: p.owner } : {}),
     amount: p.amount.toString(),
     nonce: p.nonce.toString(),
     stage: "detected",

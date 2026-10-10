@@ -8,8 +8,8 @@ import type { OrderlyBuilderApi, QuotingVenue, TwoSidedQuote, VenueAccount, Venu
 import type { Address, LocalAccount } from "viem";
 import { KeyStore, resolveKeysDir } from "./keys";
 import { type Ed25519Key, keyFromSecret, keyPrefix, signMessage } from "./orderly/auth";
-import { type HoldingData, type PositionsData, quoteOrders, toVenueAccount, toVenueFill, usdRaw } from "./orderly/convert";
-import { type AddKeyParams, ORDERLY_LEDGER_MAINNET, signAddKey, signWithdraw } from "./orderly/eip712";
+import { type DailyFeeRevenueData, dateWindows, FEE_REVENUE_MAX_DAYS, type HoldingData, type PositionsData, parseAssetHistory, parseDailyFeeRevenue, quoteOrders, toVenueAccount, toVenueFill, usdRaw } from "./orderly/convert";
+import { type AddKeyParams, ORDERLY_LEDGER_MAINNET, signAddKey, signDelegateSigner, signWithdraw } from "./orderly/eip712";
 import { type FetchLike, OrderlyHttp, OrderlyHttpError } from "./orderly/http";
 import { BUILDER_PATHS, ORDERLY_ORACLE_WS, ORDERLY_PATHS } from "./orderly/paths";
 
@@ -30,6 +30,8 @@ export interface OrderlyVenueOptions {
   fetch?: FetchLike;
   /** Order type for quotes (default POST_ONLY: quotes never take liquidity). */
   quoteOrderType?: "LIMIT" | "POST_ONLY";
+  /** Settlement token symbol on Orderly (holding row): default env ORDERLY_TOKEN, else "USDC"; "USDG" on Robinhood Chain. */
+  token?: string;
   /** Price / size ticks; default: GET /v1/public/info/{symbol} (quote_tick, base_tick), fallback 0.01 / 1e-8. */
   priceTick?: number;
   qtyTick?: number;
@@ -152,7 +154,7 @@ export class OrderlyVenue implements QuotingVenue {
 
   async account(): Promise<VenueAccount> {
     const [pos, hold] = await Promise.all([this.call<PositionsData>("GET", ORDERLY_PATHS.positions), this.call<HoldingData>("GET", ORDERLY_PATHS.holding)]);
-    return toVenueAccount(this.opts.symbol, pos, hold);
+    return toVenueAccount(this.opts.symbol, pos, hold, this.opts.token ?? (this.opts.env ?? process.env).ORDERLY_TOKEN ?? "USDC");
   }
 
   /** All fills since `sinceMs` (inclusive), oldest first; pages through /v1/trades (size 500). */
@@ -196,8 +198,8 @@ export interface FeeSettlement {
 }
 
 export interface WithdrawRecordView {
-  id: number;
-  status: string; // NEW | PROCESSING | COMPLETED | FAILED (VERIFY live values)
+  id: string; // Orderly returns ids as strings ("230707030600002"); kept verbatim
+  status: string; // trans_status: PENDING | PENDING_REBALANCE | PROCESSING | COMPLETED | FAILED (mock: NEW too)
   txHash: string | null;
   amountUsd: bigint;
   clientRef: string | null;
@@ -221,6 +223,9 @@ export interface OrderlyBuilderClientOptions {
   oracleWsUrl?: string;
   /** Live: earliest day queried for builder fee revenue (cumulative sweep accounting starts here). */
   feeHistoryStartMs?: number;
+  /** Settlement token symbol on Orderly (withdrawals, transfers): "USDC" (default); "USDG" on Robinhood Chain. */
+  token?: string;
+  sleep?: (ms: number) => Promise<void>;
   fetch?: FetchLike;
   now?: () => number;
 }
@@ -231,8 +236,53 @@ export class OrderlyBuilderClient implements OrderlyBuilderApi {
   private ws: WebSocket | null = null;
 
   constructor(readonly o: OrderlyBuilderClientOptions) {
-    this.http = new OrderlyHttp({ baseUrl: o.baseUrl, accountId: o.builderAccountId, key: o.builderKey, ...(o.fetch ? { fetch: o.fetch } : {}), ...(o.now ? { now: o.now } : {}) });
+    this.http = new OrderlyHttp({ baseUrl: o.baseUrl, accountId: o.builderAccountId, key: o.builderKey, ...(o.fetch ? { fetch: o.fetch } : {}), ...(o.now ? { now: o.now } : {}), ...(o.sleep ? { sleep: o.sleep } : {}) });
     this.now = o.now ?? Date.now;
+  }
+
+  /** Settlement token symbol on Orderly ("USDC"; "USDG" on Robinhood Chain). */
+  private get token(): string {
+    return this.o.token ?? "USDC";
+  }
+
+  // ---------------------------------------------------------------- accounts / delegate signer
+  /** Public: the Orderly account of (address, brokerId), or null when Orderly has none yet. */
+  async getAccount(address: Address): Promise<{ accountId: string; userId: number | null } | null> {
+    try {
+      const r = await this.http.request<{ account_id?: string; user_id?: number }>("GET", ORDERLY_PATHS.getAccount, {
+        query: { address, broker_id: this.o.brokerId, chain_type: "EVM" },
+        key: null,
+        accountId: "",
+      });
+      return r.account_id ? { accountId: r.account_id, userId: typeof r.user_id === "number" ? r.user_id : null } : null;
+    } catch (err) {
+      if (err instanceof OrderlyHttpError && err.status >= 400 && err.status < 500) return null;
+      throw err;
+    }
+  }
+
+  /**
+   * Confirms the delegate signer of a contract account with Orderly (docs user-flows/delegate-signer): after the
+   * contract called `Vault.delegateSigner({brokerHash, signer})` (tx `txHash`), the signer EOA signs DelegateSigner
+   * with a fresh registration nonce. Creates the contract's account if it does not exist yet.
+   */
+  async registerDelegateSigner(p: { delegateContract: Address; txHash: `0x${string}` }): Promise<{ accountId: string; validSigner: string }> {
+    const n = await this.http.request<{ registration_nonce: string | number }>("GET", ORDERLY_PATHS.registrationNonce, { key: null, accountId: "" });
+    const { message, signature } = await signDelegateSigner(this.o.signer, {
+      delegateContract: p.delegateContract,
+      brokerId: this.o.brokerId,
+      chainId: this.o.chainId,
+      timestamp: BigInt(this.now()),
+      registrationNonce: BigInt(n.registration_nonce),
+      txHash: p.txHash,
+    });
+    const r = await this.http.request<{ account_id?: string; valid_signer?: string }>("POST", ORDERLY_PATHS.delegateSigner, {
+      body: { message, signature, userAddress: this.o.signer.address },
+      key: null,
+      accountId: "",
+      retries: 0,
+    });
+    return { accountId: String(r.account_id ?? ""), validSigner: String(r.valid_signer ?? "") };
   }
 
   private async keyOf(accountId: string): Promise<Ed25519Key | null> {
@@ -329,7 +379,7 @@ export class OrderlyBuilderClient implements OrderlyBuilderApi {
       return;
     }
     if (!p.ifAccountId) throw new Error("live fundInsurance needs the IF account id");
-    await this.http.request("POST", ORDERLY_PATHS.internalTransfer, { body: { token: "USDC", amount, receiver_account_id: p.ifAccountId }, retries: 0 });
+    await this.http.request("POST", ORDERLY_PATHS.internalTransfer, { body: { token: this.token, amount, receiver_account_id: p.ifAccountId }, retries: 0 });
   }
 
   // ---------------------------------------------------------------- fee settlements
@@ -340,22 +390,14 @@ export class OrderlyBuilderClient implements OrderlyBuilderApi {
       });
       return (r.rows ?? []).map((x) => ({ id: String(x.id), symbol: x.symbol, amountUsd: usdRaw(x.amount), period: Number(x.period), ts: Number(x.timestamp) }));
     }
-    // live (VERIFY shape): daily rows with permissionless_listing_fee_share; period = end of the UTC day.
+    // live: GET /v1/broker/daily_fee_revenue (builder admin), queried in <= 180-day windows
     const start = Math.max(sinceMs, this.o.feeHistoryStartMs ?? Date.UTC(2026, 0, 1));
-    const r = await this.http.request<{ rows?: Array<Record<string, unknown>> }>("GET", BUILDER_PATHS.live.dailyFeeRevenue, {
-      query: { start_date: new Date(start).toISOString().slice(0, 10), end_date: new Date(this.now()).toISOString().slice(0, 10) },
-    });
-    return (r.rows ?? []).map((x, i) => {
-      const day = Date.parse(String(x.date ?? x.day ?? ""));
-      const periodEnd = Number.isFinite(day) ? Math.floor(day / 1000) + 86_400 : Number(x.period ?? 0);
-      return {
-        id: String(x.id ?? `${x.date ?? i}:${x.symbol ?? ""}`),
-        symbol: String(x.symbol ?? ""),
-        amountUsd: usdRaw(x.permissionless_listing_fee_share ?? x.amount ?? 0),
-        period: periodEnd,
-        ts: Number(x.timestamp ?? periodEnd * 1000),
-      };
-    });
+    const out: FeeSettlement[] = [];
+    for (const [from, to] of dateWindows(start, this.now(), FEE_REVENUE_MAX_DAYS)) {
+      const r = await this.http.request<DailyFeeRevenueData>("GET", BUILDER_PATHS.live.dailyFeeRevenue, { query: { start_date: from, end_date: to } });
+      out.push(...parseDailyFeeRevenue(r));
+    }
+    return out.sort((a, b) => a.period - b.period);
   }
 
   // ---------------------------------------------------------------- keys
@@ -377,6 +419,17 @@ export class OrderlyBuilderClient implements OrderlyBuilderApi {
       key: null,
       retries: 1,
     });
+  }
+
+  /** GET /v1/get_orderly_key: scope + expiration of a registered key (null when Orderly does not know it). */
+  async getOrderlyKey(accountId: string, orderlyKey: string): Promise<{ orderlyKey: string; scope: string; expiration: number } | null> {
+    try {
+      const r = await this.http.request<{ orderly_key?: string; scope?: string; expiration?: number }>("GET", ORDERLY_PATHS.getOrderlyKey, { query: { account_id: accountId, orderly_key: orderlyKey }, key: null, accountId: "" });
+      return r.orderly_key ? { orderlyKey: r.orderly_key, scope: String(r.scope ?? ""), expiration: Number(r.expiration ?? 0) } : null;
+    } catch (err) {
+      if (err instanceof OrderlyHttpError && err.status >= 400 && err.status < 500) return null;
+      throw err;
+    }
   }
 
   async keyInfo(accountId: string): Promise<Array<{ orderlyKey: string; scope: string; status: string }>> {
@@ -404,12 +457,17 @@ export class OrderlyBuilderClient implements OrderlyBuilderApi {
 
   // ---------------------------------------------------------------- withdrawals
   /**
-   * Request a withdrawal from `accountId` to `to`. Contract-owned accounts (adapter IF/MM) use the
-   * delegate flow (`delegateContract` = the adapter); the builder EOA account uses Withdraw.
+   * Request a withdrawal from `accountId` to `to`. Contract-owned accounts use the delegate flow
+   * (POST /v1/delegate_withdraw_request, `delegateContract` = the account owner: the adapter for MM, the
+   * OrderlyIFAccount for IF); Orderly only pays a contract account to itself, so `to` must equal
+   * `delegateContract` (checked here). The builder EOA account uses Withdraw.
    * `nonce` is our idempotency reference (the adapter's request nonce / fee period), sent as
    * client_ref in mock mode; the Orderly withdrawNonce comes from GET /v1/withdraw_nonce.
    */
   async requestWithdraw(p: { accountId: string; amountUsd: bigint; to: `0x${string}`; nonce: string; delegateContract?: Address }): Promise<{ withdrawId: string }> {
+    if (p.delegateContract && p.to.toLowerCase() !== p.delegateContract.toLowerCase()) {
+      throw new Error(`delegate withdrawal receiver ${p.to} must be the delegate contract ${p.delegateContract} (Orderly rejects any other receiver)`);
+    }
     if (this.o.mode === "mock") {
       const existing = (await this.withdrawals(p.accountId)).find((w) => w.clientRef === p.nonce && w.status !== "FAILED");
       if (existing) return { withdrawId: String(existing.id) };
@@ -422,7 +480,7 @@ export class OrderlyBuilderClient implements OrderlyBuilderApi {
         brokerId: this.o.brokerId,
         chainId: this.o.chainId,
         receiver: p.to,
-        token: "USDC",
+        token: this.token,
         amount: p.amountUsd,
         withdrawNonce: BigInt(n.withdraw_nonce),
         timestamp: BigInt(this.now()),
@@ -437,17 +495,10 @@ export class OrderlyBuilderClient implements OrderlyBuilderApi {
     return { withdrawId: String(r.withdraw_id) };
   }
 
+  /** Latest withdrawals of the account (GET /v1/asset/history?side=WITHDRAW, newest first; settlement token only). */
   async withdrawals(accountId: string): Promise<WithdrawRecordView[]> {
-    const r = await this.asAccount<{ rows?: Array<Record<string, unknown>> }>(accountId, "GET", ORDERLY_PATHS.assetHistory, { query: { side: "WITHDRAW" } });
-    return (r.rows ?? []).map((w) => ({
-      id: Number(w.id),
-      status: String(w.trans_status ?? ""),
-      txHash: w.tx_id ? String(w.tx_id) : null,
-      amountUsd: usdRaw(w.amount),
-      clientRef: w.client_ref ? String(w.client_ref) : null,
-      receiver: w.receiver ? String(w.receiver) : null,
-      createdAt: w.created_time == null || !Number.isFinite(Number(w.created_time)) ? null : Number(w.created_time),
-    }));
+    const r = await this.asAccount<{ rows?: Array<Record<string, unknown>> }>(accountId, "GET", ORDERLY_PATHS.assetHistory, { query: { token: this.token, side: "WITHDRAW", page: 1, size: 100 } });
+    return parseAssetHistory(r);
   }
 
   async withdrawal(accountId: string, withdrawId: string): Promise<WithdrawRecordView | null> {

@@ -5,7 +5,7 @@
 //   - EngineVenue   (services/bookrunner-agent/src/venues/engine.ts): in-house PoolEngine; a "quote" is
 //                    translated to desk.execute(SetQuote{spreadBps, skewBps, maxNetExposureUsd}).
 //
-// Orderly REST (VERIFY all paths/fields against https://orderly.network/docs before mainnet):
+// Orderly REST (status per path: services/ops-venue/src/orderly/paths.ts, docs/VERIFY.md O13; live client = ORDERLY_MODE=live):
 //   auth headers: orderly-account-id, orderly-key (ed25519 pubkey, "ed25519:<base58>"),
 //                 orderly-timestamp (ms), orderly-signature = base64url(ed25519(`${ts}${METHOD}${path}${body}`))
 //   POST   /v1/order                {symbol, order_type: "LIMIT"|"POST_ONLY", order_price, order_quantity, side: "BUY"|"SELL", client_order_id, reduce_only}
@@ -14,7 +14,8 @@
 //   GET    /v1/positions             {data: {rows: [{symbol, position_qty, average_open_price, mark_price, unsettled_pnl}]}}
 //   GET    /v1/client/holding        {data: {holding: [{token, holding, frozen}]}}
 //   GET    /v1/trades?symbol&start_t {data: {rows: [{id, symbol, side, executed_price, executed_quantity, fee, executed_timestamp, is_maker}]}}
-//   POST   /v1/withdraw_request      EIP-712 signed by the account's (delegate) signer
+//   POST   /v1/withdraw_request      EIP-712 signed by the account owner; contract accounts: POST /v1/delegate_withdraw_request
+//                                    (receiver must equal the contract: the adapter for MM, its OrderlyIFAccount for IF)
 //   DELETE /v1/orderly_key           remove a trade key (key revocation)
 //   Builder / Perp Anything (VERIFY): POST /v1/builder/symbol, POST /v1/builder/symbol/price_source,
 //                 GET /v1/builder/insurance_fund?symbol, GET /v1/builder/fee_settlements?start_t
