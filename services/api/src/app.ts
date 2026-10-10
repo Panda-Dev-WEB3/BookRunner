@@ -3,9 +3,11 @@ import { trpcServer } from "@hono/trpc-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { ApiDeps } from "./deps";
+import { type StatusView, buildStatus } from "./domain/status";
 import { handleMcpRequest } from "./mcp";
 import { restRoutes } from "./rest";
 import { appRouter } from "./router";
+import { limitsViews, markInterval } from "./routers/common";
 import { bearerMatches } from "./webhooks/routes";
 
 export interface AppOptions {
@@ -25,6 +27,10 @@ export const MAX_TRPC_BATCH = 10;
  * procedure list (and uptime) is only in `/health?verbose` with the admin bearer token.
  */
 export const OPTIONAL_PROCEDURES = ["book.fills", "book.hedges", "receipts.list"] as const;
+
+/** /status is computed at most this often per process (nginx micro-caches it too); public, so cheap. */
+export const STATUS_CACHE_MS = 15_000;
+export const STATUS_CACHE_CONTROL = "public, max-age=30, stale-while-revalidate=60";
 
 export function createApp(deps: ApiDeps, opts: AppOptions) {
   const app = new Hono();
@@ -56,6 +62,34 @@ export function createApp(deps: ApiDeps, opts: AppOptions) {
       ...(verbose ? { uptimeSec: Math.floor((deps.now() - started) / 1000), procedures } : {}),
       ...extra,
     });
+  });
+
+  // public status (apps/site /status/, nginx /status.json): mark age, risk level, last distribution per book
+  let statusCache: { at: number; body: StatusView } | null = null;
+  let statusInflight: Promise<StatusView> | null = null;
+  const loadStatus = async (): Promise<StatusView> => {
+    const books = await deps.data.listBooks();
+    const ids = books.map((b) => b.id);
+    const [marks, limits, distributions, interval] = await Promise.all([deps.data.latestMarks(ids), limitsViews(deps, ids), deps.data.latestDistributions(ids), markInterval(deps)]);
+    return buildStatus({ books, marks, limits, distributions, markIntervalSec: interval, chainId: deps.settings.chainId, now: deps.now() });
+  };
+  app.get("/status", async (c) => {
+    const now = deps.now();
+    if (!statusCache || now - statusCache.at >= STATUS_CACHE_MS) {
+      // one computation at a time, however many requests arrive together
+      statusInflight ??= loadStatus().finally(() => {
+        statusInflight = null;
+      });
+      try {
+        statusCache = { at: now, body: await statusInflight };
+      } catch (err) {
+        deps.log.warn({ err }, "status unavailable");
+        c.header("Cache-Control", "no-store");
+        return c.json({ error: { code: "UNAVAILABLE", message: "status temporarily unavailable" } }, 503);
+      }
+    }
+    c.header("Cache-Control", STATUS_CACHE_CONTROL);
+    return c.json(statusCache.body);
   });
 
   app.use(

@@ -95,6 +95,8 @@ export interface ReadModel {
 
   // settlements
   listSettlements(bookId: number, q: Page): Promise<SettlementRow[]>;
+  /** Newest `distribution` settlement per book (public status). */
+  latestDistributions(bookIds: number[]): Promise<SettlementRow[]>;
 
   // activity feeds (newest first)
   /** Fills ordered by (ts, venueTradeId) descending. */

@@ -149,6 +149,9 @@ export class FakeReadModel implements ReadModel {
   async listSettlements(bookId: number, q: Page) {
     return page(desc(this.settlements.filter((s) => s.bookId === bookId), (s) => s.id), q, (s) => s.id);
   }
+  async latestDistributions(ids: number[]) {
+    return ids.flatMap((id) => desc(this.settlements.filter((s) => s.bookId === id && s.source === "distribution"), (s) => s.ts.getTime()).slice(0, 1));
+  }
   async listFills(bookId: number, q: { limit: number; before?: FillCursor }) {
     const older = (f: FillRow, c: FillCursor) => f.ts < c.ts || (f.ts.getTime() === c.ts.getTime() && f.venueTradeId < c.venueTradeId);
     return this.fills

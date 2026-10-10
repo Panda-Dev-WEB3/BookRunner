@@ -1,9 +1,10 @@
 // apps/site: the BookRunner public site (static pages vendored in public/, served as-is) plus the
-// live book desk at /dashboard/, whose script is the only bundled code (src/dashboard/main.ts ->
-// dist/dashboard/app.js). `vite build` copies public/ verbatim into dist/ and adds the bundle, so
-// dist/ is a plain static tree: index.html, research/, jobs/, documents/, dashboard/, assets/...
+// live book desk at /dashboard/ and the public status page at /status/, whose scripts are the only
+// bundled code (src/dashboard/main.ts -> dist/dashboard/app.js, src/status/main.ts -> dist/status/app.js).
+// `vite build` copies public/ verbatim into dist/ and adds the bundles, so dist/ is a plain static tree:
+// index.html, research/, jobs/, documents/, dashboard/, status/, assets/...
 //
-// Dev: `bun run dev` serves the same tree and proxies /trpc + /health to SITE_API_ORIGIN
+// Dev: `bun run dev` serves the same tree and proxies /trpc, /health and /status.json to SITE_API_ORIGIN
 // (default https://bookrunner.use-cert.com, the live testnet API; read-only queries are safe).
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -16,7 +17,11 @@ const publicDir = join(root, "public");
 const apiOrigin = process.env.SITE_API_ORIGIN ?? "https://bookrunner.use-cert.com";
 const port = Number(process.env.SITE_PORT ?? 5191);
 
-/** Dev only: directory URLs serve their index.html; the dashboard bundle URL maps to its TS entry. */
+/** Bundled pages: the page directory, its TS entry, the built script (dist/<dir>/app.js). */
+const BUNDLES = { app: "dashboard", status: "status" } as const;
+const ENTRIES: Record<string, string> = { app: "src/dashboard/main.ts", status: "src/status/main.ts" };
+
+/** Dev only: directory URLs serve their index.html; each bundle URL maps to its TS entry. */
 function staticTree(): Plugin {
   return {
     name: "bookrunner-static-tree",
@@ -24,9 +29,11 @@ function staticTree(): Plugin {
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
         const url = new URL(req.url ?? "/", "http://localhost");
-        if (url.pathname === "/dashboard/app.js") {
-          req.url = "/src/dashboard/main.ts";
-          return next();
+        for (const [name, dir] of Object.entries(BUNDLES)) {
+          if (url.pathname === `/${dir}/app.js`) {
+            req.url = `/${ENTRIES[name]}`;
+            return next();
+          }
         }
         const dir = join(publicDir, decodeURIComponent(url.pathname));
         if (!dir.startsWith(publicDir)) return next();
@@ -47,17 +54,19 @@ function staticTree(): Plugin {
   };
 }
 
-/** Build only: dist/dashboard/index.html loads app.js with a content hash, so a release is never served stale. */
+/** Build only: each bundled page loads its app.js with a content hash, so a release is never served stale. */
 function versionedBundle(): Plugin {
   return {
     name: "bookrunner-versioned-bundle",
     apply: "build",
     closeBundle() {
-      const out = join(root, "dist", "dashboard");
-      const js = readFileSync(join(out, "app.js"));
-      const v = createHash("sha256").update(js).digest("hex").slice(0, 12);
-      const page = join(out, "index.html");
-      writeFileSync(page, readFileSync(page, "utf8").replace(/\/dashboard\/app\.js(\?[^"]*)?"/, `/dashboard/app.js?v=${v}"`));
+      for (const dir of Object.values(BUNDLES)) {
+        const out = join(root, "dist", dir);
+        const js = readFileSync(join(out, "app.js"));
+        const v = createHash("sha256").update(js).digest("hex").slice(0, 12);
+        const page = join(out, "index.html");
+        writeFileSync(page, readFileSync(page, "utf8").replace(new RegExp(`/${dir}/app\\.js(\\?[^"]*)?"`), `/${dir}/app.js?v=${v}"`));
+      }
     },
   };
 }
@@ -73,6 +82,7 @@ export default defineConfig({
     proxy: {
       "/trpc": { target: apiOrigin, changeOrigin: true, secure: true },
       "/health": { target: apiOrigin, changeOrigin: true, secure: true },
+      "/status.json": { target: apiOrigin, changeOrigin: true, secure: true },
     },
   },
   build: {
@@ -84,9 +94,9 @@ export default defineConfig({
     copyPublicDir: true,
     chunkSizeWarningLimit: 1200,
     rolldownOptions: {
-      input: { app: join(root, "src/dashboard/main.ts") },
+      input: Object.fromEntries(Object.entries(ENTRIES).map(([name, entry]) => [name, join(root, entry)])),
       output: {
-        entryFileNames: "dashboard/app.js",
+        entryFileNames: (chunk) => `${BUNDLES[chunk.name as keyof typeof BUNDLES] ?? chunk.name}/app.js`,
         chunkFileNames: "dashboard/chunks/[name]-[hash].js",
         assetFileNames: "dashboard/assets/[name]-[hash][extname]",
       },
