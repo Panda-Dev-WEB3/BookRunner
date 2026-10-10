@@ -8,7 +8,7 @@ import {
   createLogger,
   publicClientFor,
   redactUrl,
-  roleAccount,
+  roleSigner,
   walletClientFor,
 } from "@bookrunner/shared";
 import { bookrunnerConfigAbi } from "@bookrunner/shared/abi";
@@ -50,7 +50,7 @@ export async function main() {
   const deployment = await waitForDeployment({ file: cfg.DEPLOYMENT_FILE, log, signal: ac.signal, publicClient: pc });
   if (!deployment) return;
 
-  const keeperAccount = roleAccount("keeper");
+  const keeperAccount = await roleSigner("keeper"); // local key or KMS (shared/signer.ts)
   const wallet = walletClientFor(cfg.CHAIN_ID, cfg.RPC_URL, keeperAccount);
   const sender = new TxSender(pc, wallet, log);
   const gas = new GasMeter();

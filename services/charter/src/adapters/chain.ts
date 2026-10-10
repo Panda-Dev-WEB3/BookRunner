@@ -10,7 +10,7 @@ import {
   type Logger,
   isTokenUnderlying,
   publicClientFor,
-  roleAccount,
+  roleSigner,
   underlyingToToken,
   walletClientFor,
 } from "@bookrunner/shared";
@@ -143,7 +143,7 @@ export class CharterChain {
 
   /** JURY role write; waits for the receipt and throws on revert. */
   async postJuryVerdict(charterId: number, digest: Hex, recommendApprove: boolean): Promise<Hex> {
-    const account = roleAccount("jury", this.env);
+    const account = await roleSigner("jury", this.env); // local key or KMS (cached per process)
     const wallet = walletClientFor(this.opts.chainId, this.opts.rpcUrl, account);
     const call = {
       account,
@@ -166,7 +166,7 @@ export class CharterChain {
    * thresholds are not met. Simulated first; a tx is only sent when it would decide the charter.
    */
   async tryFinalize(charterId: number): Promise<{ finalized: boolean; tx: Hex | null }> {
-    const account = roleAccount("jury", this.env);
+    const account = await roleSigner("jury", this.env);
     const call = { account, address: this.c.committee, abi: riskCommitteeAbi, functionName: "tryFinalize", args: [BigInt(charterId)] } as const;
     const { request, result } = await this.pub.simulateContract(call);
     if (!result) return { finalized: false, tx: null };

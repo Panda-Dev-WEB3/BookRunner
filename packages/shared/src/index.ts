@@ -18,3 +18,4 @@ export * from "./clients";
 export * from "./orderly";
 export * from "./redact";
 export * from "./childenv";
+export * from "./signer";

@@ -7,7 +7,7 @@
 //   redis : CHANNELS.kill(*) -> revoke the book's venue trade key
 // Idles (log + retry) until contracts/deployments/<chainId>.json exists.
 import { createDb } from "@bookrunner/db";
-import { CHANNELS, createLogger, QUEUES, roleAccount, tryLoadDeployment, type VenueOpsJob } from "@bookrunner/shared";
+import { CHANNELS, createLogger, QUEUES, roleSigner, tryLoadDeployment, type VenueOpsJob } from "@bookrunner/shared";
 import { Worker } from "bullmq";
 import { Redis } from "ioredis";
 import type { Address } from "viem";
@@ -48,7 +48,7 @@ async function main() {
   }
   if (!dep) return cleanup([], redis, pg.close);
 
-  const ops = roleAccount("opsVenue");
+  const ops = await roleSigner("opsVenue"); // local key or KMS (shared/signer.ts)
   const chain = new ViemChain(dep, ops, log, { chainId: env.CHAIN_ID, rpcUrl: env.RPC_URL, confirmations: env.OPS_CONFIRMATIONS, fallbackMarkInterval: env.MARK_INTERVAL_SECONDS, txPollMs: env.OPS_TX_POLL_MS });
   const builderAccountId = (env.ORDERLY_BUILDER_ACCOUNT_ID ?? orderlyAccountId(ops.address, env.ORDERLY_BROKER_ID)).toLowerCase();
   const builderKey = await loadOrCreateBuilderKey(keys, builderAccountId, env.ORDERLY_BUILDER_KEY_SECRET, env.OPS_OPS_KEY_TTL_DAYS * DAY, keyFromSecret);
