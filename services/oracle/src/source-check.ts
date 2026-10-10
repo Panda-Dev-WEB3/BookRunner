@@ -47,7 +47,7 @@ export interface SourceCheckInput {
   configProblems?: readonly string[];
 }
 
-const errMsg = (e: unknown) => (e instanceof Error ? e.message.split("\n")[0] : String(e));
+const errMsg = (e: unknown): string => (e instanceof Error ? (e.message.split("\n")[0] ?? "") : String(e));
 const fmtWad = (x: bigint, dp = 6) => (Number(x) / 1e18).toFixed(dp);
 
 export async function runSourceCheck(p: SourceCheckInput): Promise<CheckRow[]> {

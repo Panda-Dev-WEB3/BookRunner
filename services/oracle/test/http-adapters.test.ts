@@ -132,6 +132,7 @@ describe("HTTP API", () => {
     const body = (await (await a.request("/attestation")).json()) as Record<string, unknown>;
     expect(body).toMatchObject({ signer, chainId: 31337, oracle: ORACLE_ADDR, registered: true, attestation: { type: "devnet-plain-key", quote: null } });
     expect(String(body.note)).toContain("VERIFY");
+    expect(body.reportData).toMatch(/^0x[0-9a-f]{64}$/); // what a TEE quote for this signer must carry
     expect(checkCopy(ATTESTATION_NOTE)).toEqual([]);
   });
 });

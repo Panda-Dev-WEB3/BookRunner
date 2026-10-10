@@ -14,7 +14,8 @@ export const ATTESTATION_NOTE =
   "Devnet and testnet sign with a plain key. Production runs the aggregator inside a TEE whose quote " +
   "carries reportData (keccak256 of chain, oracle, signer). The operator verifies the quote with the " +
   "platform verifier and the timelock records it with AttestedOracle.setAttestedSigner (allow-listed " +
-  "measurement, keccak256 of the quote); see docs/RUNBOOK.md, Oracle signer attestation.";
+  "measurement, keccak256 of the quote); see docs/RUNBOOK.md, Oracle signer attestation. The TEE " +
+  "platform itself is still VERIFY E1.";
 
 /**
  * @param attestation the enclave's attestation document (ORACLE_ATTESTATION_FILE); null = plain key.
