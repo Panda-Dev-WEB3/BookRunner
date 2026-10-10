@@ -2,7 +2,7 @@
 // oracle_prices (+ AttestedOracle.pushMany in ORACLE_PUSH_MODE=heartbeat only), builder prices to the
 // venue, HTTP on ORACLE_PORT (default 4410).
 import { createDb } from "@bookrunner/db";
-import { createLogger, roleAccount } from "@bookrunner/shared";
+import { createLogger, roleSigner } from "@bookrunner/shared";
 import type { LocalAccount } from "viem";
 import { DrizzlePriceStore } from "./adapters/db";
 import { type AttestationDocument, loadAttestationDocument } from "./attestation";
@@ -20,15 +20,16 @@ import { buildSources } from "./sources/index";
 const cfg = loadOracleConfig();
 const log = createLogger("oracle", cfg.LOG_LEVEL);
 
-function loadSignerAccount(): LocalAccount {
+/** Local key or KMS (shared/signer.ts); exits when no signer is configured for this chain. */
+async function loadSignerAccount(): Promise<LocalAccount> {
   try {
-    return roleAccount("oracleSigner");
+    return await roleSigner("oracleSigner");
   } catch (err) {
     log.fatal({ err: (err as Error).message }, "oracle signer key unavailable");
     process.exit(1);
   }
 }
-const account = loadSignerAccount();
+const account = await loadSignerAccount();
 
 process.on("unhandledRejection", (err) => log.error({ err: err instanceof Error ? err.message : String(err) }, "unhandled rejection"));
 

@@ -12,6 +12,11 @@ Status values:
 - **Divergent**: confirmed, and it differs from what the devnet code or the spec assumes. Action needed.
 - **Unconfirmed**: no primary source found, or only third-party sources.
 
+Every address / parameter below that the deployment consumes is an input field of
+`contracts/deploy-inputs/4663.json` (schema and row mapping: `contracts/deploy-inputs/README.md`);
+`DeployMainnet.checkExternals` re-checks code, USDG decimals and the vault's token on-chain before any
+transaction.
+
 Research date: 2026-10-02 (A-orderly cluster); §3 and §6 updated 2026-10-10 (mainnet prep package 3:
 USDG settlement, Uniswap routes, BKRN TWAP); sections 4, 5 and 8 updated 2026-10-10 (mainnet prep,
 real prices) from the Robinhood docs, `api.robinhood.com/rhj/assets` and Chainlink's reference-data

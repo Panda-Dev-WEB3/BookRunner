@@ -1,7 +1,7 @@
 // Builds the mark service's adapters + pipeline (shared by the service runner and the mark-now CLI).
 import { createDb } from "@bookrunner/db";
 import { PgReceiptsStore } from "@bookrunner/receipts";
-import { type Deployment, type Logger, roleAccount, walletClientFor } from "@bookrunner/shared";
+import { type Deployment, type Logger, roleSigner, walletClientFor } from "@bookrunner/shared";
 import { bookrunnerConfigAbi } from "@bookrunner/shared/abi";
 import {
   BookDirectory,
@@ -27,7 +27,7 @@ import { MarkSpool } from "./spool";
  * ops-venue reports are read from (docs/LOW_GAS.md); null = value from on-chain state only.
  */
 export async function wireMark(cfg: MarkConfig, log: Logger, deployment: Deployment, pc: PublicClient, publisher: Publisher | null, feedRedis: FeedRedis | null = null) {
-  const account = roleAccount("markSigner");
+  const account = await roleSigner("markSigner"); // local key or KMS (shared/signer.ts)
   const wallet = walletClientFor(cfg.CHAIN_ID, cfg.RPC_URL, account);
   const sender = new TxSender(pc, wallet, log);
   try {

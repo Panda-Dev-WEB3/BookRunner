@@ -1,6 +1,6 @@
 // risk service entry: wiring + graceful shutdown. See ARCHITECTURE.md §3 flow 4 and §4 (risk row).
 import { createDb } from "@bookrunner/db";
-import { createLogger, publicClientFor, roleAccount, tryLoadDeployment, walletClientFor } from "@bookrunner/shared";
+import { createLogger, publicClientFor, roleSigner, tryLoadDeployment, walletClientFor } from "@bookrunner/shared";
 import { Redis } from "ioredis";
 import { type Hex, zeroHash } from "viem";
 import { ViemChain } from "./adapters/chain";
@@ -20,7 +20,7 @@ async function main(): Promise<void> {
   const env = loadRiskEnv();
   const log = createLogger("risk", env.LOG_LEVEL);
   const settings = settingsFromEnv(env);
-  const account = roleAccount("risk", process.env);
+  const account = await roleSigner("risk", process.env); // local key or KMS (shared/signer.ts)
   log.info(
     {
       chainId: env.CHAIN_ID,

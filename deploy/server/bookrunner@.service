@@ -1,0 +1,69 @@
+# Bookrunner stack, parametrised by network: bookrunner@mainnet (the MAINNET host) or bookrunner@testnet.
+# %i is passed to scripts/dev.ts --network %i. The live testnet host keeps bookrunner.service (unchanged);
+# the mainnet host runs ONLY bookrunner@mainnet (separate host, separate keys, never both networks on one
+# machine). See MAINNET.md.
+#
+# Environment (systemd reads both files as root; the bookrunner user cannot read them):
+#   /usr/local/lib/bookrunner-deploy/.env.infra   POSTGRES_PASSWORD, REDIS_PASSWORD (install.sh)
+#   /etc/bookrunner/%i.env                        root:root 0600 — mainnet: RHC_RPC_URL, WEB_ORIGIN,
+#                                                 API_ADMIN_TOKEN, ORDERLY_*, ANTHROPIC_API_KEY, oracle
+#                                                 sources, AWS_REGION and one <ROLE>_KMS_KEY_ID per service role
+# scripts/dev.ts --network mainnet refuses to start while anything required is missing or a mnemonic is present,
+# and hands each child only its own secrets (packages/shared/src/childenv.ts).
+[Unit]
+Description=Bookrunner %i stack (services + agents)
+Documentation=https://github.com/Panda-Dev-WEB3/BookRunner/tree/main/deploy/server
+Wants=network-online.target
+Requires=bookrunner-infra.service
+After=network-online.target bookrunner-infra.service
+
+[Service]
+Type=simple
+User=bookrunner
+Group=bookrunner
+WorkingDirectory=/opt/bookrunner/app
+Environment=HOME=/opt/bookrunner
+EnvironmentFile=-/usr/local/lib/bookrunner-deploy/.env.infra
+EnvironmentFile=-/etc/bookrunner/%i.env
+Environment=BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
+ExecStartPre=/bin/mkdir -p /opt/bookrunner/app/.data/%i
+ExecStart=/opt/bookrunner/app/node_modules/.bin/bun scripts/dev.ts --network %i --no-web
+StandardOutput=append:/opt/bookrunner/app/.data/%i/dev.log
+StandardError=append:/opt/bookrunner/app/.data/%i/dev.log
+KillMode=mixed
+TimeoutStopSec=30
+Restart=always
+RestartSec=10
+MemoryHigh=2G
+MemoryMax=2560M
+MemorySwapMax=2G
+OOMScoreAdjust=500
+
+# ---- sandbox (HARDENING.md). The deployment record is READ-ONLY to the stack: on mainnet no process appends
+# books (books are chartered on-chain; the indexer reads them). A testnet instance that runs the launch script
+# needs a drop-in: ReadWritePaths=-/opt/bookrunner/app/contracts/deployments
+NoNewPrivileges=true
+UMask=0027
+ProtectSystem=strict
+ReadWritePaths=/opt/bookrunner/app/.data
+ProtectHome=yes
+PrivateTmp=true
+PrivateDevices=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

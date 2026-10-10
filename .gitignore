@@ -23,3 +23,9 @@ contracts/deployments/31337.json
 GITHUB_DEPLOY_KEY.txt
 contracts/broadcast/
 contracts/deployments/46630.json
+# mainnet record: host-local (record-books.ts appends books); archive a copy after each change (docs/RUNBOOK.md)
+contracts/deployments/4663.json
+# DeployMainnet dry runs / forge test scratch files
+contracts/deployments/*.simulation.json
+contracts/deployments/*.rehearsal.json
+contracts/deployments/test-*.json
