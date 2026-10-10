@@ -170,8 +170,11 @@ the same wiring against the VERIFY-ed external addresses of the input and keeps 
   `requireAttestations()`, so steps 4-5 of that flow happen inside the deployment, before the handover);
 - the OrderlyAdapter implementation takes only the broker / token hashes; each book proxy deploys its own
   `OrderlyIFAccount` at initialize (VERIFY O6/O9); `venueMinIf[Orderly]` > 25,000e6 (VERIFY O10);
-- `Book` links the external library `BookLogic` (forge deploys it from the deployer during the broadcast; the
-  record lists `contracts.bookLogic`);
+- `Book` links the external library `BookLogic`: forge deploys it as the first transaction of the broadcast
+  (through the deterministic CREATE2 factory `0x4e59b44847b379578588920cA78FbF26c0B4956C` when that factory has
+  code on the chain, else a plain CREATE from the deployer — checked on a local anvil, Foundry's fallback), so
+  the deployer's ETH estimate includes it; the record lists `contracts.bookLogic` and VerifyHandover checks the
+  link. `UpgradeBook.s.sol` (existing books) does the same;
 - BKRN allocations (`community` / `liquidity` / `contributors`) go to their multisig / vesting addresses at
   construction, not to the deployer.
 
