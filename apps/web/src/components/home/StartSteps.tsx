@@ -5,12 +5,14 @@ import { formatAmountDisplay } from "../../lib/amount";
 import { TEST_USDC_AMOUNT } from "../../lib/funds";
 import { appChain } from "../../wallet/chains";
 import { isTestChain } from "../../wallet/network";
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { IconCoin, IconLayers, IconWallet } from "../icons";
 import { SetupChecklist } from "../SetupChecklist";
 import { Section, Term } from "../ui";
 
 export function StartSteps() {
   const mintAmount = formatAmountDisplay(TEST_USDC_AMOUNT, 6, 0);
+  const sym = useSettlementSymbol();
   const steps: Array<{ id: string; title: string; icon: ReactNode; body: ReactNode }> = [
     {
       id: "connect",
@@ -28,11 +30,11 @@ export function StartSteps() {
       icon: <IconCoin size={18} />,
       body: isTestChain ? (
         <>
-          Take a little ETH for <Term id="gas">gas</Term> from the faucet, then mint {mintAmount} test USDC to your wallet in one click. Neither has any value.
+          Take a little ETH for <Term id="gas">gas</Term> from the faucet, then mint {mintAmount} test {sym} to your wallet in one click. Neither has any value.
         </>
       ) : (
         <>
-          Keep a little ETH for <Term id="gas">gas</Term> and the USDC you plan to deposit in this wallet, on {appChain.name}.
+          Keep a little ETH for <Term id="gas">gas</Term> and the {sym} you plan to deposit in this wallet, on {appChain.name}.
         </>
       ),
     },

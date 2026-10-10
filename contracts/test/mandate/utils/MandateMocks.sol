@@ -517,6 +517,11 @@ contract MandateMockSwapRouter is ISwapRouter02 {
         if (!ignoreMin) require(amountOut >= p.amountOutMinimum, "Too little received");
         MockERC20(p.tokenOut).mint(p.recipient, underDeliver ? amountOut / 2 : amountOut);
     }
+
+    /// @dev Multi-hop routes are exercised against the faithful v3 mock (test/mocks/UniswapV3Mocks.sol).
+    function exactInput(ExactInputParams calldata) external payable returns (uint256) {
+        revert("MandateMockSwapRouter: single-hop only");
+    }
 }
 
 /// @dev ERC20 reporting absurd decimals (registry bound test).

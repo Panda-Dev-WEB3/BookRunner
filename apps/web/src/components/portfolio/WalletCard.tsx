@@ -8,6 +8,7 @@ import { shortHex } from "../../lib/format";
 import { useWalletBalances } from "../../wallet/balances";
 import { appChain, chainName } from "../../wallet/chains";
 import { isTestChain } from "../../wallet/network";
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { useWallet } from "../../wallet/WalletContext";
 import { cx } from "../cx";
 import { IconExternal, IconWallet } from "../icons";
@@ -31,6 +32,7 @@ function Balance(props: { label: ReactNode; value: bigint | null | undefined; de
 export function WalletCard({ className }: { className?: string }) {
   const w = useWallet();
   const bal = useWalletBalances();
+  const sym = useSettlementSymbol();
   const a = w.active;
   if (!a) return null;
   const explorer = addressUrl(a.address);
@@ -90,7 +92,7 @@ export function WalletCard({ className }: { className?: string }) {
           symbol="ETH"
           dot="bg-muted"
         />
-        <Balance label={isTestChain ? "Test USDC" : "USDC"} value={bal.usdc} decimals={USDC_DECIMALS} dp={2} symbol="USDC" dot="bg-fee" />
+        <Balance label={isTestChain ? `Test ${sym}` : sym} value={bal.usdc} decimals={USDC_DECIMALS} dp={2} symbol={sym} dot="bg-fee" />
         <Balance
           label={
             <>

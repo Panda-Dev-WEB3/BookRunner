@@ -22,7 +22,8 @@ Preconditions (all must be checked off in `docs/VERIFY.md` with sources):
 1. Orderly Vault address/ABI on RHC, accountId derivation, builder IF accounts, builder endpoints,
    symbol naming, fee settlement cadence and the per-symbol IF minimum.
 2. Uniswap v3 SwapRouter02 (and v4 UniversalRouter if used) on RHC and the Stock Token pools for each
-   hedge asset; EntryPoint v0.7; USDC/USDG addresses; canonical Stock Token addresses + multipliers;
+   hedge asset (route, depth: `scripts/check-pools.ts`); EntryPoint v0.7; USDG (settlement token);
+   canonical Stock Token addresses + multipliers;
    Chainlink equity feed addresses; Dwellir archive RPC.
 3. TEE attestation for the oracle signer verified and the attestation hash registered.
 
@@ -38,9 +39,26 @@ Deployment (fresh deployer, multisig admin, unlinked from other studio deployers
      `config.timelock()` only, so the timelock handover below also hands over the registry;
    - `expenseRecipient` (charter fees) and `slashRecipient` (slashed BKRN) set to the treasury
      multisig (`TREASURY_ADDRESS` / `SLASH_RECIPIENT_ADDRESS`), never the deployer key;
+   - **settlement token = USDG** (`config.setAddress("usdc", USDG)`, VERIFY S1/O3; the key keeps its
+     historical name). `BookrunnerConfig` reverts `BadSettlementToken` unless the token returns
+     `decimals() == 6`, so a wrong address or a non-6-decimals token cannot be wired. Every component
+     caches it at construction / initialize: set it before deploying BkrnFeeRouter / Backstop /
+     PoolEngine and before chartering any book. UIs read its `symbol()` from chain;
    - `BkrnFeeRouter.setBuybackParams(poolFee, refBkrnPerUsdcWad, maxSlippageBps, maxPerCall)` with the
-     VERIFY-ed SwapRouter02 BKRN/USDC fee tier, a reference price near market (or
-     `setBkrnPriceId` once the oracle prices BKRN) and a per-call cap;
+     VERIFY-ed SwapRouter02 BKRN/USDG fee tier, a reference price near market and a per-call cap; then
+     choose the reference source: keep REF_FIXED, or `setTwapParams(pool, window, maxTickDeviation)` +
+     `setReferenceSource(1)` (Uniswap v3 TWAP of the BKRN/USDG pool; the pool's observation
+     cardinality must cover the window — `increaseObservationCardinalityNext` on the pool first, e.g.
+     ≥ window / average block spacing of swaps; window 10 min–2 days, deviation ≤ 2,000 ticks), or
+     `setBkrnPriceId` (REF_ATTESTED, once the oracle prices BKRN);
+   - `HedgeExecutor` with the real SwapRouter02 (`0xcaf6…5cb2`, VERIFY U1), `setV3Factory(UniswapV3Factory)`
+     and one `setRoute("UNIV3", stockToken, fee, hop, hopFee)` per hedge asset (direct USDG pool, or a
+     two-pool route through WETH). With the factory set, `setRoute` reverts unless every pool exists.
+     Agents / risk send `poolFee = 0` (= the route). `UNIV4` stays unset until VERIFY U3 is resolved;
+   - run `bun scripts/check-pools.ts` (read-only) against the mainnet deployment file and keep its
+     output with the launch record: every active Stock Token must show a route, existing pools with
+     liquidity and a round-trip quote within the slippage bound (VERIFY U4), and the buyback pool /
+     reference must read without reverting;
    - BKRN allocations minted to the deployer (`community` / `liquidity` / `contributors`) go to
      their multisig / vesting addresses at construction, not to the deployer.
 2. Handover: set the TimelockController min delay to 48h; grant `DEFAULT_ADMIN_ROLE` on
@@ -57,9 +75,13 @@ Deployment (fresh deployer, multisig admin, unlinked from other studio deployers
      `renounceAdmin()` from it first);
    - `config.expenseRecipient()` and `config.slashRecipient()` are the treasury multisig, not the
      deployer;
+   - `config.usdc()` is USDG (`0x5fc5…d168`, decimals 6);
    - `BkrnFeeRouter.buybackRouter()` is the real SwapRouter02 (never MockSwapRouter) and
-     `buybackPoolFee()` / `refBkrnPerUsdcWad()` (or `bkrnPriceId()`) / `maxSlippageBps()` /
-     `maxBuybackPerCall()` are set; `BkrnStaking.cooldown() >= 1 day` and `rewardsDuration()` set;
+     `buybackPoolFee()` / `refBkrnPerUsdcWad()` / `maxSlippageBps()` / `maxBuybackPerCall()` are set,
+     `referenceSource()` is the intended source and `referenceBkrnPerUsdc()` does not revert;
+     `BkrnStaking.cooldown() >= 1 day` and `rewardsDuration()` set;
+   - `HedgeExecutor.routerOf("UNIV3")` is the real SwapRouter02, `v3Factory()` is set, and
+     `routeOf("UNIV3", token)` is non-zero for every active Stock Token (`check-pools.ts` exits 0);
    - the deployer holds no BKRN allocation and owns no contract (`Ownable` mocks are never deployed).
 
    Testnet (46630) keeps the deployer as `config.timelock()` (0s delay) on purpose: the post-
@@ -83,3 +105,16 @@ Deployment (fresh deployer, multisig admin, unlinked from other studio deployers
   mark's `pnl_json` venue section against the venue statement for the period.
 - **Wind-down**: `MarketCharter.retire(bookId)` → agents flatten → keeper recalls IF + MM → final
   mark with zero deployed value → `finalizeRetirement` → every holder redeems at the final NAV.
+- **Replacing HedgeExecutor or BkrnFeeRouter** (plain, non-upgradeable contracts resolved through
+  `config`): deploy the new contract, configure it (HedgeExecutor: router(s), `setV3Factory`, one
+  `setRoute` per hedge asset; BkrnFeeRouter: `setBuybackRouter`, `setBuybackParams`, reference
+  source), then `config.setAddress("hedgeExecutor" | "feeRouter", new)` through the timelock.
+  Desks resolve `config.hedgeExecutor()` on every swap, RevenueRouters resolve `config.feeRouter()`
+  on every distribution and `BkrnStaking.notifyReward` only accepts the current `config.feeRouter()`.
+  Before the fee-router repoint executes, drain the old router's `buybackPending` with
+  `executeBuyback` (its pending settlement token has no sweep and its buybacks stop working once
+  staking points at the new router). Agents / risk must run with `HEDGE_POOL_FEE` /
+  `RISK_FLATTEN_POOL_FEE` = 0 (or the route's exact fee) against a route-aware HedgeExecutor.
+- **Route review**: `bun scripts/check-pools.ts` (read-only) before every `setRoute` proposal and
+  periodically; a failing token (no pool, no liquidity, round trip beyond the bound) should be
+  re-routed or removed from mandates' `hedgeAllowRoot` before agents hedge it.

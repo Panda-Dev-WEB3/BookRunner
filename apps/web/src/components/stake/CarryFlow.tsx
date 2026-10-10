@@ -1,5 +1,5 @@
 // Where the BKRN that stakers claim comes from: book fee flow -> 10% protocol carry -> fee router,
-// split 50/50 into the USDC backstop pool and a BKRN buyback shared across all stake. Drawn as
+// split 50/50 into the settlement-token backstop pool and a BKRN buyback shared across all stake. Drawn as
 // HTML nodes with inline SVG connectors so it reflows from one column (phones) to one row (lg+).
 // Live lifetime totals from BkrnFeeRouter and Backstop sit under each node.
 import type { ReactNode } from "react";
@@ -9,6 +9,7 @@ import { SERIES } from "../../lib/palette";
 import { cx } from "../cx";
 import { Term } from "../ui";
 import { isTestChain } from "../../wallet/network";
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { CarryPct } from "../ProtocolTerms";
 import { bkrnNum } from "./stakeLogic";
 import type { StakingProtocol } from "./useStaking";
@@ -18,18 +19,21 @@ type NodeTone = "fee" | "neutral" | "backstop" | "bkrn";
 const NODE: Record<NodeTone, { bar: string; chip: string; label: string }> = {
   fee: { bar: "bg-fee", chip: "bg-fee/14 text-fee-ink", label: "Fee flow" },
   neutral: { bar: "bg-line-strong", chip: "bg-surface-2 text-ink-2", label: "Split" },
-  backstop: { bar: "hatch bg-backstop/30", chip: "bg-backstop/12 text-backstop-ink", label: "USDC" },
+  // the backstop chip shows the settlement token's symbol (FlowNode)
+  backstop: { bar: "hatch bg-backstop/30", chip: "bg-backstop/12 text-backstop-ink", label: "" },
   bkrn: { bar: "bg-bkrn", chip: "bg-bkrn/12 text-bkrn-ink", label: "BKRN" },
 };
 
 function FlowNode(props: { tone: NodeTone; step: string; title: ReactNode; body: ReactNode; figure?: ReactNode; figureLabel?: string; className?: string }) {
   const t = NODE[props.tone];
+  const sym = useSettlementSymbol();
+  const chipLabel = props.tone === "backstop" ? sym : t.label;
   return (
     <li className={cx("relative min-w-0 list-none overflow-hidden rounded-card border border-line bg-surface p-4 pl-5 shadow-card", props.className)}>
       <span className={cx("absolute inset-y-0 left-0 w-1.5", t.bar)} aria-hidden />
       <div className="flex items-center justify-between gap-2">
         <span className="eyebrow">{props.step}</span>
-        <span className={cx("rounded-full px-2 py-0.5 text-[10.5px] font-semibold", t.chip)}>{t.label}</span>
+        <span className={cx("rounded-full px-2 py-0.5 text-[10.5px] font-semibold", t.chip)}>{chipLabel}</span>
       </div>
       <h3 className="mt-1.5 text-[14.5px] font-semibold leading-snug text-ink">{props.title}</h3>
       <p className="mt-1 text-[12.5px] leading-relaxed text-ink-2">{props.body}</p>
@@ -74,7 +78,8 @@ function Fork() {
 }
 
 export function CarryFlow({ data }: { data: StakingProtocol | undefined }) {
-  const usdc = (v: bigint | null | undefined) => (v == null ? "—" : `${fmtUsd(v)} USDC`);
+  const sym = useSettlementSymbol();
+  const usdc = (v: bigint | null | undefined) => (v == null ? "—" : `${fmtUsd(v)} ${sym}`);
   const noBuyback = data?.distributedBkrn === 0n;
   return (
     <figure className="m-0">
@@ -115,7 +120,7 @@ export function CarryFlow({ data }: { data: StakingProtocol | undefined }) {
               step="4a · Backstop"
               title={
                 <>
-                  <Term id="backstop">Backstop pool</Term>, in USDC
+                  <Term id="backstop">Backstop pool</Term>, in {sym}
                 </>
               }
               body="Covers a Senior shortfall once that book's Junior is used up, up to what the pool holds. It never uses staked BKRN."
@@ -126,7 +131,7 @@ export function CarryFlow({ data }: { data: StakingProtocol | undefined }) {
               tone="bkrn"
               step="4b · Buyback"
               title="BKRN shared with stakers"
-              body={`A keeper swaps the USDC for BKRN ${buybackWhere(isTestChain)}. The staking contract shares it in proportion to stake.`}
+              body={`A keeper swaps the ${sym} for BKRN ${buybackWhere(isTestChain)}. The staking contract shares it in proportion to stake.`}
               figureLabel={noBuyback ? "Shared so far: none yet" : "Shared with stakers, all time"}
               figure={data?.distributedBkrn == null ? "—" : `${bkrnNum(data.distributedBkrn)} BKRN`}
             />
@@ -136,7 +141,7 @@ export function CarryFlow({ data }: { data: StakingProtocol | undefined }) {
       <figcaption className="mt-4 text-[12.5px] text-ink-2">
         Live totals from the fee router and backstop contracts. The buyback amount depends on fee flow, {isTestChain ? "the mock router's fixed price" : "the market price of BKRN"} and when a keeper runs the swap. It has no fixed rate and can be
         zero for long stretches.
-        {noBuyback && data?.buybackPendingUsd != null && data.buybackPendingUsd > 0n && ` On this network no buyback has run yet, and ${fmtUsd(data.buybackPendingUsd)} USDC of carry is waiting for the first one.`}
+        {noBuyback && data?.buybackPendingUsd != null && data.buybackPendingUsd > 0n && ` On this network no buyback has run yet, and ${fmtUsd(data.buybackPendingUsd)} ${sym} of carry is waiting for the first one.`}
       </figcaption>
     </figure>
   );

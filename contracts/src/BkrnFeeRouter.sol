@@ -11,6 +11,8 @@ import {IBkrnStaking} from "./interfaces/IBkrnStaking.sol";
 import {IBookFactory} from "./interfaces/IBookFactory.sol";
 import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 import {ISwapRouter02} from "./interfaces/external/ISwapRouter02.sol";
+import {IUniswapV3PoolView} from "./interfaces/external/IUniswapV3.sol";
+import {UniswapV3Twap} from "./libraries/UniswapV3Twap.sol";
 
 /// @title BkrnFeeRouter — splits protocol carry 50% buyback-to-stakers / 50% syndicate backstop.
 /// @notice Each book's RevenueRouter transfers its carry here and calls `notifyCarry`. The backstop half
@@ -22,11 +24,19 @@ import {ISwapRouter02} from "./interfaces/external/ISwapRouter02.sol";
 ///         Buyback price bound (on-chain, not keeper-chosen): the pool fee tier is pinned by the timelock
 ///         (`buybackPoolFee`), and every swap's `amountOutMinimum` is at least
 ///         `buybackFloor(amountIn) = amountIn x referenceBkrnPerUsdc() x (1 - maxSlippageBps)`. The
-///         reference price is the AttestedOracle price of `bkrnPriceId` when the timelock set one (the
-///         oracle service does not price BKRN today), otherwise the timelock-set `refBkrnPerUsdcWad`.
-///         Each call is capped at `maxBuybackPerCall` USDC, which bounds the loss if the reference is
-///         stale in the keeper's favour. A stale reference in the other direction (BKRN up) only makes
-///         buybacks revert until governance updates it: fail-safe, the USDC stays in `buybackPending`.
+///         reference source is chosen by governance (`referenceSource`):
+///           - REF_FIXED: the timelock-set `refBkrnPerUsdcWad`;
+///           - REF_TWAP: the arithmetic-mean-tick price of the BKRN/settlement-token Uniswap v3 pool
+///             `twapPool` over `twapWindow` seconds (OracleLibrary.consult maths), refused while the pool's
+///             spot tick is more than `twapMaxTickDeviation` ticks from the mean (manipulation in
+///             progress); window and deviation are bounded by the MIN/MAX constants;
+///           - REF_ATTESTED: the AttestedOracle price of `bkrnPriceId` (USD per BKRN; the settlement token
+///             is valued at $1).
+///         Each call is capped at `maxBuybackPerCall`, which bounds the loss if the reference is
+///         stale/manipulated in the keeper's favour. A reference off in the other direction (BKRN up) only
+///         makes buybacks revert until it recovers or governance acts: fail-safe, the settlement token
+///         stays in `buybackPending`. "USDC" in names = the protocol settlement token (`config.usdc()`:
+///         USDG on Robinhood Chain; 6 decimals enforced by BookrunnerConfig).
 /// @dev Accounting: the only USDC this contract is meant to hold is `buybackPending`; `notifyCarry`
 ///      requires the USDC balance to cover `buybackPending + amount` (push-then-notify).
 contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
@@ -56,8 +66,27 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
     uint256 public refBkrnPerUsdcWad;
     /// @notice Max USDC (6dp) per executeBuyback call.
     uint256 public maxBuybackPerCall;
-    /// @notice Optional AttestedOracle price id of BKRN (USD per BKRN, WAD); 0 = use `refBkrnPerUsdcWad`.
+    /// @notice AttestedOracle price id of BKRN (USD per BKRN, WAD) read by the REF_ATTESTED source.
     bytes32 public bkrnPriceId;
+
+    /// @notice Buyback reference sources (governance-chosen).
+    uint8 public constant REF_FIXED = 0;
+    uint8 public constant REF_TWAP = 1;
+    uint8 public constant REF_ATTESTED = 2;
+    /// @notice Active reference source (REF_FIXED by default).
+    uint8 public referenceSource;
+    /// @notice TWAP averaging window (seconds), within [MIN_TWAP_WINDOW, MAX_TWAP_WINDOW].
+    uint32 public twapWindow;
+    /// @notice Max |spot tick - mean tick| for the TWAP to be usable (1..MAX_TWAP_TICK_DEVIATION).
+    uint24 public twapMaxTickDeviation;
+    /// @notice BKRN/settlement-token Uniswap v3 pool read by the REF_TWAP source.
+    address public twapPool;
+
+    /// @notice TWAP window bounds: >= 10 min (a single-block push is averaged out), <= 2 days.
+    uint32 public constant MIN_TWAP_WINDOW = 10 minutes;
+    uint32 public constant MAX_TWAP_WINDOW = 2 days;
+    /// @notice Upper bound of `twapMaxTickDeviation` (2,000 ticks ~ a 22% price move).
+    uint24 public constant MAX_TWAP_TICK_DEVIATION = 2000;
 
     /// @notice Upper bound of `maxSlippageBps` (20%).
     uint16 public constant MAX_SLIPPAGE_BPS = 2000;
@@ -85,6 +114,9 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
     error InsufficientOutput(uint256 received, uint256 minimum);
     error BuybackTooLarge(uint256 amountIn, uint256 maxPerCall);
     error BadBuybackParams();
+    error BadTwapParams();
+    error BadReferenceSource(uint8 source);
+    error TwapDeviation(int24 spotTick, int24 meanTick);
 
     /// @notice Buyback router changed.
     event BuybackRouterSet(address router);
@@ -92,6 +124,10 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
     event BuybackParamsSet(uint24 poolFee, uint256 refBkrnPerUsdcWad, uint16 maxSlippageBps, uint256 maxPerCall);
     /// @notice Oracle price id used as the buyback reference changed (0 = governance price).
     event BkrnPriceIdSet(bytes32 priceId);
+    /// @notice Buyback reference source changed (REF_FIXED / REF_TWAP / REF_ATTESTED).
+    event ReferenceSourceSet(uint8 source);
+    /// @notice TWAP source parameters changed.
+    event TwapParamsSet(address pool, uint32 window, uint24 maxTickDeviation);
 
     /// @param config_ BookrunnerConfig; `usdc()` and `bkrn()` must already be set.
     constructor(address config_) {
@@ -190,16 +226,34 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
         IBkrnStaking(staking).notifyReward(bkrnOut);
     }
 
-    /// @notice Reference price: whole BKRN per whole USDC (WAD). From the AttestedOracle when `bkrnPriceId`
-    ///         is set (reverts `StalePrice` when stale; USDC valued at $1), else `refBkrnPerUsdcWad`.
+    /// @notice Reference price: whole BKRN per whole settlement token (WAD), from `referenceSource`:
+    ///         REF_FIXED `refBkrnPerUsdcWad`; REF_TWAP `twapBkrnPerUsdc()`; REF_ATTESTED the AttestedOracle
+    ///         price of `bkrnPriceId` (reverts `StalePrice` when stale; settlement token valued at $1).
     function referenceBkrnPerUsdc() public view returns (uint256) {
-        bytes32 id = bkrnPriceId;
-        if (id == bytes32(0)) return refBkrnPerUsdcWad;
-        address oracle = config.oracle();
-        if (oracle == address(0)) revert NotConfigured("oracle");
-        (uint256 usdPerBkrn,) = IAttestedOracle(oracle).priceOf(id);
-        if (usdPerBkrn == 0) revert NotConfigured("bkrnPrice");
-        return (WAD * WAD) / usdPerBkrn;
+        uint8 src = referenceSource;
+        if (src == REF_TWAP) return twapBkrnPerUsdc();
+        if (src == REF_ATTESTED) {
+            address oracle = config.oracle();
+            if (oracle == address(0)) revert NotConfigured("oracle");
+            (uint256 usdPerBkrn,) = IAttestedOracle(oracle).priceOf(bkrnPriceId);
+            if (usdPerBkrn == 0) revert NotConfigured("bkrnPrice");
+            return (WAD * WAD) / usdPerBkrn;
+        }
+        return refBkrnPerUsdcWad;
+    }
+
+    /// @notice TWAP of `twapPool` over `twapWindow`: whole BKRN per whole settlement token (WAD). Reverts
+    ///         `TwapDeviation` when the spot tick is more than `twapMaxTickDeviation` from the mean tick,
+    ///         and (in the pool: "OLD") when its observation buffer does not cover the window.
+    function twapBkrnPerUsdc() public view returns (uint256) {
+        address pool = twapPool;
+        if (pool == address(0)) revert NotConfigured("twap");
+        int24 mean = UniswapV3Twap.meanTick(pool, twapWindow);
+        int24 spot = UniswapV3Twap.spotTick(pool);
+        int256 d = int256(spot) - int256(mean);
+        if ((d < 0 ? -d : d) > int256(uint256(twapMaxTickDeviation))) revert TwapDeviation(spot, mean);
+        // BKRN raw (18dp) for one whole settlement token (6dp) == whole BKRN per whole token, in WAD.
+        return UniswapV3Twap.quoteAtTick(mean, uint128(USDC_UNIT), address(usdc), address(bkrn));
     }
 
     /// @notice Minimum BKRN any buyback of `amountIn` USDC must return:
@@ -230,12 +284,54 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
         emit BuybackParamsSet(poolFee, refBkrnPerUsdcWad_, maxSlippageBps_, maxPerCall);
     }
 
-    /// @notice Uses the AttestedOracle price `priceId` (USD per BKRN) as the buyback reference instead of
-    ///         `refBkrnPerUsdcWad`; 0 reverts to the governance price. Config admin (timelock) only.
+    /// @notice Sets the AttestedOracle price id of BKRN (USD per BKRN) and selects REF_ATTESTED; 0 clears
+    ///         it and, if REF_ATTESTED was active, returns to REF_FIXED. Config admin (timelock) only.
     function setBkrnPriceId(bytes32 priceId) external {
-        if (!config.hasRole(DEFAULT_ADMIN_ROLE, msg.sender)) revert NotAdmin(msg.sender);
+        _onlyAdmin();
         bkrnPriceId = priceId;
         emit BkrnPriceIdSet(priceId);
+        if (priceId != bytes32(0)) _setReferenceSource(REF_ATTESTED);
+        else if (referenceSource == REF_ATTESTED) _setReferenceSource(REF_FIXED);
+    }
+
+    /// @notice Configures the TWAP source (does not select it). Config admin (timelock) only.
+    /// @param pool Uniswap v3 pool whose tokens are exactly {settlement token, BKRN} (VERIFY: the deep BKRN
+    ///        pool on RHC; its observation cardinality must cover `window`, else reads revert "OLD").
+    /// @param window Averaging window in seconds, in [MIN_TWAP_WINDOW, MAX_TWAP_WINDOW].
+    /// @param maxTickDeviation Max |spot - mean| in ticks, in [1, MAX_TWAP_TICK_DEVIATION].
+    function setTwapParams(address pool, uint32 window, uint24 maxTickDeviation) external {
+        _onlyAdmin();
+        if (pool.code.length == 0) revert BadTwapParams();
+        if (window < MIN_TWAP_WINDOW || window > MAX_TWAP_WINDOW) revert BadTwapParams();
+        if (maxTickDeviation == 0 || maxTickDeviation > MAX_TWAP_TICK_DEVIATION) revert BadTwapParams();
+        address t0 = IUniswapV3PoolView(pool).token0();
+        address t1 = IUniswapV3PoolView(pool).token1();
+        (address u, address b) = (address(usdc), address(bkrn));
+        if (!((t0 == u && t1 == b) || (t0 == b && t1 == u))) revert BadTwapParams();
+        twapPool = pool;
+        twapWindow = window;
+        twapMaxTickDeviation = maxTickDeviation;
+        emit TwapParamsSet(pool, window, maxTickDeviation);
+    }
+
+    /// @notice Selects the buyback reference source, which must be configured (REF_FIXED: buyback params
+    ///         set; REF_TWAP: `setTwapParams`; REF_ATTESTED: `bkrnPriceId`). Config admin (timelock) only.
+    function setReferenceSource(uint8 source) external {
+        _onlyAdmin();
+        bool ok = source == REF_FIXED
+            ? refBkrnPerUsdcWad != 0
+            : source == REF_TWAP ? twapPool != address(0) : source == REF_ATTESTED && bkrnPriceId != bytes32(0);
+        if (!ok) revert BadReferenceSource(source);
+        _setReferenceSource(source);
+    }
+
+    function _setReferenceSource(uint8 source) private {
+        referenceSource = source;
+        emit ReferenceSourceSet(source);
+    }
+
+    function _onlyAdmin() private view {
+        if (!config.hasRole(DEFAULT_ADMIN_ROLE, msg.sender)) revert NotAdmin(msg.sender);
     }
 
     /// @notice Sets the buyback router. Config admin (timelock) only.

@@ -2,12 +2,13 @@
 // the protocol-wide addresses (USDC, BKRN, staking, fee router, backstop, ...) are read once from the
 // BookrunnerConfig a book points at (Book.config()). VITE_USDC_ADDRESS, when set, overrides USDC.
 import { useQuery } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useMemo, useSyncExternalStore } from "react";
 import { type Address, getAddress } from "viem";
 import { trpc } from "../api/trpc";
 import { BOOK_CONFIG_ABI, CONFIG_ADDRESSES_ABI } from "../lib/abis";
 import type { BookListItem } from "../lib/api-types";
 import { config } from "../lib/config";
+import { getSettlementSymbol, subscribeSettlementSymbol } from "../lib/settlementToken";
 import { appChain, publicClient } from "./chains";
 
 export interface BookContracts {
@@ -88,6 +89,9 @@ async function readProtocol(book: Address): Promise<ProtocolContracts> {
 
 /** Every address the investor pages need, resolved through the API's book list + one config read. */
 export function useAppContracts(): AppContractsResult {
+  // every page that reads the protocol also shows settlement-token amounts: re-render it when the
+  // token's symbol() arrives (wallet/settlementSymbol.ts), so pure formatters pick the new label up
+  useSyncExternalStore(subscribeSettlementSymbol, getSettlementSymbol, getSettlementSymbol);
   const list = trpc.book.list.useQuery(undefined, { staleTime: 60_000 });
   const books = useMemo(() => (list.data ?? []).map(toBookContracts), [list.data]);
   const first = books[0]?.book ?? null;

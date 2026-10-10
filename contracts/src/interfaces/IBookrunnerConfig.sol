@@ -20,6 +20,9 @@ interface IBookrunnerConfig {
     function hasRole(bytes32 role, address account) external view returns (bool);
 
     // ---- addresses ----
+    /// @notice Protocol settlement token (name kept for ABI stability): USDC on devnet/testnet, USDG on
+    ///         Robinhood Chain mainnet. BookrunnerConfig enforces `decimals() == 6` when it is set.
+    ///         Components cache it at deployment/initialize: a repoint only affects new books/components.
     function usdc() external view returns (address);
     function bkrn() external view returns (address);
     function staking() external view returns (address);

@@ -5,25 +5,27 @@
 // next mark", and a round cannot be closed early.
 import { USDC_DECIMALS, formatAmountDisplay } from "../../lib/amount";
 import { fmtWhen } from "../../lib/format";
+import { getSettlementSymbol } from "../../lib/settlementToken";
 import { type DepositWindow, type RoundRoom, type TrancheRoom, pctOfBps } from "./logic";
 
 const whole = (raw: bigint) => formatAmountDisplay(raw, USDC_DECIMALS, 0);
+const sym = () => getSettlementSymbol();
 
-/** "0 of 100,000 USDC committed": one framing for a tranche's round on every page. */
-export function roomFigure(room: RoundRoom): string {
-  return `${whole(room.committed)} of ${whole(room.capacity)} USDC committed`;
+/** "0 of 100,000 USDC committed": one framing for a tranche's round on every page (settlement token symbol). */
+export function roomFigure(room: RoundRoom, symbol: string = sym()): string {
+  return `${whole(room.committed)} of ${whole(room.capacity)} ${symbol} committed`;
 }
 
 /**
  * The per-wallet cap in words. When it is above what the round can take per tranche, the round's
  * capacity is the real limit, so say so instead of showing a cap that cannot be reached.
  */
-export function perWalletCapText(cap: bigint | null, roundCapacity: bigint | null, sponsor = false): string {
+export function perWalletCapText(cap: bigint | null, roundCapacity: bigint | null, sponsor = false, symbol: string = sym()): string {
   if (cap === null) return "—";
   if (cap === 0n) return "None";
   if (sponsor) return "No cap (sponsor wallet)";
-  const base = `${whole(cap)} USDC per round`;
-  return roundCapacity !== null && roundCapacity > 0n && cap > roundCapacity ? `${base}; this round takes at most ${whole(roundCapacity)} USDC per tranche` : base;
+  const base = `${whole(cap)} ${symbol} per round`;
+  return roundCapacity !== null && roundCapacity > 0n && cap > roundCapacity ? `${base}; this round takes at most ${whole(roundCapacity)} ${symbol} per tranche` : base;
 }
 
 /**
@@ -36,7 +38,7 @@ export function roomNote(room: TrancheRoom, capBps: number | null | undefined): 
   if (room.capLimited) {
     return room.oversubscribed
       ? `Oversubscribed under the ${cap}: Senior deposits will be scaled down pro-rata unless more Junior comes in.`
-      : `Limited by the ${cap}: about ${whole(room.left)} USDC can still be accepted, more if Junior grows (estimate from the last mark).`;
+      : `Limited by the ${cap}: about ${whole(room.left)} ${sym()} can still be accepted, more if Junior grows (estimate from the last mark).`;
   }
   return room.oversubscribed ? "Oversubscribed: deposits will be scaled down pro-rata." : null;
 }
@@ -56,7 +58,7 @@ export const INVEST_STEPS = [
   {
     n: 3,
     title: "Deposit and sign",
-    body: "Your USDC waits in escrow until the round ends, and cannot be cancelled before then. The first mark after the round end turns it into shares at that mark's price.",
+    body: "Your deposit waits in escrow until the round ends, and cannot be cancelled before then. The first mark after the round end turns it into shares at that mark's price.",
   },
 ] as const;
 
@@ -68,7 +70,7 @@ export function windowSentence(w: DepositWindow, timeZone?: string): string {
       return "Checking whether this book takes deposits right now…";
     case "open":
       return w.kind === "subscription"
-        ? `The subscription window is open until ${when(w.endsAt)}. When it closes, commitments are allocated pro-rata and shares start at 1.00 USDC each.`
+        ? `The subscription window is open until ${when(w.endsAt)}. When it closes, commitments are allocated pro-rata and shares start at 1.00 ${sym()} each.`
         : `A top-up round is open until ${when(w.endsAt)}. Deposits wait in escrow, cannot be cancelled, and are turned into shares at the first mark after the round ends (${when(w.settlesAt)}), at that mark's share price.`;
     case "settling":
       return w.kind === "subscription"
@@ -119,6 +121,6 @@ export function noCancelLine(w: DepositWindow, timeZone?: string): string {
 export function killedDepositNote(w: DepositWindow, timeZone?: string): string {
   if (w.status !== "open") return "";
   return w.kind === "subscription"
-    ? ` Deposits are still accepted and are allocated ${settlesClause(w, timeZone)}, at 1.00 USDC per share.`
+    ? ` Deposits are still accepted and are allocated ${settlesClause(w, timeZone)}, at 1.00 ${sym()} per share.`
     : ` Deposits are still accepted and settle ${settlesClause(w, timeZone)}, at that mark's share price.`;
 }

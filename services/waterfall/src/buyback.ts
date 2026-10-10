@@ -5,7 +5,7 @@
 // the price on-chain (pinned pool fee, reference-price floor, per-call cap); the keeper reads that bound
 // and only tightens it (domain/buyback.ts).
 import type { Logger } from "@bookrunner/shared";
-import { type BuybackPlan, type BuybackPolicy, buybackAmount, buybackDue, planBuyback } from "./domain/buyback";
+import { type BuybackPlan, type BuybackPolicy, type BuybackReferenceSource, buybackAmount, buybackDue, planBuyback } from "./domain/buyback";
 import type { Cooldowns } from "./domain/keeper";
 import { usd6, wad18 } from "./kit/fmt";
 import { describeRevert } from "./kit/tx";
@@ -22,7 +22,7 @@ export interface BuybackDeps {
 
 export type BuybackOutcome =
   | { status: "skipped"; reason: string }
-  | { status: "bought"; tx: string; plan: Extract<BuybackPlan, { kind: "buy" }>; usdcIn: bigint | null; bkrnOut: bigint | null }
+  | { status: "bought"; tx: string; plan: Extract<BuybackPlan, { kind: "buy" }>; usdcIn: bigint | null; bkrnOut: bigint | null; reference: BuybackReferenceSource }
   | { status: "failed"; error: string };
 
 const KEY = "protocol:buyback";
@@ -35,6 +35,7 @@ export class BuybackRunner {
     const log = this.d.log.child({ duty: "buyback" });
     let plan: BuybackPlan;
     let legacy = false;
+    let reference: BuybackReferenceSource = "unknown";
     try {
       const pending = await this.d.chain.buybackPending();
       if (!buybackDue(pending, this.d.policy.thresholdUsd)) return { status: "skipped", reason: "below threshold" };
@@ -47,8 +48,10 @@ export class BuybackRunner {
       } catch (err) {
         log.debug({ err: err instanceof Error ? err.message.split("\n")[0] : String(err) }, "buyback router quote failed; trying the fallback price");
       }
-      // reverts (-> failed + cooldown) when the router's reference price is unset or the oracle is stale
+      // reverts (-> failed + cooldown) when the router's reference price is unset, the oracle is stale, or
+      // (TWAP source) the pool's spot tick deviates from the mean / its history is shorter than the window
       const floor = legacy ? 0n : await this.d.chain.buybackFloor(amountIn);
+      reference = legacy ? "legacy" : await this.referenceSource();
       plan = planBuyback(pending, quote, this.d.policy, { maxPerCall: b.maxPerCall, floor });
     } catch (err) {
       return this.fail(log, err, "buyback check failed; retrying after the cooldown");
@@ -56,19 +59,30 @@ export class BuybackRunner {
     if (plan.kind === "skip") {
       if (plan.reason !== "below threshold") {
         this.d.cooldowns.hold(KEY, this.d.cooldownMs);
-        log.warn({ reason: plan.reason }, "buyback due but not sent");
+        log.warn({ reason: plan.reason, reference }, "buyback due but not sent");
       }
       return { status: "skipped", reason: plan.reason };
     }
     try {
       const r = await this.d.chain.executeBuyback(plan.amountIn, plan.minOut, legacy ? this.d.policy.poolFee : undefined);
       log.info(
-        { tx: r.hash, usdcIn: usd6(r.usdcIn ?? plan.amountIn), bkrnOut: r.bkrnOut === null ? null : wad18(r.bkrnOut), minBkrnOut: wad18(plan.minOut), floor: wad18(plan.floor), priceSource: plan.priceSource, legacy },
+        { tx: r.hash, usdcIn: usd6(r.usdcIn ?? plan.amountIn), bkrnOut: r.bkrnOut === null ? null : wad18(r.bkrnOut), minBkrnOut: wad18(plan.minOut), floor: wad18(plan.floor), priceSource: plan.priceSource, reference, legacy },
         "BKRN buyback executed; streamed to stakers",
       );
-      return { status: "bought", tx: r.hash, plan, usdcIn: r.usdcIn, bkrnOut: r.bkrnOut };
+      return { status: "bought", tx: r.hash, plan, usdcIn: r.usdcIn, bkrnOut: r.bkrnOut, reference };
     } catch (err) {
       return this.fail(log, err, "executeBuyback failed; retrying after the cooldown", { amountIn: usd6(plan.amountIn), minBkrnOut: wad18(plan.minOut) });
+    }
+  }
+
+  /** The router's reference source; a read failure (or a chain without the read) is "unknown", never fatal. */
+  private async referenceSource(): Promise<BuybackReferenceSource> {
+    const read = this.d.chain.buybackReferenceSource;
+    if (!read) return "unknown";
+    try {
+      return await read.call(this.d.chain);
+    } catch {
+      return "unknown";
     }
   }
 

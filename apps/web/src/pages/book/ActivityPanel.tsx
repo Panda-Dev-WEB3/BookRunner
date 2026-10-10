@@ -10,6 +10,7 @@ import type { MarkItem } from "../../lib/api-types";
 import { hedgeQty, parseFills, parseHedges } from "../../lib/feeds";
 import { DASH, fmtDateTime, fmtNum, fmtPrice, fmtTime, fmtUsd, fmtUsdFloat, shortHex } from "../../lib/format";
 import { type MarkStatement, markStatements, wadToNumber } from "../../lib/markStatement";
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 
 const PAGE = 12;
 
@@ -104,6 +105,7 @@ function VenueByMark({ rows }: { rows: MarkStatement[] }) {
 
 function DeskByMark({ rows }: { rows: MarkStatement[] }) {
   const [n, setN] = useState(PAGE);
+  const sym = useSettlementSymbol();
   if (rows.length === 0) return <EmptyState compact title="No marks yet" body="The desk hedge book is signed into every mark once the book is live." />;
   return (
     <>
@@ -113,7 +115,7 @@ function DeskByMark({ rows }: { rows: MarkStatement[] }) {
             <Th>Mark</Th>
             <Th>Period end</Th>
             <Th right>Hedge value</Th>
-            <Th right>Desk USDC</Th>
+            <Th right>{`Desk ${sym}`}</Th>
             <Th right>Hedge ratio</Th>
             <Th>Positions (token · qty · price)</Th>
           </tr>

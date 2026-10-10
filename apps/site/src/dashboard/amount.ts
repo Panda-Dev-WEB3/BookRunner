@@ -1,6 +1,7 @@
 // Token amount entry: parsing what a person types into exact base units and checking it against a
 // balance or a maximum. Pure (test/amount.test.ts). Mirrors apps/web/src/lib/amount.ts.
 import { formatFixed, parseFixed } from "@bookrunner/shared/units";
+import { settlementSymbol } from "./token";
 
 export const USDC_DECIMALS = 6;
 export const SHARE_DECIMALS = 6;
@@ -69,7 +70,7 @@ export function amountIssue(value: string, limits: AmountLimits = {}): AmountIss
   return null;
 }
 
-export function amountIssueText(issue: AmountIssue | null, symbol = "USDC"): string | null {
+export function amountIssueText(issue: AmountIssue | null, symbol = settlementSymbol()): string | null {
   switch (issue) {
     case null:
       return null;

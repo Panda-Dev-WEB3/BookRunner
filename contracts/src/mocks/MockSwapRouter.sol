@@ -10,7 +10,7 @@ import {ISwapRouter02} from "../interfaces/external/ISwapRouter02.sol";
 import {IAttestedOracle} from "../interfaces/IAttestedOracle.sol";
 import {MockERC20} from "./MockERC20.sol";
 
-/// @title MockSwapRouter — devnet/test stand-in for Uniswap v3 SwapRouter02 (`exactInputSingle` only).
+/// @title MockSwapRouter — devnet/test stand-in for Uniswap v3 SwapRouter02 (`exactInputSingle`, `exactInput`).
 /// @notice NEVER deploy to mainnet. Fills swaps at a deterministic price, from its own inventory or by
 ///         minting `MockERC20` output tokens flagged `mintOnDemand`. Used for BKRN buybacks (USDC -> BKRN)
 ///         and desk hedges (USDC <-> Stock Token).
@@ -155,6 +155,41 @@ contract MockSwapRouter is ISwapRouter02, Ownable {
         }
         IERC20(params.tokenOut).safeTransfer(params.recipient, amountOut);
         emit Swap(msg.sender, params.tokenIn, params.tokenOut, params.amountIn, amountOut, params.recipient);
+    }
+
+    /// @inheritdoc ISwapRouter02
+    /// @dev Multi-hop: decodes the packed v3 path (token, fee, token, ...), prices each hop with `quote`
+    ///      (fees ignored, `feeBps` charged per hop), pulls the input from the caller and pays the final
+    ///      output to `recipient`. Intermediate tokens never move (devnet stand-in only).
+    function exactInput(ExactInputParams calldata params) external payable returns (uint256 amountOut) {
+        if (msg.value != 0) revert EthNotAccepted();
+        if (params.amountIn == 0) revert ZeroAmount();
+        if (params.recipient == address(0)) revert ZeroAddress();
+        bytes calldata path = params.path;
+        if (path.length < 43 || (path.length - 20) % 23 != 0) revert NoPrice(address(0), address(0));
+        uint256 hops = (path.length - 20) / 23;
+        address tokenIn = _hopIn(path, 0);
+        address tokenOut = tokenIn;
+        amountOut = params.amountIn;
+        for (uint256 i; i < hops; ++i) {
+            tokenOut = _hopIn(path, i + 1);
+            amountOut = quote(_hopIn(path, i), tokenOut, amountOut);
+        }
+        if (amountOut < params.amountOutMinimum) revert TooLittleReceived(amountOut, params.amountOutMinimum);
+
+        IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), params.amountIn);
+        uint256 available = IERC20(tokenOut).balanceOf(address(this));
+        if (available < amountOut) {
+            if (!mintOnDemand[tokenOut]) revert InsufficientLiquidity(tokenOut, available, amountOut);
+            MockERC20(tokenOut).mint(address(this), amountOut - available);
+        }
+        IERC20(tokenOut).safeTransfer(params.recipient, amountOut);
+        emit Swap(msg.sender, tokenIn, tokenOut, params.amountIn, amountOut, params.recipient);
+    }
+
+    function _hopIn(bytes calldata path, uint256 i) private pure returns (address) {
+        uint256 o = 23 * i;
+        return address(bytes20(path[o:o + 20]));
     }
 
     /// @notice Output for swapping `amountIn` of `tokenIn` into `tokenOut` at current prices (after fee).

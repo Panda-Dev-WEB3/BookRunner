@@ -32,7 +32,7 @@ const STAGES: Stage[] = [
         mandate and the tranche terms.
       </>
     ),
-    detail: "Filing pays a flat USDC charter fee, refunded if the charter is rejected, and locks the sponsor's BKRN bond.",
+    detail: "Filing pays a flat charter fee, refunded if the charter is rejected, and locks the sponsor's BKRN bond.",
     when: "Whenever new books are open.",
   },
   {
@@ -47,7 +47,7 @@ const STAGES: Stage[] = [
     id: "subscription",
     title: "Subscription window",
     who: <Term id="allocator">Allocators</Term>,
-    what: "Allocators deposit USDC into Senior or Junior while the window is open.",
+    what: "Allocators deposit into Senior or Junior while the window is open.",
     detail:
       "At close, commitments are allocated pro-rata with a per-wallet cap. The sponsor is allocated first in Junior and holds at least 10% of it when the window closes (later top-ups can dilute that share); Senior is capped at a share of book capital. Anything over is refunded. If the window fails its checks, the book is cancelled and every deposit is refundable 1:1.",
     when: (

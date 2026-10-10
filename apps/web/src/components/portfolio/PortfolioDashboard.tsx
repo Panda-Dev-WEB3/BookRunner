@@ -7,6 +7,7 @@ import { useNow } from "../../api/hooks";
 import { tickerOf } from "../../lib/format";
 import { useAppContracts } from "../../wallet/contracts";
 import { isTestChain } from "../../wallet/network";
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { IconArrowRight } from "../icons";
 import { SetupChecklist } from "../SetupChecklist";
 import { Term } from "../Term";
@@ -50,6 +51,7 @@ function ValuationNotes({ cadence }: { cadence: string | null }) {
 export function PortfolioDashboard({ wallet }: { wallet: Address }) {
   const p = usePortfolio(wallet);
   const contracts = useAppContracts();
+  const sym = useSettlementSymbol();
   const now = useNow(30_000);
   const [claimBook, setClaimBook] = useState<number | null>(null);
   const [redeem, setRedeem] = useState<{ bookId: number; tranche: TrancheName } | null>(null);
@@ -105,7 +107,7 @@ export function PortfolioDashboard({ wallet }: { wallet: Address }) {
               </button>
             ))}
           >
-            Shares from a settled round, refunds or USDC from settled redemptions are waiting. Claiming sends them to your wallet.
+            Shares from a settled round, refunds or {sym} from settled redemptions are waiting. Claiming sends them to your wallet.
           </Callout>
         )}
       </Section>

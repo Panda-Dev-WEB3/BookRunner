@@ -2,11 +2,13 @@
 // the shared mandate check, and a short "when something goes wrong" timeline from testnet.
 import { type ReactNode, useId, useState } from "react";
 import { fmtUsd, tickerOf } from "../../lib/format";
+import { getSettlementSymbol } from "../../lib/settlementToken";
 import { cx } from "../cx";
 import { Term } from "../Term";
 import { Badge, Card } from "../ui";
 import { Figure, LearnSection } from "./parts";
 import { type QuoteLimits, pctText, quoteDemo } from "./sim";
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { useShowcaseBook } from "./useLearnData";
 
 /** The NVDA launch book's quote limits (ARCHITECTURE.md §7), shown until the live mandate loads. */
@@ -51,7 +53,7 @@ const LIMITS: Limit[] = [
     name: "Maximum inventory",
     what: "The largest net position the book may hold on the venue, long or short.",
     enforced: "A hard cap on the in-house engine; monitored with venue position caps on Orderly.",
-    live: (m) => `${fmtUsd(m.maxInventoryUsd, { compact: true })} USDC`,
+    live: (m) => `${fmtUsd(m.maxInventoryUsd, { compact: true })} ${getSettlementSymbol()}`,
   },
   {
     id: "band",
@@ -203,6 +205,7 @@ function QuoteChecker(props: { limits: QuoteLimits; source: ReactNode }) {
 
 export function RiskSection(props: { index: number }) {
   const { book, detail } = useShowcaseBook();
+  useSettlementSymbol(); // the live inventory cap is shown in the settlement token's symbol
   const m = detail.data?.mandate ?? null;
   const ticker = book ? tickerOf(book.symbol) : null;
   const limits: QuoteLimits = m ? { minQuoteWidthBps: m.minQuoteWidthBps, maxSkewBps: m.maxSkewBps } : DOC_LIMITS;

@@ -2,6 +2,7 @@
 // USDC the devnet / testnet deployments use (MockERC20.mint is open there; real USDC reverts, so the
 // UI only offers it after an eth_call simulation succeeds). Pure helpers, unit-tested.
 import { type Address, type Hex, encodeFunctionData, getAddress } from "viem";
+import { getSettlementSymbol } from "./settlementToken";
 
 export const MOCK_MINT_ABI = [
   {
@@ -34,7 +35,7 @@ export function mockMintData(to: Address, amount: bigint): Hex {
   return encodeFunctionData({ abi: MOCK_MINT_ABI, functionName: "mint", args: [getAddress(to), amount] });
 }
 
-export function mockMintTx(usdc: Address, to: Address, amount: bigint, chainId: number, label = "USDC"): MintTx {
+export function mockMintTx(usdc: Address, to: Address, amount: bigint, chainId: number, label = getSettlementSymbol()): MintTx {
   const whole = amount / 1_000_000n;
   return {
     to: getAddress(usdc),

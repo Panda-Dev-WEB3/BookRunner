@@ -1,5 +1,5 @@
 // viem adapter for the waterfall: reads (book, router, adapter, config, registry) and KEEPER writes.
-import { type Deployment, type SplitResult, VENUE } from "@bookrunner/shared";
+import { type Deployment, type SplitResult, VENUE, quoterV2Abi } from "@bookrunner/shared";
 import {
   bkrnFeeRouterAbi,
   bookAbi,
@@ -13,6 +13,7 @@ import {
   underwritingVaultAbi,
 } from "@bookrunner/shared/abi";
 import { type Address, BaseError, type Hex, type PublicClient, type TransactionReceipt, erc20Abi, isAddressEqual, parseAbi, parseEventLogs, zeroAddress } from "viem";
+import { type BuybackReferenceSource, referenceSourceName } from "../domain/buyback";
 import { engineWithdrawableUsd } from "../domain/recall";
 import { amountsToSplit } from "../domain/split";
 import { type BookRef, bookStateName } from "../kit/books";
@@ -37,6 +38,8 @@ export interface ChainAdapterOptions {
   /** eth_getLogs chunk size and lookback (0 = from deployment.startBlock). */
   logChunk: bigint;
   logLookback: bigint;
+  /** Uniswap v3 QuoterV2 used to quote buybacks on a real SwapRouter02 (null = none). */
+  univ3Quoter?: Address | null;
 }
 
 export class WaterfallChainAdapter implements SettlementChain, KeeperChain, BuybackChain {
@@ -362,11 +365,35 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain, Buyb
       this.buybackTokens = { usdc, bkrn };
     }
     try {
-      // MockSwapRouter (devnet/testnet) prices the swap itself; a real SwapRouter02 has no quote (-> null)
+      // MockSwapRouter (devnet/testnet) prices the swap itself; a real SwapRouter02 has no quote
       return await this.pc.readContract({ address: router, abi: mockSwapRouterAbi, functionName: "quote", args: [this.buybackTokens.usdc, this.buybackTokens.bkrn, amountIn] });
+    } catch {
+      return this.quoteBuybackV3(amountIn);
+    }
+  }
+
+  /** Uniswap QuoterV2 on the router's pinned tier (eth_call; QuoterV2 is non-view). null when unavailable. */
+  private async quoteBuybackV3(amountIn: bigint): Promise<bigint | null> {
+    const quoter = this.o.univ3Quoter;
+    if (!quoter || !this.buybackTokens) return null;
+    try {
+      const fee = await this.pc.readContract({ address: this.feeRouter, abi: bkrnFeeRouterAbi, functionName: "buybackPoolFee" });
+      if (fee === 0) return null;
+      const { result } = await this.pc.simulateContract({
+        address: quoter,
+        abi: quoterV2Abi,
+        functionName: "quoteExactInputSingle",
+        args: [{ tokenIn: this.buybackTokens.usdc, tokenOut: this.buybackTokens.bkrn, amountIn, fee, sqrtPriceLimitX96: 0n }],
+      });
+      return result[0];
     } catch {
       return null;
     }
+  }
+
+  async buybackReferenceSource(): Promise<BuybackReferenceSource> {
+    const s = await this.pc.readContract({ address: this.feeRouter, abi: bkrnFeeRouterAbi, functionName: "referenceSource" });
+    return referenceSourceName(Number(s));
   }
 
   async buybackBounds(): Promise<{ legacy: boolean; maxPerCall: bigint }> {

@@ -54,7 +54,7 @@ export function ConnectPrompt() {
                 }
                 title="Claims in one place"
               >
-                When shares, refunds or redeemed USDC are ready, claim them here. You review every transaction in your wallet first.
+                When shares, refunds or redemption proceeds are ready, claim them here. You review every transaction in your wallet first.
               </Point>
             </ul>
             <div className="mt-7 flex flex-wrap items-center gap-3">

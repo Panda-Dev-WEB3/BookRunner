@@ -347,6 +347,7 @@ contract BookrunnerDeskTest is MandateBase {
             MockERC20 t = new MockERC20("T", "T", 18);
             bytes32 pid = bytes32(uint256(0x1000 + i));
             registry.register(address(t), pid, 1e18, 1000e18);
+            exec.setRoute(UNIV3, address(t), 3000, address(0), 0);
             oracle.set(pid, 100e18, uint64(block.timestamp), false);
             router.setPrice(address(t), 100e18);
             toks[i] = address(t);

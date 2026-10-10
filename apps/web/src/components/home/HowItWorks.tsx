@@ -24,7 +24,7 @@ const STEPS: Step[] = [
     body: (
       <>
         A <Term id="sponsor">sponsor</Term> files the market's terms on-chain: the asset it follows, the venue, the insurance-fund size, the agent's rules and the
-        tranche terms. Filing pays a flat USDC fee and locks a <Term id="bkrn">BKRN</Term> bond.
+        tranche terms. Filing pays a flat fee and locks a <Term id="bkrn">BKRN</Term> bond.
       </>
     ),
   },
@@ -45,7 +45,7 @@ const STEPS: Step[] = [
     art: <FundArt />,
     body: (
       <>
-        Allocators deposit USDC into the <Term id="senior">Senior</Term> or <Term id="junior">Junior</Term> tranche. The book funds the market's insurance fund first, then the
+        Allocators deposit into the <Term id="senior">Senior</Term> or <Term id="junior">Junior</Term> tranche. The book funds the market's insurance fund first, then the
         market-making inventory. The sponsor {SPONSOR_SKIN_SHORT}; later top-ups can dilute that share.
       </>
     ),

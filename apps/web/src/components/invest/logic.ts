@@ -5,6 +5,7 @@
 import { WAD, parseFixed } from "@bookrunner/shared/units";
 import { type Address, type Hex, decodeFunctionData, isAddressEqual } from "viem";
 import { type AmountIssue, USDC_DECIMALS, amountIssue, amountIssueText, formatAmountDisplay, parseAmount } from "../../lib/amount";
+import { getSettlementSymbol } from "../../lib/settlementToken";
 import { type TopUpRound, firstMarkAtOrAfter, isTopUpOpen } from "../../lib/topup";
 
 export { firstMarkAtOrAfter };
@@ -218,7 +219,7 @@ export interface DepositCheck {
   max: bigint | null;
 }
 
-const usdc = (raw: bigint) => `${formatAmountDisplay(raw, USDC_DECIMALS)} USDC`;
+const usdc = (raw: bigint) => `${formatAmountDisplay(raw, USDC_DECIMALS)} ${getSettlementSymbol()}`;
 
 /** Validates a typed deposit amount. Wallet cap and balance block; capacity limits only warn. */
 export function checkDeposit(value: string, i: DepositCheckInput): DepositCheck {
@@ -228,7 +229,7 @@ export function checkDeposit(value: string, i: DepositCheckInput): DepositCheck 
   let error: string | null = null;
   if (issue === "above-max" && walletRoom !== null) {
     error = walletRoom === 0n ? "You have reached the per-wallet cap for this round." : `Above the per-wallet cap: you can add at most ${usdc(walletRoom)} in this round.`;
-  } else error = amountIssueText(issue, "USDC");
+  } else error = amountIssueText(issue);
 
   const warnings: string[] = [];
   if (raw !== null && i.capacityRemaining !== null && raw > i.capacityRemaining) {
@@ -401,7 +402,7 @@ export function promptText(tx: { to: string; data: string; description: string }
   switch (decoded.functionName) {
     case "approve": {
       const [spender, amount] = decoded.args;
-      return `Allow ${trancheOf(spender, ctx)} to move up to ${usdc(amount)} from your wallet. This only sets a spending limit: no USDC moves yet.`;
+      return `Allow ${trancheOf(spender, ctx)} to move up to ${usdc(amount)} from your wallet. This only sets a spending limit: no ${getSettlementSymbol()} moves yet.`;
     }
     case "deposit": {
       const [assets] = decoded.args;
@@ -413,12 +414,12 @@ export function promptText(tx: { to: string; data: string; description: string }
     case "requestRedeem": {
       const [n] = decoded.args;
       const when = ctx.eligibleText ? ` at the first mark on or after ${ctx.eligibleText}` : " at the first mark after the notice period";
-      return `Ask to withdraw ${shares(n)} ${trancheOf(to, ctx)} shares. They wait in the withdrawal queue and settle${when}, at that mark's share price; you then collect the USDC in a separate transaction.`;
+      return `Ask to withdraw ${shares(n)} ${trancheOf(to, ctx)} shares. They wait in the withdrawal queue and settle${when}, at that mark's share price; you then collect the ${getSettlementSymbol()} in a separate transaction.`;
     }
     case "claimAllocation":
-      return `Collect your ${trancheOf(to, ctx)} shares from the settled round, plus any USDC refund.`;
+      return `Collect your ${trancheOf(to, ctx)} shares from the settled round, plus any ${getSettlementSymbol()} refund.`;
     case "claimRedemption":
-      return `Collect the USDC from your settled ${trancheOf(to, ctx)} withdrawals.`;
+      return `Collect the ${getSettlementSymbol()} from your settled ${trancheOf(to, ctx)} withdrawals.`;
     case "claimCancelledRefund":
       return `Take back your full ${trancheOf(to, ctx)} deposit: the round was cancelled.`;
     default:

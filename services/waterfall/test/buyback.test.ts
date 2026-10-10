@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { WAD, createLogger, usd } from "@bookrunner/shared";
-import { type BuybackPolicy, BuybackRunner, Cooldowns, buybackAmount, buybackDue, loadWaterfallConfig, minOutAfterSlippage, planBuyback, quoteAtPrice } from "../src/index";
+import { type BuybackPolicy, BuybackRunner, Cooldowns, buybackAmount, buybackDue, loadWaterfallConfig, minOutAfterSlippage, planBuyback, quoteAtPrice, referenceSourceName } from "../src/index";
 import { FakeBuybackChain } from "./fakes";
 
 const log = createLogger("waterfall-test", "silent");
@@ -58,6 +58,10 @@ describe("buyback decision (pure)", () => {
     expect(planBuyback(usd("10"), 0n, policy).kind).toBe("skip"); // zero quote treated as none
     // a real SwapRouter02 has no quote: the router's own reference floor is the minimum
     expect(planBuyback(usd("10"), null, policy, { maxPerCall: 0n, floor: bkrn(190n) })).toEqual({ kind: "buy", amountIn: usd("10"), quote: bkrn(190n), minOut: bkrn(190n), floor: bkrn(190n), priceSource: "reference" });
+  });
+
+  test("reference source names follow BkrnFeeRouter REF_FIXED / REF_TWAP / REF_ATTESTED", () => {
+    expect([0, 1, 2, 3].map(referenceSourceName)).toEqual(["fixed", "twap", "attested", "unknown"]);
   });
 
   test("a quote that rounds minOut to zero is skipped (the contract rejects minBkrnOut == 0)", () => {
@@ -151,6 +155,32 @@ describe("BuybackRunner", () => {
     expect(chain.executed).toHaveLength(1);
   });
 
+  test("reports the router's reference source (fixed / twap / attested); a failed read is 'unknown', not fatal", async () => {
+    const { chain, runner, now } = setup();
+    chain.pending = usd("15");
+    chain.reference = "twap";
+    expect(await runner.tick()).toMatchObject({ status: "bought", reference: "twap" });
+    chain.pending = usd("15");
+    chain.reference = "throw";
+    now.t += 1;
+    expect(await runner.tick()).toMatchObject({ status: "bought", reference: "unknown" });
+    // legacy router: no reference read
+    chain.pending = usd("15");
+    chain.legacy = true;
+    chain.reference = "attested";
+    expect(await runner.tick()).toMatchObject({ status: "bought", reference: "legacy" });
+  });
+
+  test("TWAP floor refused on-chain (spot deviates / short history): failed + cooldown, no tx", async () => {
+    const { chain, runner } = setup();
+    chain.pending = usd("15");
+    chain.reference = "twap";
+    chain.buybackFloor = async () => Promise.reject(new Error("execution reverted: TwapDeviation(-305282, -306282)"));
+    expect((await runner.tick()).status).toBe("failed");
+    expect(chain.executed).toEqual([]);
+    expect(await runner.tick()).toEqual({ status: "skipped", reason: "cooldown" });
+  });
+
   test("pending read fails: failed, cooled down (never throws into the loop)", async () => {
     const { chain, runner } = setup();
     chain.buybackPending = async () => Promise.reject(new Error("rpc down"));
@@ -167,6 +197,9 @@ describe("buyback config", () => {
     expect(c.WATERFALL_BUYBACK_POOL_FEE).toBe(3000);
     expect(c.WATERFALL_BUYBACK_BKRN_PER_USDC).toBe(0n);
     expect(c.WATERFALL_FEE_FORWARD_WAIT_SECONDS).toBe(45);
+    expect(c.WATERFALL_UNIV3_QUOTER).toBe("");
+    expect(loadWaterfallConfig({ WATERFALL_UNIV3_QUOTER: "0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7" }).WATERFALL_UNIV3_QUOTER).toBe("0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7");
+    expect(() => loadWaterfallConfig({ WATERFALL_UNIV3_QUOTER: "quoter" })).toThrow("invalid environment");
     const d = loadWaterfallConfig({ WATERFALL_BUYBACK_THRESHOLD_USD: "25.5", WATERFALL_BUYBACK_SLIPPAGE_BPS: "50", WATERFALL_BUYBACK_BKRN_PER_USDC: "20" });
     expect(d.WATERFALL_BUYBACK_THRESHOLD_USD).toBe(usd("25.5"));
     expect(d.WATERFALL_BUYBACK_SLIPPAGE_BPS).toBe(50);

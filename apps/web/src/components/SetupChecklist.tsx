@@ -1,5 +1,5 @@
 // Reusable "get set up" checklist (Home, Invest, Portfolio, Stake): wallet connected -> on the app
-// chain -> gas -> test USDC -> ready to invest. Live state from useOnboarding(); every step explains
+// chain -> gas -> settlement token (test USDC on test networks) -> ready to invest. Live state from useOnboarding(); every step explains
 // what it is for and offers the one action that completes it.
 import type { ReactNode } from "react";
 import { Link } from "react-router";
@@ -10,6 +10,7 @@ import { ONBOARDING_ORDER, type OnboardingStepId } from "../lib/onboarding";
 import { appChain } from "../wallet/chains";
 import { useConnectModal } from "../wallet/ConnectModal";
 import { DevnetTopUp, NetworkIssueLine, isTestChain } from "../wallet/network";
+import { useSettlementSymbol } from "../wallet/settlementSymbol";
 import { useMintTestUsdc } from "../wallet/useMintTestUsdc";
 import { useOnboarding } from "../wallet/useOnboarding";
 import { useWallet } from "../wallet/WalletContext";
@@ -39,13 +40,14 @@ export interface SetupChecklistProps {
 }
 
 const eth = (v: bigint | null | undefined) => (v == null ? null : `${formatAmountDisplay(v, ETH_DECIMALS, 4)} ETH`);
-const usdc = (v: bigint | null | undefined) => (v == null ? null : `${formatAmountDisplay(v, USDC_DECIMALS, 2)} USDC`);
+const usdc = (v: bigint | null | undefined, sym: string) => (v == null ? null : `${formatAmountDisplay(v, USDC_DECIMALS, 2)} ${sym}`);
 
 export function SetupChecklist(props: SetupChecklistProps) {
   const w = useWallet();
   const modal = useConnectModal();
   const mint = useMintTestUsdc();
   const ob = useOnboarding();
+  const sym = useSettlementSymbol();
   const b = ob.balances;
   const status = (id: OnboardingStepId) => ob.steps.find((s) => s.id === id) ?? { id, status: "todo" as const, checking: false, unreadable: false };
   // a balance that could not be read is unknown, not missing: say so instead of asking to fund the wallet
@@ -83,7 +85,7 @@ export function SetupChecklist(props: SetupChecklistProps) {
         }
       >
         <span className="num">
-          {usdc(b.usdc)} · {eth(b.eth)}
+          {usdc(b.usdc, sym)} · {eth(b.eth)}
         </span>{" "}
         on {appChain.name}.
       </Callout>
@@ -158,17 +160,17 @@ export function SetupChecklist(props: SetupChecklistProps) {
     {
       id: "usdc",
       status: status("usdc").status,
-      title: isTestChain ? "Mint test USDC" : "Add USDC",
+      title: isTestChain ? `Mint test ${sym}` : `Add ${sym}`,
       description: isTestChain ? (
         <>
-          Books are funded in <Term id="usdc">USDC</Term>. On {net}, the token has an open mint: mint free test USDC to your own wallet. It has no value.
+          Books are funded in <Term id="usdc">{sym}</Term>. On {net}, the token has an open mint: mint free test {sym} to your own wallet. It has no value.
         </>
       ) : (
         <>
-          Books are funded in <Term id="usdc">USDC</Term>. Send USDC on Robinhood Chain to this wallet.
+          Books are funded in <Term id="usdc">{sym}</Term>. Send {sym} on {appChain.name} to this wallet.
         </>
       ),
-      meta: checkingMeta("usdc") ?? usdc(b.usdc) ?? undefined,
+      meta: checkingMeta("usdc") ?? usdc(b.usdc, sym) ?? undefined,
       action: !isTestChain ? undefined : mint.available ? (
         <>
           <button
@@ -186,7 +188,7 @@ export function SetupChecklist(props: SetupChecklistProps) {
                 <Spinner size={14} /> Minting…
               </>
             ) : (
-              "Mint 10,000 test USDC"
+              `Mint 10,000 test ${sym}`
             )}
           </button>
           {b.eth === 0n && <span className="text-[12px] text-muted">Needs gas first (step 3).</span>}
@@ -197,9 +199,9 @@ export function SetupChecklist(props: SetupChecklistProps) {
           <Spinner size={14} /> Checking the test token…
         </span>
       ) : mint.reason === "not-mintable" ? (
-        <span className="text-[12.5px] text-ink-2">This network's USDC has no open mint. Fund the wallet from another account.</span>
+        <span className="text-[12.5px] text-ink-2">This network's {sym} has no open mint. Fund the wallet from another account.</span>
       ) : mint.reason === "no-token" ? (
-        <span className="text-[12.5px] text-ink-2">The USDC address is not known yet (no book is listed by the API).</span>
+        <span className="text-[12.5px] text-ink-2">The {sym} address is not known yet (no book is listed by the API).</span>
       ) : undefined,
     },
     {
@@ -235,7 +237,7 @@ export function SetupChecklist(props: SetupChecklistProps) {
       </div>
       {isTestChain && (
         <div className="rounded-b-card border-t border-line bg-surface-2/60 px-4 py-3 text-[12px] text-ink-2 sm:px-5">
-          {appChain.name} is a <Term id="testnet">test network</Term>: test ETH and test USDC have no value, and nothing here is an offer.
+          {appChain.name} is a <Term id="testnet">test network</Term>: test ETH and test {sym} have no value, and nothing here is an offer.
         </div>
       )}
     </section>

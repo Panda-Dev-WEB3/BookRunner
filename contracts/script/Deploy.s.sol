@@ -54,6 +54,8 @@ contract Deploy is Script {
     uint32 internal constant TREASURY_INDEX = 22; // devkeys.ts DEV_ROLE_INDEX.treasury
     /// @dev Buyback pool fee tier pinned on BkrnFeeRouter (MockSwapRouter ignores it; mainnet: VERIFY pool).
     uint24 internal constant BUYBACK_POOL_FEE = 3000;
+    /// @dev Per-Stock-Token hedge route fee tier on HedgeExecutor (mainnet: per-asset, docs/VERIFY.md U4).
+    uint24 internal constant HEDGE_POOL_FEE = 3000;
     /// @dev Devnet/testnet buyback reference price: whole BKRN per whole USDC (= the MockSwapRouter price).
     uint256 internal constant BUYBACK_REF_BKRN_PER_USDC = 20e18;
     /// @dev Max buyback slippage vs the reference price, and the per-call USDC cap.
@@ -273,6 +275,8 @@ contract Deploy is Script {
             registry.register(address(tok), pid, 1e18, 1_000_000e18);
             swapRouter.setOracleFeed(address(tok), address(oracle), pid, 1e18);
             swapRouter.setMintOnDemand(address(tok), true);
+            // governance hedge route (direct settlement/token pool; MockSwapRouter ignores the tier)
+            hedgeExecutor.setRoute("UNIV3", address(tok), HEDGE_POOL_FEE, address(0), 0);
 
             ups[i] = _priceUpdate(pid, demoPrice[t]);
             sigs[i] = _signPrice(ups[i]);

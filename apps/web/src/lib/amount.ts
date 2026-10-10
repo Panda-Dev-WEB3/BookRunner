@@ -1,6 +1,7 @@
 // Token amount entry: sanitising what a person types, parsing it to base units (bigint, exact) and
 // checking it against a balance or limits. Pure and DOM-free (unit-tested in test/amount.test.ts).
 import { formatFixed, parseFixed } from "@bookrunner/shared/units";
+import { getSettlementSymbol } from "./settlementToken";
 
 export const USDC_DECIMALS = 6;
 export const BKRN_DECIMALS = 18;
@@ -98,7 +99,7 @@ export function amountIssue(value: string, limits: AmountLimits = {}): AmountIss
 }
 
 /** Plain-language message for an amount issue ("empty" has none: nothing typed yet). */
-export function amountIssueText(issue: AmountIssue | null, symbol = "USDC"): string | null {
+export function amountIssueText(issue: AmountIssue | null, symbol = getSettlementSymbol()): string | null {
   switch (issue) {
     case null:
     case "empty":

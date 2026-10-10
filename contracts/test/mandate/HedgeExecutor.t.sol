@@ -31,14 +31,14 @@ contract ExecFakeDesk {
         address recipient
     ) external returns (uint256) {
         IERC20(tin).approve(address(exec), amountIn);
-        return exec.swapExactIn(venue, tin, tout, 500, amountIn, minOut, recipient);
+        return exec.swapExactIn(venue, tin, tout, 3000, amountIn, minOut, recipient);
     }
 }
 
 /// @dev A contract without book().
 contract ExecNoBook {
     function swap(HedgeExecutor e, address tin, address tout) external {
-        e.swapExactIn("UNIV3", tin, tout, 500, 1, 0, address(this));
+        e.swapExactIn("UNIV3", tin, tout, 3000, 1, 0, address(this));
     }
 }
 
@@ -108,7 +108,7 @@ contract HedgeExecutorTest is MandateBase {
         uint256 out = fake.swap(UNIV3, address(usdc), address(nvda), 1900e6, 9e18, address(fake));
         assertEq(out, 10e18);
         assertEq(nvda.balanceOf(address(fake)), 10e18);
-        assertEq(router.lastFee(), 500);
+        assertEq(router.lastFee(), 3000);
 
         uint256 usdcOut = fake.swap(UNIV3, address(nvda), address(usdc), 5e18, 0, address(fake));
         assertEq(usdcOut, 950e6);

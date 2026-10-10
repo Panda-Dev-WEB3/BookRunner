@@ -9,6 +9,7 @@ import { DASH, fmtUsd, shortHex } from "../../lib/format";
 import { ageOf, nextMarkLabel } from "../../lib/lowgas";
 import { SERIES_CLASS } from "../../lib/palette";
 import { useBackstopBalance } from "../../wallet/backstop";
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { appChain } from "../../wallet/chains";
 import { useConnectModal } from "../../wallet/ConnectModal";
 import { isTestChain } from "../../wallet/network";
@@ -142,6 +143,7 @@ function LiveItem(props: { label: ReactNode; value: string; sub: string; loading
 /** Senior over Junior (all books, latest marks), with the shared backstop on top: fee flow is paid top-down, losses absorbed bottom-up. */
 function CapitalStack({ summary, loading }: { summary: BooksSummary | null; loading: boolean }) {
   const pool = useBackstopBalance();
+  const sym = useSettlementSymbol();
   const split = summary ? trancheSplit(summary.seniorRaw, summary.juniorRaw) : null;
   const seniorGrow = split ? Math.max(split.senior, 0.18) : 0.6;
   const juniorGrow = split ? Math.max(split.junior, 0.18) : 0.4;
@@ -163,7 +165,7 @@ function CapitalStack({ summary, loading }: { summary: BooksSummary | null; load
             swatch={cx("hatch border", SERIES_CLASS.backstop.border)}
             title={<Term id="backstop">Backstop pool</Term>}
             note="Covers Senior only after Junior is used up"
-            value={pool.data !== undefined ? `${fmtUsd(pool.data, { compact: true })} USDC` : pool.isError ? DASH : null}
+            value={pool.data !== undefined ? `${fmtUsd(pool.data, { compact: true })} ${sym}` : pool.isError ? DASH : null}
           />
           <StackRow
             className={cx(SERIES_CLASS.senior.soft, "border", SERIES_CLASS.senior.border)}

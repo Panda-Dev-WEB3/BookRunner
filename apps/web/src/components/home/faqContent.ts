@@ -2,6 +2,7 @@
 // the copy rules in test/home.test.ts). The Faq component adds glossary terms and links per item.
 import { SPONSOR_SKIN_LINE, TESTNET_MOCKS_LINE } from "../../lib/copy";
 import type { GlossaryId } from "../../lib/glossary";
+import { DEFAULT_SETTLEMENT_SYMBOL } from "../../lib/settlementToken";
 
 export interface FaqItem {
   id: string;
@@ -23,10 +24,13 @@ export interface FaqContext {
   carryPct?: string;
   /** The books' mark cadence ("hourly"), null while unknown. */
   cadence?: string | null;
+  /** The settlement token's on-chain symbol ("USDC" while unknown). */
+  settlementSymbol?: string;
 }
 
 export function faqItems(ctx: FaqContext): FaqItem[] {
   const carry = ctx.carryPct ?? "10%";
+  const sym = ctx.settlementSymbol ?? DEFAULT_SETTLEMENT_SYMBOL;
   return [
     {
       id: "perp",
@@ -79,7 +83,7 @@ export function faqItems(ctx: FaqContext): FaqItem[] {
       id: "deposit",
       question: "How do I deposit?",
       answer: [
-        "Live books take deposits during a top-up round that the sponsor opens, with a capacity for each tranche. Your wallet asks you to approve USDC, then to deposit it; nothing moves without your signature.",
+        `Live books take deposits during a top-up round that the sponsor opens, with a capacity for each tranche. Your wallet asks you to approve ${sym}, then to deposit it; nothing moves without your signature.`,
         "Deposits wait in escrow until the round ends and cannot be cancelled before it settles. At the first mark after the round end, they are accepted at that mark's share price, up to the capacity. If a round is oversubscribed, every deposit is filled pro-rata and the rest is refunded; if the book retires first, the round is cancelled and every deposit is refunded in full.",
       ],
       terms: ["topUpRound", "sharePrice"],
@@ -89,7 +93,7 @@ export function faqItems(ctx: FaqContext): FaqItem[] {
       id: "withdraw",
       question: "How do I withdraw?",
       answer: [
-        "Request a redemption from the book page or your portfolio. Senior requests settle at NAV at the next mark; Junior requests settle at the first mark after the book's notice period. Then you claim your USDC.",
+        `Request a redemption from the book page or your portfolio. Senior requests settle at NAV at the next mark; Junior requests settle at the first mark after the book's notice period. Then you claim your ${sym}.`,
         "Notice is not a gate: a request is always accepted, and no pause or kill can block it. A claim can only wait for cash to come back from the venue.",
       ],
       terms: ["redemptionNotice", "killSwitch"],
@@ -110,7 +114,7 @@ export function faqItems(ctx: FaqContext): FaqItem[] {
           id: "network",
           question: `What is ${ctx.chainName}?`,
           answer: [
-            `The network Bookrunner's contracts run on (chain ${ctx.chainId}). Every transaction pays a small gas fee in ETH, and books are funded in USDC on this network.`,
+            `The network Bookrunner's contracts run on (chain ${ctx.chainId}). Every transaction pays a small gas fee in ETH, and books are funded in ${sym} on this network.`,
             "Stock Tokens and stock-perp books are not offered to US persons.",
           ],
           terms: ["gas", "usdc", "stockToken"],
@@ -130,7 +134,7 @@ export function faqItems(ctx: FaqContext): FaqItem[] {
       question: "What is BKRN?",
       answer: [
         "Bookrunner's token, with a fixed supply of 1 billion and no minting after launch. Staked BKRN is the bond that sponsors, committee members and larger agent operators post, and a bond can be slashed for misconduct.",
-        "Half of the protocol carry buys BKRN, which the staking contract distributes to stakers; the other half funds the USDC backstop. BKRN is for access and bonding, never a revenue claim: stakers have no claim on any book's USDC or fee flow, and a buyback depends on a keeper and can be zero.",
+        `Half of the protocol carry buys BKRN, which the staking contract distributes to stakers; the other half funds the ${sym} backstop. BKRN is for access and bonding, never a revenue claim: stakers have no claim on any book's ${sym} or fee flow, and a buyback depends on a keeper and can be zero.`,
       ],
       terms: ["bkrn", "staking", "backstop"],
       links: [{ to: "/stake", label: "Stake BKRN" }],

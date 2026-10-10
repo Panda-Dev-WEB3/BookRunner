@@ -13,6 +13,7 @@ import { shortHex } from "../lib/format";
 import { useWalletBalances } from "./balances";
 import { appChain, chainName } from "./chains";
 import { useConnectModal } from "./ConnectModal";
+import { useSettlementSymbol } from "./settlementSymbol";
 import { DevnetTopUp, NetworkIssueLine, isTestChain } from "./network";
 import { useMintTestUsdc } from "./useMintTestUsdc";
 import { useWallet } from "./WalletContext";
@@ -39,6 +40,7 @@ function AccountMenu({ onClose }: { onClose: () => void }) {
   const modal = useConnectModal();
   const bal = useWalletBalances();
   const mint = useMintTestUsdc();
+  const sym = useSettlementSymbol();
   const a = w.active;
   if (!a) return null;
   const explorer = addressUrl(a.address);
@@ -109,7 +111,7 @@ function AccountMenu({ onClose }: { onClose: () => void }) {
             dot="bg-muted"
             note={lowGas ? <Badge size="sm" tone="warn">{gas === "empty" ? "empty" : "low"}</Badge> : undefined}
           />
-          <BalanceRow label={isTestChain ? "Test USDC" : "USDC"} value={bal.usdc} decimals={USDC_DECIMALS} dp={2} symbol="USDC" dot="bg-fee" />
+          <BalanceRow label={isTestChain ? `Test ${sym}` : sym} value={bal.usdc} decimals={USDC_DECIMALS} dp={2} symbol={sym} dot="bg-fee" />
           <BalanceRow label="BKRN" value={bal.bkrn} decimals={BKRN_DECIMALS} dp={2} symbol="BKRN" dot="bg-backstop" />
         </div>
       </div>
@@ -136,14 +138,14 @@ function AccountMenu({ onClose }: { onClose: () => void }) {
                   <Spinner size={14} /> Minting…
                 </>
               ) : mint.status === "confirmed" ? (
-                "Minted. Mint 10,000 more test USDC"
+                `Minted. Mint 10,000 more test ${sym}`
               ) : (
-                "Mint 10,000 test USDC"
+                `Mint 10,000 test ${sym}`
               )}
             </button>
           )}
           {mint.error && <p className="text-[12px] text-critical-ink">{mint.error}</p>}
-          <p className="text-[11.5px] text-muted">Testnet only: test ETH and test USDC have no value.</p>
+          <p className="text-[11.5px] text-muted">Testnet only: test ETH and test {sym} have no value.</p>
         </div>
       )}
 

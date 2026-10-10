@@ -4,6 +4,7 @@ import { Link } from "react-router";
 import { BKRN_DECIMALS, formatAmountDisplay } from "../../lib/amount";
 import { fmtDuration, fmtUsd } from "../../lib/format";
 import { useBackstopBalance } from "../../wallet/backstop";
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { IconArrowRight } from "../icons";
 import { Term } from "../Term";
 import { Card, Stat, StatGrid } from "../ui";
@@ -24,6 +25,7 @@ const BONDS = [
 export function BkrnSection(props: { index: number }) {
   const pool = useBackstopBalance();
   const staking = useStakingStats();
+  const sym = useSettlementSymbol();
   const poolText = pool.data !== undefined ? fmtUsd(pool.data, { compact: true }) : pool.error ? "Unavailable" : "Loading";
   const stakingValue = <T,>(v: T | null | undefined, fmt: (x: T) => string) => (v != null ? fmt(v) : staking.error || staking.data ? "Unavailable" : "Loading");
   const stakedText = stakingValue(staking.data?.totalStaked, compactBkrn);
@@ -63,7 +65,7 @@ export function BkrnSection(props: { index: number }) {
               <div className="flex flex-col items-stretch">
                 <FlowArrow vertical label="50%" series="backstop" />
                 <FlowNode series="backstop" title={<Term id="backstop">Backstop pool</Term>} className="border-dashed">
-                  Stays in USDC. Covers a Senior shortfall once a book's Junior is used up, up to what the pool holds.
+                  Stays in {sym}. Covers a Senior shortfall once a book's Junior is used up, up to what the pool holds.
                 </FlowNode>
               </div>
             </div>
@@ -71,7 +73,7 @@ export function BkrnSection(props: { index: number }) {
         </Figure>
         <div className="space-y-4">
           <StatGrid cols={2}>
-            <Stat label="Backstop pool" value={poolText} sub="USDC, shared by every book" series="backstop" title={pool.data !== undefined ? `${fmtUsd(pool.data)} USDC` : undefined} />
+            <Stat label="Backstop pool" value={poolText} sub={`${sym}, shared by every book`} series="backstop" title={pool.data !== undefined ? `${fmtUsd(pool.data)} ${sym}` : undefined} />
             <Stat label="BKRN staked" value={stakedText} sub="BKRN in the staking contract" series="bkrn" title={exact(staking.data?.totalStaked)} />
             <Stat label="Unstake cooldown" value={cooldownText} sub="before staked BKRN can leave" />
             <Stat label="Total supply" value={supplyText} sub="BKRN, fixed at launch" title={exact(staking.data?.totalSupply)} />

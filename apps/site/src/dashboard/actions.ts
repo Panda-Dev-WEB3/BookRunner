@@ -13,6 +13,7 @@ import { badge, notice, splitList } from "./html";
 import { bookTicker, depositWindow, markRow, positionView, termsView } from "./model";
 import { errText } from "./revert";
 import { type Role, ROLES, selected, store } from "./store";
+import { settlementSymbol } from "./token";
 import {
   type PreparedExpectation,
   type StepItem,
@@ -295,7 +296,7 @@ const asTranche = (v: unknown): "senior" | "junior" => (v === "junior" ? "junior
 
 function needAmount(value: string, opts: { decimals?: number; balance?: bigint | null; max?: bigint | null; symbol?: string }): string {
   const issue = amountIssue(value, { decimals: opts.decimals ?? USDC_DECIMALS, balance: opts.balance ?? null, max: opts.max ?? null });
-  if (issue) throw new Error(amountIssueText(issue, opts.symbol ?? "USDC") ?? "Check the amount.");
+  if (issue) throw new Error(amountIssueText(issue, opts.symbol ?? settlementSymbol()) ?? "Check the amount.");
   return normalizeAmount(value, opts.decimals ?? USDC_DECIMALS) as string;
 }
 
@@ -329,7 +330,7 @@ async function chainExpectation(
       const p = store.protocol ?? (first && isAddress(first) ? await readProtocol(getAddress(first)) : null);
       if (!p) throw new Error("protocol contracts unknown");
       const names: Partial<Record<keyof ProtocolContracts, [string, number?]>> = {
-        usdc: ["USDC", USDC_DECIMALS],
+        usdc: [settlementSymbol(), USDC_DECIMALS],
         bkrn: ["BKRN", BKRN_DECIMALS],
         staking: ["BKRN staking", BKRN_DECIMALS],
         charter: ["MarketCharter"],
@@ -391,8 +392,8 @@ function subscribeForm(args: Record<string, unknown>): void {
     ticker,
     "Subscribe to the book",
     select("Tranche", "tranche", trancheChoices, t, true) +
-      amountField("Capital · USDC", "amount", "1000") +
-      `<div class="notice field full"><strong>${esc(ticker)} · ${esc(d?.state ?? b.state)}</strong><br>${esc(windowText)}<br>Wallet USDC: ${bal == null ? (host.wallet.snapshot.address ? "reading…" : "connect a wallet") : `$${formatAmountDisplay(bal)}`}. Per-wallet cap per round: ${terms?.perWalletCapUsd ? usd(terms.perWalletCapUsd) : "none"}. Senior cap: ${terms?.seniorCapBps != null ? `${terms.seniorCapBps / 100}% of book capital` : "per charter"}.<br>Deposits stay in escrow until the first mark after the round end and cannot be cancelled before. Testnet USDC has no value.</div>`,
+      amountField(`Capital · ${settlementSymbol()}`, "amount", "1000") +
+      `<div class="notice field full"><strong>${esc(ticker)} · ${esc(d?.state ?? b.state)}</strong><br>${esc(windowText)}<br>Wallet ${settlementSymbol()}: ${bal == null ? (host.wallet.snapshot.address ? "reading…" : "connect a wallet") : `$${formatAmountDisplay(bal)}`}. Per-wallet cap per round: ${terms?.perWalletCapUsd ? usd(terms.perWalletCapUsd) : "none"}. Senior cap: ${terms?.seniorCapBps != null ? `${terms.seniorCapBps / 100}% of book capital` : "per charter"}.<br>Deposits stay in escrow until the first mark after the round end and cannot be cancelled before. Testnet ${settlementSymbol()} has no value.</div>`,
     "Review deposit",
     async (v) => {
       const me = await requireWallet();
@@ -412,7 +413,7 @@ function subscribeForm(args: Record<string, unknown>): void {
           ["Deposits", res.window.depositsOpen ? `Open (${esc(res.window.state)})` : "Closed"],
           ["Committed this round", usd(res.cap.committedUsd)],
           ["Room left under the cap", res.cap.remainingUsd === null ? (res.cap.sponsorExempt ? "Sponsor (exempt)" : "No cap") : usd(res.cap.remainingUsd)],
-        ]) + notice("Your USDC stays in escrow until the first mark after the round end and cannot be cancelled before. Any excess above the caps is refundable when the round settles."),
+        ]) + notice(`Your ${settlementSymbol()} stays in escrow until the first mark after the round end and cannot be cancelled before. Any excess above the caps is refundable when the round settles.`),
         res.warnings,
       );
     },
@@ -493,9 +494,10 @@ export async function mint(): Promise<void> {
   try {
     const me = await requireWallet();
     const usdc = store.protocol?.usdc;
-    if (!usdc) throw new Error("The USDC address is still being read; try again in a moment.");
-    if (store.mintable !== true) throw new Error("The USDC this deployment uses is not mintable from a wallet.");
-    review("TEST USDC", "Mint test USDC", [mintTestUsdcStep(usdc, me)], notice(`MockERC20.mint on ${esc(CHAIN.name)}. Test networks only; the token has no value.`));
+    const sym = settlementSymbol();
+    if (!usdc) throw new Error(`The ${sym} address is still being read; try again in a moment.`);
+    if (store.mintable !== true) throw new Error(`The ${sym} this deployment uses is not mintable from a wallet.`);
+    review(`TEST ${sym}`, `Mint test ${sym}`, [mintTestUsdcStep(usdc, me)], notice(`MockERC20.mint on ${esc(CHAIN.name)}. Test networks only; the token has no value.`));
   } catch (e) {
     host.notify(errText(e), true);
   }
@@ -512,8 +514,8 @@ function topUpForm(args: Record<string, unknown>): void {
     ticker,
     "Open a top-up round",
     field("Round window · hours", "hours", 24, "number", 'min="1" step="1" required', true) +
-      amountField("Senior capacity · USDC", "senior", "50000", false) +
-      amountField("Junior capacity · USDC", "junior", "25000", false) +
+      amountField(`Senior capacity · ${settlementSymbol()}`, "senior", "50000", false) +
+      amountField(`Junior capacity · ${settlementSymbol()}`, "junior", "25000", false) +
       `<div class="notice field full">Sponsor wallet only (${d?.charter ? esc(short(d.charter.sponsor)) : "see the charter"}); the transaction is simulated first and a non-sponsor wallet is refused before any prompt. The book must be Live with no round open.${maxWindow ? ` Longest window: ${esc(duration(maxWindow))}.` : ""} Commitments settle pro-rata up to these capacities at the first mark on or after the round end; Senior is also capped by the charter's Senior cap.</div>`,
     "Review round",
     async (v) => {
@@ -522,7 +524,7 @@ function topUpForm(args: Record<string, unknown>): void {
       if (!Number.isFinite(hours) || hours <= 0) throw new Error("Enter a window in hours above zero.");
       const senior = parseAmount(v.senior ?? "", USDC_DECIMALS);
       const junior = parseAmount(v.junior ?? "", USDC_DECIMALS);
-      if (senior === null || junior === null) throw new Error("Enter both capacities as USDC amounts (0 for none).");
+      if (senior === null || junior === null) throw new Error(`Enter both capacities as ${settlementSymbol()} amounts (0 for none).`);
       const step = openTopUpStep({ book: getAddress(b.components.book), windowSeconds: Math.round(hours * 3600), seniorCapacityUsd: senior, juniorCapacityUsd: junior, maxWindowSeconds: maxWindow });
       review(ticker, "Open a top-up round", [step], notice("Book.openTopUp. Opening a round lets allocators commit; it cannot be closed early."));
     },
@@ -558,7 +560,7 @@ function charterFileForm(): void {
       select("Hedge venue", "hedgeVenue", [["UNIV3", "Uniswap v3"], ["UNIV4", "Uniswap v4"], ["ORDERLY", "Orderly"], ["ENGINE", "Pool engine"]], "UNIV3") +
       field("Hedge asset (ticker or address)", "hedgeAsset", "NVDA", "text", 'maxlength="66" required') +
       '<label class="check field full"><input type="checkbox" name="noNewRiskOffHours" checked>No new risk off-hours</label>' +
-      `<div class="notice field full">Sponsor: ${me ? `<span class="hash">${esc(me)}</span>` : "the connected wallet"}. The draft is validated by the API and MarketCharter.validate before anything is signed; the review shows the flat charter fee, the sponsor bond and every transaction (USDC approval, $BKRN stake for the bond, filing).</div>`,
+      `<div class="notice field full">Sponsor: ${me ? `<span class="hash">${esc(me)}</span>` : "the connected wallet"}. The draft is validated by the API and MarketCharter.validate before anything is signed; the review shows the flat charter fee, the sponsor bond and every transaction (${settlementSymbol()} approval, $BKRN stake for the bond, filing).</div>`,
     "Validate & review",
     async (v) => {
       const sponsor = await requireWallet();

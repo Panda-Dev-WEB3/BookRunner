@@ -9,6 +9,7 @@ import { BKRN_DECIMALS, formatAmountDisplay } from "./amount";
 import { CHAIN } from "./config";
 import { duration } from "./format";
 import { errText, isUserRejection } from "./revert";
+import { settlementSymbol } from "./token";
 
 export interface TxStep {
   to: Address;
@@ -74,7 +75,7 @@ export function mintTestUsdcStep(usdc: Address, to: Address, amount: bigint = TE
     to: getAddress(usdc),
     data: encodeFunctionData({ abi: MOCK_MINT_ABI, functionName: "mint", args: [getAddress(to), amount] }),
     value: 0n,
-    description: `Mint ${whole.toLocaleString("en-US")} test USDC to your wallet (testnet mock token, no value)`,
+    description: `Mint ${whole.toLocaleString("en-US")} test ${settlementSymbol()} to your wallet (testnet mock token, no value)`,
   };
 }
 
@@ -133,7 +134,7 @@ export function openTopUpStep(p: { book: Address; windowSeconds: number; seniorC
     to: getAddress(p.book),
     data: encodeFunctionData({ abi: bookAbi, functionName: "openTopUp", args: [p.windowSeconds, p.seniorCapacityUsd, p.juniorCapacityUsd] }),
     value: 0n,
-    description: `Open a ${duration(p.windowSeconds)} top-up round (Senior capacity ${usd(p.seniorCapacityUsd)} USDC, Junior ${usd(p.juniorCapacityUsd)} USDC); it settles at the first mark on or after the round end`,
+    description: `Open a ${duration(p.windowSeconds)} top-up round (Senior capacity ${usd(p.seniorCapacityUsd)} ${settlementSymbol()}, Junior ${usd(p.juniorCapacityUsd)} ${settlementSymbol()}); it settles at the first mark on or after the round end`,
   };
 }
 

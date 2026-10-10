@@ -1,4 +1,4 @@
-// Steps 2 and 3 of the deposit flow. Amount: AmountInput with the USDC balance, Max, the per-wallet
+// Steps 2 and 3 of the deposit flow. Amount: AmountInput with the settlement-token balance, Max, the per-wallet
 // cap, the room left in the round and the Senior cap room (estimate). Review: the plain-language
 // summary, then tranche.subscribe prepares approve + deposit and TxRunner sends them, each wallet
 // prompt described in plain words. Success: what happens next, with explorer links.
@@ -11,8 +11,10 @@ import type { BookDetail } from "../../lib/api-types";
 import { USDC_DECIMALS, formatAmountDisplay, normalizeAmount } from "../../lib/amount";
 import { addressUrl } from "../../lib/config";
 import { fmtDuration, fmtSharePrice, fmtWhen, shortHex, usdRaw } from "../../lib/format";
+import { getSettlementSymbol } from "../../lib/settlementToken";
 import { invalidateWalletBalances } from "../../wallet/balances";
 import { appChain } from "../../wallet/chains";
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { TxRunner } from "../../wallet/TxRunner";
 import { useOnboarding } from "../../wallet/useOnboarding";
 import { WalletButton } from "../../wallet/WalletButton";
@@ -25,7 +27,7 @@ import { noCancelLine, perWalletCapText, roomFigure } from "./investCopy";
 import { type DepositWindow, type RoundRoom, TRANCHE_NAME, type TrancheId, checkDeposit, indicativeShares, pctOfBps, seniorRoomPerJunior, walletRoom, withPlainPrompts } from "./logic";
 import { type TrancheAddresses, invalidateInvestReads, useWalletRoom } from "./useInvestChain";
 
-const usdc = (raw: bigint | null | undefined, dp = 2) => (raw == null ? "—" : `${formatAmountDisplay(raw, USDC_DECIMALS, dp)} USDC`);
+const usdc = (raw: bigint | null | undefined, dp = 2) => (raw == null ? "—" : `${formatAmountDisplay(raw, USDC_DECIMALS, dp)} ${getSettlementSymbol()}`);
 
 export interface DepositContext {
   book: BookDetail;
@@ -43,6 +45,7 @@ export interface DepositContext {
 export function AmountStep(props: DepositContext & { amount: string; onAmount: (v: string) => void; onBack: () => void; onReview: () => void }) {
   const w = useWallet();
   const ob = useOnboarding();
+  const sym = useSettlementSymbol();
   const me = w.active?.address ?? null;
   const wr = useWalletRoom(props.addrs, me);
   const t = props.tranche;
@@ -142,7 +145,7 @@ export function AmountStep(props: DepositContext & { amount: string; onAmount: (
           {t === "senior" && props.seniorRoom !== null && (
             <p className="mt-2 text-[12px] text-ink-2">
               Senior can be at most {pctOfBps(props.book.charter?.seniorCapBps ?? null)} of the book when the round settles.
-              {perJunior !== null ? ` Each 1 USDC of Junior accepted in the round adds about ${perJunior.toFixed(2)} USDC of Senior room.` : ""} Estimated from the last mark.
+              {perJunior !== null ? ` Each 1 ${sym} of Junior accepted in the round adds about ${perJunior.toFixed(2)} ${sym} of Senior room.` : ""} Estimated from the last mark.
             </p>
           )}
         </aside>
@@ -169,6 +172,7 @@ function SelectedLine(props: { t: TrancheId; ticker: string; action?: ReactNode 
 
 export function ReviewStep(props: DepositContext & { amount: string; onBack: () => void; onAnother: () => void; onWithdrawTab: () => void }) {
   const w = useWallet();
+  const sym = useSettlementSymbol();
   const qc = useQueryClient();
   const utils = trpc.useUtils();
   const sub = trpc.tranche.subscribe.useMutation();
@@ -221,7 +225,7 @@ export function ReviewStep(props: DepositContext & { amount: string; onBack: () 
   };
 
   const sharesLine = subscription
-    ? `Shares are issued at 1.00 USDC each when the subscription window closes (${fmtWhen(endsAt)}). If more is committed than the book can take, the excess is refunded.`
+    ? `Shares are issued at 1.00 ${sym} each when the subscription window closes (${fmtWhen(endsAt)}). If more is committed than the book can take, the excess is refunded.`
     : `Shares are issued at the price of the first mark after the round ends (${fmtWhen(settlesAt)}).`;
 
   return (
@@ -244,8 +248,8 @@ export function ReviewStep(props: DepositContext & { amount: string; onBack: () 
           <p className="mt-2 text-[13.5px] text-ink-2">
             Once you hold shares, you can request a <Term id="redemptionNotice">withdrawal</Term> at any time;{" "}
             {t === "junior" && (props.book.charter?.juniorNoticeSeconds ?? 0) > 0
-              ? `it settles after the ${fmtDuration(props.book.charter?.juniorNoticeSeconds ?? 0)} notice period, at the first mark after that, and you then collect the USDC in a separate transaction.`
-              : "Senior has no notice period, so it settles at the next mark after you ask; you then collect the USDC in a separate transaction."}
+              ? `it settles after the ${fmtDuration(props.book.charter?.juniorNoticeSeconds ?? 0)} notice period, at the first mark after that, and you then collect the ${sym} in a separate transaction.`
+              : `Senior has no notice period, so it settles at the next mark after you ask; you then collect the ${sym} in a separate transaction.`}
           </p>
           <InfoList
             className="mt-4"
@@ -326,18 +330,19 @@ function DepositDone(
   props: DepositContext & { amountText: string; me: Address | null; settlesAt: number | null; endsAt: number | null; subscription: boolean; onAnother: () => void; onWithdrawTab: () => void },
 ) {
   const name = TRANCHE_NAME[props.tranche];
+  const sym = useSettlementSymbol();
   const tranche = props.tranche === "senior" ? props.addrs.senior : props.addrs.junior;
   const steps: StepperStep[] = props.subscription
     ? [
-        { id: "committed", status: "done", title: "USDC committed", description: "It waits in the tranche's escrow until the window closes, and cannot be cancelled before then." },
+        { id: "committed", status: "done", title: `${sym} committed`, description: "It waits in the tranche's escrow until the window closes, and cannot be cancelled before then." },
         { id: "close", status: "active", title: `Window closes · ${fmtWhen(props.endsAt)}`, description: "Commitments are allocated pro-rata (the sponsor first in Junior); any excess is refunded." },
-        { id: "claim", status: "todo", title: "Collect your shares", description: "Shares start at 1.00 USDC each. Collect them, and any refund, from the Withdraw tab." },
+        { id: "claim", status: "todo", title: "Collect your shares", description: `Shares start at 1.00 ${sym} each. Collect them, and any refund, from the Withdraw tab.` },
       ]
     : [
         {
           id: "committed",
           status: "done",
-          title: "USDC committed",
+          title: `${sym} committed`,
           description: "It waits in the tranche's escrow until the round settles, and cannot be cancelled or withdrawn before then. If the book retires first, the round is cancelled and the deposit is refunded in full.",
         },
         { id: "end", status: "active", title: `Round ends · ${fmtWhen(props.endsAt)}`, description: "Other allocators can still deposit until then." },

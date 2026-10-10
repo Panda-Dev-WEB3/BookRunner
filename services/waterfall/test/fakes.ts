@@ -1,5 +1,6 @@
 import { type BookState, type SplitResult, VENUE, splitDistribution } from "@bookrunner/shared";
 import type { Hex } from "viem";
+import type { BuybackReferenceSource } from "../src/domain/buyback";
 import type { BookRef } from "../src/kit/books";
 import type {
   BookLookup,
@@ -177,6 +178,12 @@ export class FakeBuybackChain implements BuybackChain {
   /** buybackFloor reverts (reference unset / oracle stale). */
   failFloor = false;
   executed: Array<{ amountIn: bigint; minOut: bigint; poolFee?: number }> = [];
+  /** BkrnFeeRouter.referenceSource; "throw" = the read fails. */
+  reference: BuybackReferenceSource | "throw" = "fixed";
+  async buybackReferenceSource(): Promise<BuybackReferenceSource> {
+    if (this.reference === "throw") throw new Error("referenceSource reverted");
+    return this.reference;
+  }
   async buybackPending() {
     return this.pending;
   }

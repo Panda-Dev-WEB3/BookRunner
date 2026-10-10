@@ -484,6 +484,7 @@ contract MandateRedTeamTest is MandateBase {
             vm.etch(t[i], tmpl.code);
             bytes32 pid = bytes32(uint256(0x5000 + i));
             registry.register(t[i], pid, 1e18, 1000e18);
+            exec.setRoute("UNIV3", t[i], 3000, address(0), 0);
             oracle.set(pid, 100e18, uint64(block.timestamp), false);
             router.setPrice(t[i], 100e18);
         }

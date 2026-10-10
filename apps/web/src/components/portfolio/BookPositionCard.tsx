@@ -7,6 +7,7 @@ import { venueLabel } from "../../lib/copy";
 import { fmtSharePrice, fmtUsd, fmtWhen, isoToSec, tickerOf } from "../../lib/format";
 import { bookState } from "../../lib/limits";
 import type { TopUpRound } from "../../lib/topup";
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { cx } from "../cx";
 import { IconArrowRight } from "../icons";
 import { Badge, Card, Hash, StateChip, TrancheBadge } from "../ui";
@@ -27,6 +28,7 @@ function Line(props: { label: ReactNode; value: ReactNode; note?: ReactNode; acc
 
 function TrancheTile(props: { t: TrancheHolding; settle: DepositSettlement; onRedeem: () => void }) {
   const t = props.t;
+  const sym = useSettlementSymbol();
   const name = TRANCHE_NAME[t.tranche];
   const held = t.shares ?? 0n;
   const allocation = t.claimableShares > 0n || t.claimableRefund > 0n;
@@ -57,11 +59,11 @@ function TrancheTile(props: { t: TrancheHolding; settle: DepositSettlement; onRe
                     ? `Shares from a settled round, waiting in escrow and already counted in the value above, plus a ${usd(t.claimableRefund)} refund of the part the round did not accept.`
                     : t.claimableShares > 0n
                       ? "Shares from a settled round, waiting in escrow. They already count in the value above."
-                      : "The round did not accept this deposit: the USDC is refundable."
+                      : `The round did not accept this deposit: the ${sym} is refundable.`
                 }
               />
             )}
-            {t.claimableRedemption > 0n && <Line accent label="Redeemed, ready to claim" value={usd(t.claimableRedemption)} note="USDC from redemptions a mark has settled." />}
+            {t.claimableRedemption > 0n && <Line accent label="Redeemed, ready to claim" value={usd(t.claimableRedemption)} note={`${sym} from redemptions a mark has settled.`} />}
             {t.queuedShares > 0n && <Line label="In redemption" value={shares(t.queuedShares)} note="Settles at its mark, at that mark's share price." />}
           </ul>
         </>

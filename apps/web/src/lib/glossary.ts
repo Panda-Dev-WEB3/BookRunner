@@ -64,7 +64,7 @@ const entries: GlossaryEntry[] = [
     id: "charter",
     term: "Charter",
     short: "The application that creates a book. A sponsor files the market's terms on-chain: underlying, venue, oracle plan, trading sessions, insurance-fund size, the agent's mandate and the tranche terms.",
-    long: "Filing pays a flat USDC fee (refunded if the charter is rejected) and locks the sponsor's BKRN bond. The Risk Committee then approves or rejects it; an approved charter becomes a book with the same id.",
+    long: "Filing pays a flat fee in the settlement stablecoin (refunded if the charter is rejected) and locks the sponsor's BKRN bond. The Risk Committee then approves or rejects it; an approved charter becomes a book with the same id.",
     related: ["sponsor", "riskCommittee", "book"],
   },
   {
@@ -84,14 +84,14 @@ const entries: GlossaryEntry[] = [
   {
     id: "allocator",
     term: "Allocator",
-    short: "Anyone who funds a book by depositing USDC into its Senior or Junior tranche. Allocators receive tranche shares valued at NAV.",
+    short: "Anyone who funds a book by depositing the settlement stablecoin into its Senior or Junior tranche. Allocators receive tranche shares valued at NAV.",
     related: ["tranche", "nav"],
   },
   {
     id: "tranche",
     term: "Tranche",
     short: "A slice of a book with its own place in the payment and loss order. Every book has two: Senior and Junior.",
-    long: "Each tranche is a token vault (ERC-4626 shares, 6 decimals). One share is worth 1 USDC when the subscription window closes; after that it moves with the marked NAV.",
+    long: "Each tranche is a token vault (ERC-4626 shares, 6 decimals). One share is worth 1.00 in the settlement stablecoin when the subscription window closes; after that it moves with the marked NAV.",
     related: ["senior", "junior", "waterfall"],
   },
   {
@@ -144,7 +144,7 @@ const entries: GlossaryEntry[] = [
   {
     id: "sharePrice",
     term: "Share price",
-    short: "The value of one tranche share at the last mark, in USDC. It starts at 1.0 when the subscription window closes.",
+    short: "The value of one tranche share at the last mark, in the settlement stablecoin. It starts at 1.0 when the subscription window closes.",
     related: ["nav", "tranche"],
   },
   {
@@ -189,7 +189,7 @@ const entries: GlossaryEntry[] = [
   {
     id: "backstop",
     term: "Backstop",
-    short: "A shared USDC pool funded by half of the protocol carry. It covers a Senior shortfall only once that book's Junior is exhausted, and only up to what the pool holds.",
+    short: "A shared stablecoin pool funded by half of the protocol carry. It covers a Senior shortfall only once that book's Junior is exhausted, and only up to what the pool holds.",
     related: ["carry", "senior", "waterfall"],
   },
   {
@@ -224,7 +224,7 @@ const entries: GlossaryEntry[] = [
     id: "redemptionNotice",
     term: "Redemption notice",
     short: "The wait before a Junior redemption settles, set in the charter. Notice is not a gate: a request is always accepted and settles at NAV at the first mark on or after its eligible time.",
-    long: "Senior has no notice period: a Senior request settles at the next mark. Settling fixes the USDC owed; you then collect it in a separate transaction, which waits if the book's cash is still on the venue. Claims are never blocked by a pause or a kill.",
+    long: "Senior has no notice period: a Senior request settles at the next mark. Settling fixes the amount owed; you then collect it in a separate transaction, which waits if the book's cash is still on the venue. Claims are never blocked by a pause or a kill.",
     related: ["junior", "mark"],
   },
   {
@@ -267,8 +267,8 @@ const entries: GlossaryEntry[] = [
   },
   {
     id: "usdc",
-    term: "USDC",
-    short: "A dollar stablecoin. Books are funded and settled in USDC. On testnet, a mock test USDC with an open mint stands in for it and has no value.",
+    term: "Settlement stablecoin",
+    short: "The dollar stablecoin books are funded and settled in, named on-chain by the protocol config; the app shows its own symbol. On testnet, a mock test USDC with an open mint stands in for it and has no value.",
     related: ["testnet"],
   },
   {

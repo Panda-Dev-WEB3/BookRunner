@@ -118,6 +118,11 @@ are `keccak256("MARK_SIGNER")` etc. Setters (admin only) for every address/param
 `AddressSet`/`ParamSet`. `timelock()` returns the recorded address only while it holds
 `DEFAULT_ADMIN_ROLE` (else `address(0)`, fail-closed), and `setAddress("timelock", t)` requires `t`
 to hold it, so every timelock-gated power follows the admin role across the handover. `setNewBooksPaused(bool)` callable by admin or GUARDIAN.
+Settlement token: the `usdc` key (name kept for ABI stability) is the protocol settlement token —
+mock USDC on devnet/testnet, **USDG on Robinhood Chain** (VERIFY O3/S1). `setAddress("usdc", t)`
+reverts `BadSettlementToken(t, decimals)` unless `t` is a contract whose `decimals()` returns
+`SETTLEMENT_DECIMALS` (6): every USD amount in the protocol is 6-dp and valued 1:1. "USDC" in names
+and in the amounts below means that token; the apps show its on-chain `symbol()`.
 `agentTierBond(inventoryUsd)`: step function over sorted tiers `[(inventoryUsdThreshold, bond)]`;
 returns 0 below the entry tier. Defaults (mainnet): carryBps 1000, expenseCapBps 2000, charterFee
 5,000 USDC, sponsorBond 100,000 BKRN, committeeBond 250,000 BKRN, markInterval 86400, maxMarkAge
@@ -146,8 +151,12 @@ venueMinIf[PoolEngine] 10,000 USDC, tiers: entry 50k USD → 0, ≥50k → 25k B
   buyback share accumulates. `executeBuyback(amountIn, minBkrnOut)` (KEEPER) swaps via
   `ISwapRouter02.exactInputSingle` (dedicated `buybackRouter` param) through the timelock-pinned
   `buybackPoolFee`, at most `maxBuybackPerCall` per call, with `amountOutMinimum >=
-  amountIn x reference x (1 - maxSlippageBps)`; reference = AttestedOracle `bkrnPriceId` when set,
-  else the timelock-set `refBkrnPerUsdcWad` (A5-02). Sends BKRN to staking and calls `notifyReward`.
+  amountIn x reference x (1 - maxSlippageBps)`; the reference source is governance-chosen
+  (`referenceSource`): REF_FIXED = the timelock-set `refBkrnPerUsdcWad` (A5-02), REF_TWAP = Uniswap v3
+  TWAP of the BKRN/settlement pool (`libraries/UniswapV3Twap.sol`: mean tick over `twapWindow` ∈
+  [10 min, 2 days], refused with `TwapDeviation` while the spot tick is more than
+  `twapMaxTickDeviation` ≤ 2,000 ticks away; "OLD" when the pool's history is shorter than the
+  window), REF_ATTESTED = AttestedOracle `bkrnPriceId`. Sends BKRN to staking and calls `notifyReward`.
 - `Backstop`: holds USDC. `cover(bookId, shortfall)` only by `factory.bookOf(bookId) == msg.sender`;
   pays `min(shortfall, balance)` to the book's vault; emits `Covered`. Optional per-cover cap param
   (`maxCoverBps` of balance, default 10000).
@@ -360,8 +369,16 @@ an active key and `bytes4(callData) == execute.selector`. Gas policy (desk stora
 Timelock `withdrawDepositTo(to, amount)` recovers the EntryPoint deposit. Hedge notional = sum over
 held canonical tokens of `registry.valueUsd(token, balance)`.
 
-**HedgeExecutor**: `swapExactIn` for venue `UNIV3` via `ISwapRouter02.exactInputSingle`; `UNIV4`
-reverts `NotConfigured` until a v4 router is set (VERIFY). Router per venue settable by timelock.
+**HedgeExecutor**: `swapExactIn` for venue `UNIV3` via SwapRouter02; `UNIV4` reverts `NotConfigured`
+until a v4 router is set (VERIFY U3). Router per venue settable by timelock. One side of every swap is
+the settlement token (`config.usdc()`, `NotSettlementPair` otherwise); the pool(s) come from the
+timelock-set **route** of the Stock Token side (`setRoute(venue, asset, fee, hop, hopFee)`): a direct
+pool (`exactInputSingle`) or a two-pool path through `hop`, e.g. WETH (`exactInput`). The caller's
+`poolFee` must be 0 (= the route) or the route's fee (`PoolFeeMismatch`); no route = `RouteNotSet`.
+With `setV3Factory` set, `setRoute` on UNIV3 requires every pool to exist. The oracle-referenced
+minimum is the desk's (per-swap `maxSlippageBps` + per-period budget on the oracle value given vs
+received), on top of the caller's `minAmountOut`; pool depth is a pre-launch check
+(`scripts/check-pools.ts`, VERIFY U4).
 
 **StockTokenRegistry**: per `IStockTokenRegistry`. `valueUsd = qtyRaw * multiplierWad * priceWad /
 (10**decimals * 1e18) / 1e12` (WAD USD → 6dp). Prices from `AttestedOracle.priceOf(priceId)` per

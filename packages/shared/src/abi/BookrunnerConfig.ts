@@ -494,6 +494,19 @@ export const bookrunnerConfigAbi = [
   },
   {
     "type": "function",
+    "name": "SETTLEMENT_DECIMALS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "addressOf",
     "inputs": [
       {
@@ -1382,6 +1395,22 @@ export const bookrunnerConfigAbi = [
         "name": "neededRole",
         "type": "bytes32",
         "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "BadSettlementToken",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "decimals",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ]
   },

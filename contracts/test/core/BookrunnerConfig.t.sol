@@ -6,6 +6,19 @@ import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol"
 import {BookrunnerConfig} from "../../src/BookrunnerConfig.sol";
 import {IBookrunnerConfig} from "../../src/interfaces/IBookrunnerConfig.sol";
 import {BRTypes} from "../../src/interfaces/BRTypes.sol";
+import {MockERC20} from "../../src/mocks/MockERC20.sol";
+
+/// @dev decimals() reverts.
+contract NoDecimalsToken {
+    function decimals() external pure returns (uint8) {
+        revert("no decimals");
+    }
+}
+
+/// @dev decimals() returns nothing (short return data).
+contract EmptyDecimalsToken {
+    fallback() external {}
+}
 
 contract BookrunnerConfigTest is Test {
     BookrunnerConfig internal config;
@@ -142,6 +155,8 @@ contract BookrunnerConfigTest is Test {
         bytes32[18] memory keys = _addressKeys();
         for (uint256 i; i < keys.length; ++i) {
             address value = address(uint160(0x1000 + i));
+            // the settlement token must be a 6-decimals ERC20
+            if (keys[i] == "usdc") value = address(new MockERC20("Global Dollar", "USDG", 6));
             assertTrue(config.isAddressKey(keys[i]));
             if (keys[i] == "timelock") {
                 // the timelock must hold DEFAULT_ADMIN_ROLE (timelock() follows the admin role)
@@ -177,6 +192,55 @@ contract BookrunnerConfigTest is Test {
         config.setAddress("usdc", address(0));
     }
 
+    // ---------------------------------------------------------------- settlement token (USDC / USDG)
+
+    function test_settlementToken_accepts6Decimals() public {
+        MockERC20 usdg = new MockERC20("Global Dollar", "USDG", 6);
+        assertEq(config.SETTLEMENT_DECIMALS(), 6);
+        vm.prank(admin);
+        config.setAddress("usdc", address(usdg));
+        assertEq(config.usdc(), address(usdg));
+    }
+
+    function test_settlementToken_rejectsWrongDecimals() public {
+        MockERC20 dai = new MockERC20("Dai", "DAI", 18);
+        vm.expectRevert(abi.encodeWithSelector(BookrunnerConfig.BadSettlementToken.selector, address(dai), 18));
+        vm.prank(admin);
+        config.setAddress("usdc", address(dai));
+
+        MockERC20 eightDp = new MockERC20("Eight", "E8", 8);
+        bytes32[] memory keys = new bytes32[](1);
+        address[] memory vals = new address[](1);
+        (keys[0], vals[0]) = ("usdc", address(eightDp));
+        vm.expectRevert(abi.encodeWithSelector(BookrunnerConfig.BadSettlementToken.selector, address(eightDp), 8));
+        vm.prank(admin);
+        config.setAddresses(keys, vals);
+        assertEq(config.usdc(), address(0));
+    }
+
+    function test_settlementToken_rejectsNonTokens() public {
+        address eoa = makeAddr("eoa");
+        vm.expectRevert(abi.encodeWithSelector(BookrunnerConfig.BadSettlementToken.selector, eoa, 0));
+        vm.prank(admin);
+        config.setAddress("usdc", eoa);
+
+        NoDecimalsToken nd = new NoDecimalsToken();
+        vm.expectRevert(abi.encodeWithSelector(BookrunnerConfig.BadSettlementToken.selector, address(nd), 0));
+        vm.prank(admin);
+        config.setAddress("usdc", address(nd));
+
+        EmptyDecimalsToken ed = new EmptyDecimalsToken();
+        vm.expectRevert(abi.encodeWithSelector(BookrunnerConfig.BadSettlementToken.selector, address(ed), 0));
+        vm.prank(admin);
+        config.setAddress("usdc", address(ed));
+    }
+
+    /// @dev Only the settlement key is decimals-checked (other keys accept any non-zero address).
+    function test_settlementToken_checkOnlyOnUsdcKey() public {
+        vm.prank(admin);
+        config.setAddress("bkrn", makeAddr("anything"));
+    }
+
     function test_setAddress_onlyAdmin() public {
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -192,11 +256,12 @@ contract BookrunnerConfigTest is Test {
     function test_setAddresses_batch() public {
         bytes32[] memory keys = new bytes32[](2);
         address[] memory vals = new address[](2);
-        (keys[0], vals[0]) = ("usdc", address(11));
+        address usdg = address(new MockERC20("Global Dollar", "USDG", 6));
+        (keys[0], vals[0]) = ("usdc", usdg);
         (keys[1], vals[1]) = ("bkrn", address(12));
         vm.prank(admin);
         config.setAddresses(keys, vals);
-        assertEq(config.usdc(), address(11));
+        assertEq(config.usdc(), usdg);
         assertEq(config.bkrn(), address(12));
     }
 

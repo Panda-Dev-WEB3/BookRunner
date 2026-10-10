@@ -10,6 +10,7 @@ import { Term } from "../Term";
 import { Callout, Card, ErrorState, SkeletonRows, TrancheBadge, ValueKind } from "../ui";
 import { Figure, LearnSection } from "./parts";
 import { appChain } from "../../wallet/chains";
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { share } from "./sim";
 import { markedBooks, useLiveBooks } from "./useLearnData";
 
@@ -175,6 +176,7 @@ export function TrancheStack() {
 
 function LiveSplit() {
   const q = useLiveBooks();
+  const sym = useSettlementSymbol();
   const books = markedBooks(q.data);
   if (q.isLoading) return <SkeletonRows rows={3} />;
   if (q.error && !q.data) return <ErrorState error={q.error} onRetry={() => void q.refetch()} compact />;
@@ -194,7 +196,7 @@ function LiveSplit() {
               </Link>
               <span className="num text-[12px] text-ink-2">{fmtUsd(total, { compact: true, symbol: true })} marked NAV</span>
             </div>
-            <div className="mt-1.5 flex h-3 w-full gap-[2px] overflow-hidden rounded-full" role="img" aria-label={`${tickerOf(b.symbol)}: Senior ${fmtUsd(s, { dp: 0 })} USDC, Junior ${fmtUsd(j, { dp: 0 })} USDC`}>
+            <div className="mt-1.5 flex h-3 w-full gap-[2px] overflow-hidden rounded-full" role="img" aria-label={`${tickerOf(b.symbol)}: Senior ${fmtUsd(s, { dp: 0 })} ${sym}, Junior ${fmtUsd(j, { dp: 0 })} ${sym}`}>
               <span className="h-full bg-senior" style={{ width: `${sw}%` }} />
               <span className="h-full flex-1 bg-junior" />
             </div>

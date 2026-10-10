@@ -3,6 +3,7 @@
 // (MarketCharter.slashSponsor via the committee, RiskCommittee.slashMember via the timelock).
 import type { ReactNode } from "react";
 import { SERIES } from "../../lib/palette";
+import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { cx } from "../cx";
 import { IconShield } from "../icons";
 import { Card, Term } from "../ui";
@@ -26,6 +27,7 @@ function LossLayer(props: { order: string; title: ReactNode; body: string; class
 
 /** Loss order on the left, staked BKRN set apart on the right. */
 export function LossOrderDiagram() {
+  const sym = useSettlementSymbol();
   return (
     <figure className="m-0 grid gap-4 md:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)] md:items-stretch lg:grid-cols-1">
       <div className="relative rounded-card border border-line bg-surface p-4 pl-11 shadow-card">
@@ -46,7 +48,7 @@ export function LossOrderDiagram() {
           />
           <LossLayer
             order="3"
-            title={<Term id="backstop">Backstop pool (USDC)</Term>}
+            title={<Term id="backstop">{`Backstop pool (${sym})`}</Term>}
             body="Then covers Senior's shortfall, up to what the pool holds."
             className="border-backstop/40 bg-backstop/[0.08]"
             swatch="border-backstop/45 bg-surface"
@@ -62,7 +64,7 @@ export function LossOrderDiagram() {
         <p className="mt-1.5 text-[13px] text-ink-2">Not part of the loss order. Book losses never draw on staked BKRN. Only the part locked as a bond can be slashed, and only for the role holder's own conduct.</p>
       </div>
       <figcaption className="sr-only">
-        Losses hit Junior first, then Senior, then the USDC backstop pool up to what it holds. Staked BKRN is outside this order.
+        Losses hit Junior first, then Senior, then the {sym} backstop pool up to what it holds. Staked BKRN is outside this order.
       </figcaption>
     </figure>
   );
