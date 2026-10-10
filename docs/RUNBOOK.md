@@ -77,8 +77,11 @@ only (it deploys mocks and refuses 4663). Tick every box in order; two people fo
        RHC_RPC_URL=<archive rpc> bash scripts/deploy-mainnet.sh broadcast
        ```
        It deploys the TimelockController (min delay 48h, proposer = executor = canceller = multisig, no admin)
-       and every component, sets params / oracle signers / Stock Tokens / indexes / implementations / buyback /
-       staking / backstop, grants the service roles to the input's addresses and GUARDIAN to the guardian,
+       and every component (Book linked to BookLogic, OrderlyAdapter v3 with the input's broker / token hashes),
+       sets params / HedgeExecutor v3 factory + one route per Stock Token / buyback params + reference source /
+       oracle measurements + attested signers + `requireAttestations()` / Stock Tokens (live `uiMultiplier`
+       mode, anchors) / indexes / implementations / staking / backstop, grants the service roles to the
+       input's addresses and GUARDIAN to the guardian,
        hands `DEFAULT_ADMIN_ROLE` to the timelock, points `config.timelock()` at it and renounces the deployer;
        then fixes `startBlock` from the receipts and runs VerifyHandover. Output: `contracts/deployments/4663.json`.
 6. [ ] (2P) Independent check from a second machine and RPC: `bash scripts/deploy-mainnet.sh verify`. Every row
@@ -92,10 +95,16 @@ only (it deploys mocks and refuses 4663). Tick every box in order; two people fo
        - `expenseRecipient` / `slashRecipient` == treasury (input), never the deployer;
        - service roles + GUARDIAN as input; committee seats as input; charter + committee are staking lockers;
        - every component reads this config; `config.usdc()` is the 6-decimal settlement token; vault /
-         EntryPoint as input; all 8 factory implementations set; OrderlyAdapter hashes == input;
+         EntryPoint as input; all 8 factory implementations set; the Book implementation is linked to a
+         deployed BookLogic; the OrderlyAdapter implementation is v3 (OrderlyIFAccount IF accounts, 6-dp
+         settlement) with hashes == input;
        - params, tiers, venue minimum IF (> 25,000e6 for Orderly), staking cooldown (>= 1 day) / rewards
-         duration, backstop cap, buyback router (SwapRouter02) + params, HedgeExecutor routers, oracle signers
-         + attestations + minSources, Stock Tokens + indexes all equal to the input.
+         duration, backstop cap, buyback router (SwapRouter02) + params + reference source (+ TWAP params;
+         `referenceBkrnPerUsdc()` reads for fixed / TWAP), HedgeExecutor routers + v3 factory + one route per
+         Stock Token, oracle measurements / attested signers (`attestationOf` == the digest) / minSources /
+         `attestationRequired`, Stock Tokens (multiplier source, next anchors, band; every multiplier reads) +
+         indexes all equal to the input; input Stock Tokens / feeds == `config/chains/4663.json` (the oracle's
+         chain price config).
 7. [ ] Sweep the deployer's leftover ETH back to the treasury; destroy the key. Archive `4663.json` + the input
        + `contracts/broadcast/DeployMainnet.s.sol/4663/run-latest.json` (the record is gitignored because the
        services host appends books to it). Verify sources on the explorer (VERIFY R2).
@@ -126,7 +135,7 @@ only (it deploys mocks and refuses 4663). Tick every box in order; two people fo
         first full period following the window close: check `MarkRegistry` events and the API, then reconcile
         the mark's venue section against the Orderly statement (`GET /v1/broker/daily_fee_revenue`, VERIFY O11).
 
-### Mainnet wiring reference (what the input / DeployMainnet must set; asserted by VerifyHandover)
+### Mainnet wiring reference (what DeployMainnet sets from the input; asserted by VerifyHandover)
 
 `Deploy.s.sol` is devnet (31337) / testnet (46630) only: it refuses any other chain id and deploys
 protocol-owned mocks (USDC, Stock Tokens, MockSwapRouter, MockOrderlyVault). `DeployMainnet.s.sol` performs
@@ -151,11 +160,18 @@ the same wiring against the VERIFY-ed external addresses of the input and keeps 
   one `setRoute("UNIV3", stockToken, fee, hop, hopFee)` per hedge asset (direct USDG pool, or a two-pool route
   through WETH). With the factory set, `setRoute` reverts unless every pool exists. Agents / risk send
   `poolFee = 0` (= the route). `UNIV4` stays unset until VERIFY U3 is resolved;
-- `bun scripts/check-pools.ts` (read-only) against the deployment record, output kept with the launch record:
+- after the deploy, `bun scripts/check-pools.ts` (read-only) against the record, output kept with the launch record:
   every active Stock Token must show a route, existing pools with liquidity and a round-trip quote within the
   slippage bound (VERIFY U4), and the buyback pool / reference must read without reverting;
 - Stock Tokens registered with their current `uiMultiplier()` as anchor and `setMultiplierSource(token, true)`
-  ("Real prices" below); oracle signers through the attestation flow ("Oracle signer attestation" below);
+  ("Real prices" below; input `stockTokens[].multiplierSource = uiMultiplier`, optional
+  `nextMultiplierAnchorWad`); oracle signers through the attestation flow ("Oracle signer attestation" below:
+  input `oracle.measurements` + `oracle.signers[]` `{platform, measurement, quoteHash}`, then
+  `requireAttestations()`, so steps 4-5 of that flow happen inside the deployment, before the handover);
+- the OrderlyAdapter implementation takes only the broker / token hashes; each book proxy deploys its own
+  `OrderlyIFAccount` at initialize (VERIFY O6/O9); `venueMinIf[Orderly]` > 25,000e6 (VERIFY O10);
+- `Book` links the external library `BookLogic` (forge deploys it from the deployer during the broadcast; the
+  record lists `contracts.bookLogic`);
 - BKRN allocations (`community` / `liquidity` / `contributors`) go to their multisig / vesting addresses at
   construction, not to the deployer.
 

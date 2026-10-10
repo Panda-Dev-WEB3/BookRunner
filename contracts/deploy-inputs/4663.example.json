@@ -24,10 +24,14 @@
     "0x000000000000000000000000000000000000c003"
   ],
   "oracle": {
+    "measurements": [],
+    "requireAttestations": true,
     "signers": [
       {
         "signer": "0x000000000000000000000000000000000000b006",
-        "attestation": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        "platform": "INTEL_TDX",
+        "measurement": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "quoteHash": "0x0000000000000000000000000000000000000000000000000000000000000000"
       }
     ]
   },
@@ -38,14 +42,16 @@
     "orderlyBrokerId": "bookrunner",
     "orderlyTokenSymbol": "USDG",
     "uniswapV3SwapRouter02": "0xcaf681a66d020601342297493863e78c959e5cb2",
+    "uniswapV3Factory": "0x1f7d7550b1b028f7571e69a784071f0205fd2efa",
     "uniswapV4Router": "0x0000000000000000000000000000000000000000",
     "entryPoint": "0x0000000071727de22e5e9d8baf0edac6f37da032",
+    "chainPriceConfig": "../config/chains/4663.json",
     "chainlinkFeeds": [
-      { "symbol": "NVDA", "feed": "0x000000000000000000000000000000000000f001" },
-      { "symbol": "TSLA", "feed": "0x000000000000000000000000000000000000f002" },
-      { "symbol": "AAPL", "feed": "0x000000000000000000000000000000000000f003" },
-      { "symbol": "MSFT", "feed": "0x000000000000000000000000000000000000f004" },
-      { "symbol": "AMZN", "feed": "0x000000000000000000000000000000000000f005" }
+      { "symbol": "NVDA", "feed": "0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15" },
+      { "symbol": "TSLA", "feed": "0x4A1166a659A55625345e9515b32adECea5547C38" },
+      { "symbol": "AAPL", "feed": "0x6B22A786bAa607d76728168703a39Ea9C99f2cD0" },
+      { "symbol": "MSFT", "feed": "0x45C3C877C15E6BA2EBB19eA114Ea508d14C1Af2E" },
+      { "symbol": "AMZN", "feed": "0xD5a1508ceD74c084eBf3cBe853e2C968fB2a651C" }
     ]
   },
   "bkrn": {
@@ -56,12 +62,22 @@
     "contributors": "0x000000000000000000000000000000000000a007"
   },
   "stockTokens": [
-    { "symbol": "NVDA", "token": "0x000000000000000000000000000000000000e001", "priceId": "NVDA", "multiplierWad": "1000000000000000000", "floatCapRaw": "1000000000000000000000000" },
-    { "symbol": "TSLA", "token": "0x000000000000000000000000000000000000e002", "priceId": "TSLA", "multiplierWad": "1000000000000000000", "floatCapRaw": "1000000000000000000000000" },
-    { "symbol": "AAPL", "token": "0x000000000000000000000000000000000000e003", "priceId": "AAPL", "multiplierWad": "1000000000000000000", "floatCapRaw": "1000000000000000000000000" },
-    { "symbol": "MSFT", "token": "0x000000000000000000000000000000000000e004", "priceId": "MSFT", "multiplierWad": "1000000000000000000", "floatCapRaw": "1000000000000000000000000" },
-    { "symbol": "AMZN", "token": "0x000000000000000000000000000000000000e005", "priceId": "AMZN", "multiplierWad": "1000000000000000000", "floatCapRaw": "1000000000000000000000000" }
+    { "symbol": "NVDA", "token": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC", "priceId": "NVDA", "multiplierSource": "uiMultiplier", "multiplierWad": "1000000000000000000", "floatCapRaw": "1000000000000000000000000" },
+    { "symbol": "TSLA", "token": "0x322F0929c4625eD5bAd873c95208D54E1c003b2d", "priceId": "TSLA", "multiplierSource": "uiMultiplier", "multiplierWad": "1000000000000000000", "floatCapRaw": "1000000000000000000000000" },
+    { "symbol": "AAPL", "token": "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9", "priceId": "AAPL", "multiplierSource": "uiMultiplier", "multiplierWad": "1000000000000000000", "floatCapRaw": "1000000000000000000000000" },
+    { "symbol": "MSFT", "token": "0xe93237C50D904957Cf27E7B1133b510C669c2e74", "priceId": "MSFT", "multiplierSource": "uiMultiplier", "multiplierWad": "1000000000000000000", "floatCapRaw": "1000000000000000000000000" },
+    { "symbol": "AMZN", "token": "0x12f190a9F9d7D37a250758b26824B97CE941bF54", "priceId": "AMZN", "multiplierSource": "uiMultiplier", "multiplierWad": "1000000000000000000", "floatCapRaw": "1000000000000000000000000" }
   ],
+  "stockRegistry": { "multiplierBandBps": 500 },
+  "hedge": {
+    "routes": [
+      { "symbol": "NVDA", "fee": 3000, "hop": "0x0000000000000000000000000000000000000000", "hopFee": 0 },
+      { "symbol": "TSLA", "fee": 3000, "hop": "0x0000000000000000000000000000000000000000", "hopFee": 0 },
+      { "symbol": "AAPL", "fee": 3000, "hop": "0x0000000000000000000000000000000000000000", "hopFee": 0 },
+      { "symbol": "MSFT", "fee": 3000, "hop": "0x0000000000000000000000000000000000000000", "hopFee": 0 },
+      { "symbol": "AMZN", "fee": 3000, "hop": "0x0000000000000000000000000000000000000000", "hopFee": 0 }
+    ]
+  },
   "indexes": [
     {
       "name": "BKRN.INDEX.RHX5",
@@ -102,6 +118,7 @@
     "refBkrnPerUsdcWad": "20000000000000000000",
     "maxSlippageBps": 500,
     "maxPerCall": "250000000000",
-    "bkrnPriceId": ""
+    "bkrnPriceId": "",
+    "referenceSource": "fixed"
   }
 }

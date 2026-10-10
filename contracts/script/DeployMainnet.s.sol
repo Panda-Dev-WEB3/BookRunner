@@ -35,7 +35,11 @@ import {IStockTokenRegistry} from "../src/interfaces/IStockTokenRegistry.sol";
 ///         schema contracts/deploy-inputs/README.md). Sequence: validate input -> check externals on-chain
 ///         (code, 6-decimal settlement token, Orderly vault token) -> TimelockController (proposer = executor
 ///         = canceller = multisig, NO admin: self-administered) -> core + venues + governance wired as
-///         Deploy.s.sol does -> params, oracle signers, Stock Tokens, indexes, implementations -> service
+///         Deploy.s.sol does (HedgeExecutor SwapRouter02 + v3 factory + one route per Stock Token; BkrnFeeRouter
+///         buyback params + reference source FIXED / TWAP / ATTESTED) -> params (venueMinIf[Orderly] > 25,000e6),
+///         oracle (measurement allow-list, attested TEE signers, requireAttestations), Stock Tokens (live
+///         uiMultiplier mode + anchors), indexes, implementations (Book linked to BookLogic; OrderlyAdapter v3
+///         with the input's broker / token hashes) -> service
 ///         roles to the input's PUBLIC addresses, GUARDIAN to the guardian -> handover: DEFAULT_ADMIN to the
 ///         timelock, `config.setAddress("timelock", controller)`, the deployer renounces DEFAULT_ADMIN.
 ///         After the broadcast the deployer holds no role, no BKRN and owns nothing; VerifyHandover.s.sol
@@ -60,6 +64,8 @@ contract DeployMainnet is MainnetInput {
         address stockRegistry;
         address hedgeExecutor;
         address poolEngine;
+        address bookImpl;
+        address bookLogic;
         address charter;
         address committee;
         address factory;
@@ -91,6 +97,7 @@ contract DeployMainnet is MainnetInput {
         vm.startBroadcast(gov.deployer);
         _deployTimelock();
         _deployCore();
+        _setHedgeRoutes();
         _deployVenuesAndGovernance();
         _setParams();
         _registerImplementations();
@@ -150,11 +157,22 @@ contract DeployMainnet is MainnetInput {
         d.hedgeExecutor = address(new HedgeExecutor(d.config, ext.swapRouter02));
         config.setAddress("hedgeExecutor", d.hedgeExecutor);
         if (ext.univ4Router != address(0)) HedgeExecutor(d.hedgeExecutor).setRouter("UNIV4", ext.univ4Router);
+        // with the factory set, setRoute reverts PoolNotFound unless every pool of the route exists (VERIFY U4)
+        if (ext.univ3Factory != address(0)) HedgeExecutor(d.hedgeExecutor).setV3Factory(ext.univ3Factory);
 
         d.poolEngine = address(new PoolEngine(d.config));
         config.setAddress("poolEngine", d.poolEngine);
         config.setAddress("orderlyVault", ext.orderlyVault);
         config.setAddress("entryPoint", ext.entryPoint);
+    }
+
+    /// @dev One UNIV3 route per Stock Token (agents / risk send poolFee 0 = the route). Needs config.usdc().
+    function _setHedgeRoutes() internal {
+        HedgeExecutor he = HedgeExecutor(d.hedgeExecutor);
+        for (uint256 i; i < hedgeRoutes.length; ++i) {
+            HedgeRouteIn storage r = hedgeRoutes[i];
+            he.setRoute("UNIV3", _stockToken(r.symbol), uint24(r.fee), r.hop, uint24(r.hopFee));
+        }
     }
 
     function _deployVenuesAndGovernance() internal {
@@ -179,7 +197,11 @@ contract DeployMainnet is MainnetInput {
         feeRouter.setBuybackParams(
             uint24(bb.poolFee), bb.refBkrnPerUsdcWad, uint16(bb.maxSlippageBps), bb.maxPerCall
         );
-        if (bb.bkrnPriceId != bytes32(0)) feeRouter.setBkrnPriceId(bb.bkrnPriceId);
+        if (bb.bkrnPriceId != bytes32(0)) feeRouter.setBkrnPriceId(bb.bkrnPriceId); // selects REF_ATTESTED
+        if (bb.referenceSource == REF_TWAP) {
+            feeRouter.setTwapParams(bb.twapPool, uint32(bb.twapWindow), uint24(bb.twapMaxTickDeviation));
+        }
+        if (feeRouter.referenceSource() != bb.referenceSource) feeRouter.setReferenceSource(bb.referenceSource);
 
         Backstop(d.backstop).setMaxCoverBps(uint16(prm.backstopMaxCoverBps));
     }
@@ -208,7 +230,11 @@ contract DeployMainnet is MainnetInput {
         BookFactory factory = BookFactory(d.factory);
         bytes32[] memory kinds = new bytes32[](8);
         address[] memory impls = new address[](8);
-        (kinds[0], impls[0]) = (factory.BOOK(), address(new Book()));
+        // Book links the external library BookLogic: forge deploys it (from the deployer) and links it here
+        d.bookImpl = address(new Book());
+        d.bookLogic = linkedBookLogic(d.bookImpl);
+        require(d.bookLogic != address(0), "DeployMainnet: Book implementation not linked to BookLogic");
+        (kinds[0], impls[0]) = (factory.BOOK(), d.bookImpl);
         (kinds[1], impls[1]) = (factory.TRANCHE(), address(new Tranche()));
         (kinds[2], impls[2]) = (factory.VAULT(), address(new UnderwritingVault()));
         (kinds[3], impls[3]) = (factory.MANDATE(), address(new MMMandate()));
@@ -219,25 +245,38 @@ contract DeployMainnet is MainnetInput {
         factory.setImplementations(kinds, impls);
     }
 
-    /// @dev The one place that knows the OrderlyAdapter constructor (other packages are changing it: account
-    ///      ids, IF receiver): add the new arguments to the input's `externals` and here.
+    /// @dev The one place that knows the OrderlyAdapter constructor: broker hash + settlement token hash (VERIFY
+    ///      O7). v3 accounts need nothing else here: MM = the adapter proxy's own Orderly account, IF = a per-book
+    ///      OrderlyIFAccount the proxy deploys at initialize (VERIFY O6/O9); the implementation checks
+    ///      `decimals() == 6` and `vault.getAllowedToken(tokenHash) == config.usdc()` there.
     function _newOrderlyAdapterImpl() internal returns (address) {
         return address(new OrderlyAdapter(brokerHash(), tokenHash()));
     }
 
+    /// @dev VERIFY E1: enclave measurements allow-listed, then each TEE signer through setAttestedSigner (digest
+    ///      binds chain, oracle, signer, platform, measurement, quote hash); plain setSigner only in a rehearsal.
+    ///      requireAttestations last (one-way: from then on only attested signers can be activated).
     function _registerOracleSigners() internal {
         AttestedOracle oracle = AttestedOracle(d.oracle);
+        for (uint256 i; i < oracleMeasurements.length; ++i) oracle.setMeasurement(oracleMeasurements[i], true);
         for (uint256 i; i < oracleSigners.length; ++i) {
-            oracle.setSigner(oracleSigners[i].signer, true, oracleSigners[i].attestation);
+            OracleSignerIn storage s = oracleSigners[i];
+            if (_attested(s)) oracle.setAttestedSigner(s.signer, s.platform, s.measurement, s.quoteHash);
+            else oracle.setSigner(s.signer, true, s.attestation);
         }
         if (oracle.minSources() != prm.oracleMinSources) oracle.setMinSources(uint32(prm.oracleMinSources));
+        if (requireAttestations) oracle.requireAttestations();
     }
 
     function _registerStockTokens() internal {
         StockTokenRegistry registry = StockTokenRegistry(d.stockRegistry);
+        if (multiplierBandBps != 0) registry.setMultiplierBand(uint16(multiplierBandBps));
         for (uint256 i; i < stocks.length; ++i) {
             StockTokenIn storage s = stocks[i];
-            registry.register(s.token, s.priceId, s.multiplierWad, s.floatCapRaw);
+            registry.register(s.token, s.priceId, s.multiplierWad, s.floatCapRaw); // multiplierWad = the anchor
+            // live ERC-8056 uiMultiplier (reads the token once: must answer within the band of the anchor)
+            if (s.liveMultiplier) registry.setMultiplierSource(s.token, true);
+            if (s.nextMultiplierAnchor != 0) registry.setNextMultiplierAnchor(s.token, s.nextMultiplierAnchor);
         }
         for (uint256 i; i < indexes.length; ++i) {
             IndexIn storage x = indexes[i];
@@ -303,6 +342,8 @@ contract DeployMainnet is MainnetInput {
         vm.serializeAddress(root, "slashRecipient", gov.slashRecipient);
         vm.serializeString(root, "governance", _governanceJson());
         vm.serializeString(root, "chainlinkFeeds", _feedsJson());
+        // the oracle service's ORACLE_CHAIN_CONFIG (Stock Tokens + Chainlink feeds), as given in the input
+        vm.serializeString(root, "chainPriceConfig", ext.chainPriceConfig);
         vm.serializeString(root, "contracts", _contractsJson());
         string memory out = vm.serializeString(root, "stockTokens", _stocksJson());
         vm.createDir(string.concat(vm.projectRoot(), "/deployments"), true);
@@ -328,6 +369,9 @@ contract DeployMainnet is MainnetInput {
         vm.serializeAddress(c, "factory", d.factory);
         vm.serializeAddress(c, "poolEngine", d.poolEngine);
         vm.serializeAddress(c, "hedgeExecutor", d.hedgeExecutor);
+        vm.serializeAddress(c, "bookImplementation", d.bookImpl);
+        vm.serializeAddress(c, "bookLogic", d.bookLogic);
+        vm.serializeAddress(c, "uniswapV3Factory", ext.univ3Factory);
         vm.serializeAddress(c, "orderlyVault", ext.orderlyVault);
         vm.serializeAddress(c, "entryPoint", ext.entryPoint);
         return vm.serializeAddress(c, "swapRouter", ext.swapRouter02);
@@ -357,6 +401,7 @@ contract DeployMainnet is MainnetInput {
             string memory o = string.concat("st_", s.symbol);
             vm.serializeAddress(o, "token", s.token);
             vm.serializeBytes32(o, "priceId", s.priceId);
+            vm.serializeString(o, "multiplierSource", s.liveMultiplier ? "uiMultiplier" : "stored");
             string memory one = vm.serializeString(o, "multiplierWad", vm.toString(s.multiplierWad));
             out = vm.serializeString(st, s.symbol, one);
         }

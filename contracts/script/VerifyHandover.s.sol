@@ -37,7 +37,12 @@ interface IERC20Min {
 ///         open executor, delay as input (>= 48h on mainnet); StockTokenRegistry admin == 0 (follows the
 ///         timelock); expense / slash recipients = treasury; service roles + guardian as input; every
 ///         component points at the config; factory implementations set (adapter hashes as input); params,
-///         oracle signers, Stock Tokens, indexes, buyback / staking / backstop settings as input.
+///         oracle signers, Stock Tokens, indexes, buyback / staking / backstop settings as input; Book
+///         implementation linked to a deployed BookLogic; OrderlyAdapter v3 (OrderlyIFAccount accounts, 6-dp
+///         settlement); HedgeExecutor v3 factory + one route per Stock Token; BkrnFeeRouter reference source
+///         (+ TWAP params) and a reference that reads; StockTokenRegistry live uiMultiplier mode / anchors /
+///         band; AttestedOracle measurement allow-list, attested signer digests, requireAttestations; input
+///         Stock Tokens / feeds == the oracle's chain price config.
 ///
 ///   DEPLOY_INPUT=deploy-inputs/4663.json bash scripts/forge.sh script script/VerifyHandover.s.sol:VerifyHandover \
 ///       --rpc-url $RHC_RPC_URL
@@ -79,6 +84,10 @@ contract VerifyHandover is MainnetInput {
         _checkParams();
         _checkEconomics();
         _checkOracleAndMarkets();
+        _checkHedgeRoutes();
+        _checkLiveMultipliers();
+        _checkAttestation();
+        _checkPriceConfig(deploymentJson);
         console2.log("==== result: passed", passed, "failed", failed);
         return failed;
     }
@@ -196,10 +205,19 @@ contract VerifyHandover is MainnetInput {
             if (f.implementation(kinds[i]).code.length == 0) all = false;
         }
         _row(all, "factory: all 8 implementations set (with code)");
+        address bookImpl = f.implementation(f.BOOK());
+        address logic = bookImpl.code.length > 0 ? linkedBookLogic(bookImpl) : address(0);
+        _row(logic != address(0), "Book implementation linked to a deployed BookLogic library");
         OrderlyAdapter oa = OrderlyAdapter(payable(f.implementation(f.ORDERLY_ADAPTER())));
         _row(
             address(oa).code.length > 0 && oa.DEFAULT_BROKER_HASH() == brokerHash() && oa.DEFAULT_TOKEN_HASH() == tokenHash(),
             "OrderlyAdapter impl broker/token hashes == input"
+        );
+        // v3: real Orderly accounts (MM = adapter, IF = per-book OrderlyIFAccount); v2 has no ifAccount()
+        (bool v3, bytes memory r) = address(oa).staticcall(abi.encodeWithSignature("ifAccount()"));
+        _row(
+            v3 && r.length == 32 && oa.SETTLEMENT_DECIMALS() == SETTLEMENT_DECIMALS,
+            "OrderlyAdapter impl is v3 (OrderlyIFAccount IF account, 6-dp settlement)"
         );
         address ea = f.implementation(f.ENGINE_ADAPTER());
         _row(
@@ -242,6 +260,22 @@ contract VerifyHandover is MainnetInput {
             "buyback params == input"
         );
         _row(fr.bkrnPriceId() == bb.bkrnPriceId, "buyback bkrnPriceId == input");
+        _row(fr.referenceSource() == bb.referenceSource, "buyback referenceSource == input");
+        if (bb.referenceSource == REF_TWAP) {
+            _row(
+                fr.twapPool() == bb.twapPool && fr.twapWindow() == bb.twapWindow
+                    && fr.twapMaxTickDeviation() == bb.twapMaxTickDeviation,
+                "buyback TWAP pool / window / max tick deviation == input"
+            );
+        }
+        if (bb.referenceSource != REF_ATTESTED) {
+            // ATTESTED reads the oracle's BKRN price, which only exists once the oracle publishes it
+            bool reads;
+            try fr.referenceBkrnPerUsdc() returns (uint256 ref) {
+                reads = ref > 0;
+            } catch {}
+            _row(reads, "buyback referenceBkrnPerUsdc() reads (> 0)");
+        }
         BkrnStaking st = BkrnStaking(cfg.staking());
         _row(st.cooldown() == prm.stakingCooldown && st.cooldown() >= 1 days, "staking cooldown == input (>= 1 day)");
         _row(st.rewardsDuration() == prm.stakingRewardsDuration, "staking rewardsDuration == input");
@@ -249,29 +283,35 @@ contract VerifyHandover is MainnetInput {
         HedgeExecutor he = HedgeExecutor(cfg.hedgeExecutor());
         _row(he.routerOf("UNIV3") == ext.swapRouter02, "HedgeExecutor UNIV3 == SwapRouter02 (input)");
         _row(he.routerOf("UNIV4") == ext.univ4Router, "HedgeExecutor UNIV4 == input (0 = not configured)");
+        _row(he.v3Factory() == ext.univ3Factory, "HedgeExecutor v3Factory == input");
     }
 
     function _checkOracleAndMarkets() internal {
         AttestedOracle o = AttestedOracle(cfg.oracle());
         bool signersOk = true;
         for (uint256 i; i < oracleSigners.length; ++i) {
-            if (!o.isSigner(oracleSigners[i].signer) || o.attestationOf(oracleSigners[i].signer) != oracleSigners[i].attestation) {
+            if (!o.isSigner(oracleSigners[i].signer) || o.attestationOf(oracleSigners[i].signer) != _expectedAttestation(o, oracleSigners[i])) {
                 signersOk = false;
             }
         }
-        _row(signersOk, "oracle signers active with input attestations");
+        _row(signersOk, "oracle signers active with input attestations (attested: setAttestedSigner digest)");
         _row(!o.isSigner(deployerAddr), "deployer is not an oracle signer");
         _row(o.minSources() == prm.oracleMinSources, "oracle minSources == input");
         StockTokenRegistry reg = StockTokenRegistry(cfg.stockRegistry());
         bool tokensOk = true;
         for (uint256 i; i < stocks.length; ++i) {
-            IStockTokenRegistry.StockToken memory t = reg.getToken(stocks[i].token);
-            if (
-                !t.active || t.priceId != stocks[i].priceId || t.multiplierWad != stocks[i].multiplierWad
-                    || t.floatCapRaw != stocks[i].floatCapRaw
-            ) tokensOk = false;
+            // getToken reports the effective multiplier: the live uiMultiplier() in live mode (may drift from the
+            // anchor within the band — checked by its own row), the stored value otherwise
+            try reg.getToken(stocks[i].token) returns (IStockTokenRegistry.StockToken memory t) {
+                if (
+                    !t.active || t.priceId != stocks[i].priceId || t.floatCapRaw != stocks[i].floatCapRaw
+                        || (!stocks[i].liveMultiplier && t.multiplierWad != stocks[i].multiplierWad)
+                ) tokensOk = false;
+            } catch {
+                tokensOk = false;
+            }
         }
-        _row(tokensOk, "Stock Tokens registered as input (priceId, multiplier, float cap)");
+        _row(tokensOk, "Stock Tokens registered as input (priceId, stored multiplier, float cap)");
         bool idxOk = true;
         for (uint256 i; i < indexes.length; ++i) {
             (bytes32 pid, IStockTokenRegistry.IndexComponent[] memory comps) = reg.getIndex(keccak256(bytes(indexes[i].name)));
@@ -286,6 +326,82 @@ contract VerifyHandover is MainnetInput {
             }
         }
         _row(idxOk, "indexes registered as input");
+    }
+
+    function _expectedAttestation(AttestedOracle o, OracleSignerIn storage s) internal view returns (bytes32) {
+        if (!_attested(s)) return s.attestation;
+        return o.attestationDigest(s.signer, s.platform, s.measurement, s.quoteHash);
+    }
+
+    function _checkHedgeRoutes() internal {
+        HedgeExecutor he = HedgeExecutor(cfg.hedgeExecutor());
+        bool ok = hedgeRoutes.length == stocks.length;
+        for (uint256 i; i < stocks.length; ++i) {
+            (uint24 fee, address hop, uint24 hopFee) = he.routeOf("UNIV3", stocks[i].token);
+            if (fee == 0) {
+                ok = false;
+                continue;
+            }
+            HedgeRouteIn storage r = hedgeRoutes[_routeIndex(stocks[i].symbol)];
+            if (fee != r.fee || hop != r.hop || hopFee != r.hopFee) ok = false;
+        }
+        _row(ok, "HedgeExecutor UNIV3 route per Stock Token == input");
+    }
+
+    function _checkLiveMultipliers() internal {
+        StockTokenRegistry reg = StockTokenRegistry(cfg.stockRegistry());
+        uint256 band = multiplierBandBps == 0 ? reg.DEFAULT_MULTIPLIER_BAND_BPS() : multiplierBandBps;
+        _row(reg.multiplierBandBps() == band, "StockTokenRegistry multiplierBandBps == input (default 500)");
+        bool modeOk = true;
+        bool valueOk = true;
+        for (uint256 i; i < stocks.length; ++i) {
+            StockTokenIn storage s = stocks[i];
+            if (reg.multiplierFromToken(s.token) != s.liveMultiplier || reg.nextMultiplierAnchor(s.token) != s.nextMultiplierAnchor) {
+                modeOk = false;
+            }
+            try reg.multiplierOf(s.token) returns (uint256 m) {
+                if (m == 0) valueOk = false;
+            } catch {
+                valueOk = false; // live multiplier outside the band of its anchor (fails closed)
+            }
+        }
+        _row(modeOk, "Stock Token multiplier source (uiMultiplier / stored) + next anchors == input");
+        _row(valueOk, "every Stock Token multiplier reads (live value within the band)");
+    }
+
+    function _checkAttestation() internal {
+        AttestedOracle o = AttestedOracle(cfg.oracle());
+        bool allowed = true;
+        for (uint256 i; i < oracleMeasurements.length; ++i) {
+            if (!o.measurementAllowed(oracleMeasurements[i])) allowed = false;
+        }
+        _row(allowed, "oracle enclave measurements allow-listed == input");
+        bool measured = true;
+        for (uint256 i; i < oracleSigners.length; ++i) {
+            if (o.measurementOf(oracleSigners[i].signer) != oracleSigners[i].measurement) measured = false;
+        }
+        _row(measured, "oracle signer measurements == input");
+        _row(o.attestationRequired() == requireAttestations, "oracle requireAttestations == input");
+        if (inChainId == MAINNET_CHAIN_ID) _row(o.attestationRequired(), "oracle requires attestations (mainnet)");
+    }
+
+    function _checkPriceConfig(string memory j) internal {
+        if (bytes(ext.chainPriceConfig).length == 0) return;
+        bool sameTokens = true;
+        string memory c = vm.readFile(_resolve(ext.chainPriceConfig));
+        for (uint256 i; i < stocks.length; ++i) {
+            string memory k = string.concat(".stockTokens.", stocks[i].symbol, ".token");
+            if (!vm.keyExistsJson(c, k) || c.readAddress(k) != stocks[i].token) sameTokens = false;
+        }
+        for (uint256 i; i < feeds.length; ++i) {
+            string memory k = string.concat(".chainlink.feeds.", feeds[i].symbol, ".proxy");
+            if (!vm.keyExistsJson(c, k) || c.readAddress(k) != feeds[i].feed) sameTokens = false;
+        }
+        _row(sameTokens, "Stock Tokens / Chainlink feeds == chain price config (oracle service)");
+        _row(
+            vm.keyExistsJson(j, ".chainPriceConfig") && _eq(j.readString(".chainPriceConfig"), ext.chainPriceConfig),
+            "deployment record names the chain price config"
+        );
     }
 
     // ------------------------------------------------------------------------------------------- table
