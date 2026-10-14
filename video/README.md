@@ -33,3 +33,31 @@ bash scripts/video.sh npm run render          # full render: 3 MP4s + 3 posters 
   too large, raise the `CRF` constant at the top of `scripts/render.mjs`.
 - Inspect an encoded file with Remotion's bundled ffprobe/ffmpeg:
   `bash scripts/video.sh npx remotion ffprobe out/bookrunner-overview-16x9.mp4`.
+
+## Demo harness (product demos)
+
+Screen-recorded demos of the operator app on Robinhood Chain testnet (spec:
+`docs/superpowers/specs/2026-10-14-product-demo-videos-design.md`). Scripts live in `demo/` and run in the Playwright
+image (`mcr.microsoft.com/playwright:v1.64.1-noble`, Playwright 1.64.1 + viem 2.57.2 in the
+`bookrunner-video-demo-node-modules` volume):
+
+```bash
+bash scripts/video.sh app-build         # bun install + testnet build of apps/web -> apps/web/dist (base /app/, API same-origin)
+bash scripts/video.sh demo new-wallet   # once: creates video/.secrets/demo-wallet.json, prints only the address
+bash scripts/video.sh demo smoke        # serve + connect the demo wallet, no transaction -> public/demos/smoke-connected.png
+```
+
+- **App build:** `app-build` runs on the host: `bun install --frozen-lockfile`, then
+  `MSYS_NO_PATHCONV=1 VITE_API_URL=same-origin WEB_BASE=/app/ node node_modules/vite/bin/vite.js build --mode testnet`
+  in `apps/web` (vite through node: bun-spawned vite and `node_modules/.bin` shims are blocked on this PC;
+  `MSYS_NO_PATHCONV` stops Git Bash from turning `/app/` into a Windows path). The build is mounted read-only into
+  the container at `/app-dist`.
+- **Local server** (`demo/serve-app.mjs`, `startAppServer`): serves the build at `http://localhost:4610/app/` (SPA
+  fallback) and proxies `/trpc/*` and `/health` to `https://bookrunner.tech` with Host/Origin set to that site (the live
+  API only allows its own origin).
+- **Demo wallet** (`demo/wallet-inject.js` + `demo/wallet-node.mjs`, `installDemoWallet`): an EIP-6963 provider named
+  "Demo wallet" in the page; every request goes to Node, which answers account / chain methods, forwards reads to
+  `https://rpc.testnet.chain.robinhood.com`, and signs `eth_sendTransaction` with viem. Only chain 46630 is accepted.
+  The key stays in `video/.secrets/demo-wallet.json` (gitignored): never logged, never sent to the page. It needs test
+  ETH for gas (funded once from the testnet funder on the server).
+- Outputs (`public/demos/`) are gitignored. Unit tests: `node_modules/bun/bin/bun.exe test video/test`.

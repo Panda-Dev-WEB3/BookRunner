@@ -34,3 +34,6 @@ contracts/deployments/test-*.json
 video/node_modules/
 video/out/
 video/public/footage/
+# product demos: recordings/screenshots stay local; the demo wallet key never leaves video/.secrets/
+video/public/demos/
+video/.secrets/
