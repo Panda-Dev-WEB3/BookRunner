@@ -41,7 +41,12 @@ type Geo = {
   /** Header label ("MARK") position and size inside the card. */
   header: { x: number; y: number; size: number };
   seal: { c: Pt; size: number };
-  chain: { periods: number; per: number; size: number; gap: number; pgap: number; x0: number; cy: number };
+  /**
+   * `rows` false: one line of periods, left to right, centred on `cy`. `rows` true (portrait): one row per period,
+   * stacked upwards from the bottom row at `cy` (`rowStep` apart) and snaking (even rows run left to right, odd rows
+   * right to left), so the newest block ends the top row and the mark drops straight onto it.
+   */
+  chain: { periods: number; per: number; size: number; gap: number; pgap: number; x0: number; cy: number; rows: boolean; rowStep: number };
   captionTop: number;
   captionSize: number;
   /** Vertical shift (px, negative = up) applied to the chain group by the settle. */
@@ -49,18 +54,23 @@ type Geo = {
 };
 
 /**
- * Title on top; the mark card in the upper middle; the chain below it; captions under the chain. The card keeps a
- * column on its right free for the seal (as the charter card keeps one for its stamp), so the seal never covers a field.
+ * Title on top; the mark card in the upper middle; the chain below it; captions under the chain. Landscape and square:
+ * the card keeps a column on its right free for the seal (as the charter card keeps one for its stamp), so the seal
+ * never covers a field. Portrait fills its tall frame: larger chips with the seal under them (`sealGap`), and the chain
+ * as three stacked rows of large blocks.
  */
 function geometry(format: Format): Geo {
   const { W, H } = contentBox(format);
   const p = {
-    landscape: { cw: 300, ch: 68, font: 32, pad: 34, head: 36, hg: 18, gg: 22, sealCol: 190, seal: 160, cardCy: 290, chainCy: 548, per: 4, periods: 4, size: 72, gap: 20, pgap: 48, capGap: 62, capLines: 2, target: 0.47 },
-    square: { cw: 290, ch: 64, font: 30, pad: 30, head: 36, hg: 16, gg: 18, sealCol: 190, seal: 156, cardCy: 268, chainCy: 506, per: 3, periods: 3, size: 66, gap: 18, pgap: 40, capGap: 56, capLines: 2, target: 0.47 },
-    portrait: { cw: 310, ch: 76, font: 36, pad: 32, head: 42, hg: 20, gg: 20, sealCol: 196, seal: 170, cardCy: 500, chainCy: 860, per: 3, periods: 3, size: 68, gap: 16, pgap: 32, capGap: 64, capLines: 3, target: 0.38 },
+    landscape: { cw: 300, ch: 68, font: 32, pad: 34, head: 36, hg: 18, gg: 22, sealCol: 190, seal: 160, sealGap: 0, cardCy: 290, chainCy: 548, per: 4, periods: 4, size: 72, gap: 20, pgap: 48, rowGap: 0, capGap: 62, capLines: 2, target: 0.47, spreadX: 50, spreadY: 56 },
+    square: { cw: 290, ch: 64, font: 30, pad: 30, head: 36, hg: 16, gg: 18, sealCol: 190, seal: 156, sealGap: 0, cardCy: 268, chainCy: 506, per: 3, periods: 3, size: 66, gap: 18, pgap: 40, rowGap: 0, capGap: 56, capLines: 2, target: 0.47, spreadX: 50, spreadY: 56 },
+    // `chainCy` is the bottom row's centre; the grid is 3 x 140 + 2 x 76 = 572 px tall.
+    portrait: { cw: 402, ch: 96, font: 44, pad: 36, head: 46, hg: 24, gg: 24, sealCol: 0, seal: 190, sealGap: 28, cardCy: 461, chainCy: 1361, per: 3, periods: 3, size: 140, gap: 30, pgap: 0, rowGap: 76, capGap: 70, capLines: 3, target: 0.5, spreadX: 12, spreadY: 90 },
   }[format];
+  const rows = p.rowGap > 0;
+  const sealBelow = p.sealGap > 0;
   const cardW = 2 * p.pad + 2 * p.cw + p.gg + p.sealCol;
-  const cardH = 2 * p.pad + p.head + p.hg + 2 * p.ch + p.gg;
+  const cardH = 2 * p.pad + p.head + p.hg + 2 * p.ch + p.gg + (sealBelow ? p.sealGap + p.seal : 0);
   const card: Rect = { x: (W - cardW) / 2, y: p.cardCy - cardH / 2, w: cardW, h: cardH };
   const gx = card.x + p.pad;
   const gy = card.y + p.pad + p.head + p.hg;
@@ -71,14 +81,16 @@ function geometry(format: Format): Geo {
   const start: Pt[] =
     format === "landscape"
       ? [0, 1, 2, 3].map((i) => [W / 2 + (ROW_SLOT[i] - 1.5) * (p.cw + 40), p.cardCy])
-      : [0, 1, 2, 3].map((i) => [W / 2 + (i % 2 ? 1 : -1) * (p.cw / 2 + 50), p.cardCy + (i < 2 ? -1 : 1) * (p.ch / 2 + (format === "portrait" ? 90 : 56))]);
-  const chainW = p.periods * (p.per * p.size + (p.per - 1) * p.gap) + (p.periods - 1) * p.pgap;
+      : [0, 1, 2, 3].map((i) => [W / 2 + (i % 2 ? 1 : -1) * (p.cw / 2 + p.spreadX), p.cardCy + (i < 2 ? -1 : 1) * (p.ch / 2 + p.spreadY)]);
+  const rowW = p.per * p.size + (p.per - 1) * p.gap;
+  const chainW = rows ? rowW : p.periods * rowW + (p.periods - 1) * p.pgap;
+  const rowStep = p.size + p.rowGap;
   const captionSize = Math.round(BASE[format] * 0.8);
   const captionTop = p.chainCy + p.size / 2 + p.capGap;
   // Settle: centre the chain group (chain top to last caption line) at `target` of the space under the title (a little
-  // above the middle; higher in portrait, whose tall frame would otherwise leave a wide band under the title).
+  // above the middle in landscape and square).
   const titleBottom = Math.round(BASE[format] * 1.5) * 1.15;
-  const groupTop = p.chainCy - p.size / 2;
+  const groupTop = p.chainCy - p.size / 2 - (rows ? (p.periods - 1) * rowStep : 0);
   const groupBottom = captionTop + p.capLines * captionSize * 1.35 + Math.round(BASE[format] * 0.3);
   const target = titleBottom + (H - titleBottom) * p.target;
   return {
@@ -87,22 +99,53 @@ function geometry(format: Format): Geo {
     end,
     card,
     header: { x: gx, y: card.y + p.pad, size: Math.max(26, Math.round(BASE[format] * 0.6)) },
-    seal: { c: [card.x + card.w - p.pad - p.sealCol / 2 + 6, gy + p.ch + p.gg / 2], size: p.seal },
-    chain: { periods: p.periods, per: p.per, size: p.size, gap: p.gap, pgap: p.pgap, x0: (W - chainW) / 2, cy: p.chainCy },
+    seal: {
+      c: sealBelow ? [card.x + card.w / 2, gy + 2 * p.ch + p.gg + p.sealGap + p.seal / 2] : [card.x + card.w - p.pad - p.sealCol / 2 + 6, gy + p.ch + p.gg / 2],
+      size: p.seal,
+    },
+    chain: { periods: p.periods, per: p.per, size: p.size, gap: p.gap, pgap: p.pgap, x0: (W - chainW) / 2, cy: p.chainCy, rows, rowStep },
     captionTop,
     captionSize,
     settleY: Math.round(target - (groupTop + groupBottom) / 2),
   };
 }
 
-/** Rect of block `k` of period `q` on the chain. */
+/** Rect of block `k` (in chain order) of period `q` on the chain. */
 function blockRect(g: Geo, q: number, k: number): Rect {
-  const { per, size, gap, pgap, x0, cy } = g.chain;
+  const { per, size, gap, pgap, x0, cy, rows, rowStep } = g.chain;
+  if (rows) {
+    const col = q % 2 === 0 ? k : per - 1 - k; // snake: even rows left to right, odd rows right to left
+    return { x: x0 + col * (size + gap), y: cy - q * rowStep - size / 2, w: size, h: size };
+  }
   const x = x0 + q * (per * size + (per - 1) * gap + pgap) + k * (size + gap);
   return { x, y: cy - size / 2, w: size, h: size };
 }
 
-/** Which block of each earlier period carries that period's mark (deterministic, varied). The last period's mark is the newest block. */
+/** Centre y of period `q`'s blocks. */
+const rowCy = (g: Geo, q: number): number => g.chain.cy - (g.chain.rows ? q * g.chain.rowStep : 0);
+
+/** Link path(s) behind the blocks: one line (or one per row, joined by U-bends outside the rows) up to the slot. */
+function linkPath(g: Geo, slot: Rect): string {
+  const { periods, per, size, gap, x0, rows } = g.chain;
+  if (!rows) return `M ${blockRect(g, 0, 0).x} ${rowCy(g, 0)} H ${slot.x}`;
+  const right = x0 + per * size + (per - 1) * gap;
+  const out = Math.round(size * 0.28); // how far a U-bend reaches outside the rows
+  let d = "";
+  for (let q = 0; q < periods; q++) {
+    const y = rowCy(g, q);
+    const ltr = q % 2 === 0;
+    const end = q === periods - 1 ? (ltr ? slot.x : slot.x + slot.w) : ltr ? right : x0;
+    d += `M ${ltr ? x0 : right} ${y} H ${end} `;
+    if (q < periods - 1) {
+      const xo = ltr ? right + out : x0 - out;
+      d += `M ${end} ${y} H ${xo} V ${rowCy(g, q + 1)} H ${end} `;
+    }
+  }
+  return d;
+}
+
+/** Which block of each earlier period carries that period's mark (deterministic, varied; taken modulo the blocks per
+ * period). The last period's mark is the newest block. */
 const MARK_AT = [1, 2, 0];
 
 /** Seal: blue ring draws on, then the word lands; tilted, settling from 1.2x (the charter stamp's look). */
@@ -233,13 +276,13 @@ export const Proof: React.FC<{ format: Format }> = ({ format }) => {
   for (let q = 0; q < periods; q++) {
     for (let b = 0; b < per; b++) {
       if (q === last && b === per - 1) continue; // the slot is drawn separately
-      const on = q < last && b === MARK_AT[q % MARK_AT.length] ? ramp(frame, AT.periods + stagger(q, 14), AT.periods + stagger(q, 14) + 12) : 0;
+      const on = q < last && b === MARK_AT[q % MARK_AT.length] % per ? ramp(frame, AT.periods + stagger(q, 14), AT.periods + stagger(q, 14) + 12) : 0;
       blocks.push(<div key={`${q}-${b}`} style={blockStyle(blockRect(g, q, b), on)} />);
     }
   }
   const first = blockRect(g, 0, 0);
   const lead = Math.min(90, first.x); // the fading history line stays inside the safe padding
-  const bracketY = g.chain.cy + size / 2 + 20;
+  const bracketY = (q: number) => rowCy(g, q) + size / 2 + 20;
   const bracketDraw = ramp(frame, AT.gas, AT.gas + 25);
 
   return (
@@ -259,18 +302,19 @@ export const Proof: React.FC<{ format: Format }> = ({ format }) => {
             </linearGradient>
           </defs>
           {/* Earlier history fading in from the left, then one link line behind every block. */}
-          <rect x={first.x - lead} y={g.chain.cy - linkW / 2} width={lead} height={linkW} fill="url(#proof-lead)" />
-          <line x1={first.x} x2={slot.x} y1={g.chain.cy} y2={g.chain.cy} stroke={C.line} strokeWidth={linkW} />
+          <rect x={first.x - lead} y={rowCy(g, 0) - linkW / 2} width={lead} height={linkW} fill="url(#proof-lead)" />
+          <path d={linkPath(g, slot)} fill="none" stroke={C.line} strokeWidth={linkW} strokeLinejoin="round" />
           {Array.from({ length: periods }, (_, q) => {
             const a = blockRect(g, q, 0);
             const b = blockRect(g, q, per - 1);
             const p = ramp(bracketDraw, stagger(q, 0.12), stagger(q, 0.12) + 0.6);
-            const x1 = a.x + 4;
-            const x2 = b.x + b.w - 4;
+            const x1 = Math.min(a.x, b.x) + 4;
+            const x2 = Math.max(a.x, b.x) + size - 4;
+            const by = bracketY(q);
             return (
               <path
                 key={q}
-                d={`M ${x1} ${bracketY - 10} V ${bracketY} H ${x2} V ${bracketY - 10}`}
+                d={`M ${x1} ${by - 10} V ${by} H ${x2} V ${by - 10}`}
                 fill="none"
                 stroke={C.light}
                 strokeOpacity={0.7}

@@ -21,9 +21,9 @@ const clips = (format: Format): readonly FrameClip[] => [
     url: T.statusUrl,
     from: AT.status,
     durationInFrames: 600 - AT.status,
-    // Square: crop in on the status table (1.2x, the site's nav bar shifted out of view) so it fills the shorter window
-    // and reads larger; the table's own borders stay inside the frame.
-    ...(format === "square" ? { zoom: 1.2, shiftY: -50 } : {}),
+    // Square and portrait: crop in on the status table (1.2x, the site's nav bar shifted out of view) so it fills the
+    // window and reads larger; the table's own borders stay inside the frame.
+    ...(format !== "landscape" ? { zoom: 1.2, shiftY: -50 } : {}),
   },
 ];
 
@@ -47,7 +47,7 @@ type Geo = {
 function geometry(format: Format): Geo {
   const { W, H } = contentBox(format);
   const titleSize = Math.round(BASE[format] * 1.5);
-  const captionSize = Math.round(BASE[format] * 0.8);
+  const captionSize = Math.round(BASE[format] * (format === "portrait" ? 0.9 : 0.8));
   if (format === "landscape") {
     const w = 1440;
     const x = (W - w) / 2;
@@ -72,13 +72,15 @@ function geometry(format: Format): Geo {
   // The title wraps inside the safe width: two lines in square, three in portrait (larger type, same width).
   const lines = format === "square" ? 2 : 3;
   const titleBottom = lines * titleSize * 1.15;
-  const chip = format === "square" ? { h: 54, font: 28, gap: 14 } : { h: 68, font: 36, gap: 18 };
-  const gapA = format === "square" ? 30 : 44; // frame -> chips
-  const gapB = format === "square" ? 18 : 30; // chips -> caption
+  // Portrait: larger chips and caption (the caption wraps to two lines), so the stack fills more of the tall frame.
+  const chip = format === "square" ? { h: 54, font: 28, gap: 14 } : { h: 84, font: 44, gap: 22 };
+  const gapA = format === "square" ? 30 : 60; // frame -> chips
+  const gapB = format === "square" ? 18 : 36; // chips -> caption
+  const captionLines = format === "square" ? 1 : 2;
   const fh = frameHeight(format, viewH) + 4;
-  const group = fh + gapA + chip.h + gapB + captionSize * 1.35;
-  // Square: centred in the space under the title. Portrait: the group sits in the upper part of that space.
-  const y = Math.round(titleBottom + (H - titleBottom - group) * (format === "square" ? 0.5 : 0.33));
+  const group = fh + gapA + chip.h + gapB + captionLines * captionSize * 1.35;
+  // Centred in the space under the title.
+  const y = Math.round(titleBottom + (H - titleBottom - group) * 0.5);
   const chipsTop = y + fh + gapA;
   return {
     title: { size: titleSize, lines, width: W },
@@ -152,7 +154,8 @@ export const Live: React.FC<{ format: Format }> = ({ format }) => {
       size={g.captionSize}
       style={{ color: C.light, textAlign: g.row ? "right" : "center", textWrap: "balance", opacity: ramp(frame, AT.caption, AT.caption + 20) }}
     >
-      {T.caption}
+      {/* Hyphenated words (e.g. "on-chain") never break at the hyphen. */}
+      {T.caption.split(/(\S+-\S+)/).map((part, i) => (i % 2 ? <span key={i} style={{ whiteSpace: "nowrap" }}>{part}</span> : part))}
     </Body>
   );
 
