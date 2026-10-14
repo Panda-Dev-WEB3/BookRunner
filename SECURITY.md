@@ -15,6 +15,11 @@ Please report privately. Do not open a public issue, pull request or discussion 
    https://github.com/Panda-Dev-WEB3/BookRunner/security/advisories/new
 2. **Alternative:** email **contact@bookrunner.tech** with "SECURITY" in the subject line.
 
+Reports in English or French are welcome. The machine-readable contact file is published at
+https://bookrunner.tech/.well-known/security.txt (source: `apps/site/public/.well-known/security.txt`; renew its
+`Expires` date before it lapses). The web server's hardening is described in
+[deploy/server/HARDENING.md](deploy/server/HARDENING.md).
+
 ## Scope
 
 The in-scope contracts, the out-of-scope items, the severity guide and the invariants the test suite asserts

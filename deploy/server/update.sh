@@ -103,6 +103,9 @@ NGINX_HTTP_SRC="$DEPLOY/nginx-bookrunner-http.conf"
 . "$DEPLOY/nginx-lib.sh"
 nginx_install_http_conf || echo "!! nginx rate-limit conf NOT updated (see the nginx -t output above)" >&2
 nginx_install_snippet || echo "!! nginx snippet NOT updated (see the nginx -t output above); the site keeps the previous locations" >&2
+nginx_patch_site_hsts || echo "!! nginx site HSTS NOT updated (see the nginx -t output above)" >&2
+NGINX_WILDCARD_SRC="$DEPLOY/nginx-bookrunner-wildcard.conf"
+nginx_install_wildcard_site || echo "!! nginx wildcard site NOT installed (see the nginx -t output above); unknown *.bookrunner.tech names keep the host's default" >&2
 if ! nginx_site_uses_snippet; then
   echo "!! $(nginx_site_file) does not include $NGINX_SNIPPET_DST yet: /app/ is not routed." >&2
   echo "!! run once: sudo bash $DEPLOY/patch-nginx.sh --dry-run   then   sudo bash $DEPLOY/patch-nginx.sh" >&2

@@ -1,7 +1,7 @@
 # Server install (Robinhood Chain testnet stack)
 
 One Linux host runs the whole testnet stack: every service, one agent per book, the trader simulator,
-Postgres/Timescale + Redis in Docker, and nginx serving `https://bookrunner.use-cert.com`: the public site
+Postgres/Timescale + Redis in Docker, and nginx serving `https://bookrunner.tech`: the public site
 (`apps/site`) at `/`, the operator app (`apps/web`) at `/app/`, and the API at `/trpc` + `/health`.
 The host is shared with other services, so everything is loopback-only and memory-capped.
 
@@ -31,18 +31,36 @@ Mainnet (Robinhood Chain 4663) runs on a separate host with the network-parametr
 | `/trpc/…`, `/health` | proxy → API `127.0.0.1:4400` | — | — |
 | `*.webm`, `*.mp4` | either tree, explicit `video/*` types, byte ranges | — | 1 day |
 | `/invest`, `/books/…`, `/learn`, … (the app's old root URLs) | 301 → `/app/…` | — | — |
+| `/robots.txt`, `/sitemap.xml`, `/favicon.ico`, `/apple-touch-icon.png` | `apps/site/public/` | copied by vite | 1 hour |
+| `/.well-known/security.txt` (RFC 9116) | `apps/site/public/.well-known/` (vite copies dot folders) | copied by vite | 1 day, `text/plain; charset=utf-8` |
+| `https://www.bookrunner.tech/…` | 301 → `https://bookrunner.tech/…` (same path and query) | — | — |
+| `http://<anything>.bookrunner.tech/` (wildcard DNS) | 301 → `https://bookrunner.tech/` (`nginx-bookrunner-wildcard.conf`) | — | — |
+
+Indexing: `/app/` sends `X-Robots-Tag: noindex` (and its HTML has `<meta name="robots" content="noindex">`);
+`robots.txt` disallows `/app/` and `/trpc/` and points at `sitemap.xml` (the six public pages). The site's pages
+carry a canonical URL, absolute Open Graph / X card tags (`/assets/bookrunner-og.jpg`, 1200×630) and, on the
+home page, Organization + WebSite JSON-LD. `/research/human-creativity-benchmark/` (an orphan page of the
+original export; the site's script sends every link to it elsewhere) is `noindex` and left out of the sitemap.
 
 The app is built with `VITE_API_URL=same-origin`: it calls `{origin}/trpc` and `{origin}/health` at the host
 root, never under `/app/`. The dev server (`bun run dev`) still serves the app at `/`.
 
 ### nginx files
 
-- `nginx-bookrunner.conf` — the site template (`server{}` with `server_name`, `root`, security headers and
-  `include /etc/nginx/snippets/bookrunner-locations.conf;`). `install.sh` installs it only on a first install:
-  certbot rewrites that file in place (TLS listeners, port-80 redirect), so it is never overwritten later.
-- `nginx-bookrunner-locations.conf` — every `location` block, the security headers (HSTS, the
-  Content-Security-Policy `$bookrunner_csp`, Permissions-Policy), `server_tokens off`, `*.map` → 404 and the
-  per-IP rate limits of `/trpc/` and `/health`. `install.sh` and `update.sh` copy it to
+- `nginx-bookrunner.conf` — the site template (`server{}` with `server_name bookrunner.tech
+  www.bookrunner.tech`, `root`, security headers and `include /etc/nginx/snippets/bookrunner-locations.conf;`).
+  `install.sh` installs it only on a first install: certbot rewrites that file in place (TLS listeners, port-80
+  redirect), so it is never overwritten later. The one line kept current in the live copy is its server-level
+  HSTS header: `update.sh` / `install.sh` (`nginx_patch_site_hsts`) turn `max-age=31536000` into
+  `max-age=31536000; includeSubDomains` in place (validated, rolled back on failure; a no-op afterwards).
+- `nginx-bookrunner-locations.conf` — the www → apex 301 (a server-level `if ($host = www.bookrunner.tech)`
+  holding only a `return`, so the redirect carries the site file's server-level headers, HSTS included),
+  every `location` block, the security headers (HSTS `max-age=31536000; includeSubDomains`, never `preload`;
+  the Content-Security-Policy `$bookrunner_csp`; Permissions-Policy; `X-Robots-Tag: noindex` on `/app/`),
+  `server_tokens off`, gzip for this server (`gzip_types`: CSS, JS incl. the `.mjs` Framer runtime, JSON, XML,
+  SVG, text, icons; HTML is always compressed: the 850 KB home page is ~77 KB on the wire), `*.map` → 404,
+  `/.well-known/security.txt` as `text/plain`, and the per-IP rate limits of `/trpc/` and `/health`.
+  `install.sh` and `update.sh` copy it to
   `/etc/nginx/snippets/bookrunner-locations.conf` (nginx's `www-data` cannot read `/opt/bookrunner`, mode 750),
   validate with `nginx -t`, reload, and put the previous copy back if validation fails.
 - `nginx-bookrunner-http.conf` — the http{}-level rate-limit zones the snippet uses, installed (same validate /
@@ -51,7 +69,19 @@ root, never under `/app/`. The dev server (`bun run dev`) still serves the app a
   has location blocks (the 443 block certbot made), it replaces them with the `include`, keeping certbot's
   listeners/certificates, then runs `nginx -t` and reloads, or restores the backup
   (`/etc/nginx/bookrunner-backups/`) on failure. `--dry-run` prints the diff only. Idempotent.
+- `nginx-bookrunner-wildcard.conf` — a port-80 `server{}` for `*.bookrunner.tech` (the DNS wildcard points at
+  this host) that answers 301 → `https://bookrunner.tech/`, instead of the host's default server (another
+  project's). `update.sh` / `install.sh` install it to `/etc/nginx/sites-available/bookrunner-wildcard` and link
+  it in `sites-enabled` (`nginx_install_wildcard_site`: file and link added together, `nginx -t`, both removed
+  again on failure). nginx prefers exact names over wildcards, so `bookrunner.tech`, `www.bookrunner.tech` and
+  `leveret.bookrunner.tech` (another project on this host, its own site file) are unaffected. There is no
+  wildcard certificate, hence no 443 block: `https://unknown.bookrunner.tech` still meets another server's
+  certificate.
 - `nginx-lib.sh` — the shared install/validate/rollback helpers.
+
+HSTS `includeSubDomains`: once a browser has seen it, it only talks HTTPS to every `*.bookrunner.tech` name for
+a year. Every subdomain a person opens in a browser (`leveret.bookrunner.tech`, a webmail, ...) must therefore
+serve a valid certificate. `preload` is deliberately not set (it cannot be undone quickly).
 
 ## First install
 
@@ -74,10 +104,12 @@ stop the old stack, copy `.env.testnet` (it needs `ORACLE_SEED`, see HARDENING.m
 
 ```bash
 sudo /usr/local/lib/bookrunner-deploy/update.sh       # builds + publishes the web app, starts infra + stack
-sudo certbot --nginx -d bookrunner.141-94-203-130.sslip.io   # works at once (sslip.io resolves to the IP)
-# once the A record bookrunner.use-cert.com -> 141.94.203.130 exists, add it to the same certificate:
-sudo certbot --nginx --expand -d bookrunner.141-94-203-130.sslip.io -d bookrunner.use-cert.com
+# DNS: A records bookrunner.tech and www.bookrunner.tech (and the *.bookrunner.tech wildcard) -> this host
+sudo certbot --nginx -d bookrunner.tech -d www.bookrunner.tech   # the certificate covers exactly these two names
 ```
+
+(The earlier names `bookrunner.use-cert.com` and `bookrunner.141-94-203-130.sslip.io` are retired; the site
+template no longer lists them.)
 
 ## Operate
 
@@ -87,6 +119,18 @@ sudo tail -f /opt/bookrunner/app/.data/testnet/dev.log
 sudo systemctl restart bookrunner
 sudo /usr/local/lib/bookrunner-deploy/update.sh            # deploy origin/main
 sudo /usr/local/lib/bookrunner-deploy/update.sh --web-only # site + app + nginx + units, no restart
+```
+
+Checks after an nginx change:
+
+```bash
+curl -sI https://www.bookrunner.tech/research/ | grep -iE '^(HTTP|location|strict-transport)'  # 301 -> https://bookrunner.tech/research/, HSTS includeSubDomains
+curl -sI https://bookrunner.tech/app/ | grep -i x-robots-tag                                    # noindex
+curl -sI https://bookrunner.tech/.well-known/security.txt | grep -i content-type               # text/plain; charset=utf-8
+curl -s -o /dev/null -w '%{size_download}\n' -H 'Accept-Encoding: gzip' https://bookrunner.tech/  # ~77 KB (850 KB raw)
+curl -sI -H 'Accept-Encoding: gzip' https://bookrunner.tech/assets/framer/script_main.BdWRP7AY.mjs | grep -i content-encoding  # gzip
+curl -sI http://nope.bookrunner.tech/ | grep -iE '^(HTTP|location)'                              # 301 -> https://bookrunner.tech/
+curl -sI http://leveret.bookrunner.tech/ | head -1                                             # leveret's own answer, not ours
 ```
 
 ## Alerts, backups, status
@@ -111,7 +155,8 @@ fast-forwards the app checkout to the same commit (refusing local modifications)
 (`apps/web`, base `/app/`) and the site (`apps/site`) as `bookrunner`, publishes the app with
 `rsync --delete` to `/var/www/bookrunner/app/` and the site with `rsync --delete --exclude=/app` to
 `/var/www/bookrunner/` (so the site's `--delete` never removes the app), installs the nginx rate-limit conf +
-snippet and the units from the root copy, applies a changed compose file (`systemctl reload
+snippet, brings the live site's server-level HSTS line to `includeSubDomains`, installs the wildcard site, and
+the units from the root copy, applies a changed compose file (`systemctl reload
 bookrunner-infra`) and restarts the stack. It warns while the live site does not include the snippet yet
 (run `patch-nginx.sh` once).
 
@@ -128,8 +173,8 @@ sudo bash deploy/server/update.sh --web-only
 sudo bash deploy/server/patch-nginx.sh --dry-run
 sudo bash deploy/server/patch-nginx.sh
 # 4. check
-curl -sI https://bookrunner.use-cert.com/ | head -5               # site, Cache-Control: no-cache
-curl -sI https://bookrunner.use-cert.com/app/books | head -5      # app index.html (SPA fallback)
-curl -s  https://bookrunner.use-cert.com/health                   # API
-curl -sI https://bookrunner.use-cert.com/books | grep -i location # 301 -> /app/books
+curl -sI https://bookrunner.tech/ | head -5               # site, Cache-Control: no-cache
+curl -sI https://bookrunner.tech/app/books | head -5      # app index.html (SPA fallback)
+curl -s  https://bookrunner.tech/health                   # API
+curl -sI https://bookrunner.tech/books | grep -i location # 301 -> /app/books
 ```

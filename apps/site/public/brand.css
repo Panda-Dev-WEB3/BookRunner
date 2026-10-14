@@ -59,7 +59,7 @@ html{scroll-padding-top:104px}
 .framer-46DDF .framer-15h3kqv{background-position:left bottom}
 .framer-46DDF .framer-t1s44y{background-position:right bottom}
 /* Remove decorative company marks from the underwriting capital sequence. */
-#experts [data-framer-name='Images']{visibility:visible!important}
+#underwriting [data-framer-name='Images']{visibility:visible!important}
 svg > foreignObject.framer-fit-text > p{white-space:nowrap!important;text-align:center!important}
 
 

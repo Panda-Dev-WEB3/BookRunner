@@ -9,7 +9,10 @@
   };
   const filters=document.createElementNS('http://www.w3.org/2000/svg','svg');filters.setAttribute('width','0');filters.setAttribute('height','0');filters.setAttribute('aria-hidden','true');filters.style.position='absolute';filters.innerHTML='<defs><filter id="bookrunner-print-ink" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values=".175 .590 .060 0 .12 .144 .483 .049 0 .27 .047 .157 .016 0 .74 0 0 0 1 0"/></filter><filter id="bookrunner-fantasy-ink" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values=".252168 .848261 .085629 0 -.093023 .252168 .848261 .085629 0 -.093023 .252168 .848261 .085629 0 -.093023 0 0 0 1 0"/><feColorMatrix type="matrix" values=".9215686 0 0 0 .0392157 0 .945098 0 0 .0156863 0 0 -.0039216 0 .9568627 0 0 0 1 0"/></filter></defs>';document.body.append(filters);
   const modal=document.createElement('dialog');modal.className='br-dialog';modal.setAttribute('aria-labelledby','br-coming-title');modal.innerHTML='<img class="br-logo" src="/assets/bookrunner-logo-transparent.png" alt="BookRunner"><h2 id="br-coming-title">Coming soon</h2><button type="button">Close</button>';document.body.append(modal);modal.querySelector('button').onclick=()=>modal.close();modal.onclick=e=>{if(e.target===modal){const r=modal.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)modal.close()}};
-  function social(){const box=document.createElement('div');box.className='br-socials';for(const [name,path] of Object.entries(icons)){const b=document.createElement('button');b.className='br-social';b.type='button';b.setAttribute('aria-label',name);const shifts={GitHub:'0.916 .276',Telegram:'1.394 -.075',X:'-.1 0'};b.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><g transform="translate('+shifts[name]+')">'+path+'</g></svg>';b.onclick=()=>modal.showModal();box.append(b)}return box}
+  // the brand's real accounts open in a new tab; an icon without an account keeps the "Coming soon" dialog
+  const links={GitHub:'https://github.com/Panda-Dev-WEB3/BookRunner',X:'https://x.com/TryBookRunner'};
+  const realLinks=/^https:\/\/(?:x\.com\/TryBookRunner|github\.com\/Panda-Dev-WEB3\/BookRunner)\/?$/;
+  function social(){const box=document.createElement('div');box.className='br-socials';for(const [name,path] of Object.entries(icons)){let b;if(links[name]){b=document.createElement('a');b.href=links[name];b.target='_blank';b.rel='noopener noreferrer';b.setAttribute('aria-label','BookRunner on '+name)}else{b=document.createElement('button');b.type='button';b.setAttribute('aria-label',name);b.onclick=()=>modal.showModal()}b.className='br-social';const shifts={GitHub:'0.916 .276',Telegram:'1.394 -.075',X:'-.1 0'};b.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><g transform="translate('+shifts[name]+')">'+path+'</g></svg>';box.append(b)}return box}
   function lockup(a){
     a.setAttribute('aria-label','BookRunner');
     if(!a.querySelector(':scope > .br-brand-lockup')){
@@ -123,8 +126,12 @@
       svg.innerHTML='<path d="M12 5v15M3 4c4-1 7 0 9 2 2-2 5-3 9-2v15c-4-1-7 0-9 2-2-2-5-3-9-2Z"/>';
     });
   }
-  let copy={};fetch('/assets/brand-copy.json').then(r=>r.json()).then(r=>{copy=r;refresh()}).catch(()=>{});
-  const socialPattern=/x\.com\/|youtube\.com\/channel|linkedin\.com\/company|instagram\.com\/bookrunner/;
+  // Runtime copy fixes for text the export renders from template data (e.g. remote CMS items). The table
+  // is keyed by a 53-bit hash (cyrb53, base 36) of the trimmed original text, so the template copy itself
+  // is not shipped; values are the BookRunner text.
+  function copyKey(s){let h1=0xdeadbeef,h2=0x41c6ce57;for(let i=0;i<s.length;i++){const ch=s.charCodeAt(i);h1=Math.imul(h1^ch,2654435761);h2=Math.imul(h2^ch,1597334677)}h1=Math.imul(h1^(h1>>>16),2246822507)^Math.imul(h2^(h2>>>13),3266489909);h2=Math.imul(h2^(h2>>>16),2246822507)^Math.imul(h1^(h1>>>13),3266489909);return(4294967296*(2097151&h2)+(h1>>>0)).toString(36)}
+  let copy={},copyCount=0;fetch('/assets/brand-copy.json').then(r=>r.json()).then(r=>{copy=r;copyCount=Object.keys(r).length;refresh()}).catch(()=>{});
+  const socialPattern=/x\.com\//;
   function destination(a){
     const text=a.textContent.replace(/\s+/g,' ').trim(),href=a.getAttribute('href')||'';
     if(/^(\.\/|\/)research\/[^#]/.test(href))return '/documents/';
@@ -163,11 +170,12 @@
       }
       if(/#hero$/.test(href)){a.setAttribute('href','/#hero');a.removeAttribute('target')}
       if(/#hero$/.test(href)&&!a.matches('[data-framer-name="Logo Banner"]')&&!a.textContent.trim())a.classList.add('br-wordmark');
-      if(socialPattern.test(href)){
-        let parent=a.parentElement;
-        while(parent.parentElement&&parent.querySelectorAll('a[href]').length<3)parent=parent.parentElement;
+      if(socialPattern.test(href)&&!a.closest('.br-socials')){
+        // the footer's Framer "Socials" row (X only since the template's other accounts were removed)
+        let parent=a.closest('[data-framer-name="Socials"]')||a.parentElement;
+        while(!parent.matches('[data-framer-name="Socials"]')&&parent.parentElement&&parent.querySelectorAll('a[href]').length<3)parent=parent.parentElement;
         if(!parent.querySelector(':scope > .br-socials')&&(!location.pathname.startsWith('/jobs')||!document.querySelector('.br-socials')))parent.append(social());
-        parent.querySelectorAll('a[href]').forEach(link=>{if(socialPattern.test(link.getAttribute('href')||'')){const wrapper=link.parentElement;link.style.display='none';link.setAttribute('aria-hidden','true');link.setAttribute('tabindex','-1');if(wrapper!==parent&&wrapper.querySelectorAll('a').length===1)wrapper.style.display='none'}});
+        parent.querySelectorAll('a[href]').forEach(link=>{if(!link.closest('.br-socials')&&socialPattern.test(link.getAttribute('href')||'')){const wrapper=link.parentElement;link.style.display='none';link.setAttribute('aria-hidden','true');link.setAttribute('tabindex','-1');if(wrapper!==parent&&wrapper.querySelectorAll('a').length===1)wrapper.style.display='none'}});
       }
       const target=destination(a);if(target){a.setAttribute('href',target);a.removeAttribute('target')}
       if(a.closest('[name="Logo"]'))a.classList.add('br-wordmark');
@@ -191,7 +199,7 @@
     });
     document.querySelectorAll('p').forEach(p=>{if(p.textContent==='Agent market-making'){let card=p.parentElement;while(card&& !card.querySelector('h3'))card=card.parentElement;const h=card?.querySelector('h3');if(h?.textContent==='Senior')h.textContent='Agent'}});
     const walk=document.createTreeWalker(document.getElementById('main')||document.body,NodeFilter.SHOW_TEXT);
-    let n;while(n=walk.nextNode()){if(n.parentElement?.closest('script,style,.br-dialog,.br-socials,.br-brand-lockup,.br-mobile-wordmark'))continue;const t=n.nodeValue.trim();if(copy[t]&&copy[t]!==t)n.nodeValue=n.nodeValue.replace(t,copy[t]);if(n.nodeValue.includes('Charter termss'))n.nodeValue=n.nodeValue.replaceAll('Charter termss','Example charter parameters');if(n.nodeValue.includes('&amp;'))n.nodeValue=n.nodeValue.replaceAll('&amp;','&');if(n.nodeValue.includes(String.fromCharCode(8212)))n.nodeValue=n.nodeValue.replaceAll(String.fromCharCode(8212),',')}
+    let n;while(n=walk.nextNode()){if(n.parentElement?.closest('script,style,.br-dialog,.br-socials,.br-brand-lockup,.br-mobile-wordmark'))continue;const t=n.nodeValue.trim();const c=t&&copyCount?copy[copyKey(t)]:undefined;if(c&&c!==t)n.nodeValue=n.nodeValue.replace(t,c);if(n.nodeValue.includes('Charter termss'))n.nodeValue=n.nodeValue.replaceAll('Charter termss','Example charter parameters');if(n.nodeValue.includes('&amp;'))n.nodeValue=n.nodeValue.replaceAll('&amp;','&');if(n.nodeValue.includes(String.fromCharCode(8212)))n.nodeValue=n.nodeValue.replaceAll(String.fromCharCode(8212),',')}
     document.querySelectorAll('img').forEach(im=>{
       im.loading='eager';im.decoding='async';
       if(im.classList.contains('br-logo'))return;
@@ -232,6 +240,7 @@
   document.addEventListener('click',e=>{
     if(e.button!==0||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey)return;
     const a=e.target.closest('a');if(!a)return;const href=a.getAttribute('href')||'';
+    if(realLinks.test(href))return;
     if(socialPattern.test(href)){e.preventDefault();e.stopImmediatePropagation();modal.showModal();return}
     const target=destination(a)||(/^\/?dashboard\/?|^\/documents\//.test(href)?href:null);
     if(target){

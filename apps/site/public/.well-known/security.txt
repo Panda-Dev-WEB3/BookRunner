@@ -1,0 +1,6 @@
+Contact: mailto:contact@bookrunner.tech
+Contact: https://github.com/Panda-Dev-WEB3/BookRunner/security/advisories/new
+Expires: 2027-10-14T00:00:00Z
+Preferred-Languages: en, fr
+Canonical: https://bookrunner.tech/.well-known/security.txt
+Policy: https://github.com/Panda-Dev-WEB3/BookRunner/blob/main/SECURITY.md

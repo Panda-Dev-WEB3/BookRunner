@@ -70,6 +70,11 @@ if [ ! -e /etc/nginx/sites-available/bookrunner ] || [ "${1:-}" = "--nginx-site"
 fi
 # certbot rewrites the enabled site in place; only (re)link when it is not there yet
 [ -e /etc/nginx/sites-enabled/bookrunner ] || ln -s /etc/nginx/sites-available/bookrunner /etc/nginx/sites-enabled/bookrunner
+# a live site from before includeSubDomains gets its server-level HSTS line updated (no-op otherwise)
+nginx_patch_site_hsts || echo "!! nginx site HSTS NOT updated (see the nginx -t output above)" >&2
+# other *.bookrunner.tech names (port 80) -> https://bookrunner.tech/ (own site file + link)
+NGINX_WILDCARD_SRC="$DEPLOY/nginx-bookrunner-wildcard.conf"
+nginx_install_wildcard_site || echo "!! nginx wildcard site NOT installed (see the nginx -t output above)" >&2
 install -d -o bookrunner -g bookrunner -m 0755 /var/www/bookrunner /var/www/bookrunner/app
 install -d -o bookrunner -g bookrunner -m 0750 "$APP/.data" "$APP/.data/testnet"
 systemctl daemon-reload

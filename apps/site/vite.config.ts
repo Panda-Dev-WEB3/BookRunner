@@ -5,7 +5,7 @@
 // index.html, research/, jobs/, documents/, dashboard/, status/, assets/...
 //
 // Dev: `bun run dev` serves the same tree and proxies /trpc, /health and /status.json to SITE_API_ORIGIN
-// (default https://bookrunner.use-cert.com, the live testnet API; read-only queries are safe).
+// (default https://bookrunner.tech, the live testnet API; read-only queries are safe).
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -14,7 +14,7 @@ import { type Plugin, defineConfig } from "vite";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
 const publicDir = join(root, "public");
-const apiOrigin = process.env.SITE_API_ORIGIN ?? "https://bookrunner.use-cert.com";
+const apiOrigin = process.env.SITE_API_ORIGIN ?? "https://bookrunner.tech";
 const port = Number(process.env.SITE_PORT ?? 5191);
 
 /** Bundled pages: the page directory, its TS entry, the built script (dist/<dir>/app.js). */
