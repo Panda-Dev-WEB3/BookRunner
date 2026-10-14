@@ -11,6 +11,7 @@ import { sceneStart } from "../src/timeline.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = path.join(root, "out");
+const CRF = 18; // H.264 quality (lower = larger file); raise to 20-22 if an output is too large
 const suffixes = { landscape: "16x9", square: "1x1", portrait: "9x16" };
 
 try {
@@ -26,7 +27,7 @@ try {
       composition,
       serveUrl,
       codec: "h264",
-      crf: Number(process.env.CRF ?? 18),
+      crf: CRF,
       pixelFormat: "yuv420p",
       muted: true,
       outputLocation: mp4,
