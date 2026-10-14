@@ -1,16 +1,7 @@
-import { AbsoluteFill, Composition, Img, staticFile } from "remotion";
-import { FONT } from "./fonts";
-import { C, FORMATS, FPS, type Format } from "./theme";
-
-// Temporary proof-of-pipeline scene; replaced by the real Overview in a later task.
-const Hello: React.FC = () => (
-  <AbsoluteFill
-    style={{ background: C.bg, alignItems: "center", justifyContent: "center", gap: 48, color: C.cream }}
-  >
-    <Img src={staticFile("logo.png")} style={{ width: 360 }} />
-    <div style={{ fontFamily: FONT.serif, fontSize: 96, fontWeight: 600 }}>Run the book.</div>
-  </AbsoluteFill>
-);
+import { Composition } from "remotion";
+import { Overview } from "./Overview";
+import { FORMATS, FPS, type Format } from "./theme";
+import { TOTAL_FRAMES } from "./timeline";
 
 export const RemotionRoot: React.FC = () => (
   <>
@@ -18,8 +9,9 @@ export const RemotionRoot: React.FC = () => (
       <Composition
         key={f}
         id={FORMATS[f].id}
-        component={Hello}
-        durationInFrames={FPS * 5}
+        component={Overview}
+        defaultProps={{ format: f }}
+        durationInFrames={TOTAL_FRAMES}
         fps={FPS}
         width={FORMATS[f].width}
         height={FORMATS[f].height}
