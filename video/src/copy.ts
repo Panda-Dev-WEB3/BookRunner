@@ -56,6 +56,8 @@ export const COPY = {
     books: ["NVDA", "TSLA", "RHX5"],
     caption: "Three books marking on-chain, every period.",
     url: "bookrunner.tech/dashboard",
+    /** Address bar while the status page plays. */
+    statusUrl: "bookrunner.tech/status",
   },
   next: {
     /** The roadmap runs on one network: `network` labels the whole route, from today's testnet to the mainnet launch. */

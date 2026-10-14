@@ -3,23 +3,18 @@ import type { SceneId } from "./copy";
 import type { Format } from "./theme";
 import { SCENES } from "./timeline";
 import { Stage } from "./ui/Stage";
-import { Headline } from "./ui/Text";
 import { fadeInOut, ramp } from "./ui/motion";
 import { Book } from "./scenes/Book";
 import { Charter } from "./scenes/Charter";
 import { Mandate } from "./scenes/Mandate";
 import { Next } from "./scenes/Next";
 import { Hook } from "./scenes/Hook";
+import { Live } from "./scenes/Live";
 import { Problem } from "./scenes/Problem";
 import { Proof } from "./scenes/Proof";
 import { Waterfall } from "./scenes/Waterfall";
 
 type SceneProps = { format: Format };
-
-/** Temporary stub: shows the scene id so the timeline is visible end to end. Replaced scene by scene. */
-const stub =
-  (id: SceneId): React.FC<SceneProps> =>
-  ({ format }) => <Headline format={format}>{id}</Headline>;
 
 const SCENE_COMPONENTS: Record<SceneId, React.FC<SceneProps>> = {
   hook: Hook,
@@ -29,7 +24,7 @@ const SCENE_COMPONENTS: Record<SceneId, React.FC<SceneProps>> = {
   mandate: Mandate,
   waterfall: Waterfall,
   proof: Proof,
-  live: stub("live"),
+  live: Live,
   next: Next,
 };
 
