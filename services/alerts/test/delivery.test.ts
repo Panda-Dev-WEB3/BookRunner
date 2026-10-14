@@ -62,7 +62,7 @@ describe("deliverer", () => {
 
   test("email goes through sendMail with the configured mailbox; failures are scrubbed", async () => {
     const mails: unknown[] = [];
-    const email = { to: ["ops@bookrunner.tech"], from: "alerts@bookrunner.tech", host: "mail.use-cert.com", port: 587, user: "alerts@bookrunner.tech", pass: "p4ss" };
+    const email = { to: ["ops@bookrunner.tech"], from: "alerts@bookrunner.tech", host: "mail.ignition-x.com", port: 587, user: "alerts@bookrunner.tech", pass: "p4ss" };
     const d = createDeliverer(delivery({ email }), {
       fetch,
       sendMail: async (o) => {
@@ -70,9 +70,9 @@ describe("deliverer", () => {
         if (mails.length > 1) throw new Error("535 auth failed for p4ss");
       },
     });
-    expect(d.channels[0]).toBe("email -> ops@bookrunner.tech via mail.use-cert.com:587");
+    expect(d.channels[0]).toBe("email -> ops@bookrunner.tech via mail.ignition-x.com:587");
     expect((await d.deliver(m))[0]!.ok).toBe(true);
-    expect(mails[0]).toMatchObject({ host: "mail.use-cert.com", port: 587, user: "alerts@bookrunner.tech", to: ["ops@bookrunner.tech"], subject: m.subject });
+    expect(mails[0]).toMatchObject({ host: "mail.ignition-x.com", port: 587, user: "alerts@bookrunner.tech", to: ["ops@bookrunner.tech"], subject: m.subject });
     const fail = (await d.deliver(m))[0]!;
     expect(fail.ok).toBe(false);
     expect(fail.error).not.toContain("p4ss");
@@ -121,7 +121,7 @@ describe("config", () => {
   test("channels only when complete", () => {
     expect(loadConfig({ ALERT_EMAIL_TO: "a@b.c" }).delivery.email).toBeNull(); // no SMTP credentials
     const c = loadConfig({ ALERT_EMAIL_TO: "a@b.c, d@e.f", ALERT_SMTP_USER: "alerts@bookrunner.tech", ALERT_SMTP_PASS: "x" });
-    expect(c.delivery.email).toMatchObject({ to: ["a@b.c", "d@e.f"], host: "mail.use-cert.com", port: 587, from: "alerts@bookrunner.tech" });
+    expect(c.delivery.email).toMatchObject({ to: ["a@b.c", "d@e.f"], host: "mail.ignition-x.com", port: 587, from: "alerts@bookrunner.tech" });
     expect(loadConfig({ ALERT_WEBHOOK_URL: "https://x" }).delivery.webhook).toMatchObject({ format: "auto" });
   });
 

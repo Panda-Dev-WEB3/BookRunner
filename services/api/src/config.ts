@@ -59,7 +59,7 @@ const isLoopbackOrigin = (o: string) => {
 
 /**
  * Allowed CORS origins. A public deployment (any non-loopback WEB_ORIGIN entry, e.g. the server's
- * https://bookrunner.use-cert.com) allows exactly its WEB_ORIGIN entries; a local setup (loopback only,
+ * https://bookrunner.tech) allows exactly its WEB_ORIGIN entries; a local setup (loopback only,
  * the default) also gets the devnet web app on both loopback names.
  */
 export function webOrigins(webOrigin: string): string[] {

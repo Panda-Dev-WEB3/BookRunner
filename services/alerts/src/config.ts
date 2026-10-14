@@ -123,7 +123,7 @@ const shape = {
   // ---- delivery
   ALERT_EMAIL_TO: z.string().default(""),
   ALERT_EMAIL_FROM: z.string().optional(),
-  ALERT_SMTP_HOST: z.string().default("mail.use-cert.com"),
+  ALERT_SMTP_HOST: z.string().default("mail.ignition-x.com"),
   ALERT_SMTP_PORT: z.coerce.number().int().min(1).max(65535).default(587),
   ALERT_SMTP_USER: z.string().optional(),
   ALERT_SMTP_PASS: z.string().optional(),

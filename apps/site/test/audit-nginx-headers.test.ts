@@ -1,4 +1,4 @@
-// AUDIT (area 6, off-chain): web server config of https://bookrunner.use-cert.com (deploy/server).
+// AUDIT (area 6, off-chain): web server config of https://bookrunner.tech (deploy/server).
 // Live evidence (curl -sI, 2026-10-07): no Strict-Transport-Security, no Content-Security-Policy, no
 // Permissions-Policy on /, /app/, /dashboard/; "Server: nginx/1.28.3 (Ubuntu)"; source maps served:
 //   /app/assets/index-DSiGraYj.js.map 200 (1,043,515 bytes), /dashboard/app.js.map 200 (2,078,650 bytes).
