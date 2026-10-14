@@ -7,8 +7,21 @@ import { Body, Headline } from "../ui/Text";
 import { ramp, rise, stagger } from "../ui/motion";
 
 const T = COPY.mandate;
-/** Scene-local frames. `push` is the window in which the quotes are driven out of the band. */
-const AT = { panel: 15, lines: 30, chips: 60, push: [360, 420], cancel: [425, 450], caption: 430 } as const;
+/**
+ * Scene-local frames. `push` is the window in which the quotes are driven out of the band (the breach lands inside
+ * it). The kill sequence then runs in the documented order (ARCHITECTURE §3.4, and the caption): quotes cancelled,
+ * inventory flattened, keys revoked.
+ */
+const AT = {
+  panel: 15,
+  lines: 30,
+  chips: 60,
+  push: [360, 420],
+  cancel: [420, 438],
+  flatten: [440, 458],
+  revoke: [460, 476],
+  caption: 430,
+} as const;
 /** Frames of quote history shown across the chart. */
 const HISTORY = 120;
 
@@ -37,6 +50,12 @@ const mid = (f: number): number => 0.3 * Math.sin(f / 21) + 0.13 * Math.sin(f / 
 const drift = (f: number): number => 1.3 * Easing.in(Easing.quad)(Math.min(1, Math.max(0, (f - AT.push[0]) / (AT.push[1] - AT.push[0]))));
 const ask = (f: number): number => mid(f) + SPREAD + drift(f);
 const bid = (f: number): number => mid(f) - SPREAD + drift(f);
+
+/** Agent inventory (fraction of its limit, long): drifts while quoting, frozen once quotes are cancelled. */
+const inventory = (f: number): number => {
+  const t = Math.min(f, AT.cancel[0]);
+  return 0.55 + 0.2 * Math.sin(t / 41 + 0.6) + 0.08 * Math.sin(t / 13);
+};
 
 /** First frame at which the ask leaves the band: everything that reacts to the breach keys off it. */
 const BREACH = (() => {
@@ -73,7 +92,7 @@ const Chart: React.FC<{ format: Format; w: number; h: number; frame: number }> =
   const y = (v: number) => h / 2 - v * hb;
   const labelSize = Math.max(26, Math.round(BASE[format] * 0.55));
   const xEnd = w - labelSize * 2.6; // room for the "Bid"/"Ask" labels at the live end
-  const now = Math.min(frame, AT.push[1]); // quotes stop updating once cancelled
+  const now = Math.min(frame, AT.cancel[0]); // quotes stop updating once cancelled
   const path = (q: (f: number) => number) =>
     Array.from({ length: HISTORY + 1 }, (_, k) => `${k === 0 ? "M" : "L"} ${((k / HISTORY) * xEnd).toFixed(1)} ${y(q(now - HISTORY + k)).toFixed(1)}`).join(" ");
   const askD = path(ask);
@@ -83,7 +102,7 @@ const Chart: React.FC<{ format: Format; w: number; h: number; frame: number }> =
   const lineOpacity = show * (1 - 0.65 * cancelled); // cancelled quotes stay as a faint trace
   // Flash: two quick red pulses, then the band stays red-tinted.
   const t = frame - BREACH;
-  const flash = t < 0 ? 0 : t < 30 ? 0.22 + 0.28 * (0.5 + 0.5 * Math.cos((t / 15) * 2 * Math.PI)) : 0.22;
+  const flash = t < 0 ? 0 : t < 30 ? 0.22 + 0.28 * Math.sin((t / 15) * Math.PI) ** 2 : 0.22; // ends on its rest value
   const red = ramp(frame, BREACH, BREACH + 4);
   const edge = interpolateColors(red, [0, 1], [withAlpha(C.light, 0.6), C.loss]);
   const sw = format === "portrait" ? 5 : 4;
@@ -136,6 +155,26 @@ const Chart: React.FC<{ format: Format; w: number; h: number; frame: number }> =
       {label(T.ask, y(ask(now)) - sep, C.cream)}
       {label(T.bid, y(bid(now)) + sep, C.light)}
     </svg>
+  );
+};
+
+/** Inventory gauge: zero mark in the middle, long position filling to the right; `flat` 0 -> 1 takes it to zero. */
+const Gauge: React.FC<{ format: Format; frame: number; label: string }> = ({ format, frame, label }) => {
+  const size = Math.max(26, Math.round(BASE[format] * 0.55));
+  const w = { landscape: 220, square: 180, portrait: 220 }[format];
+  const h = Math.round(size * 0.55);
+  const flat = ramp(frame, AT.flatten[0], AT.flatten[1], Easing.inOut(Easing.cubic));
+  const v = inventory(frame) * (1 - flat);
+  const done = ramp(frame, AT.flatten[1] - 4, AT.flatten[1] + 4);
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+      <div style={{ fontFamily: FONT.sans, fontWeight: 500, fontSize: size, letterSpacing: "0.16em", color: C.light }}>{label.toUpperCase()}</div>
+      <svg width={w} height={h + 12} style={{ flex: "none", overflow: "visible" }}>
+        <rect x={0} y={6} width={w} height={h} rx={h / 2} fill={withAlpha(C.light, 0.12)} stroke={C.line} strokeWidth={1.5} />
+        <rect x={w / 2} y={6} width={(v * w) / 2} height={h} fill={C.light} />
+        <line x1={w / 2} x2={w / 2} y1={0} y2={h + 12} stroke={interpolateColors(done, [0, 1], [C.muted, C.cream])} strokeWidth={3} strokeLinecap="round" />
+      </svg>
+    </div>
   );
 };
 
@@ -225,9 +264,12 @@ export const Mandate: React.FC<{ format: Format }> = ({ format }) => {
             ...rise(frame, AT.panel),
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: 18, marginBottom: Math.round(base * 0.35) }}>
-            <Key size={Math.round(titleSize * 1.15)} brk={ramp(frame, BREACH + 6, BREACH + 20, Easing.out(Easing.back(1.4)))} />
-            <div style={{ fontFamily: FONT.sans, fontWeight: 600, fontSize: titleSize, lineHeight: 1.25, color: C.cream }}>{T.agent}</div>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 24, marginBottom: Math.round(base * 0.35) }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 18 }}>
+              <Key size={Math.round(titleSize * 1.15)} brk={ramp(frame, AT.revoke[0], AT.revoke[1], Easing.out(Easing.back(1.4)))} />
+              <div style={{ fontFamily: FONT.sans, fontWeight: 600, fontSize: titleSize, lineHeight: 1.25, color: C.cream }}>{T.agent}</div>
+            </div>
+            <Gauge format={format} frame={frame} label={T.inventory} />
           </div>
           <Chart format={format} w={L.panelW - 2 * panelPad - 3} h={L.chartH} frame={frame} />
         </div>

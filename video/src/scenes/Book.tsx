@@ -1,10 +1,10 @@
 import type { CSSProperties } from "react";
 import { interpolate, useCurrentFrame } from "remotion";
 import { COPY } from "../copy";
-import { BASE, C, FORMATS, type Format } from "../theme";
+import { BASE, C, type Format } from "../theme";
 import { Flow } from "../ui/Flow";
 import { Node } from "../ui/Node";
-import { PAD } from "../ui/Stage";
+import { contentBox } from "../ui/Stage";
 import { Body, Headline } from "../ui/Text";
 import { rise } from "../ui/motion";
 
@@ -23,11 +23,6 @@ const right = (r: Rect, dy = 0): Pt => [r.x + r.w, r.y + r.h / 2 + dy];
 const left = (r: Rect, dy = 0): Pt => [r.x, r.y + r.h / 2 + dy];
 const top = (r: Rect, dx = 0): Pt => [r.x + r.w / 2 + dx, r.y];
 const bottom = (r: Rect, dx = 0): Pt => [r.x + r.w / 2 + dx, r.y + r.h];
-
-/** Content-box size for a format (inside the Stage padding). */
-function box(format: Format): { W: number; H: number } {
-  return { W: FORMATS[format].width - 2 * PAD[format].x, H: FORMATS[format].height - 2 * PAD[format].y };
-}
 
 /** Landscape: allocators | senior over junior | the book | venues, left to right, centred between title and caption. */
 function landscape(): { rects: Record<Box, Rect>; links: Link[] } {
@@ -57,7 +52,7 @@ function landscape(): { rects: Record<Box, Rect>; links: Link[] } {
  * right gutter (past the junior box), so no stream crosses a box.
  */
 function stacked(format: Format): { rects: Record<Box, Rect>; links: Link[] } {
-  const { W, H } = box(format);
+  const { W, H } = contentBox(format);
   const p = format === "square"
     ? { title: 80, caption: 47, tg: 40, cg: 36, g: 160, hA: 76, hT: 124, hV: 120, gapT: 14, gapV: 60, maxF: 90 }
     : { title: 93, caption: 116, tg: 30, cg: 30, g: 170, hA: 110, hT: 190, hV: 165, gapT: 18, gapV: 60, maxF: 130 };

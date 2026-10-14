@@ -10,7 +10,18 @@ import { ramp, rise, stagger } from "../ui/motion";
 
 const T = COPY.charter;
 /** Scene-local frames: fields tick in, the committee appears, the card slides over, seats vote, stamp, caption. */
-const AT = { fields: 30, committee: 170, slide: [200, 260], arrow: [235, 265], seats: 270, stamp: 320, caption: 360 } as const;
+const AT = {
+  fields: 30,
+  committee: 170,
+  slide: [200, 260],
+  arrow: [235, 265],
+  /** The model jury posts its verdict, then two of the three bonded members vote (the 2-of-3 threshold). */
+  verdict: 266,
+  votes: [284, 296],
+  threshold: 300,
+  stamp: 320,
+  caption: 360,
+} as const;
 
 type Layout = {
   /** Card above the committee (true) or beside it. */
@@ -61,13 +72,22 @@ const Tick: React.FC<{ size: number; p: number }> = ({ size: s, p }) => (
   </svg>
 );
 
-/** Model-jury seat: a chip glyph. Lit (`on` 0 -> 1) when it votes. */
-const JurySeat: React.FC<{ size: number; on: number }> = ({ size: s, on }) => {
-  const stroke = interpolateColors(on, [0, 1], [C.muted, C.light]);
+/**
+ * Model-jury seat: a chip glyph that posts a verdict (a document) as `verdict` goes 0 -> 1. The jury recommends; it
+ * does not vote, so it is never lit like a bonded seat.
+ */
+const JurySeat: React.FC<{ size: number; verdict: number }> = ({ size: s, verdict }) => {
+  const stroke = interpolateColors(verdict, [0, 1], [C.muted, C.cream]);
   const pins = [0.35, 0.5, 0.65];
+  // Verdict document: bottom-right of the chip, rising into place.
+  const dw = s * 0.5;
+  const dh = s * 0.62;
+  const dx = s * 0.98;
+  const dy = s * 0.34 + (1 - verdict) * s * 0.15;
+  const fold = dw * 0.32;
   return (
-    <svg width={s} height={s} style={{ flex: "none" }}>
-      <rect x={s * 0.2} y={s * 0.2} width={s * 0.6} height={s * 0.6} rx={s * 0.1} fill={withAlpha(C.blue, on)} stroke={stroke} strokeWidth={3} />
+    <svg width={s * 1.55} height={s} style={{ flex: "none", overflow: "visible" }}>
+      <rect x={s * 0.2} y={s * 0.2} width={s * 0.6} height={s * 0.6} rx={s * 0.1} fill="none" stroke={stroke} strokeWidth={3} />
       <rect x={s * 0.39} y={s * 0.39} width={s * 0.22} height={s * 0.22} rx={s * 0.03} fill={stroke} />
       {pins.map((k) => (
         <g key={k} stroke={stroke} strokeWidth={3} strokeLinecap="round">
@@ -77,6 +97,15 @@ const JurySeat: React.FC<{ size: number; on: number }> = ({ size: s, on }) => {
           <line x1={s * 0.83} y1={s * k} x2={s * 0.95} y2={s * k} />
         </g>
       ))}
+      <g opacity={verdict} stroke={C.cream} strokeWidth={2.5} strokeLinejoin="round" strokeLinecap="round">
+        <path
+          d={`M ${dx} ${dy} H ${dx + dw - fold} L ${dx + dw} ${dy + fold} V ${dy + dh} H ${dx} Z`}
+          fill={C.panel}
+        />
+        <path d={`M ${dx + dw - fold} ${dy} V ${dy + fold} H ${dx + dw}`} fill="none" />
+        <line x1={dx + dw * 0.22} x2={dx + dw * 0.78} y1={dy + dh * 0.55} y2={dy + dh * 0.55} />
+        <line x1={dx + dw * 0.22} x2={dx + dw * 0.62} y1={dy + dh * 0.76} y2={dy + dh * 0.76} />
+      </g>
     </svg>
   );
 };
@@ -158,7 +187,8 @@ export const Charter: React.FC<{ format: Format }> = ({ format }) => {
   const dx = L.stacked ? 0 : (contentBox(format).W - (L.cardW + L.gap + L.comW)) / 2;
   const cardMove = L.stacked ? `translateY(${-L.lead * (1 - slide)}px)` : `translateX(${-dx * (1 - slide)}px)`;
   const committee = rise(frame, AT.committee);
-  const seatOn = (i: number) => ramp(frame, AT.seats + stagger(i, 10), AT.seats + stagger(i, 10) + 8);
+  // Bonded seat i (0-2) lights when it votes; only the first two do, which is enough to approve.
+  const vote = (i: number) => (i < AT.votes.length ? ramp(frame, AT.votes[i], AT.votes[i] + 8) : 0);
   const nodePadY = Math.round(base * 0.5);
   const nodePadX = Math.round(base * 0.65);
 
@@ -235,7 +265,7 @@ export const Charter: React.FC<{ format: Format }> = ({ format }) => {
               gap: Math.round(L.seat * 0.3),
             }}
           >
-            <JurySeat size={L.seat} on={seatOn(0)} />
+            <JurySeat size={L.seat} verdict={ramp(frame, AT.verdict, AT.verdict + 12, Easing.out(Easing.quad))} />
             <svg width={L.seat * 0.5} height={L.seat} style={{ flex: "none" }}>
               <path
                 d={`M ${L.seat * 0.25} ${L.seat * 0.32} V ${L.seat * 0.68} M ${L.seat * 0.07} ${L.seat / 2} H ${L.seat * 0.43}`}
@@ -244,9 +274,22 @@ export const Charter: React.FC<{ format: Format }> = ({ format }) => {
                 strokeLinecap="round"
               />
             </svg>
-            {[1, 2, 3].map((i) => (
-              <BondedSeat key={i} size={L.seat} on={seatOn(i)} />
+            {[0, 1, 2].map((i) => (
+              <BondedSeat key={i} size={L.seat} on={vote(i)} />
             ))}
+            <div
+              style={{
+                marginLeft: Math.round(L.seat * 0.2),
+                fontFamily: FONT.sans,
+                fontWeight: 500,
+                fontSize: Math.max(26, Math.round(base * 0.55)),
+                color: C.light,
+                whiteSpace: "nowrap",
+                opacity: ramp(frame, AT.threshold, AT.threshold + 14),
+              }}
+            >
+              {T.threshold}
+            </div>
           </div>
         </div>
       </div>
