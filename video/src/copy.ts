@@ -46,6 +46,8 @@ export const COPY = {
   proof: {
     title: "Proof, not promises.",
     items: ["NAV", "Inventory", "P&L", "Receipt root"],
+    mark: "Mark",
+    seal: "Signed",
     signed: "Every mark is signed and committed on-chain.",
     gas: "One transaction per book per period.",
   },
@@ -56,7 +58,9 @@ export const COPY = {
     url: "bookrunner.tech/dashboard",
   },
   next: {
-    steps: ["Independent audit", "Guarded mainnet launch", "Robinhood Chain"],
+    /** The roadmap runs on one network: `network` labels the whole route, from today's testnet to the mainnet launch. */
+    network: "Robinhood Chain",
+    steps: ["Live on testnet", "Independent audit", "Guarded mainnet launch"],
     url: "bookrunner.tech",
     x: "@TryBookRunner",
     disclaimer: "Testnet software. Not an offer. Stock-perp books are not available to US persons.",
