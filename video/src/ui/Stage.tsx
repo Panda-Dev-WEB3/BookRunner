@@ -1,5 +1,5 @@
 import { AbsoluteFill } from "remotion";
-import { C, type Format } from "../theme";
+import { C, FORMATS, type Format } from "../theme";
 
 /** Safe padding (px) keeping content off the edges, per format. */
 export const PAD: Record<Format, { x: number; y: number }> = {
@@ -7,6 +7,11 @@ export const PAD: Record<Format, { x: number; y: number }> = {
   square: { x: 90, y: 90 },
   portrait: { x: 90, y: 160 },
 };
+
+/** Size of the content box inside the safe padding (the coordinate space of scene layouts and `Flow`). */
+export function contentBox(format: Format): { W: number; H: number } {
+  return { W: FORMATS[format].width - 2 * PAD[format].x, H: FORMATS[format].height - 2 * PAD[format].y };
+}
 
 const GRID = "rgba(140,165,230,0.07)";
 

@@ -19,3 +19,12 @@ export function rise(frame: number, delay = 0): { opacity: number; transform: st
 export function stagger(i: number, step = 8): number {
   return i * step;
 }
+
+/** 0 -> 1 between frames `from` and `to`, clamped at both ends, optionally eased. */
+export function ramp(frame: number, from: number, to: number, easing?: (t: number) => number): number {
+  return interpolate(frame, [from, to], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+    ...(easing ? { easing } : {}),
+  });
+}

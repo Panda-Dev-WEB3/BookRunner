@@ -6,8 +6,11 @@ import { Stage } from "./ui/Stage";
 import { Headline } from "./ui/Text";
 import { fadeInOut } from "./ui/motion";
 import { Book } from "./scenes/Book";
+import { Charter } from "./scenes/Charter";
+import { Mandate } from "./scenes/Mandate";
 import { Hook } from "./scenes/Hook";
 import { Problem } from "./scenes/Problem";
+import { Waterfall } from "./scenes/Waterfall";
 
 type SceneProps = { format: Format };
 
@@ -20,9 +23,9 @@ const SCENE_COMPONENTS: Record<SceneId, React.FC<SceneProps>> = {
   hook: Hook,
   problem: Problem,
   book: Book,
-  charter: stub("charter"),
-  mandate: stub("mandate"),
-  waterfall: stub("waterfall"),
+  charter: Charter,
+  mandate: Mandate,
+  waterfall: Waterfall,
   proof: stub("proof"),
   live: stub("live"),
   next: stub("next"),
