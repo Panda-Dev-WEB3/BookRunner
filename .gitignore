@@ -29,3 +29,8 @@ contracts/deployments/4663.json
 contracts/deployments/*.simulation.json
 contracts/deployments/*.rehearsal.json
 contracts/deployments/test-*.json
+
+# overview video (video/): Linux node_modules live in a Docker volume; renders and footage stay local
+video/node_modules/
+video/out/
+video/public/footage/
