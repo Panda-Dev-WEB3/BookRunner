@@ -41,23 +41,24 @@ Delivered in three formats rendered from one source: **16:9** (1920×1080), **1:
 
 ## Build
 
-- New workspace `apps/video/` (TypeScript + React + **Remotion**; the team is ≤ 3 people, within Remotion's
-  free licence). Not deployed to the server.
+- New top-level project `video/` (TypeScript + React + **Remotion**; the team is ≤ 3 people, within Remotion's
+  free licence). Not a bun workspace and not deployed: Remotion runs inside Docker via `scripts/video.sh`
+  (its native compositor is blocked by Windows application control on this PC, like forge and bun).
 - `src/copy.ts`: every on-screen string, in one file; `scripts/check-copy.ts` is extended to cover it.
 - `src/theme.ts`: colours, fonts, timings. `src/scenes/*`: one component per scene; each receives the format
   (`landscape` / `square` / `portrait`) and lays itself out for it (no cropping).
 - `src/Overview.tsx`: the timeline (scene order and durations) shared by the three compositions
   `Overview16x9`, `Overview1x1`, `Overview9x16`.
 - Live footage: `scripts/record-footage.ts` drives headless Chrome over https://bookrunner.tech (`/dashboard/`,
-  `/status/`) and writes clips to `apps/video/public/footage/` (gitignored; re-run to refresh).
-- Render: `bun run render` → `apps/video/out/bookrunner-overview-{16x9,1x1,9x16}.mp4` (H.264, 30 fps) + a
+  `/status/`) and writes clips to `video/public/footage/` (gitignored; re-run to refresh).
+- Render: `bash scripts/video.sh npm run render` → `video/out/bookrunner-overview-{16x9,1x1,9x16}.mp4` (H.264, 30 fps) + a
   poster PNG each; `out/` is gitignored. ffmpeg comes with Remotion's renderer; Docker ffmpeg is the
   fallback for any post-processing.
 
 ## Verification
 
 1. `bun run stills`: one still per scene per format → reviewed by the user before the full render.
-2. Copy check passes on `apps/video/src/copy.ts`; typecheck passes.
+2. Copy check passes on `video/src/copy.ts`; typecheck passes.
 3. Full render of the three MP4s; watched back end to end (frames sampled per scene) for overflow, legibility,
    timing; sent to the user.
 
