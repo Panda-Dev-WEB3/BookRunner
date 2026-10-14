@@ -1,8 +1,9 @@
-import { Easing, Img, interpolateColors, spring, staticFile, useCurrentFrame } from "remotion";
+import { Easing, interpolateColors, spring, useCurrentFrame } from "remotion";
 import { COPY } from "../copy";
 import { FONT } from "../fonts";
 import { BASE, C, FPS, type Format } from "../theme";
 import { withAlpha } from "../ui/color";
+import { LogoDisc } from "../ui/LogoDisc";
 import { contentBox } from "../ui/Stage";
 import { Body, Headline, Label } from "../ui/Text";
 import { ramp, rise } from "../ui/motion";
@@ -23,6 +24,9 @@ type Geo = {
   labelW: number;
   font: number;
   dot: number;
+  /** The last stop's ring is drawn a little larger (the destination), except on the vertical route where every ring is one size. */
+  bigLast: boolean;
+  /** Logo disc diameter and top. */
   logo: { size: number; top: number };
   urlTop: number;
   xGap: number;
@@ -43,6 +47,7 @@ function geometry(format: Format): Geo {
       labelW: W - 160,
       font,
       dot: 18,
+      bigLast: false,
       logo: { size: 320, top: 730 },
       urlTop: 1090,
       xGap: 18,
@@ -50,17 +55,19 @@ function geometry(format: Format): Geo {
   }
   const landscape = format === "landscape";
   const panel = landscape ? { x: 90, y: 0, w: W - 180, h: 260, pad: 32 } : { x: 0, y: 0, w: W, h: 300, pad: 30 };
-  const spacing = landscape ? 540 : 300;
+  // Stops sit well inside the panel so the longest label ("Guarded mainnet launch") keeps clear of its edge.
+  const spacing = landscape ? 480 : 270;
   const ty = panel.y + (landscape ? 128 : 124);
   return {
     panel,
     stops: [0, 1, 2].map((i) => [W / 2 + (i - 1) * spacing, ty] as Pt),
     vertical: false,
-    labelW: landscape ? 460 : 280,
+    labelW: landscape ? 440 : 260,
     font,
     dot: 16,
-    logo: landscape ? { size: 200, top: 300 } : { size: 170, top: 336 },
-    urlTop: landscape ? 516 : 520,
+    bigLast: true,
+    logo: landscape ? { size: 196, top: 304 } : { size: 170, top: 336 },
+    urlTop: landscape ? 526 : 530,
     xGap: 14,
   };
 }
@@ -88,7 +95,7 @@ export const Next: React.FC<{ format: Format }> = ({ format }) => {
 
   const grow = spring({ frame: frame - AT.brand, fps: FPS, config: { damping: 200 }, durationInFrames: 40 });
   const logoIn = ramp(frame, AT.brand, AT.brand + 20);
-  const discSize = Math.max(26, Math.round(BASE[format] * 0.55));
+  const discSize = Math.max(28, Math.round(BASE[format] * 0.58));
 
   return (
     <div style={{ position: "absolute", inset: 0 }}>
@@ -134,7 +141,7 @@ export const Next: React.FC<{ format: Format }> = ({ format }) => {
           {g.stops.map(([x, y], i) => {
             if (i === 0) return <circle key={i} cx={x} cy={y} r={g.dot} fill={C.light} />;
             const on = reached(i);
-            const r = i === n - 1 ? g.dot + 4 : g.dot;
+            const r = g.bigLast && i === n - 1 ? g.dot + 4 : g.dot;
             return (
               <g key={i}>
                 <circle cx={x} cy={y} r={r} fill={C.bg} stroke={interpolateColors(on, [0, 1], [C.muted, C.light])} strokeWidth={4} />
@@ -168,14 +175,12 @@ export const Next: React.FC<{ format: Format }> = ({ format }) => {
       {/* Brand block */}
       {frame >= AT.brand ? (
         <>
-          <Img
-            src={staticFile("logo.png")}
+          <LogoDisc
+            size={g.logo.size}
             style={{
               position: "absolute",
               left: `calc(50% - ${g.logo.size / 2}px)`,
               top: g.logo.top,
-              width: g.logo.size,
-              height: g.logo.size,
               opacity: logoIn,
               transform: `scale(${0.9 + 0.1 * grow})`,
             }}
@@ -191,7 +196,7 @@ export const Next: React.FC<{ format: Format }> = ({ format }) => {
         </>
       ) : null}
 
-      {/* Disclaimer: small, muted, held to the last frame (Overview does not fade the closing scene out). */}
+      {/* Disclaimer: small but high-contrast (light, not muted), held to the last frame (Overview does not fade the closing scene out). */}
       <Body
         format={format}
         size={discSize}
@@ -200,7 +205,7 @@ export const Next: React.FC<{ format: Format }> = ({ format }) => {
           left: 0,
           right: 0,
           bottom: 0,
-          color: C.muted,
+          color: C.light,
           textAlign: "center",
           textWrap: "balance",
           opacity: ramp(frame, AT.disclaimer, AT.disclaimer + 20),
