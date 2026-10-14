@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Panda-Dev-WEB3/BookRunner/security/advisories/new
+    about: Please report vulnerabilities privately through GitHub security advisories, never in a public issue (see SECURITY.md).
+  - name: Testnet status
+    url: https://bookrunner.tech/status/
+    about: Check mark age, risk state and the last distribution per book before reporting an outage.
+  - name: Website and contact
+    url: https://bookrunner.tech
+    about: General questions about Bookrunner, or email contact@bookrunner.tech.

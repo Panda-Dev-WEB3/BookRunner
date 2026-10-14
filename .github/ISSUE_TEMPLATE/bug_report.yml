@@ -1,0 +1,63 @@
+name: Bug report
+description: Something in the contracts, services, apps or tooling does not work as documented.
+title: "<area>: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Security vulnerabilities must not be filed here**: use
+        [private vulnerability reporting](https://github.com/Panda-Dev-WEB3/BookRunner/security/advisories/new)
+        (see SECURITY.md). Never paste private keys, mnemonics, API keys or `.env` contents.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Contracts
+        - Off-chain services (oracle, mark, risk, agent, ops-venue, waterfall, receipts, charter, indexer, api, alerts)
+        - Web app (apps/web, /app/)
+        - Public site, live desk or status page (apps/site)
+        - Scripts / deploy tooling
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      options:
+        - Public testnet (bookrunner.tech, chain 46630)
+        - Local devnet (anvil, chain 31337)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Commands, transactions, book id, or a failing Foundry / bun test if you have one.
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs, transaction hashes, screenshots
+      description: Redact anything secret. Transaction hashes and addresses on testnet are fine.
+      render: text
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: Output of `git rev-parse --short HEAD`, if you ran it locally.
