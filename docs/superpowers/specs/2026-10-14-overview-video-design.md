@@ -4,7 +4,7 @@ Date: 2026-10-14 · Status: approved in conversation, awaiting spec review
 
 ## Goal
 
-One polished ~2:30 overview video for **investors and partners** (Orderly, auditors, launch-capital
+One polished ~2:30 overview video for **investors and counterparties** (Orderly, auditors, launch-capital
 providers) that explains what BookRunner is, how capital and fee flow move, why it can be trusted, and that it
 is live on Robinhood Chain testnet. Text on screen, **no voice** (plays muted in X / LinkedIn autoplay).
 Delivered in three formats rendered from one source: **16:9** (1920×1080), **1:1** (1080×1080), **9:16**
@@ -35,7 +35,7 @@ Delivered in three formats rendered from one source: **16:9** (1920×1080), **1:
 
 - Brand identity of the site and the GitHub social preview: deep navy background, cream text, the blue
   engraved logo (`apps/site/public/assets/bookrunner-logo-transparent.png`), serif headlines and sans labels
-  from the site's own font files (`apps/site/public/assets/fonts/` / `assets/media/`).
+  from the site's own font files (the woff2 files under `apps/site/public/assets/media/`, e.g. Source Serif 4).
 - Diagrams in thin line art matching the engraved logo; capital moves as blue particles, losses in a muted red.
 - Calm, deliberate motion; one idea per screen; captions legible on a phone with sound off.
 
