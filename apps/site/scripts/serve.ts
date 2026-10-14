@@ -7,7 +7,7 @@ import { extname, join, normalize } from "node:path";
 const root = join(import.meta.dir, "..", "dist");
 const portArg = process.argv.indexOf("--port");
 const port = Number(portArg > 0 ? process.argv[portArg + 1] : (process.env.SITE_PORT ?? 5191));
-const apiOrigin = (process.env.SITE_API_ORIGIN ?? "https://bookrunner.use-cert.com").replace(/\/+$/, "");
+const apiOrigin = (process.env.SITE_API_ORIGIN ?? "https://bookrunner.tech").replace(/\/+$/, "");
 
 const TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -25,6 +25,8 @@ const TYPES: Record<string, string> = {
   ".pdf": "application/pdf",
   ".map": "application/json",
   ".txt": "text/plain; charset=utf-8",
+  ".xml": "application/xml; charset=utf-8",
+  ".ico": "image/x-icon",
 };
 
 if (!existsSync(root)) {

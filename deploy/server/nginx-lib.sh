@@ -7,6 +7,10 @@ NGINX_SNIPPET_SRC="${NGINX_SNIPPET_SRC:-/opt/bookrunner/app/deploy/server/nginx-
 NGINX_SNIPPET_DST="${NGINX_SNIPPET_DST:-/etc/nginx/snippets/bookrunner-locations.conf}"
 NGINX_HTTP_SRC="${NGINX_HTTP_SRC:-$(dirname "$NGINX_SNIPPET_SRC")/nginx-bookrunner-http.conf}"
 NGINX_HTTP_DST="${NGINX_HTTP_DST:-/etc/nginx/conf.d/bookrunner-ratelimit.conf}"
+# port-80 catch-all for other *.bookrunner.tech names (its own site file, enabled by a sites-enabled link)
+NGINX_WILDCARD_SRC="${NGINX_WILDCARD_SRC:-$(dirname "$NGINX_SNIPPET_SRC")/nginx-bookrunner-wildcard.conf}"
+NGINX_WILDCARD_DST="${NGINX_WILDCARD_DST:-/etc/nginx/sites-available/bookrunner-wildcard}"
+NGINX_WILDCARD_LINK="${NGINX_WILDCARD_LINK:-/etc/nginx/sites-enabled/bookrunner-wildcard}"
 
 # The site file nginx actually loads (certbot edits it in place; sites-enabled links to it).
 nginx_site_file() {
@@ -51,4 +55,51 @@ nginx_install_http_conf() {
 # The locations snippet (after nginx_install_http_conf: it references the zones).
 nginx_install_snippet() {
   nginx_install_file "$NGINX_SNIPPET_SRC" "$NGINX_SNIPPET_DST" "locations snippet"
+}
+
+# The *.bookrunner.tech port-80 redirect site. Once enabled, a changed file goes through nginx_install_file;
+# the first time, the file and its sites-enabled link are added together, validated with `nginx -t` and
+# both removed again (or the previous file restored) when the check fails.
+nginx_install_wildcard_site() {
+  local label="wildcard site (*.bookrunner.tech -> https://bookrunner.tech/)"
+  if [ -L "$NGINX_WILDCARD_LINK" ] || [ -e "$NGINX_WILDCARD_LINK" ]; then
+    nginx_install_file "$NGINX_WILDCARD_SRC" "$NGINX_WILDCARD_DST" "$label"
+    return
+  fi
+  install -d -m 0755 "$(dirname "$NGINX_WILDCARD_DST")" "$(dirname "$NGINX_WILDCARD_LINK")"
+  local bak=""
+  if [ -f "$NGINX_WILDCARD_DST" ]; then bak="$(mktemp)"; cp -p "$NGINX_WILDCARD_DST" "$bak"; fi
+  install -m 0644 "$NGINX_WILDCARD_SRC" "$NGINX_WILDCARD_DST"
+  ln -s "$NGINX_WILDCARD_DST" "$NGINX_WILDCARD_LINK"
+  if nginx -t -q; then
+    systemctl reload nginx
+    echo "==> nginx $label installed and enabled ($NGINX_WILDCARD_LINK), nginx reloaded"
+    [ -z "$bak" ] || rm -f "$bak"
+    return 0
+  fi
+  echo "!! nginx -t failed with the new $label: rolling it back" >&2
+  rm -f "$NGINX_WILDCARD_LINK"
+  if [ -n "$bak" ]; then cp -p "$bak" "$NGINX_WILDCARD_DST"; rm -f "$bak"; else rm -f "$NGINX_WILDCARD_DST"; fi
+  nginx -t -q || echo "!! nginx -t still fails after the rollback: fix it before the next reload" >&2
+  return 1
+}
+
+# The live site file is certbot-managed and never reinstalled, so its server-level HSTS line (the one the
+# www -> apex redirect and other server-level responses carry) is brought to includeSubDomains in place.
+# A no-op once done; validated and rolled back like any other file.
+nginx_patch_site_hsts() {
+  local site old new tmp rc
+  site="$(nginx_site_file)"
+  old='Strict-Transport-Security "max-age=31536000" always;'
+  new='Strict-Transport-Security "max-age=31536000; includeSubDomains" always;'
+  if [ ! -f "$site" ] || ! grep -qF "$old" "$site"; then
+    echo "==> nginx site HSTS already current ($site)"
+    return 0
+  fi
+  tmp="$(mktemp)"
+  sed "s/$old/$new/" "$site" > "$tmp"
+  rc=0
+  nginx_install_file "$tmp" "$site" "site HSTS (includeSubDomains)" || rc=$?
+  rm -f "$tmp"
+  return "$rc"
 }

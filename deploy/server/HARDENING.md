@@ -12,7 +12,7 @@ its secrets to processes that do not need them, and must not sign predictable pr
 | Secrets per process | every child got the whole env (mnemonic, `ANTHROPIC_API_KEY`, ...) | allow-list per child (`packages/shared/src/childenv.ts`) |
 | Protocol admin (deployer) key | derived from the shared mnemonic by any process | only with `BKRN_ALLOW_ADMIN_KEY=1` (launch / deploy scripts) or `DEPLOYER_PRIVATE_KEY`; the gas keeper uses a dedicated **funder** key |
 | Oracle on testnet | synthetic prices from the public seed `bookrunner-devnet` | refuses to start without a secret `ORACLE_SEED`; per-step CSPRNG entropy |
-| nginx | no HSTS / CSP / Permissions-Policy, version in `Server:`, source maps public, no rate limit | all headers, `server_tokens off`, `*.map` → 404 (and builds emit none), `/trpc/` + `/health` rate-limited per IP; the API caps tRPC batches at 10 |
+| nginx | no HSTS / CSP / Permissions-Policy, version in `Server:`, source maps public, no rate limit | all headers (HSTS `max-age=31536000; includeSubDomains`, no `preload`), `server_tokens off`, `*.map` → 404 (and builds emit none), `/trpc/` + `/health` rate-limited per IP (the API caps tRPC batches at 10); www → apex 301; unknown `*.bookrunner.tech` (port 80) → apex; `/app/` `X-Robots-Tag: noindex`; the CSP allows no third-party host beyond Framer CDN, Google Fonts, the testnet RPC and WalletConnect / Reown |
 
 Values never appear in these commands' output: every secret is generated into a file and read from it.
 
@@ -78,10 +78,10 @@ Values never appear in these commands' output: every secret is generated into a 
 
 7. **Check** (from anywhere):
    ```bash
-   curl -sI https://bookrunner.use-cert.com/ | grep -iE 'strict-transport|content-security|permissions-policy|^server'
-   curl -s -o /dev/null -w '%{http_code}\n' https://bookrunner.use-cert.com/dashboard/app.js.map        # 404
-   curl -s https://bookrunner.use-cert.com/health                                                      # capabilities, no procedures/uptime
-   curl -s -o /dev/null -w '%{http_code}\n' "https://bookrunner.use-cert.com/trpc/$(printf 'book.list,%.0s' {1..11} | sed 's/,$//')?batch=1&input=%7B%7D"   # 400
+   curl -sI https://bookrunner.tech/ | grep -iE 'strict-transport|content-security|permissions-policy|^server'
+   curl -s -o /dev/null -w '%{http_code}\n' https://bookrunner.tech/dashboard/app.js.map        # 404
+   curl -s https://bookrunner.tech/health                                                      # capabilities, no procedures/uptime
+   curl -s -o /dev/null -w '%{http_code}\n' "https://bookrunner.tech/trpc/$(printf 'book.list,%.0s' {1..11} | sed 's/,$//')?batch=1&input=%7B%7D"   # 400
    ```
    Then open `/`, `/research/`, `/jobs/`, `/dashboard/` and `/app/` in a browser with the console open: there
    must be no "Content Security Policy" violations except the intended one on the Framer pages (`/`,
@@ -110,4 +110,13 @@ Values never appear in these commands' output: every secret is generated into a 
 - `/health?verbose` (full procedure list, uptime) needs `Authorization: Bearer $API_ADMIN_TOKEN`.
 - The CSP allows inline scripts by hash only. When a page under `apps/site/public` or `apps/web/index.html`
   changes an inline `<script>`, `apps/site/test/csp.test.ts` fails and prints the hash to add to
-  `nginx-bookrunner-locations.conf`.
+  `nginx-bookrunner-locations.conf`. JSON-LD (`type="application/ld+json"`) is a data block and needs none.
+  The same test fails when a page or Framer chunk references an image on a host outside `img-src` (the
+  export's template avatars on a third-party media host were removed rather than allowed).
+- HSTS carries `includeSubDomains` (no `preload`). The certbot-managed site file keeps its own server-level
+  HSTS line (it is what the www → apex redirect carries); `update.sh` updates that one line in place
+  (`nginx-lib.sh` `nginx_patch_site_hsts`, `nginx -t` + rollback). Every `*.bookrunner.tech` name opened in a
+  browser must serve HTTPS from then on.
+- Security contact: `/.well-known/security.txt` (RFC 9116, source `apps/site/public/.well-known/security.txt`,
+  policy `SECURITY.md`). Its `Expires` is 2027-10-14; `apps/site/test/audit-nginx-headers.test.ts` fails once it
+  has passed, as a reminder to renew it.

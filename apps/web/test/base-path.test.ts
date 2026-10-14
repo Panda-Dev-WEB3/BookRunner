@@ -82,7 +82,8 @@ describe("the API stays at the host root", () => {
 describe("nginx serves the build where vite mounts it", () => {
   const conf = readFileSync(new URL("../../../deploy/server/nginx-bookrunner-locations.conf", import.meta.url), "utf8");
   test("the SPA fallback and hashed assets live under the build base", () => {
-    expect(conf).toContain(`location ${DEFAULT_BUILD_BASE} {`);
+    // ^~: the SPA fallback (/app/index.html) stays in this location, not the site's .html regex location
+    expect(conf).toContain(`location ^~ ${DEFAULT_BUILD_BASE} {`);
     expect(conf).toContain(`${DEFAULT_BUILD_BASE}index.html;`);
     expect(conf).toContain(`location ^~ ${DEFAULT_BUILD_BASE}assets/ {`);
   });

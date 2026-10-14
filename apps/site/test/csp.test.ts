@@ -68,6 +68,34 @@ describe("nginx Content-Security-Policy", () => {
   test("locks down the rest: objects, base, framing, forms", () => {
     for (const d of ["object-src 'none'", "base-uri 'self'", "frame-ancestors 'none'", "form-action 'self'"]) expect(csp).toContain(d);
   });
+
+  test("JSON-LD blocks are data, not script: no hash is demanded for them, and they parse", () => {
+    const home = readFileSync(resolve(ROOT, "apps/site/public/index.html"), "utf8");
+    const blocks = [...home.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)].map((m) => m[1]!);
+    expect(blocks.length).toBe(1);
+    expect(inlineScriptHashes(`<script type="application/ld+json">${blocks[0]}</script>`)).toEqual([]);
+    const types = (JSON.parse(blocks[0]!) as { "@type": string }[]).map((b) => b["@type"]);
+    expect(types).toEqual(["Organization", "WebSite"]);
+  });
+
+  test("every absolute image / media URL in the site's pages and chunks is on an img-src host", () => {
+    const allowed = directive("img-src").split(/\s+/).filter((s) => s.startsWith("https://"));
+    const ok = (host: string) =>
+      allowed.some((a) => {
+        const h = a.slice("https://".length);
+        return h.startsWith("*.") ? host.endsWith(h.slice(1)) : host === h;
+      });
+    const files = [...new Glob("**/*.{html,mjs,js,css}").scanSync(resolve(ROOT, "apps/site/public"))];
+    const offenders = new Set<string>();
+    for (const f of files) {
+      const text = readFileSync(resolve(ROOT, "apps/site/public", f), "utf8");
+      for (const m of text.matchAll(/https:\/\/([a-z0-9.-]+)\/[^"'`\s()]*\.(?:avif|webp|png|jpe?g|gif|svg)\b/gi)) {
+        const host = m[1]!.toLowerCase();
+        if (host !== "bookrunner.tech" && !ok(host)) offenders.add(`${host} (${f})`);
+      }
+    }
+    expect([...offenders]).toEqual([]);
+  });
 });
 
 describe("nginx rate limits", () => {
