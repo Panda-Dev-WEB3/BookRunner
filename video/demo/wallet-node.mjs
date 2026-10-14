@@ -1,6 +1,7 @@
 // Node side of the demo wallet: the page gets an EIP-6963 / EIP-1193 provider (wallet-inject.js) whose every request
-// lands here through page.exposeFunction("__demoWalletRequest"). Account methods are answered locally, read methods
-// are forwarded to the testnet RPC, and eth_sendTransaction is signed by viem with the demo key and broadcast.
+// lands here through page.exposeBinding("__demoWalletRequest"), accepted only from the local app origin. Account
+// methods are answered locally, read methods are forwarded to the testnet RPC, and eth_sendTransaction is signed by
+// viem with the demo key and broadcast.
 //
 // Key rules (docs/superpowers/plans/2026-10-14-product-demo-videos.md, Global Constraints): the private key is read
 // only from video/.secrets/demo-wallet.json, never logged, never sent to the page; only chain 46630 is accepted
@@ -26,7 +27,7 @@ export class RpcError extends Error {
   }
 }
 
-/** Non-negative integer (number | bigint | decimal or hex string) -> "0x…" quantity, no leading zeros. */
+/** Non-negative integer (number | bigint | decimal or hex string, as BigInt() reads it) -> "0x…" quantity, no leading zeros. */
 export function toHexQuantity(n) {
   const b = typeof n === "bigint" ? n : BigInt(n);
   if (b < 0n) throw new RangeError(`negative quantity ${b}`);
@@ -205,9 +206,24 @@ export function jsonRpc(rpcUrl) {
   };
 }
 
+/**
+ * Reads { privateKey, address } from the demo key file. Any read / parse failure becomes one generic error with no
+ * cause attached: a JSON SyntaxError quotes the file's text, i.e. possibly the key.
+ */
+export function readDemoWalletFile(file) {
+  let j;
+  try {
+    j = JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    j = null;
+  }
+  if (!j || typeof j !== "object" || typeof j.privateKey !== "string") throw new Error(`${file}: demo wallet file unreadable`);
+  return j;
+}
+
 /** Reads the demo key file and returns the viem account (checks it matches the stored address). Never prints the key. */
 export function loadDemoAccount(file) {
-  const j = JSON.parse(readFileSync(file, "utf8"));
+  const j = readDemoWalletFile(file);
   let account;
   try {
     account = privateKeyToAccount(j.privateKey);
@@ -221,12 +237,24 @@ export function loadDemoAccount(file) {
 export const demoChain = (rpcUrl = DEMO_RPC_URL) =>
   defineChain({ id: DEMO_CHAIN_ID, name: "Robinhood Chain Testnet", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: [rpcUrl] } } });
 
+/** True when a calling frame's URL has exactly the app server's origin (scheme, host, port). */
+export function originAllowed(frameUrl, appOrigin) {
+  try {
+    return new URL(frameUrl).origin === new URL(appOrigin).origin;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Installs the demo wallet in a Playwright page (before its first navigation). Returns { address, txs, settled() }:
- * `txs` gets { hash, status: "pending" | "success" | "reverted" | "unknown" } per sent transaction.
+ * Installs the demo wallet in a Playwright page (before its first navigation). `appOrigin` is the local app server's
+ * origin (startAppServer().origin): requests from any other frame origin (iframes, a followed explorer / faucet link)
+ * are refused with 4100. Returns { address, txs, settled() }: `txs` gets
+ * { hash, status: "pending" | "success" | "reverted" | "unknown" } per sent transaction.
  */
-export async function installDemoWallet(page, { account, rpcUrl = DEMO_RPC_URL, chainId = DEMO_CHAIN_ID, log = console.log }) {
+export async function installDemoWallet(page, { account, appOrigin, rpcUrl = DEMO_RPC_URL, chainId = DEMO_CHAIN_ID, log = console.log }) {
   assertDemoChain(chainId);
+  if (!appOrigin || !originAllowed(appOrigin, appOrigin)) throw new Error("installDemoWallet: appOrigin (the local app server origin) is required");
   const chain = demoChain(rpcUrl);
   const publicClient = createPublicClient({ chain, transport: http(rpcUrl) });
   const walletClient = createWalletClient({ account, chain, transport: http(rpcUrl) });
@@ -256,7 +284,14 @@ export async function installDemoWallet(page, { account, rpcUrl = DEMO_RPC_URL, 
       return hash;
     },
   });
-  await page.exposeFunction("__demoWalletRequest", (req) => handler.handle(req));
+  await page.exposeBinding("__demoWalletRequest", (source, req) => {
+    const from = source?.frame?.url?.() ?? "";
+    if (!originAllowed(from, appOrigin)) {
+      log(`demo wallet: refused a request from another origin (${from.split(/[?#]/)[0].slice(0, 80)})`);
+      return { error: { code: ERR.UNAUTHORIZED, message: "demo wallet: this origin is not the demo app" } };
+    }
+    return handler.handle(req);
+  });
   await page.addInitScript({ path: INJECT_SCRIPT });
   return { address: handler.address, txs, settled: () => Promise.all(waits).then(() => txs) };
 }

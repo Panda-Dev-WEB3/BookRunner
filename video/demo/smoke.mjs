@@ -32,7 +32,7 @@ try {
   const ctx = await browser.newContext({ viewport: { width: 1920, height: 1080 }, deviceScaleFactor: 1 });
   page = await ctx.newPage();
   page.on("pageerror", (e) => console.log(`page error: ${e.message}`));
-  const wallet = await installDemoWallet(page, { account, rpcUrl: DEMO_RPC_URL, chainId: DEMO_CHAIN_ID });
+  const wallet = await installDemoWallet(page, { account, appOrigin: server.origin, rpcUrl: DEMO_RPC_URL, chainId: DEMO_CHAIN_ID });
   console.log(`demo wallet: ${wallet.address}`);
 
   const res = await page.goto(server.url, { waitUntil: "load", timeout: 45000 });
@@ -56,6 +56,18 @@ try {
     }
   });
   check(wagmiChain === DEMO_CHAIN_ID, `wagmi state chainId ${wagmiChain}`);
+
+  const foreign = await page.evaluate(async () => {
+    const f = document.createElement("iframe");
+    f.srcdoc = "<p>foreign frame</p>";
+    const loaded = new Promise((ok) => (f.onload = ok));
+    document.body.append(f);
+    await loaded;
+    const res = await f.contentWindow.__demoWalletRequest({ method: "eth_accounts", params: [] });
+    f.remove();
+    return res;
+  });
+  check(foreign?.error?.code === 4100, `a frame of another origin is refused (${JSON.stringify(foreign)})`);
 
   await walletBtn.first().click();
   const menu = page.getByRole("dialog", { name: "Account" });

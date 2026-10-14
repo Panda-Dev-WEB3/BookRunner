@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 // @ts-expect-error plain ESM module without types (video/demo runs in the Playwright container)
 import * as W from "../demo/wallet-node.mjs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const ADDR = "0x10e1f86Ff0b52Df12015e40907483331E291ed33";
 const TO = "0x000000000000000000000000000000000000dEaD";
@@ -103,5 +106,50 @@ describe("demo wallet: sending", () => {
     expect(r.error?.message).toMatch(/refusing chain/);
     expect(sent).toEqual([]);
     expect(other.sent).toEqual([]);
+  });
+});
+
+describe("demo wallet: edge cases", () => {
+  test("assertDemoChain accepts 46630 in every form and nothing else", () => {
+    for (const ok of [46630, 46630n, "46630", "0xb626", "0xB626"]) expect(W.assertDemoChain(ok)).toBe(46630);
+    for (const bad of [undefined, null, "", "0x", "b626", "0xb627", 46630.5, -46630, "abc", {}]) expect(() => W.assertDemoChain(bad)).toThrow(/refusing chain/);
+  });
+  test("parseTxRequest rejects malformed fields and keeps one fee model", () => {
+    const a = { address: ADDR };
+    expect(() => W.parseTxRequest({ to: TO, data: "0x01", input: "0x02" }, a)).toThrow(/data and input/);
+    expect(() => W.parseTxRequest({ to: TO, data: "0x123" }, a)).toThrow(/invalid data/);
+    expect(() => W.parseTxRequest({ to: TO, value: "100" }, a)).toThrow(/invalid value/);
+    expect(() => W.parseTxRequest({ to: TO, gas: -1 }, a)).toThrow(/invalid gas/);
+    expect(() => W.parseTxRequest({ to: "0x1234" }, a)).toThrow(/valid `to`/);
+    expect(W.parseTxRequest({ to: TO, input: "0xab", maxFeePerGas: "0x2", gasPrice: "0x1" }, a)).toEqual({ to: TO, data: "0xab", maxFeePerGas: 2n });
+    expect(W.parseTxRequest({ to: TO, gasPrice: "0x1", nonce: "0x7" }, a)).toEqual({ to: TO, gasPrice: 1n, nonce: 7 });
+  });
+  test("toRpcErrorObject keeps code and data", () => {
+    expect(W.toRpcErrorObject(new W.RpcError(3, "execution reverted", "0x08c379a0"))).toEqual({ code: 3, message: "execution reverted", data: "0x08c379a0" });
+    expect(W.toRpcErrorObject(new Error("boom"))).toEqual({ code: -32603, message: "boom" });
+  });
+  test("originAllowed: only the exact app origin", () => {
+    const app = "http://localhost:4610";
+    expect(W.originAllowed("http://localhost:4610/app/books/1?x=1", app)).toBe(true);
+    for (const u of ["http://127.0.0.1:4610/app/", "http://localhost:4611/app/", "https://localhost:4610/app/", "https://bookrunner.tech/app/", "about:srcdoc", "about:blank", "", "not a url"]) {
+      expect([u, W.originAllowed(u, app)]).toEqual([u, false]);
+    }
+  });
+  test("an unreadable key file gives a generic error that never quotes the file", () => {
+    const dir = mkdtempSync(join(tmpdir(), "demo-wallet-"));
+    const file = join(dir, "demo-wallet.json");
+    writeFileSync(file, `{"privateKey":"0x${"ab".repeat(32)}",`); // truncated JSON
+    let msg = "";
+    try {
+      W.loadDemoAccount(file);
+    } catch (e) {
+      msg = String((e as Error).message) + String((e as Error).cause ?? "");
+    }
+    expect(msg).toMatch(/demo wallet file unreadable/);
+    expect(msg).not.toContain("abab");
+    writeFileSync(file, JSON.stringify({ privateKey: "0x1234" }));
+    expect(() => W.loadDemoAccount(file)).toThrow(/invalid privateKey$/);
+    expect(() => W.loadDemoAccount(join(dir, "missing.json"))).toThrow(/demo wallet file unreadable/);
+    rmSync(dir, { recursive: true, force: true });
   });
 });

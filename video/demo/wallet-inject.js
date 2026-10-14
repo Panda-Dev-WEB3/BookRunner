@@ -57,7 +57,7 @@
         '<rect x="7" y="10" width="18" height="13" rx="3" fill="none" stroke="#fff" stroke-width="2"/>' +
         '<circle cx="21" cy="16.5" r="1.6" fill="#fff"/></svg>',
     );
-  const info = Object.freeze({ uuid: "6f1c2a8e-3b5d-4e7f-9a10-d3e0b0c0de01", name: "Demo wallet", icon, rdns: "tech.bookrunner.demo" });
+  const info = Object.freeze({ uuid: typeof crypto.randomUUID === "function" ? crypto.randomUUID() : "6f1c2a8e-3b5d-4e7f-9a10-d3e0b0c0de01", name: "Demo wallet", icon, rdns: "tech.bookrunner.demo" });
   const announce = () => window.dispatchEvent(new CustomEvent("eip6963:announceProvider", { detail: Object.freeze({ info, provider }) }));
   window.addEventListener("eip6963:requestProvider", announce);
   announce();

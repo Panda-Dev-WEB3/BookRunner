@@ -51,13 +51,16 @@ bash scripts/video.sh demo smoke        # serve + connect the demo wallet, no tr
   `MSYS_NO_PATHCONV=1 VITE_API_URL=same-origin WEB_BASE=/app/ node node_modules/vite/bin/vite.js build --mode testnet`
   in `apps/web` (vite through node: bun-spawned vite and `node_modules/.bin` shims are blocked on this PC;
   `MSYS_NO_PATHCONV` stops Git Bash from turning `/app/` into a Windows path). The build is mounted read-only into
-  the container at `/app-dist`.
+  the container at `/app-dist`. It deletes and replaces any existing `apps/web/dist` (rerun a normal build afterwards
+  if you need one).
 - **Local server** (`demo/serve-app.mjs`, `startAppServer`): serves the build at `http://localhost:4610/app/` (SPA
   fallback) and proxies `/trpc/*` and `/health` to `https://bookrunner.tech` with Host/Origin set to that site (the live
-  API only allows its own origin).
+  API only allows its own origin). tRPC GETs (queries) pass; a POST passes only for the prepare-tx procedures in
+  `TRPC_WRITE_ALLOW` (`tranche.subscribe`, `charter.file`), every procedure of a batch checked; anything else gets 403.
 - **Demo wallet** (`demo/wallet-inject.js` + `demo/wallet-node.mjs`, `installDemoWallet`): an EIP-6963 provider named
   "Demo wallet" in the page; every request goes to Node, which answers account / chain methods, forwards reads to
-  `https://rpc.testnet.chain.robinhood.com`, and signs `eth_sendTransaction` with viem. Only chain 46630 is accepted.
+  `https://rpc.testnet.chain.robinhood.com`, and signs `eth_sendTransaction` with viem. Only chain 46630 is accepted, and only
+  requests from the local app origin (exposeBinding origin check; other frames get 4100).
   The key stays in `video/.secrets/demo-wallet.json` (gitignored): never logged, never sent to the page. It needs test
   ETH for gas (funded once from the testnet funder on the server).
 - Outputs (`public/demos/`) are gitignored. Unit tests: `node_modules/bun/bin/bun.exe test video/test`.
