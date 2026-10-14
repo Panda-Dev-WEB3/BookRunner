@@ -39,8 +39,16 @@ Mainnet (Robinhood Chain 4663) runs on a separate host with the network-parametr
 Indexing: `/app/` sends `X-Robots-Tag: noindex` (and its HTML has `<meta name="robots" content="noindex">`);
 `robots.txt` disallows `/app/` and `/trpc/` and points at `sitemap.xml` (the six public pages). The site's pages
 carry a canonical URL, absolute Open Graph / X card tags (`/assets/bookrunner-og.jpg`, 1200×630) and, on the
-home page, Organization + WebSite JSON-LD. `/research/human-creativity-benchmark/` (an orphan page of the
-original export; the site's script sends every link to it elsewhere) is `noindex` and left out of the sitemap.
+home page, Organization + WebSite JSON-LD. The template's old "specification" article is retired: its links
+point to the rulebook at `/documents/`, and nginx answers `/research/human-creativity-benchmark` (and
+`/human-creativity-benchmark`) with a 301 to `/documents/`.
+
+Behind Cloudflare (optional, recommended before mainnet): the locations snippet trusts `CF-Connecting-IP` only
+from Cloudflare's published ranges (`set_real_ip_from`), so rate limits and logs keep seeing the real visitor.
+Cloudflare settings this site needs: SSL/TLS mode **Full (strict)**; **Rocket Loader off**, **Email Address
+Obfuscation off** and no automatic Web Analytics injection (each inserts a script the CSP blocks); proxy
+(orange cloud) on `@` and `www` only, mail and other names DNS-only; caching left at the default (HTML and
+`/trpc`, `/health`, `/status.json` are not cached).
 
 The app is built with `VITE_API_URL=same-origin`: it calls `{origin}/trpc` and `{origin}/health` at the host
 root, never under `/app/`. The dev server (`bun run dev`) still serves the app at `/`.

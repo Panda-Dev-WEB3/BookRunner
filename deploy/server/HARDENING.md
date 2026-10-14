@@ -88,7 +88,7 @@ Values never appear in these commands' output: every secret is generated into a 
    `/research/`, `/jobs/`): `https://framer.com/edit/init.mjs` is blocked. That is Framer's "on-page editing"
    bar, which the export would otherwise load from framer.com into every visitor's page (a third-party script
    on the origin that builds wallet transactions); the page works without it (verified locally with this exact
-   policy on `/`, `/research/`, `/research/human-creativity-benchmark/`, `/jobs/`, `/documents/`,
+   policy on `/`, `/research/`, `/jobs/`, `/documents/`,
    `/dashboard/`, `/app/`). If a page breaks, switch the header to report-only until fixed (the next update.sh
    restores the enforcing one):
    ```bash
