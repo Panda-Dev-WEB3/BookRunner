@@ -5,6 +5,9 @@ import { SCENES } from "./timeline";
 import { Stage } from "./ui/Stage";
 import { Headline } from "./ui/Text";
 import { fadeInOut } from "./ui/motion";
+import { Book } from "./scenes/Book";
+import { Hook } from "./scenes/Hook";
+import { Problem } from "./scenes/Problem";
 
 type SceneProps = { format: Format };
 
@@ -14,9 +17,9 @@ const stub =
   ({ format }) => <Headline format={format}>{id}</Headline>;
 
 const SCENE_COMPONENTS: Record<SceneId, React.FC<SceneProps>> = {
-  hook: stub("hook"),
-  problem: stub("problem"),
-  book: stub("book"),
+  hook: Hook,
+  problem: Problem,
+  book: Book,
   charter: stub("charter"),
   mandate: stub("mandate"),
   waterfall: stub("waterfall"),

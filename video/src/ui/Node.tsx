@@ -24,7 +24,7 @@ export const Node: React.FC<Props> = ({ format, title, note, style }) => (
       <div
         style={{
           fontWeight: 400,
-          fontSize: Math.round(BASE[format] * 0.55),
+          fontSize: Math.max(26, Math.round(BASE[format] * 0.55)), // never under 26 px (phone legibility)
           lineHeight: 1.35,
           color: C.muted,
           marginTop: 8,
