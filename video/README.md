@@ -45,7 +45,7 @@ image (`mcr.microsoft.com/playwright:v1.64.1-noble`, Playwright 1.64.1 + viem 2.
 bash scripts/video.sh app-build         # bun install + testnet build of apps/web -> apps/web/dist (base /app/, API same-origin)
 bash scripts/video.sh demo new-wallet   # once: creates video/.secrets/demo-wallet.json, prints only the address
 bash scripts/video.sh demo smoke        # serve + connect the demo wallet, no transaction -> public/demos/smoke-connected.png
-bash scripts/video.sh demo recorder-smoke  # ~10 s recorder check -> public/demos/recorder-smoke.webm + .steps.json (demo/recorder.mjs: recordScenario)
+bash scripts/video.sh demo recorder-smoke  # ~10 s recorder check -> public/demos/recorder-smoke.webm + .steps.json (demo/recorder.mjs: runScenario / recordScenario; step times are calibrated against the webm via a sync flash)
 ```
 
 - **App build:** `app-build` runs on the host: `bun install --frozen-lockfile`, then
