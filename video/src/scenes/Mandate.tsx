@@ -33,12 +33,19 @@ type Layout = {
   /** Chip font size (px). */
   chip: number;
   gap: number;
+  /**
+   * Band placement: `mid` centres the band in the chart; `low` sits it near the bottom (just room for its label),
+   * leaving the space above for the breach, since quotes only ever leave the band upwards.
+   */
+  band: "mid" | "low";
 };
 const LAYOUT: Record<Format, Layout> = {
-  landscape: { side: true, panelW: 900, chartH: 330, chip: 30, gap: 56 },
-  square: { side: false, panelW: 900, chartH: 230, chip: 29, gap: 22 },
-  portrait: { side: false, panelW: 900, chartH: 560, chip: 34, gap: 40 },
+  landscape: { side: true, panelW: 900, chartH: 300, chip: 30, gap: 56, band: "low" },
+  square: { side: false, panelW: 900, chartH: 230, chip: 29, gap: 22, band: "mid" },
+  portrait: { side: false, panelW: 900, chartH: 560, chip: 34, gap: 40, band: "mid" },
 };
+/** Vertical gap between chips stacked in a side column (px). */
+const SIDE_GAP = 28;
 
 /*
  * Quote model, in units of the band half-height (band = [-1, 1]). The mid wobbles on three incommensurate sines
@@ -87,10 +94,13 @@ const Key: React.FC<{ size: number; brk: number }> = ({ size, brk }) => {
 };
 
 /** The agent's quote chart: band (the mandate), bid/ask history, labels at the live end. */
-const Chart: React.FC<{ format: Format; w: number; h: number; frame: number }> = ({ format, w, h, frame }) => {
-  const hb = h * 0.2; // band half-height in px; the chart spans +-2.5 band half-heights
-  const y = (v: number) => h / 2 - v * hb;
+const Chart: React.FC<{ format: Format; w: number; h: number; frame: number; band: Layout["band"] }> = ({ format, w, h, frame, band }) => {
   const labelSize = Math.max(26, Math.round(BASE[format] * 0.55));
+  // Band half-height (px) and centre: centred, the chart spans +-2.5 band half-heights; low, the band sits above its
+  // "MANDATE" label at the bottom and the chart above it holds the full breach (quotes reach about +2.1).
+  const hb = band === "low" ? h * 0.24 : h * 0.2;
+  const cy = band === "low" ? h - hb - labelSize * 1.7 : h / 2;
+  const y = (v: number) => cy - v * hb;
   const xEnd = w - labelSize * 2.6; // room for the "Bid"/"Ask" labels at the live end
   const now = Math.min(frame, AT.cancel[0]); // quotes stop updating once cancelled
   const path = (q: (f: number) => number) =>
@@ -219,16 +229,21 @@ export const Mandate: React.FC<{ format: Format }> = ({ format }) => {
   const split = L.side ? 3 : 2; // chips before the panel (left column / top row)
   const first = T.limits.slice(0, split).map((_, i) => chip(i));
   const rest = T.limits.slice(split).map((_, i) => chip(split + i));
+  // Side columns share one height (the taller, three-chip column), so the two-chip column's pills line up with the
+  // first and last pills opposite instead of floating between them.
+  const chipH = 2 * Math.round(L.chip * 0.42) + L.chip * 1.2 + 4;
+  const sideH = split * chipH + (split - 1) * SIDE_GAP;
   const group = (items: React.ReactNode[], align: "flex-start" | "flex-end") => (
     <div
       style={{
         display: "flex",
         flexDirection: L.side ? "column" : "row",
         flexWrap: L.side ? "nowrap" : "wrap",
-        justifyContent: "center",
+        justifyContent: L.side ? "space-between" : "center",
         alignItems: L.side ? align : "center",
-        gap: L.side ? 28 : 18,
+        gap: L.side ? SIDE_GAP : 18,
         flex: L.side ? 1 : undefined,
+        height: L.side ? sideH : undefined,
       }}
     >
       {items}
@@ -271,7 +286,7 @@ export const Mandate: React.FC<{ format: Format }> = ({ format }) => {
             </div>
             <Gauge format={format} frame={frame} label={T.inventory} />
           </div>
-          <Chart format={format} w={L.panelW - 2 * panelPad - 3} h={L.chartH} frame={frame} />
+          <Chart format={format} w={L.panelW - 2 * panelPad - 3} h={L.chartH} frame={frame} band={L.band} />
         </div>
         {group(rest, "flex-start")}
       </div>

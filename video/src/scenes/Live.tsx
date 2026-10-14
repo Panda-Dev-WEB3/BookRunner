@@ -14,9 +14,17 @@ const AT = { title: 0, frame: 8, status: 360, fade: 20, chips: 40, caption: 120 
 /** Status-dot green (the live pages' "operating normally" colour); used only for the live dots. */
 const LIVE = "#3fc98a";
 
-const CLIPS: readonly FrameClip[] = [
+const clips = (format: Format): readonly FrameClip[] => [
   { src: "footage/dashboard.webm", url: T.url, from: 0, durationInFrames: AT.status + AT.fade },
-  { src: "footage/status.webm", url: T.statusUrl, from: AT.status, durationInFrames: 600 - AT.status },
+  {
+    src: "footage/status.webm",
+    url: T.statusUrl,
+    from: AT.status,
+    durationInFrames: 600 - AT.status,
+    // Square: crop in on the status table (1.2x, the site's nav bar shifted out of view) so it fills the shorter window
+    // and reads larger; the table's own borders stay inside the frame.
+    ...(format === "square" ? { zoom: 1.2, shiftY: -50 } : {}),
+  },
 ];
 
 type Geo = {
@@ -31,9 +39,10 @@ type Geo = {
 };
 
 /**
- * Title on top, the browser frame under it, the live books and the caption under the frame. Landscape crops the
- * clip a little (a shorter window) so the whole stack stays inside the safe box; square and portrait show it whole,
- * 960 wide, the frame reaching 30 px into the side padding.
+ * Title on top (at the safe padding's left edge, like every other scene), the browser frame under it, the live books
+ * and the caption under the frame. Landscape crops the clip a little (a shorter window) so the whole stack stays inside
+ * the safe box; square and portrait show it 960 wide, the frame reaching 30 px into the side padding (square in a
+ * shorter window, its status clip zoomed in).
  */
 function geometry(format: Format): Geo {
   const { W, H } = contentBox(format);
@@ -48,7 +57,7 @@ function geometry(format: Format): Geo {
     const chip = { h: 58, font: 30, gap: 16 };
     const chipsTop = bottom + 28;
     return {
-      title: { size: titleSize, lines: 1, width: w },
+      title: { size: titleSize, lines: 1, width: W },
       frame: { x, y, w, viewH },
       row: true,
       chip,
@@ -58,20 +67,21 @@ function geometry(format: Format): Geo {
     };
   }
   const w = 960;
-  // Square crops 16 px off the clip's bottom so the stack fits the safe box.
-  const viewH = format === "square" ? 524 : 540;
-  const lines = 2;
+  // Square: a shorter window (the status page's empty lower part is cropped; its clip is zoomed in to fill it).
+  const viewH = format === "square" ? 430 : 540;
+  // The title wraps inside the safe width: two lines in square, three in portrait (larger type, same width).
+  const lines = format === "square" ? 2 : 3;
   const titleBottom = lines * titleSize * 1.15;
   const chip = format === "square" ? { h: 54, font: 28, gap: 14 } : { h: 68, font: 36, gap: 18 };
-  const gapA = format === "square" ? 20 : 44; // frame -> chips
-  const gapB = format === "square" ? 12 : 30; // chips -> caption
+  const gapA = format === "square" ? 30 : 44; // frame -> chips
+  const gapB = format === "square" ? 18 : 30; // chips -> caption
   const fh = frameHeight(format, viewH) + 4;
   const group = fh + gapA + chip.h + gapB + captionSize * 1.35;
-  // Square: straight under the title. Portrait: the group sits in the upper part of the space under the title.
-  const y = format === "square" ? titleBottom + 20 : Math.round(titleBottom + (H - titleBottom - group) * 0.33);
+  // Square: centred in the space under the title. Portrait: the group sits in the upper part of that space.
+  const y = Math.round(titleBottom + (H - titleBottom - group) * (format === "square" ? 0.5 : 0.33));
   const chipsTop = y + fh + gapA;
   return {
-    title: { size: titleSize, lines, width: w },
+    title: { size: titleSize, lines, width: W },
     frame: { x: (W - w) / 2, y, w, viewH },
     row: false,
     chip,
@@ -151,13 +161,13 @@ export const Live: React.FC<{ format: Format }> = ({ format }) => {
       <Headline
         format={format}
         size={g.title.size}
-        style={{ position: "absolute", left: g.frame.x, width: g.title.width, top: 0, textWrap: "balance", ...rise(frame, AT.title) }}
+        style={{ position: "absolute", left: 0, width: g.title.width, top: 0, textWrap: "balance", ...rise(frame, AT.title) }}
       >
         {T.title}
       </Headline>
 
       <div style={{ position: "absolute", left: g.frame.x, top: g.frame.y, ...rise(frame, AT.frame) }}>
-        <BrowserFrame format={format} src={CLIPS} width={g.frame.w} viewHeight={g.frame.viewH} fade={AT.fade} />
+        <BrowserFrame format={format} src={clips(format)} width={g.frame.w} viewHeight={g.frame.viewH} fade={AT.fade} />
       </div>
 
       {g.row ? (

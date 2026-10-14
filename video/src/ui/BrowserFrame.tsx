@@ -5,8 +5,12 @@ import { C, type Format } from "../theme";
 import { withAlpha } from "./color";
 import { ramp } from "./motion";
 
-/** One recorded clip (a path under `public/`) shown from `from` for `durationInFrames`, with its own address. */
-export type FrameClip = { src: string; url: string; from: number; durationInFrames: number };
+/**
+ * One recorded clip (a path under `public/`) shown from `from` for `durationInFrames`, with its own address.
+ * `zoom` (default 1) scales the clip about its top centre, cropping its sides, and `shiftY` (px, after zoom; negative =
+ * up) moves it within the window: together they crop in on the part of a page that matters.
+ */
+export type FrameClip = { src: string; url: string; from: number; durationInFrames: number; zoom?: number; shiftY?: number };
 
 /** Chrome bar height and address text size (px) per format; the address stays >= 26 px. */
 const BAR: Record<Format, { h: number; font: number; dot: number }> = {
@@ -130,7 +134,16 @@ export const BrowserFrame: React.FC<{
             <OffthreadVideo
               src={staticFile(c.src)}
               muted
-              style={{ position: "absolute", left: 0, top: 0, width, height: videoH, opacity: shown[i] }}
+              style={{
+                position: "absolute",
+                left: 0,
+                top: c.shiftY ?? 0,
+                width,
+                height: videoH,
+                opacity: shown[i],
+                transform: c.zoom && c.zoom !== 1 ? `scale(${c.zoom})` : undefined,
+                transformOrigin: "50% 0",
+              }}
             />
           </Sequence>
         ))}

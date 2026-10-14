@@ -19,8 +19,11 @@ const AT = {
   seal: 182,
   chain: 188,
   drop: [220, 300],
-  /** After the landing, the chain and captions glide up to the optical centre (the mark has left the space above). */
-  settle: [306, 352],
+  /**
+   * While the mark drops, the chain and captions glide up to the optical centre to meet it (the mark leaves the space
+   * above), so no empty band opens under the title. The mark falls straight to where its slot ends up.
+   */
+  settle: [220, 300],
   signed: 240,
   gas: 330,
   periods: 340,
@@ -52,9 +55,9 @@ type Geo = {
 function geometry(format: Format): Geo {
   const { W, H } = contentBox(format);
   const p = {
-    landscape: { cw: 300, ch: 68, font: 32, pad: 34, head: 36, hg: 18, gg: 22, sealCol: 190, seal: 160, cardCy: 290, chainCy: 548, per: 4, periods: 4, size: 72, gap: 20, pgap: 48, capGap: 62, capLines: 2 },
-    square: { cw: 290, ch: 64, font: 30, pad: 30, head: 36, hg: 16, gg: 18, sealCol: 190, seal: 156, cardCy: 268, chainCy: 506, per: 3, periods: 3, size: 66, gap: 18, pgap: 40, capGap: 56, capLines: 2 },
-    portrait: { cw: 310, ch: 76, font: 36, pad: 32, head: 42, hg: 20, gg: 20, sealCol: 196, seal: 170, cardCy: 640, chainCy: 1030, per: 3, periods: 3, size: 76, gap: 18, pgap: 36, capGap: 70, capLines: 3 },
+    landscape: { cw: 300, ch: 68, font: 32, pad: 34, head: 36, hg: 18, gg: 22, sealCol: 190, seal: 160, cardCy: 290, chainCy: 548, per: 4, periods: 4, size: 72, gap: 20, pgap: 48, capGap: 62, capLines: 2, target: 0.47 },
+    square: { cw: 290, ch: 64, font: 30, pad: 30, head: 36, hg: 16, gg: 18, sealCol: 190, seal: 156, cardCy: 268, chainCy: 506, per: 3, periods: 3, size: 66, gap: 18, pgap: 40, capGap: 56, capLines: 2, target: 0.47 },
+    portrait: { cw: 310, ch: 76, font: 36, pad: 32, head: 42, hg: 20, gg: 20, sealCol: 196, seal: 170, cardCy: 500, chainCy: 860, per: 3, periods: 3, size: 68, gap: 16, pgap: 32, capGap: 64, capLines: 3, target: 0.38 },
   }[format];
   const cardW = 2 * p.pad + 2 * p.cw + p.gg + p.sealCol;
   const cardH = 2 * p.pad + p.head + p.hg + 2 * p.ch + p.gg;
@@ -72,11 +75,12 @@ function geometry(format: Format): Geo {
   const chainW = p.periods * (p.per * p.size + (p.per - 1) * p.gap) + (p.periods - 1) * p.pgap;
   const captionSize = Math.round(BASE[format] * 0.8);
   const captionTop = p.chainCy + p.size / 2 + p.capGap;
-  // Settle: centre the chain group (chain top to last caption line) a little above the middle of the space under the title.
+  // Settle: centre the chain group (chain top to last caption line) at `target` of the space under the title (a little
+  // above the middle; higher in portrait, whose tall frame would otherwise leave a wide band under the title).
   const titleBottom = Math.round(BASE[format] * 1.5) * 1.15;
   const groupTop = p.chainCy - p.size / 2;
   const groupBottom = captionTop + p.capLines * captionSize * 1.35 + Math.round(BASE[format] * 0.3);
-  const target = titleBottom + (H - titleBottom) * 0.47;
+  const target = titleBottom + (H - titleBottom) * p.target;
   return {
     chip: { w: p.cw, h: p.ch, font: p.font },
     start,
@@ -197,7 +201,10 @@ export const Proof: React.FC<{ format: Format }> = ({ format }) => {
   const landed = frame >= AT.drop[1];
   const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
   const cardCx = lerp(g.card.x + g.card.w / 2, slot.x + slot.w / 2, shrink);
-  const cardCy = lerp(g.card.y + g.card.h / 2, slot.y + slot.h / 2, fall);
+  const settle = ramp(frame, AT.settle[0], AT.settle[1], Easing.inOut(Easing.cubic));
+  // The card is drawn inside the settling group; subtracting the group's shift keeps its on-screen path a straight
+  // fall from where it was to where the slot ends up.
+  const cardCy = lerp(g.card.y + g.card.h / 2, slot.y + slot.h / 2 + g.settleY, fall) - g.settleY * settle;
   const cardW = lerp(g.card.w, slot.w, shrink);
   const cardH = lerp(g.card.h, slot.h, shrink);
   const k = cardW / g.card.w; // content scale while it fades
@@ -206,7 +213,6 @@ export const Proof: React.FC<{ format: Format }> = ({ format }) => {
   const cardIn = ramp(frame, AT.card[0], AT.card[1], Easing.out(Easing.cubic));
   const lit = ramp(frame, AT.drop[1] - 10, AT.drop[1]); // the mark block turns blue as it lands
   const pulse = ramp(frame, AT.drop[1], AT.drop[1] + 30, Easing.out(Easing.cubic));
-  const settle = ramp(frame, AT.settle[0], AT.settle[1], Easing.inOut(Easing.cubic));
 
   const chainIn = rise(frame, AT.chain);
   const linkW = 3;
@@ -232,6 +238,7 @@ export const Proof: React.FC<{ format: Format }> = ({ format }) => {
     }
   }
   const first = blockRect(g, 0, 0);
+  const lead = Math.min(90, first.x); // the fading history line stays inside the safe padding
   const bracketY = g.chain.cy + size / 2 + 20;
   const bracketDraw = ramp(frame, AT.gas, AT.gas + 25);
 
@@ -252,7 +259,7 @@ export const Proof: React.FC<{ format: Format }> = ({ format }) => {
             </linearGradient>
           </defs>
           {/* Earlier history fading in from the left, then one link line behind every block. */}
-          <rect x={first.x - 90} y={g.chain.cy - linkW / 2} width={90} height={linkW} fill="url(#proof-lead)" />
+          <rect x={first.x - lead} y={g.chain.cy - linkW / 2} width={lead} height={linkW} fill="url(#proof-lead)" />
           <line x1={first.x} x2={slot.x} y1={g.chain.cy} y2={g.chain.cy} stroke={C.line} strokeWidth={linkW} />
           {Array.from({ length: periods }, (_, q) => {
             const a = blockRect(g, q, 0);
