@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest an improvement or a new capability.
+title: "<area>: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the roadmap in the README first: some items (new books, self-serve charters, public API and MCP,
+        rolling deposit rounds, ...) are already planned after mainnet.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should change? Name the contracts, services or pages involved if you know them.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: risk
+    attributes:
+      label: Risk and mandate impact
+      description: Does this touch the waterfall, redemptions, the mandate, marks or governance? How should it be tested?
