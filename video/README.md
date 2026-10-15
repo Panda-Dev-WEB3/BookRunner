@@ -47,6 +47,7 @@ bash scripts/video.sh demo new-wallet   # once: creates video/.secrets/demo-wall
 bash scripts/video.sh demo smoke        # serve + connect the demo wallet, no transaction -> public/demos/smoke-connected.png
 bash scripts/video.sh demo recorder-smoke  # ~10 s recorder check -> public/demos/recorder-smoke.webm + .steps.json (demo/recorder.mjs: runScenario / recordScenario; step times are calibrated against the webm via a sync flash)
 bash scripts/video.sh demo run 4        # record clip 1|2|3|4|all -> public/demos/<n>-<id>.webm + .steps.json (demo/run.mjs, demo/scenarios/)
+bash scripts/video.sh demo run all --with-tx  # `all` skips clip 2 (real testnet transactions) unless --with-tx is given
 bash scripts/video.sh demo frames 4-risk  # 3 review stills -> public/demos/frames/ (or: frames <name> 5 | frames <name> 12,30.5)
 ```
 
@@ -86,8 +87,8 @@ early, while the form is being filled: anchored 2.5 s of source after the previo
 of output after the previous caption (in the sped-up gaps the latter wins, about 3 s of source). The app clips (2–4)
 zoom the recording ×1.25 anchored top-centre (`zoom` in `DEMO_CLIPS`): the visible source is x 192–1728, y 0–864, so the
 app's centred column (x ≈ 390–1530) and its header stay in frame while the empty side margins and the bottom 216 source
-px are cut; the caption band covers a further ~130–165 output px, so content in the bottom ~20% of the recorded
-viewport is not shown. Clip 1 (the full-width public site) is not zoomed.
+px (20% of the recorded viewport height) are cut; the caption band covers about 10% more (~130–165 output px) while
+a caption is up. Clip 1 (the full-width public site) is not zoomed.
 
 ```bash
 bash scripts/video.sh npm run demo-stills       # stills per caption step -> out/demo-stills/<n>/<nn>-<key>.png (+ title/end), prints lengths
@@ -102,7 +103,9 @@ python video/scripts/demo-sheet.py              # host (Pillow): contact sheets 
    address. The key is gitignored and never committed, logged or typed into a page.
 3. Fund that address once with ~0.02 test ETH from the testnet funder (run on the server; clip 2 mints its own test
    USDC). Only clip 2 sends transactions.
-4. `bash scripts/video.sh demo run all` (or `run 2`): records `public/demos/<n>-<id>.webm` + `.steps.json`.
+4. `bash scripts/video.sh demo run all --with-tx` (or one clip: `run 2`): records `public/demos/<n>-<id>.webm` +
+   `.steps.json`. Without `--with-tx`, `all` skips clip 2, the only clip that sends transactions; `run 2` prints a
+   notice that it spends test funds.
 5. `bash scripts/video.sh npm run demo-stills` + `python video/scripts/demo-sheet.py`: review the stills/sheets.
 6. `bash scripts/video.sh npm run demo-render` (or `-- 2` for one clip): one bundle, then
    `out/bookrunner-demo-<n>-<id>.mp4` (H.264, CRF 18, yuv420p, no audio, 1920×1080, 30 fps, 60–120 s) plus a poster

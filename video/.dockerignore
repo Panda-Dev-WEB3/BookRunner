@@ -1,0 +1,7 @@
+# `docker build` of bookrunner-video:1 (scripts/video.sh) needs only the Dockerfile: never send the demo wallet key,
+# recordings, renders or the Linux node_modules volume's host stub to the daemon.
+.secrets/
+out/
+public/demos/
+public/footage/
+node_modules/

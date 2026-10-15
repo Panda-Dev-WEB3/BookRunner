@@ -1,4 +1,6 @@
-// Records the product demo clips: bash scripts/video.sh demo run <1|2|3|4|all>
+// Records the product demo clips: bash scripts/video.sh demo run <1|2|3|4|all> [--with-tx]
+//   `all` records 1, 3 and 4 only; clip 2 sends real testnet transactions (spends test ETH gas, mints and deposits test
+//   USDC), so `all` includes it only with --with-tx. `run 2` records it directly, after printing that notice.
 //   1 site       public site https://bookrunner.tech (no local server, no wallet)
 //   2 allocator  local app + demo wallet: mint test USDC, approve + deposit 1,000 test USDC into NVDA Junior (the only
 //                clip that sends transactions, on testnet 46630)
@@ -49,11 +51,20 @@ async function record(sc) {
   return runScenario({ ...opts, path: sc.path ?? "" });
 }
 
-const arg = process.argv[2] ?? "";
-const picked = arg === "all" ? Object.keys(SCENARIOS) : [arg];
-if (!picked.every((k) => k in SCENARIOS)) {
-  console.error("usage: bash scripts/video.sh demo run <1|2|3|4|all>");
+const args = process.argv.slice(2);
+const withTx = args.includes("--with-tx");
+const arg = args.find((a) => !a.startsWith("--")) ?? "";
+const unknown = args.filter((a) => a.startsWith("--") && a !== "--with-tx");
+const SENDS_TX = "2"; // the allocator clip: the only one that sends transactions
+const picked = arg === "all" ? Object.keys(SCENARIOS).filter((k) => k !== SENDS_TX || withTx) : [arg];
+if (unknown.length || !picked.length || !picked.every((k) => k in SCENARIOS)) {
+  console.error("usage: bash scripts/video.sh demo run <1|2|3|4|all> [--with-tx]   (all: clip 2 only with --with-tx)");
   process.exit(2);
+}
+if (arg === "all" && !withTx) console.log(`run all: skipping clip ${SENDS_TX} (${SCENARIOS[SENDS_TX].name}), which sends real testnet transactions; add --with-tx to include it`);
+if (picked.includes(SENDS_TX)) {
+  console.log(`NOTICE: clip ${SENDS_TX} (${SCENARIOS[SENDS_TX].name}) sends real transactions on Robinhood Chain testnet 46630 from the demo wallet:`);
+  console.log("        it spends test ETH for gas, mints 10,000 test USDC and deposits 1,000 test USDC into NVDA Junior.");
 }
 const summary = [];
 for (const k of picked) {

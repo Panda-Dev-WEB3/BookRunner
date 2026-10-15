@@ -5,7 +5,8 @@
 // webm from its first caption step to `tailMs` after its last one; idle stretches between two steps longer than
 // `minGapMs` play at `rate`, except `keepAfterMs` after a step (the viewer sees its result) and `keepBeforeMs` before
 // the next one (the action that leads to it), which stay at 1x. Output frames: a title card, the video (cross-faded in),
-// an end card (cross-faded in); captions are placed at their step's output frame.
+// an end card (cross-faded in). A caption starts at its step's output frame (a `lead` key's earlier), never before the
+// title card has faded out nor sooner than `captionMinFrames` after the previous caption, and runs to the next one.
 import type { DemoId } from "../demo-copy";
 
 export const DEMO_FPS = 30;
@@ -18,8 +19,8 @@ export const DEMO_FPS = 30;
  * the anchor maps to ~2.25 s of output, so the 2.5 s minimum hold wins (about previous step + 3 s of source).
  * `zoom`: the recording is scaled by `scale` around (50%, `originY`). The app clips (a centred ~1140 px column) are
  * zoomed x1.25 top-anchored: the visible source is x 192-1728, y 0-864, so the empty side margins and the bottom 216
- * source px are cut. The caption band covers a further ~130-165 output px at the bottom, so page content in the bottom
- * ~20% of the recorded viewport is not shown. The full-width public site (clip 1) is not zoomed.
+ * source px (20% of the recorded viewport height) are cut; the caption band covers a further ~130-165 output px (about
+ * 10% more) while a caption is up. The full-width public site (clip 1) is not zoomed.
  */
 export const DEMO_CLIPS = [
   { n: 1, id: "site", name: "1-site", comp: "Demo1Site", lead: [], zoom: { scale: 1, originY: 0 } },

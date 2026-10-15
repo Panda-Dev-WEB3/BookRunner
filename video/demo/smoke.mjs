@@ -32,7 +32,7 @@ try {
   const ctx = await browser.newContext({ viewport: { width: 1920, height: 1080 }, deviceScaleFactor: 1 });
   page = await ctx.newPage();
   page.on("pageerror", (e) => console.log(`page error: ${e.message}`));
-  const wallet = await installDemoWallet(page, { account, appOrigin: server.origin, rpcUrl: DEMO_RPC_URL, chainId: DEMO_CHAIN_ID });
+  const wallet = await installDemoWallet(page, { account, appOrigin: server.origin, rpcUrl: DEMO_RPC_URL, chainId: DEMO_CHAIN_ID, allowSend: false });
   console.log(`demo wallet: ${wallet.address}`);
 
   const res = await page.goto(server.url, { waitUntil: "load", timeout: 45000 });

@@ -13,7 +13,7 @@ export interface DemoClipCopy {
 
 export const DEMO_COPY: Record<DemoId, DemoClipCopy> = {
   site: {
-    title: "Bookrunner in two minutes",
+    title: "Bookrunner in one minute",
     subtitle: "The public site, the live desk and the rulebook · Robinhood Chain testnet",
     steps: {
       hero: "Bookrunner: the underwriting syndicate for on-chain perp markets.",
