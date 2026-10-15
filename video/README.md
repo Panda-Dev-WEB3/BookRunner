@@ -73,3 +73,19 @@ bash scripts/video.sh demo frames 4-risk  # 3 review stills -> public/demos/fram
   step keys; `run.mjs` keeps a recording only if every key was logged in order. Captions: `src/demo-copy.ts`
   (checked by `test/demo-copy.test.ts` and `scripts/check-copy.ts`). Clip 2 spends test gas and deposits test USDC on every run.
 - Outputs (`public/demos/`) are gitignored. Unit tests: `node_modules/bun/bin/bun.exe test video/test`.
+
+### Demo clips (Remotion)
+
+Compositions `Demo1Site`, `Demo2Allocator`, `Demo3Sponsor`, `Demo4Risk` (1920×1080, 30 fps, `src/demos/Demo.tsx`) play
+`public/demos/<n>-<id>.webm` with a 3 s title card, a lower-third caption per step (`src/demo-copy.ts`) and a 3 s end
+card; their length comes from the step log via `calculateMetadata`. The timing plan (`src/demos/segments.ts`, tested in
+`test/demo-segments.test.ts`) starts at the first caption step, ends 4 s after the last, and plays gaps longer than 5 s
+between steps at ×2 except 2 s after a step and 1.5 s before the next (dropped for a clip that would fall under 60 s).
+Steps the scenario logs only after typing (clip 3: market, capital, mandate; `lead` in `DEMO_CLIPS`) get their caption
+2.5 s after the previous step, while the form is being filled.
+
+```bash
+bash scripts/video.sh npm run demo-stills       # stills per caption step -> out/demo-stills/<n>/<nn>-<key>.png (+ title/end), prints lengths
+bash scripts/video.sh npm run demo-stills -- 3  # one clip
+python video/scripts/demo-sheet.py              # host (Pillow): contact sheets -> out/demo-stills/<n>-sheet.png
+```

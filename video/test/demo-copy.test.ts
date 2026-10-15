@@ -4,7 +4,7 @@ import { scenario as site } from "../demo/scenarios/1-site.mjs";
 import { scenario as allocator } from "../demo/scenarios/2-allocator.mjs";
 import { scenario as sponsor } from "../demo/scenarios/3-sponsor.mjs";
 import { scenario as risk } from "../demo/scenarios/4-risk.mjs";
-import { DEMO_COPY, DEMO_IDS } from "../src/demo-copy";
+import { DEMO_CARDS, DEMO_COPY, DEMO_IDS } from "../src/demo-copy";
 
 const SCENARIOS = [site, allocator, sponsor, risk] as Array<{ id: string; name: string; steps: string[]; wallet: boolean | { allowSend?: boolean } }>;
 const RESERVED = ["__sync", "loaded"];
@@ -40,8 +40,12 @@ describe("demo copy", () => {
       }
     }
   });
-  test("passes the repo copy rules", () => {
+  test("passes the repo copy rules (captions and the title / end cards)", () => {
     expect(checkCopy(all(DEMO_COPY).join("\n"))).toEqual([]);
+    expect(checkCopy(all(DEMO_CARDS).join("\n"))).toEqual([]);
+  });
+  test("the end card carries the site, the X handle and the testnet disclaimer", () => {
+    expect(DEMO_CARDS).toEqual({ network: "Robinhood Chain testnet", url: "bookrunner.tech", x: "@TryBookRunner", disclaimer: "Testnet software. Not an offer." });
   });
   test("every clip says it runs on testnet; the deposit clip says the USDC is test USDC", () => {
     for (const id of DEMO_IDS) expect(all(DEMO_COPY[id]).join(" ")).toMatch(/testnet/i);

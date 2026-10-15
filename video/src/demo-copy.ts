@@ -95,3 +95,11 @@ export const DEMO_COPY: Record<DemoId, DemoClipCopy> = {
     },
   },
 };
+
+/** Shared by every clip: the title card's network label and the end card (site, X handle, disclaimer). */
+export const DEMO_CARDS = {
+  network: "Robinhood Chain testnet",
+  url: "bookrunner.tech",
+  x: "@TryBookRunner",
+  disclaimer: "Testnet software. Not an offer.",
+} as const;
