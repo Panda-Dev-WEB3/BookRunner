@@ -6,7 +6,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { bundle } from "@remotion/bundler";
-import { renderMedia, renderStill, selectComposition } from "@remotion/renderer";
+import { getVideoMetadata, renderMedia, renderStill, selectComposition } from "@remotion/renderer";
 import { DEMO_COPY } from "../src/demo-copy.ts";
 import { DEMO_CLIPS, DEMO_FPS, DEMO_TIMING, cueMidFrame, planDemo } from "../src/demos/segments.ts";
 
@@ -26,6 +26,8 @@ try {
   for (const c of clips) {
     const log = JSON.parse(readFileSync(path.join(root, "public", "demos", `${c.name}.steps.json`), "utf8"));
     const plan = planDemo(log, Object.keys(DEMO_COPY[c.id].steps), c.lead);
+    const { durationInSeconds } = await getVideoMetadata(path.join(root, "public", "demos", `${c.name}.webm`));
+    if (plan.endMs / 1000 > durationInSeconds) throw new Error(`${c.name}.webm is ${durationInSeconds} s, the plan plays to ${plan.endMs / 1000} s`);
     const seconds = plan.totalFrames / DEMO_FPS;
     if (seconds < DEMO_TIMING.minSeconds || seconds > DEMO_TIMING.maxSeconds) throw new Error(`${c.comp} is ${seconds.toFixed(1)} s, outside ${DEMO_TIMING.minSeconds}-${DEMO_TIMING.maxSeconds} s`);
     const composition = await selectComposition({ serveUrl, id: c.comp, inputProps: { clip: c.n, plan: null } });

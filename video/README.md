@@ -82,9 +82,12 @@ card; their length comes from the step log via `calculateMetadata`. The timing p
 `test/demo-segments.test.ts`) starts at the first caption step, ends 4 s after the last, and plays gaps longer than 5 s
 between steps at ×2 except 2 s after a step and 1.5 s before the next (dropped for a clip that would fall under 60 s).
 Steps the scenario logs only after typing (clip 3: market, capital, mandate; `lead` in `DEMO_CLIPS`) get their caption
-2.5 s after the previous step, while the form is being filled. The app clips (2–4) zoom the recording ×1.25 anchored
-top-centre (`zoom` in `DEMO_CLIPS`): the app's centred column (x ≈ 390–1530) and its header stay in frame, the crop
-falls on the empty side margins and the bottom, behind the captions; clip 1 (the full-width public site) is not zoomed.
+early, while the form is being filled: anchored 2.5 s of source after the previous step, but never sooner than 2.5 s
+of output after the previous caption (in the sped-up gaps the latter wins, about 3 s of source). The app clips (2–4)
+zoom the recording ×1.25 anchored top-centre (`zoom` in `DEMO_CLIPS`): the visible source is x 192–1728, y 0–864, so the
+app's centred column (x ≈ 390–1530) and its header stay in frame while the empty side margins and the bottom 216 source
+px are cut; the caption band covers a further ~130–165 output px, so content in the bottom ~20% of the recorded
+viewport is not shown. Clip 1 (the full-width public site) is not zoomed.
 
 ```bash
 bash scripts/video.sh npm run demo-stills       # stills per caption step -> out/demo-stills/<n>/<nn>-<key>.png (+ title/end), prints lengths

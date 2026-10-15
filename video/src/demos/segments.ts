@@ -12,10 +12,14 @@ export const DEMO_FPS = 30;
 
 /**
  * The four clips: composition id, recording name (public/demos/<name>.webm + .steps.json) and copy id. `lead`: steps
- * the scenario logs only once their action is done (form fields typed), so their caption leads in: it appears when
- * the previous caption has held `captionLeadHoldMs` of source, i.e. as the action starts (see planDemo). `zoom`: the
- * recording is scaled by `scale` around (50%, `originY`) — the app clips (a centred ~1140 px column) are zoomed so the
- * crop falls on the empty side margins and the bottom, behind the captions; the full-width public site is not.
+ * the scenario logs only once their action is done (form fields typed), so their caption leads in: it is anchored at
+ * the previous step + `captionLeadHoldMs` of SOURCE time (about when the action starts), mapped to output, and then,
+ * like every caption, held back to at least `captionMinFrames` of OUTPUT after the previous caption. In a sped-up gap
+ * the anchor maps to ~2.25 s of output, so the 2.5 s minimum hold wins (about previous step + 3 s of source).
+ * `zoom`: the recording is scaled by `scale` around (50%, `originY`). The app clips (a centred ~1140 px column) are
+ * zoomed x1.25 top-anchored: the visible source is x 192-1728, y 0-864, so the empty side margins and the bottom 216
+ * source px are cut. The caption band covers a further ~130-165 output px at the bottom, so page content in the bottom
+ * ~20% of the recorded viewport is not shown. The full-width public site (clip 1) is not zoomed.
  */
 export const DEMO_CLIPS = [
   { n: 1, id: "site", name: "1-site", comp: "Demo1Site", lead: [], zoom: { scale: 1, originY: 0 } },
@@ -195,8 +199,11 @@ function layout(log: StepLog, captionKeys: string[], lead: readonly string[], ru
 /**
  * The plan for one clip: speed-up applied unless that would make the clip shorter than `timing.minSeconds`, in which
  * case the clip plays at 1x (never padded). `captionKeys` are the clip's caption steps; other log keys are ignored.
- * A caption starts at its step's output frame, or for a `lead` key `captionLeadHoldMs` after the previous step if
- * that is earlier; never before the title card has faded out, and at least `captionMinFrames` after the previous one.
+ * Caption start (output frames): max(mapped anchor, end of the title card, previous caption start + captionMinFrames),
+ * where the anchor is the step's source time, or for a `lead` key min(step, previous step + captionLeadHoldMs) in
+ * source time. The 60-120 s target is enforced by the stills / render scripts, not here: the 1x fallback is returned
+ * even if it is still under `minSeconds`, and a speed-up layout that throws (a caption under the minimum hold) does not
+ * fall back.
  */
 export function planDemo(
   log: StepLog,

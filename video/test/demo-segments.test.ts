@@ -11,6 +11,7 @@ import {
   planDemo,
   speedSpans,
   srcToVideoFrame,
+  type DemoPlan,
   type StepLog,
 } from "../src/demos/segments";
 
@@ -103,19 +104,46 @@ describe("planDemo", () => {
     expect(p.speedUp).toBeNull();
     expect(p.segments).toHaveLength(1);
     expect(p.videoFrames).toBe(Math.round((45000 + T.tailMs) * 30 / 1000));
+    // 1x is still under 60 s here (75 + 1470 - 15 + 90 = 1620 frames = 54 s): planDemo returns it; the scripts reject it.
+    expect(p.totalFrames).toBe(1620);
   });
-  test("a lead-in caption starts captionLeadHoldMs after the previous step when its own step comes later", () => {
-    const steps: Array<[string, number]> = [["a", 0], ["b", 10000], ["c", 20000], ["d", 50000], ["e", 80000]];
-    const k = steps.map(([x]) => x);
+  describe("lead-in captions (with the x2 speed-up applied)", () => {
+    // 20 steps 9 s apart (like clip 3's form steps): each gap is 2 s 1x + 5.5 s x2 + 1.5 s 1x = 6.25 s of output.
+    const k = Array.from({ length: 20 }, (_, i) => `s${i}`);
+    const steps = k.map((x, i): [string, number] => [x, 10000 + i * 9000]);
+    const at = (p: DemoPlan, ms: number) => p.videoFrom + srcToVideoFrame(p.segments, ms);
     const plain = planDemo(log(steps), k);
-    const led = planDemo(log(steps), k, ["c"]);
-    const at = (p: typeof plain, ms: number) => p.videoFrom + srcToVideoFrame(p.segments, ms);
-    expect(led.captions[2].from).toBe(at(led, 10000 + T.captionLeadHoldMs));
-    expect(led.captions[1].to).toBe(led.captions[2].from);
-    expect(plain.captions[2].from).toBe(at(plain, 20000));
-    // other captions and the video are unchanged
-    expect(led.captions.map((c) => c.from).filter((_, i) => i !== 2)).toEqual(plain.captions.map((c) => c.from).filter((_, i) => i !== 2));
-    expect(led.totalFrames).toBe(plain.totalFrames);
+    const led = planDemo(log(steps), k, ["s5"]);
+    const prevMs = steps[4][1];
+
+    test("the speed-up applies, and the lead changes only that caption's start", () => {
+      expect(plain.speedUp).toEqual(SPEED_UP);
+      expect(led.speedUp).toEqual(SPEED_UP);
+      expect(led.totalFrames).toBe(plain.totalFrames);
+      expect(led.captions.map((c) => c.from).filter((_, i) => i !== 5)).toEqual(plain.captions.map((c) => c.from).filter((_, i) => i !== 5));
+      expect(plain.captions[5].from).toBe(at(plain, steps[5][1]));
+      expect(led.captions[4].to).toBe(led.captions[5].from);
+    });
+    test("start = max(mapped anchor, previous start + captionMinFrames): in a sped-up gap the minimum hold wins", () => {
+      const anchor = at(led, prevMs + T.captionLeadHoldMs); // 2 s at 1x + 0.5 s at x2 = 2.25 s of output
+      expect(anchor - led.captions[4].from).toBeGreaterThanOrEqual(67);
+      expect(anchor - led.captions[4].from).toBeLessThanOrEqual(68);
+      expect(led.captions[5].from).toBe(Math.max(anchor, led.captions[4].from + T.captionMinFrames));
+      expect(led.captions[5].from).toBe(led.captions[4].from + T.captionMinFrames);
+      expect(led.captions[5].from).toBeLessThan(plain.captions[5].from);
+    });
+    test("with a longer hold the mapped anchor wins", () => {
+      const timing = { ...T, captionLeadHoldMs: 4000 }; // 2 s at 1x + 2 s at x2 = 3 s of output > 2.5 s
+      const p = planDemo(log(steps), k, ["s5"], timing);
+      expect(p.speedUp).toEqual(SPEED_UP);
+      expect(p.captions[5].from).toBe(at(p, prevMs + 4000));
+      expect(p.captions[5].from).toBeGreaterThan(p.captions[4].from + T.captionMinFrames);
+    });
+    test("a lead key whose step comes before the hold keeps its step time", () => {
+      const close = steps.map(([x, t], i): [string, number] => [x, i === 5 ? prevMs + 4000 : t]);
+      const p = planDemo(log(close), k, ["s5"], { ...T, captionLeadHoldMs: 6000 });
+      expect(p.captions[5].from).toBe(at(p, prevMs + 4000));
+    });
   });
   test("a caption key missing from the log throws", () => {
     expect(() => planDemo(log([["a", 0]]), ["a", "b"])).toThrow(/no step for caption/);
