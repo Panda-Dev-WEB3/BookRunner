@@ -1,5 +1,6 @@
 // CI copy linter (Overview §10 "What not to say"). Scans user-facing copy:
-//   README.md, docs/public/**/*.md, apps/web/src/**/*.{ts,tsx}, video/src/copy.ts (JSX text + string literals only)
+//   README.md, docs/public/**/*.md, apps/web/src/**/*.{ts,tsx}, video/src/copy.ts, video/src/demo-copy.ts
+//   (JSX text + string literals only)
 // Exits 1 on any banned term. Usage: bun scripts/check-copy.ts
 //
 // TS / TSX sources are parsed with the TypeScript compiler (the same extractor as apps/web's own copy check,
@@ -30,7 +31,7 @@ if (import.meta.main) {
   if (existsSync(resolve(ROOT, "README.md"))) targets.push(resolve(ROOT, "README.md"));
   add("**/*.md", resolve(ROOT, "docs/public"));
   add("**/*.{ts,tsx}", resolve(ROOT, "apps/web/src"));
-  add("copy.ts", resolve(ROOT, "video/src"));
+  add("{copy,demo-copy}.ts", resolve(ROOT, "video/src"));
 
   let violations = 0;
   for (const file of targets) {

@@ -268,8 +268,26 @@ function makeContext({ page, log, baseUrl, wallet, name }) {
         if (ready) break;
         if (Date.now() > deadline) throw new Error(`[${name}] ${locator} is disabled or covered at its centre`);
         await sleep(150);
+        // clipped by a scroll container (e.g. a wide table) or under the sticky header: centre it, then glide again
+        if (await locator.evaluate((el) => !el.matches(":disabled")).catch(() => false)) await scrollTo(locator);
       }
       await page.mouse.click(pos.x, pos.y, { delay: 60 });
+    },
+    /**
+     * Drags horizontally across `locator` (e.g. a range slider) from `fromFrac` to `toFrac` of its width, at its
+     * vertical centre, with the visible cursor gliding along the way.
+     */
+    async drag(locator, fromFrac, toFrac) {
+      await glideTo(locator);
+      const b = await locator.boundingBox();
+      if (!b) throw new Error(`recorder: ${locator} has no box`);
+      const y = b.y + b.height / 2;
+      await moveTo(b.x + b.width * fromFrac, y);
+      await sleep(150);
+      await page.mouse.down();
+      await moveTo(b.x + b.width * toFrac, y);
+      await sleep(100);
+      await page.mouse.up();
     },
     /** Clicks the field, clears it, then types `text` one key at a time (60 ms per character). */
     async type(locator, text) {

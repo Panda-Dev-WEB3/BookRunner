@@ -46,6 +46,8 @@ bash scripts/video.sh app-build         # bun install + testnet build of apps/we
 bash scripts/video.sh demo new-wallet   # once: creates video/.secrets/demo-wallet.json, prints only the address
 bash scripts/video.sh demo smoke        # serve + connect the demo wallet, no transaction -> public/demos/smoke-connected.png
 bash scripts/video.sh demo recorder-smoke  # ~10 s recorder check -> public/demos/recorder-smoke.webm + .steps.json (demo/recorder.mjs: runScenario / recordScenario; step times are calibrated against the webm via a sync flash)
+bash scripts/video.sh demo run 4        # record clip 1|2|3|4|all -> public/demos/<n>-<id>.webm + .steps.json (demo/run.mjs, demo/scenarios/)
+bash scripts/video.sh demo frames 4-risk  # 3 review stills -> public/demos/frames/ (or: frames <name> 5 | frames <name> 12,30.5)
 ```
 
 - **App build:** `app-build` runs on the host: `bun install --frozen-lockfile`, then
@@ -64,4 +66,10 @@ bash scripts/video.sh demo recorder-smoke  # ~10 s recorder check -> public/demo
   requests from the local app origin (exposeBinding origin check; other frames get 4100).
   The key stays in `video/.secrets/demo-wallet.json` (gitignored): never logged, never sent to the page. It needs test
   ETH for gas (funded once from the testnet funder on the server).
+- **Clips** (`demo/scenarios/`, run by `demo/run.mjs`): 1 site (public https://bookrunner.tech, no wallet), 2 allocator
+  (demo wallet: mints 10,000 test USDC, approves and deposits 1,000 test USDC into NVDA Junior: the only clip that sends
+  transactions, all on testnet 46630; every receipt must be `success`), 3 sponsor (file-a-charter form up to the prepared
+  filing, never signed), 4 risk (risk, agents, marks, proof check, waterfall; no wallet). Each scenario exports its ordered
+  step keys; `run.mjs` keeps a recording only if every key was logged in order. Captions: `src/demo-copy.ts`
+  (checked by `test/demo-copy.test.ts` and `scripts/check-copy.ts`). Clip 2 spends test gas and deposits test USDC on every run.
 - Outputs (`public/demos/`) are gitignored. Unit tests: `node_modules/bun/bin/bun.exe test video/test`.
