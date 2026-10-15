@@ -1018,13 +1018,13 @@ export function AmountInput(props: {
 
 export function KV(props: { rows: Array<[ReactNode, ReactNode] | null | false>; className?: string }) {
   return (
-    <dl className={cx("grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 text-[12.5px]", props.className)}>
+    <dl className={cx("grid grid-cols-[minmax(min-content,1fr)_minmax(0,auto)] gap-x-4 text-[12.5px]", props.className)}>
       {props.rows.filter(Boolean).map((r, i) => {
         const [k, v] = r as [ReactNode, ReactNode];
         return (
           <div key={i} className="contents">
-            <dt className="min-w-0 break-words border-b border-line py-2 text-ink-2">{k}</dt>
-            <dd className="num border-b border-line py-2 text-right">{v}</dd>
+            <dt className="border-b border-line py-2 text-ink-2">{k}</dt>
+            <dd className="num min-w-0 break-words border-b border-line py-2 text-right">{v}</dd>
           </div>
         );
       })}
