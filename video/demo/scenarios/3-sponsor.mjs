@@ -10,7 +10,7 @@ export const scenario = {
   id: "sponsor",
   name: "3-sponsor",
   path: "charters",
-  wallet: true,
+  wallet: { allowSend: false }, // connected for the form, but the wallet refuses every transaction (4100)
   steps: ["charters", "connect", "form", "market", "capital", "mandate", "tranches", "review", "prepared", "charter", "jury", "votes", "committee", "book"],
   async run(ctx) {
     const { page, step, click, type, scrollTo, wait, expectText, waitFor } = ctx;

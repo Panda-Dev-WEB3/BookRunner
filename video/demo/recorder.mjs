@@ -88,7 +88,8 @@ function withTimeout(promise, ms, what) {
  * @param {object} o
  * @param {string} o.name         file stem: [A-Za-z0-9_-]
  * @param {string} o.baseUrl      page opened first (e.g. server.url = http://localhost:PORT/app/)
- * @param {boolean} [o.wallet]    install the demo wallet (needs video/.secrets/demo-wallet.json); handle on ctx.wallet
+ * @param {boolean | { allowSend?: boolean }} [o.wallet]  install the demo wallet (needs video/.secrets/demo-wallet.json);
+ *                                handle on ctx.wallet; `{ allowSend: false }` makes it refuse every transaction
  * @param {(ctx: object) => Promise<void>} o.run
  * @param {string} [o.outDir]
  * @param {number} [o.scenarioTimeoutMs]  watchdog for `run` (default 10 min); expiry takes the failure path
@@ -123,7 +124,8 @@ export async function recordScenario({ name, baseUrl, wallet = false, run, outDi
     let walletHandle;
     if (wallet) {
       const account = loadDemoAccount(join(VIDEO_DIR, ".secrets/demo-wallet.json"));
-      walletHandle = await installDemoWallet(page, { account, appOrigin: new URL(baseUrl).origin, rpcUrl: DEMO_RPC_URL, chainId: DEMO_CHAIN_ID });
+      const allowSend = typeof wallet === "object" ? wallet.allowSend !== false : true;
+      walletHandle = await installDemoWallet(page, { account, appOrigin: new URL(baseUrl).origin, rpcUrl: DEMO_RPC_URL, chainId: DEMO_CHAIN_ID, allowSend });
     }
 
     // Calibration flash on the blank first page (see the header): logged first, shown right after.
@@ -285,9 +287,12 @@ function makeContext({ page, log, baseUrl, wallet, name }) {
       await moveTo(b.x + b.width * fromFrac, y);
       await sleep(150);
       await page.mouse.down();
-      await moveTo(b.x + b.width * toFrac, y);
-      await sleep(100);
-      await page.mouse.up();
+      try {
+        await moveTo(b.x + b.width * toFrac, y);
+        await sleep(100);
+      } finally {
+        await page.mouse.up(); // never leave the button held down if the move fails
+      }
     },
     /** Clicks the field, clears it, then types `text` one key at a time (60 ms per character). */
     async type(locator, text) {

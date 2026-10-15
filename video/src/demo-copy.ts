@@ -88,7 +88,7 @@ export const DEMO_COPY: Record<DemoId, DemoClipCopy> = {
       limits: "Live limits: inventory, hedge ratio, skew and drawdown against the kill level.",
       marks: "Marks: signed EIP-712, one on-chain transaction per book per period.",
       "verify-mark": "Verify: the receipts root is rebuilt in the browser and matches the mark.",
-      "verify-receipt": "One receipt's inclusion proof, checked in the browser against the signed root.",
+      "verify-receipt": "Any receipt can be checked locally against its hourly Merkle root.",
       waterfall: "Fee-flow waterfall: every unit of the last distribution is accounted for.",
       "loss-junior": "Losses run the other way: at a mark, Junior absorbs a loss first.",
       "loss-senior": "Past Junior, Senior absorbs next; the backstop covers Senior up to the pool.",

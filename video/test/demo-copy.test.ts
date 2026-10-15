@@ -6,7 +6,7 @@ import { scenario as sponsor } from "../demo/scenarios/3-sponsor.mjs";
 import { scenario as risk } from "../demo/scenarios/4-risk.mjs";
 import { DEMO_COPY, DEMO_IDS } from "../src/demo-copy";
 
-const SCENARIOS = [site, allocator, sponsor, risk] as Array<{ id: string; name: string; steps: string[] }>;
+const SCENARIOS = [site, allocator, sponsor, risk] as Array<{ id: string; name: string; steps: string[]; wallet: boolean | { allowSend?: boolean } }>;
 const RESERVED = ["__sync", "loaded"];
 const all = (v: unknown): string[] => (typeof v === "string" ? [v] : Array.isArray(v) ? v.flatMap(all) : v && typeof v === "object" ? Object.values(v).flatMap(all) : []);
 
@@ -18,6 +18,9 @@ describe("demo copy", () => {
       expect(new Set(s.steps).size).toBe(s.steps.length);
       for (const r of RESERVED) expect(s.steps).not.toContain(r);
     }
+  });
+  test("only the allocator clip can send: site and risk have no wallet, sponsor's wallet refuses sends", () => {
+    expect(SCENARIOS.map((s) => s.wallet)).toEqual([false, true, { allowSend: false }, false]);
   });
   test("every step a scenario logs has a caption, and every caption belongs to a step", () => {
     for (const s of SCENARIOS) {

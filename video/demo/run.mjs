@@ -32,7 +32,7 @@ function checkedRun(sc) {
 
 async function record(sc) {
   if (sc.steps.some((k) => RESERVED.has(k))) throw new Error(`[${sc.name}] reserved step key in steps`);
-  console.log(`\n=== ${sc.name} (${sc.steps.length} steps${sc.wallet ? ", demo wallet" : ""}) ===`);
+  console.log(`\n=== ${sc.name} (${sc.steps.length} steps${sc.wallet ? (sc.wallet.allowSend === false ? ", demo wallet, sends refused" : ", demo wallet") : ""}) ===`);
   const opts = { name: sc.name, wallet: sc.wallet, run: checkedRun(sc), scenarioTimeoutMs: sc.timeoutMs };
   if (sc.baseUrl) {
     // public site: no local app server

@@ -94,6 +94,28 @@ describe("demo wallet: sending", () => {
     expect(sent).toEqual([{ to: TO, data: "0xabcd", value: 16n, gas: 21000n }]);
     expect(rpcCalls).toEqual([["eth_chainId", []]]);
   });
+  test("allowSend: false refuses every transaction (4100) without parsing, rpc or signing", async () => {
+    const rpcCalls: string[] = [];
+    const sent: unknown[] = [];
+    const h = W.createWalletHandler({
+      address: ADDR,
+      chainId: 46630,
+      allowSend: false,
+      rpc: async (method: string) => (rpcCalls.push(method), method === "eth_chainId" ? "0xb626" : "0xrpc"),
+      send: async (tx: unknown) => (sent.push(tx), "0xhash"),
+    });
+    expect((await h.handle({ method: "eth_requestAccounts" })).result).toEqual([ADDR]);
+    for (const params of [[{ from: ADDR, to: TO, value: "0x0", data: "0x", chainId: "0xb626" }], [{ to: TO }], [], [{ data: "0x00" }]]) {
+      const r = await h.handle({ method: "eth_sendTransaction", params });
+      expect(r.error?.code).toBe(4100);
+      expect(r.error?.message).toMatch(/sending is disabled/);
+    }
+    expect(sent).toEqual([]);
+    expect(rpcCalls).toEqual([]);
+    // reads and account methods still work
+    expect((await h.handle({ method: "eth_call", params: [{ to: TO }] })).result).toBe("0xrpc");
+    expect((await h.handle({ method: "eth_chainId" })).result).toBe("0xb626");
+  });
   test("refuses another chain id, another sender, or an RPC on another chain", async () => {
     const { h, sent } = make();
     await h.handle({ method: "eth_requestAccounts" });

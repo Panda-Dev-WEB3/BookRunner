@@ -115,8 +115,10 @@ export function toRpcErrorObject(e) {
  * The request router, without network: `rpc(method, params)` forwards reads, `send(txParams)` signs + broadcasts and
  * resolves the hash. `handle({ method, params })` resolves { result, events } or { error } — never rejects. `events`
  * are [name, payload] pairs the page emits on the provider (accountsChanged on connect / revoke).
+ * With `allowSend: false` every eth_sendTransaction is refused (4100) before it is parsed, signed or sent: for
+ * recordings that must never transact.
  */
-export function createWalletHandler({ address, chainId, rpc, send }) {
+export function createWalletHandler({ address, chainId, rpc, send, allowSend = true }) {
   assertDemoChain(chainId);
   if (!isAddress(address, { strict: false })) throw new Error("demo wallet: invalid address");
   const addr = getAddress(address);
@@ -167,6 +169,7 @@ export function createWalletHandler({ address, chainId, rpc, send }) {
         }
         break;
       case "send": {
+        if (allowSend !== true) throw new RpcError(ERR.UNAUTHORIZED, "demo wallet: sending is disabled for this recording");
         if (!state.connected) throw new RpcError(ERR.UNAUTHORIZED, "demo wallet: not connected");
         const tx = parseTxRequest(params?.[0], { address: addr });
         // the endpoint itself must be on 46630, not just the configured id
@@ -250,9 +253,10 @@ export function originAllowed(frameUrl, appOrigin) {
  * Installs the demo wallet in a Playwright page (before its first navigation). `appOrigin` is the local app server's
  * origin (startAppServer().origin): requests from any other frame origin (iframes, a followed explorer / faucet link)
  * are refused with 4100. Returns { address, txs, settled() }: `txs` gets
- * { hash, status: "pending" | "success" | "reverted" | "unknown" } per sent transaction.
+ * { hash, status: "pending" | "success" | "reverted" | "unknown" } per sent transaction. With
+ * `allowSend: false` the wallet refuses every transaction (see createWalletHandler).
  */
-export async function installDemoWallet(page, { account, appOrigin, rpcUrl = DEMO_RPC_URL, chainId = DEMO_CHAIN_ID, log = console.log }) {
+export async function installDemoWallet(page, { account, appOrigin, rpcUrl = DEMO_RPC_URL, chainId = DEMO_CHAIN_ID, allowSend = true, log = console.log }) {
   assertDemoChain(chainId);
   if (!appOrigin || !originAllowed(appOrigin, appOrigin)) throw new Error("installDemoWallet: appOrigin (the local app server origin) is required");
   const chain = demoChain(rpcUrl);
@@ -263,6 +267,7 @@ export async function installDemoWallet(page, { account, appOrigin, rpcUrl = DEM
   const handler = createWalletHandler({
     address: account.address,
     chainId,
+    allowSend,
     rpc: jsonRpc(rpcUrl),
     async send(tx) {
       const hash = await walletClient.sendTransaction({ ...tx, account, chain });

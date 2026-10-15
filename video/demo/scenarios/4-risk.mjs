@@ -85,10 +85,18 @@ export const scenario = {
     // Loss order: an illustration computed in the browser on the last marked tranche NAVs.
     const slider = page.locator("#loss-slider");
     await scrollTo(slider);
+    // Junior is about half of NAV here: ~30% stays within Junior, ~68% reaches Senior. The drag must move the slider.
+    const pct = async () => Number(await slider.inputValue());
+    const kv = (label) => page.locator("dt", { hasText: label }).first().locator("xpath=following-sibling::dd[1]");
+    const usd = async (label) => Number((await kv(label).innerText()).replace(/[^\d.-]/g, ""));
     await drag(slider, 0.01, 0.3);
+    if (!((await pct()) >= 20 && (await pct()) <= 40)) throw new Error(`4-risk: loss slider at ${await pct()}% after the first drag (want ~30%)`);
+    if (!((await usd("Junior absorbs")) > 0)) throw new Error("4-risk: Junior absorbs nothing after the first drag");
     step("loss-junior");
     await wait(LONG_REST);
     await drag(slider, 0.3, 0.68);
+    if (!((await pct()) >= 60 && (await pct()) <= 76)) throw new Error(`4-risk: loss slider at ${await pct()}% after the second drag (want ~68%)`);
+    if (!((await usd("Senior absorbs")) > 0)) throw new Error("4-risk: Senior absorbs nothing after the second drag");
     step("loss-senior");
     await wait(LONG_REST);
   },
