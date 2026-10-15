@@ -51,9 +51,10 @@ export const EndCard: React.FC = () => {
         <Body
           format="landscape"
           size={30}
-          style={{ position: "absolute", left: 0, right: 0, bottom: 0, color: C.light, textAlign: "center", opacity: ramp(frame, 18, 32) }}
+          style={{ position: "absolute", left: 0, right: 0, bottom: 0, color: C.light, textAlign: "center", textWrap: "balance", opacity: ramp(frame, 18, 32) }}
         >
-          {DEMO_CARDS.disclaimer}
+          {/* Hyphenated words (e.g. "Stock-perp") never break at the hyphen. */}
+          {DEMO_CARDS.disclaimer.split(/(\S+-\S+)/).map((part, i) => (i % 2 ? <span key={i} style={{ whiteSpace: "nowrap" }}>{part}</span> : part))}
         </Body>
       </div>
     </Stage>

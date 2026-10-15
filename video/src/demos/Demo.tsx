@@ -42,7 +42,12 @@ export const Demo: React.FC<DemoProps> = ({ clip: n, plan }) => {
   const T = DEMO_TIMING;
   return (
     <AbsoluteFill style={{ background: C.deep }}>
-      <Sequence from={plan.videoFrom} durationInFrames={plan.videoFrames} name="recording">
+      <Sequence
+        from={plan.videoFrom}
+        durationInFrames={plan.videoFrames}
+        name="recording"
+        style={{ transform: `scale(${clip.zoom.scale})`, transformOrigin: `50% ${clip.zoom.originY}%` }}
+      >
         {plan.segments
           .filter((s) => s.frames > 0)
           .map((s) => (

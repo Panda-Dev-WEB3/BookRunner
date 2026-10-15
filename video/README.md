@@ -82,10 +82,29 @@ card; their length comes from the step log via `calculateMetadata`. The timing p
 `test/demo-segments.test.ts`) starts at the first caption step, ends 4 s after the last, and plays gaps longer than 5 s
 between steps at ×2 except 2 s after a step and 1.5 s before the next (dropped for a clip that would fall under 60 s).
 Steps the scenario logs only after typing (clip 3: market, capital, mandate; `lead` in `DEMO_CLIPS`) get their caption
-2.5 s after the previous step, while the form is being filled.
+2.5 s after the previous step, while the form is being filled. The app clips (2–4) zoom the recording ×1.25 anchored
+top-centre (`zoom` in `DEMO_CLIPS`): the app's centred column (x ≈ 390–1530) and its header stay in frame, the crop
+falls on the empty side margins and the bottom, behind the captions; clip 1 (the full-width public site) is not zoomed.
 
 ```bash
 bash scripts/video.sh npm run demo-stills       # stills per caption step -> out/demo-stills/<n>/<nn>-<key>.png (+ title/end), prints lengths
 bash scripts/video.sh npm run demo-stills -- 3  # one clip
 python video/scripts/demo-sheet.py              # host (Pillow): contact sheets -> out/demo-stills/<n>-sheet.png
 ```
+
+### Demo workflow, end to end
+
+1. `bash scripts/video.sh app-build`: testnet build of `apps/web` (base `/app/`, API same-origin).
+2. `bash scripts/video.sh demo new-wallet` (once): creates `video/.secrets/demo-wallet.json` and prints only the
+   address. The key is gitignored and never committed, logged or typed into a page.
+3. Fund that address once with ~0.02 test ETH from the testnet funder (run on the server; clip 2 mints its own test
+   USDC). Only clip 2 sends transactions.
+4. `bash scripts/video.sh demo run all` (or `run 2`): records `public/demos/<n>-<id>.webm` + `.steps.json`.
+5. `bash scripts/video.sh npm run demo-stills` + `python video/scripts/demo-sheet.py`: review the stills/sheets.
+6. `bash scripts/video.sh npm run demo-render` (or `-- 2` for one clip): one bundle, then
+   `out/bookrunner-demo-<n>-<id>.mp4` (H.264, CRF 18, yuv420p, no audio, 1920×1080, 30 fps, 60–120 s) plus a poster
+   `.png` of the same name (middle of the second caption). Check a file with
+   `bash scripts/video.sh npx remotion ffprobe out/bookrunner-demo-2-allocator.mp4`.
+
+Re-record a clip (step 4) before a final render when its live data (marks, "x min ago" labels) should be current; the
+stills and the render read the newest `.steps.json`, so captions follow the new timing automatically.

@@ -101,5 +101,5 @@ export const DEMO_CARDS = {
   network: "Robinhood Chain testnet",
   url: "bookrunner.tech",
   x: "@TryBookRunner",
-  disclaimer: "Testnet software. Not an offer.",
+  disclaimer: "Testnet software. Not an offer. Stock-perp books are not available to US persons.",
 } as const;

@@ -122,6 +122,18 @@ describe("planDemo", () => {
   });
 });
 
+describe("DEMO_CLIPS zoom", () => {
+  test("the public site plays full frame; the app clips zoom x1.25 from the top and keep the app column (x 390-1530) in view", () => {
+    expect(DEMO_CLIPS.map((c) => c.zoom.scale)).toEqual([1, 1.25, 1.25, 1.25]);
+    for (const c of DEMO_CLIPS) {
+      const half = 960 / c.zoom.scale; // visible source half-width around the centre
+      expect(960 - half).toBeLessThanOrEqual(390);
+      expect(960 + half).toBeGreaterThanOrEqual(1530);
+      expect(c.zoom.originY).toBe(0); // top anchored: the app's nav and wallet button stay in frame
+    }
+  });
+});
+
 // The real recordings (gitignored; present on the machine that recorded them): every clip lands in 60–120 s.
 const demos = path.join(import.meta.dir, "..", "public", "demos");
 describe.if(DEMO_CLIPS.every((c) => existsSync(path.join(demos, `${c.name}.steps.json`))))("recorded clips", () => {

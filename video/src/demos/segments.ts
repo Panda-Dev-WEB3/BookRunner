@@ -13,14 +13,22 @@ export const DEMO_FPS = 30;
 /**
  * The four clips: composition id, recording name (public/demos/<name>.webm + .steps.json) and copy id. `lead`: steps
  * the scenario logs only once their action is done (form fields typed), so their caption leads in: it appears when
- * the previous caption has held `captionLeadHoldMs` of source, i.e. as the action starts (see planDemo).
+ * the previous caption has held `captionLeadHoldMs` of source, i.e. as the action starts (see planDemo). `zoom`: the
+ * recording is scaled by `scale` around (50%, `originY`) — the app clips (a centred ~1140 px column) are zoomed so the
+ * crop falls on the empty side margins and the bottom, behind the captions; the full-width public site is not.
  */
 export const DEMO_CLIPS = [
-  { n: 1, id: "site", name: "1-site", comp: "Demo1Site", lead: [] },
-  { n: 2, id: "allocator", name: "2-allocator", comp: "Demo2Allocator", lead: [] },
-  { n: 3, id: "sponsor", name: "3-sponsor", comp: "Demo3Sponsor", lead: ["market", "capital", "mandate"] },
-  { n: 4, id: "risk", name: "4-risk", comp: "Demo4Risk", lead: [] },
-] as const satisfies ReadonlyArray<{ n: number; id: DemoId; name: string; comp: string; lead: readonly string[] }>;
+  { n: 1, id: "site", name: "1-site", comp: "Demo1Site", lead: [], zoom: { scale: 1, originY: 0 } },
+  { n: 2, id: "allocator", name: "2-allocator", comp: "Demo2Allocator", lead: [], zoom: { scale: 1.25, originY: 0 } },
+  { n: 3, id: "sponsor", name: "3-sponsor", comp: "Demo3Sponsor", lead: ["market", "capital", "mandate"], zoom: { scale: 1.25, originY: 0 } },
+  { n: 4, id: "risk", name: "4-risk", comp: "Demo4Risk", lead: [], zoom: { scale: 1.25, originY: 0 } },
+] as const satisfies ReadonlyArray<{ n: number; id: DemoId; name: string; comp: string; lead: readonly string[]; zoom: DemoZoom }>;
+
+export interface DemoZoom {
+  scale: number;
+  /** Transform-origin y, % of the frame height (0: top anchored). */
+  originY: number;
+}
 export type DemoClip = (typeof DEMO_CLIPS)[number];
 
 export interface StepMark {
@@ -88,6 +96,8 @@ export interface Segment extends Span {
 /** One caption on the composition timeline (absolute frames, `to` exclusive). */
 export interface CaptionCue {
   key: string;
+  /** The step's source time (ms). */
+  tMs: number;
   index: number;
   from: number;
   to: number;
@@ -175,7 +185,7 @@ function layout(log: StepLog, captionKeys: string[], lead: readonly string[], ru
     const anchorMs = index > 0 && lead.includes(m.key) ? Math.min(m.tMs, marks[index - 1].tMs + timing.captionLeadHoldMs) : m.tMs;
     const from = Math.max(videoFrom + srcToVideoFrame(segments, anchorMs, fps), timing.titleFrames, prev ? prev.from + timing.captionMinFrames : 0);
     if (prev) prev.to = from;
-    captions.push({ key: m.key, index, from, to: endFrom });
+    captions.push({ key: m.key, tMs: m.tMs, index, from, to: endFrom });
   }
   const short = captions.find((c) => c.to - c.from < timing.captionMinFrames);
   if (short) throw new Error(`demo plan: ${log.name} caption "${short.key}" is on screen for only ${short.to - short.from} frames`);
