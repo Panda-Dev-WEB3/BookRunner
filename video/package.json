@@ -6,7 +6,9 @@
     "typecheck": "tsc --noEmit",
     "studio": "remotion studio",
     "stills": "node scripts/stills.mjs",
-    "render": "node scripts/render.mjs"
+    "render": "node scripts/render.mjs",
+    "demo-stills": "node scripts/demo-stills.mjs",
+    "demo-render": "node scripts/demo-render.mjs"
   },
   "dependencies": {
     "@remotion/bundler": "4.0.535",
