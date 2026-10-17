@@ -95,8 +95,10 @@ const shape = {
   ALERT_API_URL: z.string().optional(),
   /** the oracle's HTTP base URL (GET /health); default http://127.0.0.1:ORACLE_PORT */
   ALERT_ORACLE_URL: z.string().optional(),
-  /** a live oracle source failing in-session tickers this long alerts (warning; critical when 2+ fail at once) */
+  /** a live oracle source failing in-session tickers this long alerts (warning; critical when 2+ fail on one ticker) */
   ALERT_ORACLE_SOURCE_FAIL_SECONDS: int(60),
+  /** an in-session price id with no publishable price this long alerts (critical) */
+  ALERT_ORACLE_PRICE_MISSING_SECONDS: int(120),
   /** default: on for testnet / mainnet, off on devnet */
   ALERT_ORACLE_EXPECTED: z.string().optional(),
   ALERT_LABEL: z.string().optional(),
@@ -169,6 +171,7 @@ export interface RuleConfig {
   apiForSec: number;
   oracleExpected: boolean;
   oracleSourceFailSec: number;
+  oraclePriceMissingSec: number;
   backupExpected: boolean;
   backupMaxAgeSec: number;
   supervisorExpected: boolean;
@@ -270,6 +273,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       oracleExpected:
         e.ALERT_ORACLE_EXPECTED === undefined || e.ALERT_ORACLE_EXPECTED === "" ? network !== "devnet" : e.ALERT_ORACLE_EXPECTED === "1" || e.ALERT_ORACLE_EXPECTED.toLowerCase() === "true",
       oracleSourceFailSec: e.ALERT_ORACLE_SOURCE_FAIL_SECONDS,
+      oraclePriceMissingSec: e.ALERT_ORACLE_PRICE_MISSING_SECONDS,
       backupExpected: e.ALERT_BACKUP_EXPECTED === undefined || e.ALERT_BACKUP_EXPECTED === "" ? network !== "devnet" : e.ALERT_BACKUP_EXPECTED === "1" || e.ALERT_BACKUP_EXPECTED.toLowerCase() === "true",
       backupMaxAgeSec: Math.round(e.ALERT_BACKUP_MAX_AGE_HOURS * 3600),
       supervisorExpected: true,

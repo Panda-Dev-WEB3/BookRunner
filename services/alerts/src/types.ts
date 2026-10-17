@@ -112,6 +112,8 @@ export interface OracleProbe {
   sources: OracleSourceSnap[];
   /** the oracle's on-chain minSources problem (minSources() above the live sources), if any */
   minSourcesProblem: string | null;
+  /** in-session price ids without a publishable price (since = unix ms of the start of the run) */
+  unpublished: Array<{ priceId: string; since: number; reason: string }>;
 }
 
 /** A timestamped sample kept across passes (rpc probe outcome, buyback pending). */

@@ -128,6 +128,7 @@ describe("collect", () => {
         { name: "pyth", kind: "pyth", lastOkAt: null, failingSince: NOW - 90_000, failingTickers: ["NVDA"], lastError: "HTTP 401", lastErrorAt: NOW },
       ],
       onchain: { minSourcesProblem: null },
+      unpublished: [{ priceId: "NVDA", since: NOW - 150_000, reason: "sources disagree" }, { priceId: 7 }],
     };
     const urls: string[] = [];
     const f = (async (url: string) => {
@@ -144,11 +145,12 @@ describe("collect", () => {
         { name: "chainlink", kind: "chainlink", lastOkAt: NOW - 1000, failingSince: null, failingTickers: [], lastError: null },
         { name: "pyth", kind: "pyth", lastOkAt: null, failingSince: NOW - 90_000, failingTickers: ["NVDA"], lastError: "HTTP 401" },
       ],
+      unpublished: [{ priceId: "NVDA", since: NOW - 150_000, reason: "sources disagree" }],
     });
     expect(parseOracleHealth(null)).toMatchObject({ ok: false, error: "unexpected body" });
     expect(parseOracleHealth({ onchain: { minSourcesProblem: "AttestedOracle.minSources()=3 > 2" } }).minSourcesProblem).toBe("AttestedOracle.minSources()=3 > 2");
     const down = (async () => new Response("no", { status: 503 })) as unknown as typeof fetch;
     const r = await collect({ db, kv, chain, fetch: down, now: () => NOW }, { ...settings, oracleUrl: "http://oracle:4410" }, emptyMemory(), 86_400);
-    expect(r.snapshot.oracle).toEqual({ ok: false, error: "HTTP 503", sources: [], minSourcesProblem: null });
+    expect(r.snapshot.oracle).toEqual({ ok: false, error: "HTTP 503", sources: [], minSourcesProblem: null, unpublished: [] });
   });
 });

@@ -230,9 +230,10 @@ describe("oracle sources", () => {
     lastError: "HTTP 401",
     ...over,
   });
-  const withSources = (sources: OracleSourceSnap[], minSourcesProblem: string | null = null) => snap({ oracle: { ok: true, error: null, sources, minSourcesProblem } });
+  const withSources = (sources: OracleSourceSnap[], minSourcesProblem: string | null = null, unpublished: Array<{ priceId: string; since: number; reason: string }> = []) =>
+    snap({ oracle: { ok: true, error: null, sources, minSourcesProblem, unpublished } });
 
-  test("any live source failing in-session tickers for more than 60 s alerts; two at once is critical", () => {
+  test("any live source failing in-session tickers for more than 60 s alerts; two on the same ticker is critical", () => {
     expect(oracle(snap(), rules())).toEqual([]);
     expect(oracle(withSources([failing(59_000)]), rules())).toEqual([]);
     const c = oracle(withSources([failing(61_000)]), rules());
@@ -241,15 +242,38 @@ describe("oracle sources", () => {
     expect(c[0]!.summary).toBe(
       "oracle source pyth (pyth) failing for 61s on NVDA, TSLA (HTTP 401; last ok 2026-10-10T11:00:00.000Z): prices continue from the remaining sources while they agree, with no spare left",
     );
-    const two = oracle(withSources([failing(61_000), failing(120_000, { name: "vendor", kind: "http", lastError: "timeout" })]), rules());
+    const two = oracle(withSources([failing(61_000), failing(120_000, { name: "vendor", kind: "http", lastError: "timeout", failingTickers: ["TSLA"] })]), rules());
     expect(keys(two)).toEqual(["oracle_source_failing:pyth", "oracle_source_failing:vendor"]);
     expect(two.map((x) => x.severity)).toEqual(["critical", "critical"]);
-    expect(two[1]!.summary).toContain("2 sources failing: below 2 sources no price is published");
+    expect(two[1]!.summary).toContain("another source fails on TSLA too: below 2 sources no price is published");
+    // two sources failing on DIFFERENT tickers: every ticker still has two sources -> warnings
+    const apart = oracle(withSources([failing(61_000, { failingTickers: ["NVDA"] }), failing(61_000, { name: "vendor", kind: "http", failingTickers: ["TSLA"] })]), rules());
+    expect(apart.map((x) => x.severity)).toEqual(["warning", "warning"]);
     expect(keys(oracle(withSources([failing(30_000)]), rules({ oracleSourceFailSec: 20 })))).toEqual(["oracle_source_failing:pyth"]);
   });
 
+  test("a ticker without a publishable price in session for > 2 min is critical unless two failing sources explain it", () => {
+    const u = (sinceMs: number) => [{ priceId: "AAPL", since: NOW - sinceMs, reason: "sources disagree: chainlink and vendor are 180.0 bps apart (limit 150)" }];
+    expect(oracle(withSources([], null, u(119_000)), rules())).toEqual([]);
+    const c = oracle(withSources([], null, u(121_000)), rules());
+    expect(keys(c)).toEqual(["oracle_price_missing:AAPL"]);
+    expect(c[0]).toMatchObject({ severity: "critical" });
+    expect(c[0]!.summary).toBe(
+      "oracle: no publishable price for AAPL for 2m in session (sources disagree: chainlink and vendor are 180.0 bps apart (limit 150)); after maxPriceAge valuations and liquidations revert",
+    );
+    // one failing source on that ticker does not explain it (the other two should carry it): still alerted
+    expect(keys(oracle(withSources([failing(61_000, { failingTickers: ["AAPL"] })], null, u(121_000)), rules()))).toEqual([
+      "oracle_source_failing:pyth",
+      "oracle_price_missing:AAPL",
+    ]);
+    // two failing sources on it: the (critical) source alerts already say why
+    const both = [failing(61_000, { failingTickers: ["AAPL"] }), failing(61_000, { name: "vendor", kind: "http", failingTickers: ["AAPL"] })];
+    expect(keys(oracle(withSources(both, null, u(121_000)), rules()))).toEqual(["oracle_source_failing:pyth", "oracle_source_failing:vendor"]);
+    expect(loadConfig({ NETWORK: "mainnet", CHAIN_ID: "4663" }).rules.oraclePriceMissingSec).toBe(120);
+  });
+
   test("unreachable oracle, the on-chain minimum, and off by profile", () => {
-    expect(keys(oracle(snap({ oracle: { ok: false, error: "ECONNREFUSED", sources: [], minSourcesProblem: null } }), rules()))).toEqual(["oracle_health"]);
+    expect(keys(oracle(snap({ oracle: { ok: false, error: "ECONNREFUSED", sources: [], minSourcesProblem: null, unpublished: [] } }), rules()))).toEqual(["oracle_health"]);
     expect(keys(oracle(withSources([], "AttestedOracle.minSources()=3 > 2 configured live sources"), rules()))).toEqual(["oracle_min_sources"]);
     expect(oracle(withSources([failing(600_000)]), rules({ oracleExpected: false }))).toEqual([]);
     expect(oracle(snap({ oracle: null }), rules())).toEqual([]);

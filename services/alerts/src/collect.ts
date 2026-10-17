@@ -144,8 +144,8 @@ export function parseBackup(raw: string | null): BackupSnap | null {
 
 /** The oracle's GET /health body -> per-source health (unknown shapes -> not ok). */
 export function parseOracleHealth(body: unknown): OracleProbe {
-  if (!body || typeof body !== "object") return { ok: false, error: "unexpected body", sources: [], minSourcesProblem: null };
-  const o = body as { sources?: unknown; onchain?: { minSourcesProblem?: unknown } };
+  if (!body || typeof body !== "object") return { ok: false, error: "unexpected body", sources: [], minSourcesProblem: null, unpublished: [] };
+  const o = body as { sources?: unknown; onchain?: { minSourcesProblem?: unknown }; unpublished?: unknown };
   const sources: OracleSourceSnap[] = Array.isArray(o.sources)
     ? o.sources
         .filter((x): x is Record<string, unknown> => !!x && typeof x === "object" && typeof (x as { name?: unknown }).name === "string")
@@ -159,7 +159,15 @@ export function parseOracleHealth(body: unknown): OracleProbe {
         }))
     : [];
   const msp = o.onchain?.minSourcesProblem;
-  return { ok: true, error: null, sources, minSourcesProblem: typeof msp === "string" ? msp : null };
+  const unpublished = Array.isArray(o.unpublished)
+    ? o.unpublished
+        .filter((x): x is Record<string, unknown> => !!x && typeof x === "object" && typeof (x as { priceId?: unknown }).priceId === "string")
+        .flatMap((x) => {
+          const since = num(x.since);
+          return since === null ? [] : [{ priceId: String(x.priceId), since, reason: typeof x.reason === "string" ? x.reason.slice(0, 200) : "?" }];
+        })
+    : [];
+  return { ok: true, error: null, sources, minSourcesProblem: typeof msp === "string" ? msp : null, unpublished };
 }
 
 /** Appends a sample and drops those older than `windowMs`. */
@@ -299,9 +307,9 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
   if (st.oracleUrl) {
     try {
       const res = await d.fetch(`${st.oracleUrl}/health`, { signal: AbortSignal.timeout(5_000) });
-      oracle = res.ok ? parseOracleHealth(await res.json().catch(() => null)) : { ok: false, error: `HTTP ${res.status}`, sources: [], minSourcesProblem: null };
+      oracle = res.ok ? parseOracleHealth(await res.json().catch(() => null)) : { ok: false, error: `HTTP ${res.status}`, sources: [], minSourcesProblem: null, unpublished: [] };
     } catch (err) {
-      oracle = { ok: false, error: errMsg(err), sources: [], minSourcesProblem: null };
+      oracle = { ok: false, error: errMsg(err), sources: [], minSourcesProblem: null, unpublished: [] };
     }
   }
 

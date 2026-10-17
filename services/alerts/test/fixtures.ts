@@ -63,6 +63,7 @@ export function snap(over: Partial<Snapshot> = {}): Snapshot {
         { name: "pyth", kind: "pyth", lastOkAt: NOW - 1_000, failingSince: null, failingTickers: [], lastError: null },
       ],
       minSourcesProblem: null,
+      unpublished: [],
     },
     backup: { ts: NOW - 3_600_000, ok: true, error: "", offsite: "ok", bytes: 1_000_000, dir: "/var/backups/bookrunner/daily/x" },
     infraErrors: [],
