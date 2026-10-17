@@ -4,17 +4,22 @@
 //       [--config config/chains/4663.json] [--registry 0x<StockTokenRegistry>] [--no-service-config] [--json]
 //
 // Feeds/tokens come from the chain price config (default config/chains/<chain>.json) overlaid with
-// ORACLE_CHAINLINK_FEEDS; the service-config rows (mainnet production rules) and the HTTP sources compared
-// against Chainlink come from the current process environment (ORACLE_* variables), never from a .env file.
+// ORACLE_CHAINLINK_FEEDS; the service-config rows (mainnet production rules) and the live sources compared
+// against Chainlink (Pyth Pro when PYTH_API_KEY is set, ORACLE_HTTP_SOURCES) come from the current process
+// environment (ORACLE_* / PYTH_API_KEY), never from a file the CLI reads itself: pass a gitignored key file
+// explicitly, e.g. `bun --env-file=../../.env.pyth src/cli/source-check.ts ...`. Without PYTH_API_KEY the Pyth row
+// FAILs on 4663 and is skipped elsewhere.
 // Exit code 1 when any row FAILs. Sends no transaction and needs no key.
 import { createLogger, isMainnet } from "@bookrunner/shared";
 import { stockTokenRegistryAbi } from "@bookrunner/shared/abi";
 import { type Address, BaseError, ContractFunctionRevertedError, type PublicClient, createPublicClient, getAddress, http } from "viem";
-import { loadOracleConfig } from "../config";
+import { type OracleConfig, loadOracleConfig } from "../config";
+import type { PriceSource } from "../domain/types";
 import { productionProblems } from "../production";
 import { type RegistryView, type SourceCheckReader, formatTable, runSourceCheck } from "../source-check";
 import { buildSources } from "../sources";
 import { aggregatorV3Abi, stockTokenAbi, viemAggregatorReader } from "../sources/chainlink";
+import { PythProSource } from "../sources/pyth";
 
 interface Args {
   chain: number;
@@ -76,6 +81,27 @@ export function viemRegistryView(pub: PublicClient, registry: Address): Registry
   };
 }
 
+/**
+ * Live sources compared with Chainlink: every configured non-Chainlink live source (Pyth Pro, HTTP), plus Pyth
+ * Pro whenever an access token is present even without ORACLE_PYTH=1 (it is the mainnet's second source).
+ */
+export function checkedOtherSources(cfg: OracleConfig, configured: readonly PriceSource[]): PriceSource[] {
+  const others = configured.filter((s) => s.kind !== "chainlink" && s.kind !== "synthetic");
+  if (cfg.PYTH_API_KEY && !others.some((s) => s.kind === "pyth")) {
+    others.push(
+      new PythProSource({
+        url: cfg.ORACLE_PYTH_URL,
+        apiKey: cfg.PYTH_API_KEY,
+        feeds: cfg.pythFeeds,
+        channel: cfg.ORACLE_PYTH_CHANNEL,
+        maxAgeMs: cfg.ORACLE_PYTH_MAX_AGE_MS,
+        timeoutMs: cfg.ORACLE_SOURCE_TIMEOUT_MS,
+      }),
+    );
+  }
+  return others;
+}
+
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
   if (!args.rpc) throw new Error("no RPC: pass --rpc <url> (or set RHC_RPC_URL)");
@@ -84,6 +110,7 @@ async function main(): Promise<number> {
   const pub = createPublicClient({ transport: http(args.rpc, { batch: true }) }) as PublicClient;
   const log = createLogger("source-check", "silent");
   const built = args.serviceConfig ? buildSources(cfg, log) : null;
+  const others = checkedOtherSources(cfg, built?.sources ?? []);
   const rows = await runSourceCheck({
     chainId: args.chain,
     config: cfg.chainConfig,
@@ -92,7 +119,9 @@ async function main(): Promise<number> {
     sequencerFeed: cfg.sequencerUptimeFeed,
     sequencerGraceMs: cfg.ORACLE_SEQUENCER_GRACE_MS,
     registry: args.registry ? viemRegistryView(pub, args.registry) : null,
-    otherSources: built ? built.sources.filter((s) => s.kind === "http") : [],
+    otherSources: others,
+    pythKey: !!cfg.PYTH_API_KEY,
+    minSources: cfg.ORACLE_MIN_SOURCES,
     outlierBps: cfg.ORACLE_OUTLIER_BPS,
     configProblems: built
       ? [...productionProblems(cfg, built.sources), ...(built.syntheticRefused && !isMainnet(args.chain) ? [built.syntheticRefused] : [])]

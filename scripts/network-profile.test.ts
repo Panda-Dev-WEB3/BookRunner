@@ -40,7 +40,10 @@ function goodEnv(): Env {
     ORDERLY_BUILDER_KEY_SECRET: "seed",
     ANTHROPIC_API_KEY: "sk",
     ORACLE_CHAINLINK_FEEDS: JSON.stringify({ NVDA: { proxy: "0x0000000000000000000000000000000000000f01", basis: "per-token" } }),
-    ORACLE_HTTP_SOURCES: JSON.stringify([{ name: "vendor", url: "https://prices.example/{ticker}", pricePath: "price" }]),
+    // the mainnet design: Chainlink + Pyth Pro, both required
+    ORACLE_PYTH: "1",
+    PYTH_API_KEY: "pyth-test-token",
+    ORACLE_MIN_SOURCES: "2",
     MARK_SIGNER_KMS_KEY_ID: "alias/bkrn-mark",
     RISK_KMS_KEY_ID: "alias/bkrn-risk",
     OPS_VENUE_KMS_KEY_ID: "alias/bkrn-ops",
@@ -137,9 +140,30 @@ describe("mainnet profile (scripts/dev.ts --network mainnet)", () => {
   test("oracle production rules: feeds state their basis, and an independent source exists", () => {
     const plain = { ...goodEnv(), ORACLE_CHAINLINK_FEEDS: JSON.stringify({ NVDA: "0x0000000000000000000000000000000000000f01" }) };
     expect(mainnetProfile(plain, hostRoot(GOOD_DEP)).errors).toEqual([expect.stringMatching(/plain addresses for NVDA/)]);
-    const chainlinkOnly = { ...goodEnv(), ORACLE_HTTP_SOURCES: "[]" };
-    expect(mainnetProfile(chainlinkOnly, hostRoot(GOOD_DEP)).errors).toEqual([expect.stringMatching(/no independent oracle source/)]);
+    const chainlinkOnly: Env = { ...goodEnv(), ORACLE_PYTH: undefined, PYTH_API_KEY: undefined };
+    const noSource = mainnetProfile(chainlinkOnly, hostRoot(GOOD_DEP)).errors;
+    expect(noSource).toEqual([expect.stringMatching(/no independent oracle source/)]);
+    expect(noSource[0]).toContain("ORACLE_PYTH=1 + PYTH_API_KEY");
     expect(mainnetProfile({ ...chainlinkOnly, ORACLE_HTTP_FINNHUB: "1" }, hostRoot(GOOD_DEP)).errors).toEqual([]);
+    const vendor = JSON.stringify([{ name: "vendor", url: "https://prices.example/{ticker}", pricePath: "price" }]);
+    expect(mainnetProfile({ ...chainlinkOnly, ORACLE_HTTP_SOURCES: vendor }, hostRoot(GOOD_DEP)).errors).toEqual([]);
+  });
+
+  test("Pyth Pro counts as the independent source only with its access token; ORACLE_MIN_SOURCES must be 2", () => {
+    const noKey = mainnetProfile({ ...goodEnv(), PYTH_API_KEY: "" }, hostRoot(GOOD_DEP)).errors;
+    expect(noKey).toEqual([expect.stringMatching(/ORACLE_PYTH=1 but PYTH_API_KEY is not set/), expect.stringMatching(/no independent oracle source/)]);
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_PYTH_FEEDS: '{"NVDA":"x"}' }, hostRoot(GOOD_DEP)).errors).toEqual([
+      expect.stringMatching(/ORACLE_PYTH_FEEDS is not a JSON object/),
+    ]);
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_PYTH_FEEDS: '{"NVDA":1314}' }, hostRoot(GOOD_DEP)).errors).toEqual([]);
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_MIN_SOURCES: "3" }, hostRoot(GOOD_DEP)).errors).toEqual([
+      expect.stringMatching(/ORACLE_MIN_SOURCES must be 2 on mainnet .*got 3/),
+    ]);
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_MIN_SOURCES: undefined }, hostRoot(GOOD_DEP)).errors).toEqual([
+      expect.stringMatching(/ORACLE_MIN_SOURCES must be 2 on mainnet .*unset/),
+    ]);
+    // the access token is never echoed in an error
+    for (const e of mainnetProfile({ ...goodEnv(), ORACLE_MIN_SOURCES: "9" }, hostRoot(GOOD_DEP)).errors) expect(e).not.toContain("pyth-test-token");
   });
 
   test("alerts watch role ADDRESSES: local keys and per-book desk keys derived, KMS roles left to dev.ts", () => {

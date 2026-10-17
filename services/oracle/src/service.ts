@@ -15,6 +15,7 @@ import { roundPrice, toPriceWad } from "./domain/price";
 import { type PushedState, pushReason, publishTimestamp } from "./domain/push-policy";
 import { canonicalSources, sourcesHash } from "./domain/sources-hash";
 import { type PriceSource, type UniverseEntry, sourceKind } from "./domain/types";
+import { onchainMinSourcesProblem } from "./production";
 import type { PriceSigner } from "./signing";
 
 export interface OracleSettings {
@@ -192,6 +193,11 @@ export class OracleService {
         else this.log.warn({ signer: this.deps.signer.address, oracle: chain.oracle }, "oracle signer is not registered on AttestedOracle; on-chain pushes paused");
       }
       this.signerActive = active;
+      if (min !== this.onchainMinSources && this.deps.settings.production) {
+        // startup refuses this (index.ts); a timelock change while running is logged on every change
+        const problem = onchainMinSourcesProblem(min, this.deps.sources);
+        if (problem) this.log.error({ onchainMinSources: min, oracle: chain.oracle }, problem);
+      }
       this.onchainMinSources = min;
       this.chainReason = active ? "ok" : "signer not registered on AttestedOracle";
       if (this.pullSupported === null && this.deps.settings.pushMode === "pull" && chain.supportsUpdate) {

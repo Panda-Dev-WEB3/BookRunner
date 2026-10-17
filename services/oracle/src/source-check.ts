@@ -1,13 +1,13 @@
 // Read-only pre-launch check of every configured price source (VERIFY C4 / T2 / T3): run by the operator
 // against a mainnet RPC (`bun run source-check --chain 4663 --rpc <url>`, cli/source-check.ts). Pure over
 // an injected reader so it is unit-tested with fakes; never sends a transaction.
-import { type ChainPriceConfig, SESSIONS_24X5, type Sessions, WAD, isOpen } from "@bookrunner/shared";
+import { type ChainPriceConfig, MAINNET_CHAIN_ID, SESSIONS_24X5, type Sessions, WAD, isOpen } from "@bookrunner/shared";
 import type { Address } from "viem";
 import { exceedsBps } from "./domain/aggregate";
 import type { PriceSource } from "./domain/types";
 import { type AggregatorReader, ChainlinkSource, type ResolvedFeed } from "./sources/chainlink";
 
-export type CheckStatus = "PASS" | "WARN" | "FAIL";
+export type CheckStatus = "PASS" | "WARN" | "FAIL" | "SKIP";
 
 export interface CheckRow {
   subject: string;
@@ -40,8 +40,15 @@ export interface SourceCheckInput {
   sequencerFeed?: Address | null;
   sequencerGraceMs?: number;
   registry?: RegistryView | null;
-  /** Other live sources (HTTP) compared with the Chainlink per-share price. */
+  /** Other live sources (Pyth Pro, HTTP) compared with the Chainlink per-share price. */
   otherSources?: readonly PriceSource[];
+  /**
+   * Whether a Pyth Pro access token (PYTH_API_KEY) is available; undefined = not evaluated. Without one the
+   * Pyth row FAILs on mainnet (the second source of the 2-source design) and is SKIPped elsewhere.
+   */
+  pythKey?: boolean;
+  /** Minimum live sources (ORACLE_MIN_SOURCES): adds the "sources / live" summary row when set. */
+  minSources?: number;
   outlierBps?: number;
   /** Rows from the service-config production guard (production.ts). */
   configProblems?: readonly string[];
@@ -80,6 +87,12 @@ export async function runSourceCheck(p: SourceCheckInput): Promise<CheckRow[]> {
   }
 
   for (const msg of p.configProblems ?? []) add("service config", "production rule", "FAIL", msg);
+  if (p.pythKey === false) {
+    const mainnet = p.chainId === MAINNET_CHAIN_ID;
+    add("pyth", "access token", mainnet ? "FAIL" : "SKIP", `PYTH_API_KEY not set${mainnet ? ": Pyth Pro is the mainnet's second source (ORACLE_PYTH=1 + PYTH_API_KEY)" : ""}`);
+  }
+  // sources that produced a fresh observation for at least one feed
+  const live = new Set<string>();
 
   // ---- config coverage ----
   for (const id of Object.keys(p.config.stockTokens)) if (!p.feeds[id]) add(id, "coverage", "WARN", "Stock Token without a Chainlink feed");
@@ -138,11 +151,23 @@ export async function runSourceCheck(p: SourceCheckInput): Promise<CheckRow[]> {
         const status: CheckStatus = o.stale ? (marketOpen ? "FAIL" : "WARN") : "PASS";
         const basis = f.basis === "per-token" ? `per share = feed / uiMultiplier` : "per share";
         add(id, "observation", status, `$${o.price.toFixed(4)} ${basis}, ${age}${o.stale && !marketOpen ? ", held off-hours" : ""}`);
-        for (const other of p.otherSources ?? []) await compare(other, id, o.price, p.outlierBps ?? 150, add);
+        if (!o.stale) live.add(source.name);
+        for (const other of p.otherSources ?? []) if (await compare(other, id, o.price, p.outlierBps ?? 150, marketOpen, add)) live.add(other.name);
       }
     } catch (e) {
       add(id, "observation", "FAIL", errMsg(e));
     }
+  }
+  if (p.minSources !== undefined) {
+    const configured = ["chainlink", ...(p.otherSources ?? []).map((s) => s.name)];
+    const names = [...live].sort();
+    const enough = names.length >= p.minSources;
+    add(
+      "sources",
+      "live",
+      enough ? "PASS" : marketOpen ? "FAIL" : "WARN",
+      `${names.length > 0 ? names.join(", ") : "none"} (${names.length} of ORACLE_MIN_SOURCES=${p.minSources}; configured: ${configured.join(", ")})`,
+    );
   }
   return rows;
 }
@@ -168,25 +193,30 @@ async function checkRegistry(
   else add(id, "registry", t.active ? "PASS" : "WARN", `${live ? "live uiMultiplier" : "stored"} ${fmtWad(t.multiplierWad)}${t.active ? "" : " (inactive)"}`);
 }
 
+/** Compares one other source with Chainlink per share; true when it produced an observation. */
 async function compare(
   other: PriceSource,
   id: string,
   chainlinkPerShare: number,
   outlierBps: number,
+  marketOpen: boolean,
   add: (s: string, c: string, st: CheckStatus, d: string) => void,
-): Promise<void> {
+): Promise<boolean> {
   try {
     const r = await other.fetch(id);
     if (!r) {
-      add(id, `vs ${other.name}`, "FAIL", "no observation");
-      return;
+      // off-hours a source may have no fresh price (Pyth: session closed / feedUpdateTimestamp too old)
+      add(id, `vs ${other.name}`, marketOpen ? "FAIL" : "WARN", marketOpen ? "no observation" : "no fresh observation (off-hours)");
+      return false;
     }
     const bps = (Math.abs(r.price - chainlinkPerShare) / chainlinkPerShare) * 1e4;
     // a source quoting per TOKEN would sit ~uiMultiplier away: still inside the band today (~0.1%), so it is
     // the operator's job to confirm the basis of every HTTP source (VERIFY C2)
     add(id, `vs ${other.name}`, exceedsBps(r.price, chainlinkPerShare, outlierBps) ? "FAIL" : "PASS", `$${r.price.toFixed(4)} (${bps.toFixed(1)} bps from Chainlink per share)`);
+    return true;
   } catch (e) {
     add(id, `vs ${other.name}`, "FAIL", errMsg(e));
+    return false;
   }
 }
 
@@ -206,6 +236,6 @@ export function formatTable(rows: readonly CheckRow[]): string {
   const line = (r: CheckRow, st: string) => `${r.subject.padEnd(ws.subject)}  ${r.check.padEnd(ws.check)}  ${st.padEnd(ws.status)}  ${r.detail}`;
   const out = [line(head, "STATUS"), ...rows.map((r) => line(r, r.status))];
   const n = (s: CheckStatus) => rows.filter((r) => r.status === s).length;
-  out.push("", `${n("PASS")} pass, ${n("WARN")} warn, ${n("FAIL")} fail -> ${n("FAIL") === 0 ? "OK" : "NOT READY"}`);
+  out.push("", `${n("PASS")} pass, ${n("WARN")} warn, ${n("SKIP")} skip, ${n("FAIL")} fail -> ${n("FAIL") === 0 ? "OK" : "NOT READY"}`);
   return out.join("\n");
 }

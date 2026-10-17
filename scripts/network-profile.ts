@@ -65,8 +65,15 @@ const isLocal = (url: string) => /(^|\/\/|@)(127\.0\.0\.1|localhost|0\.0\.0\.0|\
  * Chainlink feeds come from the chain price config the oracle loads on 4663 (ORACLE_CHAIN_CONFIG, else
  * config/chains/4663.json under `root`) overlaid by ORACLE_CHAINLINK_FEEDS, whose entries must state their basis
  * ({"proxy","basis","token"}: a plain address is refused, VERIFY C2); the median also needs at least one
- * independent per-share source (ORACLE_HTTP_SOURCES or ORACLE_HTTP_FINNHUB).
+ * independent per-share source: Pyth Pro (ORACLE_PYTH=1 + PYTH_API_KEY, the mainnet design: Chainlink + Pyth),
+ * else ORACLE_HTTP_SOURCES or ORACLE_HTTP_FINNHUB. ORACLE_MIN_SOURCES must be exactly
+ * MAINNET_ORACLE_MIN_SOURCES (2 sources, 2 required; the oracle also refuses to start when the on-chain
+ * AttestedOracle.minSources() exceeds its live sources).
  */
+export const MAINNET_ORACLE_MIN_SOURCES = 2;
+
+const isOn = (v: string | undefined) => ["1", "true"].includes((v ?? "").trim().toLowerCase());
+
 function oracleSourcesProblems(env: Env, root: string): string[] {
   const problems: string[] = [];
   const parse = (v: string | undefined, d: unknown) => {
@@ -103,9 +110,26 @@ function oracleSourcesProblems(env: Env, root: string): string[] {
   if (cfgFeeds + Object.keys(envFeeds).length === 0) {
     problems.push("no Chainlink feed: config/chains/4663.json (ORACLE_CHAIN_CONFIG) or ORACLE_CHAINLINK_FEEDS");
   }
-  const finnhub = ["1", "true"].includes((env.ORACLE_HTTP_FINNHUB ?? "").toLowerCase());
-  if ((Array.isArray(http) ? http.length : 0) === 0 && !finnhub) {
-    problems.push("no independent oracle source besides Chainlink: set ORACLE_HTTP_SOURCES (per-share US-equity prices) or ORACLE_HTTP_FINNHUB=1");
+  const finnhub = isOn(env.ORACLE_HTTP_FINNHUB);
+  const pythOn = isOn(env.ORACLE_PYTH);
+  const pythKey = !!env.PYTH_API_KEY?.trim();
+  if (pythOn && !pythKey) problems.push("ORACLE_PYTH=1 but PYTH_API_KEY is not set (Pyth Pro access token)");
+  if (env.ORACLE_PYTH_FEEDS?.trim()) {
+    const pf = parse(env.ORACLE_PYTH_FEEDS, {});
+    if (pf === null || typeof pf !== "object" || Array.isArray(pf) || !Object.values(pf as object).every((v) => Number.isInteger(v) && (v as number) >= 0)) {
+      problems.push('ORACLE_PYTH_FEEDS is not a JSON object of ticker -> Pyth Pro feed id (e.g. {"NVDA":1314})');
+    }
+  }
+  if ((Array.isArray(http) ? http.length : 0) === 0 && !finnhub && !(pythOn && pythKey)) {
+    problems.push(
+      "no independent oracle source besides Chainlink: set ORACLE_PYTH=1 + PYTH_API_KEY (Pyth Pro), or ORACLE_HTTP_SOURCES (per-share US-equity prices) / ORACLE_HTTP_FINNHUB=1",
+    );
+  }
+  const min = env.ORACLE_MIN_SOURCES?.trim();
+  if (min !== String(MAINNET_ORACLE_MIN_SOURCES)) {
+    problems.push(
+      `ORACLE_MIN_SOURCES must be ${MAINNET_ORACLE_MIN_SOURCES} on mainnet (Chainlink + Pyth Pro; ${min ? `got ${min}` : "unset: the oracle default is 3"})`,
+    );
   }
   return problems;
 }
