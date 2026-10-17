@@ -190,6 +190,7 @@ describe("Pyth Pro: config and source assembly", () => {
     expect(c.ORACLE_PYTH_URL).toBe("https://pyth-lazer.dourolabs.app/v1/latest_price");
     expect(c.ORACLE_PYTH_CHANNEL).toBe("fixed_rate@200ms");
     expect(c.ORACLE_PYTH_MAX_AGE_MS).toBe(10_000);
+    expect(c.ORACLE_CHAINLINK_PAIR_MAX_AGE_MS).toBe(3_600_000); // Chainlink may back a 2-source price up to 1 h old
     expect(c.pythFeeds).toEqual({ NVDA: 1314, TSLA: 1435, AAPL: 922, MSFT: 1292, AMZN: 954 });
     const o = loadOracleConfig({ ORACLE_PYTH_FEEDS: '{"NVDA":7,"GME":99}', ORACLE_PYTH_CHANNEL: "real_time" });
     expect(o.pythFeeds).toMatchObject({ NVDA: 7, GME: 99, TSLA: 1435 });

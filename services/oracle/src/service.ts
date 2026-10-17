@@ -32,6 +32,8 @@ export interface OracleSettings {
   pushMode: PushMode;
   /** price ids whose latest signed update is older than this are left out of the bundle */
   bundleMaxAgeMs: number;
+  /** per source name: oldest observation allowed to back a 2-source price (aggregate pairMaxAgeMs) */
+  pairMaxAgeMs?: Readonly<Record<string, number>>;
   /**
    * Mainnet rules (production.ts): no synthetic source may be wired in (the constructor throws), and no
    * price — held or not, off-hours seeding included — is signed with fewer than the minimum sources.
@@ -124,6 +126,8 @@ export class OracleService {
   private readonly pushed = new Map<string, PushedState>();
   private readonly onchainAt = new Map<string, number>();
   private readonly skipSince = new Map<string, number>();
+  /** in-session price ids without a publishable price: since (unix ms) + the latest reason */
+  private readonly unpublished = new Map<string, { since: number; reason: string }>();
   private readonly venueInFlight = new Set<string>();
   private bundle: OracleBundleMsg | null = null;
   /** the deployed AttestedOracle has update(bytes); false = pre-low-gas contract (pull falls back to pushes) */
@@ -299,7 +303,7 @@ export class OracleService {
     for (const e of this.universe) {
       const agg: AggregateResult =
         e.kind === "equity"
-          ? aggregate(quotes.get(e.priceId) ?? [], { nowMs, outlierBps: s.outlierBps, minSources, maxAgeMs: s.maxSourceAgeMs })
+          ? aggregate(quotes.get(e.priceId) ?? [], { nowMs, outlierBps: s.outlierBps, minSources, maxAgeMs: s.maxSourceAgeMs, ...(s.pairMaxAgeMs ? { pairMaxAgeMs: s.pairMaxAgeMs } : {}) })
           : indexAsAggregate(indexLevel(e.components, componentPrices), minSources);
       const open = marketOpen(e.sessions, at, s.sessionsMode);
       let d = decide({ open, agg, lastOpen: this.lastOpen.get(e.priceId) ?? null, nowMs, minSeedSources: s.production ? minSources : 1 });
@@ -309,6 +313,11 @@ export class OracleService {
       }
       if (d.kind === "skip") {
         summary.skipped.push({ priceId: e.priceId, reason: d.reason });
+        // in session and nothing publishable: /health `unpublished` (services/alerts oracle_price_missing)
+        if (open) {
+          const u = this.unpublished.get(e.priceId);
+          this.unpublished.set(e.priceId, { since: u?.since ?? nowMs, reason: d.reason });
+        } else this.unpublished.delete(e.priceId);
         this.noteSkip(e.priceId, d.reason, nowMs, agg);
         // an index may still use this component's recent publication
         const last = this.latest.get(e.priceId);
@@ -318,6 +327,7 @@ export class OracleService {
         continue;
       }
       this.skipSince.delete(e.priceId);
+      this.unpublished.delete(e.priceId);
       if (d.seeded) this.log.warn({ priceId: e.priceId, price: d.price }, "off-hours start without history: holding at the currently observed price");
       this.lastOpen.set(e.priceId, d.lastOpen);
       const msg = await this.buildMsg(ctx, e, d, publishedAt);
@@ -588,6 +598,8 @@ export class OracleService {
       lastTickAt: this.lastTickAt,
       /** per live source: last fresh observation, current failure run (in-session tickers only), last error class */
       sources: this.sourceHealth.view(),
+      /** in-session price ids with no publishable price this tick (since = start of the run) */
+      unpublished: [...this.unpublished.entries()].map(([priceId, u]) => ({ priceId, since: u.since, reason: u.reason })),
       pushMode: this.deps.settings.pushMode,
       effectivePushMode: this.effectivePushMode(),
       bundle: this.bundle ? { publishedAt: this.bundle.publishedAt, priceIds: this.bundle.priceIds } : null,

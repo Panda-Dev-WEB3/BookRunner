@@ -141,6 +141,13 @@ export const oracleEnvShape = {
   ORACLE_PYTH_MIN_PUBLISHERS_EXTENDED: z.coerce.number().int().nonnegative().default(2),
   /** Drop a Pyth print whose confidence interval is wider than this (bps of the price). */
   ORACLE_PYTH_MAX_CONF_BPS: z.coerce.number().positive().default(50),
+  /**
+   * Oldest Chainlink observation that may back a price when only two sources are accepted (0 = no limit). The
+   * Robinhood equity feeds round on a 0.5% deviation or a 24 h heartbeat, so an in-session round can legitimately be
+   * hours old in a calm market; with only one other source that round is the whole cross-check, so it is capped at
+   * an hour (beyond: no price rather than a price anchored on a possibly held round).
+   */
+  ORACLE_CHAINLINK_PAIR_MAX_AGE_MS: z.coerce.number().int().nonnegative().default(3_600_000),
 };
 
 /**

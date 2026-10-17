@@ -77,6 +77,7 @@ const service = new OracleService({
   venue: cfg.ORACLE_VENUE_PRICES ? builderPriceClient(cfg.ORDERLY_MODE, cfg.ORDERLY_BASE_URL, cfg.ORACLE_SOURCE_TIMEOUT_MS) : null,
   settings: {
     outlierBps: cfg.ORACLE_OUTLIER_BPS,
+    pairMaxAgeMs: { chainlink: cfg.ORACLE_CHAINLINK_PAIR_MAX_AGE_MS },
     minSources: cfg.ORACLE_MIN_SOURCES,
     maxSourceAgeMs: cfg.ORACLE_MAX_SOURCE_AGE_MS,
     sourceTimeoutMs: cfg.ORACLE_SOURCE_TIMEOUT_MS,

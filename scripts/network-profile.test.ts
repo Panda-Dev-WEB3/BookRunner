@@ -43,7 +43,7 @@ function goodEnv(): Env {
     // the mainnet design: Chainlink + Pyth Pro + a third source, 2 required
     ORACLE_PYTH: "1",
     PYTH_API_KEY: "pyth-test-token",
-    ORACLE_HTTP_SOURCES: JSON.stringify([{ name: "vendor", url: "https://prices.example/{ticker}", pricePath: "price" }]),
+    ORACLE_HTTP_SOURCES: JSON.stringify([{ name: "vendor", url: "https://prices.example/{ticker}", pricePath: "price", tsPath: "ts", tsUnit: "ms", maxAgeMs: 10_000 }]),
     ORACLE_MIN_SOURCES: "2",
     MARK_SIGNER_KMS_KEY_ID: "alias/bkrn-mark",
     RISK_KMS_KEY_ID: "alias/bkrn-risk",
@@ -146,9 +146,28 @@ describe("mainnet profile (scripts/dev.ts --network mainnet)", () => {
     const noThird = mainnetProfile(two, hostRoot(GOOD_DEP)).errors;
     expect(noThird).toEqual([expect.stringMatching(/no third oracle source besides Chainlink and Pyth Pro/)]);
     expect(noThird[0]).toContain("3 live sources (2 required)");
-    expect(mainnetProfile({ ...two, ORACLE_HTTP_FINNHUB: "1" }, hostRoot(GOOD_DEP)).errors).toEqual([]);
+    // Finnhub is never the third source on mainnet (regular session only); without its key it is named as such
+    expect(mainnetProfile({ ...two, ORACLE_HTTP_FINNHUB: "1" }, hostRoot(GOOD_DEP)).errors).toEqual([
+      expect.stringMatching(/ORACLE_HTTP_FINNHUB=1 but ORACLE_FINNHUB_API_KEY is not set/),
+      expect.stringMatching(/no third oracle source/),
+    ]);
+    expect(mainnetProfile({ ...two, ORACLE_HTTP_FINNHUB: "1", ORACLE_FINNHUB_API_KEY: "f" }, hostRoot(GOOD_DEP)).errors).toEqual([
+      expect.stringMatching(/ORACLE_HTTP_FINNHUB is not a mainnet source/),
+      expect.stringMatching(/no third oracle source/),
+    ]);
+    // an HTTP source without its own quote timestamp, or with a loose max age, does not count
+    const spec = (over: Record<string, unknown>) =>
+      JSON.stringify([{ name: "vendor", url: "https://prices.example/{ticker}", pricePath: "price", tsPath: "ts", maxAgeMs: 10_000, ...over }]);
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_HTTP_SOURCES: spec({ tsPath: undefined }) }, hostRoot(GOOD_DEP)).errors).toEqual([
+      expect.stringMatching(/ORACLE_HTTP_SOURCES.vendor has no tsPath/),
+      expect.stringMatching(/no third oracle source/),
+    ]);
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_HTTP_SOURCES: spec({ maxAgeMs: 60_000 }) }, hostRoot(GOOD_DEP)).errors).toEqual([
+      expect.stringMatching(/ORACLE_HTTP_SOURCES.vendor needs maxAgeMs <= 30000/),
+      expect.stringMatching(/no third oracle source/),
+    ]);
     // no Pyth: refused even with other sources
-    const noPyth = mainnetProfile({ ...goodEnv(), ORACLE_PYTH: undefined, PYTH_API_KEY: undefined, ORACLE_HTTP_FINNHUB: "1" }, hostRoot(GOOD_DEP)).errors;
+    const noPyth = mainnetProfile({ ...goodEnv(), ORACLE_PYTH: undefined, PYTH_API_KEY: undefined }, hostRoot(GOOD_DEP)).errors;
     expect(noPyth).toEqual([expect.stringMatching(/no Pyth Pro source: set ORACLE_PYTH=1 \+ PYTH_API_KEY/)]);
     // Chainlink only: both missing
     expect(mainnetProfile({ ...two, ORACLE_PYTH: undefined }, hostRoot(GOOD_DEP)).errors).toEqual([

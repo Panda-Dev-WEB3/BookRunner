@@ -54,6 +54,21 @@ describe("productionProblems", () => {
     expect(has(productionProblems(mainnet({ ORACLE_MIN_SOURCES: "1" }), THREE), `below the mainnet floor ${MAINNET_MIN_SOURCES_FLOOR}`)).toBe(true);
   });
 
+  test("every HTTP source carries its own quote timestamp and a tight in-session max age; Finnhub is refused", () => {
+    const spec = (over: Record<string, unknown>) =>
+      mainnet({ ORACLE_HTTP_SOURCES: JSON.stringify([{ name: "vendor", url: "https://v.example/{ticker}", pricePath: "p", tsPath: "t", tsUnit: "ms", maxAgeMs: 10_000, ...over }]) });
+    expect(productionProblems(spec({}), THREE)).toEqual([]);
+    expect(productionProblems(spec({ maxAgeMs: 30_000 }), THREE)).toEqual([]);
+    expect(productionProblems(spec({ tsPath: undefined }), THREE)).toEqual([
+      "ORACLE_HTTP_SOURCES.vendor has no tsPath: on mainnet every quote must carry the vendor's own timestamp (receive time would make a stale last trade look fresh)",
+    ]);
+    expect(productionProblems(spec({ maxAgeMs: 30_001 }), THREE)).toEqual(["ORACLE_HTTP_SOURCES.vendor needs maxAgeMs <= 30000 on mainnet (got 30001)"]);
+    expect(productionProblems(spec({ maxAgeMs: undefined }), THREE)).toEqual([
+      "ORACLE_HTTP_SOURCES.vendor needs maxAgeMs <= 30000 on mainnet (got unset: the 15 s default is not pinned)",
+    ]);
+    expect(has(productionProblems(mainnet({ ORACLE_HTTP_FINNHUB: "1", ORACLE_FINNHUB_API_KEY: "f" }), THREE), "ORACLE_HTTP_FINNHUB is not a mainnet source")).toBe(true);
+  });
+
   test("Pyth Pro configuration: key, feed ids per launch ticker, https, never the key in a problem", () => {
     // ORACLE_PYTH=1 without a key is named (buildSources skipped the source)
     const noKey = productionProblems(mainnet({ PYTH_API_KEY: "" }), [chainlink, third, httpB]);

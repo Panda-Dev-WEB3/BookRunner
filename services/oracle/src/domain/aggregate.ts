@@ -1,6 +1,6 @@
 // Multi-source aggregation: median of fresh observations, outliers beyond `outlierBps` of that
 // median rejected, final price = median of the accepted set, ok iff >= minSources accepted and, with exactly two
-// accepted, they are within pairMaxBps of each other.
+// accepted, they are within pairMaxBps of each other and neither is older than its pairMaxAgeMs.
 import type { SourceQuote } from "./types";
 
 export interface AggregateOptions {
@@ -13,9 +13,16 @@ export interface AggregateOptions {
   maxFutureMs?: number;
   /**
    * When only two sources are accepted in a tick (the third down, or an outlier) the band cannot reject either
-   * (each sits half their gap from the midpoint): refuse when they are further apart than this (bps of their midpoint; default outlierBps, the source-check rule).
+   * (each sits half their gap from the midpoint): refuse when they are further apart than this (bps of their
+   * midpoint; default outlierBps, the source-check rule).
    */
   pairMaxBps?: number;
+  /**
+   * Per source name: the oldest observation that may back a price when only two sources are accepted (e.g.
+   * Chainlink, whose in-session age is a deviation-triggered round and says little about the market). Older ->
+   * refused, so a held-up round cannot co-sign with one other source.
+   */
+  pairMaxAgeMs?: Readonly<Record<string, number>>;
 }
 
 export type RejectReason = "invalid" | "stale" | "duplicate" | "outlier";
@@ -30,6 +37,8 @@ export interface AggregateResult {
   sourceCount?: number;
   /** why ok is false */
   reason?: string;
+  /** set when exactly two accepted sources were refused as a pair (disagreement / too old to pair): never seed from them */
+  pairRefused?: boolean;
 }
 
 /** Number of independent sources behind an aggregate. */
@@ -96,7 +105,20 @@ export function aggregate(quotes: readonly CollectedQuote[], o: AggregateOptions
     const gap = deviationBps(Math.max(a.price, b.price), price) + deviationBps(Math.min(a.price, b.price), price);
     const limit = o.pairMaxBps ?? o.outlierBps;
     if (gap > limit + 1e-9) {
-      return { ok: false, price, accepted, rejected, reason: `sources disagree: ${a.name} and ${b.name} are ${gap.toFixed(1)} bps apart (limit ${limit})` };
+      return { ok: false, price, accepted, rejected, pairRefused: true, reason: `sources disagree: ${a.name} and ${b.name} are ${gap.toFixed(1)} bps apart (limit ${limit})` };
+    }
+    for (const q of [a, b]) {
+      const maxAge = o.pairMaxAgeMs?.[q.name];
+      if (maxAge !== undefined && maxAge > 0 && o.nowMs - q.ts > maxAge) {
+        return {
+          ok: false,
+          price,
+          accepted,
+          rejected,
+          pairRefused: true,
+          reason: `${q.name} observation is ${Math.round((o.nowMs - q.ts) / 1000)}s old: too old to back a 2-source price (limit ${Math.round(maxAge / 1000)}s)`,
+        };
+      }
     }
   }
   const ok = accepted.length >= o.minSources && price !== null;

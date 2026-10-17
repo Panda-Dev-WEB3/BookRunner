@@ -87,6 +87,19 @@ describe("aggregate", () => {
     expect(aggregate([q("a", 100), q("b", 101.4), q("c", 100.7)], opts).ok).toBe(true);
   });
 
+  test("a pair may not lean on an old Chainlink round (pairMaxAgeMs); three sources are unaffected", () => {
+    const two = { ...opts, minSources: 2, maxAgeMs: 90_000_000, pairMaxAgeMs: { chainlink: 3_600_000 } };
+    const fresh = aggregate([q("chainlink", 100, 3_000_000), q("vendor", 100.2)], two);
+    expect(fresh.ok).toBe(true);
+    const old = aggregate([q("chainlink", 100, 3_700_000), q("vendor", 100.2)], two);
+    expect(old).toMatchObject({ ok: false, pairRefused: true, reason: "chainlink observation is 3700s old: too old to back a 2-source price (limit 3600s)" });
+    // with a third agreeing source the median carries the price as usual
+    expect(aggregate([q("chainlink", 100, 3_700_000), q("vendor", 100.2), q("pyth", 100.1)], two).ok).toBe(true);
+    // 0 disables the cap; disagreement is flagged as a refused pair too
+    expect(aggregate([q("chainlink", 100, 3_700_000), q("vendor", 100.2)], { ...two, pairMaxAgeMs: { chainlink: 0 } }).ok).toBe(true);
+    expect(aggregate([q("chainlink", 100), q("vendor", 101.6)], two).pairRefused).toBe(true);
+  });
+
   test("no fresh sources", () => {
     const r = aggregate([], opts);
     expect(r).toMatchObject({ ok: false, price: null, reason: "no fresh sources" });

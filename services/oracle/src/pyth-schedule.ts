@@ -1,7 +1,7 @@
 // Pyth Pro published market-session schedules (`/v1/symbols` -> `market_session_schedule`) vs the charter
-// calendar (packages/shared/src/sessions.ts). Used by source-check: with Chainlink + Pyth both required on mainnet,
-// a minute the calendar treats as open while Pyth is closed publishes nothing (no held price either), so the
-// calendar must be closed wherever Pyth is (holiday eves, early closes: sessions.ts nyseCalendarClosed).
+// calendar (packages/shared/src/sessions.ts). Used by source-check: a minute the calendar treats as open while Pyth
+// is closed runs mainnet without its spare source (and signals out-of-date holiday tables), so the calendar must be
+// closed wherever Pyth is (holiday eves, early closes: sessions.ts nyseCalendarClosed) and hold there.
 //
 // Schedule string (https://docs.pyth.network/price-feeds/pro/symbology-reference): `TZ;<weekly>;<overrides>`,
 // weekly = 7 entries Monday..Sunday, each `O` (open), `C` (closed) or `HHMM-HHMM` ranges joined by `&` (`2400` =

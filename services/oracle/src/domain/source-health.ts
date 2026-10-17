@@ -1,6 +1,6 @@
-// Per-source health for /health (and services/alerts' oracle_source_failing rule). With exactly two required
-// sources on mainnet (Chainlink + Pyth Pro) any single source outage stops publishing, so an operator must see
-// WHICH source fails and why. Only in-session tickers count: a closed market (Pyth `closed`, weekends) is not a
+// Per-source health for /health (and services/alerts' oracle_source_failing rule). Mainnet runs 3 live sources
+// with 2 required: one source outage leaves no spare and a second stops publishing, so an operator must see WHICH
+// source fails and why. Only in-session tickers count: a closed market (Pyth `closed`, weekends) is not a
 // failure. Error texts come from the sources, which never include access tokens (pyth.ts redacts).
 
 export type SourceOutcome = { ok: true } | { ok: false; error: string };

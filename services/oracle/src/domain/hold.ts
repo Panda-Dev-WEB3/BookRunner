@@ -59,8 +59,10 @@ export function decide(p: { open: boolean; agg: AggregateResult; lastOpen: LastO
   if (lastOpen) {
     return { kind: "publish", price: lastOpen.price, held: true, sources: lastOpen.sources, sourceCount: lastOpen.sourceCount, lastOpen };
   }
-  // Started off-hours with no history: seed the hold from whatever is observable now (>= 1 source).
+  // Started off-hours with no history: seed the hold from whatever is observable now (>= 1 source), never from a
+  // pair the aggregate refused (two sources > the band apart, or one too old to pair)
   const seedMin = Math.max(1, p.minSeedSources ?? 1);
+  if (agg.pairRefused) return { kind: "skip", reason: `off-hours with no price history: ${agg.reason ?? "pair refused"}`, lastOpen: null };
   if (agg.accepted.length > 0 && sourceCountOf(agg) >= seedMin) {
     // an index level is a weighted sum, not a median of its components
     const price = agg.sourceCount !== undefined && agg.price !== null ? agg.price : median(agg.accepted.map((s) => s.price));

@@ -72,10 +72,17 @@ describe("OracleService /health sources", () => {
     const sources = svc.health().sources;
     expect(sources.find((s) => s.name === "pyth")).toMatchObject({ failingSince: T0, failingTickers: ["NVDA"], lastError: "HTTP 403", lastOkAt: null });
     expect(sources.find((s) => s.name === "chainlink")).toMatchObject({ failingSince: null, lastOkAt: T0 });
-    // Saturday: the RTH session is closed, a failing source is not "failing"
+    // in session without a publishable price: listed with the start of the run and the reason
+    expect(svc.health().unpublished).toEqual([{ priceId: "NVDA", since: T0, reason: "1 of 3 required sources" }]); // FakeChain minSources() = 3
+    clock += 1000;
+    chain.head = Math.floor(clock / 1000);
+    await svc.tick(clock);
+    expect(svc.health().unpublished[0]!.since).toBe(T0);
+    // Saturday: the RTH session is closed, a failing source is not "failing" and nothing is "unpublished"
     clock = Date.parse("2026-10-03T15:00:00Z");
     chain.head = Math.floor(clock / 1000);
     await svc.tick(clock);
     expect(svc.health().sources.find((s) => s.name === "pyth")!.failingSince).toBeNull();
+    expect(svc.health().unpublished).toEqual([]);
   });
 });
