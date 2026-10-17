@@ -209,23 +209,67 @@ Units: AttestedOracle prices are USD per **share**; a Robinhood Chainlink feed q
 (share price × `uiMultiplier()`); the registry multiplies once by the token's live `uiMultiplier()`.
 The oracle divides per-token feeds by that same on-chain value before the median
 (`packages/shared/src/stockTokens.ts`). Never configure an HTTP source that quotes the Stock Token
-price: every non-Chainlink source must be a per-share US-equity price.
+price: every non-Chainlink source must be a per-share US-equity price. Mainnet runs on **three** live sources —
+Chainlink + **Pyth Pro** (`Equity.US.<T>/USD`, per share; VERIFY C6) + one more licensed per-share source (vendor
+being chosen: `ORACLE_HTTP_SOURCES` or a preset) — and signs a non-held price backed by **two** agreeing ones
+(`ORACLE_MIN_SOURCES=2`, on-chain `AttestedOracle.minSources() == 2`; the oracle refuses to start without a
+spare live source). What that means in operation:
+
+- **One source down = prices continue** from the remaining two, as long as they agree within `ORACLE_OUTLIER_BPS`
+  (150 bps): when only two quotes are accepted in a tick (third down, or rejected as an outlier) a non-held price
+  is refused if they are further apart — the same rule `source-check` reports pairwise — instead of signing their
+  midpoint. With three quotes the median and its 150 bps band isolate one bad source.
+- **Two sources down (or the remaining two disagree) = no price** for the affected tickers. Once the last published
+  price is older than `maxPriceAge` (300 s) on-chain, `priceOf` reverts `StalePrice`: valuations, trades on those
+  keys **and liquidations** revert until two sources agree again (reduce-only applies only to `held` prices,
+  i.e. off-hours).
+- **Alerts on any single failure.** The oracle logs every in-session source failure (warn, once a minute, never
+  the key) and reports it per source in `GET /health` (`sources[]`: `lastOkAt`, `failingSince`, `lastError`);
+  `services/alerts` raises `oracle_source_failing` when a live source has failed in-session tickers for more than
+  60 s — a warning while the other two carry the price (no spare left), critical when two fail on the same ticker.
+- **Stale pairs are refused.** Every HTTP source must carry the vendor's own quote timestamp (`tsPath`) with
+  `maxAgeMs` <= 30 s (production rule + preflight; the Finnhub preset is refused on mainnet), and when only two
+  sources are accepted a Chainlink round older than `ORACLE_CHAINLINK_PAIR_MAX_AGE_MS` (1 h) cannot back the price;
+  a refused pair never seeds an off-hours hold. `GET /health` `unpublished[]` lists in-session tickers without a
+  price; `services/alerts` raises `oracle_price_missing` (critical) after 2 min unless two failing sources already
+  explain it.
+- **Thin Pyth prints** are dropped (a failure with a reason): fewer publishers than Pyth's own session minimum
+  (`ORACLE_PYTH_MIN_PUBLISHERS` 3 in the regular session, `ORACLE_PYTH_MIN_PUBLISHERS_EXTENDED` 2 pre / post /
+  overnight), a confidence interval wider than `ORACLE_PYTH_MAX_CONF_BPS` (50 bps of the price), a missing or
+  unknown `marketSession`.
+- **Calendar.** Pyth has no session on holiday eves after 20:00 ET (incl. the Sunday before a Monday holiday) and
+  after 17:00 ET on early-close days; the 24/5 calendar closes there too (`NYSE_EARLY_CLOSES`, holiday-eve rule in
+  `packages/shared/src/sessions.ts`), so prices are **held** in those windows. `source-check` compares the
+  calendar with Pyth's published schedule for the next 30 days.
+
+**Pyth outage / token problem** (alert `oracle_source_failing:pyth`, `/health` `sources[].lastError`): HTTP 401 /
+403 → renew or re-entitle the token in the Pyth Pro dashboard, update `PYTH_API_KEY` in
+`/etc/bookrunner/mainnet.env`, restart `bookrunner@mainnet`; 429 / 5xx / timeout → Pyth status page and support;
+check with `source-check`. Prices continue from Chainlink + the third source meanwhile; fix it before a second
+source fails.
+**Corporate action** (Chainlink `oraclePaused()` on a token): that ticker runs on Pyth + the third source for the
+paused window (no spare); plan it with the corporate-actions steps below.
 
 1. **Source check** (read-only, before anything is registered and again before launch):
    `bun run --cwd services/oracle source-check --chain 4663 --rpc $RHC_RPC_URL [--registry 0x<registry>]`
    reads every feed and token in `config/chains/4663.json` (proxy code, `decimals()`, `description()`,
    `latestRoundData()` age vs heartbeat in session, token code / `decimals() == 18` / `uiMultiplier()` /
-   `oraclePaused()` / pending multiplier, per-share price, the HTTP sources from `ORACLE_HTTP_SOURCES`
-   against Chainlink, the mainnet production rules of the current `ORACLE_*` environment, and with
-   `--registry` the registration + live-multiplier mode). Exit code 1 on any FAIL; fix every FAIL.
+   `oraclePaused()` / pending multiplier, per-share price, Pyth Pro (when `PYTH_API_KEY` is set; FAIL on
+   4663 without it) and the HTTP sources from `ORACLE_HTTP_SOURCES` against Chainlink (150 bps), their
+   pairwise agreement, which sources are live, the mainnet production rules of the current `ORACLE_*` environment, and with
+   `--registry` the registration + live-multiplier mode). Exit code 1 on any FAIL; fix every FAIL. Off the
+   mainnet host, keep the token in the gitignored `.env.pyth` and pass it explicitly:
+   `cd services/oracle && bun --env-file=../../.env.pyth src/cli/source-check.ts --chain 4663 --rpc ...`.
 2. **Stock Tokens** (timelock, per token of `config/chains/4663.json`):
    `register(token, bytes32(<TICKER>), <current uiMultiplier()>, floatCapRaw)` then
    `setMultiplierSource(token, true)`. The stored value is the anchor; the live multiplier may drift
    `multiplierBandBps` (default 500 = 5%) from it before valuations fail closed.
 3. **Oracle environment** (`services/oracle`, chain 4663): `ORACLE_SYNTHETIC=0`, `SESSIONS_MODE=charter`,
-   `ORACLE_MIN_SOURCES>=2` (the service also applies `AttestedOracle.minSources()`, default 3),
-   `ORACLE_CHAINLINK_RPC_URL` (or `RPC_URL`), at least one licensed per-share source in
-   `ORACLE_HTTP_SOURCES`, `ORACLE_ATTESTATION_FILE`. The service refuses to start on 4663 when any
+   `ORACLE_MIN_SOURCES=2` (the mainnet preflight requires exactly 2; the service also applies
+   `AttestedOracle.minSources()`, set to 2 by DeployMainnet from `params.oracleMinSources`, and refuses to
+   start unless it leaves one spare live source), `ORACLE_PYTH=1` + `PYTH_API_KEY` (Pyth Pro; licence
+   VERIFY C6), the third licensed per-share source (`ORACLE_HTTP_SOURCES` or its preset: the preflight refuses
+   fewer than 3 live sources), `ORACLE_CHAINLINK_RPC_URL` (or `RPC_URL`), `ORACLE_ATTESTATION_FILE`. The service refuses to start on 4663 when any
    production rule fails (`services/oracle/src/production.ts`) and never signs a price, held or not, with
    fewer than the minimum sources. Synthetic sources cannot be constructed on 4663.
 
@@ -263,8 +307,9 @@ can redo it during the timelock delay from the published quote.
   `oraclePaused()`): `source-check` warns "pending multiplier". Before `effectiveAt`, propose
   `setNextMultiplierAnchor(token, newUIMultiplier)` so valuations keep working across the change; after
   it, `setMultiplier(token, new)` and `setNextMultiplierAnchor(token, 0)`. While `oraclePaused()` is set
-  the oracle drops the Chainlink observation for that ticker (the other sources keep the price, or
-  nothing is signed below the minimum and consumers see a stale price: reduce-only).
+  the oracle drops the Chainlink observation for that ticker: Pyth + the third source carry its price (2 of 3,
+  within 150 bps of each other); if one of them fails too, nothing is signed and after `maxPriceAge` its
+  valuations, trades and liquidations revert `StalePrice` until two sources agree again.
 
 ## Operations
 

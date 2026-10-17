@@ -51,10 +51,17 @@ export class Runtime {
       db: this.db,
       cfg: { tickers: this.cfg.tickers, indexes: this.cfg.indexes, defaultSessions: DEFAULT_SESSIONS[this.cfg.ORACLE_DEFAULT_SESSIONS] },
     });
-    const w = JSON.stringify(result.warnings);
+    const warnings = [...result.warnings];
+    if (this.cfg.ORACLE_PYTH) {
+      // a ticker chartered later without a Pyth feed id never reaches 2 sources: say so in the log and /health
+      for (const e of result.entries) {
+        if (e.kind === "equity" && this.cfg.pythFeeds[e.priceId] === undefined) warnings.push(`no Pyth Pro feed id for ${e.priceId} (ORACLE_PYTH_FEEDS)`);
+      }
+    }
+    const w = JSON.stringify(warnings);
     if (w !== this.lastWarnings) {
       this.lastWarnings = w;
-      if (result.warnings.length > 0) this.log.warn({ warnings: result.warnings, source: result.source }, "universe discovery warnings");
+      if (warnings.length > 0) this.log.warn({ warnings, source: result.source }, "universe discovery warnings");
     }
     if (this.market) {
       for (const e of result.entries) {
@@ -64,7 +71,7 @@ export class Runtime {
         }
       }
     }
-    await this.service.setUniverse(result.entries, result.source, result.warnings);
+    await this.service.setUniverse(result.entries, result.source, warnings);
     return this.cfg.ORACLE_UNIVERSE_REFRESH_MS;
   }
 

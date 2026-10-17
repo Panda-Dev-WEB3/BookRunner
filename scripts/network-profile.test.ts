@@ -40,7 +40,11 @@ function goodEnv(): Env {
     ORDERLY_BUILDER_KEY_SECRET: "seed",
     ANTHROPIC_API_KEY: "sk",
     ORACLE_CHAINLINK_FEEDS: JSON.stringify({ NVDA: { proxy: "0x0000000000000000000000000000000000000f01", basis: "per-token" } }),
-    ORACLE_HTTP_SOURCES: JSON.stringify([{ name: "vendor", url: "https://prices.example/{ticker}", pricePath: "price" }]),
+    // the mainnet design: Chainlink + Pyth Pro + a third source, 2 required
+    ORACLE_PYTH: "1",
+    PYTH_API_KEY: "pyth-test-token",
+    ORACLE_HTTP_SOURCES: JSON.stringify([{ name: "vendor", url: "https://prices.example/{ticker}", pricePath: "price", tsPath: "ts", tsUnit: "ms", maxAgeMs: 10_000 }]),
+    ORACLE_MIN_SOURCES: "2",
     MARK_SIGNER_KMS_KEY_ID: "alias/bkrn-mark",
     RISK_KMS_KEY_ID: "alias/bkrn-risk",
     OPS_VENUE_KMS_KEY_ID: "alias/bkrn-ops",
@@ -134,12 +138,65 @@ describe("mainnet profile (scripts/dev.ts --network mainnet)", () => {
     ]);
   });
 
-  test("oracle production rules: feeds state their basis, and an independent source exists", () => {
+  test("oracle production rules: feeds state their basis; Chainlink + Pyth Pro + a third source", () => {
     const plain = { ...goodEnv(), ORACLE_CHAINLINK_FEEDS: JSON.stringify({ NVDA: "0x0000000000000000000000000000000000000f01" }) };
     expect(mainnetProfile(plain, hostRoot(GOOD_DEP)).errors).toEqual([expect.stringMatching(/plain addresses for NVDA/)]);
-    const chainlinkOnly = { ...goodEnv(), ORACLE_HTTP_SOURCES: "[]" };
-    expect(mainnetProfile(chainlinkOnly, hostRoot(GOOD_DEP)).errors).toEqual([expect.stringMatching(/no independent oracle source/)]);
-    expect(mainnetProfile({ ...chainlinkOnly, ORACLE_HTTP_FINNHUB: "1" }, hostRoot(GOOD_DEP)).errors).toEqual([]);
+    // no third source: refused, the text says why
+    const two: Env = { ...goodEnv(), ORACLE_HTTP_SOURCES: "[]" };
+    const noThird = mainnetProfile(two, hostRoot(GOOD_DEP)).errors;
+    expect(noThird).toEqual([expect.stringMatching(/no third oracle source besides Chainlink and Pyth Pro/)]);
+    expect(noThird[0]).toContain("3 live sources (2 required)");
+    // Finnhub is never the third source on mainnet (regular session only); without its key it is named as such
+    expect(mainnetProfile({ ...two, ORACLE_HTTP_FINNHUB: "1" }, hostRoot(GOOD_DEP)).errors).toEqual([
+      expect.stringMatching(/ORACLE_HTTP_FINNHUB=1 but ORACLE_FINNHUB_API_KEY is not set/),
+      expect.stringMatching(/no third oracle source/),
+    ]);
+    expect(mainnetProfile({ ...two, ORACLE_HTTP_FINNHUB: "1", ORACLE_FINNHUB_API_KEY: "f" }, hostRoot(GOOD_DEP)).errors).toEqual([
+      expect.stringMatching(/ORACLE_HTTP_FINNHUB is not a mainnet source/),
+      expect.stringMatching(/no third oracle source/),
+    ]);
+    // an HTTP source without its own quote timestamp, or with a loose max age, does not count
+    const spec = (over: Record<string, unknown>) =>
+      JSON.stringify([{ name: "vendor", url: "https://prices.example/{ticker}", pricePath: "price", tsPath: "ts", maxAgeMs: 10_000, ...over }]);
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_HTTP_SOURCES: spec({ tsPath: undefined }) }, hostRoot(GOOD_DEP)).errors).toEqual([
+      expect.stringMatching(/ORACLE_HTTP_SOURCES.vendor has no tsPath/),
+      expect.stringMatching(/no third oracle source/),
+    ]);
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_HTTP_SOURCES: spec({ maxAgeMs: 60_000 }) }, hostRoot(GOOD_DEP)).errors).toEqual([
+      expect.stringMatching(/ORACLE_HTTP_SOURCES.vendor needs maxAgeMs <= 30000/),
+      expect.stringMatching(/no third oracle source/),
+    ]);
+    // no Pyth: refused even with other sources
+    const noPyth = mainnetProfile({ ...goodEnv(), ORACLE_PYTH: undefined, PYTH_API_KEY: undefined }, hostRoot(GOOD_DEP)).errors;
+    expect(noPyth).toEqual([expect.stringMatching(/no Pyth Pro source: set ORACLE_PYTH=1 \+ PYTH_API_KEY/)]);
+    // Chainlink only: both missing
+    expect(mainnetProfile({ ...two, ORACLE_PYTH: undefined }, hostRoot(GOOD_DEP)).errors).toEqual([
+      expect.stringMatching(/no Pyth Pro source/),
+      expect.stringMatching(/no third oracle source/),
+    ]);
+  });
+
+  test("Pyth Pro counts only with its access token; ORACLE_MIN_SOURCES must be 2", () => {
+    const noKey = mainnetProfile({ ...goodEnv(), PYTH_API_KEY: "" }, hostRoot(GOOD_DEP)).errors;
+    expect(noKey).toEqual([expect.stringMatching(/ORACLE_PYTH=1 but PYTH_API_KEY is not set/), expect.stringMatching(/no Pyth Pro source/)]);
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_PYTH_FEEDS: '{"NVDA":"x"}' }, hostRoot(GOOD_DEP)).errors).toEqual([
+      expect.stringMatching(/ORACLE_PYTH_FEEDS is not a JSON object/),
+    ]);
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_PYTH_FEEDS: '{"NVDA":1314}' }, hostRoot(GOOD_DEP)).errors).toEqual([]);
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_MIN_SOURCES: "3" }, hostRoot(GOOD_DEP)).errors).toEqual([
+      expect.stringMatching(/ORACLE_MIN_SOURCES must be 2 on mainnet \(2 of the 3 live sources; got 3\)/),
+    ]);
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_MIN_SOURCES: undefined }, hostRoot(GOOD_DEP)).errors).toEqual([
+      expect.stringMatching(/ORACLE_MIN_SOURCES must be 2 on mainnet .*unset/),
+    ]);
+    // flags parse like the oracle's z.stringbool(); the token only over https
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_PYTH: "yes" }, hostRoot(GOOD_DEP)).errors).toEqual([]);
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_PYTH: "off" }, hostRoot(GOOD_DEP)).errors).toEqual([expect.stringMatching(/no Pyth Pro source/)]);
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_PYTH_URL: "http://pyth.example/v1/latest_price" }, hostRoot(GOOD_DEP)).errors).toEqual([
+      expect.stringMatching(/ORACLE_PYTH_URL must be https:\/\//),
+    ]);
+    // the access token is never echoed in an error
+    for (const e of mainnetProfile({ ...goodEnv(), ORACLE_MIN_SOURCES: "9", ORACLE_HTTP_SOURCES: "[]" }, hostRoot(GOOD_DEP)).errors) expect(e).not.toContain("pyth-test-token");
   });
 
   test("alerts watch role ADDRESSES: local keys and per-book desk keys derived, KMS roles left to dev.ts", () => {

@@ -1,7 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import { KEYS } from "@bookrunner/shared/queues";
 import { SUPERVISOR_STATUS_KEY } from "@bookrunner/shared/supervisor";
-import { BACKUP_STATUS_KEY, type ChainPort, type DbPort, collect, emptyMemory, parseBackup, parseRisk, parseVenueAsOf, pushBuyback, pushSample } from "../src/collect";
+import {
+  BACKUP_STATUS_KEY,
+  type ChainPort,
+  type DbPort,
+  collect,
+  emptyMemory,
+  parseBackup,
+  parseOracleHealth,
+  parseRisk,
+  parseVenueAsOf,
+  pushBuyback,
+  pushSample,
+} from "../src/collect";
 import { NOW, supervisor } from "./fixtures";
 
 describe("parsers", () => {
@@ -105,5 +117,40 @@ describe("collect", () => {
     expect(memory.rpcSamples).toEqual([{ ts: NOW, value: 0 }]);
     expect(s.markIntervalSec).toBe(3600); // last known kept
     expect(s.api).toMatchObject({ ok: false, error: "ECONNREFUSED" });
+    expect(s.oracle).toBeNull(); // no oracle URL: not probed
+  });
+
+  test("oracle /health: per-source health and the on-chain minSources problem", async () => {
+    const body = {
+      status: "running",
+      sources: [
+        { name: "chainlink", kind: "chainlink", lastOkAt: NOW - 1000, failingSince: null, failingTickers: [], lastError: null, lastErrorAt: null },
+        { name: "pyth", kind: "pyth", lastOkAt: null, failingSince: NOW - 90_000, failingTickers: ["NVDA"], lastError: "HTTP 401", lastErrorAt: NOW },
+      ],
+      onchain: { minSourcesProblem: null },
+      unpublished: [{ priceId: "NVDA", since: NOW - 150_000, reason: "sources disagree" }, { priceId: 7 }],
+    };
+    const urls: string[] = [];
+    const f = (async (url: string) => {
+      urls.push(url);
+      return new Response(JSON.stringify(url.startsWith("http://oracle") ? body : { ok: true, db: "up", redis: "ready" }));
+    }) as unknown as typeof fetch;
+    const { snapshot: s } = await collect({ db, kv, chain, fetch: f, now: () => NOW }, { ...settings, oracleUrl: "http://oracle:4410" }, emptyMemory(), 86_400);
+    expect(urls).toContain("http://oracle:4410/health");
+    expect(s.oracle).toEqual({
+      ok: true,
+      error: null,
+      minSourcesProblem: null,
+      sources: [
+        { name: "chainlink", kind: "chainlink", lastOkAt: NOW - 1000, failingSince: null, failingTickers: [], lastError: null },
+        { name: "pyth", kind: "pyth", lastOkAt: null, failingSince: NOW - 90_000, failingTickers: ["NVDA"], lastError: "HTTP 401" },
+      ],
+      unpublished: [{ priceId: "NVDA", since: NOW - 150_000, reason: "sources disagree" }],
+    });
+    expect(parseOracleHealth(null)).toMatchObject({ ok: false, error: "unexpected body" });
+    expect(parseOracleHealth({ onchain: { minSourcesProblem: "AttestedOracle.minSources()=3 > 2" } }).minSourcesProblem).toBe("AttestedOracle.minSources()=3 > 2");
+    const down = (async () => new Response("no", { status: 503 })) as unknown as typeof fetch;
+    const r = await collect({ db, kv, chain, fetch: down, now: () => NOW }, { ...settings, oracleUrl: "http://oracle:4410" }, emptyMemory(), 86_400);
+    expect(r.snapshot.oracle).toEqual({ ok: false, error: "HTTP 503", sources: [], minSourcesProblem: null, unpublished: [] });
   });
 });

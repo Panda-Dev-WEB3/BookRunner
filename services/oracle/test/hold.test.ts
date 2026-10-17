@@ -104,6 +104,20 @@ describe("decide edge cases", () => {
     expect(d2.kind).toBe("skip");
   });
 
+  test("off-hours start: never seeds a hold from a refused pair (two sources > 150 bps apart)", () => {
+    const t0 = Date.parse("2026-10-03T15:00:00Z");
+    const agg = aggregate(
+      [
+        { name: "chainlink", price: 100, ts: t0 },
+        { name: "vendor", price: 101.6, ts: t0 },
+      ],
+      { nowMs: t0, outlierBps: 150, minSources: 2, maxAgeMs: 15_000 },
+    );
+    const d = decide({ open: false, agg, lastOpen: null, nowMs: t0, minSeedSources: 2 });
+    expect(d).toMatchObject({ kind: "skip", lastOpen: null });
+    expect(d.kind === "skip" && d.reason).toContain("off-hours with no price history: sources disagree");
+  });
+
   test("index seeded off-hours holds the weighted level and the weakest component count", () => {
     const comps = [
       { priceId: "NVDA", weightBps: 8000 },

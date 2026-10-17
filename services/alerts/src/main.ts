@@ -2,7 +2,8 @@
 //   bun src/main.ts            # loop every ALERT_INTERVAL_SECONDS (default 60)
 //   bun src/main.ts --once     # one pass: print the active conditions, deliver nothing, change no state
 //   bun src/main.ts --test     # send one test message through every configured channel, then exit
-// Reads only: Postgres, Redis, the chain (no key, no transaction), the API's /health. Holds no signing key.
+// Reads only: Postgres, Redis, the chain (no key, no transaction), the API's and the oracle's /health. Holds no
+// signing key.
 import { bkrnFeeRouterAbi, bookrunnerConfigAbi } from "@bookrunner/shared/abi";
 import { tryLoadDeployment } from "@bookrunner/shared/deployments";
 import { createLogger } from "@bookrunner/shared/logger";
@@ -77,7 +78,7 @@ const chain: ChainPort = {
 const collectFn = (mem: Parameters<typeof collect>[2]) =>
   collect(
     { db, kv: { get: (k) => redis.get(k), mget: (ks) => redis.mget(...ks) }, chain, fetch, now: Date.now },
-    { network: cfg.network, chainId: cfg.chainId, apiUrl: cfg.apiUrl, markIntervalSec: cfg.markIntervalSec, roles: cfg.roles, rpcWindowSec: cfg.rpcWindowSec },
+    { network: cfg.network, chainId: cfg.chainId, apiUrl: cfg.apiUrl, oracleUrl: cfg.oracleUrl, markIntervalSec: cfg.markIntervalSec, roles: cfg.roles, rpcWindowSec: cfg.rpcWindowSec },
     mem,
     cfg.rules.buybackGrowSec * 2 + 86_400,
   );

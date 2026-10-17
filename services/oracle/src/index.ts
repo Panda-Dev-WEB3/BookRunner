@@ -2,7 +2,8 @@
 // oracle_prices (+ AttestedOracle.pushMany in ORACLE_PUSH_MODE=heartbeat only), builder prices to the
 // venue, HTTP on ORACLE_PORT (default 4410).
 import { createDb } from "@bookrunner/db";
-import { createLogger, roleSigner } from "@bookrunner/shared";
+import { createLogger, publicClientFor, roleSigner, tryLoadDeployment } from "@bookrunner/shared";
+import { attestedOracleAbi } from "@bookrunner/shared/abi";
 import type { LocalAccount } from "viem";
 import { DrizzlePriceStore } from "./adapters/db";
 import { type AttestationDocument, loadAttestationDocument } from "./attestation";
@@ -12,7 +13,7 @@ import { loadOracleConfig } from "./config";
 import { MAX_SAFE_PUSH_DEVIATION_BPS, createApp, serveOptions } from "./http";
 import { startLoop } from "./loop";
 import { Runtime } from "./runtime";
-import { isProductionChain, productionProblems } from "./production";
+import { MAINNET_SPARE_SOURCES, isProductionChain, liveSourceCount, productionProblems, startupOnchainMinSourcesProblem } from "./production";
 import { OracleService } from "./service";
 import { accountSigner } from "./signing";
 import { buildSources } from "./sources/index";
@@ -49,6 +50,23 @@ if (problems.length > 0) {
   log.fatal({ chainId: cfg.CHAIN_ID, problems }, "refusing to start: mainnet oracle configuration is not production-ready");
   process.exit(1);
 }
+if (production) {
+  // the on-chain minimum must be reachable: AttestedOracle refuses every non-held price below minSources()
+  const dep = tryLoadDeployment(cfg.DEPLOYMENT_FILE);
+  const oracle = dep?.chainId === cfg.CHAIN_ID ? dep.contracts?.oracle : undefined;
+  const problem = !oracle
+    ? `no AttestedOracle in ${cfg.DEPLOYMENT_FILE} for chain ${cfg.CHAIN_ID}: cannot check minSources() against the configured sources`
+    : await startupOnchainMinSourcesProblem({
+        readMinSources: async () =>
+          Number(await publicClientFor(cfg.CHAIN_ID, cfg.RPC_URL).readContract({ address: oracle, abi: attestedOracleAbi, functionName: "minSources" })),
+        sources,
+        spare: MAINNET_SPARE_SOURCES,
+      });
+  if (problem) {
+    log.fatal({ chainId: cfg.CHAIN_ID, oracle: oracle ?? null, liveSources: liveSourceCount(sources) }, `refusing to start: ${problem}`);
+    process.exit(1);
+  }
+}
 
 const service = new OracleService({
   log,
@@ -59,6 +77,7 @@ const service = new OracleService({
   venue: cfg.ORACLE_VENUE_PRICES ? builderPriceClient(cfg.ORDERLY_MODE, cfg.ORDERLY_BASE_URL, cfg.ORACLE_SOURCE_TIMEOUT_MS) : null,
   settings: {
     outlierBps: cfg.ORACLE_OUTLIER_BPS,
+    pairMaxAgeMs: { chainlink: cfg.ORACLE_CHAINLINK_PAIR_MAX_AGE_MS },
     minSources: cfg.ORACLE_MIN_SOURCES,
     maxSourceAgeMs: cfg.ORACLE_MAX_SOURCE_AGE_MS,
     sourceTimeoutMs: cfg.ORACLE_SOURCE_TIMEOUT_MS,

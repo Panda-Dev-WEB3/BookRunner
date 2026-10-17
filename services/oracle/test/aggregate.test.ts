@@ -69,6 +69,37 @@ describe("aggregate", () => {
     expect(r.accepted.map((s) => s.name)).toContain("slow");
   });
 
+  test("only two sources accepted (third down or outlier): refused when further apart than the band, not averaged", () => {
+    const two = { ...opts, minSources: 2 };
+    // 140 bps apart: both within 70 bps of the midpoint -> published at the midpoint
+    const near = aggregate([q("chainlink", 100), q("pyth", 101.4)], two);
+    expect(near.ok).toBe(true);
+    expect(near.price).toBeCloseTo(100.7, 9);
+    // 160 bps apart: each only 80 bps from the midpoint (the band alone would accept both) -> refused
+    const far = aggregate([q("chainlink", 100), q("pyth", 101.6)], two);
+    expect(far.ok).toBe(false);
+    expect(far.accepted).toHaveLength(2);
+    expect(far.reason).toBe("sources disagree: chainlink and pyth are 158.7 bps apart (limit 150)");
+    // the pair limit is configurable and defaults to the outlier band
+    expect(aggregate([q("chainlink", 100), q("pyth", 101.6)], { ...two, pairMaxBps: 200 }).ok).toBe(true);
+    expect(aggregate([q("chainlink", 100), q("pyth", 101.4)], { ...two, pairMaxBps: 100 }).ok).toBe(false);
+    // three sources: the band decides as before
+    expect(aggregate([q("a", 100), q("b", 101.4), q("c", 100.7)], opts).ok).toBe(true);
+  });
+
+  test("a pair may not lean on an old Chainlink round (pairMaxAgeMs); three sources are unaffected", () => {
+    const two = { ...opts, minSources: 2, maxAgeMs: 90_000_000, pairMaxAgeMs: { chainlink: 3_600_000 } };
+    const fresh = aggregate([q("chainlink", 100, 3_000_000), q("vendor", 100.2)], two);
+    expect(fresh.ok).toBe(true);
+    const old = aggregate([q("chainlink", 100, 3_700_000), q("vendor", 100.2)], two);
+    expect(old).toMatchObject({ ok: false, pairRefused: true, reason: "chainlink observation is 3700s old: too old to back a 2-source price (limit 3600s)" });
+    // with a third agreeing source the median carries the price as usual
+    expect(aggregate([q("chainlink", 100, 3_700_000), q("vendor", 100.2), q("pyth", 100.1)], two).ok).toBe(true);
+    // 0 disables the cap; disagreement is flagged as a refused pair too
+    expect(aggregate([q("chainlink", 100, 3_700_000), q("vendor", 100.2)], { ...two, pairMaxAgeMs: { chainlink: 0 } }).ok).toBe(true);
+    expect(aggregate([q("chainlink", 100), q("vendor", 101.6)], two).pairRefused).toBe(true);
+  });
+
   test("no fresh sources", () => {
     const r = aggregate([], opts);
     expect(r).toMatchObject({ ok: false, price: null, reason: "no fresh sources" });

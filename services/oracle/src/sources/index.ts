@@ -1,5 +1,6 @@
 // Source assembly from config: synthetic GBM (devnet; testnet with a secret seed; never on mainnet),
-// HTTP sources and Chainlink feeds (config/chains/<chainId>.json + ORACLE_CHAINLINK_FEEDS).
+// HTTP sources, Pyth Pro (ORACLE_PYTH + PYTH_API_KEY) and Chainlink feeds (config/chains/<chainId>.json +
+// ORACLE_CHAINLINK_FEEDS).
 import { type Logger, isMainnet } from "@bookrunner/shared";
 import { createPublicClient, http, type PublicClient } from "viem";
 import { type OracleConfig, syntheticSeedProblem } from "../config";
@@ -7,6 +8,7 @@ import { csprngNormal } from "../domain/rng";
 import type { PriceSource } from "../domain/types";
 import { ChainlinkSource, viemAggregatorReader } from "./chainlink";
 import { GenericHttpSource, finnhubSpec } from "./http";
+import { PythProSource } from "./pyth";
 import { SyntheticMarket, syntheticSources } from "./synthetic";
 
 export const DEFAULT_S0 = 100;
@@ -69,6 +71,24 @@ export function buildSources(cfg: OracleConfig, log: Logger, now: () => number =
     else log.warn("ORACLE_HTTP_FINNHUB=1 but ORACLE_FINNHUB_API_KEY is not set; source skipped");
   }
   for (const spec of cfg.httpSources) sources.push(new GenericHttpSource(spec, cfg.ORACLE_SOURCE_TIMEOUT_MS));
+
+  if (cfg.ORACLE_PYTH) {
+    if (cfg.PYTH_API_KEY) {
+      sources.push(
+        new PythProSource({
+          url: cfg.ORACLE_PYTH_URL,
+          apiKey: cfg.PYTH_API_KEY,
+          feeds: cfg.pythFeeds,
+          channel: cfg.ORACLE_PYTH_CHANNEL,
+          maxAgeMs: cfg.ORACLE_PYTH_MAX_AGE_MS,
+          timeoutMs: cfg.ORACLE_SOURCE_TIMEOUT_MS,
+          quality: cfg.pythQuality,
+        }),
+      );
+      // never the access token
+      log.info({ url: cfg.ORACLE_PYTH_URL, channel: cfg.ORACLE_PYTH_CHANNEL, feeds: cfg.pythFeeds, maxAgeMs: cfg.ORACLE_PYTH_MAX_AGE_MS, quality: cfg.pythQuality }, "Pyth Pro source enabled");
+    } else log.warn("ORACLE_PYTH=1 but PYTH_API_KEY is not set; Pyth Pro source skipped");
+  }
 
   const feeds = cfg.chainlinkFeeds;
   if (Object.keys(feeds).length > 0) {

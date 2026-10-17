@@ -64,9 +64,21 @@ const isLocal = (url: string) => /(^|\/\/|@)(127\.0\.0\.1|localhost|0\.0\.0\.0|\
  * Oracle sources (mirrors services/oracle/src/production.ts so the stack refuses before the oracle crash-loops):
  * Chainlink feeds come from the chain price config the oracle loads on 4663 (ORACLE_CHAIN_CONFIG, else
  * config/chains/4663.json under `root`) overlaid by ORACLE_CHAINLINK_FEEDS, whose entries must state their basis
- * ({"proxy","basis","token"}: a plain address is refused, VERIFY C2); the median also needs at least one
- * independent per-share source (ORACLE_HTTP_SOURCES or ORACLE_HTTP_FINNHUB).
+ * ({"proxy","basis","token"}: a plain address is refused, VERIFY C2). The mainnet design is 3 live sources with 2
+ * required: Chainlink + Pyth Pro (ORACLE_PYTH=1 + PYTH_API_KEY) + at least one more independent per-share source
+ * (ORACLE_HTTP_SOURCES entries with the vendor's own quote timestamp — tsPath — and maxAgeMs <=
+ * MAINNET_HTTP_MAX_AGE_MS; the Finnhub preset is not a mainnet source), so one source outage is tolerated and the
+ * 150 bps band can isolate one bad source. ORACLE_MIN_SOURCES must be exactly MAINNET_ORACLE_MIN_SOURCES (the oracle also refuses
+ * to start unless the on-chain AttestedOracle.minSources() leaves one spare live source).
  */
+export const MAINNET_ORACLE_MIN_SOURCES = 2;
+/** services/oracle production.ts MAINNET_HTTP_MAX_AGE_MS */
+export const MAINNET_HTTP_MAX_AGE_MS = 30_000;
+
+/** Same truthy set as the oracle's z.stringbool() flags (ORACLE_PYTH=yes runs Pyth there, so it counts here too). */
+const TRUTHY = new Set(["true", "1", "yes", "on", "y", "enabled"]);
+const isOn = (v: string | undefined) => TRUTHY.has((v ?? "").trim().toLowerCase());
+
 function oracleSourcesProblems(env: Env, root: string): string[] {
   const problems: string[] = [];
   const parse = (v: string | undefined, d: unknown) => {
@@ -103,9 +115,49 @@ function oracleSourcesProblems(env: Env, root: string): string[] {
   if (cfgFeeds + Object.keys(envFeeds).length === 0) {
     problems.push("no Chainlink feed: config/chains/4663.json (ORACLE_CHAIN_CONFIG) or ORACLE_CHAINLINK_FEEDS");
   }
-  const finnhub = ["1", "true"].includes((env.ORACLE_HTTP_FINNHUB ?? "").toLowerCase());
-  if ((Array.isArray(http) ? http.length : 0) === 0 && !finnhub) {
-    problems.push("no independent oracle source besides Chainlink: set ORACLE_HTTP_SOURCES (per-share US-equity prices) or ORACLE_HTTP_FINNHUB=1");
+  const finnhub = isOn(env.ORACLE_HTTP_FINNHUB);
+  const pythOn = isOn(env.ORACLE_PYTH);
+  const pythKey = !!env.PYTH_API_KEY?.trim();
+  if (pythOn && !pythKey) problems.push("ORACLE_PYTH=1 but PYTH_API_KEY is not set (Pyth Pro access token)");
+  const pythUrl = env.ORACLE_PYTH_URL?.trim();
+  if (pythUrl && !pythUrl.startsWith("https://")) problems.push("ORACLE_PYTH_URL must be https:// (the Pyth Pro access token travels in its Authorization header)");
+  if (env.ORACLE_PYTH_FEEDS?.trim()) {
+    const pf = parse(env.ORACLE_PYTH_FEEDS, {});
+    if (pf === null || typeof pf !== "object" || Array.isArray(pf) || !Object.values(pf as object).every((v) => Number.isInteger(v) && (v as number) >= 0)) {
+      problems.push('ORACLE_PYTH_FEEDS is not a JSON object of ticker -> Pyth Pro feed id (e.g. {"NVDA":1314})');
+    }
+  }
+  const pyth = pythOn && pythKey;
+  // HTTP sources count only when they stamp their own quotes and are in-session tight (with one source down the
+  // other two must both be live market data); Finnhub never counts on mainnet (regular session only, 120 s)
+  let thirdCount = 0;
+  for (const spec of Array.isArray(http) ? (http as Array<Record<string, unknown>>) : []) {
+    const name = typeof spec?.name === "string" ? spec.name : "?";
+    const age = typeof spec?.maxAgeMs === "number" ? spec.maxAgeMs : undefined;
+    if (typeof spec?.tsPath !== "string" || spec.tsPath === "") {
+      problems.push(`ORACLE_HTTP_SOURCES.${name} has no tsPath: on mainnet every quote must carry the vendor's own timestamp`);
+    } else if (age === undefined || age > MAINNET_HTTP_MAX_AGE_MS) {
+      problems.push(`ORACLE_HTTP_SOURCES.${name} needs maxAgeMs <= ${MAINNET_HTTP_MAX_AGE_MS} on mainnet`);
+    } else thirdCount++;
+  }
+  if (finnhub) {
+    problems.push(
+      env.ORACLE_FINNHUB_API_KEY?.trim()
+        ? "ORACLE_HTTP_FINNHUB is not a mainnet source (regular session only, 120 s quote age, licence unverified): use a 24/5 vendor in ORACLE_HTTP_SOURCES"
+        : "ORACLE_HTTP_FINNHUB=1 but ORACLE_FINNHUB_API_KEY is not set (and Finnhub is not a mainnet source)",
+    );
+  }
+  if (!pyth) problems.push("no Pyth Pro source: set ORACLE_PYTH=1 + PYTH_API_KEY (the mainnet design: Chainlink + Pyth Pro + a third source)");
+  if (thirdCount === 0) {
+    problems.push(
+      "no third oracle source besides Chainlink and Pyth Pro: set ORACLE_HTTP_SOURCES (licensed per-share US-equity prices) or a preset; the mainnet design needs 3 live sources (2 required) so one outage is tolerated",
+    );
+  }
+  const min = env.ORACLE_MIN_SOURCES?.trim();
+  if (min !== String(MAINNET_ORACLE_MIN_SOURCES)) {
+    problems.push(
+      `ORACLE_MIN_SOURCES must be ${MAINNET_ORACLE_MIN_SOURCES} on mainnet (2 of the 3 live sources; ${min ? `got ${min}` : "unset: the oracle default is 3"})`,
+    );
   }
   return problems;
 }

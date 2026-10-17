@@ -146,8 +146,10 @@ curl -sI http://leveret.bookrunner.tech/ | head -1                              
 - **Alerts** (`services/alerts`, a child of `scripts/dev.ts` like every service; no signing key): every 60 s it
   checks marks, risk / kills, supervised processes (Redis heartbeat `bkrn:supervisor:status` written by
   dev.ts), role-key and gas-funder ETH, RPC errors / head lag, indexer lag, venue-report age, buybackPending,
-  the API's `/health` and the backup record, and sends one message per condition (and one "resolved") by
-  email and/or webhook. Configure in `.env.<network>`: `ALERT_EMAIL_TO`, `ALERT_SMTP_USER`, `ALERT_SMTP_PASS`
+  the API's `/health`, the oracle's `/health` (any live price source failing in-session tickers for > 60 s:
+  `oracle_source_failing`, `ALERT_ORACLE_SOURCE_FAIL_SECONDS`; critical when two fail on one ticker; `oracle_price_missing` when an
+  in-session ticker has no publishable price for > 2 min) and the backup
+  record, and sends one message per condition (and one "resolved") by email and/or webhook. Configure in `.env.<network>`: `ALERT_EMAIL_TO`, `ALERT_SMTP_USER`, `ALERT_SMTP_PASS`
   (host `mail.ignition-x.com:587` STARTTLS by default), and/or `ALERT_WEBHOOK_URL` (Slack / Discord / Telegram +
   `ALERT_TELEGRAM_CHAT_ID` / generic JSON); optional `ALERT_HEARTBEAT_URL` (dead-man's switch) and
   `ALERT_DIGEST_HOUR_UTC`. Thresholds: `services/alerts/src/config.ts`. Test the channels:

@@ -91,7 +91,7 @@ describe("per-process secrets (scripts/dev.ts)", () => {
     }
   });
 
-  test("mainnet-style host: per-role KMS ids + AWS secrets, ALERT_* to alerts, desk keys and price API specs scoped", () => {
+  test("mainnet-style host: per-role KMS ids + AWS secrets, ALERT_* to alerts, desk keys and price API keys scoped", () => {
     const host = {
       CHAIN_ID: "4663",
       AWS_REGION: "eu-west-1",
@@ -104,6 +104,7 @@ describe("per-process secrets (scripts/dev.ts)", () => {
       ORACLE_SIGNER_KMS_KEY_ID: "alias/bkrn-oracle",
       DESK_KEY_PRIVATE_KEY_7: "0x07",
       ORACLE_HTTP_SOURCES: '[{"name":"v","url":"https://x/{ticker}","pricePath":"p","headers":{"X-Api-Key":"k"}}]',
+      PYTH_API_KEY: "pyth-token",
       ALERT_SMTP_USER: "alerts@bookrunner.tech",
       ALERT_SMTP_PASS: "smtp",
       ALERT_ROLE_ADDRESSES: "markSigner=0x00000000000000000000000000000000000000aa",
@@ -114,7 +115,7 @@ describe("per-process secrets (scripts/dev.ts)", () => {
     expect(secrets("ops-venue")).toEqual(["AWS_SECRET_ACCESS_KEY", "OPS_VENUE_KMS_KEY_ID"]);
     expect(secrets("charter")).toEqual(["AWS_SECRET_ACCESS_KEY", "JURY_KMS_KEY_ID"]);
     expect(secrets("waterfall")).toEqual(["AWS_SECRET_ACCESS_KEY", "KEEPER_KMS_KEY_ID"]);
-    expect(secrets("oracle")).toEqual(["AWS_SECRET_ACCESS_KEY", "ORACLE_HTTP_SOURCES", "ORACLE_SIGNER_KMS_KEY_ID"]);
+    expect(secrets("oracle")).toEqual(["AWS_SECRET_ACCESS_KEY", "ORACLE_HTTP_SOURCES", "ORACLE_SIGNER_KMS_KEY_ID", "PYTH_API_KEY"]);
     expect(secrets("alerts")).toEqual(["ALERT_SMTP_PASS", "ALERT_SMTP_USER"]);
     for (const p of ["api", "indexer", "receipts"]) expect(secrets(p)).toEqual([]);
     // the per-book desk key is stripped from every child; dev.ts hands it to agent:<book> as DESK_KEY_PRIVATE_KEY

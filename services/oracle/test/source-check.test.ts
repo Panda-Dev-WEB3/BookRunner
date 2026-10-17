@@ -2,8 +2,8 @@
 import { describe, expect, test } from "bun:test";
 import { MULTIPLIER_VECTOR as V, WAD, loadChainPriceConfig } from "@bookrunner/shared";
 import type { Address } from "viem";
-import { parseArgs } from "../src/cli/source-check";
-import { resolveFeeds } from "../src/config";
+import { checkedOtherSources, parseArgs } from "../src/cli/source-check";
+import { loadOracleConfig, resolveFeeds } from "../src/config";
 import type { PriceSource } from "../src/domain/types";
 import { type CheckRow, type RegistryView, type SourceCheckReader, formatTable, runSourceCheck } from "../src/source-check";
 import type { RoundData, TokenState } from "../src/sources/chainlink";
@@ -160,6 +160,77 @@ describe("runSourceCheck", () => {
     expect(status(rows, "NVDA", "vs http-b")).toBe("FAIL");
     expect(status(rows, "service config", "production rule")).toBe("FAIL");
     expect(status(rows, "TSLA", "coverage")).toBe("WARN");
+  });
+});
+
+describe("Pyth Pro in source-check", () => {
+  const pythAt = (factor: number | null): PriceSource => ({
+    name: "pyth",
+    kind: "pyth",
+    fetch: async () => (factor === null ? null : { price: V.perSharePrice * factor, ts: T0 - 400 }),
+  });
+  const run = (p: Partial<Parameters<typeof runSourceCheck>[0]>) =>
+    runSourceCheck({ chainId: 4663, config: CONFIG, feeds: { NVDA: FEEDS.NVDA! }, reader: new FakeCheckReader(), now: () => T0, ...p });
+
+  test("compared with Chainlink per share on the 150 bps rule; the live sources are listed", async () => {
+    let rows = await run({ otherSources: [pythAt(1.004)], pythKey: true, minSources: 2 });
+    expect(status(rows, "NVDA", "vs pyth")).toBe("PASS");
+    expect(rows.find((r) => r.subject === "NVDA" && r.check === "vs pyth")!.detail).toContain("40.0 bps from Chainlink per share");
+    const live = rows.find((r) => r.subject === "sources" && r.check === "live")!;
+    expect(live.status).toBe("PASS");
+    expect(live.detail).toBe("chainlink, pyth (2 of ORACLE_MIN_SOURCES=2; configured: chainlink, pyth)");
+    expect(rows.some((r) => r.subject === "pyth")).toBe(false);
+
+    rows = await run({ otherSources: [pythAt(1.016)], pythKey: true, minSources: 2 });
+    expect(status(rows, "NVDA", "vs pyth")).toBe("FAIL"); // 160 bps > 150
+    expect(rows.find((r) => r.subject === "sources")!.detail).toBe("chainlink, pyth (2 of ORACLE_MIN_SOURCES=2; configured: chainlink, pyth)");
+  });
+
+  test("three sources: each vs Chainlink, plus pairwise agreement of the others", async () => {
+    const vendor: PriceSource = { name: "vendor", kind: "http", fetch: async () => ({ price: V.perSharePrice * 0.999, ts: T0 }) };
+    let rows = await run({ otherSources: [pythAt(1.004), vendor], pythKey: true, minSources: 2 });
+    expect(status(rows, "NVDA", "vs pyth")).toBe("PASS");
+    expect(status(rows, "NVDA", "vs vendor")).toBe("PASS");
+    const pair = rows.find((r) => r.subject === "NVDA" && r.check === "pyth vs vendor")!;
+    expect(pair).toMatchObject({ status: "PASS", detail: "49.9 bps apart (limit 150, of their midpoint)" });
+    expect(rows.find((r) => r.subject === "sources")!.detail).toBe("chainlink, pyth, vendor (3 of ORACLE_MIN_SOURCES=2; configured: chainlink, pyth, vendor)");
+    // each within 150 bps of Chainlink but 180 bps from each other
+    const low: PriceSource = { name: "vendor", kind: "http", fetch: async () => ({ price: V.perSharePrice * 0.991, ts: T0 }) };
+    rows = await run({ otherSources: [pythAt(1.009), low], pythKey: true, minSources: 2 });
+    expect(status(rows, "NVDA", "vs pyth")).toBe("PASS");
+    expect(status(rows, "NVDA", "vs vendor")).toBe("PASS");
+    expect(status(rows, "NVDA", "pyth vs vendor")).toBe("FAIL");
+  });
+
+  test("no fresh Pyth price: FAIL in session (and too few live sources), WARN off-hours", async () => {
+    let rows = await run({ otherSources: [pythAt(null)], pythKey: true, minSources: 2 });
+    expect(status(rows, "NVDA", "vs pyth")).toBe("FAIL");
+    expect(rows.find((r) => r.subject === "sources")).toMatchObject({ status: "FAIL", detail: "chainlink (1 of ORACLE_MIN_SOURCES=2; configured: chainlink, pyth)" });
+    const saturday = Date.parse("2026-10-03T15:00:00Z");
+    rows = await run({ otherSources: [pythAt(null)], pythKey: true, minSources: 2, now: () => saturday });
+    expect(rows.find((r) => r.subject === "NVDA" && r.check === "vs pyth")).toMatchObject({ status: "WARN", detail: "no fresh observation (off-hours)" });
+    expect(status(rows, "sources", "live")).toBe("WARN");
+  });
+
+  test("without PYTH_API_KEY: FAIL on the mainnet profile, SKIP elsewhere", async () => {
+    let rows = await run({ pythKey: false });
+    expect(rows.find((r) => r.subject === "pyth")).toMatchObject({ check: "access token", status: "FAIL" });
+    const reader = new FakeCheckReader();
+    reader.chain = 46630;
+    rows = await runSourceCheck({ chainId: 46630, config: CONFIG, feeds: { NVDA: FEEDS.NVDA! }, reader, now: () => T0, pythKey: false });
+    expect(rows.find((r) => r.subject === "pyth")).toMatchObject({ check: "access token", status: "SKIP", detail: "PYTH_API_KEY not set" });
+    expect(formatTable(rows)).toContain("1 skip");
+  });
+
+  test("CLI source list: configured live sources, plus Pyth whenever a key is present", () => {
+    const base = { CHAIN_ID: "4663", ORACLE_SYNTHETIC: "0" };
+    const http: PriceSource = { name: "vendor", kind: "http", fetch: async () => null };
+    const cl: PriceSource = { name: "chainlink", kind: "chainlink", fetch: async () => null };
+    expect(checkedOtherSources(loadOracleConfig(base), [cl, http]).map((s) => s.name)).toEqual(["vendor"]);
+    const withKey = checkedOtherSources(loadOracleConfig({ ...base, PYTH_API_KEY: "k" }), [cl, http]);
+    expect(withKey.map((s) => `${s.name}:${s.kind}`)).toEqual(["vendor:http", "pyth:pyth"]);
+    const pythOn: PriceSource = { name: "pyth", kind: "pyth", fetch: async () => null };
+    expect(checkedOtherSources(loadOracleConfig({ ...base, PYTH_API_KEY: "k" }), [cl, pythOn])).toEqual([pythOn]);
   });
 });
 

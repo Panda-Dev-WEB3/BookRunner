@@ -4,7 +4,7 @@
 // infra / rpc / api condition instead of blinding the other rules.
 import { KEYS } from "@bookrunner/shared/queues";
 import { SUPERVISOR_STATUS_KEY, parseSupervisorStatus } from "@bookrunner/shared/supervisor";
-import type { BackupSnap, BookSnap, IndexerCursorSnap, KillEventSnap, RiskSnap, Sample, Snapshot } from "./types";
+import type { BackupSnap, BookSnap, IndexerCursorSnap, KillEventSnap, OracleProbe, OracleSourceSnap, RiskSnap, Sample, Snapshot } from "./types";
 
 /** deploy/server/backup.sh records its outcome here (same Redis db as the stack). */
 export const BACKUP_STATUS_KEY = "bkrn:backup:last";
@@ -53,6 +53,8 @@ export interface CollectSettings {
   network: string;
   chainId: number;
   apiUrl: string;
+  /** the oracle's HTTP base URL (GET /health: per-source health); unset = not probed */
+  oracleUrl?: string;
   markIntervalSec: number;
   roles: Array<{ role: string; address: `0x${string}` }>;
   /** how long rpc samples are kept */
@@ -138,6 +140,34 @@ export function parseBackup(raw: string | null): BackupSnap | null {
   } catch {
     return null;
   }
+}
+
+/** The oracle's GET /health body -> per-source health (unknown shapes -> not ok). */
+export function parseOracleHealth(body: unknown): OracleProbe {
+  if (!body || typeof body !== "object") return { ok: false, error: "unexpected body", sources: [], minSourcesProblem: null, unpublished: [] };
+  const o = body as { sources?: unknown; onchain?: { minSourcesProblem?: unknown }; unpublished?: unknown };
+  const sources: OracleSourceSnap[] = Array.isArray(o.sources)
+    ? o.sources
+        .filter((x): x is Record<string, unknown> => !!x && typeof x === "object" && typeof (x as { name?: unknown }).name === "string")
+        .map((x) => ({
+          name: String(x.name),
+          kind: typeof x.kind === "string" ? x.kind : "?",
+          lastOkAt: num(x.lastOkAt),
+          failingSince: num(x.failingSince),
+          failingTickers: Array.isArray(x.failingTickers) ? x.failingTickers.map(String) : [],
+          lastError: typeof x.lastError === "string" ? x.lastError.slice(0, 200) : null,
+        }))
+    : [];
+  const msp = o.onchain?.minSourcesProblem;
+  const unpublished = Array.isArray(o.unpublished)
+    ? o.unpublished
+        .filter((x): x is Record<string, unknown> => !!x && typeof x === "object" && typeof (x as { priceId?: unknown }).priceId === "string")
+        .flatMap((x) => {
+          const since = num(x.since);
+          return since === null ? [] : [{ priceId: String(x.priceId), since, reason: typeof x.reason === "string" ? x.reason.slice(0, 200) : "?" }];
+        })
+    : [];
+  return { ok: true, error: null, sources, minSourcesProblem: typeof msp === "string" ? msp : null, unpublished };
 }
 
 /** Appends a sample and drops those older than `windowMs`. */
@@ -272,6 +302,17 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
     api = { ok: false, httpStatus: null, db: null, redis: null, error: errMsg(err) };
   }
 
+  // ---- oracle (per-source health: 3 live sources, 2 required on mainnet; one failure leaves no spare)
+  let oracle: Snapshot["oracle"] = null;
+  if (st.oracleUrl) {
+    try {
+      const res = await d.fetch(`${st.oracleUrl}/health`, { signal: AbortSignal.timeout(5_000) });
+      oracle = res.ok ? parseOracleHealth(await res.json().catch(() => null)) : { ok: false, error: `HTTP ${res.status}`, sources: [], minSourcesProblem: null, unpublished: [] };
+    } catch (err) {
+      oracle = { ok: false, error: errMsg(err), sources: [], minSourcesProblem: null, unpublished: [] };
+    }
+  }
+
   const snapshot: Snapshot = {
     now,
     network: st.network,
@@ -286,6 +327,7 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
     indexer,
     buybackSamples,
     api,
+    oracle,
     backup,
     infraErrors,
   };

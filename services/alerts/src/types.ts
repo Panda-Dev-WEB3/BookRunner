@@ -93,6 +93,29 @@ export interface ApiProbe {
   error: string | null;
 }
 
+/** One live price source as the oracle reports it (GET /health `sources`, services/oracle SourceHealth). */
+export interface OracleSourceSnap {
+  name: string;
+  kind: string;
+  /** unix ms of the last fresh observation */
+  lastOkAt: number | null;
+  /** unix ms since when it fails in-session tickers; null = healthy */
+  failingSince: number | null;
+  failingTickers: string[];
+  /** failure class, e.g. "HTTP 401", "timeout" (never a key) */
+  lastError: string | null;
+}
+
+export interface OracleProbe {
+  ok: boolean;
+  error: string | null;
+  sources: OracleSourceSnap[];
+  /** the oracle's on-chain minSources problem (minSources() above the live sources), if any */
+  minSourcesProblem: string | null;
+  /** in-session price ids without a publishable price (since = unix ms of the start of the run) */
+  unpublished: Array<{ priceId: string; since: number; reason: string }>;
+}
+
 /** A timestamped sample kept across passes (rpc probe outcome, buyback pending). */
 export interface Sample {
   ts: number; // unix ms
@@ -129,6 +152,8 @@ export interface Snapshot {
   /** rolling buybackPending in USD (null samples are skipped) */
   buybackSamples: Sample[];
   api: ApiProbe;
+  /** the oracle's /health (per-source health); null = not probed (no oracle URL) */
+  oracle: OracleProbe | null;
   /** null: no backup recorded, undefined: Redis read failed */
   backup: BackupSnap | null | undefined;
   /** collection failures that are themselves worth an alert (db / redis unreachable) */
