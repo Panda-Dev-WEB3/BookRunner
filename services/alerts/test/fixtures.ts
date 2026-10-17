@@ -55,6 +55,15 @@ export function snap(over: Partial<Snapshot> = {}): Snapshot {
     ],
     buybackSamples: [],
     api: { ok: true, httpStatus: 200, db: "up", redis: "ready", error: null },
+    oracle: {
+      ok: true,
+      error: null,
+      sources: [
+        { name: "chainlink", kind: "chainlink", lastOkAt: NOW - 1_000, failingSince: null, failingTickers: [], lastError: null },
+        { name: "pyth", kind: "pyth", lastOkAt: NOW - 1_000, failingSince: null, failingTickers: [], lastError: null },
+      ],
+      minSourcesProblem: null,
+    },
     backup: { ts: NOW - 3_600_000, ok: true, error: "", offsite: "ok", bytes: 1_000_000, dir: "/var/backups/bookrunner/daily/x" },
     infraErrors: [],
     ...over,

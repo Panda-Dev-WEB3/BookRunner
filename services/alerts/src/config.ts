@@ -89,9 +89,16 @@ const shape = {
   DEPLOYMENT_FILE: z.string().default("contracts/deployments/31337.json"),
   MARK_INTERVAL_SECONDS: z.coerce.number().int().min(1).default(300),
   API_PORT: z.coerce.number().int().default(4400),
+  ORACLE_PORT: z.coerce.number().int().default(4410),
 
   ALERT_INTERVAL_SECONDS: int(60),
   ALERT_API_URL: z.string().optional(),
+  /** the oracle's HTTP base URL (GET /health); default http://127.0.0.1:ORACLE_PORT */
+  ALERT_ORACLE_URL: z.string().optional(),
+  /** a live oracle source failing in-session tickers this long alerts (warning; critical when 2+ fail at once) */
+  ALERT_ORACLE_SOURCE_FAIL_SECONDS: int(60),
+  /** default: on for testnet / mainnet, off on devnet */
+  ALERT_ORACLE_EXPECTED: z.string().optional(),
   ALERT_LABEL: z.string().optional(),
   /** comma-separated rule names to switch off, e.g. "buyback_growing,role_balance_low" */
   ALERT_DISABLE: z.string().default(""),
@@ -160,6 +167,8 @@ export interface RuleConfig {
   buybackGrowSec: number;
   buybackMaxUsd: number;
   apiForSec: number;
+  oracleExpected: boolean;
+  oracleSourceFailSec: number;
   backupExpected: boolean;
   backupMaxAgeSec: number;
   supervisorExpected: boolean;
@@ -188,6 +197,7 @@ export interface AlertsConfig {
   markIntervalSec: number;
   intervalSec: number;
   apiUrl: string;
+  oracleUrl: string;
   rpcWindowSec: number;
   roles: Array<{ role: string; address: `0x${string}` }>;
   rules: RuleConfig;
@@ -235,6 +245,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     markIntervalSec: e.MARK_INTERVAL_SECONDS,
     intervalSec: Math.max(10, e.ALERT_INTERVAL_SECONDS),
     apiUrl: (e.ALERT_API_URL || `http://127.0.0.1:${e.API_PORT}`).replace(/\/+$/, ""),
+    oracleUrl: (e.ALERT_ORACLE_URL || `http://127.0.0.1:${e.ORACLE_PORT}`).replace(/\/+$/, ""),
     rpcWindowSec: e.ALERT_RPC_WINDOW_SECONDS,
     roles,
     rules: {
@@ -256,6 +267,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       buybackGrowSec: Math.round(e.ALERT_BUYBACK_GROW_HOURS * 3600),
       buybackMaxUsd: e.ALERT_BUYBACK_MAX_USD,
       apiForSec: e.ALERT_API_FOR_SECONDS,
+      oracleExpected:
+        e.ALERT_ORACLE_EXPECTED === undefined || e.ALERT_ORACLE_EXPECTED === "" ? network !== "devnet" : e.ALERT_ORACLE_EXPECTED === "1" || e.ALERT_ORACLE_EXPECTED.toLowerCase() === "true",
+      oracleSourceFailSec: e.ALERT_ORACLE_SOURCE_FAIL_SECONDS,
       backupExpected: e.ALERT_BACKUP_EXPECTED === undefined || e.ALERT_BACKUP_EXPECTED === "" ? network !== "devnet" : e.ALERT_BACKUP_EXPECTED === "1" || e.ALERT_BACKUP_EXPECTED.toLowerCase() === "true",
       backupMaxAgeSec: Math.round(e.ALERT_BACKUP_MAX_AGE_HOURS * 3600),
       supervisorExpected: true,

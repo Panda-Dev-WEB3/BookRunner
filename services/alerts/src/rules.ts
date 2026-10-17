@@ -332,6 +332,43 @@ export function apiHealth(s: Snapshot, c: RuleConfig): Condition[] {
   return [{ key: "api_health", rule: "api_health", severity: "critical", forSec: c.apiForSec, summary: `API /health failing: ${detail}` }];
 }
 
+// ------------------------------------------------------------------ oracle sources
+/**
+ * A live oracle source (Chainlink, Pyth Pro, the third source) failing in-session tickers for longer than
+ * oracleSourceFailSec. Mainnet runs 3 sources with 2 required: one failing source is a warning (prices continue
+ * from the remaining two while they agree within the band, with no spare left); two or more failing at once is
+ * critical (no price, and after maxPriceAge valuations and liquidations revert).
+ * Also: the oracle's /health unreachable, and an on-chain minSources the configured sources cannot reach.
+ */
+export function oracle(s: Snapshot, c: RuleConfig): Condition[] {
+  const o = s.oracle;
+  if (!c.oracleExpected || !o) return [];
+  if (!o.ok) {
+    return [{ key: "oracle_health", rule: "oracle_health", severity: "warning", forSec: 120, summary: `oracle /health unreachable: ${o.error ?? "?"}` }];
+  }
+  const out: Condition[] = [];
+  const failing = o.sources.filter((src) => src.failingSince != null && (s.now - src.failingSince) / 1000 >= c.oracleSourceFailSec);
+  const several = failing.length >= 2;
+  for (const src of failing) {
+    const age = (s.now - (src.failingSince ?? s.now)) / 1000;
+    const lastOk = src.lastOkAt == null ? "never ok since start" : `last ok ${new Date(src.lastOkAt).toISOString()}`;
+    out.push({
+      key: `oracle_source_failing:${src.name}`,
+      rule: "oracle_source_failing",
+      severity: several ? "critical" : "warning",
+      summary: `oracle source ${src.name} (${src.kind}) failing for ${dur(age)} on ${src.failingTickers.join(", ") || "?"} (${src.lastError ?? "?"}; ${lastOk}): ${
+        several
+          ? `${failing.length} sources failing: below 2 sources no price is published; after maxPriceAge valuations and liquidations revert`
+          : "prices continue from the remaining sources while they agree, with no spare left"
+      }`,
+    });
+  }
+  if (o.minSourcesProblem) {
+    out.push({ key: "oracle_min_sources", rule: "oracle_min_sources", severity: "critical", summary: `oracle: ${o.minSourcesProblem}` });
+  }
+  return out;
+}
+
 export function infra(s: Snapshot, _c: RuleConfig): Condition[] {
   return s.infraErrors.map((e) => ({
     key: `infra_${e.source}`,
@@ -355,6 +392,7 @@ export const RULES = {
   indexer_lag: indexerLag,
   buyback,
   api_health: apiHealth,
+  oracle,
   backup,
   infra,
 } as const;
