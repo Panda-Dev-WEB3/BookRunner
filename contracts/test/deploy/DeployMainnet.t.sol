@@ -183,7 +183,7 @@ contract DeployMainnetTest is Test {
         assertEq(BkrnToken(d.bkrn).balanceOf(community), 800_000_000e18);
         assertEq(TimelockController(payable(d.timelock)).getMinDelay(), 48 hours);
         assertTrue(d.bkrnDeployed);
-        // 2-source design (Chainlink + Pyth Pro): set at deploy, below the contract default of 3
+        // 2 of 3 live sources (Chainlink + Pyth Pro + one more): set at deploy, below the contract default of 3
         assertEq(AttestedOracle(d.oracle).DEFAULT_MIN_SOURCES(), 3);
         assertEq(AttestedOracle(d.oracle).minSources(), 2);
     }
@@ -440,7 +440,7 @@ contract DeployMainnetTest is Test {
         assertEq(platform0, bytes32("INTEL_TDX"));
         assertTrue(reqAtt);
         assertEq(pc, CHAIN_CFG);
-        assertEq(s.parsedOracleMinSources(), 2); // Chainlink + Pyth Pro
+        assertEq(s.parsedOracleMinSources(), 2); // 2 of the 3 live sources
     }
 
     function _assertExampleHead(DeployMainnetHarness s) internal view {
@@ -555,12 +555,14 @@ contract DeployMainnetTest is Test {
         _expectValidateRevert(o, "input: oracle.requireAttestations must be true on mainnet (VERIFY E1)");
     }
 
-    function test_refuses_oracle_min_sources_below_two_on_mainnet() public {
+    function test_refuses_oracle_min_sources_other_than_two_on_mainnet() public {
         Opts memory o = _mainnetOpts();
+        o.oracleMinSources = 3; // no spare among the 3 live sources: the oracle would refuse to start
+        _expectValidateRevert(o, "input: mainnet oracleMinSources must be 2 (2 of the 3 live sources; the oracle needs one spare to start)");
         o.oracleMinSources = 1;
-        _expectValidateRevert(o, "input: mainnet oracleMinSources must be >= 2 (Chainlink + Pyth Pro)");
+        _expectValidateRevert(o, "input: mainnet oracleMinSources must be 2 (2 of the 3 live sources; the oracle needs one spare to start)");
         o.oracleMinSources = 0;
-        _expectValidateRevert(o, "input: mainnet oracleMinSources must be >= 2 (Chainlink + Pyth Pro)");
+        _expectValidateRevert(o, "input: mainnet oracleMinSources must be 2 (2 of the 3 live sources; the oracle needs one spare to start)");
         // a rehearsal (46630) keeps only the generic floor: 1 is allowed there, 0 never
         vm.chainId(46630);
         o = _rehearsalOpts();
@@ -668,7 +670,7 @@ contract DeployMainnetTest is Test {
         o.withPriceConfig = true;
         o.nRoutes = 5;
         o.univ3Factory = address(factory);
-        o.oracleMinSources = 2; // Chainlink + Pyth Pro
+        o.oracleMinSources = 2; // 2 of the 3 live sources
     }
 
     function _rehearsalOpts() internal view returns (Opts memory o) {

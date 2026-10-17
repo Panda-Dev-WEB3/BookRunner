@@ -64,7 +64,7 @@ Numbers above 2^53 are decimal strings (`"100000000000000000000000"`); small one
 | `params.tiers.thresholds` / `bonds` | uint[] | same length, ascending (config) | — |
 | `params.backstopMaxCoverBps` | uint | 1..10000 | — |
 | `params.stakingCooldown` / `stakingRewardsDuration` | uint (s) | cooldown >= 1 day | — |
-| `params.oracleMinSources` | uint | > 0 | — |
+| `params.oracleMinSources` | uint | `AttestedOracle.setMinSources` at deploy; > 0; **mainnet: exactly 2** (2 of the 3 live sources Chainlink + Pyth Pro + one more: the oracle refuses to start unless it leaves one spare live source) | VERIFY C6 |
 | `buyback.poolFee` / `refBkrnPerUsdcWad` / `maxSlippageBps` / `maxPerCall` | uint | fee tier of the BKRN/USDG pool, reference price near market, slippage <= 2000 | VERIFY U1 + market |
 | `buyback.bkrnPriceId` | string | optional oracle price id of BKRN ("" = governance price) | — |
 | `buyback.referenceSource` | `fixed` \| `twap` \| `attested` | `BkrnFeeRouter.setReferenceSource` (default: `attested` with a `bkrnPriceId`, else `fixed`); `attested` needs `bkrnPriceId` (verify: source == input; `referenceBkrnPerUsdc()` reads for fixed / twap) | VERIFY U5 |

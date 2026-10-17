@@ -25,9 +25,9 @@ abstract contract MainnetInput is Script {
     /// @notice Mainnet marks are daily (Orderly settles builder fees once a day, VERIFY O11; scripts/dev.ts
     ///         --network mainnet runs MARK_INTERVAL_SECONDS=86400).
     uint256 internal constant MAINNET_MARK_INTERVAL = 1 days;
-    /// @notice Lowest AttestedOracle.minSources() on mainnet: the oracle runs on Chainlink + Pyth Pro and refuses
-    ///         a non-held price backed by fewer than both (services/oracle MAINNET_MIN_SOURCES_FLOOR). Above the
-    ///         number of live sources the oracle refuses to start (every price would be refused on-chain).
+    /// @notice AttestedOracle.minSources() on mainnet, exactly: the oracle runs on 3 live sources (Chainlink + Pyth
+    ///         Pro + one more) and signs a non-held price backed by 2 agreeing ones (services/oracle
+    ///         MAINNET_MIN_SOURCES_FLOOR); it refuses to start unless minSources() leaves one spare live source.
     uint256 internal constant MAINNET_ORACLE_MIN_SOURCES = 2;
     uint160 internal constant PLACEHOLDER_MAX = 0xFFFF;
     uint8 internal constant SETTLEMENT_DECIMALS = 6;
@@ -93,7 +93,7 @@ abstract contract MainnetInput is Script {
         uint256 stakingCooldown;
         uint256 stakingRewardsDuration;
         // AttestedOracle.setMinSources at deploy (timelock-only: set while the deployer is still the timelock,
-        // before the handover). Mainnet: 2 = Chainlink + Pyth Pro (the contract default is 3).
+        // before the handover). Mainnet: 2 of the 3 live sources (the contract default is 3).
         uint256 oracleMinSources;
     }
 
@@ -514,8 +514,8 @@ abstract contract MainnetInput is Script {
             require(prm.markInterval == MAINNET_MARK_INTERVAL, "input: mainnet markInterval must be 86400 (daily marks)");
             require(prm.venueMinIfOrderly > ORDERLY_MAINNET_IF_REQUIREMENT, "input: venueMinIfOrderly must be > 25,000e6 (VERIFY O10)");
             require(
-                prm.oracleMinSources >= MAINNET_ORACLE_MIN_SOURCES,
-                "input: mainnet oracleMinSources must be >= 2 (Chainlink + Pyth Pro)"
+                prm.oracleMinSources == MAINNET_ORACLE_MIN_SOURCES,
+                "input: mainnet oracleMinSources must be 2 (2 of the 3 live sources; the oracle needs one spare to start)"
             );
         }
         require(prm.maxPriceAge > 0 && prm.maxTradePriceAge > 0 && prm.maxMarkAge > 0, "input: zero age param");
