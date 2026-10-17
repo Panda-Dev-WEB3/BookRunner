@@ -209,23 +209,33 @@ Units: AttestedOracle prices are USD per **share**; a Robinhood Chainlink feed q
 (share price × `uiMultiplier()`); the registry multiplies once by the token's live `uiMultiplier()`.
 The oracle divides per-token feeds by that same on-chain value before the median
 (`packages/shared/src/stockTokens.ts`). Never configure an HTTP source that quotes the Stock Token
-price: every non-Chainlink source must be a per-share US-equity price.
+price: every non-Chainlink source must be a per-share US-equity price. Mainnet runs on exactly two sources:
+Chainlink + **Pyth Pro** (`Equity.US.<T>/USD`, per share; VERIFY C6), both required for every non-held price
+(`ORACLE_MIN_SOURCES=2`, on-chain `AttestedOracle.minSources() == 2`). With two sources the median is their
+midpoint: when they diverge by more than ~300 bps (2 × the 150 bps band) both are rejected, nothing is
+published and the books go reduce-only until they agree again — intended. A third source is a post-launch
+enhancement (then raise `ORACLE_MIN_SOURCES` and `setMinSources` through the timelock).
 
 1. **Source check** (read-only, before anything is registered and again before launch):
    `bun run --cwd services/oracle source-check --chain 4663 --rpc $RHC_RPC_URL [--registry 0x<registry>]`
    reads every feed and token in `config/chains/4663.json` (proxy code, `decimals()`, `description()`,
    `latestRoundData()` age vs heartbeat in session, token code / `decimals() == 18` / `uiMultiplier()` /
-   `oraclePaused()` / pending multiplier, per-share price, the HTTP sources from `ORACLE_HTTP_SOURCES`
-   against Chainlink, the mainnet production rules of the current `ORACLE_*` environment, and with
-   `--registry` the registration + live-multiplier mode). Exit code 1 on any FAIL; fix every FAIL.
+   `oraclePaused()` / pending multiplier, per-share price, Pyth Pro (when `PYTH_API_KEY` is set; FAIL on
+   4663 without it) and the HTTP sources from `ORACLE_HTTP_SOURCES` against Chainlink (150 bps), which
+   sources are live, the mainnet production rules of the current `ORACLE_*` environment, and with
+   `--registry` the registration + live-multiplier mode). Exit code 1 on any FAIL; fix every FAIL. Off the
+   mainnet host, keep the token in the gitignored `.env.pyth` and pass it explicitly:
+   `cd services/oracle && bun --env-file=../../.env.pyth src/cli/source-check.ts --chain 4663 --rpc ...`.
 2. **Stock Tokens** (timelock, per token of `config/chains/4663.json`):
    `register(token, bytes32(<TICKER>), <current uiMultiplier()>, floatCapRaw)` then
    `setMultiplierSource(token, true)`. The stored value is the anchor; the live multiplier may drift
    `multiplierBandBps` (default 500 = 5%) from it before valuations fail closed.
 3. **Oracle environment** (`services/oracle`, chain 4663): `ORACLE_SYNTHETIC=0`, `SESSIONS_MODE=charter`,
-   `ORACLE_MIN_SOURCES>=2` (the service also applies `AttestedOracle.minSources()`, default 3),
-   `ORACLE_CHAINLINK_RPC_URL` (or `RPC_URL`), at least one licensed per-share source in
-   `ORACLE_HTTP_SOURCES`, `ORACLE_ATTESTATION_FILE`. The service refuses to start on 4663 when any
+   `ORACLE_MIN_SOURCES=2` (the mainnet preflight requires exactly 2; the service also applies
+   `AttestedOracle.minSources()`, set to 2 by DeployMainnet from `params.oracleMinSources`, and refuses to
+   start when it exceeds the configured live sources), `ORACLE_PYTH=1` + `PYTH_API_KEY` (Pyth Pro; licence
+   VERIFY C6), `ORACLE_CHAINLINK_RPC_URL` (or `RPC_URL`), `ORACLE_ATTESTATION_FILE`. Other licensed
+   per-share sources may be added in `ORACLE_HTTP_SOURCES`. The service refuses to start on 4663 when any
    production rule fails (`services/oracle/src/production.ts`) and never signs a price, held or not, with
    fewer than the minimum sources. Synthetic sources cannot be constructed on 4663.
 
