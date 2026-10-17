@@ -226,7 +226,13 @@ spare live source). What that means in operation:
 - **Alerts on any single failure.** The oracle logs every in-session source failure (warn, once a minute, never
   the key) and reports it per source in `GET /health` (`sources[]`: `lastOkAt`, `failingSince`, `lastError`);
   `services/alerts` raises `oracle_source_failing` when a live source has failed in-session tickers for more than
-  60 s — a warning while the other two carry the price (no spare left), critical when two fail at once.
+  60 s — a warning while the other two carry the price (no spare left), critical when two fail on the same ticker.
+- **Stale pairs are refused.** Every HTTP source must carry the vendor's own quote timestamp (`tsPath`) with
+  `maxAgeMs` <= 30 s (production rule + preflight; the Finnhub preset is refused on mainnet), and when only two
+  sources are accepted a Chainlink round older than `ORACLE_CHAINLINK_PAIR_MAX_AGE_MS` (1 h) cannot back the price;
+  a refused pair never seeds an off-hours hold. `GET /health` `unpublished[]` lists in-session tickers without a
+  price; `services/alerts` raises `oracle_price_missing` (critical) after 2 min unless two failing sources already
+  explain it.
 - **Thin Pyth prints** are dropped (a failure with a reason): fewer publishers than Pyth's own session minimum
   (`ORACLE_PYTH_MIN_PUBLISHERS` 3 in the regular session, `ORACLE_PYTH_MIN_PUBLISHERS_EXTENDED` 2 pre / post /
   overnight), a confidence interval wider than `ORACLE_PYTH_MAX_CONF_BPS` (50 bps of the price), a missing or

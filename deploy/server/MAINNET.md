@@ -88,7 +88,8 @@ ORACLE_MIN_SOURCES=2                                    # exactly 2 of the 3 liv
 # ORACLE_PYTH_MAX_CONF_BPS=50; ORACLE_PYTH_URL must stay https. One source down: prices continue from the other two;
 # two down: no price after maxPriceAge (RUNBOOK "Real prices"). services/alerts: oracle_source_failing after 60 s.
 # the third licensed per-share source (required; or its preset once added):
-ORACLE_HTTP_SOURCES='[{"name":"<vendor>","url":"https://.../{ticker}","pricePath":"...","headers":{"X-Api-Key":"..."}}]'
+# tsPath (the vendor's own quote time) and maxAgeMs <= 30000 are required on mainnet; the Finnhub preset is refused
+ORACLE_HTTP_SOURCES='[{"name":"<vendor>","url":"https://.../{ticker}","pricePath":"...","tsPath":"...","tsUnit":"ms","maxAgeMs":15000,"headers":{"X-Api-Key":"..."}}]'
 ORACLE_ATTESTATION_FILE=/etc/bookrunner/attestation.json   # served at GET /attestation (VERIFY E1)
 # alerts (services/alerts): delivery + optional explicit role addresses (default: derived / resolved by dev.ts)
 ALERT_EMAIL_TO=<ops address>
