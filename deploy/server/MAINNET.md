@@ -12,14 +12,14 @@ never on a developer PC. Same layout and hardening as the testnet host ([README.
 | Deployer | devkeys index 0, stays `config.timelock()` | one-shot EOA used by `scripts/deploy-mainnet.sh` from the operator machine; holds nothing afterwards |
 | Processes | all services + agents + trader-sim + mock-orderly + gas-keeper + launch | services + agents only: no trader-sim, mock-orderly, gas-keeper, launch, web dev server |
 | Cadence | marks hourly (3600) | marks daily (86400, the on-chain `markInterval`) |
-| Oracle | synthetic GBM (secret seed) | real sources only, exactly two: Chainlink feeds of `config/chains/4663.json` (or `ORACLE_CHAIN_CONFIG`) + Pyth Pro (`ORACLE_PYTH=1` + `PYTH_API_KEY`), `ORACLE_MIN_SOURCES=2`, on-chain `minSources() == 2`, `ORACLE_SYNTHETIC=0` (services/oracle production rules; licence VERIFY C6) |
+| Oracle | synthetic GBM (secret seed) | real sources only, three live: Chainlink feeds of `config/chains/4663.json` (or `ORACLE_CHAIN_CONFIG`) + Pyth Pro (`ORACLE_PYTH=1` + `PYTH_API_KEY`) + one more licensed per-share source (`ORACLE_HTTP_SOURCES` / preset), 2 required (`ORACLE_MIN_SOURCES=2`, on-chain `minSources() == 2`), `ORACLE_SYNTHETIC=0` (services/oracle production rules; licences VERIFY C6) |
 | Alerts | `services/alerts` (role addresses derived from the mnemonic) | `services/alerts` (role addresses: local keys derived, KMS roles resolved by dev.ts, or `ALERT_ROLE_ADDRESSES`); delivery credentials reach the alerts process only |
 | Orderly | mock | live (`ORDERLY_MODE=live`, builder key from the env file) |
 | Deployment record | `contracts/deployments/46630.json` (launch appends books) | `contracts/deployments/4663.json` (copied from the deploy machine; `scripts/record-books.ts` appends chartered books; read-only to the stack) |
 | Database / Redis | `bookrunner_testnet`, Redis db 1 | `bookrunner_mainnet`, Redis db 0, passwords required |
 
 `scripts/dev.ts --network mainnet` refuses to start while any required env var, any role signer, the oracle
-sources (Chainlink + Pyth Pro or another independent source, `ORACLE_MIN_SOURCES=2`) or the DeployMainnet
+sources (Chainlink + Pyth Pro + a third source, `ORACLE_MIN_SOURCES=2`) or the DeployMainnet
 record is missing, while two roles share a key, or while any `*MNEMONIC*`, the deployer key, the funder key or
 `BKRN_ALLOW_ADMIN_KEY` is in the environment (scripts/network-profile.ts).
 
@@ -79,13 +79,16 @@ ORDERLY_BUILDER_KEY_SECRET=<base58 ed25519 seed>
 ANTHROPIC_API_KEY=<key>                                # charter jury
 # oracle (RUNBOOK "Real prices"): Chainlink feeds come from config/chains/4663.json in the app tree (the
 # DeployMainnet input was checked against it); ORACLE_CHAINLINK_FEEDS only overrides, and only in the
-# {"proxy","basis","token"} form (a plain address is refused). The independent per-share source is Pyth Pro
-# (Equity.US.<T>/USD feed ids built in; ORACLE_PYTH_FEEDS overrides). Licence for on-chain use: VERIFY C6.
+# {"proxy","basis","token"} form (a plain address is refused). Plus two independent per-share sources: Pyth Pro
+# (Equity.US.<T>/USD feed ids built in; ORACLE_PYTH_FEEDS overrides) and a third vendor. Licences: VERIFY C6.
 ORACLE_PYTH=1
 PYTH_API_KEY=<Pyth Pro access token>                   # reaches the oracle process only (childenv.ts), never logged
-ORACLE_MIN_SOURCES=2                                    # exactly 2 (Chainlink + Pyth); on-chain minSources() is 2 too
-# optional extra licensed per-share sources (a third source is a post-launch enhancement):
-# ORACLE_HTTP_SOURCES='[{"name":"<vendor>","url":"https://.../{ticker}","pricePath":"...","headers":{"X-Api-Key":"..."}}]'
+ORACLE_MIN_SOURCES=2                                    # exactly 2 of the 3 live sources; on-chain minSources() is 2 too
+# optional Pyth print floor (defaults shown): ORACLE_PYTH_MIN_PUBLISHERS=3 ORACLE_PYTH_MIN_PUBLISHERS_EXTENDED=2
+# ORACLE_PYTH_MAX_CONF_BPS=50; ORACLE_PYTH_URL must stay https. One source down: prices continue from the other two;
+# two down: no price after maxPriceAge (RUNBOOK "Real prices"). services/alerts: oracle_source_failing after 60 s.
+# the third licensed per-share source (required; or its preset once added):
+ORACLE_HTTP_SOURCES='[{"name":"<vendor>","url":"https://.../{ticker}","pricePath":"...","headers":{"X-Api-Key":"..."}}]'
 ORACLE_ATTESTATION_FILE=/etc/bookrunner/attestation.json   # served at GET /attestation (VERIFY E1)
 # alerts (services/alerts): delivery + optional explicit role addresses (default: derived / resolved by dev.ts)
 ALERT_EMAIL_TO=<ops address>

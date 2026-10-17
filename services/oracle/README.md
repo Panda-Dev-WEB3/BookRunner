@@ -73,20 +73,28 @@ Every source reports USD per **share** of the equity (the AttestedOracle unit).
 | Source | Enabled by | Notes |
 |---|---|---|
 | `synthetic-a/b/c` | `ORACLE_SYNTHETIC=1` (default; 31337, or 46630 with a secret `ORACLE_SEED`) | one seeded GBM path per ticker (`ORACLE_SEED`, vols NVDA 45% TSLA 60% AAPL 25% MSFT 25% AMZN 30%, `ORACLE_VOL_SCALE`), per-source noise, dropouts, rare spikes. **Impossible on 4663**: never constructed, the service refuses to start |
-| `pyth` (Pyth Pro) | `ORACLE_PYTH=1` + `PYTH_API_KEY` (optional `ORACLE_PYTH_URL`, `ORACLE_PYTH_CHANNEL`, `ORACLE_PYTH_FEEDS`, `ORACLE_PYTH_MAX_AGE_MS`) | the mainnet's second source (`src/sources/pyth.ts`). One batched `POST /v1/latest_price` (Bearer token) per tick for every ticker; feed ids `Equity.US.<T>/USD` NVDA 1314, TSLA 1435, AAPL 922, MSFT 1292, AMZN 954 (`ORACLE_PYTH_FEEDS` overrides); price = mantissa × 10^exponent; timestamp = the feed's own `feedUpdateTimestamp` (Pyth repeats the last price when it cannot aggregate, so freshness never comes from the receive time); no observation when the session is `closed`, the feed is missing or older than 10 s. The token is never logged. Licence for on-chain use: VERIFY C6 |
+| `pyth` (Pyth Pro) | `ORACLE_PYTH=1` + `PYTH_API_KEY` (optional `ORACLE_PYTH_URL`, `ORACLE_PYTH_CHANNEL`, `ORACLE_PYTH_FEEDS`, `ORACLE_PYTH_MAX_AGE_MS`) | one of the mainnet's three live sources (`src/sources/pyth.ts`). One batched `POST /v1/latest_price` (Bearer token) per tick for every ticker; feed ids `Equity.US.<T>/USD` NVDA 1314, TSLA 1435, AAPL 922, MSFT 1292, AMZN 954 (`ORACLE_PYTH_FEEDS` overrides); price = mantissa × 10^exponent; timestamp = the feed's own `feedUpdateTimestamp` (Pyth repeats the last price when it cannot aggregate, so freshness never comes from the receive time); no observation when the session is `closed`, the feed is missing or older than 10 s. The token is never logged. Licence for on-chain use: VERIFY C6 |
 | HTTP JSON | `ORACLE_HTTP_SOURCES` JSON array, `ORACLE_HTTP_FINNHUB=1` + key | must quote per share; VERIFY endpoints, symbols, licensing |
 | `chainlink` | `config/chains/<CHAIN_ID>.json` (`ORACLE_CHAIN_CONFIG`) + `ORACLE_CHAINLINK_FEEDS` overlay | per feed: `proxy`, `basis` (`per-token`: Robinhood tokenized-equity feed = share price × `uiMultiplier()`, divided by the token's on-chain `uiMultiplier()`; `per-share`: used as is), `token`, pinned `decimals` (checked against `decimals()`), `heartbeatSec` (in-session max age = heartbeat + `ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS`). A multiplier that became effective after the feed's last round is undone with the multiplier observed with that round (no observation if that round was never seen). No observation while the token's `oraclePaused()` is set, or when the L2 sequencer feed (if configured) is down / in its grace period. `held` never comes from the feed (session calendar only). Reads of one tick are JSON-RPC batched. None on devnet |
 
 ### Mainnet (4663) production rules (`src/production.ts`)
 
 The service refuses to start unless: `ORACLE_SYNTHETIC=0`; Chainlink feeds **and** at least one other
-live source (the design: Pyth Pro, `ORACLE_PYTH=1` + `PYTH_API_KEY`, with `ORACLE_MIN_SOURCES=2`); distinct
-live sources ≥ `ORACLE_MIN_SOURCES` ≥ 2; the on-chain `AttestedOracle.minSources()` ≤ the configured live
-sources (read at startup from the deployment's oracle; an unreadable contract refuses too); every feed has an explicit basis (a plain
+live source — the design is 3 live sources (Chainlink + Pyth Pro, `ORACLE_PYTH=1` + `PYTH_API_KEY`, + one more)
+with `ORACLE_MIN_SOURCES=2`, i.e. distinct live sources ≥ max(3, `ORACLE_MIN_SOURCES` + 1), `ORACLE_MIN_SOURCES` ≥ 2;
+the on-chain `AttestedOracle.minSources()` leaves one spare live source (read at startup from the deployment's
+oracle; an unreadable contract refuses too); every feed has an explicit basis (a plain
 address in `ORACLE_CHAINLINK_FEEDS` is refused); every `ORACLE_TICKERS` entry has a feed;
 `SESSIONS_MODE` is not `24x7`. At runtime (`settings.production`) no synthetic source can be wired in and
 no price — held, restored or seeded off-hours — is signed with fewer than
 `max(ORACLE_MIN_SOURCES, AttestedOracle.minSources())` sources.
+
+When only two sources are accepted in a tick (`aggregate`: the third down or an outlier) a non-held price is
+refused when they are more than `ORACLE_OUTLIER_BPS` apart (no midpoint is signed). Pyth prints below Pyth's session publisher minimum
+(`ORACLE_PYTH_MIN_PUBLISHERS` 3 / `ORACLE_PYTH_MIN_PUBLISHERS_EXTENDED` 2) or with a confidence wider than
+`ORACLE_PYTH_MAX_CONF_BPS` (50) are failures with a reason. Per-source health (`GET /health` `sources[]`:
+`lastOkAt`, `failingSince`, `failingTickers`, `lastError`; in-session tickers only) feeds `services/alerts`
+`oracle_source_failing`; a source failing for > 10 s is logged at warn once a minute (never a key).
 
 ### Operator CLIs (read-only / offline, no key)
 
