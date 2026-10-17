@@ -15,8 +15,11 @@ export interface SourceObservation {
   maxAgeMs?: number;
 }
 
-/** synthetic = devnet / testnet GBM (impossible on mainnet); live = market data. */
-export type SourceKind = "synthetic" | "chainlink" | "http";
+/**
+ * synthetic = devnet / testnet GBM (impossible on mainnet); live = market data: chainlink (on-chain feeds),
+ * pyth (Pyth Pro, sources/pyth.ts), http (generic / Finnhub, sources/http.ts).
+ */
+export type SourceKind = "synthetic" | "chainlink" | "pyth" | "http";
 
 /** Pluggable price source. Returns null when the source has no (usable) observation. */
 export interface PriceSource {

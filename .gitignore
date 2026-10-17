@@ -37,3 +37,5 @@ video/public/footage/
 # product demos: recordings/screenshots stay local; the demo wallet key never leaves video/.secrets/
 video/public/demos/
 video/.secrets/
+# Pyth Pro access token for local source-check runs (PYTH_API_KEY=...): never committed
+.env.pyth

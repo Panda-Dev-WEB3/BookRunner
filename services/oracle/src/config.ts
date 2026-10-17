@@ -122,7 +122,27 @@ export const oracleEnvShape = {
   ORACLE_FINNHUB_API_KEY: z.string().optional(),
   /** JSON array of generic HTTP JSON sources (see sources/http.ts). */
   ORACLE_HTTP_SOURCES: z.string().default("[]"),
+
+  // ---- Pyth Pro (sources/pyth.ts): the mainnet second source next to Chainlink (VERIFY C6) ----
+  ORACLE_PYTH: flag(false),
+  /** Pyth Pro access token (Authorization: Bearer). Secret: never logged; reaches the oracle process only. */
+  PYTH_API_KEY: z.string().optional(),
+  /** Pyth Pro Router latest-price endpoint (POST, JSON body = the WebSocket subscription params). */
+  ORACLE_PYTH_URL: z.url().default("https://pyth-lazer.dourolabs.app/v1/latest_price"),
+  /** Channel of the requested update; must be at or above each feed's min_channel (US equities: fixed_rate@50ms). */
+  ORACLE_PYTH_CHANNEL: z.enum(["real_time", "fixed_rate@50ms", "fixed_rate@200ms", "fixed_rate@1000ms"]).default("fixed_rate@200ms"),
+  /** JSON map ticker -> Pyth Pro feed id (pyth_lazer_id), merged over DEFAULT_PYTH_FEEDS. */
+  ORACLE_PYTH_FEEDS: z.string().optional(),
+  /** In-session max age of a Pyth observation (its own feedUpdateTimestamp, never the receive time). */
+  ORACLE_PYTH_MAX_AGE_MS: z.coerce.number().int().positive().default(10_000),
 };
+
+/**
+ * Pyth Pro feed ids (pyth_lazer_id) of the US-equity feeds `Equity.US.<TICKER>/USD` (USD per share, exponent -5,
+ * 24/5 incl. pre / post / overnight sessions). Read from Pyth's symbols endpoint
+ * (https://pyth.dourolabs.app/v1/symbols, 2026-10-17); `source-check` compares them with Chainlink per share.
+ */
+export const DEFAULT_PYTH_FEEDS: Readonly<Record<string, number>> = { NVDA: 1314, TSLA: 1435, AAPL: 922, MSFT: 1292, AMZN: 954 };
 
 export const httpSourceSpecSchema = z.object({
   name: z.string().min(1),
@@ -141,7 +161,8 @@ export const httpSourceSpecSchema = z.object({
 export type HttpSourceSpec = z.infer<typeof httpSourceSpecSchema>;
 
 const numberMap = z.record(z.string(), z.number().positive());
-const indexMap = z.record(z.string(), z.record(z.string(), z.number().int().positive()));
+const pythFeedMap = z.record(z.string(), z.number().int().nonnegative());
+const indexMap =z.record(z.string(), z.record(z.string(), z.number().int().positive()));
 
 function parseJson<T>(name: string, raw: string | undefined, schema: z.ZodType<T>, fallback: T): T {
   if (raw === undefined || raw.trim() === "") return fallback;
@@ -194,6 +215,7 @@ export function loadOracleConfig(source: Record<string, string | undefined> = pr
     legacyChainlinkFeeds,
     sequencerUptimeFeed: chainConfig?.chainlink.sequencerUptimeFeed ? getAddress(chainConfig.chainlink.sequencerUptimeFeed) : null,
     httpSources: parseJson("ORACLE_HTTP_SOURCES", env.ORACLE_HTTP_SOURCES, z.array(httpSourceSpecSchema), []),
+    pythFeeds: { ...DEFAULT_PYTH_FEEDS, ...parseJson("ORACLE_PYTH_FEEDS", env.ORACLE_PYTH_FEEDS, pythFeedMap, {}) },
   };
 }
 

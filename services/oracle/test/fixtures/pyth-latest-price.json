@@ -1,0 +1,11 @@
+{
+  "parsed": {
+    "timestampUs": "1790866800000000",
+    "priceFeeds": [
+      { "priceFeedId": 1314, "price": "18523456", "exponent": -5, "marketSession": "regular", "feedUpdateTimestamp": 1790866799600000 },
+      { "priceFeedId": 1435, "price": "44012345000", "exponent": -8, "marketSession": "postMarket", "feedUpdateTimestamp": 1790866798000000 },
+      { "priceFeedId": 922, "price": "25510000", "exponent": -5, "marketSession": "regular", "feedUpdateTimestamp": 1790866770000000 },
+      { "priceFeedId": 1292, "price": "52040000", "exponent": -5, "marketSession": "closed", "feedUpdateTimestamp": 1790866799900000 }
+    ]
+  }
+}
