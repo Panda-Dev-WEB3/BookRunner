@@ -1,28 +1,45 @@
-// Pyth Pro (Pyth Lazer) price source: the mainnet's second live source next to Chainlink (VERIFY C6).
+// Pyth Pro (Pyth Lazer) price source: one of the mainnet's three live sources (Chainlink, Pyth, one more; VERIFY C6).
 //
 //   POST <ORACLE_PYTH_URL>  (default https://pyth-lazer.dourolabs.app/v1/latest_price)
 //   Authorization: Bearer <PYTH_API_KEY>
-//   {"priceFeedIds":[1314,...],"properties":["price","exponent","marketSession","feedUpdateTimestamp"],
-//    "formats":[],"channel":"fixed_rate@200ms","parsed":true}
+//   {"priceFeedIds":[1314,...],"properties":["price","exponent","marketSession","feedUpdateTimestamp",
+//    "publisherCount","confidence"],"formats":[],"channel":"fixed_rate@200ms","parsed":true}
 //   -> {"parsed":{"timestampUs":"...","priceFeeds":[{"priceFeedId":1314,"price":"18523456","exponent":-5,
-//       "marketSession":"regular","feedUpdateTimestamp":1758690761740000}, ...]}}
+//       "marketSession":"regular","feedUpdateTimestamp":1758690761740000,"publisherCount":9,"confidence":4200}, ...]}}
 //
 // One batched request per poll tick serves every ticker (the service fetches all tickers of a tick
 // concurrently: they share one in-flight request for `cacheMs`). Value = mantissa x 10^exponent, USD per
 // SHARE (Equity.US.<TICKER>/USD). Since 2026 `price` no longer turns null when Pyth cannot aggregate: it
 // repeats the last price, so freshness comes only from the feed's own `feedUpdateTimestamp` (microseconds),
 // never from the receive time or the response's `timestampUs`. No observation (null) when the feed is
-// missing, the session is `closed`, a field is unusable, or the price is older than `maxAgeMs`.
+// missing or the session is `closed`; an in-session print that is unusable (unknown / missing session, older than
+// `maxAgeMs`, too few publishers, confidence too wide: PythQuality) throws with the reason.
 // The access token is never logged and never part of an error message.
 import type { PriceSource, SourceObservation } from "../domain/types";
 
-export const PYTH_PROPERTIES = ["price", "exponent", "marketSession", "feedUpdateTimestamp"] as const;
+export const PYTH_PROPERTIES = ["price", "exponent", "marketSession", "feedUpdateTimestamp", "publisherCount", "confidence"] as const;
+
+/** Sessions in which a print is used; `closed`, null or anything unknown is no observation. */
+export const PYTH_TRADING_SESSIONS: ReadonlySet<string> = new Set(["regular", "preMarket", "postMarket", "overNight"]);
+
+/**
+ * Print quality floor. A thin Pyth print would move the signed median (or the midpoint of two), so it is dropped:
+ * fewer publishers than Pyth's own per-session minimum for US equities (`market_sessions.*.min_pub` of
+ * /v1/symbols: regular 3, pre / post / overnight 2), or a confidence interval wider than `maxConfidenceBps` of
+ * the price.
+ */
+export interface PythQuality {
+  minPublishers: number;
+  minPublishersExtended: number;
+  maxConfidenceBps: number;
+}
+export const DEFAULT_PYTH_QUALITY: PythQuality = { minPublishers: 3, minPublishersExtended: 2, maxConfidenceBps: 50 };
 
 export type PythChannel = "real_time" | "fixed_rate@50ms" | "fixed_rate@200ms" | "fixed_rate@1000ms";
 
 export type PythPost = (
   url: string,
-  init: { method: "POST"; headers: Record<string, string>; body: string; signal?: AbortSignal },
+  init: { method: "POST"; headers: Record<string, string>; body: string; signal?: AbortSignal; redirect: "error" },
 ) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
 
 export interface PythOptions {
@@ -36,6 +53,7 @@ export interface PythOptions {
   timeoutMs?: number;
   /** one request serves every fetch within this window (default 500 ms, below the 1 s tick) */
   cacheMs?: number;
+  quality?: PythQuality;
   post?: PythPost;
   now?: () => number;
 }
@@ -47,6 +65,8 @@ export interface PythFeedUpdate {
   exponent?: number | null;
   marketSession?: string | null;
   feedUpdateTimestamp?: number | string | null;
+  publisherCount?: number | null;
+  confidence?: number | string | null;
 }
 
 const isInt = (x: unknown): x is number => typeof x === "number" && Number.isInteger(x);
@@ -59,17 +79,29 @@ export function scalePythPrice(mantissa: string | number, exponent: number): num
   return Number.isFinite(v) ? v : null;
 }
 
-/** Pure parse of one feed update -> observation (null = no usable fresh price). */
-export function pythObservation(f: PythFeedUpdate, nowMs: number, maxAgeMs: number): SourceObservation | null {
-  if (f.marketSession === "closed") return null;
-  if (f.price === null || f.price === undefined || f.exponent === null || f.exponent === undefined) return null;
+export type PythParse = { obs: SourceObservation } | { closed: true } | { reason: string };
+
+/**
+ * Pure parse of one feed update: an observation, `closed` (market closed: no observation, not a failure), or why the
+ * print is unusable (in session: a failure the source reports).
+ */
+export function pythObservation(f: PythFeedUpdate, nowMs: number, maxAgeMs: number, q: PythQuality = DEFAULT_PYTH_QUALITY): PythParse {
+  if (f.marketSession === "closed") return { closed: true };
+  if (typeof f.marketSession !== "string" || !PYTH_TRADING_SESSIONS.has(f.marketSession)) return { reason: `market session ${String(f.marketSession)}` };
+  if (f.price === null || f.price === undefined || f.exponent === null || f.exponent === undefined) return { reason: "no price" };
   const price = scalePythPrice(f.price, f.exponent);
-  if (price === null || price <= 0) return null;
+  if (price === null || price <= 0) return { reason: "unusable price" };
   const rawTs = typeof f.feedUpdateTimestamp === "string" ? Number(f.feedUpdateTimestamp) : f.feedUpdateTimestamp;
-  if (!isInt(rawTs) || rawTs <= 0) return null;
+  if (!isInt(rawTs) || rawTs <= 0) return { reason: "no feedUpdateTimestamp" };
   const ts = Math.floor(rawTs / 1000); // microseconds -> ms
-  if (nowMs - ts > maxAgeMs) return null;
-  return { price, ts, maxAgeMs };
+  if (nowMs - ts > maxAgeMs) return { reason: `stale (${Math.round((nowMs - ts) / 1000)}s old)` };
+  const minPub = f.marketSession === "regular" ? q.minPublishers : q.minPublishersExtended;
+  if (!isInt(f.publisherCount) || f.publisherCount < minPub) return { reason: `publisherCount ${f.publisherCount ?? "missing"} < ${minPub} (${f.marketSession})` };
+  const conf = f.confidence === null || f.confidence === undefined ? null : scalePythPrice(f.confidence, f.exponent);
+  if (conf === null || conf < 0) return { reason: "no confidence" };
+  const confBps = (conf / price) * 1e4;
+  if (confBps > q.maxConfidenceBps) return { reason: `confidence ${confBps.toFixed(1)} bps > ${q.maxConfidenceBps}` };
+  return { obs: { price, ts, maxAgeMs } };
 }
 
 export class PythProSource implements PriceSource {
@@ -94,7 +126,12 @@ export class PythProSource implements PriceSource {
     if (id === undefined) return null;
     const feeds = await this.latest();
     const f = feeds.get(id);
-    return f ? pythObservation(f, this.now(), this.maxAgeMs) : null;
+    if (!f) return null;
+    const r = pythObservation(f, this.now(), this.maxAgeMs, this.o.quality);
+    if ("obs" in r) return r.obs;
+    if ("closed" in r) return null;
+    // an unusable print in session is a failure with a reason (source health, source-check), never a silent null
+    throw new Error(`pyth ${ticker}: ${r.reason}`);
   }
 
   /** The current batch (shared by every ticker of one tick), or a new one. A failed batch is shared too. */
@@ -127,6 +164,8 @@ export class PythProSource implements PriceSource {
         headers: { authorization: `Bearer ${this.o.apiKey}`, "content-type": "application/json", accept: "application/json" },
         body,
         signal: AbortSignal.timeout(this.o.timeoutMs ?? 2_000),
+        // never re-send the Authorization header to wherever a redirect points
+        redirect: "error",
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}${res.status === 401 || res.status === 403 ? " (access token rejected or not entitled to these feeds)" : ""}`);
       json = await res.json();

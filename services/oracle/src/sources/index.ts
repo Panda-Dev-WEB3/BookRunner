@@ -82,10 +82,11 @@ export function buildSources(cfg: OracleConfig, log: Logger, now: () => number =
           channel: cfg.ORACLE_PYTH_CHANNEL,
           maxAgeMs: cfg.ORACLE_PYTH_MAX_AGE_MS,
           timeoutMs: cfg.ORACLE_SOURCE_TIMEOUT_MS,
+          quality: cfg.pythQuality,
         }),
       );
       // never the access token
-      log.info({ url: cfg.ORACLE_PYTH_URL, channel: cfg.ORACLE_PYTH_CHANNEL, feeds: cfg.pythFeeds, maxAgeMs: cfg.ORACLE_PYTH_MAX_AGE_MS }, "Pyth Pro source enabled");
+      log.info({ url: cfg.ORACLE_PYTH_URL, channel: cfg.ORACLE_PYTH_CHANNEL, feeds: cfg.pythFeeds, maxAgeMs: cfg.ORACLE_PYTH_MAX_AGE_MS, quality: cfg.pythQuality }, "Pyth Pro source enabled");
     } else log.warn("ORACLE_PYTH=1 but PYTH_API_KEY is not set; Pyth Pro source skipped");
   }
 

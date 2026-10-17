@@ -8,7 +8,8 @@
 //              open == close -> closed all day; close < open -> session wraps past local midnight
 //              close = 1439 means open to the end of the local day (the 1439th minute included),
 //              so open = 0 & close = 1439 is the whole day
-//   [170..177] holiday calendar id: 0 = none, 1 = NYSE (dates in HOLIDAYS below)
+//   [170..177] holiday calendar id: 0 = none, 1 = NYSE (NYSE_HOLIDAYS closed all day, NYSE_EARLY_CLOSES from 17:00 ET,
+//              holiday eves from 20:00 ET: nyseCalendarClosed)
 //   rest       reserved (zero)
 import { type Hex, numberToHex } from "viem";
 
@@ -64,6 +65,42 @@ export const NYSE_HOLIDAYS = new Set([
   "2027-09-06", "2027-11-25", "2027-12-24",
 ]);
 
+/**
+ * NYSE early closes (regular session ends 13:00 ET, post-market 13:00-17:00, no overnight session that night) — VERIFY
+ * yearly next to NYSE_HOLIDAYS. A weekly calendar with `holidays = 1` is closed on these dates from
+ * EARLY_CLOSE_END_MINUTE.
+ */
+export const NYSE_EARLY_CLOSES = new Set(["2026-11-27", "2026-12-24", "2027-11-26"]);
+/** 17:00 ET: end of the post-market session on an early-close day. */
+export const EARLY_CLOSE_END_MINUTE = 17 * 60;
+/**
+ * 20:00 ET: on the evening before a NYSE holiday (incl. the Sunday before a Monday holiday) the overnight session
+ * does not open, so a weekly calendar with `holidays = 1` closes from here until the holiday ends.
+ *
+ * Source of both rules: Pyth's US-equity market hours (pre 04:00-09:30, regular 09:30-16:00, post 16:00-20:00 ET
+ * on NYSE days; overnight 20:00-04:00 Sun-Thu nights on the Blue Ocean ATS calendar),
+ * https://docs.pyth.network/price-feeds/market-hours , and the per-feed `market_session_schedule` of
+ * https://pyth.dourolabs.app/v1/symbols (e.g. over_night `1125/0000-0400`, `0117/C`, `1231/0000-0400`;
+ * post_market `1127/1300-1700`). The market has no session there per Pyth (one of the mainnet's 3 sources, 2
+ * required): the calendar closes too, so the oracle publishes HELD prices instead of depending on the rest. `source-check` compares this
+ * calendar with Pyth's published schedule.
+ */
+export const HOLIDAY_EVE_CLOSE_MINUTE = 20 * 60;
+
+/** "YYYY-MM-DD" of the next calendar day. */
+function nextYmd(ymd: string): string {
+  const d = new Date(`${ymd}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+/** NYSE calendar closures beyond the weekly schedule: holidays, early closes from 17:00, holiday eves from 20:00. */
+export function nyseCalendarClosed(ymd: string, minute: number): boolean {
+  if (NYSE_HOLIDAYS.has(ymd)) return true;
+  if (minute >= EARLY_CLOSE_END_MINUTE && NYSE_EARLY_CLOSES.has(ymd)) return true;
+  return minute >= HOLIDAY_EVE_CLOSE_MINUTE && NYSE_HOLIDAYS.has(nextYmd(ymd));
+}
+
 export function encodeSessions(s: Sessions): Hex {
   let v = BigInt(s.kind) | (BigInt(s.tz) << 8n);
   if (s.days.length !== 7) throw new Error("sessions: need 7 days");
@@ -90,8 +127,10 @@ export function decodeSessions(h: Hex): Sessions {
   return { kind, tz, days, holidays };
 }
 
+const partFormatters: Partial<Record<TimezoneId, Intl.DateTimeFormat>> = {};
+
 function localParts(date: Date, tz: TimezoneId) {
-  const fmt = new Intl.DateTimeFormat("en-US", {
+  const fmt = (partFormatters[tz] ??= new Intl.DateTimeFormat("en-US", {
     timeZone: TIMEZONES[tz],
     hourCycle: "h23",
     weekday: "short",
@@ -100,7 +139,7 @@ function localParts(date: Date, tz: TimezoneId) {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-  });
+  }));
   const parts = Object.fromEntries(fmt.formatToParts(date).map((p) => [p.type, p.value]));
   const wd = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].indexOf(parts.weekday ?? "");
   return {
@@ -123,7 +162,7 @@ function inDay(d: DaySession, minute: number): boolean {
 export function isOpen(s: Sessions, date: Date = new Date()): boolean {
   if (s.kind === 0) return true;
   const p = localParts(date, s.tz);
-  if (s.holidays === 1 && NYSE_HOLIDAYS.has(p.ymd)) return false;
+  if (s.holidays === 1 && nyseCalendarClosed(p.ymd, p.minute)) return false;
   const today = s.days[p.weekday];
   if (today && inDay(today, p.minute)) {
     // a wrapping session only counts its pre-midnight part for "today"

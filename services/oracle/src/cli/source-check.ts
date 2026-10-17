@@ -19,6 +19,7 @@ import { productionProblems } from "../production";
 import { type RegistryView, type SourceCheckReader, formatTable, runSourceCheck } from "../source-check";
 import { buildSources } from "../sources";
 import { aggregatorV3Abi, stockTokenAbi, viemAggregatorReader } from "../sources/chainlink";
+import { PYTH_SYMBOLS_URL, type PythSchedule, schedulesById } from "../pyth-schedule";
 import { PythProSource } from "../sources/pyth";
 
 interface Args {
@@ -83,7 +84,7 @@ export function viemRegistryView(pub: PublicClient, registry: Address): Registry
 
 /**
  * Live sources compared with Chainlink: every configured non-Chainlink live source (Pyth Pro, HTTP), plus Pyth
- * Pro whenever an access token is present even without ORACLE_PYTH=1 (it is the mainnet's second source).
+ * Pro whenever an access token is present even without ORACLE_PYTH=1 (it is one of the mainnet's three live sources).
  */
 export function checkedOtherSources(cfg: OracleConfig, configured: readonly PriceSource[]): PriceSource[] {
   const others = configured.filter((s) => s.kind !== "chainlink" && s.kind !== "synthetic");
@@ -96,10 +97,34 @@ export function checkedOtherSources(cfg: OracleConfig, configured: readonly Pric
         channel: cfg.ORACLE_PYTH_CHANNEL,
         maxAgeMs: cfg.ORACLE_PYTH_MAX_AGE_MS,
         timeoutMs: cfg.ORACLE_SOURCE_TIMEOUT_MS,
+        quality: cfg.pythQuality,
       }),
     );
   }
   return others;
+}
+
+/** Pyth market-session schedules per ticker from the public symbols endpoint (no access token involved). */
+export async function fetchPythCalendar(
+  feeds: Readonly<Record<string, number>>,
+  tickers: readonly string[],
+  get: (url: string) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }> = (url) =>
+    fetch(url, { signal: AbortSignal.timeout(15_000), redirect: "error" }),
+): Promise<{ schedules: Map<string, PythSchedule[]> } | { error: string }> {
+  try {
+    const res = await get(PYTH_SYMBOLS_URL);
+    if (!res.ok) return { error: `HTTP ${res.status} from ${PYTH_SYMBOLS_URL}` };
+    const ids = tickers.map((t) => feeds[t]).filter((x): x is number => x !== undefined);
+    const byId = schedulesById(await res.json(), ids);
+    const schedules = new Map<string, PythSchedule[]>();
+    for (const t of tickers) {
+      const id = feeds[t];
+      if (id !== undefined) schedules.set(t, byId.get(id) ?? []);
+    }
+    return { schedules };
+  } catch (e) {
+    return { error: e instanceof Error ? (e.message.split("\n")[0] ?? "") : String(e) };
+  }
 }
 
 async function main(): Promise<number> {
@@ -111,6 +136,8 @@ async function main(): Promise<number> {
   const log = createLogger("source-check", "silent");
   const built = args.serviceConfig ? buildSources(cfg, log) : null;
   const others = checkedOtherSources(cfg, built?.sources ?? []);
+  // Pyth's published session calendar (public, no key) vs ours, whenever Pyth is one of the sources
+  const pythCalendar = others.some((s) => s.kind === "pyth") || cfg.ORACLE_PYTH ? await fetchPythCalendar(cfg.pythFeeds, cfg.tickers) : undefined;
   const rows = await runSourceCheck({
     chainId: args.chain,
     config: cfg.chainConfig,
@@ -121,6 +148,7 @@ async function main(): Promise<number> {
     registry: args.registry ? viemRegistryView(pub, args.registry) : null,
     otherSources: others,
     pythKey: !!cfg.PYTH_API_KEY,
+    ...(pythCalendar ? { pythCalendar } : {}),
     minSources: cfg.ORACLE_MIN_SOURCES,
     outlierBps: cfg.ORACLE_OUTLIER_BPS,
     configProblems: built

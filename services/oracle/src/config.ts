@@ -123,7 +123,7 @@ export const oracleEnvShape = {
   /** JSON array of generic HTTP JSON sources (see sources/http.ts). */
   ORACLE_HTTP_SOURCES: z.string().default("[]"),
 
-  // ---- Pyth Pro (sources/pyth.ts): the mainnet second source next to Chainlink (VERIFY C6) ----
+  // ---- Pyth Pro (sources/pyth.ts): one of the mainnet's three live sources (VERIFY C6) ----
   ORACLE_PYTH: flag(false),
   /** Pyth Pro access token (Authorization: Bearer). Secret: never logged; reaches the oracle process only. */
   PYTH_API_KEY: z.string().optional(),
@@ -135,6 +135,12 @@ export const oracleEnvShape = {
   ORACLE_PYTH_FEEDS: z.string().optional(),
   /** In-session max age of a Pyth observation (its own feedUpdateTimestamp, never the receive time). */
   ORACLE_PYTH_MAX_AGE_MS: z.coerce.number().int().positive().default(10_000),
+  /** Drop a regular-session Pyth print with fewer publishers (Pyth's own regular-session min_pub is 3). */
+  ORACLE_PYTH_MIN_PUBLISHERS: z.coerce.number().int().nonnegative().default(3),
+  /** Same for pre / post / overnight prints (Pyth's own min_pub there is 2). */
+  ORACLE_PYTH_MIN_PUBLISHERS_EXTENDED: z.coerce.number().int().nonnegative().default(2),
+  /** Drop a Pyth print whose confidence interval is wider than this (bps of the price). */
+  ORACLE_PYTH_MAX_CONF_BPS: z.coerce.number().positive().default(50),
 };
 
 /**
@@ -144,8 +150,16 @@ export const oracleEnvShape = {
  */
 export const DEFAULT_PYTH_FEEDS: Readonly<Record<string, number>> = { NVDA: 1314, TSLA: 1435, AAPL: 922, MSFT: 1292, AMZN: 954 };
 
+/** Names of built-in sources: an HTTP source must not reuse them (one name = one vote in the median). */
+export const RESERVED_SOURCE_NAMES = ["chainlink", "pyth"] as const;
+
 export const httpSourceSpecSchema = z.object({
-  name: z.string().min(1),
+  name: z
+    .string()
+    .min(1)
+    .refine((n) => !(RESERVED_SOURCE_NAMES as readonly string[]).includes(n.toLowerCase()) && !n.toLowerCase().startsWith("synthetic"), {
+      message: "reserved source name (chainlink, pyth, synthetic*)",
+    }),
   /** URL template; `{ticker}` is replaced with the (mapped) symbol. */
   url: z.string().min(1),
   /** Dot path to the price in the JSON body, e.g. "data.price" or "c". */
@@ -162,7 +176,7 @@ export type HttpSourceSpec = z.infer<typeof httpSourceSpecSchema>;
 
 const numberMap = z.record(z.string(), z.number().positive());
 const pythFeedMap = z.record(z.string(), z.number().int().nonnegative());
-const indexMap =z.record(z.string(), z.record(z.string(), z.number().int().positive()));
+const indexMap = z.record(z.string(), z.record(z.string(), z.number().int().positive()));
 
 function parseJson<T>(name: string, raw: string | undefined, schema: z.ZodType<T>, fallback: T): T {
   if (raw === undefined || raw.trim() === "") return fallback;
@@ -215,6 +229,11 @@ export function loadOracleConfig(source: Record<string, string | undefined> = pr
     legacyChainlinkFeeds,
     sequencerUptimeFeed: chainConfig?.chainlink.sequencerUptimeFeed ? getAddress(chainConfig.chainlink.sequencerUptimeFeed) : null,
     httpSources: parseJson("ORACLE_HTTP_SOURCES", env.ORACLE_HTTP_SOURCES, z.array(httpSourceSpecSchema), []),
+    pythQuality: {
+      minPublishers: env.ORACLE_PYTH_MIN_PUBLISHERS,
+      minPublishersExtended: env.ORACLE_PYTH_MIN_PUBLISHERS_EXTENDED,
+      maxConfidenceBps: env.ORACLE_PYTH_MAX_CONF_BPS,
+    },
     pythFeeds: { ...DEFAULT_PYTH_FEEDS, ...parseJson("ORACLE_PYTH_FEEDS", env.ORACLE_PYTH_FEEDS, pythFeedMap, {}) },
   };
 }

@@ -40,9 +40,10 @@ function goodEnv(): Env {
     ORDERLY_BUILDER_KEY_SECRET: "seed",
     ANTHROPIC_API_KEY: "sk",
     ORACLE_CHAINLINK_FEEDS: JSON.stringify({ NVDA: { proxy: "0x0000000000000000000000000000000000000f01", basis: "per-token" } }),
-    // the mainnet design: Chainlink + Pyth Pro, both required
+    // the mainnet design: Chainlink + Pyth Pro + a third source, 2 required
     ORACLE_PYTH: "1",
     PYTH_API_KEY: "pyth-test-token",
+    ORACLE_HTTP_SOURCES: JSON.stringify([{ name: "vendor", url: "https://prices.example/{ticker}", pricePath: "price" }]),
     ORACLE_MIN_SOURCES: "2",
     MARK_SIGNER_KMS_KEY_ID: "alias/bkrn-mark",
     RISK_KMS_KEY_ID: "alias/bkrn-risk",
@@ -137,33 +138,46 @@ describe("mainnet profile (scripts/dev.ts --network mainnet)", () => {
     ]);
   });
 
-  test("oracle production rules: feeds state their basis, and an independent source exists", () => {
+  test("oracle production rules: feeds state their basis; Chainlink + Pyth Pro + a third source", () => {
     const plain = { ...goodEnv(), ORACLE_CHAINLINK_FEEDS: JSON.stringify({ NVDA: "0x0000000000000000000000000000000000000f01" }) };
     expect(mainnetProfile(plain, hostRoot(GOOD_DEP)).errors).toEqual([expect.stringMatching(/plain addresses for NVDA/)]);
-    const chainlinkOnly: Env = { ...goodEnv(), ORACLE_PYTH: undefined, PYTH_API_KEY: undefined };
-    const noSource = mainnetProfile(chainlinkOnly, hostRoot(GOOD_DEP)).errors;
-    expect(noSource).toEqual([expect.stringMatching(/no independent oracle source/)]);
-    expect(noSource[0]).toContain("ORACLE_PYTH=1 + PYTH_API_KEY");
-    expect(mainnetProfile({ ...chainlinkOnly, ORACLE_HTTP_FINNHUB: "1" }, hostRoot(GOOD_DEP)).errors).toEqual([]);
-    const vendor = JSON.stringify([{ name: "vendor", url: "https://prices.example/{ticker}", pricePath: "price" }]);
-    expect(mainnetProfile({ ...chainlinkOnly, ORACLE_HTTP_SOURCES: vendor }, hostRoot(GOOD_DEP)).errors).toEqual([]);
+    // no third source: refused, the text says why
+    const two: Env = { ...goodEnv(), ORACLE_HTTP_SOURCES: "[]" };
+    const noThird = mainnetProfile(two, hostRoot(GOOD_DEP)).errors;
+    expect(noThird).toEqual([expect.stringMatching(/no third oracle source besides Chainlink and Pyth Pro/)]);
+    expect(noThird[0]).toContain("3 live sources (2 required)");
+    expect(mainnetProfile({ ...two, ORACLE_HTTP_FINNHUB: "1" }, hostRoot(GOOD_DEP)).errors).toEqual([]);
+    // no Pyth: refused even with other sources
+    const noPyth = mainnetProfile({ ...goodEnv(), ORACLE_PYTH: undefined, PYTH_API_KEY: undefined, ORACLE_HTTP_FINNHUB: "1" }, hostRoot(GOOD_DEP)).errors;
+    expect(noPyth).toEqual([expect.stringMatching(/no Pyth Pro source: set ORACLE_PYTH=1 \+ PYTH_API_KEY/)]);
+    // Chainlink only: both missing
+    expect(mainnetProfile({ ...two, ORACLE_PYTH: undefined }, hostRoot(GOOD_DEP)).errors).toEqual([
+      expect.stringMatching(/no Pyth Pro source/),
+      expect.stringMatching(/no third oracle source/),
+    ]);
   });
 
-  test("Pyth Pro counts as the independent source only with its access token; ORACLE_MIN_SOURCES must be 2", () => {
+  test("Pyth Pro counts only with its access token; ORACLE_MIN_SOURCES must be 2", () => {
     const noKey = mainnetProfile({ ...goodEnv(), PYTH_API_KEY: "" }, hostRoot(GOOD_DEP)).errors;
-    expect(noKey).toEqual([expect.stringMatching(/ORACLE_PYTH=1 but PYTH_API_KEY is not set/), expect.stringMatching(/no independent oracle source/)]);
+    expect(noKey).toEqual([expect.stringMatching(/ORACLE_PYTH=1 but PYTH_API_KEY is not set/), expect.stringMatching(/no Pyth Pro source/)]);
     expect(mainnetProfile({ ...goodEnv(), ORACLE_PYTH_FEEDS: '{"NVDA":"x"}' }, hostRoot(GOOD_DEP)).errors).toEqual([
       expect.stringMatching(/ORACLE_PYTH_FEEDS is not a JSON object/),
     ]);
     expect(mainnetProfile({ ...goodEnv(), ORACLE_PYTH_FEEDS: '{"NVDA":1314}' }, hostRoot(GOOD_DEP)).errors).toEqual([]);
     expect(mainnetProfile({ ...goodEnv(), ORACLE_MIN_SOURCES: "3" }, hostRoot(GOOD_DEP)).errors).toEqual([
-      expect.stringMatching(/ORACLE_MIN_SOURCES must be 2 on mainnet .*got 3/),
+      expect.stringMatching(/ORACLE_MIN_SOURCES must be 2 on mainnet \(2 of the 3 live sources; got 3\)/),
     ]);
     expect(mainnetProfile({ ...goodEnv(), ORACLE_MIN_SOURCES: undefined }, hostRoot(GOOD_DEP)).errors).toEqual([
       expect.stringMatching(/ORACLE_MIN_SOURCES must be 2 on mainnet .*unset/),
     ]);
+    // flags parse like the oracle's z.stringbool(); the token only over https
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_PYTH: "yes" }, hostRoot(GOOD_DEP)).errors).toEqual([]);
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_PYTH: "off" }, hostRoot(GOOD_DEP)).errors).toEqual([expect.stringMatching(/no Pyth Pro source/)]);
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_PYTH_URL: "http://pyth.example/v1/latest_price" }, hostRoot(GOOD_DEP)).errors).toEqual([
+      expect.stringMatching(/ORACLE_PYTH_URL must be https:\/\//),
+    ]);
     // the access token is never echoed in an error
-    for (const e of mainnetProfile({ ...goodEnv(), ORACLE_MIN_SOURCES: "9" }, hostRoot(GOOD_DEP)).errors) expect(e).not.toContain("pyth-test-token");
+    for (const e of mainnetProfile({ ...goodEnv(), ORACLE_MIN_SOURCES: "9", ORACLE_HTTP_SOURCES: "[]" }, hostRoot(GOOD_DEP)).errors) expect(e).not.toContain("pyth-test-token");
   });
 
   test("alerts watch role ADDRESSES: local keys and per-book desk keys derived, KMS roles left to dev.ts", () => {

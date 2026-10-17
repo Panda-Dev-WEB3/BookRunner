@@ -13,7 +13,7 @@ import { loadOracleConfig } from "./config";
 import { MAX_SAFE_PUSH_DEVIATION_BPS, createApp, serveOptions } from "./http";
 import { startLoop } from "./loop";
 import { Runtime } from "./runtime";
-import { isProductionChain, liveSourceCount, productionProblems, startupOnchainMinSourcesProblem } from "./production";
+import { MAINNET_SPARE_SOURCES, isProductionChain, liveSourceCount, productionProblems, startupOnchainMinSourcesProblem } from "./production";
 import { OracleService } from "./service";
 import { accountSigner } from "./signing";
 import { buildSources } from "./sources/index";
@@ -60,6 +60,7 @@ if (production) {
         readMinSources: async () =>
           Number(await publicClientFor(cfg.CHAIN_ID, cfg.RPC_URL).readContract({ address: oracle, abi: attestedOracleAbi, functionName: "minSources" })),
         sources,
+        spare: MAINNET_SPARE_SOURCES,
       });
   if (problem) {
     log.fatal({ chainId: cfg.CHAIN_ID, oracle: oracle ?? null, liveSources: liveSourceCount(sources) }, `refusing to start: ${problem}`);

@@ -64,15 +64,17 @@ const isLocal = (url: string) => /(^|\/\/|@)(127\.0\.0\.1|localhost|0\.0\.0\.0|\
  * Oracle sources (mirrors services/oracle/src/production.ts so the stack refuses before the oracle crash-loops):
  * Chainlink feeds come from the chain price config the oracle loads on 4663 (ORACLE_CHAIN_CONFIG, else
  * config/chains/4663.json under `root`) overlaid by ORACLE_CHAINLINK_FEEDS, whose entries must state their basis
- * ({"proxy","basis","token"}: a plain address is refused, VERIFY C2); the median also needs at least one
- * independent per-share source: Pyth Pro (ORACLE_PYTH=1 + PYTH_API_KEY, the mainnet design: Chainlink + Pyth),
- * else ORACLE_HTTP_SOURCES or ORACLE_HTTP_FINNHUB. ORACLE_MIN_SOURCES must be exactly
- * MAINNET_ORACLE_MIN_SOURCES (2 sources, 2 required; the oracle also refuses to start when the on-chain
- * AttestedOracle.minSources() exceeds its live sources).
+ * ({"proxy","basis","token"}: a plain address is refused, VERIFY C2). The mainnet design is 3 live sources with 2
+ * required: Chainlink + Pyth Pro (ORACLE_PYTH=1 + PYTH_API_KEY) + at least one more independent per-share source
+ * (ORACLE_HTTP_SOURCES entries, ORACLE_HTTP_FINNHUB), so one source outage is tolerated and the 150 bps band can
+ * isolate one bad source. ORACLE_MIN_SOURCES must be exactly MAINNET_ORACLE_MIN_SOURCES (the oracle also refuses
+ * to start unless the on-chain AttestedOracle.minSources() leaves one spare live source).
  */
 export const MAINNET_ORACLE_MIN_SOURCES = 2;
 
-const isOn = (v: string | undefined) => ["1", "true"].includes((v ?? "").trim().toLowerCase());
+/** Same truthy set as the oracle's z.stringbool() flags (ORACLE_PYTH=yes runs Pyth there, so it counts here too). */
+const TRUTHY = new Set(["true", "1", "yes", "on", "y", "enabled"]);
+const isOn = (v: string | undefined) => TRUTHY.has((v ?? "").trim().toLowerCase());
 
 function oracleSourcesProblems(env: Env, root: string): string[] {
   const problems: string[] = [];
@@ -114,21 +116,26 @@ function oracleSourcesProblems(env: Env, root: string): string[] {
   const pythOn = isOn(env.ORACLE_PYTH);
   const pythKey = !!env.PYTH_API_KEY?.trim();
   if (pythOn && !pythKey) problems.push("ORACLE_PYTH=1 but PYTH_API_KEY is not set (Pyth Pro access token)");
+  const pythUrl = env.ORACLE_PYTH_URL?.trim();
+  if (pythUrl && !pythUrl.startsWith("https://")) problems.push("ORACLE_PYTH_URL must be https:// (the Pyth Pro access token travels in its Authorization header)");
   if (env.ORACLE_PYTH_FEEDS?.trim()) {
     const pf = parse(env.ORACLE_PYTH_FEEDS, {});
     if (pf === null || typeof pf !== "object" || Array.isArray(pf) || !Object.values(pf as object).every((v) => Number.isInteger(v) && (v as number) >= 0)) {
       problems.push('ORACLE_PYTH_FEEDS is not a JSON object of ticker -> Pyth Pro feed id (e.g. {"NVDA":1314})');
     }
   }
-  if ((Array.isArray(http) ? http.length : 0) === 0 && !finnhub && !(pythOn && pythKey)) {
+  const pyth = pythOn && pythKey;
+  const thirdCount = (Array.isArray(http) ? http.length : 0) + (finnhub ? 1 : 0);
+  if (!pyth) problems.push("no Pyth Pro source: set ORACLE_PYTH=1 + PYTH_API_KEY (the mainnet design: Chainlink + Pyth Pro + a third source)");
+  if (thirdCount === 0) {
     problems.push(
-      "no independent oracle source besides Chainlink: set ORACLE_PYTH=1 + PYTH_API_KEY (Pyth Pro), or ORACLE_HTTP_SOURCES (per-share US-equity prices) / ORACLE_HTTP_FINNHUB=1",
+      "no third oracle source besides Chainlink and Pyth Pro: set ORACLE_HTTP_SOURCES (licensed per-share US-equity prices) or a preset; the mainnet design needs 3 live sources (2 required) so one outage is tolerated",
     );
   }
   const min = env.ORACLE_MIN_SOURCES?.trim();
   if (min !== String(MAINNET_ORACLE_MIN_SOURCES)) {
     problems.push(
-      `ORACLE_MIN_SOURCES must be ${MAINNET_ORACLE_MIN_SOURCES} on mainnet (Chainlink + Pyth Pro; ${min ? `got ${min}` : "unset: the oracle default is 3"})`,
+      `ORACLE_MIN_SOURCES must be ${MAINNET_ORACLE_MIN_SOURCES} on mainnet (2 of the 3 live sources; ${min ? `got ${min}` : "unset: the oracle default is 3"})`,
     );
   }
   return problems;

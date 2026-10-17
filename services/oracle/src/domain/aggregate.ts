@@ -1,5 +1,6 @@
 // Multi-source aggregation: median of fresh observations, outliers beyond `outlierBps` of that
-// median rejected, final price = median of the accepted set, ok iff >= minSources accepted.
+// median rejected, final price = median of the accepted set, ok iff >= minSources accepted and, with exactly two
+// accepted, they are within pairMaxBps of each other.
 import type { SourceQuote } from "./types";
 
 export interface AggregateOptions {
@@ -10,6 +11,11 @@ export interface AggregateOptions {
   maxAgeMs: number;
   /** tolerated clock skew for observations stamped in the future */
   maxFutureMs?: number;
+  /**
+   * When only two sources are accepted in a tick (the third down, or an outlier) the band cannot reject either
+   * (each sits half their gap from the midpoint): refuse when they are further apart than this (bps of their midpoint; default outlierBps, the source-check rule).
+   */
+  pairMaxBps?: number;
 }
 
 export type RejectReason = "invalid" | "stale" | "duplicate" | "outlier";
@@ -85,6 +91,14 @@ export function aggregate(quotes: readonly CollectedQuote[], o: AggregateOptions
   }
   accepted.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   const price = accepted.length > 0 ? median(accepted.map((q) => q.price)) : null;
+  if (accepted.length === 2 && price !== null) {
+    const [a, b] = accepted as [SourceQuote, SourceQuote];
+    const gap = deviationBps(Math.max(a.price, b.price), price) + deviationBps(Math.min(a.price, b.price), price);
+    const limit = o.pairMaxBps ?? o.outlierBps;
+    if (gap > limit + 1e-9) {
+      return { ok: false, price, accepted, rejected, reason: `sources disagree: ${a.name} and ${b.name} are ${gap.toFixed(1)} bps apart (limit ${limit})` };
+    }
+  }
   const ok = accepted.length >= o.minSources && price !== null;
   return ok
     ? { ok, price, accepted, rejected }

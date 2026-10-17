@@ -5,6 +5,7 @@ import { type ChainPriceConfig, MAINNET_CHAIN_ID, SESSIONS_24X5, type Sessions, 
 import type { Address } from "viem";
 import { exceedsBps } from "./domain/aggregate";
 import type { PriceSource } from "./domain/types";
+import { type PythSchedule, compareCalendars } from "./pyth-schedule";
 import { type AggregatorReader, ChainlinkSource, type ResolvedFeed } from "./sources/chainlink";
 
 export type CheckStatus = "PASS" | "WARN" | "FAIL" | "SKIP";
@@ -44,11 +45,19 @@ export interface SourceCheckInput {
   otherSources?: readonly PriceSource[];
   /**
    * Whether a Pyth Pro access token (PYTH_API_KEY) is available; undefined = not evaluated. Without one the
-   * Pyth row FAILs on mainnet (the second source of the 2-source design) and is SKIPped elsewhere.
+   * Pyth row FAILs on mainnet (one of the three required live sources) and is SKIPped elsewhere.
    */
   pythKey?: boolean;
   /** Minimum live sources (ORACLE_MIN_SOURCES): adds the "sources / live" summary row when set. */
   minSources?: number;
+  /**
+   * Pyth's published market-session schedules per ticker (`/v1/symbols`), or why they could not be read: compared
+   * with the session calendar over the next `calendarDays` (default 30). A minute the calendar treats as open
+   * while Pyth is closed leaves mainnet without its spare source and means the tables are out of date — FAIL on
+   * 4663, WARN elsewhere.
+   */
+  pythCalendar?: { schedules: ReadonlyMap<string, readonly PythSchedule[]> } | { error: string };
+  calendarDays?: number;
   outlierBps?: number;
   /** Rows from the service-config production guard (production.ts). */
   configProblems?: readonly string[];
@@ -89,8 +98,10 @@ export async function runSourceCheck(p: SourceCheckInput): Promise<CheckRow[]> {
   for (const msg of p.configProblems ?? []) add("service config", "production rule", "FAIL", msg);
   if (p.pythKey === false) {
     const mainnet = p.chainId === MAINNET_CHAIN_ID;
-    add("pyth", "access token", mainnet ? "FAIL" : "SKIP", `PYTH_API_KEY not set${mainnet ? ": Pyth Pro is the mainnet's second source (ORACLE_PYTH=1 + PYTH_API_KEY)" : ""}`);
+    add("pyth", "access token", mainnet ? "FAIL" : "SKIP", `PYTH_API_KEY not set${mainnet ? ": Pyth Pro is one of the mainnet's three live sources (ORACLE_PYTH=1 + PYTH_API_KEY)" : ""}`);
   }
+  if (p.pythCalendar) checkPythCalendar(p, now(), add);
+
   // sources that produced a fresh observation for at least one feed
   const live = new Set<string>();
 
@@ -152,7 +163,24 @@ export async function runSourceCheck(p: SourceCheckInput): Promise<CheckRow[]> {
         const basis = f.basis === "per-token" ? `per share = feed / uiMultiplier` : "per share";
         add(id, "observation", status, `$${o.price.toFixed(4)} ${basis}, ${age}${o.stale && !marketOpen ? ", held off-hours" : ""}`);
         if (!o.stale) live.add(source.name);
-        for (const other of p.otherSources ?? []) if (await compare(other, id, o.price, p.outlierBps ?? 150, marketOpen, add)) live.add(other.name);
+        const seen: Array<{ name: string; price: number }> = [];
+        for (const other of p.otherSources ?? []) {
+          const price = await compare(other, id, o.price, p.outlierBps ?? 150, marketOpen, add);
+          if (price !== null) {
+            live.add(other.name);
+            seen.push({ name: other.name, price });
+          }
+        }
+        // pairwise agreement of the other sources (the runtime refuses a 2-source price beyond the band)
+        for (let i = 0; i < seen.length; i++) {
+          for (let j = i + 1; j < seen.length; j++) {
+            const a = seen[i]!;
+            const b = seen[j]!;
+            const gap = (Math.abs(a.price - b.price) / ((a.price + b.price) / 2)) * 1e4;
+            const limit = p.outlierBps ?? 150;
+            add(id, `${a.name} vs ${b.name}`, gap > limit + 1e-9 ? "FAIL" : "PASS", `${gap.toFixed(1)} bps apart (limit ${limit}, of their midpoint)`);
+          }
+        }
       }
     } catch (e) {
       add(id, "observation", "FAIL", errMsg(e));
@@ -170,6 +198,33 @@ export async function runSourceCheck(p: SourceCheckInput): Promise<CheckRow[]> {
     );
   }
   return rows;
+}
+
+const fmtEt = (ms: number) =>
+  new Date(ms).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "2-digit", weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+
+function checkPythCalendar(p: SourceCheckInput, nowMs: number, add: (s: string, c: string, st: CheckStatus, d: string) => void): void {
+  const cal = p.pythCalendar;
+  if (!cal) return;
+  const bad: CheckStatus = p.chainId === MAINNET_CHAIN_ID ? "FAIL" : "WARN";
+  if ("error" in cal) {
+    add("pyth", "calendar", bad, `Pyth market-session schedules not readable: ${cal.error}`);
+    return;
+  }
+  const days = p.calendarDays ?? 30;
+  for (const [ticker, schedules] of cal.schedules) {
+    if (schedules.length === 0) {
+      add(ticker, "pyth calendar", bad, "no market_session_schedule for this feed");
+      continue;
+    }
+    const d = compareCalendars({ ours: p.sessions ?? SESSIONS_24X5, pyth: schedules, fromMs: nowMs, days });
+    if (d.oursOpenPythClosed.length > 0) {
+      const w = d.oursOpenPythClosed.slice(0, 3).map((x) => `${fmtEt(x.from)} -> ${fmtEt(x.to)} ET`);
+      add(ticker, "pyth calendar", bad, `calendar open while Pyth is closed: ${w.join("; ")}${d.oursOpenPythClosed.length > 3 ? ` (+${d.oursOpenPythClosed.length - 3})` : ""} — extend NYSE_HOLIDAYS / NYSE_EARLY_CLOSES`);
+    } else {
+      add(ticker, "pyth calendar", "PASS", `next ${days} d: calendar closed wherever Pyth is (${d.pythOpenOursClosed.length} window(s) held while Pyth quotes)`);
+    }
+  }
 }
 
 async function checkRegistry(
@@ -193,7 +248,7 @@ async function checkRegistry(
   else add(id, "registry", t.active ? "PASS" : "WARN", `${live ? "live uiMultiplier" : "stored"} ${fmtWad(t.multiplierWad)}${t.active ? "" : " (inactive)"}`);
 }
 
-/** Compares one other source with Chainlink per share; true when it produced an observation. */
+/** Compares one other source with Chainlink per share; its price when it produced an observation, else null. */
 async function compare(
   other: PriceSource,
   id: string,
@@ -201,22 +256,22 @@ async function compare(
   outlierBps: number,
   marketOpen: boolean,
   add: (s: string, c: string, st: CheckStatus, d: string) => void,
-): Promise<boolean> {
+): Promise<number | null> {
   try {
     const r = await other.fetch(id);
     if (!r) {
       // off-hours a source may have no fresh price (Pyth: session closed / feedUpdateTimestamp too old)
       add(id, `vs ${other.name}`, marketOpen ? "FAIL" : "WARN", marketOpen ? "no observation" : "no fresh observation (off-hours)");
-      return false;
+      return null;
     }
     const bps = (Math.abs(r.price - chainlinkPerShare) / chainlinkPerShare) * 1e4;
     // a source quoting per TOKEN would sit ~uiMultiplier away: still inside the band today (~0.1%), so it is
     // the operator's job to confirm the basis of every HTTP source (VERIFY C2)
     add(id, `vs ${other.name}`, exceedsBps(r.price, chainlinkPerShare, outlierBps) ? "FAIL" : "PASS", `$${r.price.toFixed(4)} (${bps.toFixed(1)} bps from Chainlink per share)`);
-    return true;
+    return r.price;
   } catch (e) {
     add(id, `vs ${other.name}`, "FAIL", errMsg(e));
-    return false;
+    return null;
   }
 }
 

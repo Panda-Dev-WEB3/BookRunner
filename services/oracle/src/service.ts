@@ -14,8 +14,9 @@ import { type ComponentPrice, indexAsAggregate, indexLevel } from "./domain/inde
 import { roundPrice, toPriceWad } from "./domain/price";
 import { type PushedState, pushReason, publishTimestamp } from "./domain/push-policy";
 import { canonicalSources, sourcesHash } from "./domain/sources-hash";
+import { SourceHealth, type SourceOutcome, errorClass } from "./domain/source-health";
 import { type PriceSource, type UniverseEntry, sourceKind } from "./domain/types";
-import { onchainMinSourcesProblem } from "./production";
+import { MAINNET_SPARE_SOURCES, onchainMinSourcesProblem } from "./production";
 import type { PriceSigner } from "./signing";
 
 export interface OracleSettings {
@@ -108,6 +109,7 @@ const errMsg = (e: unknown) => (e instanceof Error ? e.message.split("\n")[0] : 
 
 export class OracleService {
   private readonly log: Logger;
+  private readonly sourceHealth: SourceHealth;
   private readonly now: () => number;
   private ctx: DeploymentContext | null = null;
   private universe: UniverseEntry[] = [];
@@ -130,6 +132,7 @@ export class OracleService {
   private signerActive: boolean | null = null;
   private chainReason = "deployment not loaded";
   private onchainMinSources: number | null = null;
+  private minSourcesProblem: string | null = null;
   private chainFailures = 0;
   private chainBackoffUntil = 0;
   private venueDisabled: string | null = null;
@@ -144,6 +147,7 @@ export class OracleService {
 
   constructor(private readonly deps: OracleServiceDeps) {
     this.log = deps.log;
+    this.sourceHealth = new SourceHealth(deps.sources, (fields, msg) => this.log.warn(fields, msg));
     this.now = deps.now ?? Date.now;
     if (deps.settings.production) {
       const synthetic = deps.sources.filter((src) => sourceKind(src) === "synthetic").map((src) => src.name);
@@ -193,11 +197,11 @@ export class OracleService {
         else this.log.warn({ signer: this.deps.signer.address, oracle: chain.oracle }, "oracle signer is not registered on AttestedOracle; on-chain pushes paused");
       }
       this.signerActive = active;
-      if (min !== this.onchainMinSources && this.deps.settings.production) {
-        // startup refuses this (index.ts); a timelock change while running is logged on every change
-        const problem = onchainMinSourcesProblem(min, this.deps.sources);
-        if (problem) this.log.error({ onchainMinSources: min, oracle: chain.oracle }, problem);
-      }
+      // startup refuses this (index.ts); a timelock change while running is logged on every change and stays
+      // visible in /health (onchain.minSourcesProblem) for as long as it holds
+      const problem = this.deps.settings.production ? onchainMinSourcesProblem(min, this.deps.sources, MAINNET_SPARE_SOURCES) : null;
+      if (problem && min !== this.onchainMinSources) this.log.error({ onchainMinSources: min, oracle: chain.oracle }, problem);
+      this.minSourcesProblem = problem;
       this.onchainMinSources = min;
       this.chainReason = active ? "ok" : "signer not registered on AttestedOracle";
       if (this.pullSupported === null && this.deps.settings.pushMode === "pull" && chain.supportsUpdate) {
@@ -268,9 +272,17 @@ export class OracleService {
     const at = new Date(nowMs);
 
     const quotes = new Map<string, CollectedQuote[]>();
+    const outcomes = new Map<string, Map<string, SourceOutcome>>();
+    const equities = this.universe.filter((e) => e.kind === "equity");
     await Promise.all(
-      this.universe.filter((e) => e.kind === "equity").map(async (e) => quotes.set(e.priceId, await this.collect(e.priceId))),
+      equities.map(async (e) => {
+        const c = await this.collect(e.priceId, nowMs);
+        quotes.set(e.priceId, c.quotes);
+        outcomes.set(e.priceId, c.outcomes);
+      }),
     );
+    // per-source health counts in-session tickers only (a closed market is no failure)
+    this.sourceHealth.update(nowMs, outcomes, new Set(equities.filter((e) => marketOpen(e.sessions, at, s.sessionsMode)).map((e) => e.priceId)));
 
     let head: number | null = null;
     if (ctx.chain) {
@@ -335,8 +347,9 @@ export class OracleService {
     return summary;
   }
 
-  private async collect(ticker: string): Promise<CollectedQuote[]> {
+  private async collect(ticker: string, nowMs: number): Promise<{ quotes: CollectedQuote[]; outcomes: Map<string, SourceOutcome> }> {
     const timeout = this.deps.settings.sourceTimeoutMs;
+    const outcomes = new Map<string, SourceOutcome>();
     const results = await Promise.all(
       this.deps.sources.map(async (src): Promise<CollectedQuote | null> => {
         let timer: ReturnType<typeof setTimeout> | undefined;
@@ -347,12 +360,21 @@ export class OracleService {
               timer = setTimeout(() => reject(new Error(`timeout after ${timeout}ms`)), timeout);
             }),
           ]);
-          if (!r) return null;
+          if (!r) {
+            outcomes.set(src.name, { ok: false, error: "no observation" });
+            return null;
+          }
           const q: CollectedQuote = { name: src.name, price: Number.isFinite(r.price) && r.price > 0 ? roundPrice(r.price) : r.price, ts: r.ts };
           const maxAge = r.maxAgeMs ?? src.maxAgeMs;
           if (maxAge !== undefined) q.maxAgeMs = maxAge;
+          const usable = Number.isFinite(r.price) && r.price > 0 && Number.isFinite(r.ts);
+          const fresh = nowMs - r.ts <= (maxAge ?? this.deps.settings.maxSourceAgeMs);
+          outcomes.set(src.name, usable && fresh ? { ok: true } : { ok: false, error: usable ? "stale observation" : "invalid observation" });
           return q;
         } catch (e) {
+          // every failure is counted per source (SourceHealth: rate-limited warn + /health); the message never
+          // carries an access token (sources redact it)
+          outcomes.set(src.name, { ok: false, error: errorClass(errMsg(e) ?? "") });
           this.log.debug({ source: src.name, ticker, err: errMsg(e) }, "source fetch failed");
           return null;
         } finally {
@@ -360,7 +382,7 @@ export class OracleService {
         }
       }),
     );
-    return results.filter((q): q is CollectedQuote => q !== null);
+    return { quotes: results.filter((q): q is CollectedQuote => q !== null), outcomes };
   }
 
   private async buildMsg(ctx: DeploymentContext, e: UniverseEntry, d: Extract<Decision, { kind: "publish" }>, publishedAt: number): Promise<OraclePriceMsg> {
@@ -564,6 +586,8 @@ export class OracleService {
       warnings: this.warnings,
       universe: this.universe.map((e) => ({ priceId: e.priceId, kind: e.kind, bookIds: e.bookIds, venueSymbols: e.venueSymbols, components: e.components })),
       lastTickAt: this.lastTickAt,
+      /** per live source: last fresh observation, current failure run (in-session tickers only), last error class */
+      sources: this.sourceHealth.view(),
       pushMode: this.deps.settings.pushMode,
       effectivePushMode: this.effectivePushMode(),
       bundle: this.bundle ? { publishedAt: this.bundle.publishedAt, priceIds: this.bundle.priceIds } : null,
@@ -575,6 +599,7 @@ export class OracleService {
         signerRegistered: this.signerActive,
         status: this.chainReason,
         minSources: Math.max(this.deps.settings.minSources, this.onchainMinSources ?? 0),
+        minSourcesProblem: this.minSourcesProblem,
         backoffUntil: this.chainBackoffUntil > this.now() ? this.chainBackoffUntil : null,
       },
       venue: { mode: this.deps.venue?.mode ?? null, enabled: this.deps.settings.venuePrices && !this.venueDisabled, disabledReason: this.venueDisabled },
