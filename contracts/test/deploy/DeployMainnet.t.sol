@@ -68,6 +68,10 @@ contract DeployMainnetHarness is DeployMainnet {
     function parsedOracleAndConfig() external view returns (bytes32 platform0, bool requireAtt, string memory priceConfig) {
         return (oracleSigners[0].platform, requireAttestations, ext.chainPriceConfig);
     }
+
+    function parsedOracleMinSources() external view returns (uint256) {
+        return prm.oracleMinSources;
+    }
 }
 
 /// @notice End-to-end (simulated) mainnet deploy: JSON input -> DeployMainnet (no mocks deployed by the script;
@@ -99,6 +103,7 @@ contract DeployMainnetTest is Test {
         bool mismatchFeed;
         uint256 nRoutes;
         address univ3Factory;
+        uint256 oracleMinSources;
     }
 
     string internal constant CHAIN_CFG = "../config/chains/4663.json";
@@ -178,6 +183,9 @@ contract DeployMainnetTest is Test {
         assertEq(BkrnToken(d.bkrn).balanceOf(community), 800_000_000e18);
         assertEq(TimelockController(payable(d.timelock)).getMinDelay(), 48 hours);
         assertTrue(d.bkrnDeployed);
+        // 2-source design (Chainlink + Pyth Pro): set at deploy, below the contract default of 3
+        assertEq(AttestedOracle(d.oracle).DEFAULT_MIN_SOURCES(), 3);
+        assertEq(AttestedOracle(d.oracle).minSources(), 2);
     }
 
     /// Branches 2-4 wired from the input: hedge routes + v3 factory, buyback reference, live multipliers,
@@ -391,6 +399,16 @@ contract DeployMainnetTest is Test {
         assertEq(_verify(_mainnetOpts(), d), 3);
     }
 
+    function test_verify_flags_oracle_min_sources_drift() public {
+        (DeployMainnet.Deployed memory d,) = _deployAndVerify(_mainnetOpts(), "min-sources");
+        vm.prank(d.timelock);
+        AttestedOracle(d.oracle).setMinSources(3);
+        assertEq(_verify(_mainnetOpts(), d), 1); // "oracle minSources == input"
+        vm.prank(d.timelock);
+        AttestedOracle(d.oracle).setMinSources(2);
+        assertEq(_verify(_mainnetOpts(), d), 0);
+    }
+
     function test_verify_flags_live_multiplier_outside_band() public {
         (DeployMainnet.Deployed memory d,) = _deployAndVerify(_mainnetOpts(), "band");
         MockStockToken(stocks[3]).updateMultiplier(1.2e18); // 20% > the 3% band: valuation fails closed
@@ -422,6 +440,7 @@ contract DeployMainnetTest is Test {
         assertEq(platform0, bytes32("INTEL_TDX"));
         assertTrue(reqAtt);
         assertEq(pc, CHAIN_CFG);
+        assertEq(s.parsedOracleMinSources(), 2); // Chainlink + Pyth Pro
     }
 
     function _assertExampleHead(DeployMainnetHarness s) internal view {
@@ -536,6 +555,19 @@ contract DeployMainnetTest is Test {
         _expectValidateRevert(o, "input: oracle.requireAttestations must be true on mainnet (VERIFY E1)");
     }
 
+    function test_refuses_oracle_min_sources_below_two_on_mainnet() public {
+        Opts memory o = _mainnetOpts();
+        o.oracleMinSources = 1;
+        _expectValidateRevert(o, "input: mainnet oracleMinSources must be >= 2 (Chainlink + Pyth Pro)");
+        o.oracleMinSources = 0;
+        _expectValidateRevert(o, "input: mainnet oracleMinSources must be >= 2 (Chainlink + Pyth Pro)");
+        // a rehearsal (46630) keeps only the generic floor: 1 is allowed there, 0 never
+        vm.chainId(46630);
+        o = _rehearsalOpts();
+        o.oracleMinSources = 0;
+        _expectValidateRevert(o, "input: oracleMinSources 0");
+    }
+
     function test_refuses_mismatched_network() public {
         Opts memory o = _mainnetOpts();
         o.network = "rehearsal";
@@ -636,6 +668,7 @@ contract DeployMainnetTest is Test {
         o.withPriceConfig = true;
         o.nRoutes = 5;
         o.univ3Factory = address(factory);
+        o.oracleMinSources = 2; // Chainlink + Pyth Pro
     }
 
     function _rehearsalOpts() internal view returns (Opts memory o) {
@@ -834,8 +867,11 @@ contract DeployMainnetTest is Test {
             "\"tiers\":{\"thresholds\":[\"50000000000\",\"250000000000\",\"1000000000000\"],",
             "\"bonds\":[\"25000000000000000000000\",\"100000000000000000000000\",\"400000000000000000000000\"]},"
         );
-        string memory e =
-            "\"backstopMaxCoverBps\":5000,\"stakingCooldown\":1209600,\"stakingRewardsDuration\":604800,\"oracleMinSources\":2},";
+        string memory e = string.concat(
+            "\"backstopMaxCoverBps\":5000,\"stakingCooldown\":1209600,\"stakingRewardsDuration\":604800,\"oracleMinSources\":",
+            vm.toString(o.oracleMinSources),
+            "},"
+        );
         return string.concat(a, b, c, d, e);
     }
 

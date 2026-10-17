@@ -111,7 +111,7 @@
     "backstopMaxCoverBps": 10000,
     "stakingCooldown": 604800,
     "stakingRewardsDuration": 604800,
-    "oracleMinSources": 3
+    "oracleMinSources": 2
   },
   "buyback": {
     "poolFee": 3000,
