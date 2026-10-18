@@ -126,8 +126,46 @@ const jsonRpcError = (status: number, message: string) =>
   });
 
 /** Stateless Streamable HTTP: POST only (no server-initiated streams, no sessions). */
+/**
+ * Most JSON-RPC messages one POST may carry (audit L-3: the SDK accepts 100, and each tools/call runs
+ * several procedures). Same bound as a tRPC batch (MAX_TRPC_BATCH). Bodies are small JSON-RPC messages.
+ */
+export const MCP_MAX_BATCH = 10;
+export const MCP_MAX_BODY_BYTES = 64 * 1024;
+
+/** The body as UTF-8 text, or null as soon as more than `max` bytes arrived (never buffers past the cap). */
+async function readCapped(req: Request, max: number): Promise<string | null> {
+  if (!req.body) return "";
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) {
+      void reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks));
+}
+
 export async function handleMcpRequest(deps: ApiDeps, req: Request): Promise<Response> {
   if (req.method !== "POST") return jsonRpcError(405, "Method not allowed: this MCP endpoint is stateless (POST only)");
+  const declared = Number(req.headers.get("content-length") ?? 0);
+  if (declared > MCP_MAX_BODY_BYTES) return jsonRpcError(413, "Request body too large");
+  const body = await readCapped(req, MCP_MAX_BODY_BYTES);
+  if (body === null) return jsonRpcError(413, "Request body too large");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    parsed = undefined; // the transport answers the parse error
+  }
+  if (Array.isArray(parsed) && parsed.length > MCP_MAX_BATCH) return jsonRpcError(400, `Invalid Request: batch must not exceed ${MCP_MAX_BATCH} messages`);
+  req = new Request(req.url, { method: req.method, headers: req.headers, body });
   const server = createMcpServer(deps);
   const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   try {

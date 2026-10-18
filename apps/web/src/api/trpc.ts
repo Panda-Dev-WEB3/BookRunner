@@ -1,6 +1,6 @@
 // tRPC v11 client (superjson) against services/api. Typed procedures go through `trpc`; optional
 // procedures this API version may not serve yet go through the untyped client (see useOptional).
-import { createTRPCUntypedClient, httpBatchLink, httpLink } from "@trpc/client";
+import { createTRPCUntypedClient, httpBatchLink, httpLink, splitLink } from "@trpc/client";
 import { createTRPCReact } from "@trpc/react-query";
 import { QueryClient } from "@tanstack/react-query";
 import superjson from "superjson";
@@ -13,8 +13,25 @@ export const trpc = createTRPCReact<AppRouter>();
 /** The API refuses HTTP batches above this many calls (services/api MAX_TRPC_BATCH): split at it. */
 export const TRPC_MAX_BATCH = 10;
 
+/**
+ * Procedures the API counts as a full batch on their own (services/api TRPC_HEAVY_PREFIXES: Merkle proofs and
+ * roots); nginx rate-limits them in a stricter per-IP zone. Sent unbatched.
+ */
+export const isHeavyProcedure = (path: string) => path.startsWith("receipts.");
+
+/** Links of the typed client: receipts.* unbatched, everything else batched up to TRPC_MAX_BATCH. */
+export function trpcLinks() {
+  return [
+    splitLink<AppRouter>({
+      condition: (op) => isHeavyProcedure(op.path),
+      true: httpLink({ url: trpcUrl, transformer: superjson }),
+      false: httpBatchLink({ url: trpcUrl, transformer: superjson, maxURLLength: 4000, maxItems: TRPC_MAX_BATCH }),
+    }),
+  ];
+}
+
 export function createTrpcClient() {
-  return trpc.createClient({ links: [httpBatchLink({ url: trpcUrl, transformer: superjson, maxURLLength: 4000, maxItems: TRPC_MAX_BATCH })] });
+  return trpc.createClient({ links: trpcLinks() });
 }
 
 /** Unbatched, untyped client for optional procedures (an unknown path must not fail a batch). */
