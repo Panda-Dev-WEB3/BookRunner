@@ -388,6 +388,22 @@ contract AttestedOracleTest is EngineBase {
         assertEq(oracle.latest(PID_A).sourceCount, 1);
     }
 
+    /// Mainnet primary-confirm: minSources 1, Chainlink alone signs a non-held price with sourceCount 1.
+    function test_push_minSourcesOne_primaryConfirm() public {
+        vm.prank(timelock);
+        oracle.setMinSources(1);
+        IAttestedOracle.PriceUpdate memory z = _update(PID_A, 2e18, uint64(block.timestamp), false, 0);
+        bytes memory zsig = _sign(SIGNER_PK, z);
+        vm.expectRevert(abi.encodeWithSelector(AttestedOracle.InsufficientSources.selector, 0, 1));
+        oracle.push(z, zsig);
+        IAttestedOracle.PriceUpdate memory u = _update(PID_A, 2e18, uint64(block.timestamp), false, 1);
+        oracle.push(u, _sign(SIGNER_PK, u));
+        (uint256 price, bool held) = oracle.priceOf(PID_A);
+        assertEq(price, 2e18);
+        assertFalse(held);
+        assertEq(oracle.latest(PID_A).sourceCount, 1);
+    }
+
     // ------------------------------------------------------------------ fuzz
 
     function testFuzz_push_roundTrip(bytes32 pid, uint256 price, uint32 dt, bool held, uint32 sources)

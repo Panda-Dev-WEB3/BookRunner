@@ -297,6 +297,12 @@ contract VerifyHandover is MainnetInput {
         _row(signersOk, "oracle signers active with input attestations (attested: setAttestedSigner digest)");
         _row(!o.isSigner(deployerAddr), "deployer is not an oracle signer");
         _row(o.minSources() == prm.oracleMinSources, "oracle minSources == input");
+        if (inChainId == MAINNET_CHAIN_ID) {
+            _row(
+                o.minSources() == MAINNET_ORACLE_MIN_SOURCES,
+                "oracle minSources == 1 (mainnet primary-confirm)"
+            );
+        }
         StockTokenRegistry reg = StockTokenRegistry(cfg.stockRegistry());
         bool tokensOk = true;
         for (uint256 i; i < stocks.length; ++i) {
