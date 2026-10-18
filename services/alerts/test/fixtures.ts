@@ -46,6 +46,8 @@ export function confirmOracle(over: Partial<OracleProbe> = {}): OracleProbe {
     since: NOW - 3_600_000,
     checkedAt: NOW - 1_000,
     primaryPrice: price,
+    primaryTs: NOW - 600_000,
+    lagSince: null,
     confirmers: [{ name: "dex-twap", price: price * 1.001, diffBps: 10 }],
   });
   return {
@@ -53,6 +55,7 @@ export function confirmOracle(over: Partial<OracleProbe> = {}): OracleProbe {
     error: null,
     policy: "primary-confirm",
     confirmBps: 200,
+    primaryLagBps: 100,
     sources: [src("chainlink", "chainlink", "primary"), src("dex-twap", "dex", "confirm"), src("pyth", "pyth", "confirm")],
     confirm: [ok("NVDA", 180), ok("TSLA", 250), ok("AAPL", 230)],
     minSourcesProblem: null,
@@ -85,6 +88,7 @@ export function snap(over: Partial<Snapshot> = {}): Snapshot {
       error: null,
       policy: "median",
       confirmBps: null,
+      primaryLagBps: null,
       sources: [
         { name: "chainlink", kind: "chainlink", role: "median", lastOkAt: NOW - 1_000, failingSince: null, failingTickers: [], lastError: null },
         { name: "pyth", kind: "pyth", role: "median", lastOkAt: NOW - 1_000, failingSince: null, failingTickers: [], lastError: null },

@@ -233,7 +233,7 @@ describe("oracle sources", () => {
     ...over,
   });
   const withSources = (sources: OracleSourceSnap[], minSourcesProblem: string | null = null, unpublished: Array<{ priceId: string; since: number; reason: string }> = []) =>
-    snap({ oracle: { ok: true, error: null, policy: "median", confirmBps: null, sources, confirm: [], minSourcesProblem, unpublished } });
+    snap({ oracle: { ok: true, error: null, policy: "median", confirmBps: null, primaryLagBps: null, sources, confirm: [], minSourcesProblem, unpublished } });
 
   test("any live source failing in-session tickers for more than 60 s alerts; two on the same ticker is critical", () => {
     expect(oracle(snap(), rules())).toEqual([]);
@@ -305,6 +305,8 @@ describe("oracle primary-confirm (mainnet: Chainlink signs, DEX TWAP / Pyth conf
     since: sinceMs === null ? null : NOW - sinceMs,
     checkedAt: NOW - 1_000,
     primaryPrice: 180,
+    primaryTs: NOW - 3_600_000,
+    lagSince: null,
     confirmers: status === "diverged" ? [{ name: "dex-twap", price: 184.68, diffBps: 260 }] : [],
     ...over,
   });
@@ -417,6 +419,25 @@ describe("oracle primary-confirm (mainnet: Chainlink signs, DEX TWAP / Pyth conf
     expect(c[0]!.severity).toBe("warning");
     // no failing confirm source reported (e.g. stale observations): no reason suffix
     expect(c[0]!.summary).toBe("oracle: no confirm source for NVDA for 10m in session: Chainlink is published unconfirmed");
+  });
+
+  test("oracle_primary_suspect_stale: gap > primaryLagBps for 10 min with no Chainlink round since (warning only)", () => {
+    const lag = (lagMs: number | null, roundAgeMs: number, over: Partial<OracleConfirmSnap> = {}) =>
+      cf("NVDA", "ok", 3_600_000, { diffBps: 150, lagSince: lagMs === null ? null : NOW - lagMs, primaryTs: NOW - roundAgeMs, confirmers: [{ name: "dex-twap", price: 182.7, diffBps: 150 }], ...over });
+    expect(oracle(pc({ confirm: [lag(599_000, 700_000)] }), rules())).toEqual([]); // < 10 min
+    const c = oracle(pc({ confirm: [lag(600_000, 700_000)] }), rules());
+    expect(keys(c)).toEqual(["oracle_primary_suspect_stale:NVDA"]);
+    expect(c[0]!.severity).toBe("warning");
+    expect(c[0]!.summary).toContain("NVDA Chainlink 180 (round 12m old) vs dex-twap 182.7 (150 bps): gap above 100 bps for 10m in session with no new Chainlink round");
+    // a Chainlink round arrived during the gap: the feed is alive (the market moved again), no alert
+    expect(oracle(pc({ confirm: [lag(900_000, 300_000)] }), rules())).toEqual([]);
+    // no lag run, or off-hours: nothing
+    expect(oracle(pc({ confirm: [lag(null, 9_000_000)] }), rules())).toEqual([]);
+    expect(oracle(pc({ confirm: [lag(900_000, 9_000_000, { status: "closed" })] }), rules())).toEqual([]);
+    // the duration is configurable; the threshold text follows the oracle's primaryLagBps
+    expect(keys(oracle(pc({ confirm: [lag(300_000, 400_000)] }), rules({ oraclePrimaryLagSec: 300 })))).toEqual(["oracle_primary_suspect_stale:NVDA"]);
+    expect(oracle(pc({ primaryLagBps: 80, confirm: [lag(600_000, 700_000)] }), rules())[0]!.summary).toContain("gap above 80 bps");
+    expect(loadConfig({ NETWORK: "mainnet", CHAIN_ID: "4663" }).rules.oraclePrimaryLagSec).toBe(600);
   });
 
   test('"closed" (off-hours) and "no-primary" never raise a confirm alert', () => {

@@ -343,7 +343,7 @@ const bps = (b: number | null) => (b === null ? "?" : `${Math.round(b)} bps`);
  *
  * median (devnet / testnet; N live sources, M required, median within the band): oracle_source_failing when a live
  * source has failed in-session tickers for longer than oracleSourceFailSec: a warning while the remaining sources
- * carry the price (with 3 live / 2 required: no spare left), critical when two or more fail on the same ticker (no
+ * carry the price, critical when two or more fail on the same ticker (no
  * price for it; after maxPriceAge valuations and liquidations revert). oracle_price_missing: an in-session ticker
  * without a publishable price for oraclePriceMissingSec that two failing sources do not explain.
  *
@@ -468,6 +468,23 @@ function oraclePrimaryConfirm(o: OracleProbe, s: Snapshot, c: RuleConfig): Condi
       rule: "oracle_confirm_divergence",
       severity: wide || many ? "critical" : "warning",
       summary: `oracle: ${x.priceId} Chainlink ${px(x.primaryPrice)} vs ${vs}: ${bps(x.diffBps)} apart (limit ${band} bps) for ${dur(runAge(x) ?? 0)} in session${why ? ` (${why})` : ""}; the published price is still Chainlink (the DEX never moves it). Check Chainlink lag (0.5% deviation / 24 h heartbeat update rule), the USDG peg, DEX pool manipulation; docs/RUNBOOK.md "Real prices"`,
+    });
+  }
+
+  // a sustained gap above the lag threshold with no Chainlink round since it began: Chainlink rounds on a 50 bps
+  // deviation, so a feed that silently stopped posting looks like this long before heartbeat + grace (~24 h) marks it
+  // stale; until then the oracle keeps signing the frozen round as fresh
+  const lagBps = o.primaryLagBps ?? 100;
+  for (const x of o.confirm) {
+    if (x.status === "closed" || x.lagSince == null || x.primaryTs == null || x.primaryTs > x.lagSince) continue;
+    const lagAge = (s.now - x.lagSince) / 1000;
+    if (lagAge < c.oraclePrimaryLagSec) continue;
+    const vs = x.confirmers.length ? x.confirmers.map((k) => `${k.name} ${px(k.price)} (${bps(k.diffBps)})`).join(", ") : "?";
+    out.push({
+      key: `oracle_primary_suspect_stale:${x.priceId}`,
+      rule: "oracle_primary_suspect_stale",
+      severity: "warning",
+      summary: `oracle: ${x.priceId} Chainlink ${px(x.primaryPrice)} (round ${dur((s.now - x.primaryTs) / 1000)} old) vs ${vs}: gap above ${lagBps} bps for ${dur(lagAge)} in session with no new Chainlink round (its deviation rule is 50 bps): the feed may have stopped updating and is still signed as fresh until heartbeat + grace (~24 h). Check the round on-chain and Chainlink status; consider reduce-only on RHX5 (docs/RUNBOOK.md "Real prices")`,
     });
   }
 

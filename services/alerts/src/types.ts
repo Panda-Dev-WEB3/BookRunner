@@ -134,6 +134,10 @@ export interface OracleConfirmSnap {
   /** unix ms of the last evaluation */
   checkedAt: number | null;
   primaryPrice: number | null;
+  /** unix ms: updatedAt of the Chainlink round behind primaryPrice */
+  primaryTs: number | null;
+  /** unix ms: start of the run in which the confirm gap exceeds the oracle's primaryLagBps (null = none) */
+  lagSince: number | null;
   confirmers: Array<{ name: string; price: number; diffBps: number }>;
 }
 
@@ -144,6 +148,8 @@ export interface OracleProbe {
   policy: OraclePolicy;
   /** primary-confirm: ORACLE_CONFIRM_BPS (divergence threshold); null when absent (median) */
   confirmBps: number | null;
+  /** primary-confirm: ORACLE_PRIMARY_LAG_BPS (stalled-feed gap); null when absent */
+  primaryLagBps: number | null;
   sources: OracleSourceSnap[];
   /** primary-confirm: per-ticker confirmation status; [] under median */
   confirm: OracleConfirmSnap[];

@@ -109,6 +109,11 @@ const shape = {
   ALERT_ORACLE_CONFIRM_UNAVAILABLE_SECONDS: int(600),
   /** primary-confirm: this many tickers diverged at once makes every divergence alert critical */
   ALERT_ORACLE_CONFIRM_CRITICAL_TICKERS: z.coerce.number().int().min(1).default(3),
+  /**
+   * primary-confirm: a confirm gap above the oracle's ORACLE_PRIMARY_LAG_BPS for this long in session, with no Chainlink
+   * round since it began = oracle_primary_suspect_stale (the feed may have silently stopped updating)
+   */
+  ALERT_ORACLE_PRIMARY_LAG_SECONDS: int(600),
   /** default: on for testnet / mainnet, off on devnet */
   ALERT_ORACLE_EXPECTED: z.string().optional(),
   ALERT_LABEL: z.string().optional(),
@@ -188,6 +193,8 @@ export interface RuleConfig {
   oracleConfirmUnavailableSec: number;
   /** primary-confirm: this many tickers diverged at once = critical */
   oracleConfirmCriticalTickers: number;
+  /** primary-confirm: stalled-feed gap duration (s) for oracle_primary_suspect_stale */
+  oraclePrimaryLagSec: number;
   backupExpected: boolean;
   backupMaxAgeSec: number;
   supervisorExpected: boolean;
@@ -293,6 +300,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       oracleConfirmDivergenceSec: e.ALERT_ORACLE_CONFIRM_DIVERGENCE_SECONDS,
       oracleConfirmUnavailableSec: e.ALERT_ORACLE_CONFIRM_UNAVAILABLE_SECONDS,
       oracleConfirmCriticalTickers: e.ALERT_ORACLE_CONFIRM_CRITICAL_TICKERS,
+      oraclePrimaryLagSec: e.ALERT_ORACLE_PRIMARY_LAG_SECONDS,
       backupExpected: e.ALERT_BACKUP_EXPECTED === undefined || e.ALERT_BACKUP_EXPECTED === "" ? network !== "devnet" : e.ALERT_BACKUP_EXPECTED === "1" || e.ALERT_BACKUP_EXPECTED.toLowerCase() === "true",
       backupMaxAgeSec: Math.round(e.ALERT_BACKUP_MAX_AGE_HOURS * 3600),
       supervisorExpected: true,

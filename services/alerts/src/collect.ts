@@ -156,7 +156,7 @@ export function parseBackup(raw: string | null): BackupSnap | null {
 }
 
 /** An oracle probe that saw no usable body (unreachable, HTTP error, unknown shape). */
-export const oracleDown = (error: string): OracleProbe => ({ ok: false, error, policy: "median", confirmBps: null, sources: [], confirm: [], minSourcesProblem: null, unpublished: [] });
+export const oracleDown = (error: string): OracleProbe => ({ ok: false, error, policy: "median", confirmBps: null, primaryLagBps: null, sources: [], confirm: [], minSourcesProblem: null, unpublished: [] });
 
 const ROLES = new Set<OracleSourceRole>(["primary", "confirm", "median"]);
 const CONFIRM_STATUS = new Set<OracleConfirmSnap["status"]>(["ok", "diverged", "unavailable", "closed", "no-primary"]);
@@ -185,6 +185,8 @@ function parseConfirm(raw: unknown): OracleConfirmSnap[] {
         since: num(x.since),
         checkedAt: num(x.checkedAt),
         primaryPrice: num(x.primaryPrice),
+        primaryTs: num(x.primaryTs),
+        lagSince: num(x.lagSince),
         confirmers: confirmers.slice(0, 8),
       },
     ];
@@ -194,7 +196,7 @@ function parseConfirm(raw: unknown): OracleConfirmSnap[] {
 /** The oracle's GET /health body -> policy + per-source health + confirm status (unknown shapes -> not ok). */
 export function parseOracleHealth(body: unknown): OracleProbe {
   if (!body || typeof body !== "object") return oracleDown("unexpected body");
-  const o = body as { policy?: unknown; confirmBps?: unknown; sources?: unknown; confirm?: unknown; onchain?: { minSourcesProblem?: unknown }; unpublished?: unknown };
+  const o = body as { policy?: unknown; confirmBps?: unknown; primaryLagBps?: unknown; sources?: unknown; confirm?: unknown; onchain?: { minSourcesProblem?: unknown }; unpublished?: unknown };
   const policy: OraclePolicy = o.policy === "primary-confirm" ? "primary-confirm" : "median";
   const sources: OracleSourceSnap[] = Array.isArray(o.sources)
     ? o.sources
@@ -223,6 +225,7 @@ export function parseOracleHealth(body: unknown): OracleProbe {
     error: null,
     policy,
     confirmBps: num(o.confirmBps),
+    primaryLagBps: num(o.primaryLagBps),
     sources,
     confirm: parseConfirm(o.confirm),
     minSourcesProblem: typeof msp === "string" ? msp : null,

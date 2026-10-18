@@ -143,6 +143,7 @@ describe("collect", () => {
       error: null,
       policy: "median",
       confirmBps: null,
+      primaryLagBps: null,
       minSourcesProblem: null,
       sources: [
         { name: "chainlink", kind: "chainlink", role: "median", lastOkAt: NOW - 1000, failingSince: null, failingTickers: [], lastError: null },
@@ -155,20 +156,21 @@ describe("collect", () => {
     expect(parseOracleHealth({ onchain: { minSourcesProblem: "AttestedOracle.minSources()=3 > 2" } }).minSourcesProblem).toBe("AttestedOracle.minSources()=3 > 2");
     const down = (async () => new Response("no", { status: 503 })) as unknown as typeof fetch;
     const r = await collect({ db, kv, chain, fetch: down, now: () => NOW }, { ...settings, oracleUrl: "http://oracle:4410" }, emptyMemory(), 86_400);
-    expect(r.snapshot.oracle).toEqual({ ok: false, error: "HTTP 503", policy: "median", confirmBps: null, sources: [], confirm: [], minSourcesProblem: null, unpublished: [] });
+    expect(r.snapshot.oracle).toEqual({ ok: false, error: "HTTP 503", policy: "median", confirmBps: null, primaryLagBps: null, sources: [], confirm: [], minSourcesProblem: null, unpublished: [] });
   });
 
   test("oracle /health primary-confirm: policy, confirmBps, source roles, confirm[]", () => {
     const p = parseOracleHealth({
       policy: "primary-confirm",
       confirmBps: 200,
+      primaryLagBps: 100,
       sources: [
         { name: "chainlink", kind: "chainlink", role: "primary", lastOkAt: NOW - 1000, failingSince: null, failingTickers: [], lastError: null, lastErrorAt: null },
         { name: "dex-twap", kind: "dex", role: "confirm", lastOkAt: NOW - 1000, failingSince: NOW - 5000, failingTickers: ["TSLA"], lastError: "timeout", lastErrorAt: NOW },
         { name: "odd", kind: "x", role: "boss", lastOkAt: null, failingSince: null, failingTickers: [], lastError: null },
       ],
       confirm: [
-        { priceId: "NVDA", status: "diverged", diffBps: 260.4, since: NOW - 180_000, checkedAt: NOW - 1000, primaryPrice: 180, confirmers: [{ name: "dex-twap", price: 184.7, diffBps: 260.4 }, { name: 5 }, { name: "pyth", price: "x", diffBps: 1 }] },
+        { priceId: "NVDA", status: "diverged", diffBps: 260.4, since: NOW - 180_000, checkedAt: NOW - 1000, primaryPrice: 180, primaryTs: NOW - 900_000, lagSince: NOW - 600_000, confirmers: [{ name: "dex-twap", price: 184.7, diffBps: 260.4 }, { name: 5 }, { name: "pyth", price: "x", diffBps: 1 }] },
         { priceId: "TSLA", status: "unavailable", diffBps: null, since: NOW - 700_000, checkedAt: NOW - 1000, primaryPrice: 250, confirmers: [] },
         { priceId: "AAPL", status: "closed", diffBps: null, since: null, checkedAt: NOW - 1000, primaryPrice: null },
         { priceId: "AMZN", status: "no-primary", diffBps: null, since: NOW - 60_000, checkedAt: NOW - 1000, primaryPrice: null, confirmers: [] },
@@ -181,17 +183,18 @@ describe("collect", () => {
     });
     expect(p.policy).toBe("primary-confirm");
     expect(p.confirmBps).toBe(200);
+    expect(p.primaryLagBps).toBe(100);
     expect(p.sources.map((x) => [x.name, x.role])).toEqual([
       ["chainlink", "primary"],
       ["dex-twap", "confirm"],
       ["odd", "median"], // unknown role -> median
     ]);
     expect(p.confirm).toEqual([
-      { priceId: "NVDA", status: "diverged", diffBps: 260.4, since: NOW - 180_000, checkedAt: NOW - 1000, primaryPrice: 180, confirmers: [{ name: "dex-twap", price: 184.7, diffBps: 260.4 }] },
-      { priceId: "TSLA", status: "unavailable", diffBps: null, since: NOW - 700_000, checkedAt: NOW - 1000, primaryPrice: 250, confirmers: [] },
-      { priceId: "AAPL", status: "closed", diffBps: null, since: null, checkedAt: NOW - 1000, primaryPrice: null, confirmers: [] },
-      { priceId: "AMZN", status: "no-primary", diffBps: null, since: NOW - 60_000, checkedAt: NOW - 1000, primaryPrice: null, confirmers: [] },
-      { priceId: "X".repeat(64), status: "ok", diffBps: 12, since: null, checkedAt: NOW, primaryPrice: 1, confirmers: [] },
+      { priceId: "NVDA", status: "diverged", diffBps: 260.4, since: NOW - 180_000, checkedAt: NOW - 1000, primaryPrice: 180, primaryTs: NOW - 900_000, lagSince: NOW - 600_000, confirmers: [{ name: "dex-twap", price: 184.7, diffBps: 260.4 }] },
+      { priceId: "TSLA", status: "unavailable", diffBps: null, since: NOW - 700_000, checkedAt: NOW - 1000, primaryPrice: 250, primaryTs: null, lagSince: null, confirmers: [] },
+      { priceId: "AAPL", status: "closed", diffBps: null, since: null, checkedAt: NOW - 1000, primaryPrice: null, primaryTs: null, lagSince: null, confirmers: [] },
+      { priceId: "AMZN", status: "no-primary", diffBps: null, since: NOW - 60_000, checkedAt: NOW - 1000, primaryPrice: null, primaryTs: null, lagSince: null, confirmers: [] },
+      { priceId: "X".repeat(64), status: "ok", diffBps: 12, since: null, checkedAt: NOW, primaryPrice: 1, primaryTs: null, lagSince: null, confirmers: [] },
     ]);
     // unknown policy / malformed fields: median, null, []
     expect(parseOracleHealth({ policy: "vote", confirmBps: "abc", confirm: {} })).toMatchObject({ ok: true, policy: "median", confirmBps: null, confirm: [] });
