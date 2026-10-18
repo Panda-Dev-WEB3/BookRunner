@@ -19,6 +19,7 @@ import {
   riskState,
   rpc,
   venueReportAge,
+  venueListing,
   venueSymbol,
 } from "../src/rules";
 import { BUILDER_FEED_STATUS_TTL_SEC, type BuilderFeedStatusMsg, KEYS, VENUE_SYMBOL_ISSUES_TTL_SEC } from "@bookrunner/shared/queues";
@@ -119,13 +120,31 @@ describe("venue_report_stale", () => {
     expect(c[0]?.summary).toMatch(/NVDA-PERP.*withdrawals still run/);
     expect(venueSymbol(snap({ books: [book({ venueSymbolError: null })] }), rules())).toEqual([]);
     expect(venueSymbol(snap({ books: [book()] }), rules())).toEqual([]);
+    // a Retired / Cancelled book has nothing left on the venue
+    for (const state of ["Retired", "Cancelled"]) expect(venueSymbol(snap({ books: [book({ state, venueSymbolError: "no market" })] }), rules())).toEqual([]);
+    expect(keys(venueSymbol(snap({ books: [book({ state: "Retiring", venueSymbolError: "no market" })] }), rules()))).toEqual(["venue_symbol_unmapped:3"]);
+  });
+
+  test("venue_listing_pending: manual listing mode, per book, critical once Live (VERIFY O20)", () => {
+    const manual = { ts: NOW, mode: "live" as const, builderPush: true, listingMode: "manual" as const };
+    const l = { symbol: "PERP_NVDA_USDC_bookrunner", venueStatus: null, since: NOW - 600_000, error: null };
+    const live = venueListing(snap({ venueOps: manual, books: [book({ venueListing: l })] }), rules());
+    expect(live.map((x) => [x.key, x.severity])).toEqual([["venue_listing_pending:3", "critical"]]);
+    expect(live[0]?.summary).toMatch(/PERP_NVDA_USDC_bookrunner awaiting listing in Orderly One for 10m \(not on \/v1\/public\/info\)/);
+    const sub = venueListing(snap({ venueOps: manual, books: [book({ state: "Subscription", venueListing: { ...l, venueStatus: "PENDING", error: "HTTP 502" } })] }), rules());
+    expect(sub.map((x) => [x.key, x.severity])).toEqual([["venue_listing_pending:3", "warning"]]);
+    expect(sub[0]?.summary).toContain("Orderly status PENDING; last check failed: HTTP 502");
+    for (const state of ["Retired", "Cancelled"]) expect(venueListing(snap({ venueOps: manual, books: [book({ state, venueListing: l })] }), rules())).toEqual([]);
+    expect(venueListing(snap({ venueOps: { ...manual, listingMode: "api" }, books: [book({ venueListing: l })] }), rules())).toEqual([]);
+    expect(venueListing(snap({ venueOps: null, books: [book({ venueListing: l })] }), rules())).toEqual([]);
+    expect(venueListing(snap({ venueOps: manual, books: [book({ venueListing: null })] }), rules())).toEqual([]);
   });
 });
 
 describe("builder_price_push (live Orderly builder prices, VERIFY O18)", () => {
   const sym = (over: Record<string, unknown> = {}) => ({ symbol: "PERP_NVDA_USDC_bookrunner", bookIds: [3], state: "pushing", lastPushAt: NOW, failingSince: null, error: null, preListing: false, ...over });
   const feed = (symbols: ReturnType<typeof sym>[], ts = NOW) => ({ ts, socket: { state: "ready", lastError: null }, symbols }) as BuilderFeedSnap;
-  const liveOps = { ts: NOW, mode: "live" as const, builderPush: true };
+  const liveOps = { ts: NOW, mode: "live" as const, builderPush: true, listingMode: "manual" as const };
   test("a symbol failing >= 30 s in session is critical; shorter, held or pushing is quiet", () => {
     const c = builderPricePush(snap({ builderFeed: feed([sym({ state: "disconnected", failingSince: NOW - 31_000, error: "auth failed" })]) }), rules());
     expect(c.map((x) => [x.key, x.severity])).toEqual([["builder_price_push:PERP_NVDA_USDC_bookrunner", "critical"]]);

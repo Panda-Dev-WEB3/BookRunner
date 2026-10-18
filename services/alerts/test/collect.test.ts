@@ -72,7 +72,17 @@ describe("collect", () => {
     [KEYS.venueReport(3), JSON.stringify({ asOf: NOW / 1000 - 30 })],
     [SUPERVISOR_STATUS_KEY, JSON.stringify(supervisor())],
     [BACKUP_STATUS_KEY, JSON.stringify({ ts: NOW, ok: true })],
-    [KEYS.venueSymbolIssues, JSON.stringify({ v: 1, ts: NOW, mode: "live", books: [{ bookId: 3, charterSymbol: "NVDA-PERP", error: "no market" }] })],
+    [
+      KEYS.venueSymbolIssues,
+      JSON.stringify({
+        v: 1,
+        ts: NOW,
+        mode: "live",
+        books: [{ bookId: 3, charterSymbol: "NVDA-PERP", error: "no market" }],
+        listingMode: "manual",
+        awaitingListing: [{ bookId: 3, symbol: "PERP_NVDA_USDC_bookrunner", venueStatus: null, since: NOW - 60_000, error: null }, { bookId: "x" }],
+      }),
+    ],
     [
       KEYS.builderFeedStatus,
       JSON.stringify({
@@ -102,7 +112,8 @@ describe("collect", () => {
       [4, "pool_engine", null, null, null],
     ]);
     expect(s.books!.map((b) => b.venueSymbolError)).toEqual(["no market", null]);
-    expect(s.venueOps).toEqual({ ts: NOW, mode: "live", builderPush: false });
+    expect(s.venueOps).toEqual({ ts: NOW, mode: "live", builderPush: false, listingMode: "manual" });
+    expect(s.books!.map((b) => b.venueListing)).toEqual([{ symbol: "PERP_NVDA_USDC_bookrunner", venueStatus: null, since: NOW - 60_000, error: null }, null]);
     expect(s.builderFeed).toEqual({
       ts: NOW,
       socket: { state: "ready", lastError: null },

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { KEYS } from "@bookrunner/shared";
 import { createTRPCClient, createTRPCUntypedClient, httpBatchLink, httpLink } from "@trpc/client";
 import superjson from "superjson";
 import { MAX_TRPC_BATCH, createApp } from "../src/app";
@@ -25,6 +26,20 @@ describe("http app", () => {
     // no reconnaissance surface for anonymous callers: no full procedure list, no uptime
     expect(body.procedures).toBeUndefined();
     expect(body.uptimeSec).toBeUndefined();
+  });
+
+  test("GET /health carries ops-venue's Orderly listing status when it is in Redis (awaiting listing in Orderly One)", async () => {
+    const { w, app } = setup();
+    const none = (await (await app.request("/health")).json()) as { orderlyListing?: unknown };
+    expect(none.orderlyListing).toBeUndefined();
+    await w.deps.kv.set(
+      KEYS.venueSymbolIssues,
+      JSON.stringify({ v: 1, ts: 1, mode: "live", books: [], listingMode: "manual", awaitingListing: [{ bookId: 3, symbol: "PERP_NVDA_USDC_bookrunner", venueStatus: null, since: 1000, error: "HTTP 502" }, { bookId: "x" }] }),
+      600,
+    );
+    const body = (await (await app.request("/health")).json()) as { orderlyListing?: unknown };
+    // the check error stays in ops-venue's logs / alerts, not on the public endpoint
+    expect(body.orderlyListing).toEqual({ mode: "live", listingMode: "manual", awaiting: [{ bookId: 3, symbol: "PERP_NVDA_USDC_bookrunner", venueStatus: null, since: 1000 }] });
   });
 
   test("GET /health?verbose lists every procedure and the uptime for the admin token only", async () => {

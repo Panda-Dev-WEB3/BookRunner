@@ -56,6 +56,19 @@ export interface BookSnap {
   venueReportAsOf: number | null;
   /** ops-venue (KEYS.venueSymbolIssues): why the book's charter symbol has no Orderly market (not listed / traded); null = fine or unknown */
   venueSymbolError?: string | null;
+  /** ops-venue (KEYS.venueSymbolIssues awaitingListing): the book's market is not listed on Orderly yet; null = listed or unknown */
+  venueListing?: VenueListingSnap | null;
+}
+
+/** A book's Orderly market not listed yet (ops-venue listing check, GET /v1/public/info/{symbol}). */
+export interface VenueListingSnap {
+  symbol: string;
+  /** NEW / PENDING; null = not on /v1/public/info */
+  venueStatus: string | null;
+  /** unix ms: first check that found it not listed */
+  since: number;
+  /** last listing check error, null = it succeeded */
+  error: string | null;
 }
 
 export interface KillEventSnap {
@@ -202,7 +215,7 @@ export interface BuilderFeedSnap {
     /** unix ms: start of the failing run (null = pushing or held) */
     failingSince: number | null;
     error: string | null;
-    /** every book on it is in Subscription: the market may not be listed yet (not paged) */
+    /** the market is not listed on Orderly yet (ops-venue listing check; before it: every book in Subscription): not paged */
     preListing: boolean;
   }>;
 }
@@ -213,6 +226,8 @@ export interface VenueOpsSnap {
   mode: "mock" | "live";
   /** the live builder price push is enabled: its status (builderFeed) must exist */
   builderPush: boolean;
+  /** ORDERLY_LISTING_MODE (an older ops-venue: api) */
+  listingMode: "api" | "manual";
 }
 
 export interface Snapshot {

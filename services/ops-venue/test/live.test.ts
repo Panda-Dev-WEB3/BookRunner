@@ -118,6 +118,31 @@ describe("orderly-key auth (ed25519)", () => {
   });
 });
 
+describe("listing status (GET /v1/public/info/{symbol}, ORDERLY_LISTING_MODE=manual)", () => {
+  // shapes observed on testnet-api.orderly.org 2026-10-18 (docs/VERIFY.md O20): rows carry `status` + `broker_id`; an
+  // unknown symbol answers 200 {success: true, timestamp} with no data
+  test("listed row with status; absent symbol = not listed; public (no orderly-key headers); only GETs", async () => {
+    const SYM = "PERP_BTC_USDC_testgg";
+    const { client, calls } = await liveBuilder({
+      [`GET /v1/public/info/${SYM}`]: { success: true, data: { symbol: SYM, broker_id: "testgg", quote_tick: 0.1, base_tick: 0.00001, status: "REDUCE_ONLY" }, timestamp: NOW },
+      "GET /v1/public/info/PERP_NVDA_USDC_bookrunner": { success: true, timestamp: NOW },
+    });
+    expect(await client.listingStatus(SYM)).toEqual({ listed: true, status: "REDUCE_ONLY" });
+    expect(await client.listingStatus("PERP_NVDA_USDC_bookrunner")).toEqual({ listed: false, status: null });
+    expect(calls.map((c) => c.method)).toEqual(["GET", "GET"]);
+    expect(calls.every((c) => !("orderly-key" in c.headers) && !("orderly-signature" in c.headers))).toBe(true);
+  });
+
+  test("a row for another symbol is not a listing of ours; a row without status is listed (docs schema)", async () => {
+    const { client } = await liveBuilder({
+      "GET /v1/public/info/PERP_NVDA_USDC_bookrunner": { success: true, data: { symbol: "PERP_NVDA_USDC" } },
+      "GET /v1/public/info/PERP_AAPL_USDC_bookrunner": { success: true, data: { symbol: "PERP_AAPL_USDC_bookrunner", quote_tick: 0.01 } },
+    });
+    expect(await client.listingStatus("PERP_NVDA_USDC_bookrunner")).toEqual({ listed: false, status: null });
+    expect(await client.listingStatus("PERP_AAPL_USDC_bookrunner")).toEqual({ listed: true, status: null });
+  });
+});
+
 describe("live endpoints against recorded fixtures", () => {
   test("positions + holding (docs examples): equity uses the settlement token's holding (+ isolated margin)", () => {
     const pos = FX.positions.data;

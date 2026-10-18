@@ -94,8 +94,9 @@ export interface BuilderFeedStatusMsg {
     failingSince: number | null;
     error: string | null;
     /**
-     * every book on this symbol is still in Subscription: the builder market / ORACLE_<broker> feed may not be listed
-     * yet (manual Orderly One listing, VERIFY O20), so a failure is logged, not paged
+     * the builder market is not listed on Orderly yet (ops-venue's listing check: absent from GET /v1/public/info/{symbol}
+     * or NEW / PENDING; before the first check: every book on it is in Subscription), so a failure is logged, not paged
+     * (manual Orderly One listing, VERIFY O20)
      */
     preListing: boolean;
   }>;
@@ -115,7 +116,31 @@ export interface VenueSymbolIssuesMsg {
   books: Array<{ bookId: number; charterSymbol: string; error: string }>;
   /** live builder price push enabled (KEYS.builderFeedStatus expected; alerts raise a missing status) */
   builderPush?: boolean;
+  /** ORDERLY_LISTING_MODE (absent: an older ops-venue, api) */
+  listingMode?: ListingMode;
+  /**
+   * Tradable Orderly books (not Cancelled / Retired) whose venue symbol is not listed on Orderly yet (GET
+   * /v1/public/info/{symbol}: absent, NEW or PENDING). In manual mode the admin lists it in Orderly One; alerts raise
+   * venue_listing_pending per book. Books not checked yet are not in the list.
+   */
+  awaitingListing?: Array<{
+    bookId: number;
+    symbol: string;
+    /** Orderly's status (NEW / PENDING), null = not on /v1/public/info */
+    venueStatus: string | null;
+    /** unix ms: first check that found it not listed */
+    since: number;
+    /** last check error (the previous phase is kept), null = the last check succeeded */
+    error: string | null;
+  }>;
 }
+
+/**
+ * ORDERLY_LISTING_MODE. api: ops-venue lists each book's market through the listing API (mock contract; live bodies
+ * VERIFY O13). manual: the admin lists the market in Orderly One; ops-venue only checks /v1/public/info and never calls
+ * a listing / status endpoint (VERIFY O20).
+ */
+export type ListingMode = "api" | "manual";
 
 export interface OraclePriceMsg {
   priceId: string; // e.g. "NVDA" or index name

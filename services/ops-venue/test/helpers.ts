@@ -490,7 +490,7 @@ export const testReportSigner = (chainId = 31337): ReportSigner => ({
  * Test context. `reportMode` defaults to "onchain" (the scenarios below assert report txs); the service
  * default is OPS_REPORT_MODE=signed (see report712.test.ts for the signed flow).
  */
-export async function makeCtx(o: { mode?: "mock" | "live"; authMode?: "strict" | "permissive"; now?: () => number; reportMode?: "signed" | "onchain" } = {}) {
+export async function makeCtx(o: { mode?: "mock" | "live"; authMode?: "strict" | "permissive"; now?: () => number; reportMode?: "signed" | "onchain"; listingMode?: "api" | "manual" } = {}) {
   const mock = makeMock(o.authMode ?? "permissive", o.now);
   const chain = new FakeChain();
   const store = new MemoryStore();
@@ -527,6 +527,7 @@ export async function makeCtx(o: { mode?: "mock" | "live"; authMode?: "strict" |
       reportDropConfirmations: 3,
       reportSettleSec: 30,
       reportMode: o.reportMode ?? "onchain",
+      ...(o.listingMode ? { listingMode: o.listingMode } : {}),
     },
     chain,
     store,
@@ -544,7 +545,7 @@ export async function makeCtx(o: { mode?: "mock" | "live"; authMode?: "strict" |
   return { ctx, mock, chain, store, sagas, keys, builder, builderKey, reports };
 }
 
-const provisioner = async (t: Awaited<ReturnType<typeof makeCtx>>) => new Provisioner(t.ctx, await loadOrCreateBuilderKey(t.keys, BUILDER_ID, undefined, 86_400_000, keyFromSecret));
+export const provisioner = async (t: Awaited<ReturnType<typeof makeCtx>>) => new Provisioner(t.ctx, await loadOrCreateBuilderKey(t.keys, BUILDER_ID, undefined, 86_400_000, keyFromSecret));
 
 /** Withdraw saga fixture: provisioned book (IF 25k / MM 75k on the venue and in the mock vault ledger). */
 export async function setupWithdraw(state: "Live" | "Retiring" = "Live", authMode: "strict" | "permissive" = "permissive") {

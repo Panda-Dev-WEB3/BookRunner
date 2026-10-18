@@ -61,9 +61,12 @@ export class OpsService {
     }
   }
 
-  /** Books loop: discover/refresh, provision new books, re-provision on state change. */
+  /**
+   * Books loop: discover/refresh, provision new books, re-provision on state change, listing checks (each symbol on its
+   * own backoff, worker/listing.ts), then the status for alerts. Every book is isolated: one failing never stops another.
+   */
   async syncBooks(): Promise<void> {
-    const delta = await this.registry.refresh();
+    const delta = await this.registry.refresh({ publish: false });
     for (const b of [...delta.added, ...delta.changed.map((c) => c.book)]) {
       try {
         await this.provisioner.ensure(b);
@@ -79,6 +82,8 @@ export class OpsService {
         this.ctx.log.debug({ bookId: b.bookId, err: errMsg(err) }, "provisioning retry failed");
       }
     }
+    await this.provisioner.listing.check(this.registry.list());
+    await this.registry.publishStatus();
   }
 
   async reportAll(): Promise<void> {

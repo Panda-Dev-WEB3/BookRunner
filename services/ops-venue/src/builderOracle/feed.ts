@@ -22,7 +22,10 @@ export interface FeedSocket {
 export interface PushTarget {
   symbol: string;
   bookIds: number[];
-  /** every book on it is still in Subscription: the market / feed may not be listed yet (failures are not paged) */
+  /**
+   * the market is not listed on Orderly yet (TrackedBook.listing: not on /v1/public/info, or NEW / PENDING; before the
+   * first listing check: every book on it is in Subscription); failures are logged, not paged
+   */
   preListing?: boolean;
 }
 
@@ -63,14 +66,22 @@ interface SymbolState {
 /** Book states whose builder market is (or is about to be) listed: provisioning lists every non-cancelled book. */
 const FED_STATES: ReadonlySet<string> = new Set(["Subscription", "Live", "Retiring"]);
 
+/**
+ * A book's market is not listed yet: the listing check's phase (worker/listing.ts) once there is one; before that, the
+ * book is still in Subscription (the market is listed during the subscription, by hand in manual mode, VERIFY O20).
+ */
+function preListingOf(b: Pick<TrackedBook, "state" | "listing">): boolean {
+  return b.listing ? b.listing.phase !== "listed" : b.state === "Subscription";
+}
+
 /** Push targets: tradable Orderly books (they have a builder market) in a listed state, one entry per venue symbol. */
-export function builderFeedTargets(books: ReadonlyArray<Pick<TrackedBook, "bookId" | "symbol" | "state" | "venueSymbolError">>): PushTarget[] {
+export function builderFeedTargets(books: ReadonlyArray<Pick<TrackedBook, "bookId" | "symbol" | "state" | "venueSymbolError" | "listing">>): PushTarget[] {
   const by = new Map<string, { bookIds: number[]; preListing: boolean }>();
   for (const b of books) {
     if (!tradable(b) || !FED_STATES.has(b.state)) continue;
     const cur = by.get(b.symbol) ?? { bookIds: [], preListing: true };
     cur.bookIds = [...cur.bookIds, b.bookId].sort((x, y) => x - y);
-    cur.preListing &&= b.state === "Subscription";
+    cur.preListing &&= preListingOf(b);
     by.set(b.symbol, cur);
   }
   return [...by.entries()].map(([symbol, v]) => ({ symbol, bookIds: v.bookIds, preListing: v.preListing }));
@@ -219,7 +230,7 @@ export class BuilderPriceFeed {
     if (prev === next && st.logged) return; // transitions only
     st.logged = true;
     const fields = { symbol: st.symbol, base: st.base, bookIds: st.bookIds, from: prev, to: next, preListing: st.preListing, ...(error ? { err: error } : {}) };
-    if (FAILING.has(next)) this.o.log.warn(fields, st.preListing ? "builder price push not running (books in Subscription: market may not be listed yet)" : "builder price push not running");
+    if (FAILING.has(next)) this.o.log.warn(fields, st.preListing ? "builder price push not running (market not listed on Orderly yet)" : "builder price push not running");
     else this.o.log.info(fields, next === "held" ? "builder price push paused: session closed (oracle holds)" : "builder price push running");
   }
 

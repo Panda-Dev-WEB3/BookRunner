@@ -2,10 +2,14 @@
 // adapter account ids and lifecycle state. Non-Orderly books are remembered and skipped. Each book's charter symbol is
 // mapped once here to its venue symbol (@bookrunner/shared resolveVenueSymbol: ORDERLY_MODE + ORDERLY_BROKER_ID). A
 // live book without an Orderly market stays tracked for its non-trading duties (TrackedBook.venueSymbolError); the
-// set of such books is published every pass (KEYS.venueSymbolIssues) for alerts.
+// set of such books is published every pass (KEYS.venueSymbolIssues) for alerts, with the books whose market is not
+// listed on Orderly yet (TrackedBook.listing, worker/listing.ts).
 import { type BookState, resolveVenueSymbol, type VenueSymbolIssuesMsg } from "@bookrunner/shared";
 import { errMsg } from "../util";
 import { lc, type OpsContext, type TrackedBook } from "./context";
+
+/** Book states whose market must be listed (published as awaitingListing when it is not). */
+const LISTING_STATES: ReadonlySet<string> = new Set(["Subscription", "Live", "Retiring"]);
 
 export interface RegistryDelta {
   added: TrackedBook[];
@@ -18,7 +22,8 @@ export class BookRegistry {
 
   constructor(private readonly ctx: OpsContext) {}
 
-  async refresh(): Promise<RegistryDelta> {
+  /** `publish: false`: the caller publishes the status itself (OpsService.syncBooks, after the listing checks). */
+  async refresh(opts: { publish?: boolean } = {}): Promise<RegistryDelta> {
     const delta: RegistryDelta = { added: [], changed: [] };
     const ids = await this.ctx.chain.listBookIds();
     for (const id of ids) {
@@ -60,7 +65,7 @@ export class BookRegistry {
         this.ctx.log.warn({ bookId: id, err: errMsg(err) }, "book load failed (will retry)");
       }
     }
-    await this.publishStatus();
+    if (opts.publish !== false) await this.publishStatus();
     return delta;
   }
 
@@ -69,7 +74,12 @@ export class BookRegistry {
     return this.list().filter((b) => b.venueSymbolError !== null);
   }
 
-  private async publishStatus(): Promise<void> {
+  /** Tradable books in Subscription / Live / Retiring whose market a listing check found not listed yet. */
+  awaitingListing(): TrackedBook[] {
+    return this.list().filter((b) => b.venueSymbolError === null && LISTING_STATES.has(b.state) && b.listing?.phase === "awaiting");
+  }
+
+  async publishStatus(): Promise<void> {
     if (!this.ctx.status) return;
     const msg: VenueSymbolIssuesMsg = {
       v: 1,
@@ -77,6 +87,11 @@ export class BookRegistry {
       mode: this.ctx.settings.mode,
       builderPush: this.ctx.settings.builderPush === true,
       books: this.untradable().map((b) => ({ bookId: b.bookId, charterSymbol: b.charterSymbol, error: b.venueSymbolError as string })),
+      listingMode: this.ctx.settings.listingMode ?? "api",
+      awaitingListing: this.awaitingListing().map((b) => {
+        const l = b.listing as NonNullable<TrackedBook["listing"]>;
+        return { bookId: b.bookId, symbol: b.symbol, venueStatus: l.venueStatus, since: l.since, error: l.error };
+      }),
     };
     try {
       await this.ctx.status.venueSymbolIssues(msg);

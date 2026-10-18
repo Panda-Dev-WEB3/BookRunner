@@ -318,7 +318,18 @@ export class OrderlyBuilderClient implements OrderlyBuilderApi {
     return { symbol: r.symbol ?? p.symbol, ...(r.status ? { status: r.status } : {}) };
   }
 
-  /** Delist / reduce-only a symbol (retirement). Mock contract path; live VERIFY (Orderly One admin). */
+  /**
+   * The venue symbol's listing on Orderly: GET /v1/public/info/{symbol} (public, both modes). `listed: false` when the
+   * symbol is absent (live: 200 with no data); `status` is Orderly's market status when the row carries one. Read-only:
+   * ORDERLY_LISTING_MODE=manual relies on it instead of any listing endpoint (VERIFY O20).
+   */
+  async listingStatus(symbol: string): Promise<{ listed: boolean; status: string | null }> {
+    const r = await this.http.request<{ symbol?: unknown; status?: unknown }>("GET", `${ORDERLY_PATHS.publicInfo}/${encodeURIComponent(symbol)}`, { key: null, retries: 1 });
+    const listed = typeof r?.symbol === "string" && r.symbol === symbol;
+    return { listed, status: listed && typeof r.status === "string" && r.status ? r.status : null };
+  }
+
+  /** Delist / reduce-only a symbol (retirement). Mock contract path; live VERIFY O20 (ORDERLY_LISTING_MODE=api only). */
   async setSymbolStatus(symbol: string, status: "ACTIVE" | "REDUCE_ONLY" | "DELISTED"): Promise<{ symbol: string; status: string }> {
     return this.http.request("POST", this.o.mode === "mock" ? BUILDER_PATHS.mock.symbolStatus : BUILDER_PATHS.live.symbolStatus, { body: { symbol, status } });
   }

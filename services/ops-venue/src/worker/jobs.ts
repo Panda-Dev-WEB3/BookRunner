@@ -32,7 +32,15 @@ export async function handleVenueOpsJob(job: VenueOpsJob, d: JobDeps): Promise<R
   switch (job.kind) {
     case "create_symbol":
       await d.provisioner.ensure(book, true);
-      return { bookId: book.bookId, symbol: book.symbol, listed: tradable(book), ...(book.venueSymbolError ? { error: book.venueSymbolError } : {}) };
+      // listed: the book has an Orderly market symbol; listing: what /v1/public/info shows for it (manual mode: Orderly One)
+      return {
+        bookId: book.bookId,
+        symbol: book.symbol,
+        listed: tradable(book),
+        listingMode: d.ctx.settings.listingMode ?? "api",
+        ...(book.listing ? { listing: book.listing.phase, venueStatus: book.listing.venueStatus } : {}),
+        ...(book.venueSymbolError ? { error: book.venueSymbolError } : {}),
+      };
     case "fund_if": {
       if (!tradable(book)) {
         // no symbol, so no per-symbol IF row: report the IF account's own equity instead

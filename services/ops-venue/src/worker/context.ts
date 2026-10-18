@@ -1,4 +1,4 @@
-import type { BookState, Logger, VenueAccount, VenueSymbolIssuesMsg } from "@bookrunner/shared";
+import type { BookState, ListingMode, Logger, VenueAccount, VenueSymbolIssuesMsg } from "@bookrunner/shared";
 import type { Address, Hex } from "viem";
 import type { ChainPort, OrderlyBook } from "../chain";
 import type { FeeSettlement, OrderlyBuilderClient } from "../client";
@@ -7,12 +7,13 @@ import type { Ed25519Key } from "../orderly/auth";
 import type { SignedVenueReportJson, VenueReportValues } from "../report712";
 import type { OpsStore, SagaStore } from "../store";
 import type { KeyedMutex } from "../util";
+import type { ListingInfo, ListingSchedule } from "./listing";
 import type { NativeFeeSettings } from "./native";
 
 /** Builder/ops venue operations the workers use (OrderlyBuilderClient satisfies it; tests fake it). */
 export type BuilderPort = Pick<
   OrderlyBuilderClient,
-  "createSymbol" | "setSymbolStatus" | "insuranceFund" | "addKey" | "keyInfo" | "revokeTradeKey" | "requestWithdraw" | "withdrawal" | "withdrawals" | "mockCompleteWithdraw" | "mockRegisterAccount" | "registerDelegateSigner"
+  "createSymbol" | "listingStatus" | "setSymbolStatus" | "insuranceFund" | "addKey" | "keyInfo" | "revokeTradeKey" | "requestWithdraw" | "withdrawal" | "withdrawals" | "mockCompleteWithdraw" | "mockRegisterAccount" | "registerDelegateSigner"
 > & { feeSettlements(sinceMs: number): Promise<FeeSettlement[]> };
 
 /** Venue account read for (accountId, symbol) authenticated with `key` (ops key). */
@@ -42,6 +43,13 @@ export interface OpsSettings {
   reportMode: ReportMode;
   /** live builder price push enabled (published in VenueSymbolIssuesMsg: alerts expect its status) */
   builderPush?: boolean;
+  /**
+   * ORDERLY_LISTING_MODE (default api). manual: the admin lists each market in Orderly One; provisioning never calls
+   * createSymbol / setSymbolStatus and waits for the market on /v1/public/info (worker/listing.ts, VERIFY O20).
+   */
+  listingMode?: ListingMode;
+  /** listing re-check schedule (OPS_LISTING_RECHECK_MS / OPS_LISTING_RECHECK_MAX_MS) */
+  listingRecheck?: Partial<ListingSchedule>;
   /** Orderly native deposit-fee keeper (worker/native.ts); default: warn only. */
   native?: NativeFeeSettings;
 }
@@ -99,6 +107,11 @@ export interface TrackedBook extends OrderlyBook {
   accounts: { if: Hex; mm: Hex };
   /** Owner (deposit receiver / delegateContract / payout address) of each Orderly account (chain.accountOwners). */
   owners: { if: Address; mm: Address };
+  /**
+   * The venue symbol's listing on Orderly (worker/listing.ts, GET /v1/public/info/{symbol}); undefined / null = not
+   * checked yet (or every check failed so far). Shared by every book on the symbol.
+   */
+  listing?: ListingInfo | null;
 }
 
 export const lc = (a: Address | string) => a.toLowerCase();

@@ -7,6 +7,8 @@ import type { BookSnap, Condition, OracleConfirmSnap, OracleProbe, OracleSourceS
 
 /** States in which a book is marked every period (Book.sol: Live and Retiring). */
 const MARKABLE = new Set(["Live", "Retiring"]);
+/** Terminal book states: nothing of the book is left on a venue. */
+const ENDED = new Set(["Cancelled", "Retired"]);
 
 export function dur(sec: number): string {
   const s = Math.max(0, Math.round(sec));
@@ -141,7 +143,8 @@ export function riskStale(s: Snapshot, c: RuleConfig): Condition[] {
 export function venueSymbol(s: Snapshot, _c: RuleConfig): Condition[] {
   const out: Condition[] = [];
   for (const b of s.books ?? []) {
-    if (b.venue !== "orderly" || !b.venueSymbolError) continue;
+    // a Cancelled / Retired book holds nothing on the venue any more: nothing to decide
+    if (b.venue !== "orderly" || !b.venueSymbolError || ENDED.has(b.state)) continue;
     out.push({
       key: `venue_symbol_unmapped:${b.bookId}`,
       rule: "venue_symbol_unmapped",
@@ -153,13 +156,38 @@ export function venueSymbol(s: Snapshot, _c: RuleConfig): Condition[] {
 }
 
 /**
+ * ORDERLY_LISTING_MODE=manual (docs/VERIFY.md O20): the admin lists each Orderly book's market in Orderly One and
+ * ops-venue waits for it on /v1/public/info (KEYS.venueSymbolIssues awaitingListing). One alert per book:
+ * - venue_listing_pending:<bookId> WARNING while the book is in Subscription / Retiring (the admin has to list it);
+ *   CRITICAL once the book is Live (its capital is on the venue and its market maker cannot quote).
+ * Not raised in api mode (ops-venue lists through the API; a PENDING market there is Orderly's own launch check).
+ */
+export function venueListing(s: Snapshot, _c: RuleConfig): Condition[] {
+  if (s.venueOps?.listingMode !== "manual") return [];
+  const out: Condition[] = [];
+  for (const b of s.books ?? []) {
+    const l = b.venueListing;
+    if (b.venue !== "orderly" || !l || ENDED.has(b.state)) continue;
+    const age = (s.now - l.since) / 1000;
+    const status = l.venueStatus ? `Orderly status ${l.venueStatus}` : "not on /v1/public/info";
+    out.push({
+      key: `venue_listing_pending:${b.bookId}`,
+      rule: "venue_listing_pending",
+      severity: b.state === "Live" ? "critical" : "warning",
+      summary: `${bookLabel(b)} (state ${b.state}): ${l.symbol} awaiting listing in Orderly One for ${dur(age)} (${status}${l.error ? `; last check failed: ${l.error}` : ""}). The admin lists it in Orderly One (dex.orderly.network, price source ORACLE_<broker>, the book's IF account)${b.state === "Live" ? "; the book is Live and cannot be market-made until then" : ""}`,
+    });
+  }
+  return out;
+}
+
+/**
  * Live builder price push (ops-venue -> Orderly Builder Oracle, docs/VERIFY.md O18). Orderly needs >= 1 price/s per
  * builder market while the session is open, else it can restrict the market (reduce-only). held (session closed) is
  * not a failure. The span is measured up to ops-venue's own status time (never grows on a stale status); the status key
  * lives 600 s, far beyond these thresholds, so a stalled or stopped push is seen as an old status, then as a missing one.
  * - builder_price_push:<symbol> CRITICAL: failing (stale / no-price / disconnected / rejected / ...) >= builderPushFailSec.
- *   Not paged while every book on the symbol is in Subscription (preListing: the market / ORACLE_<broker> feed is
- *   listed by hand in Orderly One, VERIFY O20; ops-venue logs it).
+ *   Not paged while the market is not listed on Orderly yet (preListing: ops-venue's listing check, before it every book
+ *   on the symbol in Subscription; listed by hand in Orderly One, VERIFY O20 / venue_listing_pending; ops-venue logs it).
  * - builder_price_push_status CRITICAL: the status is older than builderPushFailSec + 30 s (push loop stalled), or it is
  *   missing while ops-venue reports live mode with the push enabled and an Orderly book is Live / Retiring.
  */
@@ -603,6 +631,7 @@ export const RULES = {
   risk_stale: riskStale,
   venue_report_stale: venueReportAge,
   venue_symbol_unmapped: venueSymbol,
+  venue_listing_pending: venueListing,
   builder_price_push: builderPricePush,
   processes,
   balances,

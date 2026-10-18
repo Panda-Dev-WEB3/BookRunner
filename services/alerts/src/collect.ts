@@ -19,6 +19,7 @@ import type {
   RiskSnap,
   Sample,
   Snapshot,
+  VenueListingSnap,
 } from "./types";
 
 /** deploy/server/backup.sh records its outcome here (same Redis db as the stack). */
@@ -143,14 +144,32 @@ export function parseVenueSymbolIssues(raw: string | null): Map<number, string> 
   return out;
 }
 
-/** KEYS.venueSymbolIssues JSON -> ops-venue mode + builder push flag; malformed / absent -> null. */
+/** KEYS.venueSymbolIssues JSON awaitingListing -> bookId -> listing; malformed entries dropped, malformed JSON -> empty. */
+export function parseAwaitingListing(raw: string | null): Map<number, VenueListingSnap> {
+  const out = new Map<number, VenueListingSnap>();
+  if (!raw) return out;
+  try {
+    const o = JSON.parse(raw) as { awaitingListing?: unknown };
+    for (const x of Array.isArray(o.awaitingListing) ? (o.awaitingListing as Array<Record<string, unknown> | null>) : []) {
+      const id = num(x?.bookId);
+      const since = num(x?.since);
+      if (id === null || since === null || typeof x?.symbol !== "string") continue;
+      out.set(id, { symbol: x.symbol, venueStatus: typeof x.venueStatus === "string" ? x.venueStatus : null, since, error: typeof x.error === "string" ? x.error : null });
+    }
+  } catch {
+    // ignore: an unreadable status is not an alert of its own
+  }
+  return out;
+}
+
+/** KEYS.venueSymbolIssues JSON -> ops-venue mode + builder push flag + listing mode; malformed / absent -> null. */
 export function parseVenueOps(raw: string | null): VenueOpsSnap | null {
   if (!raw) return null;
   try {
     const o = JSON.parse(raw) as Record<string, unknown>;
     const ts = num(o.ts);
     if (ts === null || (o.mode !== "live" && o.mode !== "mock")) return null;
-    return { ts, mode: o.mode, builderPush: o.builderPush === true };
+    return { ts, mode: o.mode, builderPush: o.builderPush === true, listingMode: o.listingMode === "manual" ? "manual" : "api" };
   } catch {
     return null;
   }
@@ -348,6 +367,7 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
   let riskRaw: Array<string | null> = [];
   let venueRaw: Array<string | null> = [];
   let symbolIssues = new Map<number, string>();
+  let awaitingListing = new Map<number, VenueListingSnap>();
   let builderFeed: Snapshot["builderFeed"];
   let venueOps: Snapshot["venueOps"];
   try {
@@ -361,6 +381,7 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
       d.kv.get(KEYS.builderFeedStatus),
     ]);
     symbolIssues = parseVenueSymbolIssues(issues);
+    awaitingListing = parseAwaitingListing(issues);
     builderFeed = parseBuilderFeed(feed);
     venueOps = parseVenueOps(issues);
     supervisor = parseSupervisorStatus(sup);
@@ -384,6 +405,7 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
       risk: parseRisk(riskRaw[i] ?? null),
       venueReportAsOf: parseVenueAsOf(venueRaw[i] ?? null),
       venueSymbolError: symbolIssues.get(Number(b.id)) ?? null,
+      venueListing: awaitingListing.get(Number(b.id)) ?? null,
     }));
   }
 

@@ -60,6 +60,14 @@ export const opsEnvSchema = baseEnvSchema.extend({
   OPS_BUILDER_ORACLE_LIVENESS_MS: z.coerce.number().int().min(0).default(5_000),
   OPS_BUILDER_ORACLE_LIVENESS_TIMEOUT_MS: z.coerce.number().int().min(1_000).default(15_000),
   ORDERLY_SYMBOL_PRICE_SOURCE: z.enum(["builder", "chainlink"]).default("builder"),
+  // Who lists each book's market (docs/VERIFY.md O20). api: ops-venue (mock contract; live listing bodies VERIFY O13);
+  // manual: the admin in Orderly One, ops-venue only checks GET /v1/public/info/{symbol} and never calls a listing /
+  // symbol-status endpoint. Default: api with ORDERLY_MODE=mock, manual with ORDERLY_MODE=live (resolveListingMode).
+  ORDERLY_LISTING_MODE: z.enum(["api", "manual"]).optional(),
+  // listing re-check while a market is not listed (or after a failed check): first delay, doubling up to the max; a
+  // listed market is re-checked every max (its status: REDUCE_ONLY / DELISTING are logged)
+  OPS_LISTING_RECHECK_MS: z.coerce.number().int().min(1_000).default(15_000),
+  OPS_LISTING_RECHECK_MAX_MS: z.coerce.number().int().min(1_000).default(300_000),
   // Settlement token symbol on Orderly (holding rows, withdraw / transfer messages): USDC on devnet, USDG on
   // Robinhood Chain (VERIFY O3/O7). Must match the OrderlyAdapter tokenHash (keccak256 of this symbol).
   ORDERLY_TOKEN: z.string().default("USDC"),
@@ -72,6 +80,11 @@ export const opsEnvSchema = baseEnvSchema.extend({
 
 export type OpsEnv = z.infer<typeof opsEnvSchema>;
 
+/** ORDERLY_LISTING_MODE, else api in mock mode (today's behaviour) and manual in live mode (no unverified listing calls). */
+export function resolveListingMode(e: Pick<OpsEnv, "ORDERLY_MODE" | "ORDERLY_LISTING_MODE">): "api" | "manual" {
+  return e.ORDERLY_LISTING_MODE ?? (e.ORDERLY_MODE === "live" ? "manual" : "api");
+}
+
 export function loadOpsEnv(source: Record<string, string | undefined> = process.env): OpsEnv {
   const parsed = opsEnvSchema.safeParse(source);
   if (!parsed.success) throw new Error(`invalid environment: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
@@ -82,6 +95,9 @@ export function loadOpsEnv(source: Record<string, string | undefined> = process.
   }
   if (e.OPS_BUILDER_ORACLE_LIVENESS_MS > 0 && e.OPS_BUILDER_ORACLE_LIVENESS_TIMEOUT_MS <= e.OPS_BUILDER_ORACLE_LIVENESS_MS) {
     throw new Error("invalid environment: OPS_BUILDER_ORACLE_LIVENESS_TIMEOUT_MS must exceed OPS_BUILDER_ORACLE_LIVENESS_MS");
+  }
+  if (e.OPS_LISTING_RECHECK_MAX_MS < e.OPS_LISTING_RECHECK_MS) {
+    throw new Error("invalid environment: OPS_LISTING_RECHECK_MAX_MS must be >= OPS_LISTING_RECHECK_MS");
   }
   return e;
 }

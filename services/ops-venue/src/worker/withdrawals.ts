@@ -15,8 +15,13 @@ import type { BookRegistry } from "./books";
 import { type OpsContext, type TrackedBook, tradable } from "./context";
 import { sendOnce } from "./txonce";
 
+/** Manual listing mode: re-try period of an IF withdrawal waiting for the admin to delist the market in Orderly One. */
+export const DELIST_WAIT_MS = 60_000;
+
 export class WithdrawProcessor {
   private readonly nextAttemptAt = new Map<string, number>();
+  /** books whose "delist in Orderly One" request was logged (manual listing mode) */
+  private readonly delistAsked = new Set<number>();
 
   constructor(
     private readonly ctx: OpsContext,
@@ -147,6 +152,16 @@ export class WithdrawProcessor {
           return { type: "venue_requested", withdrawId: await this.venueRequest(s, st.requestedAt) };
         } catch (err) {
           if (book && tradable(book) && s.account === ACCOUNT.IF && isInsufficient(err) && book.state === "Retiring" && (await this.mmFlat(book))) {
+            if ((settings.listingMode ?? "api") === "manual") {
+              // no confirmed delisting endpoint (VERIFY O20): the admin delists in Orderly One. Waiting on a person is
+              // not a failed attempt (the saga would run out of attempts): re-try the venue request every minute.
+              if (!this.delistAsked.has(s.bookId)) {
+                this.delistAsked.add(s.bookId);
+                log.warn({ bookId: s.bookId, symbol: book.symbol, err: errMsg(err) }, "retiring book: the insurance fund is locked by the listed market — delist it in Orderly One (manual listing mode); the IF withdrawal re-tries every minute");
+              }
+              this.nextAttemptAt.set(key, this.ctx.now() + DELIST_WAIT_MS);
+              return null;
+            }
             log.info({ bookId: s.bookId, symbol: book.symbol }, "retiring book: delisting symbol to release the insurance fund");
             await builder.setSymbolStatus(book.symbol, "DELISTED");
             return { type: "venue_requested", withdrawId: await this.venueRequest(s, st.requestedAt) };

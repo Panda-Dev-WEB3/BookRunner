@@ -5,6 +5,8 @@
 //   queue : BullMQ QUEUES.venueOps (create_symbol, fund_if, deposit_mm, execute_withdraw, report,
 //           sweep_fees, revoke_key)
 //   redis : CHANNELS.kill(*) -> revoke the book's venue trade key
+//   listing: ORDERLY_LISTING_MODE (api in mock mode, manual in live mode by default): manual = the admin lists each
+//           market in Orderly One, ops-venue re-checks GET /v1/public/info/{symbol} with backoff (worker/listing.ts)
 //   live builder prices (ORDERLY_MODE=live, ORDERLY_SYMBOL_PRICE_SOURCE=builder): the oracle's venue feed
 //           (KEYS.oracleVenueFeed, key + channel) -> Orderly Builder Oracle WebSocket >= 1/s per builder market
 //           (src/builderOracle), state -> KEYS.builderFeedStatus for alerts
@@ -17,7 +19,7 @@ import type { Address } from "viem";
 import { builderPushEnabled, startBuilderPriceFeed } from "./builderOracle/wire";
 import { ViemChain } from "./chain";
 import { OrderlyBuilderClient, OrderlyVenue } from "./client";
-import { loadOpsEnv } from "./config";
+import { loadOpsEnv, resolveListingMode } from "./config";
 import { KeyStore, resolveKeysDir } from "./keys";
 import { keyFromSecret } from "./orderly/auth";
 import { orderlyAccountId } from "./orderly/convert";
@@ -71,6 +73,9 @@ async function main() {
   });
 
   const statusPublisher = new RedisStatusPublisher(redis);
+  const listingMode = resolveListingMode(env);
+  if (listingMode === "manual") log.info("ORDERLY_LISTING_MODE=manual: markets are listed in Orderly One; ops-venue checks /v1/public/info and calls no listing / symbol-status endpoint");
+  else if (env.ORDERLY_MODE === "live") log.warn("ORDERLY_LISTING_MODE=api with ORDERLY_MODE=live: posts the unverified /v1/broker/listing/* bodies (VERIFY O13 / O20)");
   const ctx: OpsContext = {
     settings: {
       mode: env.ORDERLY_MODE,
@@ -88,6 +93,8 @@ async function main() {
       reportSettleSec: env.OPS_REPORT_SETTLE_S,
       reportMode: env.OPS_REPORT_MODE,
       builderPush: builderPushEnabled(env),
+      listingMode,
+      listingRecheck: { recheckMs: env.OPS_LISTING_RECHECK_MS, recheckMaxMs: env.OPS_LISTING_RECHECK_MAX_MS },
       native: { topUpMaxWei: env.OPS_NATIVE_TOPUP_MAX_WEI, headroom: env.OPS_NATIVE_FEE_HEADROOM, cooldownMs: env.OPS_NATIVE_TOPUP_COOLDOWN_MS },
     },
     chain,
