@@ -225,15 +225,21 @@ Subscription --closeWindow ok--> Live --retire--> Retiring --finalizeRetirement-
   increase S/J by top-up accepted (cash moved escrow → vault). `registry.markApplied(markId)`.
   In **Retired** state redemption requests settle immediately at the final price.
 - **Held marks [ext, audit M-1]**: `MarkInput.held` (signed, part of the EIP-712 `Mark`) is set by the
-  mark service when the valuation used a price the oracle signed as `held` (the book's underlying or a
-  desk Stock Token position: session closed / feed held). A held mark applies the P&L (waterfall,
+  mark service, failing closed, when the valuation used a price that is not known, live and fresh: the
+  oracle signed the underlying's price as `held` (session closed / feed held), the underlying's price is
+  unreadable or older than `maxPriceAge`, or a desk Stock Token position is priced held or stale
+  (`services/mark/src/domain/held.ts`). A held mark applies the P&L (waterfall,
   backstop, drawdown kill, share prices) but settles **no redemption bucket and no top-up round**; they
   wait for the first non-held mark, which settles every bucket due by then at its post-P&L prices (so
   a reopen gap is shared by everyone who was in the book when the session closed). `heldSince` = the
   first held mark's periodEnd of the current run (0 after a non-held mark); once
-  `periodEnd − heldSince ≥ MAX_HELD_DEFERRAL` (7 days) held marks settle again, so a long hold (a
-  suspended or delisted underlying) defers exits but never blocks them. Each held mark emits
-  `MarkHeld(bookId, markId, heldSince, settled)`. `requestRedeem` and claims are unaffected.
+  `periodEnd − heldSince ≥ MAX_HELD_DEFERRAL` (30 days, docs/AUDIT-2026-10.md D-M1-1) held marks settle
+  again at the held valuation unless governance set a settle-at-price for the book (Task 7 hook), so a long
+  hold (a suspended or delisted underlying) defers exits but never blocks them. The first settling mark
+  settles at most `MAX_SETTLE_BUCKETS` (256) due buckets per tranche; the rest settle at the next mark (also
+  post-hold). Each held mark emits `MarkHeld(bookId, markId, heldSince, settled)`. `requestRedeem` and
+  claims are unaffected. `MarketCharter.decide` re-checks the minimum notice against the interval the book
+  caches at creation.
 - **Senior impairment follows the outstanding shares [ext]**: whenever Senior shares are burned at a
   settlement (redemption buckets at a mark, the Retired backlog, Retired immediate redemptions) the
   impairment is scaled pro-rata, `imp' = floor(imp · (supply − burned) / supply)` (0 once no Senior
