@@ -398,13 +398,29 @@ can redo it during the timelock delay from the published quote.
   revert `StalePrice` until the pause ends; off-hours the price stays held at the last Chainlink price. Expect
   `oracle_source_failing:chainlink` for the ticker during the pause.
 - Split window (audit M-2): from `effectiveAt` until the oracle signs the first live price after it (normally
-  the next open), `StockTokenRegistry.valueUsd` for that token reverts `MultiplierChangedSincePrice` (the held
-  price is still in pre-change shares): desk hedges and desk-key flattens of the token revert, the RISK
-  flatten still runs, and the mark service logs "desk position priced before its multiplier change" and
-  retries (no mark, nothing settles) for books holding it. This is expected and clears by itself. The
-  Chainlink source also drops a round from before a split until the feed's next round. A dividend update
-  during a hold has the same effect until the open. In stored-multiplier mode (devnet / testnet) a
-  `setMultiplier` counts as the change.
+  the next open), `StockTokenRegistry.valueUsd` for that token reverts `MultiplierChangedSincePrice`, because the
+  held price is still in pre-change shares. During that window:
+  - desk hedges and flattens of the token revert. That includes the RISK flatten, which is deferred until the
+    reprice instead of selling unbounded;
+  - the risk service values the token at its pre-change multiplier, never sells it and suppresses the
+    `DRAWDOWN` / `HEDGE_BAND` breaches while it is in the window;
+  - the mark service refuses for up to one mark interval (warn log "split window: refusing ..."), then commits
+    held marks with the token at the multiplier of the price's basis. The basis multiplier comes from the token's
+    `UIMultiplierUpdated` events; when it is unknown the token is valued at 0. Check the log line, and raise
+    `MARK_SPLIT_LOG_LOOKBACK_BLOCKS` if the events are out of range.
+
+  All of this is expected and clears by itself at the reprice. The Chainlink source also drops a round from
+  before a split until the feed's next round. A dividend update during a hold has the same effect until the
+  open. In stored-multiplier mode (devnet / testnet), a `setMultiplier` that changes the value counts as the
+  change.
+- Engine markets (audit N-1): from the moment a split is pre-approved (`setNextMultiplierAnchor`) or staged on the
+  token, PoolEngine markets on that price id (or an index containing the token) are close-only (`SplitPending`).
+  In the window, every voluntary trade reverts (`SplitWindow`); liquidations still run. The market reopens for
+  new risk only after the reprice **and** the cleanup: `setMultiplier(token, new)` and
+  `setNextMultiplierAnchor(token, 0)`. Do the cleanup right after the first live post-split print. Existing
+  positions are not rebased: wind down or cap engine markets before a split.
+- If the issuer stages another change before you re-anchor a split, valuations of the token stop until your
+  re-anchor plus the next live print: re-anchor promptly.
 
 ## Operations
 

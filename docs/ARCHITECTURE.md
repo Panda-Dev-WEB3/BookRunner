@@ -408,7 +408,9 @@ Split window (audit M-2, docs/AUDIT-2026-10.md): `valueUsd` reverts `MultiplierC
 price's share basis (its `publishedAt`, or `AttestedOracle.lastLiveAt` for a held price) predates
 `multiplierChangedAt(token)` (live mode: the token's passed `effectiveAt()`; stored mode: the last
 `setMultiplier` / source switch), until the oracle signs a live price after the change; the mark service
-refuses a mark valuing such a position. `valueUsdAt` is the pure valuation at a given price.
+values such a position at the multiplier of the price's basis (or 0): it refuses the mark for at most one interval,
+then commits it held. `valueUsdAt` is the pure valuation at a given price. `splitGate(priceId, basisAt)` gates the
+engine (audit N-1, below).
 
 ### 2.8 AttestedOracle, PoolEngine, PoolEngineAdapter [A-engine]
 
@@ -423,6 +425,10 @@ refuses a mark valuing such a position. `valueUsdAt` is the pure valuation at a 
   - fill price: buy (trader long) at `oracle * (1e4 + spread/2 + skew) / 1e4`, sell at
     `oracle * (1e4 - spread/2 + skew) / 1e4` — skew (signed bps) shifts both sides; reverts if worse
     than `acceptablePriceWad`.
+  - split gate (audit N-1): positions are per share and never rebased, so while an out-of-band multiplier
+    change of the market's token (any component, for an index) is pre-approved or staged, new risk (and margin
+    withdrawal with a position) reverts `SplitPending` (close-only); while the price predates the change every
+    voluntary trade reverts `SplitWindow` (`StockTokenRegistry.splitGate`). Liquidations / `forceClose` stay open.
   - taker fee `takerFeeBps` of notional → `feesAccruedUsd` (claimed by the adapter → RevenueRouter).
   - every voluntary trade (open, increase, reduce, close, flip) needs a live price: none fills while
     the oracle is `held` (off-hours) or older than `min(maxPriceAge, 60 s, maxTradePriceAge)` (audit
