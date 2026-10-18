@@ -79,7 +79,7 @@ describe("chain price config", () => {
     const token = { token: "0x00000000000000000000000000000000000000d1" };
     const pool = { pool: "0x00000000000000000000000000000000000000e1", quoteToken: "0x00000000000000000000000000000000000000f1", fee: 3000, minDepthUsd: 50_000 };
     const ok = parseChainPriceConfig({ chainId: 1, stockTokens: { NVDA: token }, dexConfirm: { readAt: "2026-10-17", pools: { NVDA: pool } } });
-    expect(ok.dexConfirm?.pools.NVDA?.twapSec).toBe(600);
+    expect(ok.dexConfirm?.pools.NVDA?.twapSec).toBe(1_800);
     expect(() => parseChainPriceConfig({ chainId: 1, dexConfirm: { pools: { NVDA: pool } } })).toThrow("DEX confirm pool needs a stockTokens entry");
     expect(() => parseChainPriceConfig({ chainId: 1, stockTokens: { NVDA: token }, dexConfirm: { pools: { NVDA: { ...pool, minDepthUsd: 0 } } } })).toThrow("minDepthUsd");
     expect(() => parseChainPriceConfig({ chainId: 1, stockTokens: { NVDA: token }, dexConfirm: { pools: { NVDA: { ...pool, twapSec: 30 } } } })).toThrow("twapSec");

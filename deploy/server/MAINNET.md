@@ -83,8 +83,8 @@ ANTHROPIC_API_KEY=<key>                                # charter jury
 # oracle (RUNBOOK "Real prices", VERIFY C6): primary + confirm. Chainlink feeds come from config/chains/4663.json in
 # the app tree (the DeployMainnet input was checked against it); ORACLE_CHAINLINK_FEEDS only overrides, and only in
 # the {"proxy","basis","token"} form (a plain address is refused). Chainlink alone signs (sourceCount 1); the DEX
-# confirm pools (Uniswap v3 TWAP, factory-verified, 2% depth floor minDepthUsd $50k) come from the same file's
-# dexConfirm.pools; TSLA and MSFT were below the floor on 2026-10-18 (confirm unavailable; do not lower it). Chainlink
+# confirm pools (Uniswap v3 TWAP over 1800 s, factory-verified, 2% depth floor minDepthUsd $25k: recalibrated from the
+# balance-based $50k; confirm-only, so a thin pool can only cause false alerts) come from the same file's dexConfirm.pools. Chainlink
 # read failure / oraclePaused / round older than heartbeat + grace in session: no price for that ticker (StalePrice
 # after maxPriceAge); the DEX never substitutes. A feed that stops updating but keeps answering is signed as fresh for
 # up to heartbeat + grace (24 h 10 min): only the confirm gap shows it. services/alerts: oracle_source_failing:chainlink

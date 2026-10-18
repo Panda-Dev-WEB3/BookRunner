@@ -217,16 +217,17 @@ Mainnet runs the **primary + confirm** policy (`ORACLE_POLICY=primary-confirm`, 
 - **Chainlink alone sets and signs each price** (`sourceCount` 1, `ORACLE_MIN_SOURCES=1`, on-chain
   `AttestedOracle.minSources() == 1`; the oracle refuses to start otherwise).
 - **A Uniswap v3 TWAP confirms it**: per ticker the deepest Stock Token / USDG pool of `config/chains/4663.json`
-  `dexConfirm.pools` (600 s window; 2% depth floor `minDepthUsd` $50,000 = USDG needed to move the pool price 2%
+  `dexConfirm.pools` (1800 s window; 2% depth floor `minDepthUsd` $25,000 = USDG needed to move the pool price 2%
   within the active range; each pool checked against the v3 factory's `getPool(stockToken, USDG, fee)`). Pyth Pro
   (`ORACLE_PYTH=1` + `PYTH_API_KEY`) and `ORACLE_HTTP_SOURCES` are optional extra confirmers; none of them ever
   counts for signing. `sourcesHash` commits to Chainlink and every fresh confirmer.
-- **Depth today** (read 2026-10-18): NVDA ~$296k, TSLA ~$45.5k, AAPL ~$61.8k, MSFT ~$43.7k, AMZN ~$83.2k. **TSLA
-  and MSFT are below the floor**: their confirm is `unavailable` (`oracle_confirm_unavailable` after 10 min in
-  session, `source-check` FAILs them on 4663) until their depth grows. Do not lower the floor.
-- **Quiet hours**: a pool with no swap inside the TWAP window is `unavailable` ("no swap in the 600s TWAP
-  window"; `source-check` prints "last swap Ns ago"). On 2026-10-18 the last swaps were 69–556 s old, close to
-  the 600 s window: expect intermittent `unavailable`; the alert needs 10 min continuous (with hysteresis).
+- **Depth today** (read 2026-10-18): NVDA ~$314k, TSLA ~$45.5k, AAPL ~$61.8k, MSFT ~$43.7k, AMZN ~$83.2k: all above
+  the floor. Why $25k and 1800 s (controller decision 2026-10-18): recalibrated from the earlier balance-based
+  $50k (the 2% depth measure is 2–5x stricter than the pool's USDG balance); the DEX only confirms, so a thin pool
+  can only cause false or missing alerts, never a price change; 1800 s keeps a swap inside the window in quiet hours.
+- **Quiet hours**: a pool with no swap inside the TWAP window is `unavailable` ("no swap in the 1800s TWAP
+  window"; `source-check` prints "last swap Ns ago"). On 2026-10-18 (a Sunday) the last swaps were 92–1,696 s old
+  and TSLA had none for 8,909 s: expect intermittent `unavailable` off-peak; the alert needs 10 min continuous.
 - **The DEX never moves the price.** A confirmer more than `ORACLE_CONFIRM_BPS` (200 bps) from Chainlink: Chainlink
   is still published, the oracle warns (rate-limited) and `/health` `confirm[]` shows the ticker `diverged`.
 - **"Chainlink stale" = no fresh price** for that ticker (the DEX never substitutes) only when the read fails, the
@@ -293,7 +294,7 @@ Alerts (`services/alerts`) and what to do:
 - **`oracle_confirm_unavailable:<id>`** (warning, no confirm source for 10 min continuous in session, with the
   60 s hysteresis, `ALERT_ORACLE_CONFIRM_UNAVAILABLE_SECONDS`; the oracle logs it after
   `ORACLE_CONFIRM_UNAVAILABLE_WARN_MS`): Chainlink is published unconfirmed. Causes (`source-check` prints the
-  reason per ticker): 2% depth below `minDepthUsd` (TSLA and MSFT today), no swap inside the TWAP window (quiet
+  reason per ticker): 2% depth below `minDepthUsd`, no swap inside the TWAP window (quiet
   hours), observation history shorter than the window, the pool not the factory's `getPool`, token
   `oraclePaused()` or a multiplier change inside the window, the DEX RPC (`ORACLE_DEX_RPC_URL`, default
   `ORACLE_CHAINLINK_RPC_URL`), a block older than `ORACLE_DEX_MAX_AGE_MS`. A pool that stays below its floor:
@@ -330,7 +331,7 @@ the corporate-actions steps below.
    `oraclePaused()` / pending multiplier, per-share price), per ticker the `dex confirm` row (TWAP per share vs
    Chainlink per share, diff in bps, 2% depth vs floor, cardinality, observation history, "last swap Ns ago",
    "factory getPool verified"; FAIL on 4663 when a pool is missing, not the factory's, below its depth floor, too
-   young for the window or unreadable (2026-10-18: TSLA and MSFT FAIL on depth); WARN on transient causes (no swap
+   young for the window or unreadable (2026-10-18: none); WARN on transient causes (no swap
    in the window, token paused, multiplier change in the window) and above `ORACLE_CONFIRM_BPS`), the
    optional confirmers (Pyth Pro when `PYTH_API_KEY` is set, `ORACLE_HTTP_SOURCES`: WARN only), the summary rows
    `sources primary` / `sources confirm`, the `pyth calendar` row (WARN), the mainnet production rules of the
@@ -347,7 +348,7 @@ the corporate-actions steps below.
    `AttestedOracle.minSources() == 1`, set by DeployMainnet from `params.oracleMinSources`), `ORACLE_CONFIRM_BPS`
    (default 200, at most 500), `ORACLE_PRIMARY_LAG_BPS` (default 100, below `ORACLE_CONFIRM_BPS`),
    `ORACLE_CONFIRM_HYSTERESIS_MS` (default 60 s), the DEX confirm (`ORACLE_DEX_CONFIRM` default 1, cannot be 0 on
-   4663; `ORACLE_DEX_TWAP_SEC` overrides the pools' 600 s, 300–3600 s on 4663; `ORACLE_DEX_MAX_AGE_MS` 60 s, at most
+   4663; `ORACLE_DEX_TWAP_SEC` overrides the pools' 1800 s, 300–3600 s on 4663; `ORACLE_DEX_MAX_AGE_MS` 60 s, at most
    120 s on 4663; `ORACLE_DEX_RPC_URL`, default `ORACLE_CHAINLINK_RPC_URL`, else `RPC_URL`),
    `ORACLE_CHAINLINK_RPC_URL` (or `RPC_URL`), `ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS` (default 10 min, at most 1 h on
    4663; `ORACLE_CHAINLINK_MAX_AGE_MS` at most 25 h), `ORACLE_ATTESTATION_FILE`; optional: `ORACLE_PYTH=1` +

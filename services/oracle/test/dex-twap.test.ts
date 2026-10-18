@@ -253,8 +253,8 @@ describe("dexConfirm config", () => {
       token: NVDA,
       tokenDecimals: 18,
       quoteToken: USDG,
-      twapSec: 600,
-      minDepthUsd: 50_000,
+      twapSec: 1_800,
+      minDepthUsd: 25_000,
       fee: 500,
     });
     expect(cfg.dexConfirm?.readAt).toBe("2026-10-17");

@@ -100,7 +100,7 @@ export const dexConfirmPoolSchema = z.object({
   /** Quote token (USDG on Robinhood Chain), assumed to be worth $1: a depeg shows up as divergence alerts. */
   quoteToken: address,
   /** TWAP window (s): observe([twapSec, 0]). The pool's observation history must cover it. */
-  twapSec: z.number().int().min(60).max(86_400).default(600),
+  twapSec: z.number().int().min(60).max(86_400).default(1800),
   /**
    * Depth floor (whole quote tokens, ~USD): the smaller of the quote amounts that move the pool price 2% up or down
    * within the active range (in-range liquidity() and sqrtPriceX96; services/oracle sources/dex-twap.ts depth2PctQuote).
