@@ -25,7 +25,8 @@ import {
 import { BUILDER_FEED_STATUS_TTL_SEC, type BuilderFeedStatusMsg, KEYS, VENUE_SYMBOL_ISSUES_TTL_SEC } from "@bookrunner/shared/queues";
 import { collect, emptyMemory, oracleDown } from "../src/collect";
 import { loadConfig } from "../src/config";
-import type { BuilderFeedSnap, OracleConfirmSnap, OracleProbe, OracleSourceSnap } from "../src/types";
+import type { VenueMarketMsg } from "@bookrunner/shared/venueMarket";
+import type { BuilderFeedSnap, VenueOpsSnap, OracleConfirmSnap, OracleProbe, OracleSourceSnap } from "../src/types";
 import { NOW, NOW_S, book, confirmOracle, rules, snap, supervisor } from "./fixtures";
 
 const keys = (cs: Array<{ key: string }>) => cs.map((c) => c.key);
@@ -125,19 +126,79 @@ describe("venue_report_stale", () => {
     expect(keys(venueSymbol(snap({ books: [book({ state: "Retiring", venueSymbolError: "no market" })] }), rules()))).toEqual(["venue_symbol_unmapped:3"]);
   });
 
-  test("venue_listing_pending: manual listing mode, per book, critical once Live (VERIFY O20)", () => {
+  describe("Orderly market state (ops-venue listing check, VERIFY O20)", () => {
     const manual = { ts: NOW, mode: "live" as const, builderPush: true, listingMode: "manual" as const };
-    const l = { symbol: "PERP_NVDA_USDC_bookrunner", venueStatus: null, since: NOW - 600_000, error: null };
-    const live = venueListing(snap({ venueOps: manual, books: [book({ venueListing: l })] }), rules());
-    expect(live.map((x) => [x.key, x.severity])).toEqual([["venue_listing_pending:3", "critical"]]);
-    expect(live[0]?.summary).toMatch(/PERP_NVDA_USDC_bookrunner awaiting listing in Orderly One for 10m \(not on \/v1\/public\/info\)/);
-    const sub = venueListing(snap({ venueOps: manual, books: [book({ state: "Subscription", venueListing: { ...l, venueStatus: "PENDING", error: "HTTP 502" } })] }), rules());
-    expect(sub.map((x) => [x.key, x.severity])).toEqual([["venue_listing_pending:3", "warning"]]);
-    expect(sub[0]?.summary).toContain("Orderly status PENDING; last check failed: HTTP 502");
-    for (const state of ["Retired", "Cancelled"]) expect(venueListing(snap({ venueOps: manual, books: [book({ state, venueListing: l })] }), rules())).toEqual([]);
-    expect(venueListing(snap({ venueOps: { ...manual, listingMode: "api" }, books: [book({ venueListing: l })] }), rules())).toEqual([]);
-    expect(venueListing(snap({ venueOps: null, books: [book({ venueListing: l })] }), rules())).toEqual([]);
-    expect(venueListing(snap({ venueOps: manual, books: [book({ venueListing: null })] }), rules())).toEqual([]);
+    const apiLive = { ...manual, listingMode: "api" as const };
+    const apiMock = { ...apiLive, mode: "mock" as const };
+    const mk = (over: Partial<VenueMarketMsg> = {}): VenueMarketMsg => ({ symbol: "PERP_NVDA_USDC_bookrunner", bookIds: [3], phase: "awaiting", venueStatus: null, openForRisk: false, everListed: false, since: NOW - 600_000, checkedAt: NOW, failures: 0, error: null, ...over });
+    const run = (ops: VenueOpsSnap | null, b: Partial<ReturnType<typeof book>>) => venueListing(snap({ venueOps: ops, books: [book(b)] }), rules());
+    const ks = (cs: ReturnType<typeof venueListing>) => cs.map((x) => [x.key, x.severity]);
+
+    test("venue_listing_pending (manual): warning in Subscription / Retiring and during the Live grace, critical after it", () => {
+      expect(ks(run(manual, { state: "Subscription", venueMarket: mk() }))).toEqual([["venue_listing_pending:3", "warning"]]);
+      expect(ks(run(manual, { state: "Retiring", venueMarket: mk() }))).toEqual([["venue_listing_pending:3", "warning"]]);
+      // Live for 10 min (< 30 min grace): warning; the grace counts from going Live, not from the first not-listed check
+      expect(ks(run(manual, { liveSince: NOW_S - 600, venueMarket: mk({ since: NOW - 86_400_000 }) }))).toEqual([["venue_listing_pending:3", "warning"]]);
+      const crit = run(manual, { liveSince: NOW_S - 1_801, venueMarket: mk() });
+      expect(ks(crit)).toEqual([["venue_listing_pending:3", "critical"]]);
+      expect(crit[0]?.summary).toMatch(/PERP_NVDA_USDC_bookrunner awaiting listing in Orderly One for 10m \(not on \/v1\/public\/info\)/);
+      expect(crit[0]?.summary).toContain("with no market");
+      expect(ks(run(manual, { liveSince: NOW_S - 1_000, venueMarket: mk() }))).toEqual([["venue_listing_pending:3", "warning"]]);
+      expect(run(manual, { state: "Subscription", venueMarket: mk({ venueStatus: "PENDING" }) })[0]?.summary).toContain("Orderly status PENDING");
+      expect(ks(run(manual, { liveSince: NOW_S - 7_200, venueMarket: mk() }))).toEqual([["venue_listing_pending:3", "critical"]]);
+      for (const state of ["Retired", "Cancelled"]) expect(run(manual, { state, venueMarket: mk() })).toEqual([]);
+      expect(run(null, { venueMarket: mk() })).toEqual([]);
+      expect(run(manual, { venueMarket: null })).toEqual([]);
+    });
+
+    test("venue_listing_pending (api mode): only ORDERLY_MODE=live and a Live book; never api + mock (devnet)", () => {
+      expect(ks(run(apiLive, { liveSince: NOW_S - 7_200, venueMarket: mk({ venueStatus: "PENDING" }) }))).toEqual([["venue_listing_pending:3", "critical"]]);
+      expect(run(apiLive, { liveSince: NOW_S - 7_200, venueMarket: mk() })[0]?.summary).toContain("not launched on Orderly (listing API)");
+      expect(run(apiLive, { state: "Subscription", venueMarket: mk() })).toEqual([]);
+      expect(run(apiMock, { liveSince: NOW_S - 7_200, venueMarket: mk({ venueStatus: "PENDING" }) })).toEqual([]);
+    });
+
+    test("venue_market_restricted: listed but not open; DELISTING / DELISTED on a Live book critical, Retiring quiet", () => {
+      const listed = (venueStatus: string) => mk({ phase: "listed", venueStatus, everListed: true, openForRisk: false });
+      expect(ks(run(manual, { venueMarket: listed("REDUCE_ONLY") }))).toEqual([["venue_market_restricted:3", "warning"]]);
+      expect(ks(run(apiMock, { venueMarket: listed("REDUCE_ONLY") }))).toEqual([["venue_market_restricted:3", "warning"]]); // any mode
+      expect(ks(run(manual, { venueMarket: listed("DELISTING") }))).toEqual([["venue_market_restricted:3", "critical"]]);
+      expect(ks(run(manual, { venueMarket: listed("DELISTED") }))).toEqual([["venue_market_restricted:3", "critical"]]);
+      expect(ks(run(manual, { venueMarket: listed("POST_ONLY") }))).toEqual([["venue_market_restricted:3", "warning"]]);
+      expect(ks(run(manual, { venueMarket: listed("HALTED") }))).toEqual([["venue_market_restricted:3", "warning"]]); // undocumented
+      expect(run(manual, { venueMarket: listed("DELISTING") })[0]?.summary).toContain("being delisted");
+      expect(run(manual, { state: "Retiring", venueMarket: listed("DELISTED") })).toEqual([]);
+      expect(ks(run(manual, { state: "Subscription", venueMarket: listed("REDUCE_ONLY") }))).toEqual([["venue_market_restricted:3", "warning"]]);
+      expect(run(manual, { state: "Subscription", venueMarket: listed("POST_ONLY") })).toEqual([]); // launch phase
+      expect(run(manual, { venueMarket: mk({ phase: "listed", venueStatus: "ACTIVE", everListed: true, openForRisk: true }) })).toEqual([]);
+    });
+
+    test("venue_market_missing: was listed, now absent; Live critical, Retiring a one-off warning", () => {
+      const missing = mk({ phase: "missing", everListed: true, venueStatus: null });
+      const live = run(manual, { venueMarket: missing });
+      expect(ks(live)).toEqual([["venue_market_missing:3", "critical"]]);
+      expect(live[0]?.summary).not.toContain("awaiting");
+      const ret = run(manual, { state: "Retiring", venueMarket: missing });
+      expect(ks(ret)).toEqual([["venue_market_missing:3", "warning"]]);
+      expect(ret[0]?.notifyResolve).toBe(false);
+      expect(run(manual, { state: "Retired", venueMarket: missing })).toEqual([]);
+    });
+
+    test("venue_listing_check: N consecutive failures warn (the last known state stays)", () => {
+      expect(run(manual, { venueMarket: mk({ phase: "unknown", failures: 4, error: "timed out" }) })).toEqual([]);
+      const c = run(manual, { venueMarket: mk({ phase: "unknown", failures: 5, error: "timed out" }) });
+      expect(ks(c)).toEqual([["venue_listing_check:3", "warning"]]);
+      expect(c[0]?.summary).toContain("failed 5 times in a row (timed out)");
+      expect(loadConfig({}).rules.listingCheckFailures).toBe(5);
+      expect(loadConfig({}).rules.listingLiveGraceSec).toBe(1800);
+    });
+
+    test("venue_delist_pending: an IF withdrawal waiting for the admin's delisting; critical after 6 h", () => {
+      const listed = mk({ phase: "listed", venueStatus: "ACTIVE", everListed: true, openForRisk: true });
+      expect(ks(run(manual, { state: "Retiring", venueMarket: listed, delistWaitSince: NOW - 600_000 }))).toEqual([["venue_delist_pending:3", "warning"]]);
+      expect(ks(run(manual, { state: "Retiring", venueMarket: listed, delistWaitSince: NOW - 21_600_000 }))).toEqual([["venue_delist_pending:3", "critical"]]);
+      expect(run(manual, { state: "Retired", delistWaitSince: NOW - 21_600_000 })).toEqual([]);
+    });
   });
 });
 

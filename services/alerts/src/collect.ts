@@ -3,6 +3,7 @@
 // markInterval) and the API's /health. Each source fails independently: a failed source becomes an
 // infra / rpc / api condition instead of blinding the other rules.
 import { KEYS } from "@bookrunner/shared/queues";
+import { parseVenueMarkets, type VenueMarketMsg } from "@bookrunner/shared/venueMarket";
 import { SUPERVISOR_STATUS_KEY, parseSupervisorStatus } from "@bookrunner/shared/supervisor";
 import type {
   BackupSnap,
@@ -19,7 +20,6 @@ import type {
   RiskSnap,
   Sample,
   Snapshot,
-  VenueListingSnap,
 } from "./types";
 
 /** deploy/server/backup.sh records its outcome here (same Redis db as the stack). */
@@ -144,17 +144,23 @@ export function parseVenueSymbolIssues(raw: string | null): Map<number, string> 
   return out;
 }
 
-/** KEYS.venueSymbolIssues JSON awaitingListing -> bookId -> listing; malformed entries dropped, malformed JSON -> empty. */
-export function parseAwaitingListing(raw: string | null): Map<number, VenueListingSnap> {
-  const out = new Map<number, VenueListingSnap>();
+/** KEYS.venueSymbolIssues JSON markets -> bookId -> market (shared parseVenueMarkets: malformed entries dropped). */
+export function parseMarketsByBook(raw: string | null): Map<number, VenueMarketMsg> {
+  const out = new Map<number, VenueMarketMsg>();
+  for (const m of parseVenueMarkets(raw)) for (const id of m.bookIds) out.set(id, m);
+  return out;
+}
+
+/** KEYS.venueSymbolIssues JSON delistWaits -> bookId -> since (unix ms); malformed entries dropped. */
+export function parseDelistWaits(raw: string | null): Map<number, number> {
+  const out = new Map<number, number>();
   if (!raw) return out;
   try {
-    const o = JSON.parse(raw) as { awaitingListing?: unknown };
-    for (const x of Array.isArray(o.awaitingListing) ? (o.awaitingListing as Array<Record<string, unknown> | null>) : []) {
+    const o = JSON.parse(raw) as { delistWaits?: unknown };
+    for (const x of Array.isArray(o.delistWaits) ? (o.delistWaits as Array<Record<string, unknown> | null>) : []) {
       const id = num(x?.bookId);
       const since = num(x?.since);
-      if (id === null || since === null || typeof x?.symbol !== "string") continue;
-      out.set(id, { symbol: x.symbol, venueStatus: typeof x.venueStatus === "string" ? x.venueStatus : null, since, error: typeof x.error === "string" ? x.error : null });
+      if (id !== null && since !== null) out.set(id, since);
     }
   } catch {
     // ignore: an unreadable status is not an alert of its own
@@ -367,7 +373,8 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
   let riskRaw: Array<string | null> = [];
   let venueRaw: Array<string | null> = [];
   let symbolIssues = new Map<number, string>();
-  let awaitingListing = new Map<number, VenueListingSnap>();
+  let markets = new Map<number, VenueMarketMsg>();
+  let delistWaits = new Map<number, number>();
   let builderFeed: Snapshot["builderFeed"];
   let venueOps: Snapshot["venueOps"];
   try {
@@ -381,7 +388,8 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
       d.kv.get(KEYS.builderFeedStatus),
     ]);
     symbolIssues = parseVenueSymbolIssues(issues);
-    awaitingListing = parseAwaitingListing(issues);
+    markets = parseMarketsByBook(issues);
+    delistWaits = parseDelistWaits(issues);
     builderFeed = parseBuilderFeed(feed);
     venueOps = parseVenueOps(issues);
     supervisor = parseSupervisorStatus(sup);
@@ -405,7 +413,8 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
       risk: parseRisk(riskRaw[i] ?? null),
       venueReportAsOf: parseVenueAsOf(venueRaw[i] ?? null),
       venueSymbolError: symbolIssues.get(Number(b.id)) ?? null,
-      venueListing: awaitingListing.get(Number(b.id)) ?? null,
+      venueMarket: markets.get(Number(b.id)) ?? null,
+      delistWaitSince: delistWaits.get(Number(b.id)) ?? null,
     }));
   }
 

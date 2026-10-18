@@ -1,5 +1,6 @@
 // What the alert rules see: one Snapshot per pass (collected from Postgres, Redis, the chain and the API by
 // collect.ts), plus the rolling samples the runner keeps between passes. Rules are pure functions of these.
+import type { VenueMarketMsg } from "@bookrunner/shared/venueMarket";
 import type { SupervisorStatus } from "@bookrunner/shared/supervisor";
 
 export type Severity = "warning" | "critical";
@@ -56,19 +57,10 @@ export interface BookSnap {
   venueReportAsOf: number | null;
   /** ops-venue (KEYS.venueSymbolIssues): why the book's charter symbol has no Orderly market (not listed / traded); null = fine or unknown */
   venueSymbolError?: string | null;
-  /** ops-venue (KEYS.venueSymbolIssues awaitingListing): the book's market is not listed on Orderly yet; null = listed or unknown */
-  venueListing?: VenueListingSnap | null;
-}
-
-/** A book's Orderly market not listed yet (ops-venue listing check, GET /v1/public/info/{symbol}). */
-export interface VenueListingSnap {
-  symbol: string;
-  /** NEW / PENDING; null = not on /v1/public/info */
-  venueStatus: string | null;
-  /** unix ms: first check that found it not listed */
-  since: number;
-  /** last listing check error, null = it succeeded */
-  error: string | null;
+  /** ops-venue (KEYS.venueSymbolIssues markets): the Orderly market state of the book's venue symbol; null = not checked / not an Orderly book */
+  venueMarket?: VenueMarketMsg | null;
+  /** ops-venue (KEYS.venueSymbolIssues delistWaits): unix ms since the book's IF withdrawal waits for the admin's delisting in Orderly One */
+  delistWaitSince?: number | null;
 }
 
 export interface KillEventSnap {

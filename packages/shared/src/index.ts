@@ -17,6 +17,7 @@ export * from "./deployments";
 export * from "./clients";
 export * from "./orderly";
 export * from "./venueSymbol";
+export * from "./venueMarket";
 export * from "./redact";
 export * from "./childenv";
 export * from "./uniswap";

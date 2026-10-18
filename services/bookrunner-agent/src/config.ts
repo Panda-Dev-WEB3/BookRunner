@@ -66,6 +66,12 @@ export const agentEnvShape = {
   // pull oracle (docs/LOW_GAS.md §1): desk actions carry the freshest signed prices
   /** auto: executeWithPrices when the deployed desk has it; on: always; off: plain execute (stored prices). */
   AGENT_PULL_PRICES: z.enum(["auto", "on", "off"]).default("auto"),
+  // Orderly books: stay reduce-only while ops-venue reports the market not open for new risk (not listed, missing,
+  // POST_ONLY, REDUCE_ONLY, DELISTING, DELISTED; Redis bkrn:ops-venue:symbol-issues, docs/VERIFY.md O20)
+  AGENT_VENUE_MARKET_GATE: flag(true),
+  // POST_ONLY (Orderly's launch phase: limit orders only until both sides hold the depth warning for 10 min) is gated
+  // too by default; true lets the agent quote (our quotes are limit orders) so the market can reach ACTIVE
+  AGENT_VENUE_POST_ONLY_QUOTE: flag(false),
   /** Signed prices older than this are not carried (the desk then runs on the stored price). */
   AGENT_PRICE_DATA_MAX_AGE_SECONDS: num(60),
   /**

@@ -98,7 +98,7 @@ export class Provisioner {
       await store.upsertVenueAccount({ bookId: book.bookId, kind: "builder", accountId: settings.builderAccountId, keyPrefix: null, status: "active" });
       if (trades && book.state === "Retiring" && manual) {
         // no confirmed builder endpoint (VERIFY O20): the mandate's reduce-only (agent / risk) is our enforcement
-        log.warn({ bookId: book.bookId, symbol: book.symbol }, "retiring book: set the market REDUCE_ONLY in Orderly One if needed (manual listing mode); the mandate's reduce-only stops new risk on our side");
+        log.warn({ bookId: book.bookId, symbol: book.symbol }, "retiring book: set the market REDUCE_ONLY in Orderly One if needed (manual listing mode); on our side the agent is reduce-only (book Retiring)");
       } else if (trades && book.state === "Retiring") {
         try {
           await builder.setSymbolStatus(book.symbol, "REDUCE_ONLY");
@@ -112,7 +112,7 @@ export class Provisioner {
         if (manual) sym = { symbol: book.symbol, status: book.listing ? (book.listing.venueStatus ?? (book.listing.phase === "listed" ? "LISTED" : "NOT_LISTED")) : "UNCHECKED" };
       }
       if (trades && manual && book.listing?.phase !== "listed") {
-        log.warn({ bookId: book.bookId, symbol: book.symbol, symbolStatus: sym.status, state: book.state, ifAccount: book.accounts.if, tradeKey: tradePrefix }, "book venue accounts provisioned; awaiting listing in Orderly One (re-checked with backoff)");
+        log.warn({ bookId: book.bookId, symbol: book.symbol, phase: book.listing?.phase ?? "unknown", symbolStatus: sym.status, state: book.state, ifAccount: book.accounts.if, tradeKey: tradePrefix }, "book venue accounts provisioned; market not listed on Orderly (manual mode: listed in Orderly One; re-checked with backoff; the agent stays reduce-only)");
       } else if (trades) log.info({ bookId: book.bookId, symbol: sym.symbol, symbolStatus: sym.status, state: book.state, tradeKey: tradePrefix, tradeRevoked }, "book venue provisioned");
       else log.warn({ bookId: book.bookId, charterSymbol: book.charterSymbol, state: book.state, err: book.venueSymbolError }, "book venue accounts provisioned WITHOUT listing or trade key (no Orderly market for the charter symbol)");
     });

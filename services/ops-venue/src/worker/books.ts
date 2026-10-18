@@ -3,12 +3,12 @@
 // mapped once here to its venue symbol (@bookrunner/shared resolveVenueSymbol: ORDERLY_MODE + ORDERLY_BROKER_ID). A
 // live book without an Orderly market stays tracked for its non-trading duties (TrackedBook.venueSymbolError); the
 // set of such books is published every pass (KEYS.venueSymbolIssues) for alerts, with the books whose market is not
-// listed on Orderly yet (TrackedBook.listing, worker/listing.ts).
-import { type BookState, resolveVenueSymbol, type VenueSymbolIssuesMsg } from "@bookrunner/shared";
+// listed / open on Orderly (TrackedBook.listing, worker/listing.ts) and IF withdrawals waiting for a delisting.
+import { type BookState, resolveVenueSymbol, type VenueMarketMsg, type VenueSymbolIssuesMsg } from "@bookrunner/shared";
 import { errMsg } from "../util";
 import { lc, type OpsContext, type TrackedBook } from "./context";
 
-/** Book states whose market must be listed (published as awaitingListing when it is not). */
+/** Book states whose market must be listed (published in VenueSymbolIssuesMsg.markets). */
 const LISTING_STATES: ReadonlySet<string> = new Set(["Subscription", "Live", "Retiring"]);
 
 export interface RegistryDelta {
@@ -74,9 +74,25 @@ export class BookRegistry {
     return this.list().filter((b) => b.venueSymbolError !== null);
   }
 
-  /** Tradable books in Subscription / Live / Retiring whose market a listing check found not listed yet. */
-  awaitingListing(): TrackedBook[] {
-    return this.list().filter((b) => b.venueSymbolError === null && LISTING_STATES.has(b.state) && b.listing?.phase === "awaiting");
+  /** Manual listing mode: IF withdrawals waiting for the admin's delisting (set by OpsService from the withdrawals worker). */
+  delistWaits: () => NonNullable<VenueSymbolIssuesMsg["delistWaits"]> = () => [];
+
+  /** Orderly market state per venue symbol of the tradable books in Subscription / Live / Retiring (listing checks). */
+  markets(): VenueMarketMsg[] {
+    const by = new Map<string, { bookIds: number[]; info: NonNullable<TrackedBook["listing"]> | null }>();
+    for (const b of this.list()) {
+      if (b.venueSymbolError !== null || !LISTING_STATES.has(b.state)) continue;
+      const cur = by.get(b.symbol) ?? { bookIds: [], info: null };
+      cur.bookIds = [...cur.bookIds, b.bookId].sort((x, y) => x - y);
+      cur.info ??= b.listing ?? null;
+      by.set(b.symbol, cur);
+    }
+    const out: VenueMarketMsg[] = [];
+    for (const [symbol, { bookIds, info }] of by) {
+      if (!info) continue; // not checked yet
+      out.push({ symbol, bookIds, phase: info.phase, venueStatus: info.venueStatus, openForRisk: info.openForRisk, everListed: info.everListed, since: info.since, checkedAt: info.checkedAt, failures: info.failures, error: info.error });
+    }
+    return out;
   }
 
   async publishStatus(): Promise<void> {
@@ -88,10 +104,8 @@ export class BookRegistry {
       builderPush: this.ctx.settings.builderPush === true,
       books: this.untradable().map((b) => ({ bookId: b.bookId, charterSymbol: b.charterSymbol, error: b.venueSymbolError as string })),
       listingMode: this.ctx.settings.listingMode ?? "api",
-      awaitingListing: this.awaitingListing().map((b) => {
-        const l = b.listing as NonNullable<TrackedBook["listing"]>;
-        return { bookId: b.bookId, symbol: b.symbol, venueStatus: l.venueStatus, since: l.since, error: l.error };
-      }),
+      markets: this.markets(),
+      delistWaits: this.delistWaits(),
     };
     try {
       await this.ctx.status.venueSymbolIssues(msg);

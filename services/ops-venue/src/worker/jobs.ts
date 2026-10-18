@@ -38,7 +38,7 @@ export async function handleVenueOpsJob(job: VenueOpsJob, d: JobDeps): Promise<R
         symbol: book.symbol,
         listed: tradable(book),
         listingMode: d.ctx.settings.listingMode ?? "api",
-        ...(book.listing ? { listing: book.listing.phase, venueStatus: book.listing.venueStatus } : {}),
+        ...(book.listing ? { listing: book.listing.phase, venueStatus: book.listing.venueStatus, openForRisk: book.listing.openForRisk, ...(book.listing.error ? { listingError: book.listing.error } : {}) } : {}),
         ...(book.venueSymbolError ? { error: book.venueSymbolError } : {}),
       };
     case "fund_if": {

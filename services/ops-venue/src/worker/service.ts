@@ -37,6 +37,7 @@ export class OpsService {
     this.registry = new BookRegistry(ctx);
     this.reporter = new Reporter(ctx);
     this.withdrawals = new WithdrawProcessor(ctx, this.registry);
+    this.registry.delistWaits = () => this.withdrawals.delistWaits();
     this.fees = new FeeSweeper(ctx, this.registry);
     this.revoker = new Revoker(ctx, this.registry);
     this.native = new NativeFeeKeeper(ctx, ctx.settings.native ?? { topUpMaxWei: 0n, headroom: 2n, cooldownMs: 3_600_000 });

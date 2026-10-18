@@ -1,5 +1,5 @@
 // Hono app: /health (+ ops-venue's Orderly listing status), tRPC at /trpc, REST mirror at /v1, read-only MCP at /mcp, CORS for apps/web.
-import { KEYS } from "@bookrunner/shared";
+import { KEYS, parseVenueMarkets, type VenueMarketMsg, venueMarketGate } from "@bookrunner/shared";
 import { trpcServer } from "@hono/trpc-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
@@ -34,29 +34,36 @@ export const OPTIONAL_PROCEDURES = ["book.fills", "book.hedges", "receipts.list"
 export const STATUS_CACHE_MS = 15_000;
 export const STATUS_CACHE_CONTROL = "public, max-age=30, stale-while-revalidate=60";
 
-/** /health `orderlyListing`: ops-venue's Orderly listing status (KEYS.venueSymbolIssues, docs/VERIFY.md O20). */
+/** /health `orderlyListing`: ops-venue's Orderly market state (KEYS.venueSymbolIssues, docs/VERIFY.md O20). */
 export interface OrderlyListingHealth {
   mode: "mock" | "live";
   listingMode: "api" | "manual";
-  /** books whose Orderly market is not listed yet (manual mode: awaiting the admin in Orderly One) */
-  awaiting: Array<{ bookId: number; symbol: string; venueStatus: string | null; since: number }>;
+  /** per venue symbol: phase (unknown / awaiting / listed / missing), Orderly status, open for new risk, failed checks */
+  markets: Array<Omit<VenueMarketMsg, "error" | "checkedAt" | "everListed">>;
+  /** books whose market is not open for new risk (not listed, missing, restricted or POST_ONLY) */
+  notOpen: number[];
+  /** manual mode: IF withdrawals waiting for the admin's delisting in Orderly One */
+  delistWaits: Array<{ bookId: number; symbol: string; since: number }>;
 }
 
-/** ops-venue's status from Redis (absent / unreadable / slow -> null; never fails /health). */
+/** ops-venue's status from Redis (absent / unreadable / slow -> null; never fails /health). Check errors stay private. */
 export async function orderlyListingHealth(kv: Kv, timeoutMs = 500): Promise<OrderlyListingHealth | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const raw = await Promise.race([kv.get(KEYS.venueSymbolIssues).catch(() => null), new Promise<null>((r) => (timer = setTimeout(() => r(null), timeoutMs)))]).finally(() => clearTimeout(timer));
   if (!raw) return null;
   try {
-    const o = JSON.parse(raw) as { mode?: unknown; listingMode?: unknown; awaitingListing?: unknown };
+    const o = JSON.parse(raw) as { mode?: unknown; listingMode?: unknown; delistWaits?: unknown };
     if (o.mode !== "mock" && o.mode !== "live") return null;
-    const rows = Array.isArray(o.awaitingListing) ? (o.awaitingListing as Array<Record<string, unknown> | null>) : [];
+    const markets = parseVenueMarkets(o);
+    const waits = Array.isArray(o.delistWaits) ? (o.delistWaits as Array<Record<string, unknown> | null>) : [];
     return {
       mode: o.mode,
       listingMode: o.listingMode === "manual" ? "manual" : "api",
-      awaiting: rows
+      markets: markets.map(({ symbol, bookIds, phase, venueStatus, openForRisk, since, failures }) => ({ symbol, bookIds, phase, venueStatus, openForRisk, since, failures })),
+      notOpen: markets.flatMap((m) => (venueMarketGate([m], m.bookIds[0] ?? -1) ? m.bookIds : [])).sort((a, b) => a - b),
+      delistWaits: waits
         .filter((x): x is Record<string, unknown> => !!x && Number.isFinite(Number(x.bookId)) && typeof x.symbol === "string")
-        .map((x) => ({ bookId: Number(x.bookId), symbol: x.symbol as string, venueStatus: typeof x.venueStatus === "string" ? x.venueStatus : null, since: Number(x.since) || 0 })),
+        .map((x) => ({ bookId: Number(x.bookId), symbol: x.symbol as string, since: Number(x.since) || 0 })),
     };
   } catch {
     return null;

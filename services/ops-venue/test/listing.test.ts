@@ -1,16 +1,20 @@
 // ORDERLY_LISTING_MODE (docs/VERIFY.md O20): manual = the admin lists each market in Orderly One, ops-venue never calls a
-// listing / symbol-status endpoint and waits for the market on /v1/public/info (backoff, per symbol); api = today's
-// createSymbol. In both modes a book whose market is not listed never blocks another book.
+// listing / symbol-status endpoint and follows the market on /v1/public/info (backoff, per symbol, timeout, bounded
+// concurrency); api = today's createSymbol. In both modes a book whose market is not listed never blocks another book.
+// Phases: unknown -> awaiting -> listed (open or restricted) -> missing (never back to awaiting).
 import { describe, expect, test } from "bun:test";
-import { ACCOUNT, type VenueSymbolIssuesMsg } from "@bookrunner/shared";
+import { ACCOUNT, type Logger, parseVenueMarkets, type VenueSymbolIssuesMsg, venueMarketGate } from "@bookrunner/shared";
 import type { Address, Hex } from "viem";
 import { builderFeedTargets } from "../src/builderOracle/feed";
+import { OrderlyBuilderClient } from "../src/client";
 import { loadOpsEnv, resolveListingMode } from "../src/config";
+import { keyFromSecret } from "../src/orderly/auth";
+import type { FetchLike } from "../src/orderly/http";
 import { OrderlyHttpError } from "../src/orderly/http";
-import type { TrackedBook } from "../src/worker/context";
-import { listingPhase } from "../src/worker/listing";
+import type { OpsContext, TrackedBook } from "../src/worker/context";
+import { type ListingInfo, listingPhase, ListingTracker } from "../src/worker/listing";
 import { OpsService } from "../src/worker/service";
-import { ADAPTER, IF_ID, makeCtx, MM_ID, provisioner, setupWithdraw, SYMBOL, trackedBook } from "./helpers";
+import { ADAPTER, BUILDER_ID, IF_ID, makeCtx, MM_ID, OPS, provisioner, setupWithdraw, SYMBOL, trackedBook } from "./helpers";
 
 const TSLA = "PERP_TSLA_USDC";
 const ADAPTER2 = "0x00000000000000000000000000000000000b0b01" as Address;
@@ -21,6 +25,16 @@ function tslaBook(): TrackedBook {
   return { ...trackedBook(), bookId: 2, book: "0x00000000000000000000000000000000000b0b00", adapter: ADAPTER2, mandate: "0x00000000000000000000000000000000000b0b02", charterSymbol: TSLA, symbol: TSLA, baseAsset: "TSLA", accounts: { if: IF2, mm: MM2 }, owners: { if: ADAPTER2, mm: ADAPTER2 } };
 }
 
+/** Logger capturing (level, msg) pairs. */
+function captureLog() {
+  const lines: Array<{ level: string; msg: string; o: Record<string, unknown> }> = [];
+  const at = (level: string) => (o: Record<string, unknown> | string, msg?: string) => {
+    lines.push({ level, msg: typeof o === "string" ? o : (msg ?? ""), o: typeof o === "string" ? {} : o });
+  };
+  const log = { trace: at("trace"), debug: at("debug"), info: at("info"), warn: at("warn"), error: at("error"), fatal: at("fatal"), child: () => log } as unknown as Logger;
+  return { log, lines };
+}
+
 /** Two Orderly books (NVDA = book 1, TSLA = book 2) with their own venue accounts; status messages captured. */
 async function twoBooks(listingMode: "api" | "manual", o: { createFails?: string } = {}) {
   let now = 1_800_000_000_000;
@@ -29,6 +43,8 @@ async function twoBooks(listingMode: "api" | "manual", o: { createFails?: string
   t.chain.accountIds = async (adapter?: Address) => (adapter?.toLowerCase() === ADAPTER2.toLowerCase() ? { if: IF2, mm: MM2 } : { if: IF_ID, mm: MM_ID });
   const statuses: VenueSymbolIssuesMsg[] = [];
   t.ctx.status = { venueSymbolIssues: async (m) => void statuses.push(m) };
+  const cap = captureLog();
+  t.ctx.log = cap.log;
   const calls = { createSymbol: [] as string[], setSymbolStatus: [] as string[], listingStatus: [] as string[] };
   const b = t.builder;
   const create = b.createSymbol.bind(b);
@@ -53,27 +69,139 @@ async function twoBooks(listingMode: "api" | "manual", o: { createFails?: string
     t.mock.venue.createSymbol({ symbol, ifAccountId: ifAccount });
     t.mock.venue.credit(ifAccount, 200_000_000);
   };
-  return { ...t, svc, calls, statuses, adminLists, advance: (ms: number) => (now += ms), last: () => statuses.at(-1) as VenueSymbolIssuesMsg };
+  const last = () => statuses.at(-1) as VenueSymbolIssuesMsg;
+  const market = (symbol: string) => (last().markets ?? []).find((m) => m.symbol === symbol);
+  return { ...t, svc, calls, statuses, adminLists, logs: cap.lines, advance: (ms: number) => (now += ms), last, market };
+}
+
+/** Bare tracker over a scripted listingStatus (manual clock): the schedule without the books loop. */
+function bareTracker(answer: (symbol: string) => Promise<{ listed: boolean; status: string | null }>, schedule: Partial<ConstructorParameters<typeof ListingTracker>[1]> = {}) {
+  let now = 0;
+  const calls: Array<{ symbol: string; at: number }> = [];
+  const cap = captureLog();
+  const ctx = {
+    settings: { mode: "live", brokerId: "bookrunner", listingMode: "manual" },
+    builder: {
+      listingStatus: async (s: string) => {
+        calls.push({ symbol: s, at: now });
+        return answer(s);
+      },
+    },
+    log: cap.log,
+    now: () => now,
+  } as unknown as OpsContext;
+  const tr = new ListingTracker(ctx, schedule);
+  const book = (bookId: number, symbol: string, state: TrackedBook["state"] = "Live") => ({ ...trackedBook(state), bookId, symbol });
+  return { tr, calls, logs: cap.lines, book, set: (t: number) => (now = t), at: () => now };
 }
 
 describe("config", () => {
-  test("ORDERLY_LISTING_MODE: api in mock mode, manual in live mode unless set; re-check bounds", () => {
+  test("ORDERLY_LISTING_MODE: api in mock mode, manual in live mode unless set; re-check / timeout / ceiling bounds", () => {
     expect(resolveListingMode(loadOpsEnv({ ORDERLY_MODE: "mock" }))).toBe("api");
     expect(resolveListingMode(loadOpsEnv({ ORDERLY_MODE: "live" }))).toBe("manual");
     expect(resolveListingMode(loadOpsEnv({ ORDERLY_MODE: "live", ORDERLY_LISTING_MODE: "api" }))).toBe("api");
     expect(resolveListingMode(loadOpsEnv({ ORDERLY_MODE: "mock", ORDERLY_LISTING_MODE: "manual" }))).toBe("manual");
     expect(() => loadOpsEnv({ ORDERLY_LISTING_MODE: "dashboard" })).toThrow();
     expect(() => loadOpsEnv({ OPS_LISTING_RECHECK_MS: "60000", OPS_LISTING_RECHECK_MAX_MS: "30000" })).toThrow("OPS_LISTING_RECHECK_MAX_MS");
+    const e = loadOpsEnv({});
+    expect([e.OPS_LISTING_CHECK_TIMEOUT_MS, e.OPS_LISTING_CHECK_CONCURRENCY, e.OPS_DELIST_WAIT_MAX_MS]).toEqual([5_000, 4, 86_400_000]);
   });
 });
 
 describe("listing phase (GET /v1/public/info/{symbol})", () => {
-  test("absent, NEW and PENDING are awaiting; launched statuses and unknown ones are listed", () => {
+  test("never listed: absent / NEW / PENDING = awaiting; launched or undocumented = listed", () => {
     expect(listingPhase({ listed: false, status: null })).toBe("awaiting");
     expect(listingPhase({ listed: true, status: "NEW" })).toBe("awaiting");
     expect(listingPhase({ listed: true, status: "pending" })).toBe("awaiting");
     for (const s of ["POST_ONLY", "ACTIVE", "REDUCE_ONLY", "DELISTING", "DELISTED", "SOMETHING_NEW"]) expect(listingPhase({ listed: true, status: s })).toBe("listed");
-    expect(listingPhase({ listed: true, status: null })).toBe("listed"); // a row without status (older API / docs schema)
+    expect(listingPhase({ listed: true, status: null })).toBe("listed"); // a row without status (docs schema)
+  });
+  test("seen listed before: absent = missing (never awaiting again); a NEW / PENDING row stays listed (restricted)", () => {
+    expect(listingPhase({ listed: false, status: null }, true)).toBe("missing");
+    expect(listingPhase({ listed: true, status: "PENDING" }, true)).toBe("listed");
+  });
+});
+
+describe("ListingTracker schedule (manual clock, no books loop)", () => {
+  test("not listed: 15 s doubling to the 5 min cap; a listed open market every 5 min", async () => {
+    let listed = false;
+    const h = bareTracker(async () => ({ listed, status: listed ? "ACTIVE" : null }));
+    const books = [h.book(1, "PERP_A_USDC_bookrunner")];
+    for (let t = 0; t <= 800_000; t += 1_000) {
+      h.set(t);
+      await h.tr.check(books);
+    }
+    expect(h.calls.map((c) => c.at / 1000)).toEqual([0, 15, 45, 105, 225, 465, 765]);
+    listed = true;
+    h.calls.length = 0;
+    for (let t = 801_000; t <= 1_800_000; t += 1_000) {
+      h.set(t);
+      await h.tr.check(books);
+    }
+    // due at 1065 (765 + 300): listed -> every 300 s
+    expect(h.calls.map((c) => c.at / 1000)).toEqual([1065, 1365, 1665]);
+  });
+
+  test("forced checks (provisioning, create_symbol) do not inflate the backoff", async () => {
+    const h = bareTracker(async () => ({ listed: false, status: null }));
+    const books = [h.book(1, "PERP_A_USDC_bookrunner")];
+    await h.tr.check(books); // t=0: next +15, delay 30
+    for (const t of [5_000, 6_000, 7_000]) {
+      h.set(t);
+      await h.tr.check(books, true);
+    }
+    for (let t = 8_000; t <= 200_000; t += 1_000) {
+      h.set(t);
+      await h.tr.check(books);
+    }
+    // forced at 5, 6, 7 s re-arm the current 30 s delay without doubling it (inflated it would be 240 s after three):
+    // next scheduled 37 s, then the doubling resumes: 67 (+30), 127 (+60)
+    expect(h.calls.map((c) => c.at / 1000)).toEqual([0, 5, 6, 7, 37, 67, 127]);
+  });
+
+  test("a hung check times out and never holds up another symbol (bounded concurrency)", async () => {
+    const h = bareTracker((s) => (s === "PERP_HANG_USDC_bookrunner" ? new Promise(() => {}) : Promise.resolve({ listed: true, status: "ACTIVE" })), { timeoutMs: 50, concurrency: 1 });
+    const books = [h.book(1, "PERP_HANG_USDC_bookrunner"), h.book(2, "PERP_OK_USDC_bookrunner")];
+    const t0 = Date.now();
+    await h.tr.check(books);
+    expect(Date.now() - t0).toBeLessThan(2_000);
+    expect(books[0]?.listing).toMatchObject({ phase: "unknown", failures: 1, error: "listing check timed out after 50 ms" });
+    expect(books[1]?.listing).toMatchObject({ phase: "listed", venueStatus: "ACTIVE", openForRisk: true });
+  });
+
+  test("first-check failures are counted (published for alerts / health), the last known state is kept", async () => {
+    let fail = true;
+    const h = bareTracker(async () => {
+      if (fail) throw new OrderlyHttpError(502, null, "GET /v1/public/info: HTTP 502", "/v1/public/info");
+      return { listed: true, status: "ACTIVE" };
+    });
+    const books = [h.book(1, "PERP_A_USDC_bookrunner")];
+    for (let t = 0; t <= 120_000; t += 1_000) {
+      h.set(t);
+      await h.tr.check(books);
+    }
+    expect(books[0]?.listing).toMatchObject({ phase: "unknown", failures: 4, checkedAt: null }); // 0, 15, 45, 105
+    expect(h.logs.filter((l) => l.msg.startsWith("Orderly listing check failed") && l.level === "warn").length).toBe(1); // first, then every 10th
+    fail = false;
+    h.set(400_000);
+    await h.tr.check(books);
+    expect(books[0]?.listing).toMatchObject({ phase: "listed", failures: 0, error: null, everListed: true });
+    fail = true;
+    h.set(800_000);
+    await h.tr.check(books);
+    expect(books[0]?.listing).toMatchObject({ phase: "listed", venueStatus: "ACTIVE", failures: 1, error: "GET /v1/public/info: HTTP 502" });
+  });
+
+  test("an undocumented status warns once and is listed but not open for new risk", async () => {
+    const h = bareTracker(async () => ({ listed: true, status: "HALTED" }));
+    const books = [h.book(1, "PERP_A_USDC_bookrunner")];
+    for (let t = 0; t <= 400_000; t += 5_000) {
+      h.set(t);
+      await h.tr.check(books);
+    }
+    expect(h.calls.length).toBeGreaterThan(3);
+    expect(h.logs.filter((l) => l.msg.includes("not in the documented set")).length).toBe(1);
+    expect(books[0]?.listing).toMatchObject({ phase: "listed", venueStatus: "HALTED", openForRisk: false });
   });
 });
 
@@ -85,9 +213,8 @@ describe("ORDERLY_LISTING_MODE=manual", () => {
     expect(t.calls.createSymbol).toEqual([]);
     expect(t.calls.setSymbolStatus).toEqual([]);
     expect(t.mock.venue.symbols.has(TSLA)).toBe(false); // nothing created on the venue
-    const [b1, b2] = [t.svc.registry.get(1), t.svc.registry.get(2)];
-    expect(b1?.listing).toMatchObject({ phase: "listed", venueStatus: "ACTIVE", error: null });
-    expect(b2?.listing).toMatchObject({ phase: "awaiting", venueStatus: "NEW", error: null });
+    expect(t.svc.registry.get(1)?.listing).toMatchObject({ phase: "listed", venueStatus: "ACTIVE", openForRisk: true, error: null });
+    expect(t.svc.registry.get(2)?.listing).toMatchObject({ phase: "awaiting", venueStatus: "NEW", openForRisk: false, error: null });
     // both books are provisioned for every other duty (accounts, keys)
     for (const id of [1, 2]) {
       expect((await t.store.venueAccounts(id)).map((r) => [r.kind, r.status]).sort()).toEqual([
@@ -97,60 +224,45 @@ describe("ORDERLY_LISTING_MODE=manual", () => {
       ]);
       expect(t.keys.loadBook(id)?.trade?.registeredAt).toBeTruthy();
     }
-    expect(t.last()).toMatchObject({ listingMode: "manual", awaitingListing: [{ bookId: 2, symbol: TSLA, venueStatus: "NEW", error: null }] });
+    expect(t.last().listingMode).toBe("manual");
+    expect(t.market(SYMBOL)).toMatchObject({ bookIds: [1], phase: "listed", openForRisk: true });
+    expect(t.market(TSLA)).toMatchObject({ bookIds: [2], phase: "awaiting", venueStatus: "NEW", failures: 0 });
+    expect(venueMarketGate(parseVenueMarkets(t.last()), 2)).toEqual({ reason: "VENUE_NOT_LISTED", symbol: TSLA });
+    expect(venueMarketGate(parseVenueMarkets(t.last()), 1)).toBeNull();
 
     // the admin lists TSLA: picked up at the next due re-check
     t.adminLists(TSLA, IF2);
     t.advance(15_000);
     await t.svc.syncBooks();
     expect(t.svc.registry.get(2)?.listing).toMatchObject({ phase: "listed", venueStatus: "ACTIVE" });
-    expect(t.last().awaitingListing).toEqual([]);
+    expect(t.market(TSLA)?.openForRisk).toBe(true);
     expect(t.calls.createSymbol).toEqual([]);
   });
 
-  test("not-listed re-checks back off (15 s doubling to the cap); a listed market is re-checked at the cap", async () => {
+  test("a listed market that disappears is missing (not awaiting), keeps the push paged, and comes back as listed", async () => {
     const t = await twoBooks("manual");
     t.adminLists(SYMBOL, IF_ID);
-    const checks = (s: string) => t.calls.listingStatus.filter((x) => x === s).length;
-    await t.svc.syncBooks(); // provisioning forces one check per book
-    expect([checks(SYMBOL), checks(TSLA)]).toEqual([1, 1]);
-    const seen: number[] = [];
-    for (let i = 0; i < 40; i++) {
-      t.advance(5_000); // book poll
+    await t.svc.syncBooks();
+    expect(t.market(SYMBOL)?.phase).toBe("listed");
+    t.mock.venue.symbols.delete(SYMBOL); // gone from /v1/public/info (mock: unknown symbol -> NEW row; live: no data)
+    t.mock.venue.infoView = ((orig) => (s: string) => (s === SYMBOL ? ({ success: true } as unknown as ReturnType<typeof orig>) : orig(s)))(t.mock.venue.infoView.bind(t.mock.venue));
+    for (let i = 0; i < 3; i++) {
+      t.advance(300_000);
       await t.svc.syncBooks();
-      seen.push(checks(TSLA));
+      expect(t.market(SYMBOL)).toMatchObject({ phase: "missing", everListed: true, openForRisk: false });
     }
-    // TSLA: 0, then due at +15 s, +45 s (+30), +105 s (+60), next +225 s (+120): 4 checks in 200 s; NVDA (listed): next at +300 s
-    expect(checks(TSLA)).toBe(4);
-    expect(checks(SYMBOL)).toBe(1);
-    expect(seen.indexOf(2)).toBe(2); // the 3rd poll (+15 s)
-    for (let i = 0; i < 21; i++) {
-      t.advance(5_000);
-      await t.svc.syncBooks();
-    }
-    expect(checks(SYMBOL)).toBe(2); // +305 s: the listed market's slow re-check
-    expect(checks(TSLA)).toBe(5); // +225 s, then capped (next +525 s)
-  });
-
-  test("a failing check keeps the phase, is retried with backoff and does not stop the other symbol", async () => {
-    const t = await twoBooks("manual");
+    const b1 = t.svc.registry.get(1) as TrackedBook;
+    expect(builderFeedTargets([b1])[0]?.preListing).toBe(false); // builder_price_push still pages
+    expect(venueMarketGate(parseVenueMarkets(t.last()), 1)?.reason).toBe("VENUE_MARKET_MISSING");
+    expect(t.logs.some((l) => l.level === "error" && l.msg.includes("MISSING"))).toBe(true);
+    t.mock.venue.infoView = Object.getPrototypeOf(t.mock.venue).infoView.bind(t.mock.venue);
     t.adminLists(SYMBOL, IF_ID);
-    const real = t.builder.listingStatus;
-    t.builder.listingStatus = async (s) => {
-      if (s === TSLA) throw new OrderlyHttpError(0, null, "network error: boom", "/v1/public/info");
-      return real(s);
-    };
+    t.advance(300_000);
     await t.svc.syncBooks();
-    expect(t.svc.registry.get(1)?.listing?.phase).toBe("listed");
-    expect(t.svc.registry.get(2)?.listing ?? null).toBeNull(); // never checked successfully: unknown
-    expect(t.last().awaitingListing).toEqual([]); // unknown is not reported as awaiting
-    t.builder.listingStatus = real;
-    t.advance(15_000);
-    await t.svc.syncBooks();
-    expect(t.svc.registry.get(2)?.listing).toMatchObject({ phase: "awaiting", venueStatus: "NEW" });
+    expect(t.market(SYMBOL)).toMatchObject({ phase: "listed", openForRisk: true });
   });
 
-  test("retiring book: no REDUCE_ONLY call (Orderly One + the mandate's reduce-only)", async () => {
+  test("retiring book: no REDUCE_ONLY call (Orderly One; the agent is reduce-only on our side)", async () => {
     const t = await twoBooks("manual");
     t.adminLists(SYMBOL, IF_ID);
     t.chain.states.set(trackedBook().book.toLowerCase(), "Retiring");
@@ -160,7 +272,17 @@ describe("ORDERLY_LISTING_MODE=manual", () => {
     expect(t.mock.venue.symbolStatus(t.mock.venue.requireSymbol(SYMBOL))).toBe("ACTIVE");
   });
 
-  test("retiring IF withdrawal locked by the listed market waits for the admin's delisting (no DELISTED call, no attempt burnt)", async () => {
+  test("create_symbol job: forced check, listing fields, no listing call", async () => {
+    const t = await twoBooks("manual");
+    t.adminLists(SYMBOL, IF_ID);
+    await t.svc.syncBooks();
+    const r = await t.svc.handleJob({ kind: "create_symbol", bookId: 1 });
+    expect(r).toEqual({ bookId: 1, symbol: SYMBOL, listed: true, listingMode: "manual", listing: "listed", venueStatus: "ACTIVE", openForRisk: true });
+    expect(await t.svc.handleJob({ kind: "create_symbol", bookId: 2 })).toMatchObject({ listing: "awaiting", venueStatus: "NEW", openForRisk: false });
+    expect(t.calls.createSymbol).toEqual([]);
+  });
+
+  test("retiring IF withdrawal locked by the listed market: waits for the admin's delisting (persisted, published, no DELISTED call, no attempt burnt)", async () => {
     const t = await setupWithdraw("Retiring");
     t.ctx.settings.listingMode = "manual";
     const delists: string[] = [];
@@ -176,11 +298,81 @@ describe("ORDERLY_LISTING_MODE=manual", () => {
     const s0 = Object.values(t.sagas.get().withdrawals)[0];
     expect(delists).toEqual([]);
     expect(s0?.attempts ?? 0).toBe(0);
-    expect(s0?.stage).not.toBe("failed");
+    expect(s0?.stage).toBe("detected");
+    expect(typeof s0?.delistWaitSince).toBe("number"); // persisted in the saga store (survives a restart)
+    expect(t.wp.delistWaits()).toEqual([{ bookId: 1, symbol: SYMBOL, since: s0?.delistWaitSince as number }]);
     t.mock.venue.setSymbolStatus(SYMBOL, "DELISTED"); // the admin, in Orderly One
     await t.wp.processNonce(1, s0?.nonce as string);
     expect(Object.values(t.sagas.get().withdrawals)[0]?.stage).toBe("swept");
+    expect(t.wp.delistWaits()).toEqual([]);
     expect(delists).toEqual([]);
+  });
+
+  test("past the delisting ceiling the venue error counts as an attempt again", async () => {
+    const t = await setupWithdraw("Retiring");
+    let now = Date.now();
+    t.ctx.now = () => now;
+    t.ctx.settings.listingMode = "manual";
+    t.ctx.settings.delistWaitMaxMs = 120_000;
+    const req = t.chain.requestWithdraw(ADAPTER, ACCOUNT.IF, 25_000_000_000n);
+    await t.wp.onRequested(req);
+    await t.wp.processAll();
+    const nonce = Object.values(t.sagas.get().withdrawals)[0]?.nonce as string;
+    now += 61_000;
+    await t.wp.processNonce(1, nonce);
+    expect(Object.values(t.sagas.get().withdrawals)[0]?.attempts).toBe(0);
+    now += 120_000;
+    await t.wp.processNonce(1, nonce);
+    const s = Object.values(t.sagas.get().withdrawals)[0];
+    expect(s?.attempts).toBe(1);
+    expect(s?.stage).toBe("detected");
+  });
+});
+
+describe("restricted markets end to end (testnet-like /v1/public/info rows -> published state -> agent gate)", () => {
+  // shapes as served by testnet-api.orderly.org on 2026-10-18 (PERP_BTC_USDC_testgg REDUCE_ONLY, PERP_ETH_USDC_testgg
+  // DELISTING), with our broker's symbols
+  const row = (symbol: string, status: string) => ({ success: true, data: { symbol, display_symbol_name: symbol, broker_id: "bookrunner", quote_min: 0, quote_max: 100000, quote_tick: 0.1, base_min: 0.00001, base_tick: 0.00001, min_notional: 10, status, is_pretge: false }, timestamp: 1 });
+  async function liveListing(rows: Record<string, unknown>) {
+    const fetch: FetchLike = async (input) => {
+      const path = new URL(input).pathname;
+      const body = rows[path] ?? { success: true, timestamp: 1 };
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const client = new OrderlyBuilderClient({
+      baseUrl: "https://testnet-api.orderly.org",
+      mode: "live",
+      brokerId: "bookrunner",
+      chainId: 46630,
+      builderAccountId: BUILDER_ID,
+      builderKey: await keyFromSecret(new Uint8Array(32).fill(7)),
+      signer: OPS,
+      fetch,
+      sleep: async () => {},
+    });
+    return (s: string) => client.listingStatus(s);
+  }
+
+  test("REDUCE_ONLY / DELISTING / POST_ONLY / ACTIVE / absent rows", async () => {
+    const t = await twoBooks("manual");
+    const NV = SYMBOL;
+    for (const [status, gate, open] of [
+      ["REDUCE_ONLY", "VENUE_REDUCE_ONLY", false],
+      ["DELISTING", "VENUE_DELISTING", false],
+      ["POST_ONLY", "VENUE_POST_ONLY", false],
+      ["ACTIVE", null, true],
+    ] as const) {
+      t.builder.listingStatus = await liveListing({ [`/v1/public/info/${NV}`]: row(NV, status) });
+      t.advance(300_000);
+      await t.svc.syncBooks();
+      expect(t.market(NV)).toMatchObject({ phase: "listed", venueStatus: status, openForRisk: open, everListed: true });
+      expect(t.market(TSLA)).toMatchObject({ phase: "awaiting", venueStatus: null }); // absent: 200 without data
+      expect(venueMarketGate(parseVenueMarkets(t.last()), 1)?.reason ?? null).toBe(gate);
+      expect(venueMarketGate(parseVenueMarkets(t.last()), 2)?.reason).toBe("VENUE_NOT_LISTED");
+    }
+    expect(venueMarketGate(parseVenueMarkets(t.last()), 1, { allowPostOnly: true })).toBeNull();
+    expect(t.logs.some((l) => l.level === "warn" && l.msg.includes("not open for new risk"))).toBe(true);
+    expect(t.calls.createSymbol).toEqual([]);
   });
 });
 
@@ -191,7 +383,7 @@ describe("ORDERLY_LISTING_MODE=api (default in mock mode)", () => {
     expect(t.mock.venue.symbols.has(SYMBOL)).toBe(true);
     expect(t.mock.venue.symbols.has(TSLA)).toBe(false);
     expect(t.calls.createSymbol).toContain(TSLA);
-    expect(t.svc.registry.get(1)?.listing?.phase).toBeDefined(); // tracked in api mode too (builder push gate)
+    expect(t.svc.registry.get(1)?.listing?.phase).toBeDefined(); // tracked in api mode too (push gate, alerts)
     expect(t.last().listingMode).toBe("api");
     const before = t.calls.createSymbol.filter((s) => s === TSLA).length;
     await t.svc.syncBooks(); // the failed book is retried every pass
@@ -208,12 +400,16 @@ describe("ORDERLY_LISTING_MODE=api (default in mock mode)", () => {
 });
 
 describe("builder price push gate (preListing)", () => {
-  const book = (bookId: number, state: TrackedBook["state"], listing?: TrackedBook["listing"]) => ({ bookId, symbol: SYMBOL, state, venueSymbolError: null, ...(listing !== undefined ? { listing } : {}) });
-  const L = (phase: "awaiting" | "listed") => ({ phase, venueStatus: phase === "listed" ? "ACTIVE" : null, since: 0, checkedAt: 0, error: null });
-  test("the listing check decides once there is one; before it, a book in Subscription is preListing", () => {
-    expect(builderFeedTargets([book(1, "Live", L("awaiting"))])[0]?.preListing).toBe(true); // Live but not listed: not paged
-    expect(builderFeedTargets([book(1, "Subscription", L("listed"))])[0]?.preListing).toBe(false); // listed: must be fed
+  const book = (bookId: number, state: TrackedBook["state"], listing?: ListingInfo | null) => ({ bookId, symbol: SYMBOL, state, venueSymbolError: null, ...(listing !== undefined ? { listing } : {}) });
+  const L = (phase: ListingInfo["phase"], venueStatus: string | null = phase === "listed" ? "ACTIVE" : null): ListingInfo => ({ phase, venueStatus, openForRisk: phase === "listed" && venueStatus === "ACTIVE", everListed: phase === "listed" || phase === "missing", since: 0, checkedAt: 0, failures: 0, error: null });
+  test("only a never-listed market is preListing; missing / restricted page; without a check, Subscription decides", () => {
+    expect(builderFeedTargets([book(1, "Live", L("awaiting"))])[0]?.preListing).toBe(true);
+    expect(builderFeedTargets([book(1, "Subscription", L("listed"))])[0]?.preListing).toBe(false);
+    expect(builderFeedTargets([book(1, "Live", L("missing"))])[0]?.preListing).toBe(false);
+    expect(builderFeedTargets([book(1, "Live", L("listed", "REDUCE_ONLY"))])[0]?.preListing).toBe(false);
     expect(builderFeedTargets([book(1, "Subscription")])[0]?.preListing).toBe(true);
+    expect(builderFeedTargets([book(1, "Subscription", L("unknown"))])[0]?.preListing).toBe(true);
+    expect(builderFeedTargets([book(1, "Live", L("unknown"))])[0]?.preListing).toBe(false);
     expect(builderFeedTargets([book(1, "Live", null)])[0]?.preListing).toBe(false);
     expect(builderFeedTargets([book(1, "Subscription", L("awaiting")), book(2, "Live", L("listed"))])[0]?.preListing).toBe(false);
   });

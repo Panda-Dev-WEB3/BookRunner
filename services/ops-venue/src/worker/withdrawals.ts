@@ -17,11 +17,11 @@ import { sendOnce } from "./txonce";
 
 /** Manual listing mode: re-try period of an IF withdrawal waiting for the admin to delist the market in Orderly One. */
 export const DELIST_WAIT_MS = 60_000;
+/** Manual listing mode: past this wait (OPS_DELIST_WAIT_MAX_MS) the venue error counts as a failed attempt again. */
+export const DELIST_WAIT_MAX_MS = 24 * 3_600_000;
 
 export class WithdrawProcessor {
   private readonly nextAttemptAt = new Map<string, number>();
-  /** books whose "delist in Orderly One" request was logged (manual listing mode) */
-  private readonly delistAsked = new Set<number>();
 
   constructor(
     private readonly ctx: OpsContext,
@@ -62,6 +62,13 @@ export class WithdrawProcessor {
     this.ctx.sagas.save();
     this.ctx.log.info({ bookId: book.bookId, account: l.account, amount: l.amount.toString(), nonce: l.nonce.toString(), tx: l.txHash }, "withdraw requested on adapter");
     return s;
+  }
+
+  /** Manual listing mode: pending IF withdrawals waiting for the admin's delisting (published for alerts). */
+  delistWaits(): Array<{ bookId: number; symbol: string; since: number }> {
+    return this.pending()
+      .filter((s) => s.stage === "detected" && s.delistWaitSince !== undefined)
+      .map((s) => ({ bookId: s.bookId, symbol: this.registry.get(s.bookId)?.symbol ?? "", since: s.delistWaitSince as number }));
   }
 
   pending(): WithdrawSaga[] {
@@ -149,18 +156,30 @@ export class WithdrawProcessor {
         if (st.status !== WITHDRAW_STATUS.Requested) return { type: "skipped", reason: `on-chain request is ${withdrawStatusName(st.status)}` };
         const book = this.registry.get(s.bookId);
         try {
-          return { type: "venue_requested", withdrawId: await this.venueRequest(s, st.requestedAt) };
+          const withdrawId = await this.venueRequest(s, st.requestedAt);
+          if (s.delistWaitSince !== undefined) log.info({ bookId: s.bookId, symbol: book?.symbol, waitedMs: this.ctx.now() - s.delistWaitSince }, "delisting in Orderly One done: the insurance-fund withdrawal went through");
+          return { type: "venue_requested", withdrawId };
         } catch (err) {
           if (book && tradable(book) && s.account === ACCOUNT.IF && isInsufficient(err) && book.state === "Retiring" && (await this.mmFlat(book))) {
             if ((settings.listingMode ?? "api") === "manual") {
               // no confirmed delisting endpoint (VERIFY O20): the admin delists in Orderly One. Waiting on a person is
-              // not a failed attempt (the saga would run out of attempts): re-try the venue request every minute.
-              if (!this.delistAsked.has(s.bookId)) {
-                this.delistAsked.add(s.bookId);
+              // not a failed attempt (the saga would run out of attempts): re-try the venue request every minute, up to
+              // the ceiling; past it the error counts again (the saga can fail: a real shortfall is not hidden forever).
+              const now = this.ctx.now();
+              const since = s.delistWaitSince ?? now;
+              const maxMs = settings.delistWaitMaxMs ?? DELIST_WAIT_MAX_MS;
+              if (s.delistWaitSince === undefined) {
+                this.patch(key, { delistWaitSince: since });
                 log.warn({ bookId: s.bookId, symbol: book.symbol, err: errMsg(err) }, "retiring book: the insurance fund is locked by the listed market — delist it in Orderly One (manual listing mode); the IF withdrawal re-tries every minute");
+              } else {
+                log.debug({ bookId: s.bookId, symbol: book.symbol, err: errMsg(err), waitingMs: now - since }, "IF withdrawal still waiting for the delisting in Orderly One");
               }
-              this.nextAttemptAt.set(key, this.ctx.now() + DELIST_WAIT_MS);
-              return null;
+              if (now - since < maxMs) {
+                this.nextAttemptAt.set(key, now + DELIST_WAIT_MS);
+                return null;
+              }
+              log.error({ bookId: s.bookId, symbol: book.symbol, err: errMsg(err), waitingMs: now - since }, "IF withdrawal waited past the delisting ceiling: counting the venue error as a failed attempt (check the market in Orderly One and the IF balance)");
+              throw err;
             }
             log.info({ bookId: s.bookId, symbol: book.symbol }, "retiring book: delisting symbol to release the insurance fund");
             await builder.setSymbolStatus(book.symbol, "DELISTED");

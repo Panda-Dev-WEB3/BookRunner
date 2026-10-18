@@ -80,7 +80,8 @@ describe("collect", () => {
         mode: "live",
         books: [{ bookId: 3, charterSymbol: "NVDA-PERP", error: "no market" }],
         listingMode: "manual",
-        awaitingListing: [{ bookId: 3, symbol: "PERP_NVDA_USDC_bookrunner", venueStatus: null, since: NOW - 60_000, error: null }, { bookId: "x" }],
+        markets: [{ symbol: "PERP_NVDA_USDC_bookrunner", bookIds: [3], phase: "awaiting", venueStatus: null, openForRisk: false, everListed: false, since: NOW - 60_000, checkedAt: NOW, failures: 0, error: null }, { symbol: 7 }],
+        delistWaits: [{ bookId: 3, symbol: "PERP_NVDA_USDC_bookrunner", since: NOW - 1_000 }, { bookId: "x" }],
       }),
     ],
     [
@@ -113,7 +114,9 @@ describe("collect", () => {
     ]);
     expect(s.books!.map((b) => b.venueSymbolError)).toEqual(["no market", null]);
     expect(s.venueOps).toEqual({ ts: NOW, mode: "live", builderPush: false, listingMode: "manual" });
-    expect(s.books!.map((b) => b.venueListing)).toEqual([{ symbol: "PERP_NVDA_USDC_bookrunner", venueStatus: null, since: NOW - 60_000, error: null }, null]);
+    expect(s.books!.map((b) => b.venueMarket?.phase ?? null)).toEqual(["awaiting", null]);
+    expect(s.books![0]!.venueMarket).toMatchObject({ symbol: "PERP_NVDA_USDC_bookrunner", since: NOW - 60_000, failures: 0 });
+    expect(s.books!.map((b) => b.delistWaitSince)).toEqual([NOW - 1_000, null]);
     expect(s.builderFeed).toEqual({
       ts: NOW,
       socket: { state: "ready", lastError: null },

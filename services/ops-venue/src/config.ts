@@ -68,6 +68,13 @@ export const opsEnvSchema = baseEnvSchema.extend({
   // listed market is re-checked every max (its status: REDUCE_ONLY / DELISTING are logged)
   OPS_LISTING_RECHECK_MS: z.coerce.number().int().min(1_000).default(15_000),
   OPS_LISTING_RECHECK_MAX_MS: z.coerce.number().int().min(1_000).default(300_000),
+  // one listing check (public GET) still running after this counts as failed; at most this many run at once, so a hung
+  // request never stalls the books loop
+  OPS_LISTING_CHECK_TIMEOUT_MS: z.coerce.number().int().min(100).default(5_000),
+  OPS_LISTING_CHECK_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(4),
+  // manual listing mode: an IF withdrawal of a retiring book waits this long for the admin's delisting in Orderly One
+  // (re-tried every minute, no attempt burnt, alert venue_delist_pending); past it the venue error counts again
+  OPS_DELIST_WAIT_MAX_MS: z.coerce.number().int().min(60_000).default(86_400_000),
   // Settlement token symbol on Orderly (holding rows, withdraw / transfer messages): USDC on devnet, USDG on
   // Robinhood Chain (VERIFY O3/O7). Must match the OrderlyAdapter tokenHash (keccak256 of this symbol).
   ORDERLY_TOKEN: z.string().default("USDC"),

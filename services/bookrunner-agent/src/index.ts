@@ -317,6 +317,7 @@ async function runOnce(
       quoteTtlMs: Math.max(5_000, env.AGENT_QUOTE_INTERVAL_MS * 10),
       fillLookbackMs: 15 * 60_000,
       pullPrices: pull,
+      venueGate: { enabled: env.AGENT_VENUE_MARKET_GATE, allowPostOnly: env.AGENT_VENUE_POST_ONLY_QUOTE },
     },
   );
   holder.agent = agent;

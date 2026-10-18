@@ -1,4 +1,5 @@
 // BullMQ queue names, Redis pub/sub channels and keys, and job payloads shared across services.
+import type { VenueMarketMsg } from "./venueMarket";
 
 export const QUEUES = {
   jury: "bkrn-jury", // charter -> model jury
@@ -94,8 +95,9 @@ export interface BuilderFeedStatusMsg {
     failingSince: number | null;
     error: string | null;
     /**
-     * the builder market is not listed on Orderly yet (ops-venue's listing check: absent from GET /v1/public/info/{symbol}
-     * or NEW / PENDING; before the first check: every book on it is in Subscription), so a failure is logged, not paged
+     * the builder market was never seen listed on Orderly (ops-venue's listing check: phase awaiting = absent from GET
+     * /v1/public/info/{symbol} or NEW / PENDING; before a successful check: every book on it is in Subscription), so a
+     * failure is logged, not paged. A market that was listed and is now missing is NOT preListing
      * (manual Orderly One listing, VERIFY O20)
      */
     preListing: boolean;
@@ -119,20 +121,16 @@ export interface VenueSymbolIssuesMsg {
   /** ORDERLY_LISTING_MODE (absent: an older ops-venue, api) */
   listingMode?: ListingMode;
   /**
-   * Tradable Orderly books (not Cancelled / Retired) whose venue symbol is not listed on Orderly yet (GET
-   * /v1/public/info/{symbol}: absent, NEW or PENDING). In manual mode the admin lists it in Orderly One; alerts raise
-   * venue_listing_pending per book. Books not checked yet are not in the list.
+   * Orderly market state per venue symbol of the tradable books in Subscription / Live / Retiring (ops-venue listing
+   * check, GET /v1/public/info/{symbol}; VERIFY O20). Read by alerts (venue_listing_pending, venue_market_restricted,
+   * venue_market_missing, venue_listing_check), the API's /health and the agent (venueMarketGate).
    */
-  awaitingListing?: Array<{
-    bookId: number;
-    symbol: string;
-    /** Orderly's status (NEW / PENDING), null = not on /v1/public/info */
-    venueStatus: string | null;
-    /** unix ms: first check that found it not listed */
-    since: number;
-    /** last check error (the previous phase is kept), null = the last check succeeded */
-    error: string | null;
-  }>;
+  markets?: VenueMarketMsg[];
+  /**
+   * Manual listing mode: IF withdrawals of retiring books waiting for the admin to delist the market in Orderly One
+   * (alerts venue_delist_pending).
+   */
+  delistWaits?: Array<{ bookId: number; symbol: string; since: number }>;
 }
 
 /**

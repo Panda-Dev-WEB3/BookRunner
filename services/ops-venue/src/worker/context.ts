@@ -48,8 +48,10 @@ export interface OpsSettings {
    * createSymbol / setSymbolStatus and waits for the market on /v1/public/info (worker/listing.ts, VERIFY O20).
    */
   listingMode?: ListingMode;
-  /** listing re-check schedule (OPS_LISTING_RECHECK_MS / OPS_LISTING_RECHECK_MAX_MS) */
+  /** listing check schedule (OPS_LISTING_RECHECK_MS / _MAX_MS, OPS_LISTING_CHECK_TIMEOUT_MS / _CONCURRENCY) */
   listingRecheck?: Partial<ListingSchedule>;
+  /** manual listing mode: how long an IF withdrawal may wait for the admin's delisting before errors count (OPS_DELIST_WAIT_MAX_MS) */
+  delistWaitMaxMs?: number;
   /** Orderly native deposit-fee keeper (worker/native.ts); default: warn only. */
   native?: NativeFeeSettings;
 }

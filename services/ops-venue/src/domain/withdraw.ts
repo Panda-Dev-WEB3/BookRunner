@@ -48,6 +48,11 @@ export interface WithdrawSaga {
   attempts: number;
   lastError?: string;
   detectedTx?: Hex;
+  /**
+   * Manual listing mode: unix ms since the IF venue request of a retiring book has waited for the admin to delist the
+   * market in Orderly One (persisted so a restart neither re-asks nor resets the ceiling).
+   */
+  delistWaitSince?: number;
   createdAt: number;
   updatedAt: number;
 }

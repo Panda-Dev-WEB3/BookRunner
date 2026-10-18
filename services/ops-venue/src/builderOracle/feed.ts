@@ -67,11 +67,15 @@ interface SymbolState {
 const FED_STATES: ReadonlySet<string> = new Set(["Subscription", "Live", "Retiring"]);
 
 /**
- * A book's market is not listed yet: the listing check's phase (worker/listing.ts) once there is one; before that, the
- * book is still in Subscription (the market is listed during the subscription, by hand in manual mode, VERIFY O20).
+ * A book's market was never seen listed: the listing check's phase awaiting (worker/listing.ts); without a successful
+ * check, the book is still in Subscription (the market is listed during the subscription, by hand in manual mode,
+ * VERIFY O20). A listed market that went missing or restricted is NOT preListing: its push failures page.
  */
 function preListingOf(b: Pick<TrackedBook, "state" | "listing">): boolean {
-  return b.listing ? b.listing.phase !== "listed" : b.state === "Subscription";
+  const p = b.listing?.phase;
+  if (p === "awaiting") return true;
+  if (p === "listed" || p === "missing") return false;
+  return b.state === "Subscription";
 }
 
 /** Push targets: tradable Orderly books (they have a builder market) in a listed state, one entry per venue symbol. */

@@ -155,27 +155,88 @@ export function venueSymbol(s: Snapshot, _c: RuleConfig): Condition[] {
   return out;
 }
 
+/** Books whose Orderly market must exist: listing alerts never look at Cancelled / Retired books. */
+const LISTED_STATES = new Set(["Subscription", "Live", "Retiring"]);
+
 /**
- * ORDERLY_LISTING_MODE=manual (docs/VERIFY.md O20): the admin lists each Orderly book's market in Orderly One and
- * ops-venue waits for it on /v1/public/info (KEYS.venueSymbolIssues awaitingListing). One alert per book:
- * - venue_listing_pending:<bookId> WARNING while the book is in Subscription / Retiring (the admin has to list it);
- *   CRITICAL once the book is Live (its capital is on the venue and its market maker cannot quote).
- * Not raised in api mode (ops-venue lists through the API; a PENDING market there is Orderly's own launch check).
+ * Orderly market state of each book's venue symbol (ops-venue listing check, KEYS.venueSymbolIssues markets; docs/VERIFY.md
+ * O20). One alert per book and condition; Cancelled / Retired books are ignored.
+ * - venue_listing_pending:<bookId> (never listed: absent / NEW / PENDING). Manual mode (the admin lists it in Orderly
+ *   One): WARNING while the book is in Subscription or Retiring and during its first ALERT_LISTING_LIVE_GRACE_SECONDS
+ *   (1800) Live; CRITICAL after that (capital is on the venue with no market). Api mode: only with ORDERLY_MODE=live and
+ *   a Live book (warning, then critical after the same grace); api + mock (devnet) never alerts (PENDING until the IF is
+ *   funded is normal there).
+ * - venue_market_restricted:<bookId> (listed, not open for new risk; the agent is reduce-only): a Live book on DELISTING /
+ *   DELISTED = CRITICAL; REDUCE_ONLY, POST_ONLY or an undocumented status = WARNING; a Subscription book on a
+ *   REDUCE_ONLY / DELISTING / DELISTED market = WARNING; Retiring books are expected to wind down (no alert).
+ * - venue_market_missing:<bookId> (was listed, now absent from /v1/public/info): Live = CRITICAL; Retiring = WARNING
+ *   once (one-off: the admin may have delisted it for the retirement; ops-venue logs the IF withdrawal completing).
+ * - venue_listing_check:<bookId>: the market's listing check failed ALERT_LISTING_CHECK_FAILURES (5) times in a row
+ *   (WARNING; the last known state stays in force).
+ * - venue_delist_pending:<bookId>: manual mode, a retiring book's IF withdrawal waits for the admin's delisting in
+ *   Orderly One: WARNING, CRITICAL after ALERT_DELIST_WAIT_CRITICAL_SECONDS (6 h).
  */
-export function venueListing(s: Snapshot, _c: RuleConfig): Condition[] {
-  if (s.venueOps?.listingMode !== "manual") return [];
+export function venueListing(s: Snapshot, c: RuleConfig): Condition[] {
+  const ops = s.venueOps;
+  if (!ops) return [];
   const out: Condition[] = [];
   for (const b of s.books ?? []) {
-    const l = b.venueListing;
-    if (b.venue !== "orderly" || !l || ENDED.has(b.state)) continue;
-    const age = (s.now - l.since) / 1000;
-    const status = l.venueStatus ? `Orderly status ${l.venueStatus}` : "not on /v1/public/info";
-    out.push({
-      key: `venue_listing_pending:${b.bookId}`,
-      rule: "venue_listing_pending",
-      severity: b.state === "Live" ? "critical" : "warning",
-      summary: `${bookLabel(b)} (state ${b.state}): ${l.symbol} awaiting listing in Orderly One for ${dur(age)} (${status}${l.error ? `; last check failed: ${l.error}` : ""}). The admin lists it in Orderly One (dex.orderly.network, price source ORACLE_<broker>, the book's IF account)${b.state === "Live" ? "; the book is Live and cannot be market-made until then" : ""}`,
-    });
+    if (b.venue !== "orderly" || !LISTED_STATES.has(b.state)) continue;
+    const m = b.venueMarket;
+    if (b.delistWaitSince != null) {
+      const wait = (s.now - b.delistWaitSince) / 1000;
+      out.push({
+        key: `venue_delist_pending:${b.bookId}`,
+        rule: "venue_delist_pending",
+        severity: wait >= c.delistWaitCriticalSec ? "critical" : "warning",
+        summary: `${bookLabel(b)} (state ${b.state}): its insurance-fund withdrawal has waited ${dur(wait)} for the market${m ? ` ${m.symbol}` : ""} to be delisted in Orderly One (manual listing mode): delist it there; ops-venue re-tries every minute`,
+      });
+    }
+    if (!m) continue;
+    if (m.failures >= c.listingCheckFailures) {
+      out.push({
+        key: `venue_listing_check:${b.bookId}`,
+        rule: "venue_listing_check",
+        severity: "warning",
+        summary: `${bookLabel(b)}: the Orderly listing check of ${m.symbol} failed ${m.failures} times in a row (${m.error ?? "?"}); last known state ${m.phase}${m.venueStatus ? ` ${m.venueStatus}` : ""}`,
+      });
+    }
+    const status = m.venueStatus ? `Orderly status ${m.venueStatus}` : "not on /v1/public/info";
+    if (m.phase === "awaiting") {
+      const manual = ops.listingMode === "manual";
+      if (!manual && !(ops.mode === "live" && b.state === "Live")) continue;
+      // never listed: the market has been missing for as long as the book is Live (ops-venue's `since` resets on restart)
+      const liveFor = b.state === "Live" ? (s.now - (b.liveSince != null ? b.liveSince * 1000 : m.since)) / 1000 : 0;
+      const critical = b.state === "Live" && liveFor >= c.listingLiveGraceSec;
+      const where = manual ? "awaiting listing in Orderly One" : "not launched on Orderly (listing API)";
+      out.push({
+        key: `venue_listing_pending:${b.bookId}`,
+        rule: "venue_listing_pending",
+        severity: critical ? "critical" : "warning",
+        summary: `${bookLabel(b)} (state ${b.state}): ${m.symbol} ${where} for ${dur((s.now - m.since) / 1000)} (${status})${manual ? ". The admin lists it in Orderly One (dex.orderly.network, price source ORACLE_<broker>, the book's IF account)" : ""}${b.state === "Live" ? `; the book is Live${critical ? ` for ${dur(liveFor)} with no market: its capital cannot be market-made` : " (the agent is reduce-only)"}` : ""}`,
+      });
+    } else if (m.phase === "missing") {
+      if (b.state === "Subscription") continue;
+      const live = b.state === "Live";
+      out.push({
+        key: `venue_market_missing:${b.bookId}`,
+        rule: "venue_market_missing",
+        severity: live ? "critical" : "warning",
+        ...(live ? {} : { notifyResolve: false }),
+        summary: `${bookLabel(b)} (state ${b.state}): ${m.symbol} was listed on Orderly and is now missing from /v1/public/info${live ? ": the book is Live with no market (the agent is reduce-only); check the market in Orderly One" : " (delisted for the retirement? expected once the admin delisted it)"}`,
+      });
+    } else if (m.phase === "listed" && !m.openForRisk) {
+      const st = (m.venueStatus ?? "").toUpperCase();
+      const ending = st === "DELISTING" || st === "DELISTED";
+      if (b.state === "Retiring") continue;
+      if (b.state === "Subscription" && !(ending || st === "REDUCE_ONLY")) continue;
+      out.push({
+        key: `venue_market_restricted:${b.bookId}`,
+        rule: "venue_market_restricted",
+        severity: b.state === "Live" && ending ? "critical" : "warning",
+        summary: `${bookLabel(b)} (state ${b.state}): Orderly market ${m.symbol} is ${m.venueStatus ?? "restricted"} since ${new Date(m.since).toISOString()}: no new risk (the agent is reduce-only)${ending ? "; the market is being delisted" : st === "POST_ONLY" ? "; limit orders only until the depth warning holds" : ""}`,
+      });
+    }
   }
   return out;
 }
@@ -631,7 +692,7 @@ export const RULES = {
   risk_stale: riskStale,
   venue_report_stale: venueReportAge,
   venue_symbol_unmapped: venueSymbol,
-  venue_listing_pending: venueListing,
+  venue_listing: venueListing,
   builder_price_push: builderPricePush,
   processes,
   balances,

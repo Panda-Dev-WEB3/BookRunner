@@ -24,7 +24,9 @@ import {
   type Sessions,
   type VenueFill,
   isOpen,
+  parseVenueMarkets,
   usdToNumber,
+  venueMarketGate,
 } from "@bookrunner/shared";
 import type { AgentBus } from "../adapters/bus";
 import type { AgentStore, FillRow } from "../adapters/store";
@@ -70,6 +72,12 @@ export interface BookAgentConfig {
   quoteTtlMs: number;
   fillLookbackMs: number;
   /**
+   * Orderly books: read ops-venue's market state (Redis KEYS.venueSymbolIssues, every state refresh) and stay
+   * reduce-only while the market is not open for new risk (shared venueMarketGate). It can only restrict the agent;
+   * an absent / unreadable key gates nothing. Default: on for the Orderly venue.
+   */
+  venueGate?: { enabled: boolean; allowPostOnly: boolean };
+  /**
    * Pull oracle: the desk carries signed prices in every price-checked tx, so the mandate evaluates
    * off-hours after the in-tx update. The on-chain `mandate.offHours()` view (stored price stale because
    * nothing landed recently) then says nothing about the next tx and is ignored while the feed price is
@@ -105,6 +113,7 @@ export class BookAgent {
   private bookState: BookState | null = null;
   private riskState: LimitState | null = null;
   private killMsg: KillMsg | null = null;
+  private venueGate: { reason: string; symbol: string } | null = null;
 
   private resting: AgentQuote | null = null;
   private restingSince = 0;
@@ -298,12 +307,30 @@ export class BookAgent {
 
     const risk = await this.d.bus.getJson<{ state?: string }>(KEYS.riskState(this.d.bookId)).catch(() => null);
     if (risk && typeof risk.state === "string" && LIMIT_STATES.includes(risk.state as LimitState)) this.setRiskState(risk.state as LimitState);
+    await this.refreshVenueGate();
 
     if (this.d.chain.oracleFallback && this.d.price.ageSec(this.now()) > this.cfg.chainPriceFallbackSec) {
       const p = await this.d.chain.oracleFallback().catch(() => null);
       if (this.d.price.ingest(p)) this.d.log.debug({ price: p?.price }, "price from AttestedOracle fallback");
     }
     if (failed.length === 4) throw new Error(`chain state unavailable: ${errMsg(failed[0]?.reason)}`);
+  }
+
+  /** ops-venue's Orderly market state for this book (Redis, written by ops-venue): restricts only. */
+  private async refreshVenueGate(): Promise<void> {
+    const g = this.cfg.venueGate;
+    if (this.d.venue.kind !== "orderly" || (g && !g.enabled)) return;
+    const raw = await this.d.bus.getJson<unknown>(KEYS.venueSymbolIssues).catch(() => null);
+    const next = venueMarketGate(parseVenueMarkets(raw), this.d.bookId, { allowPostOnly: g?.allowPostOnly ?? false });
+    const prev = this.venueGate;
+    this.venueGate = next;
+    if ((prev?.reason ?? null) === (next?.reason ?? null)) return;
+    if (next) {
+      this.d.log.warn({ reason: next.reason, symbol: next.symbol }, "Orderly market not open for new risk: reduce-only quoting and hedging");
+      void this.quoteTickSafe(); // stop new risk now
+    } else {
+      this.d.log.info({ from: prev?.reason }, "Orderly market open again");
+    }
   }
 
   // ---------------------------------------------------------------- quoting
@@ -316,7 +343,7 @@ export class BookAgent {
     const now = this.now();
     void this.d.bus.heartbeat(this.d.bookId, this.cfg.heartbeatTtlMs).catch((err) => this.d.log.debug({ err: errMsg(err) }, "heartbeat failed"));
 
-    const md = resolveMode({ killMessage: this.killMsg, mandateKilled: this.mandateKilled, riskState: this.riskState, bookState: this.bookState });
+    const md = resolveMode({ killMessage: this.killMsg, mandateKilled: this.mandateKilled, riskState: this.riskState, bookState: this.bookState, venueGate: this.venueGate });
     if (md.reason !== this.lastModeReason) {
       this.d.log.info({ mode: md.mode, hedgeMode: md.hedgeMode, reason: md.reason }, "agent mode");
       this.lastModeReason = md.reason;
@@ -528,7 +555,7 @@ export class BookAgent {
 
   async hedgeTick(): Promise<void> {
     if (!this.d.hedger) return;
-    const md = resolveMode({ killMessage: this.killMsg, mandateKilled: this.mandateKilled, riskState: this.riskState, bookState: this.bookState });
+    const md = resolveMode({ killMessage: this.killMsg, mandateKilled: this.mandateKilled, riskState: this.riskState, bookState: this.bookState, venueGate: this.venueGate });
     if (md.hedgeMode === "off" || this.stopped) return;
     // plan against the exposure the on-chain hedge check uses; the venue view is the fallback
     const exposure = this.d.chain.venueExposureUsd
