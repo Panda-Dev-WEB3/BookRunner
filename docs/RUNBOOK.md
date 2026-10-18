@@ -217,20 +217,37 @@ Mainnet runs the **primary + confirm** policy (`ORACLE_POLICY=primary-confirm`, 
 - **Chainlink alone sets and signs each price** (`sourceCount` 1, `ORACLE_MIN_SOURCES=1`, on-chain
   `AttestedOracle.minSources() == 1`; the oracle refuses to start otherwise).
 - **A Uniswap v3 TWAP confirms it**: per ticker the deepest Stock Token / USDG pool of `config/chains/4663.json`
-  `dexConfirm.pools` (600 s window, USDG floor 50,000). Pyth Pro (`ORACLE_PYTH=1` + `PYTH_API_KEY`) and
-  `ORACLE_HTTP_SOURCES` are optional extra confirmers; none of them ever counts for signing. `sourcesHash` commits
-  to Chainlink and every fresh confirmer.
+  `dexConfirm.pools` (600 s window; 2% depth floor `minDepthUsd` $50,000 = USDG needed to move the pool price 2%
+  within the active range; each pool checked against the v3 factory's `getPool(stockToken, USDG, fee)`). Pyth Pro
+  (`ORACLE_PYTH=1` + `PYTH_API_KEY`) and `ORACLE_HTTP_SOURCES` are optional extra confirmers; none of them ever
+  counts for signing. `sourcesHash` commits to Chainlink and every fresh confirmer.
+- **Depth today** (read 2026-10-18): NVDA ~$296k, TSLA ~$45.5k, AAPL ~$61.8k, MSFT ~$43.7k, AMZN ~$83.2k. **TSLA
+  and MSFT are below the floor**: their confirm is `unavailable` (`oracle_confirm_unavailable` after 10 min in
+  session, `source-check` FAILs them on 4663) until their depth grows. Do not lower the floor.
+- **Quiet hours**: a pool with no swap inside the TWAP window is `unavailable` ("no swap in the 600s TWAP
+  window"; `source-check` prints "last swap Ns ago"). On 2026-10-18 the last swaps were 69–556 s old, close to
+  the 600 s window: expect intermittent `unavailable`; the alert needs 10 min continuous (with hysteresis).
 - **The DEX never moves the price.** A confirmer more than `ORACLE_CONFIRM_BPS` (200 bps) from Chainlink: Chainlink
   is still published, the oracle warns (rate-limited) and `/health` `confirm[]` shows the ticker `diverged`.
-- **Chainlink stale / paused / down in session = no fresh price** for that ticker (the DEX never substitutes).
-  Once the last signed price is older than `maxPriceAge` (300 s) on-chain, `priceOf` reverts `StalePrice`:
-  valuations, trades on that key **and liquidations** revert until Chainlink is back (reduce-only applies only to
-  `held` prices, i.e. off-hours). Off-hours prices hold at the last Chainlink price; a start off-hours without
-  history seeds from Chainlink only.
+- **"Chainlink stale" = no fresh price** for that ticker (the DEX never substitutes) only when the read fails, the
+  token is `oraclePaused()`, the sequencer check fails, or the round is older than heartbeat + grace in session
+  (24 h 10 min with the defaults; mainnet refuses more than heartbeat + 1 h). Once the last signed price is older
+  than `maxPriceAge` (300 s) on-chain, `priceOf` reverts `StalePrice`: valuations, trades on that key **and
+  liquidations** revert until Chainlink is back (reduce-only applies only to `held` prices, i.e. off-hours).
+  Off-hours prices hold at the last Chainlink price; a start off-hours without history seeds from Chainlink only.
+- **A stalled feed is signed as fresh.** A feed that silently stops updating but keeps answering is signed as a
+  fresh, non-held price for up to heartbeat + grace (24 h 10 min). The feeds round on a 0.5% (50 bps) deviation or
+  the 24 h heartbeat and normal in-session gaps reach ~15–22 h, so age alone cannot tell a quiet market from a
+  stalled feed. The signal is the confirm gap: above `ORACLE_PRIMARY_LAG_BPS` (100) with no new round since it
+  began → `oracle_primary_suspect_stale`; above `ORACLE_CONFIRM_BPS` (200) → `oracle_confirm_divergence`.
 - **Health**: `GET /health` `sources[]` (role `primary` / `confirm`, `lastOkAt`, `failingSince`,
-  `failingTickers`, `lastError`; in-session tickers only), `confirm[]` (per ticker `ok` / `diverged` /
-  `unavailable` / `no-primary` / `closed` (off-hours, not evaluated), `diffBps`, `since`, confirmers),
-  `unpublished[]` (in-session tickers without a publishable price).
+  `failingTickers`, `lastError`; in-session tickers only), `confirm[]` (per ticker `status` ok / diverged /
+  unavailable / no-primary / closed (off-hours, not evaluated), sticky; `current` = this tick's raw status;
+  `diffBps`, `since`, `primaryPrice`, `primaryTs` (the Chainlink round's `updatedAt`), `lagSince` (start of the
+  run with a gap above `primaryLagBps`), confirmers), top-level `confirmBps` / `primaryLagBps`, `unpublished[]`
+  (in-session tickers without a publishable price). Runs (diverged / unavailable, lag, source failure,
+  unpublished) end only after the other state held `ORACLE_CONFIRM_HYSTERESIS_MS` (60 s): a one-tick flap does
+  not reset the alert timers.
 - **Calendar.** Holiday eves after 20:00 ET (incl. the Sunday before a Monday holiday) and early-close days after
   17:00 ET are closed in the 24/5 calendar (`NYSE_EARLY_CLOSES`, holiday-eve rule in
   `packages/shared/src/sessions.ts`), so prices are **held** there (VERIFY C3).
@@ -242,33 +259,47 @@ Alerts (`services/alerts`) and what to do:
   (or point it at another RHC RPC), restart `bookrunner@mainnet`; `oraclePaused()` → corporate action (below); a
   round older than heartbeat + grace in session → Chainlink status / support, `source-check`. Nothing substitutes:
   if it lasts beyond `maxPriceAge`, pause new business (GUARDIAN `setNewBooksPaused(true)`, "Rollback and
-  incidents").
+  incidents"). **Sunday open**: the first round after 20:00 ET can land tens of seconds late (seen ~24 s); a
+  slower one pages this alert and prices skip until it lands. Expected; do **not** widen
+  `ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS` to silence it (mainnet refuses more than 1 h, and a wider grace signs an
+  old round as fresh).
 - **`oracle_price_missing:<id>`** (critical, 2 min, `ALERT_ORACLE_PRICE_MISSING_SECONDS`): an in-session ticker
   without a publishable price that no Chainlink alert explains: `/health` `unpublished[].reason` and the oracle log.
-- **`oracle_confirm_divergence:<id>`** (warning after 2 min in session, `ALERT_ORACLE_CONFIRM_DIVERGENCE_SECONDS`;
-  critical above 2× `ORACLE_CONFIRM_BPS` or with ≥ 3 tickers at once, `ALERT_ORACLE_CONFIRM_CRITICAL_TICKERS`).
-  The published price is still Chainlink. Find which side is wrong (the code cannot tell them apart):
-  1. Chainlink: round age (`latestRoundData().updatedAt`, `source-check`): a round hours old in a moving market is
-     lag (up to ~50 bps without a new round, more in a fast move);
-  2. the DEX pool: spot vs TWAP (`source-check` `dex confirm` row prints both), USDG depth vs floor, recent large
-     swaps on the explorer;
+- **`oracle_primary_suspect_stale:<id>`** (warning; the confirm gap above `ORACLE_PRIMARY_LAG_BPS` (100) for
+  `ALERT_ORACLE_PRIMARY_LAG_SECONDS` (600) in session **and** no Chainlink round since the gap began, `primaryTs <=
+  lagSince`; the oracle logs "Chainlink suspect stale" after 10 min): the feed may have stopped updating while it
+  keeps answering, and it is still signed as fresh until heartbeat + grace (~24 h). A live feed 50 bps off the
+  market would have rounded by now. Same checks and levers as divergence (below).
+- **`oracle_confirm_divergence:<id>`** (warning after 2 min above `ORACLE_CONFIRM_BPS` (200) in session,
+  `ALERT_ORACLE_CONFIRM_DIVERGENCE_SECONDS`; critical above 2× the threshold (400 bps) or with ≥ 3 tickers at once,
+  `ALERT_ORACLE_CONFIRM_CRITICAL_TICKERS`). The published price is still Chainlink. Find which side is wrong (the
+  code cannot tell them apart):
+  1. Chainlink: the feed's `latestRoundData()` `updatedAt` and answer on-chain (`source-check`, `/health`
+     `confirm[].primaryTs`) vs the market; Chainlink status and Robinhood status. A round hours old while other
+     venues moved more than 50 bps means the feed is stalled or lagging;
+  2. the DEX pool: spot vs TWAP (`source-check` `dex confirm` row prints both), 2% depth vs floor, last swap age,
+     recent large swaps on the explorer;
   3. the USDG peg: every ticker diverging in the same direction at once points at USDG, not the equities;
   4. other markets: the underlying's public quote (regular, pre, post or overnight session).
 
-  Chainlink lagging in a fast market: the RHX5 PoolEngine fills at the lagging price (an arbitrage window against
-  the pool); stop new risk on the RHX5 book with the existing levers — risk kill on the book (reduce-only) or
-  GUARDIAN `setNewBooksPaused(true)` ("Rollback and incidents") — until Chainlink rounds again. DEX manipulated or
-  thin: nothing to do for prices (the DEX never moves them); if a pool is easy to move, raise its
-  `minQuoteLiquidityUsd` or choose a deeper pool / fee tier in `config/chains/4663.json`, then restart. USDG depeg:
+  Chainlink is the one that is wrong (stalled or lagging): the RHX5 PoolEngine fills at that price (an arbitrage
+  window against the pool); stop new risk on the RHX5 book with the existing levers — risk kill on the book
+  (reduce-only) or GUARDIAN `setNewBooksPaused(true)` ("Rollback and incidents") — until Chainlink rounds again.
+  The oracle itself never switches source. At launch RHX5 is off or on small caps (owner decision, VERIFY C6).
+  DEX manipulated or thin: nothing to do for prices (the DEX never moves them); if a pool is easy to move, raise
+  its `minDepthUsd` or choose a deeper pool / fee tier in `config/chains/4663.json`, then restart. USDG depeg:
   prices are unaffected (Chainlink quotes USD); the alerts last until the peg recovers; assess the USDG exposure of
   the books separately (VERIFY S1).
-- **`oracle_confirm_unavailable:<id>`** (warning, no confirm source for 10 min in session,
-  `ALERT_ORACLE_CONFIRM_UNAVAILABLE_SECONDS`; the oracle logs it after `ORACLE_CONFIRM_UNAVAILABLE_WARN_MS`):
-  Chainlink is published unconfirmed. Causes (`source-check` prints the reason per ticker): pool USDG below the
-  floor, observation history shorter than the window, token `oraclePaused()` or a multiplier change inside the
-  window, the DEX RPC (`ORACLE_DEX_RPC_URL`, default `ORACLE_CHAINLINK_RPC_URL`), a block older than
-  `ORACLE_DEX_MAX_AGE_MS`. A pool that stays below its floor: switch to a deeper pool / tier (`dexConfirm.pools`);
-  never lower the floor below 10,000.
+- **`oracle_confirm_unavailable:<id>`** (warning, no confirm source for 10 min continuous in session, with the
+  60 s hysteresis, `ALERT_ORACLE_CONFIRM_UNAVAILABLE_SECONDS`; the oracle logs it after
+  `ORACLE_CONFIRM_UNAVAILABLE_WARN_MS`): Chainlink is published unconfirmed. Causes (`source-check` prints the
+  reason per ticker): 2% depth below `minDepthUsd` (TSLA and MSFT today), no swap inside the TWAP window (quiet
+  hours), observation history shorter than the window, the pool not the factory's `getPool`, token
+  `oraclePaused()` or a multiplier change inside the window, the DEX RPC (`ORACLE_DEX_RPC_URL`, default
+  `ORACLE_CHAINLINK_RPC_URL`), a block older than `ORACLE_DEX_MAX_AGE_MS`. A pool that stays below its floor:
+  switch to a deeper pool / tier (`dexConfirm.pools`) if one exists; never lower the floor (and never below
+  10,000). While a ticker has no confirm, `oracle_primary_suspect_stale` cannot fire for it either: watch its
+  Chainlink round age by hand.
 - **`oracle_source_failing:<confirm source>`** (warning, after 10 min; not for tickers already `unavailable` or
   without Chainlink): one confirmer fails while others still confirm, e.g. Pyth Pro HTTP 401 / 403 → renew the token
   in the Pyth Pro dashboard, update `PYTH_API_KEY` in `/etc/bookrunner/mainnet.env`, restart; 429 / 5xx / timeout →
@@ -278,12 +309,15 @@ Alerts (`services/alerts`) and what to do:
 
 Residual risks of the design (VERIFY C6): (a) Chainlink is a single point of failure: a pause
 (`oraclePaused()`, corporate action), a feed outage or a split / multiplier change mid-round leaves that ticker
-without a fresh price (hold off-hours, skip in session, `StalePrice` after `maxPriceAge`); (b) the 0.5% deviation /
-24 h heartbeat rule lets the signed price trail the market by up to ~50 bps in session without a new round (more
-in a fast move) and RHX5 trades on it: launch with small `maxNetExposureUsd` caps or RHX5 off until the lag has been
-observed; (c) USDG is assumed = $1: a depeg shows up as divergence alerts on every ticker, not as a price change;
-(d) DEX manipulation only raises alerts; a thin pool gives no confirmation (alert after 10 min); (e) a lagging
-Chainlink and a manipulated DEX look the same to the code: the operator decides (steps above).
+without a fresh price (hold off-hours, skip in session, `StalePrice` after `maxPriceAge`), and a feed that stops
+updating but keeps answering is signed as fresh for up to heartbeat + grace (24 h 10 min), caught only by the
+suspect-stale / divergence alerts; (b) the 0.5% deviation / 24 h heartbeat rule lets the signed price trail the
+market by up to ~50 bps in session without a new round (more in a fast move) and RHX5 trades on it: RHX5 off or
+small `maxNetExposureUsd` caps at launch (owner decision) until the lag has been observed; (c) USDG is assumed =
+$1: a depeg shows up as divergence alerts on every ticker, not as a price change; (d) DEX manipulation only raises
+alerts; a pool below its 2% depth floor or without a swap in the window gives no confirmation (alert after 10 min);
+(e) a stalled / lagging Chainlink and a manipulated DEX look the same to the code: the operator decides (steps
+above).
 
 **Corporate action** (Chainlink `oraclePaused()` on a token): that ticker has **no price** for the paused window —
 held off-hours, skipped in session (then `StalePrice` after `maxPriceAge`); its DEX confirm stops too. Plan it with
@@ -294,8 +328,10 @@ the corporate-actions steps below.
    reads every feed and token in `config/chains/4663.json` (proxy code, `decimals()`, `description()`,
    `latestRoundData()` age vs heartbeat in session, token code / `decimals() == 18` / `uiMultiplier()` /
    `oraclePaused()` / pending multiplier, per-share price), per ticker the `dex confirm` row (TWAP per share vs
-   Chainlink per share, diff in bps, USDG depth vs floor, cardinality, observation history; FAIL on 4663 when a
-   pool is missing, below its floor, too young for the window or unreadable; WARN above `ORACLE_CONFIRM_BPS`), the
+   Chainlink per share, diff in bps, 2% depth vs floor, cardinality, observation history, "last swap Ns ago",
+   "factory getPool verified"; FAIL on 4663 when a pool is missing, not the factory's, below its depth floor, too
+   young for the window or unreadable (2026-10-18: TSLA and MSFT FAIL on depth); WARN on transient causes (no swap
+   in the window, token paused, multiplier change in the window) and above `ORACLE_CONFIRM_BPS`), the
    optional confirmers (Pyth Pro when `PYTH_API_KEY` is set, `ORACLE_HTTP_SOURCES`: WARN only), the summary rows
    `sources primary` / `sources confirm`, the `pyth calendar` row (WARN), the mainnet production rules of the
    current `ORACLE_*` environment, and with `--registry` the registration + live-multiplier mode. Exit code 1 on
@@ -309,13 +345,17 @@ the corporate-actions steps below.
    `ORACLE_POLICY=primary-confirm` and `ORACLE_MIN_SOURCES=1` (both pinned by the mainnet profile,
    `scripts/network-profile.ts`; a contradicting inherited value is refused; the service also requires
    `AttestedOracle.minSources() == 1`, set by DeployMainnet from `params.oracleMinSources`), `ORACLE_CONFIRM_BPS`
-   (default 200, at most 500), the DEX confirm (`ORACLE_DEX_CONFIRM` default 1, cannot be 0 on 4663;
-   `ORACLE_DEX_TWAP_SEC` overrides the pools' 600 s; `ORACLE_DEX_MAX_AGE_MS` 60 s; `ORACLE_DEX_RPC_URL`, default
-   `ORACLE_CHAINLINK_RPC_URL`, else `RPC_URL`), `ORACLE_CHAINLINK_RPC_URL` (or `RPC_URL`),
-   `ORACLE_ATTESTATION_FILE`; optional: `ORACLE_PYTH=1` + `PYTH_API_KEY` (https only; licence VERIFY C6),
-   `ORACLE_HTTP_SOURCES` (`tsPath` + `maxAgeMs` ≤ 30 s; Finnhub refused). The service refuses to start on 4663 when
-   any production rule fails (`services/oracle/src/production.ts`: a Chainlink feed and a DEX confirm pool with a
-   floor ≥ 10,000 for every ticker). Synthetic sources cannot be constructed on 4663.
+   (default 200, at most 500), `ORACLE_PRIMARY_LAG_BPS` (default 100, below `ORACLE_CONFIRM_BPS`),
+   `ORACLE_CONFIRM_HYSTERESIS_MS` (default 60 s), the DEX confirm (`ORACLE_DEX_CONFIRM` default 1, cannot be 0 on
+   4663; `ORACLE_DEX_TWAP_SEC` overrides the pools' 600 s, 300–3600 s on 4663; `ORACLE_DEX_MAX_AGE_MS` 60 s, at most
+   120 s on 4663; `ORACLE_DEX_RPC_URL`, default `ORACLE_CHAINLINK_RPC_URL`, else `RPC_URL`),
+   `ORACLE_CHAINLINK_RPC_URL` (or `RPC_URL`), `ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS` (default 10 min, at most 1 h on
+   4663; `ORACLE_CHAINLINK_MAX_AGE_MS` at most 25 h), `ORACLE_ATTESTATION_FILE`; optional: `ORACLE_PYTH=1` +
+   `PYTH_API_KEY` (https only; licence VERIFY C6), `ORACLE_HTTP_SOURCES` (`tsPath` + `maxAgeMs` ≤ 30 s; Finnhub
+   refused). The service (and the preflight `scripts/network-profile.ts`) refuses to start on 4663 when any
+   production rule fails (`services/oracle/src/production.ts`: a Chainlink feed per ticker with an in-session max
+   age ≤ heartbeat + 1 h, a DEX confirm pool with `minDepthUsd` ≥ 10,000 for every ticker, the bounds above).
+   Synthetic sources cannot be constructed on 4663.
 
 ### Oracle signer attestation (VERIFY E1)
 

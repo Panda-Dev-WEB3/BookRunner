@@ -20,7 +20,9 @@ never on a developer PC. Same layout and hardening as the testnet host ([README.
 
 `scripts/dev.ts --network mainnet` refuses to start while any required env var, any role signer, the oracle
 sources (a Chainlink feed and a DEX confirm pool per ticker; `ORACLE_POLICY=primary-confirm` and
-`ORACLE_MIN_SOURCES=1` pinned, a contradicting value refused) or the DeployMainnet
+`ORACLE_MIN_SOURCES=1` pinned, a contradicting value refused; Chainlink max age ≤ heartbeat + 1 h, DEX TWAP
+300-3600 s, `ORACLE_DEX_MAX_AGE_MS` ≤ 120 s, `minDepthUsd` ≥ 10,000, `ORACLE_PRIMARY_LAG_BPS` < `ORACLE_CONFIRM_BPS`)
+or the DeployMainnet
 record is missing, while two roles share a key, or while any `*MNEMONIC*`, the deployer key, the funder key or
 `BKRN_ALLOW_ADMIN_KEY` is in the environment (scripts/network-profile.ts).
 
@@ -81,15 +83,25 @@ ANTHROPIC_API_KEY=<key>                                # charter jury
 # oracle (RUNBOOK "Real prices", VERIFY C6): primary + confirm. Chainlink feeds come from config/chains/4663.json in
 # the app tree (the DeployMainnet input was checked against it); ORACLE_CHAINLINK_FEEDS only overrides, and only in
 # the {"proxy","basis","token"} form (a plain address is refused). Chainlink alone signs (sourceCount 1); the DEX
-# confirm pools (Uniswap v3 TWAP, USDG floor) come from the same file's dexConfirm.pools. Chainlink stale / paused in
-# session: no price for that ticker (StalePrice after maxPriceAge); the DEX never substitutes. services/alerts:
-# oracle_source_failing:chainlink (critical, 60 s), oracle_confirm_divergence (2 min), oracle_confirm_unavailable (10 min).
+# confirm pools (Uniswap v3 TWAP, factory-verified, 2% depth floor minDepthUsd $50k) come from the same file's
+# dexConfirm.pools; TSLA and MSFT were below the floor on 2026-10-18 (confirm unavailable; do not lower it). Chainlink
+# read failure / oraclePaused / round older than heartbeat + grace in session: no price for that ticker (StalePrice
+# after maxPriceAge); the DEX never substitutes. A feed that stops updating but keeps answering is signed as fresh for
+# up to heartbeat + grace (24 h 10 min): only the confirm gap shows it. services/alerts: oracle_source_failing:chainlink
+# (critical, 60 s; can page at the Sunday 20:00 ET open, expected: do not widen the grace), oracle_primary_suspect_stale
+# (gap > ORACLE_PRIMARY_LAG_BPS, no new round, 10 min), oracle_confirm_divergence (> 200 bps, 2 min),
+# oracle_confirm_unavailable (10 min). Actions: docs/RUNBOOK.md "Real prices".
 # ORACLE_POLICY=primary-confirm                         # pinned by the mainnet profile: leave unset (another value is refused)
 # ORACLE_MIN_SOURCES=1                                  # pinned likewise; on-chain AttestedOracle.minSources() is 1 too
 # ORACLE_CONFIRM_BPS=200                                # divergence threshold (bps of Chainlink), at most 500 on mainnet
+# ORACLE_PRIMARY_LAG_BPS=100                            # stalled-feed gap (oracle_primary_suspect_stale), below ORACLE_CONFIRM_BPS
+# ORACLE_CONFIRM_HYSTERESIS_MS=60000                    # a diverged / unavailable / lag / failure run ends only after this
+# ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS=600000            # in-session max age = heartbeat + grace; at most 3600000 on mainnet
+# ORACLE_CHAINLINK_MAX_AGE_MS=3600000                   # feeds without heartbeatSec; at most 90000000 on mainnet
 # ORACLE_DEX_CONFIRM=1                                  # default; cannot be 0 on mainnet
-# ORACLE_DEX_TWAP_SEC=600                               # overrides every pool's twapSec
-# ORACLE_DEX_MAX_AGE_MS=60000
+# ORACLE_DEX_TWAP_SEC=600                               # overrides every pool's twapSec; 300-3600 on mainnet
+# ORACLE_DEX_MAX_AGE_MS=60000                           # at most 120000 on mainnet
+# ALERT_ORACLE_PRIMARY_LAG_SECONDS=600                  # services/alerts: suspect-stale gap duration in session
 # ORACLE_DEX_RPC_URL=https://<rpc>                      # default ORACLE_CHAINLINK_RPC_URL, else RPC_URL
 # optional extra confirm source, only if bought (never counts for signing; licence VERIFY C6):
 # ORACLE_PYTH=1
