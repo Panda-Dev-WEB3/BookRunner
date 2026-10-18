@@ -209,6 +209,7 @@ export function parseOracleHealth(body: unknown): OracleProbe {
           failingSince: num(x.failingSince),
           failingTickers: Array.isArray(x.failingTickers) ? x.failingTickers.map(String) : [],
           lastError: typeof x.lastError === "string" ? x.lastError.slice(0, 200) : null,
+          lastErrorAt: num(x.lastErrorAt),
         }))
     : [];
   const msp = o.onchain?.minSourcesProblem;
@@ -217,7 +218,7 @@ export function parseOracleHealth(body: unknown): OracleProbe {
         .filter((x): x is Record<string, unknown> => !!x && typeof x === "object" && typeof (x as { priceId?: unknown }).priceId === "string")
         .flatMap((x) => {
           const since = num(x.since);
-          return since === null ? [] : [{ priceId: String(x.priceId), since, reason: typeof x.reason === "string" ? x.reason.slice(0, 200) : "?" }];
+          return since === null ? [] : [{ priceId: String(x.priceId), since, reason: typeof x.reason === "string" ? x.reason.slice(0, 200) : "?", lastSeenAt: num(x.lastSeenAt) }];
         })
     : [];
   return {

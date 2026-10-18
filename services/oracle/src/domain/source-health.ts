@@ -19,6 +19,10 @@ export interface SourceHealthView {
   failingTickers: string[];
   /** class of the last failure, e.g. "HTTP 401", "timeout", "no observation" */
   lastError: string | null;
+  /**
+   * latest failed tick (unix ms). failingSince lingers for the hysteresis after recovery, so consumers measure the
+   * observed failing span lastErrorAt - failingSince (services/alerts), never now - failingSince.
+   */
   lastErrorAt: number | null;
 }
 

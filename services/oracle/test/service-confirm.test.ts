@@ -221,7 +221,8 @@ describe("OracleService primary-confirm", () => {
     await h.tick();
     h.chainlink.set("NVDA", { price: 190 });
     await h.tick(T0 + 30_000);
-    expect(h.svc.health().unpublished.find((u) => u.priceId === "NVDA")).toMatchObject({ since: T0 });
+    // lingering (hysteresis) but lastSeenAt stays at the last tick without a price: alerts measure since -> lastSeenAt
+    expect(h.svc.health().unpublished.find((u) => u.priceId === "NVDA")).toMatchObject({ since: T0, lastSeenAt: T0 });
     h.chainlink.set("NVDA", null);
     await h.tick(T0 + 31_000);
     expect(h.svc.health().unpublished.find((u) => u.priceId === "NVDA")).toMatchObject({ since: T0 });

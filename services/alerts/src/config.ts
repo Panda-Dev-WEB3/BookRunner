@@ -110,8 +110,8 @@ const shape = {
   /** primary-confirm: this many tickers diverged at once makes every divergence alert critical */
   ALERT_ORACLE_CONFIRM_CRITICAL_TICKERS: z.coerce.number().int().min(1).default(3),
   /**
-   * primary-confirm: a confirm gap above the oracle's ORACLE_PRIMARY_LAG_BPS for this long in session, with no Chainlink
-   * round since it began = oracle_primary_suspect_stale (the feed may have silently stopped updating)
+   * primary-confirm: a confirm gap above the oracle's ORACLE_PRIMARY_LAG_BPS lasting this long in session with no new
+   * Chainlink round for this long (clock from the later of lagSince and the round) = oracle_primary_suspect_stale
    */
   ALERT_ORACLE_PRIMARY_LAG_SECONDS: int(600),
   /** default: on for testnet / mainnet, off on devnet */

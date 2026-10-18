@@ -40,7 +40,8 @@ describe("SourceHealth", () => {
     expect(h.view()[0]!.failingSince).toBe(T0);
     h.update(T0 + 3_000, tick({ NVDA: { "dex-twap": ok } }), open);
     h.update(T0 + 62_999, tick({ NVDA: { "dex-twap": ok } }), open);
-    expect(h.view()[0]!.failingSince).toBe(T0);
+    // the run lingers, but lastErrorAt stays at the latest failed tick: the observed span (what alerts measure) is 2 s
+    expect(h.view()[0]).toMatchObject({ failingSince: T0, lastErrorAt: T0 + 2_000 });
     h.update(T0 + 63_000, tick({ NVDA: { "dex-twap": ok } }), open);
     expect(h.view()[0]).toMatchObject({ failingSince: null, failingTickers: [] });
     // the market closing ends the run at once
@@ -92,7 +93,7 @@ describe("OracleService /health sources", () => {
     expect(sources.find((s) => s.name === "pyth")).toMatchObject({ failingSince: T0, failingTickers: ["NVDA"], lastError: "HTTP 403", lastOkAt: null });
     expect(sources.find((s) => s.name === "chainlink")).toMatchObject({ failingSince: null, lastOkAt: T0 });
     // in session without a publishable price: listed with the start of the run and the reason
-    expect(svc.health().unpublished).toEqual([{ priceId: "NVDA", since: T0, reason: "1 of 3 required sources" }]); // FakeChain minSources() = 3
+    expect(svc.health().unpublished).toEqual([{ priceId: "NVDA", since: T0, lastSeenAt: T0, reason: "1 of 3 required sources" }]); // FakeChain minSources() = 3
     clock += 1000;
     chain.head = Math.floor(clock / 1000);
     await svc.tick(clock);

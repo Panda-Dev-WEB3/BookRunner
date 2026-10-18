@@ -25,7 +25,7 @@ recorded in `oracle_prices` (history), and — in heartbeat mode only — sent t
   failure, `oraclePaused()`, a failed sequencer check or a round older than heartbeat + grace (24 h 10 min with the
   defaults): a feed that stops updating but keeps answering is signed as a fresh, non-held price until then. The
   signal for it is the confirm gap: above `ORACLE_PRIMARY_LAG_BPS` (100, below `ORACLE_CONFIRM_BPS`) a lag run
-  starts (`confirm[].lagSince`); with no Chainlink round since (`primaryTs <= lagSince`) for 10 min the oracle logs
+  starts (`confirm[].lagSince`); with no new Chainlink round for 10 min while it lasts (clock from the later of `lagSince` and `primaryTs`) the oracle logs
   "Chainlink suspect stale" (`services/alerts` `oracle_primary_suspect_stale`). The price never changes; the oracle
   never switches source. A diverged / unavailable run, the lag run, a source failure run and an unpublished run end
   only after the other state held `ORACLE_CONFIRM_HYSTERESIS_MS` (60 s).

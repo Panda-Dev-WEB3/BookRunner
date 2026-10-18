@@ -146,11 +146,11 @@ describe("collect", () => {
       primaryLagBps: null,
       minSourcesProblem: null,
       sources: [
-        { name: "chainlink", kind: "chainlink", role: "median", lastOkAt: NOW - 1000, failingSince: null, failingTickers: [], lastError: null },
-        { name: "pyth", kind: "pyth", role: "median", lastOkAt: null, failingSince: NOW - 90_000, failingTickers: ["NVDA"], lastError: "HTTP 401" },
+        { name: "chainlink", kind: "chainlink", role: "median", lastOkAt: NOW - 1000, failingSince: null, failingTickers: [], lastError: null, lastErrorAt: null },
+        { name: "pyth", kind: "pyth", role: "median", lastOkAt: null, failingSince: NOW - 90_000, failingTickers: ["NVDA"], lastError: "HTTP 401", lastErrorAt: NOW },
       ],
       confirm: [],
-      unpublished: [{ priceId: "NVDA", since: NOW - 150_000, reason: "sources disagree" }],
+      unpublished: [{ priceId: "NVDA", since: NOW - 150_000, reason: "sources disagree", lastSeenAt: null }],
     });
     expect(parseOracleHealth(null)).toMatchObject({ ok: false, error: "unexpected body", policy: "median", confirm: [] });
     expect(parseOracleHealth({ onchain: { minSourcesProblem: "AttestedOracle.minSources()=3 > 2" } }).minSourcesProblem).toBe("AttestedOracle.minSources()=3 > 2");

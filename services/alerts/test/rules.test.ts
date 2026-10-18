@@ -235,6 +235,11 @@ describe("oracle sources", () => {
   const withSources = (sources: OracleSourceSnap[], minSourcesProblem: string | null = null, unpublished: Array<{ priceId: string; since: number; reason: string }> = []) =>
     snap({ oracle: { ok: true, error: null, policy: "median", confirmBps: null, primaryLagBps: null, sources, confirm: [], minSourcesProblem, unpublished } });
 
+  test("median: a lingering one-tick blip (lastErrorAt at the blip) does not age into an alert", () => {
+    expect(oracle(withSources([failing(70_000, { lastErrorAt: NOW - 70_000 })]), rules())).toEqual([]);
+    expect(keys(oracle(withSources([failing(70_000, { lastErrorAt: NOW })]), rules()))).toEqual(["oracle_source_failing:pyth"]);
+  });
+
   test("any live source failing in-session tickers for more than 60 s alerts; two on the same ticker is critical", () => {
     expect(oracle(snap(), rules())).toEqual([]);
     expect(oracle(withSources([failing(59_000)]), rules())).toEqual([]);
@@ -317,6 +322,22 @@ describe("oracle primary-confirm (mainnet: Chainlink signs, DEX TWAP / Pyth conf
     return snap({ oracle: confirmOracle({ ...over, confirm: [...base, ...(over.confirm ?? [])] }) });
   };
   const withPrimary = (failingMs: number, tickers: string[]) => [src("chainlink", failingMs, tickers), ...healthySources().slice(1)];
+
+  test("hysteresis linger: one failed Chainlink tick then 60 s healthy pages nothing; a sustained failure still does", () => {
+    // the oracle keeps failingSince for 60 s after recovery; the latest failed tick (lastErrorAt) is the blip itself
+    const blip = [src("chainlink", 60_000, ["NVDA"], { lastErrorAt: NOW - 60_000 }), ...healthySources().slice(1)];
+    expect(oracle(pc({ sources: blip }), rules())).toEqual([]);
+    // flapping: failed ticks keep coming, the observed span grows past 60 s
+    const flapping = [src("chainlink", 61_000, ["NVDA"], { lastErrorAt: NOW - 1_000 }), ...healthySources().slice(1)];
+    expect(keys(oracle(pc({ sources: flapping }), rules()))).toEqual(["oracle_source_failing:chainlink"]); // observed span 60 s
+    const sustained = [src("chainlink", 61_000, ["NVDA"], { lastErrorAt: NOW }), ...healthySources().slice(1)];
+    expect(oracle(pc({ sources: sustained }), rules()).map((c) => [c.key, c.severity])).toEqual([["oracle_source_failing:chainlink", "critical"]]);
+    // price missing: a 10 s gap lingering for 60 s is not a 2 min outage; a sustained one is
+    const lingering = [{ priceId: "NVDA", since: NOW - 130_000, lastSeenAt: NOW - 120_000, reason: "primary source chainlink has no fresh observation" }];
+    expect(oracle(pc({ unpublished: lingering }), rules())).toEqual([]);
+    const missing = [{ priceId: "NVDA", since: NOW - 130_000, lastSeenAt: NOW, reason: "primary source chainlink has no fresh observation" }];
+    expect(keys(oracle(pc({ unpublished: missing }), rules()))).toEqual(["oracle_price_missing:NVDA"]);
+  });
 
   test("healthy: nothing; config defaults 120 s / 600 s / 3 tickers, env overrides", () => {
     expect(evaluate(pc(), rules())).toEqual([]);
@@ -429,8 +450,10 @@ describe("oracle primary-confirm (mainnet: Chainlink signs, DEX TWAP / Pyth conf
     expect(keys(c)).toEqual(["oracle_primary_suspect_stale:NVDA"]);
     expect(c[0]!.severity).toBe("warning");
     expect(c[0]!.summary).toContain("NVDA Chainlink 180 (round 12m old) vs dex-twap 182.7 (150 bps): gap above 100 bps for 10m in session with no new Chainlink round");
-    // a Chainlink round arrived during the gap: the feed is alive (the market moved again), no alert
+    // a Chainlink round arrived during the gap: the feed was alive then; the stall clock restarts from that round
     expect(oracle(pc({ confirm: [lag(900_000, 300_000)] }), rules())).toEqual([]);
+    // ... and fires again if the gap persists 10 min after that round with no further round
+    expect(keys(oracle(pc({ confirm: [lag(1_500_000, 700_000)] }), rules()))).toEqual(["oracle_primary_suspect_stale:NVDA"]);
     // no lag run, or off-hours: nothing
     expect(oracle(pc({ confirm: [lag(null, 9_000_000)] }), rules())).toEqual([]);
     expect(oracle(pc({ confirm: [lag(900_000, 9_000_000, { status: "closed" })] }), rules())).toEqual([]);

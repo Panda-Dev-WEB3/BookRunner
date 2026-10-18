@@ -377,11 +377,19 @@ export function oracle(s: Snapshot, c: RuleConfig): Condition[] {
   return out;
 }
 
+/**
+ * Observed span (s) of a run that the oracle keeps for its hysteresis after recovery: from its start to its latest
+ * failing tick (`last`; absent = now). A one-tick blip stays ~0 however long it lingers; a flapping or sustained failure
+ * keeps growing.
+ */
+export const observedSpanSec = (since: number, last: number | null | undefined, now: number): number => ((last ?? now) - since) / 1000;
+const failSpan = (src: OracleSourceSnap, now: number): number => (src.failingSince == null ? 0 : observedSpanSec(src.failingSince, src.lastErrorAt, now));
+
 /** in-session tickers without a publishable price for oraclePriceMissingSec, minus those `explained` by source alerts */
 function priceMissing(o: OracleProbe, s: Snapshot, c: RuleConfig, explained: Set<string>): Condition[] {
   const out: Condition[] = [];
   for (const u of o.unpublished) {
-    const age = (s.now - u.since) / 1000;
+    const age = observedSpanSec(u.since, u.lastSeenAt, s.now);
     if (age < c.oraclePriceMissingSec || explained.has(u.priceId)) continue;
     out.push({
       key: `oracle_price_missing:${u.priceId}`,
@@ -395,13 +403,13 @@ function priceMissing(o: OracleProbe, s: Snapshot, c: RuleConfig, explained: Set
 
 function oracleMedian(o: OracleProbe, s: Snapshot, c: RuleConfig): Condition[] {
   const out: Condition[] = [];
-  const failing = o.sources.filter((src) => src.failingSince != null && (s.now - src.failingSince) / 1000 >= c.oracleSourceFailSec);
+  const failing = o.sources.filter((src) => src.failingSince != null && failSpan(src, s.now) >= c.oracleSourceFailSec);
   // tickers failed by 2+ sources at once: below 2 sources nothing is published for them
   const failedBy = new Map<string, number>();
   for (const src of failing) for (const t of src.failingTickers) failedBy.set(t, (failedBy.get(t) ?? 0) + 1);
   const dark = new Set([...failedBy].filter(([, n]) => n >= 2).map(([t]) => t));
   for (const src of failing) {
-    const age = (s.now - (src.failingSince ?? s.now)) / 1000;
+    const age = failSpan(src, s.now);
     const shared = src.failingTickers.filter((t) => dark.has(t));
     out.push({
       key: `oracle_source_failing:${src.name}`,
@@ -427,7 +435,7 @@ function oraclePrimaryConfirm(o: OracleProbe, s: Snapshot, c: RuleConfig): Condi
   const confirmFailSec = Math.max(c.oracleSourceFailSec, c.oracleConfirmUnavailableSec);
   for (const src of o.sources) {
     if (src.failingSince == null) continue;
-    const age = (s.now - src.failingSince) / 1000;
+    const age = failSpan(src, s.now);
     if (src.role === "primary") {
       if (age < c.oracleSourceFailSec) continue;
       for (const t of src.failingTickers) primaryDark.add(t);
@@ -471,13 +479,15 @@ function oraclePrimaryConfirm(o: OracleProbe, s: Snapshot, c: RuleConfig): Condi
     });
   }
 
-  // a sustained gap above the lag threshold with no Chainlink round since it began: Chainlink rounds on a 50 bps
+  // a sustained gap above the lag threshold with no new Chainlink round for oraclePrimaryLagSec: Chainlink rounds on a 50 bps
   // deviation, so a feed that silently stopped posting looks like this long before heartbeat + grace (~24 h) marks it
   // stale; until then the oracle keeps signing the frozen round as fresh
   const lagBps = o.primaryLagBps ?? 100;
+  // the stall clock restarts at every new Chainlink round: a round that lands mid-gap proves the feed alive then,
+  // but if the gap persists after it and no further round comes, the alert fires again oraclePrimaryLagSec later
   for (const x of o.confirm) {
-    if (x.status === "closed" || x.lagSince == null || x.primaryTs == null || x.primaryTs > x.lagSince) continue;
-    const lagAge = (s.now - x.lagSince) / 1000;
+    if (x.status === "closed" || x.lagSince == null || x.primaryTs == null) continue;
+    const lagAge = (s.now - Math.max(x.lagSince, x.primaryTs)) / 1000;
     if (lagAge < c.oraclePrimaryLagSec) continue;
     const vs = x.confirmers.length ? x.confirmers.map((k) => `${k.name} ${px(k.price)} (${bps(k.diffBps)})`).join(", ") : "?";
     out.push({

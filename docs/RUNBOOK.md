@@ -267,8 +267,9 @@ Alerts (`services/alerts`) and what to do:
 - **`oracle_price_missing:<id>`** (critical, 2 min, `ALERT_ORACLE_PRICE_MISSING_SECONDS`): an in-session ticker
   without a publishable price that no Chainlink alert explains: `/health` `unpublished[].reason` and the oracle log.
 - **`oracle_primary_suspect_stale:<id>`** (warning; the confirm gap above `ORACLE_PRIMARY_LAG_BPS` (100) for
-  `ALERT_ORACLE_PRIMARY_LAG_SECONDS` (600) in session **and** no Chainlink round since the gap began, `primaryTs <=
-  lagSince`; the oracle logs "Chainlink suspect stale" after 10 min): the feed may have stopped updating while it
+  `ALERT_ORACLE_PRIMARY_LAG_SECONDS` (600) in session **and** no new Chainlink round for that long: the clock runs
+  from the later of `lagSince` and `primaryTs`, so a round mid-gap restarts it rather than silencing it; the oracle
+  logs "Chainlink suspect stale" after 10 min): the feed may have stopped updating while it
   keeps answering, and it is still signed as fresh until heartbeat + grace (~24 h). A live feed 50 bps off the
   market would have rounded by now. Same checks and levers as divergence (below).
 - **`oracle_confirm_divergence:<id>`** (warning after 2 min above `ORACLE_CONFIRM_BPS` (200) in session,

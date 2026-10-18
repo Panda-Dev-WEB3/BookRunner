@@ -116,6 +116,12 @@ export interface OracleSourceSnap {
   failingTickers: string[];
   /** failure class, e.g. "HTTP 401", "timeout" (never a key) */
   lastError: string | null;
+  /**
+   * unix ms of the latest failed tick. The oracle keeps a run (failingSince) for its hysteresis after recovery, so the
+   * rules measure the OBSERVED failing span lastErrorAt - failingSince, never now - failingSince (a one-tick blip must
+   * not age into an alert while the source is healthy). Absent (older oracle) = now.
+   */
+  lastErrorAt?: number | null;
 }
 
 /**
@@ -156,7 +162,8 @@ export interface OracleProbe {
   /** the oracle's on-chain minSources problem (minSources() above the live sources), if any */
   minSourcesProblem: string | null;
   /** in-session price ids without a publishable price (since = unix ms of the start of the run) */
-  unpublished: Array<{ priceId: string; since: number; reason: string }>;
+  /** lastSeenAt: unix ms of the latest tick without a price (the run lingers for the hysteresis; absent = now) */
+  unpublished: Array<{ priceId: string; since: number; reason: string; lastSeenAt?: number | null }>;
 }
 
 /** A timestamped sample kept across passes (rpc probe outcome, buyback pending). */

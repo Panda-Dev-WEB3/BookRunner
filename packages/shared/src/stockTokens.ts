@@ -103,7 +103,7 @@ export const dexConfirmPoolSchema = z.object({
   twapSec: z.number().int().min(60).max(86_400).default(1800),
   /**
    * Depth floor (whole quote tokens, ~USD): the smaller of the quote amounts that move the pool price 2% up or down
-   * within the active range (in-range liquidity() and sqrtPriceX96; services/oracle sources/dex-twap.ts depth2PctQuote).
+   * within the active range (in-range liquidity() and sqrtPriceX96; services/oracle sources/dex-twap.ts depthQuote).
    * Below it the pool confirms nothing (status unavailable). Not the pool's token balance (out-of-range positions,
    * uncollected fees and donations would count there).
    */

@@ -167,7 +167,7 @@ export class OracleService {
   private readonly onchainAt = new Map<string, number>();
   private readonly skipSince = new Map<string, number>();
   /** in-session price ids without a publishable price: since (unix ms) + the latest reason */
-  private readonly unpublished = new Map<string, { since: number; reason: string; publishedAt: number | null }>();
+  private readonly unpublished = new Map<string, { since: number; reason: string; lastSeenAt: number; publishedAt: number | null }>();
   /** primary-confirm: latest confirm evaluation per equity price id */
   private readonly confirmState = new Map<string, ConfirmView>();
   private readonly confirmRuns = new Map<string, ConfirmRun>();
@@ -369,7 +369,7 @@ export class OracleService {
         // in session and nothing publishable: /health `unpublished` (services/alerts oracle_price_missing)
         if (open) {
           const u = this.unpublished.get(e.priceId);
-          this.unpublished.set(e.priceId, { since: u?.since ?? nowMs, reason: d.reason, publishedAt: null });
+          this.unpublished.set(e.priceId, { since: u?.since ?? nowMs, reason: d.reason, lastSeenAt: nowMs, publishedAt: null });
         } else this.unpublished.delete(e.priceId);
         this.noteSkip(e.priceId, d.reason, nowMs, agg);
         // an index may still use this component's recent publication
@@ -479,21 +479,22 @@ export class OracleService {
   }
 
   /**
-   * A confirm gap above primaryLagBps for confirmUnavailableWarnMs (10 min) with no Chainlink round since it began:
+   * A confirm gap above primaryLagBps for confirmUnavailableWarnMs (10 min) with no new Chainlink round for as long:
    * the feed may have silently stopped updating (it still answers, so it stays "fresh" up to heartbeat + grace).
    * Logged (rate-limited); services/alerts raises oracle_primary_suspect_stale. The price is never changed.
    */
   private warnLag(v: ConfirmView, nowMs: number): void {
     const s = this.deps.settings;
-    if (v.lagSince === null || v.primaryTs === null || v.primaryTs > v.lagSince) return;
-    if (nowMs - v.lagSince < (s.confirmUnavailableWarnMs ?? 600_000)) return;
+    if (v.lagSince === null || v.primaryTs === null) return;
+    // the stall clock restarts at every new round (services/alerts oracle_primary_suspect_stale does the same)
+    if (nowMs - Math.max(v.lagSince, v.primaryTs) < (s.confirmUnavailableWarnMs ?? 600_000)) return;
     const key = `${v.priceId}:lag`;
     const last = this.confirmWarnAt.get(key);
     if (last !== undefined && nowMs - last < (s.confirmWarnEveryMs ?? 60_000)) return;
     this.confirmWarnAt.set(key, nowMs);
     this.log.warn(
       { priceId: v.priceId, chainlink: v.primaryPrice, chainlinkRoundAgeMs: nowMs - v.primaryTs, diffBps: v.diffBps, lagForMs: nowMs - v.lagSince },
-      "Chainlink suspect stale: the confirm gap exceeds ORACLE_PRIMARY_LAG_BPS with no new round since it began (the price is still Chainlink)",
+      "Chainlink suspect stale: the confirm gap exceeds ORACLE_PRIMARY_LAG_BPS with no new round for 10 min (the price is still Chainlink)",
     );
   }
 
@@ -745,7 +746,8 @@ export class OracleService {
       /** primary-confirm: per equity, how the confirm sources compare with Chainlink */
       confirm: this.universe.map((e) => this.confirmState.get(e.priceId)).filter((c): c is ConfirmView => !!c),
       /** in-session price ids with no publishable price this tick (since = start of the run) */
-      unpublished: [...this.unpublished.entries()].map(([priceId, u]) => ({ priceId, since: u.since, reason: u.reason })),
+      /** since = start of the run (kept for the hysteresis after recovery), lastSeenAt = latest tick without a price */
+      unpublished: [...this.unpublished.entries()].map(([priceId, u]) => ({ priceId, since: u.since, lastSeenAt: u.lastSeenAt, reason: u.reason })),
       pushMode: this.deps.settings.pushMode,
       effectivePushMode: this.effectivePushMode(),
       bundle: this.bundle ? { publishedAt: this.bundle.publishedAt, priceIds: this.bundle.priceIds } : null,
