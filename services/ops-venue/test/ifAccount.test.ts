@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { ACCOUNT, type VenueSymbolIssuesMsg } from "@bookrunner/shared";
 import type { Address, Hex } from "viem";
 import { loadOpsEnv } from "../src/config";
-import { type VenueWithdrawRow } from "../src/domain/withdraw";
+import type { VenueWithdrawRow, WithdrawSaga } from "../src/domain/withdraw";
 import { ifAboveRequirement, ifAccountIssue, ifBindingOf, ORDERLY_IF_REQUIREMENT_USD, parseIfBuilderAccounts, resolveIfRequirementUsd } from "../src/domain/ifAccount";
 import type { TrackedBook } from "../src/worker/context";
 import { BookRegistry } from "../src/worker/books";
@@ -53,7 +53,7 @@ describe("domain: binding, consistency, config parsing", () => {
   test("env: ORDERLY_IF_MODE defaults to contract; builder needs ORDERLY_MODE=live; malformed accounts are refused", () => {
     expect(loadOpsEnv({}).ORDERLY_IF_MODE).toBe("contract");
     expect(() => loadOpsEnv({ ORDERLY_IF_MODE: "builder" })).toThrow(/needs ORDERLY_MODE=live/);
-    const e = loadOpsEnv({ ORDERLY_MODE: "live", ORDERLY_BROKER_ID: "bookrunner", ORDERLY_IF_MODE: "builder", ORDERLY_IF_BUILDER_ACCOUNTS: `1=${IF_ID}` });
+    const e = loadOpsEnv({ ORDERLY_MODE: "live", ORDERLY_BASE_URL: "https://testnet-api.orderly.org", ORDERLY_BROKER_ID: "bookrunner", ORDERLY_IF_MODE: "builder", ORDERLY_IF_BUILDER_ACCOUNTS: `1=${IF_ID}` });
     expect([e.ORDERLY_IF_MODE, e.ORDERLY_IF_BUILDER_ACCOUNTS]).toEqual(["builder", `1=${IF_ID}`]);
     expect(() => loadOpsEnv({ ORDERLY_MODE: "live", ORDERLY_IF_MODE: "builder", ORDERLY_IF_BUILDER_ACCOUNTS: "1=nope" })).toThrow(/32-byte/);
     expect(() => loadOpsEnv({ ORDERLY_IF_MODE: "custodian" })).toThrow();
@@ -234,7 +234,18 @@ describe("builder IF withdrawal: the operator withdraws on Orderly and returns t
     t.builder.withdrawals = async () => rows.map((r) => ({ ...r })) as Awaited<ReturnType<typeof t.builder.withdrawals>>;
     t.builder.withdrawal = async (_a, id) => (rows.find((r) => String(r.id) === id) ?? null) as Awaited<ReturnType<typeof t.builder.withdrawal>>;
     const wp = t.svc.withdrawals as WithdrawProcessor;
-    return { ...t, rows, wp };
+    const saga = () => Object.values(t.sagas.get().withdrawals)[0] as WithdrawSaga;
+    /** recall -> the operator's withdrawal adopted + confirmed -> Orderly pays the EOA (COMPLETED) */
+    const paidToEoa = async (amount: bigint, id = 71) => {
+      const req = t.chain.requestWithdraw(ADAPTER, ACCOUNT.IF, amount);
+      await wp.onRequested(req);
+      rows.push({ id, status: "COMPLETED", amountUsd: amount, clientRef: null, receiver: EOA, createdAt: t.ctx.now() });
+      const nonce = req.nonce.toString();
+      await wp.processNonce(1, nonce);
+      t.chain.balances.set(EOA.toLowerCase(), (t.chain.balances.get(EOA.toLowerCase()) ?? 0n) + amount); // Orderly paid the EOA
+      return nonce;
+    };
+    return { ...t, rows, wp, saga, paidToEoa };
   }
 
   test("waits (no venue POST, no attempt burnt, published) -> adopts the operator's withdrawal -> confirms -> waits for the return -> sweeps", async () => {
@@ -242,13 +253,12 @@ describe("builder IF withdrawal: the operator withdraws on Orderly and returns t
     const amount = 10_000_000_000n;
     const req = t.chain.requestWithdraw(ADAPTER, ACCOUNT.IF, amount);
     const saga = await t.wp.onRequested(req);
-    expect(saga?.operatorIf).toBe(true);
-    expect(saga?.owner).toBe(EOA);
+    expect([saga?.operatorIf, saga?.owner, saga?.requestBlock]).toEqual([true, EOA, req.block.toString()]);
     await t.wp.processAll();
-    let s = t.wp.pending()[0];
-    expect([s?.stage, s?.attempts, typeof s?.operatorWaitSince]).toEqual(["detected", 0, "number"]);
+    let s = t.saga();
+    expect([s.stage, s.attempts, typeof s.operatorWaitSince]).toEqual(["detected", 0, "number"]);
     expect(t.calls.requestWithdraw).toBe(0); // ops-venue never signs for the operator's wallet
-    expect(t.wp.ifOperatorWaits()).toEqual([{ bookId: 1, nonce: "1", step: "withdraw", amount: amount.toString(), owner: EOA, adapter: ADAPTER, since: s?.operatorWaitSince as number }]);
+    expect(t.wp.ifOperatorWaits()).toEqual([{ bookId: 1, nonce: "1", step: "withdraw", amount: amount.toString(), owner: EOA, adapter: ADAPTER, since: s.operatorWaitSince as number }]);
     await t.svc.syncBooks();
     expect(t.last().ifOperatorWaits?.[0]?.step).toBe("withdraw");
 
@@ -256,23 +266,103 @@ describe("builder IF withdrawal: the operator withdraws on Orderly and returns t
     t.rows.push({ id: 70, status: "PENDING", amountUsd: 1n, clientRef: null, receiver: EOA, createdAt: 5_000 });
     t.rows.push({ id: 71, status: "PENDING", amountUsd: amount, clientRef: null, receiver: EOA, createdAt: 6_000 });
     await t.wp.processNonce(1, "1");
-    s = t.wp.pending()[0];
-    expect([s?.stage, s?.withdrawId]).toEqual(["confirmed", "71"]);
+    s = t.saga();
+    expect([s.stage, s.withdrawId]).toEqual(["confirmed", "71"]);
     expect(t.chain.count("confirmWithdraw")).toBe(1);
+    expect(t.sagas.get().ifAdopted?.[IF_ID.toLowerCase()]).toEqual(["71"]);
 
-    // Orderly paid the EOA; nothing on the adapter yet: waits for the operator's transfer
+    // Orderly paid the EOA; nothing returned yet: waits for the operator's transfer
     (t.rows[1] as VenueWithdrawRow).status = "COMPLETED";
+    t.chain.balances.set(EOA.toLowerCase(), amount);
     await t.wp.processNonce(1, "1");
-    s = t.wp.pending()[0];
-    expect([s?.stage, s?.attempts, typeof s?.returnWaitSince]).toEqual(["confirmed", 0, "number"]);
+    s = t.saga();
+    expect([s.stage, s.attempts, typeof s.returnWaitSince]).toEqual(["confirmed", 0, "number"]);
     expect(t.wp.ifOperatorWaits()[0]?.step).toBe("return");
     expect(t.chain.count("sweepToVault")).toBe(0);
 
-    t.chain.balances.set(ADAPTER.toLowerCase(), amount); // the operator transfers the USDG to the adapter
+    t.chain.tokenTransfer(EOA, ADAPTER, amount); // the operator transfers the USDG back to the adapter
     await t.wp.processNonce(1, "1");
-    expect(Object.values(t.sagas.get().withdrawals)[0]?.stage).toBe("swept");
+    expect(t.saga().stage).toBe("swept");
+    expect(t.saga().returns?.length).toBe(1);
     expect(t.chain.bal(VAULT)).toBe(amount);
     expect(t.wp.ifOperatorWaits()).toEqual([]);
+  });
+
+  test("regression: funds in the operator's wallet never count as returned; other USDC on the adapter does not either", async () => {
+    const t = await setup();
+    const amount = 4_000_000_000n;
+    const nonce = await t.paidToEoa(amount);
+    expect(t.chain.bal(EOA)).toBe(amount); // the payout sits in the operator's wallet
+    expect((await t.chain.adapterFlowState(ADAPTER)).usdcBalance).toBe(0n); // the flow view never counts the EOA
+    await t.wp.processNonce(1, nonce);
+    expect(t.saga().stage).toBe("confirmed");
+    expect(t.wp.ifOperatorWaits()).toMatchObject([{ step: "return", nonce }]); // the return alert fires
+    // USDC reaching the adapter from elsewhere (fees, an MM payout, a donation) is not this payout's return
+    t.chain.balances.set(ADAPTER.toLowerCase(), amount);
+    t.chain.tokenTransfer(EOA, VAULT, amount); // the operator sending it anywhere but the adapter does not count either
+    t.advance(61_000);
+    await t.wp.processNonce(1, nonce);
+    expect(t.saga().stage).toBe("confirmed");
+    expect(t.chain.count("sweepToVault")).toBe(0);
+    // a too-small return is not enough (the operator returns the full amount)
+    t.chain.balances.set(EOA.toLowerCase(), amount);
+    t.chain.tokenTransfer(EOA, ADAPTER, amount - 1n);
+    t.advance(61_000);
+    await t.wp.processNonce(1, nonce);
+    expect(t.saga().stage).toBe("confirmed");
+  });
+
+  test("one return transfer is claimed by one saga only", async () => {
+    const t = await setup();
+    const a = await t.paidToEoa(1_000_000_000n, 71);
+    const b = await t.paidToEoa(1_000_000_000n, 72);
+    t.chain.tokenTransfer(EOA, ADAPTER, 1_000_000_000n);
+    await t.wp.processNonce(1, a);
+    await t.wp.processNonce(1, b);
+    const stages = Object.values(t.sagas.get().withdrawals).map((s) => [s.nonce, s.stage]);
+    expect(stages).toEqual([
+      [a, "swept"],
+      [b, "confirmed"],
+    ]);
+  });
+
+  test("unreturned past OPS_IF_RETURN_WRITE_OFF_MS: written off from NAV on-chain, published critical; a late return is still swept", async () => {
+    const t = await setup();
+    t.ctx.settings.ifReturnWriteOffMs = 3_600_000;
+    const amount = 2_000_000_000n;
+    const nonce = await t.paidToEoa(amount);
+    await t.wp.processNonce(1, nonce);
+    t.advance(3_599_000);
+    await t.wp.processNonce(1, nonce);
+    expect(t.chain.count("writeOffOperatorPayout")).toBe(0);
+    t.advance(1_000);
+    await t.wp.processNonce(1, nonce);
+    expect(t.chain.count("writeOffOperatorPayout")).toBe(1);
+    expect(t.chain.adapter(ADAPTER).inTransit).toBe(0n); // NAV no longer counts it
+    expect(typeof t.saga().writtenOffAt).toBe("number");
+    expect(t.wp.ifOperatorWaits()[0]).toMatchObject({ step: "return", writtenOffAt: t.saga().writtenOffAt });
+    t.advance(61_000);
+    await t.wp.processNonce(1, nonce);
+    expect(t.chain.count("writeOffOperatorPayout")).toBe(1); // once
+    t.chain.tokenTransfer(EOA, ADAPTER, amount); // the late return: swept to the vault as a gain
+    t.advance(61_000);
+    await t.wp.processNonce(1, nonce);
+    expect(t.saga().stage).toBe("swept");
+    expect(t.chain.bal(VAULT)).toBe(amount);
+  });
+
+  test("a return-wait does not freeze the book's venue reports; the operator's pending withdrawal (Requested) still does", async () => {
+    const t = await setup();
+    const book = t.svc.registry.get(1) as TrackedBook;
+    const req = t.chain.requestWithdraw(ADAPTER, ACCOUNT.IF, 1_000_000n);
+    await t.wp.onRequested(req);
+    await t.wp.processAll();
+    expect(await t.svc.reporter.holdReason(book, t.chain.headTs)).toContain("withdrawal in flight");
+    t.rows.push({ id: 80, status: "COMPLETED", amountUsd: 1_000_000n, clientRef: null, receiver: EOA, createdAt: t.ctx.now() });
+    await t.wp.processNonce(1, "1");
+    expect(t.saga().stage).toBe("confirmed");
+    t.chain.adapter(ADAPTER).lastFlowAt = 0n;
+    expect(await t.svc.reporter.holdReason(book, t.chain.headTs)).toBeNull();
   });
 
   test("an unreadable IF history (key not registered yet) waits too; MM withdrawals of the same book run as usual", async () => {
@@ -285,9 +375,102 @@ describe("builder IF withdrawal: the operator withdraws on Orderly and returns t
     await t.wp.processAll();
     t.advance(61_000);
     await t.wp.processAll();
-    const s = Object.values(t.sagas.get().withdrawals)[0];
-    expect([s?.stage, s?.attempts]).toEqual(["detected", 0]);
+    const s = t.saga();
+    expect([s.stage, s.attempts]).toEqual(["detected", 0]);
     const mm = await t.wp.onRequested(t.chain.requestWithdraw(ADAPTER, ACCOUNT.MM, 1_000_000n));
     expect(mm?.operatorIf).toBeUndefined();
+  });
+});
+
+describe("builder IF misuse detection", () => {
+  test("a withdrawal from the builder IF account no saga adopted is published after the grace; adopted / acknowledged ones never", async () => {
+    const t = await ifService({ mode: "builder", builderBound: true, expected: new Map([[1, IF_ID as string]]) });
+    await t.svc.syncBooks();
+    const rows: VenueWithdrawRow[] = [{ id: 90, status: "COMPLETED", amountUsd: 7_000_000n, clientRef: null, receiver: EOA, createdAt: t.ctx.now() }];
+    t.builder.withdrawals = async () => rows.map((r) => ({ ...r })) as Awaited<ReturnType<typeof t.builder.withdrawals>>;
+    await t.svc.withdrawals.processAll();
+    expect(t.svc.withdrawals.ifUnadopted()).toEqual([]); // inside the grace (a pending saga may adopt it)
+    t.advance(600_000);
+    await t.svc.withdrawals.processAll();
+    expect(t.svc.withdrawals.ifUnadopted()).toEqual([{ bookId: 1, accountId: IF_ID, id: "90", amount: "7000000", status: "COMPLETED", createdAt: rows[0]?.createdAt as number }]);
+    await t.svc.syncBooks();
+    expect(t.last().ifUnadopted?.[0]?.id).toBe("90");
+    // acknowledged after review: no longer published; an adopted one (ledger) never is
+    t.ctx.settings.ifWithdrawAck = new Set(["90"]);
+    t.sagas.get().ifAdopted = { [IF_ID.toLowerCase()]: ["91"] };
+    rows.push({ id: 91, status: "COMPLETED", amountUsd: 1n, clientRef: null, receiver: EOA, createdAt: 1 });
+    t.advance(60_000);
+    await t.svc.withdrawals.processAll();
+    expect(t.svc.withdrawals.ifUnadopted()).toEqual([]);
+  });
+
+  test("venue IF equity below the adapter's insurance is an unexplained drop (published), equal is not", async () => {
+    const t = await ifService({ mode: "builder", builderBound: true, expected: new Map([[1, IF_ID as string]]) });
+    t.ctx.settings.reportSettleSec = 0;
+    t.registerKey();
+    await t.svc.syncBooks();
+    t.mock.venue.credit(IF_ID, 25_000_000_000);
+    t.mock.venue.credit(MM_ID, 75_000_000_000);
+    t.mock.venue.setPrice("NVDA", 190, false);
+    t.chain.headTs = BigInt(Math.floor(t.ctx.now() / 1000));
+    const book = t.svc.registry.get(1) as TrackedBook;
+    t.chain.adapter(ADAPTER).insurance = 25_000_000_000n;
+    await t.svc.reporter.report(book);
+    expect(t.svc.reporter.ifEquityDrops()).toEqual([]);
+    t.chain.adapter(ADAPTER).insurance = 30_000_000_000n; // the adapter expects more than the venue shows
+    t.advance(20_000);
+    t.chain.headTs += 20n;
+    await t.svc.reporter.report(book);
+    expect(t.svc.reporter.ifEquityDrops()).toMatchObject([{ bookId: 1, accountId: IF_ID, expectedUsd: "30000000000", venueUsd: "25000000000" }]);
+    await t.svc.syncBooks();
+    expect(t.last().ifEquityDrops?.[0]?.bookId).toBe(1);
+  });
+
+  test("equity on the builder IF account before the book's deposit: recorded, reports refused, published; a rebound clears it", async () => {
+    const t = await ifService({ mode: "builder", builderBound: true, expected: new Map([[1, IF_ID as string]]), state: "Subscription" });
+    t.registerKey();
+    await t.svc.syncBooks();
+    t.mock.venue.credit(IF_ID, 3_000_000);
+    t.advance(60_000);
+    await t.svc.syncBooks();
+    expect(t.sagas.get().ifPriorEquity?.[ADAPTER.toLowerCase()]?.usd).toBe("3000000");
+    const book = t.svc.registry.get(1) as TrackedBook;
+    expect(await t.svc.reporter.holdReason(book, 1n << 40n)).toContain("held 3000000");
+    expect(t.last().ifAccounts?.map((x) => x.issue)).toContain("prior_equity");
+  });
+});
+
+describe("IF account switch after tracking (rebound)", () => {
+  test("re-read periodically even when Live; the old IF key is removed from Orderly and kept in history; re-assign notice", async () => {
+    const t = await ifService({ mode: "contract", builderBound: false, listingMode: "api" });
+    t.ctx.settings.ifBindingRecheckMs = 300_000;
+    await t.svc.syncBooks();
+    const oldKey = t.keys.loadBook(1)?.ops.if;
+    expect(oldKey?.registeredAt).toBeTruthy();
+    const removed: string[] = [];
+    t.builder.removeKeyWith = async (accountId, _key, orderlyKey) => void removed.push(`${accountId}:${orderlyKey}`);
+    // the timelock binds a builder EOA (mode contract now mismatches: still picked up, never ignored)
+    t.chain.builderIfOwners.set(ADAPTER.toLowerCase(), EOA);
+    t.chain.accountIds = async () => ({ if: OTHER_ID, mm: MM_ID });
+    await t.svc.syncBooks();
+    expect(t.svc.registry.get(1)?.accounts.if).toBe(IF_ID); // Live: not due yet
+    t.advance(300_000);
+    await t.svc.syncBooks();
+    const book = t.svc.registry.get(1) as TrackedBook;
+    expect([book.accounts.if, book.ifBinding]).toEqual([OTHER_ID, "builder"]);
+    expect(removed).toEqual([`${IF_ID}:${oldKey?.orderlyKey}`]);
+    expect(t.keys.loadBook(1)?.history.some((h) => h.orderlyKey === oldKey?.orderlyKey && h.reason === "if_account_switched")).toBe(true);
+    expect(t.last().ifAccounts?.map((x) => x.issue).sort()).toEqual(["mismatch", "reassign"]);
+  });
+});
+
+describe("builder IF mode is a fallback: refused on mainnet without the owner's sign-off", () => {
+  test("ops-venue env: CHAIN_ID 4663 + builder needs ORDERLY_IF_MODE_BUILDER_ACK=1; live needs a known Orderly host", () => {
+    const live = { ORDERLY_MODE: "live", ORDERLY_BROKER_ID: "bookrunner", ORDERLY_BASE_URL: "https://api.orderly.org", CHAIN_ID: "4663", ORDERLY_IF_MODE: "builder", ORDERLY_IF_BUILDER_ACCOUNTS: `1=${IF_ID}` };
+    expect(() => loadOpsEnv(live)).toThrow(/ORDERLY_IF_MODE_BUILDER_ACK=1/);
+    expect(loadOpsEnv({ ...live, ORDERLY_IF_MODE_BUILDER_ACK: "1" }).ORDERLY_IF_MODE).toBe("builder");
+    expect(loadOpsEnv({ ...live, CHAIN_ID: "46630", ORDERLY_BASE_URL: "https://testnet-api.orderly.org" }).ORDERLY_IF_MODE).toBe("builder");
+    expect(() => loadOpsEnv({ ORDERLY_MODE: "live", ORDERLY_BASE_URL: "https://orderly-proxy.internal" })).toThrow(/ORDERLY_IF_REQUIREMENT_USD/);
+    expect(loadOpsEnv({ ORDERLY_MODE: "live", ORDERLY_BASE_URL: "https://orderly-proxy.internal", ORDERLY_IF_REQUIREMENT_USD: "100" }).ORDERLY_IF_REQUIREMENT_USD).toBe(100);
   });
 });

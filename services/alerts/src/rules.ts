@@ -231,9 +231,9 @@ export function venueListing(s: Snapshot, c: RuleConfig): Condition[] {
       const ending = st === "DELISTING" || st === "DELISTED";
       if (b.state === "Retiring") continue;
       if (b.state === "Subscription" && !(ending || st === "REDUCE_ONLY")) continue;
-      // POST_ONLY in live mode: the agent's default (AGENT_VENUE_POST_ONLY_QUOTE true with ORDERLY_MODE=live) is maker-only
-      // two-sided quoting, not reduce-only
-      const postOnlyQuoted = st === "POST_ONLY" && ops.mode === "live";
+      // POST_ONLY: the agents' AGENT_VENUE_POST_ONLY_QUOTE (read from the same stack env; unset = the agent default,
+      // true with ORDERLY_MODE=live) decides between maker-only two-sided quoting and reduce-only
+      const postOnlyQuoted = st === "POST_ONLY" && (c.venuePostOnlyQuote ?? ops.mode === "live");
       out.push({
         key: `venue_market_restricted:${b.bookId}`,
         rule: "venue_market_restricted",
@@ -252,8 +252,15 @@ export function venueListing(s: Snapshot, c: RuleConfig): Condition[] {
  *   ORDERLY_IF_BUILDER_ACCOUNTS: no IF provisioning, no api-mode listing): WARNING in Subscription, CRITICAL once Live /
  *   Retiring (the IF capital sits on an account ops-venue does not manage). key_pending (builder mode: ops-venue's IF key
  *   is not registered for the builder IF account yet, so the book's venue reports fail): WARNING.
+ *   prior_equity (builder mode: the EOA's account held equity before the book's IF deposit; reports refused): CRITICAL.
+ *   reassign (the IF account switched: the admin re-assigns the market's IF account in Orderly One): WARNING.
  * - venue_if_operator_pending:<bookId>:<nonce> (builder mode): an IF withdrawal waits for the operator (withdraw on Orderly
- *   to the IF account's wallet / transfer it back to the adapter): WARNING, CRITICAL after ALERT_IF_OPERATOR_WAIT_CRITICAL_SECONDS (6 h).
+ *   to the IF account's wallet / transfer it back to the adapter): WARNING, CRITICAL after ALERT_IF_OPERATOR_WAIT_CRITICAL_SECONDS
+ *   (6 h), and CRITICAL once ops-venue wrote the unreturned payout off from NAV.
+ * - venue_if_unadopted_withdrawal:<bookId>:<id> (builder mode): a withdrawal from the builder IF account that no on-chain
+ *   request asked for (the operator's key moved IF capital): CRITICAL.
+ * - venue_if_equity_drop:<bookId> (builder mode): the venue's IF equity is below the adapter's insurance with no on-chain
+ *   flow: CRITICAL.
  */
 export function venueIfAccount(s: Snapshot, c: RuleConfig): Condition[] {
   const out: Condition[] = [];
@@ -265,11 +272,15 @@ export function venueIfAccount(s: Snapshot, c: RuleConfig): Condition[] {
       out.push({
         key: `venue_if_account:${b.bookId}`,
         rule: "venue_if_account",
-        severity: i.issue === "mismatch" && live ? "critical" : "warning",
+        severity: (i.issue === "mismatch" && live) || i.issue === "prior_equity" ? "critical" : "warning",
         summary:
           i.issue === "mismatch"
             ? `${bookLabel(b)} (state ${b.state}): its insurance-fund account ${i.accountId} does not match ops-venue's ORDERLY_IF_MODE: ${i.detail}`
-            : `${bookLabel(b)} (state ${b.state}): builder IF account ${i.accountId} waits${i.since != null ? ` ${dur((s.now - i.since) / 1000)}` : ""} for ops-venue's Orderly key (${i.detail}); until then its venue reports fail`,
+            : i.issue === "prior_equity"
+              ? `${bookLabel(b)} (state ${b.state}): builder IF account ${i.accountId}: ${i.detail}`
+              : i.issue === "reassign"
+                ? `${bookLabel(b)} (state ${b.state}): ${i.detail}`
+                : `${bookLabel(b)} (state ${b.state}): builder IF account ${i.accountId} waits${i.since != null ? ` ${dur((s.now - i.since) / 1000)}` : ""} for ops-venue's Orderly key (${i.detail}); until then its venue reports fail`,
       });
     }
     for (const w of b.ifOperatorWaits ?? []) {
@@ -278,11 +289,28 @@ export function venueIfAccount(s: Snapshot, c: RuleConfig): Condition[] {
       out.push({
         key: `venue_if_operator_pending:${b.bookId}:${w.nonce}`,
         rule: "venue_if_operator_pending",
-        severity: wait >= c.ifOperatorWaitCriticalSec ? "critical" : "warning",
+        severity: wait >= c.ifOperatorWaitCriticalSec || w.writtenOffAt != null ? "critical" : "warning",
         summary:
           w.step === "withdraw"
-            ? `${bookLabel(b)} (state ${b.state}): insurance-fund withdrawal #${w.nonce} (${usd.toLocaleString("en-US")} USD) has waited ${dur(wait)} for the operator: withdraw it on Orderly from the builder IF account (wallet ${w.owner}), then transfer it to the adapter ${w.adapter}`
-            : `${bookLabel(b)} (state ${b.state}): Orderly paid insurance-fund withdrawal #${w.nonce} (${usd.toLocaleString("en-US")} USD) to the operator's wallet ${w.owner} ${dur(wait)} ago: transfer it to the adapter ${w.adapter}`,
+            ? `${bookLabel(b)} (state ${b.state}): insurance-fund withdrawal #${w.nonce} (${usd.toLocaleString("en-US")} USD) has waited ${dur(wait)} for the operator: withdraw it promptly on Orderly from the builder IF account (wallet ${w.owner}; until then the book's venue reports are frozen), then transfer it to the adapter ${w.adapter}`
+            : `${bookLabel(b)} (state ${b.state}): Orderly paid insurance-fund withdrawal #${w.nonce} (${usd.toLocaleString("en-US")} USD) to the operator's wallet ${w.owner} ${dur(wait)} ago: transfer it (one transfer, the full amount) to the adapter ${w.adapter}${w.writtenOffAt != null ? `; WRITTEN OFF from NAV ${dur((s.now - w.writtenOffAt) / 1000)} ago (a late return is swept as a gain)` : ""}`,
+      });
+    }
+    for (const u of b.ifUnadopted ?? []) {
+      out.push({
+        key: `venue_if_unadopted_withdrawal:${b.bookId}:${u.id}`,
+        rule: "venue_if_unadopted_withdrawal",
+        severity: "critical",
+        summary: `${bookLabel(b)} (state ${b.state}): Orderly withdrawal ${u.id} (${(Number(u.amount) / 1e6).toLocaleString("en-US")} USD, ${u.status}) left the builder IF account without any on-chain request — the operator's key moved insurance-fund capital: investigate (ops-venue OPS_IF_WITHDRAW_ACK once reviewed)`,
+      });
+    }
+    const d = b.ifEquityDrop;
+    if (d) {
+      out.push({
+        key: `venue_if_equity_drop:${b.bookId}`,
+        rule: "venue_if_equity_drop",
+        severity: "critical",
+        summary: `${bookLabel(b)} (state ${b.state}): builder IF account equity ${(Number(d.venueUsd) / 1e6).toLocaleString("en-US")} USD is below the adapter's insurance ${(Number(d.expectedUsd) / 1e6).toLocaleString("en-US")} USD with no on-chain flow (operator key? insurance use?): investigate`,
       });
     }
   }

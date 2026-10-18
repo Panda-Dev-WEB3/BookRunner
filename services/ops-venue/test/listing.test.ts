@@ -98,8 +98,8 @@ function bareTracker(answer: (symbol: string) => Promise<{ listed: boolean; stat
 describe("config", () => {
   test("ORDERLY_LISTING_MODE: api in mock mode, manual in live mode unless set; re-check / timeout / ceiling bounds", () => {
     expect(resolveListingMode(loadOpsEnv({ ORDERLY_MODE: "mock" }))).toBe("api");
-    expect(resolveListingMode(loadOpsEnv({ ORDERLY_MODE: "live" }))).toBe("manual");
-    expect(resolveListingMode(loadOpsEnv({ ORDERLY_MODE: "live", ORDERLY_LISTING_MODE: "api" }))).toBe("api");
+    expect(resolveListingMode(loadOpsEnv({ ORDERLY_MODE: "live", ORDERLY_BASE_URL: "https://testnet-api.orderly.org" }))).toBe("manual");
+    expect(resolveListingMode(loadOpsEnv({ ORDERLY_MODE: "live", ORDERLY_BASE_URL: "https://testnet-api.orderly.org", ORDERLY_LISTING_MODE: "api" }))).toBe("api");
     expect(resolveListingMode(loadOpsEnv({ ORDERLY_MODE: "mock", ORDERLY_LISTING_MODE: "manual" }))).toBe("manual");
     expect(() => loadOpsEnv({ ORDERLY_LISTING_MODE: "dashboard" })).toThrow();
     expect(() => loadOpsEnv({ OPS_LISTING_RECHECK_MS: "60000", OPS_LISTING_RECHECK_MAX_MS: "30000" })).toThrow("OPS_LISTING_RECHECK_MAX_MS");

@@ -482,7 +482,10 @@ describe("builder price feed", () => {
       refreshEvery: 1,
       statusEvery: 1,
     });
-    await Bun.sleep(300);
+    // wait for the outcome, not a fixed 300 ms: under full-suite load timers fire late (de-flaked; the hung IO never
+    // resolves, so publishes still arriving prove the loop is not blocked on it)
+    const deadline = Date.now() + 5_000;
+    while ((socket.sent.length < 8 || reads < 2) && Date.now() < deadline) await Bun.sleep(20);
     ac.abort();
     await run;
     expect(socket.sent.length).toBeGreaterThanOrEqual(8);
@@ -613,7 +616,7 @@ describe("builder price feed wiring (startBuilderPriceFeed) and config", () => {
   });
 
   test("ORDERLY_ORACLE_ACCOUNT_ID and ORDERLY_ORACLE_KEY_SECRET: both or neither", () => {
-    const base = { ORDERLY_MODE: "live" };
+    const base = { ORDERLY_MODE: "live", ORDERLY_BASE_URL: "https://testnet-api.orderly.org" };
     expect(() => loadOpsEnv({ ...base, ORDERLY_ORACLE_ACCOUNT_ID: ACCOUNT })).toThrow("must be set together");
     expect(() => loadOpsEnv({ ...base, ORDERLY_ORACLE_KEY_SECRET: "x" })).toThrow("must be set together");
     expect(loadOpsEnv({ ...base, ORDERLY_ORACLE_ACCOUNT_ID: ACCOUNT, ORDERLY_ORACLE_KEY_SECRET: "x" }).ORDERLY_ORACLE_ACCOUNT_ID).toBe(ACCOUNT);

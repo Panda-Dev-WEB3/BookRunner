@@ -534,8 +534,13 @@ the Orderly testnet vault, NVDA and TSLA chartered again on it (new book ids, Or
      It exists once the book is created and its delegate signer confirmed (step 3.4). Admin in Orderly One: when
      listing the market (step 2.3) pick that account (`adapter.accountId(0)`) as the market's IF account. Withdrawals
      are automatic (ops-venue, delegate signer).
-   - **builder** (fallback if Orderly refuses a contract account): the IF account is the Orderly account of an
-     operator EOA held behind the multisig (one EOA per book: Orderly derives one account per wallet and broker).
+   - **builder** (FALLBACK only, if Orderly refuses a contract account; **not for mainnet without the owner's explicit
+     sign-off**: ops-venue and the mainnet preflight refuse it on 4663 unless `ORDERLY_IF_MODE_BUILDER_ACK=1`): the IF
+     account is the Orderly account of an operator EOA (one EOA per book: Orderly derives one account per wallet and
+     broker). An EOA is a single private key: the multisig / timelock controls only the binding
+     (`setIfAccountOwner`), never the EOA, so the book's IF safety equals that key's custody. Use a fresh EOA whose
+     Orderly account holds nothing (equity found there before the book's IF deposit makes ops-venue refuse the book's
+     reports: alert `venue_if_account` prior_equity).
      Operator, per book: (a) register the EOA with Orderly for broker `bookrunner` (Orderly One / `POST
      /v1/register_account` signed by the EOA); its account id is `keccak256(abi.encode(eoa, keccak256("bookrunner")))`;
      (b) the timelock calls `adapter.setIfAccountOwner(eoa)` while the book's IF is empty (before the window
@@ -546,10 +551,22 @@ the Orderly testnet vault, NVDA and TSLA chartered again on it (new book ids, Or
      venue reports fail (alert `venue_if_account` key_pending). Admin in Orderly One: assign that account as the
      market's IF account (step 2.3). IF withdrawals (recall / retirement): ops-venue cannot sign for the EOA, so the
      operator withdraws the requested amount on Orderly (paid to the EOA; delist first on a retiring book), then
-     transfers it to the adapter (plain USDG transfer); ops-venue recognises the withdrawal, confirms it on-chain and
-     sweeps once the USDG is back (alert `venue_if_operator_pending`, critical after 6 h). This moves IF custody off
-     the adapter to that EOA: every deposit is still on-chain (`OrderlyDeposit`), every return a transfer to the
-     adapter.
+     transfers it to the adapter: ONE plain USDG transfer of at least the requested amount (top up Orderly's withdrawal
+     fee), from the EOA. ops-venue recognises the withdrawal, confirms it on-chain, tracks that Transfer log (never the
+     adapter's balance) and sweeps (alert `venue_if_operator_pending`, critical after 6 h). Withdraw promptly: while the
+     on-chain request is still Requested the book's venue reports are frozen (the adapter refuses them); the
+     return-wait afterwards does not freeze them. A payout not returned within `OPS_IF_RETURN_WRITE_OFF_MS` (24 h,
+     at least the adapter's 1 h floor) is written off from NAV on-chain (`adapter.writeOffOperatorPayout`, the vault's
+     flowNonce bumps; alert critical "WRITTEN OFF"); returned later it is swept to the vault as a gain. Misuse
+     detection: any withdrawal from the builder IF account that no on-chain request asked for pages critical
+     (`venue_if_unadopted_withdrawal`; acknowledge reviewed ids with `OPS_IF_WITHDRAW_ACK`), and so does an IF equity
+     below the adapter's insurance with no on-chain flow (`venue_if_equity_drop`). This moves IF custody off the
+     adapter to that key: every deposit is still on-chain (`OrderlyDeposit`), every return a transfer to the adapter.
+   - **Switching an IF account after the book was listed** (either direction, only while its IF is empty): ops-venue
+     picks the new binding up within `OPS_IF_BINDING_RECHECK_MS` (5 min), re-provisions the book, removes the previous
+     IF account's ops key from Orderly and publishes `venue_if_account` reassign: the admin must **re-assign the
+     market's IF account in Orderly One** to the new account (api mode too: `createSymbol` does not change it), then
+     check it with the `fund_if` job (the market's IF balance strictly above the requirement).
 
 ### 3. Operator side (testnet: the deployer is `config.timelock()`)
 
@@ -638,7 +655,7 @@ the Orderly testnet vault, NVDA and TSLA chartered again on it (new book ids, Or
 | G2 | **Closed in code (2026-10-18).** Builder-pushed index price: the oracle publishes its signed price per venue symbol every tick (`bkrn:oracle:venue-feed`); ops-venue pushes it to the Builder Oracle WebSocket (`src/builderOracle`, documented auth / message / ping) every second in session, re-sending the latest signed price between oracle ticks (testnet: every 2 s) and stopping when the oracle holds (session closed) or has no fresh price (a held price older than 10 s / 3 ticks counts as no price); alert `builder_price_push` after 30 s (a market never listed on Orderly yet, G4: logged only), or when the push status is old or missing. The session in which the oracle holds follows the charter sessions: they must equal the Orderly One market session of each listing (step 3). Still to confirm with Orderly: the testnet host (default `wss://testnet-ws-oracle.orderly.org`, undocumented), the auth / reject message shapes, and whether the builder account (vs the admin account, G6) may push `ORACLE_bookrunner`. | O18 |
 | G3 | **Closed (2026-10-18).** Symbol naming: one mapping (`packages/shared/src/venueSymbol.ts`) used by ops-venue, the agent and risk: `ORDERLY_MODE=live` -> `PERP_<T>_USDC_<ORDERLY_BROKER_ID>` (`PERP_NVDA_USDC_bookrunner`), mock -> the charter symbol verbatim. Charters, marks and the UI keep `PERP_NVDA_USDC`. Charters with a symbol no Orderly market can carry are rejected at filing (API) and blocked by the jury; a live book without a market is tracked for reports / withdrawals only (alert `venue_symbol_unmapped`). | O19 |
 | G4 | **Closed in code (2026-10-18).** `ORDERLY_LISTING_MODE=manual` (default with `ORDERLY_MODE=live`; `api` stays the default in mock mode): the admin lists each market in Orderly One (step 2.3); ops-venue never calls a listing or symbol-status endpoint, provisions the book's accounts and keys and follows `GET /v1/public/info/{symbol}` per symbol (15 s doubling to 5 min, 5 s timeout, 4 at once: a book waiting for its listing never holds up another). State per symbol (awaiting / listed / missing, open for new risk or restricted) in `bkrn:ops-venue:symbol-issues` and the API's `/health` `orderlyListing`. Alerts: `venue_listing_pending` (warning; critical after a Live book has had no market for 30 min), `venue_market_restricted` (REDUCE_ONLY / POST_ONLY warning, DELISTING / DELISTED on a Live book critical), `venue_market_missing` (a listed market gone: Live critical), `venue_listing_check` (5 failed checks), `venue_delist_pending`. The agent quotes and hedges reduce-only while its market is not open (`AGENT_VENUE_MARKET_GATE`); in Orderly's POST_ONLY launch phase it quotes both sides maker-only (POST_ONLY orders within the mandate) to provide the launch depth (`AGENT_VENUE_POST_ONLY_QUOTE`, default true with `ORDERLY_MODE=live`; false = reduce-only); the builder price push pages for a listed market that went missing or restricted. Retirement: set the market REDUCE_ONLY in Orderly One if needed and delist it there when the IF withdrawal of a retiring book waits on it (alert `venue_delist_pending`; ops-venue retries every minute, 24 h ceiling). | O20 |
-| G5 | **Closed in code (2026-10-18)**; Orderly's answer still open. IF account mode: `ORDERLY_IF_MODE=contract` (default, the per-book OrderlyIFAccount delegate account) or `builder` (an operator EOA's Orderly account bound by the timelock's `adapter.setIfAccountOwner(eoa)` (OrderlyAdapter v4), listed per book in `ORDERLY_IF_BUILDER_ACCOUNTS`; deposits unchanged on-chain via `Vault.depositTo(eoa, …)`; the operator registers ops-venue's IF key and performs IF withdrawals, returning the USDG to the adapter, ops-venue confirms and sweeps). Mode / binding mismatch: alert `venue_if_account`, no IF provisioning for that book only. Admin clicks per mode: step 2.4. `venueMinIf[Orderly]` per network in `Deploy.s.sol` (testnet 101 USDG). Still to ask Orderly: may a contract (delegate) account be a market's IF account? | O10 |
+| G5 | **Closed in code (2026-10-18)**; Orderly's answer still open. IF account mode: `ORDERLY_IF_MODE=contract` (default, the per-book OrderlyIFAccount delegate account) or `builder` (FALLBACK, not for mainnet without the owner's sign-off, `ORDERLY_IF_MODE_BUILDER_ACK=1`; return tracking per Transfer log, write-off from NAV after 24 h, unadopted-withdrawal and IF-drop alerts: step 2.4; an operator EOA's Orderly account bound by the timelock's `adapter.setIfAccountOwner(eoa)` (OrderlyAdapter v4), listed per book in `ORDERLY_IF_BUILDER_ACCOUNTS`; deposits unchanged on-chain via `Vault.depositTo(eoa, …)`; the operator registers ops-venue's IF key and performs IF withdrawals, returning the USDG to the adapter, ops-venue confirms and sweeps). Mode / binding mismatch: alert `venue_if_account`, no IF provisioning for that book only. Admin clicks per mode: step 2.4. `venueMinIf[Orderly]` per network in `Deploy.s.sol` (testnet 101 USDG). Still to ask Orderly: may a contract (delegate) account be a market's IF account? | O10 |
 | G6 | The builder admin account belongs to `0x9c1B…e8b9`, not to the ops-venue key: ops-venue's builder fee withdrawal signs a plain `Withdraw` with the ops-venue key and fails; sweep manually (`OPS_FEE_SWEEP_AUTO=false`). | O21 |
 | G7 | dev.ts testnet profile: `ORDERLY_MODE=mock` unless `.env.testnet` sets it, no `ORDERLY_*` live values, mock-orderly always started (trader-sim unless `--no-sim`). Workable through `.env.testnet` (step 3.6); no live-venue profile switch. | O22 |
 | G8 | Orderly's testnet itself: chain 46630 in `chain_info`, USDG and the broker allowed on the vault (Orderly action). | O1-O3, O7 |

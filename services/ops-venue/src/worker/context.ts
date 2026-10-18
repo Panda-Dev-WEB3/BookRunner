@@ -14,7 +14,7 @@ import type { NativeFeeSettings } from "./native";
 /** Builder/ops venue operations the workers use (OrderlyBuilderClient satisfies it; tests fake it). */
 export type BuilderPort = Pick<
   OrderlyBuilderClient,
-  "createSymbol" | "listingStatus" | "setSymbolStatus" | "insuranceFund" | "addKey" | "getOrderlyKey" | "keyInfo" | "revokeTradeKey" | "requestWithdraw" | "withdrawal" | "withdrawals" | "mockCompleteWithdraw" | "mockRegisterAccount" | "registerDelegateSigner"
+  "createSymbol" | "listingStatus" | "setSymbolStatus" | "insuranceFund" | "addKey" | "getOrderlyKey" | "removeKeyWith" | "keyInfo" | "revokeTradeKey" | "requestWithdraw" | "withdrawal" | "withdrawals" | "mockCompleteWithdraw" | "mockRegisterAccount" | "registerDelegateSigner"
 > & { feeSettlements(sinceMs: number): Promise<FeeSettlement[]> };
 
 /** Venue account read for (accountId, symbol) authenticated with `key` (ops key). */
@@ -63,6 +63,20 @@ export interface OpsSettings {
   ifRequirementUsd?: bigint | null;
   /** builder IF mode: re-check period of an IF withdrawal waiting for the operator (OPS_IF_OPERATOR_RECHECK_MS) */
   ifOperatorRecheckMs?: number;
+  /** builder IF mode: an operator payout not returned this long after Orderly paid it is written off from NAV (OPS_IF_RETURN_WRITE_OFF_MS) */
+  ifReturnWriteOffMs?: number;
+  /** builder IF mode: an IF withdrawal no saga adopted is reported once older than this (OPS_IF_UNADOPTED_GRACE_MS) */
+  ifUnadoptedGraceMs?: number;
+  /** builder IF mode: reviewed Orderly withdrawal ids that are not reported as unadopted (OPS_IF_WITHDRAW_ACK) */
+  ifWithdrawAck?: ReadonlySet<string>;
+  /** builder IF mode: venue IF equity this far (USD 6dp) below the adapter's insurance is an unexplained drop (OPS_IF_DROP_TOLERANCE_USD) */
+  ifDropToleranceUsd?: bigint;
+  /** builder IF mode: a drop stays published this long after it was last seen (OPS_IF_DROP_ALERT_MS) */
+  ifDropAlertMs?: number;
+  /** every book: the IF binding is re-read at least this often (OPS_IF_BINDING_RECHECK_MS) */
+  ifBindingRecheckMs?: number;
+  /** after an IF account switch on a listed market: how long the "re-assign the IF account in Orderly One" notice stays (OPS_IF_REASSIGN_NOTICE_MS) */
+  ifReassignNoticeMs?: number;
   /** Orderly native deposit-fee keeper (worker/native.ts); default: warn only. */
   native?: NativeFeeSettings;
 }

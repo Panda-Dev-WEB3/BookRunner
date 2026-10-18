@@ -169,28 +169,51 @@ export function parseDelistWaits(raw: string | null): Map<number, number> {
 }
 
 /** KEYS.venueSymbolIssues JSON ifAccounts / ifOperatorWaits -> per book (ORDERLY_IF_MODE, VERIFY O10); malformed entries dropped. */
-export function parseIfAccounts(raw: string | null): { issues: Map<number, NonNullable<BookSnap["ifAccountIssue"]>>; waits: Map<number, NonNullable<BookSnap["ifOperatorWaits"]>> } {
+export function parseIfAccounts(raw: string | null): {
+  issues: Map<number, NonNullable<BookSnap["ifAccountIssue"]>>;
+  waits: Map<number, NonNullable<BookSnap["ifOperatorWaits"]>>;
+  unadopted: Map<number, NonNullable<BookSnap["ifUnadopted"]>>;
+  drops: Map<number, NonNullable<BookSnap["ifEquityDrop"]>>;
+} {
   const issues = new Map<number, NonNullable<BookSnap["ifAccountIssue"]>>();
   const waits = new Map<number, NonNullable<BookSnap["ifOperatorWaits"]>>();
-  if (!raw) return { issues, waits };
+  const unadopted = new Map<number, NonNullable<BookSnap["ifUnadopted"]>>();
+  const drops = new Map<number, NonNullable<BookSnap["ifEquityDrop"]>>();
+  if (!raw) return { issues, waits, unadopted, drops };
   try {
-    const o = JSON.parse(raw) as { ifAccounts?: unknown; ifOperatorWaits?: unknown };
+    const o = JSON.parse(raw) as { ifAccounts?: unknown; ifOperatorWaits?: unknown; ifUnadopted?: unknown; ifEquityDrops?: unknown };
+    const s = (v: unknown) => (typeof v === "string" ? v : "");
+    const ISSUES = new Set(["mismatch", "key_pending", "prior_equity", "reassign"]);
     for (const x of Array.isArray(o.ifAccounts) ? (o.ifAccounts as Array<Record<string, unknown> | null>) : []) {
       const id = num(x?.bookId);
-      if (id === null || (x?.issue !== "mismatch" && x?.issue !== "key_pending") || typeof x.detail !== "string") continue;
-      issues.set(id, { issue: x.issue, detail: x.detail, accountId: typeof x.accountId === "string" ? x.accountId : "", since: num(x.since) });
+      if (id === null || !ISSUES.has(x?.issue as string) || typeof x?.detail !== "string") continue;
+      const issue = { issue: x.issue as NonNullable<BookSnap["ifAccountIssue"]>["issue"], detail: x.detail, accountId: s(x.accountId), since: num(x.since) };
+      // one per book: a mismatch / prior equity outranks a pending key or a re-assign notice
+      const cur = issues.get(id);
+      const rank = (i: string) => (i === "mismatch" || i === "prior_equity" ? 2 : 1);
+      if (!cur || rank(issue.issue) > rank(cur.issue)) issues.set(id, issue);
     }
     for (const x of Array.isArray(o.ifOperatorWaits) ? (o.ifOperatorWaits as Array<Record<string, unknown> | null>) : []) {
       const id = num(x?.bookId);
       const since = num(x?.since);
       if (id === null || since === null || (x?.step !== "withdraw" && x?.step !== "return")) continue;
-      const s = (v: unknown) => (typeof v === "string" ? v : "");
-      waits.set(id, [...(waits.get(id) ?? []), { nonce: s(x.nonce), step: x.step, amount: s(x.amount), owner: s(x.owner), adapter: s(x.adapter), since }]);
+      waits.set(id, [...(waits.get(id) ?? []), { nonce: s(x.nonce), step: x.step, amount: s(x.amount), owner: s(x.owner), adapter: s(x.adapter), since, writtenOffAt: num(x.writtenOffAt) }]);
+    }
+    for (const x of Array.isArray(o.ifUnadopted) ? (o.ifUnadopted as Array<Record<string, unknown> | null>) : []) {
+      const id = num(x?.bookId);
+      if (id === null || typeof x?.id !== "string") continue;
+      unadopted.set(id, [...(unadopted.get(id) ?? []), { id: x.id, amount: s(x.amount), status: s(x.status), createdAt: num(x.createdAt) }]);
+    }
+    for (const x of Array.isArray(o.ifEquityDrops) ? (o.ifEquityDrops as Array<Record<string, unknown> | null>) : []) {
+      const id = num(x?.bookId);
+      const at = num(x?.at);
+      if (id === null || at === null) continue;
+      drops.set(id, { expectedUsd: s(x?.expectedUsd), venueUsd: s(x?.venueUsd), at });
     }
   } catch {
     // ignore: an unreadable status is not an alert of its own
   }
-  return { issues, waits };
+  return { issues, waits, unadopted, drops };
 }
 
 /** KEYS.venueSymbolIssues JSON -> ops-venue mode + builder push flag + listing mode; malformed / absent -> null. */
@@ -400,7 +423,7 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
   let symbolIssues = new Map<number, string>();
   let markets = new Map<number, VenueMarketMsg>();
   let delistWaits = new Map<number, number>();
-  let ifAccounts: ReturnType<typeof parseIfAccounts> = { issues: new Map(), waits: new Map() };
+  let ifAccounts: ReturnType<typeof parseIfAccounts> = { issues: new Map(), waits: new Map(), unadopted: new Map(), drops: new Map() };
   let builderFeed: Snapshot["builderFeed"];
   let venueOps: Snapshot["venueOps"];
   try {
@@ -444,6 +467,8 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
       delistWaitSince: delistWaits.get(Number(b.id)) ?? null,
       ifAccountIssue: ifAccounts.issues.get(Number(b.id)) ?? null,
       ifOperatorWaits: ifAccounts.waits.get(Number(b.id)) ?? [],
+      ifUnadopted: ifAccounts.unadopted.get(Number(b.id)) ?? [],
+      ifEquityDrop: ifAccounts.drops.get(Number(b.id)) ?? null,
     }));
   }
 

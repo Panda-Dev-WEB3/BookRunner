@@ -19,8 +19,8 @@ const LISTING_STATES: ReadonlySet<string> = new Set(["Subscription", "Live", "Re
 export interface RegistryDelta {
   added: TrackedBook[];
   changed: Array<{ book: TrackedBook; from: BookState }>;
-  /** the IF account binding changed (adapter.setIfAccountOwner): re-provision (force) */
-  rebound: TrackedBook[];
+  /** the IF account binding changed (adapter.setIfAccountOwner): re-provision (force); `from` = the previous IF account */
+  rebound: Array<{ book: TrackedBook; from: string }>;
 }
 
 type IfFacts = Pick<TrackedBook, "accounts" | "owners" | "ifBinding" | "ifAccountError">;
@@ -50,7 +50,8 @@ export class BookRegistry {
         } catch (err) {
           this.ctx.log.warn({ bookId: id, err: errMsg(err) }, "book state read failed");
         }
-        if (known.ifAccountError || known.state === "Subscription") await this.rereadIf(known, delta);
+        const due = this.ctx.now() - (this.ifReadAt.get(id) ?? 0) >= (this.ctx.settings.ifBindingRecheckMs ?? 300_000);
+        if (known.ifAccountError || known.state === "Subscription" || due) await this.rereadIf(known, delta);
         continue;
       }
       try {
@@ -62,6 +63,7 @@ export class BookRegistry {
         const r = resolveVenueSymbol({ charterSymbol: b.charterSymbol, mode: this.ctx.settings.mode, brokerId: this.ctx.settings.brokerId });
         const [state, facts] = await Promise.all([this.ctx.chain.bookState(b.book), this.readIf(b)]);
         const tb: TrackedBook = { ...b, symbol: r.symbol ?? b.charterSymbol, venueSymbolError: r.error, state, ...facts };
+        this.ifReadAt.set(id, this.ctx.now());
         if (tb.ifAccountError) this.ctx.log.error({ bookId: id, ifMode: this.ifMode, ifBinding: tb.ifBinding, ifAccount: tb.accounts.if, err: tb.ifAccountError }, "Orderly book IF account does not match ORDERLY_IF_MODE: no IF provisioning for it (re-checked every poll)");
         this.books.set(id, tb);
         delta.added.push(tb);
@@ -93,7 +95,10 @@ export class BookRegistry {
     return { accounts, owners, ifBinding, ifAccountError };
   }
 
+  private readonly ifReadAt = new Map<number, number>();
+
   private async rereadIf(known: TrackedBook, delta: RegistryDelta): Promise<void> {
+    this.ifReadAt.set(known.bookId, this.ctx.now());
     let f: IfFacts;
     try {
       f = await this.readIf(known);
@@ -107,7 +112,7 @@ export class BookRegistry {
     const before = { ifAccount: known.accounts.if, err: known.ifAccountError ?? null };
     Object.assign(known, f);
     if (moved) {
-      delta.rebound.push(known);
+      delta.rebound.push({ book: known, from: before.ifAccount });
       this.ctx.log.warn({ bookId: known.bookId, from: before.ifAccount, to: f.accounts.if, ifBinding: f.ifBinding, owner: f.owners.if }, "book IF account changed on-chain (adapter.setIfAccountOwner): re-provisioning");
     }
     if (f.ifAccountError) this.ctx.log.error({ bookId: known.bookId, ifMode: this.ifMode, ifBinding: f.ifBinding, err: f.ifAccountError }, "Orderly book IF account does not match ORDERLY_IF_MODE");
@@ -123,6 +128,14 @@ export class BookRegistry {
   delistWaits: () => NonNullable<VenueSymbolIssuesMsg["delistWaits"]> = () => [];
   /** Builder IF mode: IF ops keys waiting for the operator's registration (set by OpsService from the provisioner). */
   ifKeysPending: () => Array<{ bookId: number; accountId: string; owner: string; since: number }> = () => [];
+  /** After an IF account switch: markets that may still have the previous IF account (set by OpsService). */
+  ifReassign: () => Array<{ bookId: number; from: string; to: string; since: number }> = () => [];
+  /** Builder IF mode: equity found on the IF account before the book's deposit (set by OpsService). */
+  ifPriorEquity: () => Array<{ bookId: number; accountId: string; usd: string; since: number }> = () => [];
+  /** Builder IF mode: IF withdrawals no saga adopted (set by OpsService from the withdrawals worker). */
+  ifUnadopted: () => NonNullable<VenueSymbolIssuesMsg["ifUnadopted"]> = () => [];
+  /** Builder IF mode: unexplained IF equity drops (set by OpsService from the reporter). */
+  ifEquityDrops: () => NonNullable<VenueSymbolIssuesMsg["ifEquityDrops"]> = () => [];
   /** Builder IF mode: IF withdrawals waiting for the operator (set by OpsService from the withdrawals worker). */
   ifOperatorWaits: () => NonNullable<VenueSymbolIssuesMsg["ifOperatorWaits"]> = () => [];
 
@@ -130,11 +143,17 @@ export class BookRegistry {
   ifAccountIssues(): NonNullable<VenueSymbolIssuesMsg["ifAccounts"]> {
     const out: NonNullable<VenueSymbolIssuesMsg["ifAccounts"]> = [];
     const pending = new Map(this.ifKeysPending().map((p) => [p.bookId, p]));
+    const prior = new Map(this.ifPriorEquity().map((p) => [p.bookId, p]));
+    const reassign = new Map(this.ifReassign().map((p) => [p.bookId, p]));
     for (const b of this.list()) {
       if (b.state === "Cancelled" || b.state === "Retired") continue;
       const p = pending.get(b.bookId);
       if (b.ifAccountError) out.push({ bookId: b.bookId, accountId: b.accounts.if, binding: b.ifBinding ?? "contract", issue: "mismatch", detail: b.ifAccountError });
       else if (p) out.push({ bookId: b.bookId, accountId: p.accountId, binding: "builder", issue: "key_pending", detail: `the operator (wallet ${p.owner}) must register ops-venue's IF key for ${p.accountId}`, since: p.since });
+      const pe = prior.get(b.bookId);
+      if (pe) out.push({ bookId: b.bookId, accountId: pe.accountId, binding: "builder", issue: "prior_equity", detail: `the builder IF account held ${pe.usd} (USD 6dp) before the book's IF deposit: reports refused; bind a fresh EOA account`, since: pe.since });
+      const ra = reassign.get(b.bookId);
+      if (ra) out.push({ bookId: b.bookId, accountId: ra.to, binding: b.ifBinding ?? "contract", issue: "reassign", detail: `the book's IF account changed from ${ra.from}: the admin re-assigns the market ${b.symbol}'s IF account in Orderly One (fund_if checks the market's IF balance)`, since: ra.since });
     }
     return out;
   }
@@ -171,6 +190,8 @@ export class BookRegistry {
       ifMode: this.ifMode,
       ifAccounts: this.ifAccountIssues(),
       ifOperatorWaits: this.ifOperatorWaits(),
+      ifUnadopted: this.ifUnadopted(),
+      ifEquityDrops: this.ifEquityDrops(),
     };
     try {
       await this.ctx.status.venueSymbolIssues(msg);

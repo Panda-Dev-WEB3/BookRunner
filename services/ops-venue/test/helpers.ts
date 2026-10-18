@@ -24,7 +24,7 @@ import { OpsService } from "../src/worker/service";
 import { WithdrawProcessor } from "../src/worker/withdrawals";
 
 /** OrderlyAdapter.WithdrawStatus (mirrors src/chain WITHDRAW_STATUS). */
-export const WS = { None: 0, Requested: 1, Confirmed: 2, Cancelled: 3, Failed: 4 } as const;
+export const WS = { None: 0, Requested: 1, Confirmed: 2, Cancelled: 3, Failed: 4, WrittenOff: 5 } as const;
 
 export const log = createLogger("ops-venue-test", "silent");
 export const OPS = devAccount("opsVenue");
@@ -83,6 +83,8 @@ export interface FakeAdapterState {
   pendingFees: bigint;
   feeSwept: Map<string, bigint>;
   lastFlowAt: bigint;
+  /** adapter.insuranceEquityUsd() (tests set it; builder IF drop check) */
+  insurance: bigint;
 }
 
 /**
@@ -131,7 +133,7 @@ export class FakeChain implements ChainPort {
     let s = this.adapters.get(k);
     if (!s) {
       const b = this.books.find((x) => x.adapter.toLowerCase() === k);
-      s = { vault: b?.vault ?? VAULT, router: b?.router ?? ROUTER, nonce: 0n, requests: new Map(), inTransit: 0n, pendingWithdraw: [0n, 0n], pendingFees: 0n, feeSwept: new Map(), lastFlowAt: 0n };
+      s = { vault: b?.vault ?? VAULT, router: b?.router ?? ROUTER, nonce: 0n, requests: new Map(), inTransit: 0n, pendingWithdraw: [0n, 0n], pendingFees: 0n, feeSwept: new Map(), lastFlowAt: 0n, insurance: 0n };
       this.adapters.set(k, s);
     }
     return s;
@@ -297,7 +299,30 @@ export class FakeChain implements ChainPort {
   }
   async adapterFlowState(adapter: Address): Promise<AdapterFlowState> {
     const a = this.adapter(adapter);
-    return { lastFlowAt: a.lastFlowAt, pendingWithdrawUsd: a.pendingWithdraw[0] + a.pendingWithdraw[1], inTransitUsd: a.inTransit, pendingFeesUsd: a.pendingFees, usdcBalance: this.attributed(adapter) };
+    // like OrderlyAdapter._usdcBalance: the adapter plus its OrderlyIFAccount CONTRACT, never a builder EOA's wallet
+    return { lastFlowAt: a.lastFlowAt, pendingWithdrawUsd: a.pendingWithdraw[0] + a.pendingWithdraw[1], inTransitUsd: a.inTransit, pendingFeesUsd: a.pendingFees, usdcBalance: this.attributed(adapter), insuranceUsd: a.insurance };
+  }
+  /** settlement-token Transfer logs (tokenTransfer records them) */
+  transfers: Array<{ from: string; to: string; amount: bigint; block: bigint; txHash: Hex; logIndex: number }> = [];
+  /** An ERC-20 transfer by `from` (e.g. the operator EOA returning a payout to the adapter): moves balances + logs it. */
+  tokenTransfer(from: Address, to: Address, amount: bigint) {
+    this.move(from, to, amount);
+    this.block++;
+    this.transfers.push({ from: from.toLowerCase(), to: to.toLowerCase(), amount, block: this.block, txHash: `0x${"7a".repeat(31)}${(this.transfers.length + 1).toString(16).padStart(2, "0")}` as Hex, logIndex: 0 });
+  }
+  async tokenTransfers(from: Address, to: Address, fromBlock: bigint, toBlock: bigint) {
+    return this.transfers.filter((t) => t.from === from.toLowerCase() && t.to === to.toLowerCase() && t.block >= fromBlock && t.block <= toBlock).map((t) => ({ txHash: t.txHash, logIndex: t.logIndex, block: t.block, amount: t.amount }));
+  }
+  async writeOffOperatorPayout(adapter: Address, nonce: bigint, opts?: WriteOpts) {
+    const a = this.adapter(adapter);
+    const r = a.requests.get(nonce.toString());
+    if (!r || r.status !== WS.Confirmed) throw new Error(`RequestNotConfirmed(${nonce}, ${r?.status ?? 0})`);
+    if (r.account !== 0 || !this.builderIfOwners.has(adapter.toLowerCase())) throw new Error(`NotBuilderIfPayout(${nonce})`);
+    const h = this.begin("writeOffOperatorPayout", [adapter, nonce], opts);
+    r.status = WS.WrittenOff;
+    a.inTransit -= a.inTransit < r.amount ? a.inTransit : r.amount;
+    a.lastFlowAt = this.headTs;
+    return this.end("writeOffOperatorPayout", h);
   }
   async feeSweptForPeriod(adapter: Address, period: bigint) {
     return this.adapter(adapter).feeSwept.get(period.toString()) ?? 0n;

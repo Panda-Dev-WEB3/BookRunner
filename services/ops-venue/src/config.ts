@@ -1,6 +1,8 @@
 import { baseEnvSchema } from "@bookrunner/shared";
 import { z } from "zod";
-import { parseIfBuilderAccounts } from "./domain/ifAccount";
+import { parseIfBuilderAccounts, resolveIfRequirementUsd } from "./domain/ifAccount";
+
+const MAINNET_CHAIN_ID = 4663;
 
 const bool = (d: boolean) =>
   z
@@ -88,6 +90,24 @@ export const opsEnvSchema = baseEnvSchema.extend({
   // builder IF mode: an IF withdrawal waiting for the operator (withdraw on Orderly, return the USDG to the adapter) is
   // re-checked this often (no attempt burnt; alert venue_if_operator_pending)
   OPS_IF_OPERATOR_RECHECK_MS: z.coerce.number().int().min(1_000).default(60_000),
+  // builder IF mode is a FALLBACK (IF custody with one operator key): refused on mainnet (CHAIN_ID 4663) unless the owner
+  // signed it off and this is "1" (the mainnet preflight, scripts/network-profile.ts, refuses it too)
+  ORDERLY_IF_MODE_BUILDER_ACK: z.string().optional(),
+  // builder IF mode: a payout Orderly paid to the operator's wallet and not returned this long after is written off from
+  // NAV on-chain (adapter.writeOffOperatorPayout; >= the contract's 1 h floor); conservative: NAV stops counting it soon
+  OPS_IF_RETURN_WRITE_OFF_MS: z.coerce.number().int().min(3_600_000).default(86_400_000),
+  // builder IF mode: a withdrawal from the builder IF account that no saga adopted is reported (critical) once older than
+  // this; OPS_IF_WITHDRAW_ACK lists reviewed Orderly withdrawal ids (comma separated) that are no longer reported
+  OPS_IF_UNADOPTED_GRACE_MS: z.coerce.number().int().min(60_000).default(600_000),
+  OPS_IF_WITHDRAW_ACK: z.string().default(""),
+  // builder IF mode: venue IF equity more than this (USD 6dp) below the adapter's insurance is an unexplained drop
+  // (alert venue_if_equity_drop, critical), published for OPS_IF_DROP_ALERT_MS after it was last seen
+  OPS_IF_DROP_TOLERANCE_USD: z.coerce.bigint().default(10_000n),
+  OPS_IF_DROP_ALERT_MS: z.coerce.number().int().min(60_000).default(86_400_000),
+  // every book: the adapter's IF binding is re-read at least this often (a switch is picked up and re-provisioned)
+  OPS_IF_BINDING_RECHECK_MS: z.coerce.number().int().min(10_000).default(300_000),
+  // after an IF account switch on a listed market: how long the "re-assign the market's IF account" notice is published
+  OPS_IF_REASSIGN_NOTICE_MS: z.coerce.number().int().min(60_000).default(86_400_000),
   // Settlement token symbol on Orderly (holding rows, withdraw / transfer messages): USDC on devnet, USDG on
   // Robinhood Chain (VERIFY O3/O7). Must match the OrderlyAdapter tokenHash (keccak256 of this symbol).
   ORDERLY_TOKEN: z.string().default("USDC"),
@@ -119,10 +139,17 @@ export function loadOpsEnv(source: Record<string, string | undefined> = process.
   if (e.ORDERLY_IF_MODE === "builder" && e.ORDERLY_MODE !== "live") {
     throw new Error("invalid environment: ORDERLY_IF_MODE=builder needs ORDERLY_MODE=live (the mock venue has no operator-wallet IF flows)");
   }
+  if (e.ORDERLY_IF_MODE === "builder" && e.CHAIN_ID === MAINNET_CHAIN_ID && e.ORDERLY_IF_MODE_BUILDER_ACK !== "1") {
+    throw new Error("invalid environment: ORDERLY_IF_MODE=builder on mainnet moves the insurance fund into one operator key: a fallback that needs the owner's explicit sign-off (ORDERLY_IF_MODE_BUILDER_ACK=1)");
+  }
   try {
     parseIfBuilderAccounts(e.ORDERLY_IF_BUILDER_ACCOUNTS);
   } catch (err) {
     throw new Error(`invalid environment: ${(err as Error).message}`);
+  }
+  // live: Orderly's IF requirement must be known (fail closed on an unrecognised API host, e.g. a proxy)
+  if (e.ORDERLY_MODE === "live" && resolveIfRequirementUsd(e.ORDERLY_BASE_URL, e.ORDERLY_IF_REQUIREMENT_USD) === null) {
+    throw new Error(`invalid environment: ORDERLY_MODE=live with ORDERLY_BASE_URL ${e.ORDERLY_BASE_URL}: unknown Orderly network, set ORDERLY_IF_REQUIREMENT_USD (testnet 100, mainnet 25000)`);
   }
   if (e.OPS_LISTING_RECHECK_MAX_MS < e.OPS_LISTING_RECHECK_MS) {
     throw new Error("invalid environment: OPS_LISTING_RECHECK_MAX_MS must be >= OPS_LISTING_RECHECK_MS");

@@ -4,7 +4,8 @@ import type { AdapterLog, MandateLog } from "../chain";
 import { pruneSagas } from "../store";
 import { errMsg, runLoop } from "../util";
 import { BookRegistry } from "./books";
-import type { OpsContext, TrackedBook } from "./context";
+import { prefixOf, toKey } from "../keys";
+import { type OpsContext, type TrackedBook, tradable } from "./context";
 import { FeeSweeper } from "./fees";
 import { handleVenueOpsJob } from "./jobs";
 import { LogWatcher } from "./logs";
@@ -40,6 +41,13 @@ export class OpsService {
     this.registry.delistWaits = () => this.withdrawals.delistWaits();
     this.registry.ifOperatorWaits = () => this.withdrawals.ifOperatorWaits();
     this.registry.ifKeysPending = () => this.provisioner.pendingIfKeys();
+    this.registry.ifReassign = () => this.provisioner.pendingReassign();
+    this.registry.ifUnadopted = () => this.withdrawals.ifUnadopted();
+    this.registry.ifEquityDrops = () => this.reporter.ifEquityDrops();
+    this.registry.ifPriorEquity = () => Object.entries(this.ctx.sagas.get().ifPriorEquity ?? {}).flatMap(([a, p]) => {
+      const b = this.registry.byAdapter(a);
+      return b ? [{ bookId: b.bookId, accountId: b.accounts.if, usd: p.usd, since: p.at }] : [];
+    });
     this.fees = new FeeSweeper(ctx, this.registry);
     this.revoker = new Revoker(ctx, this.registry);
     this.native = new NativeFeeKeeper(ctx, ctx.settings.native ?? { topUpMaxWei: 0n, headroom: 2n, cooldownMs: 3_600_000 });
@@ -77,11 +85,32 @@ export class OpsService {
         this.ctx.log.warn({ bookId: b.bookId, err: errMsg(err) }, "provisioning failed (will retry)");
       }
     }
-    for (const b of delta.rebound) {
+    for (const r of delta.rebound) {
+      const b = r.book;
+      const oldKey = this.ctx.keys.loadBook(b.bookId)?.ops.if ?? null; // ensure() replaces it with a key for the new account
       try {
         await this.provisioner.ensure(b, true); // new IF account id: new IF ops key, delegates / registration again
       } catch (err) {
         this.ctx.log.warn({ bookId: b.bookId, err: errMsg(err) }, "re-provisioning after an IF account change failed (will retry)");
+      }
+      // the previous IF account's ops key is of no further use: remove it from Orderly (best effort) and keep it in history
+      if (oldKey && oldKey.accountId.toLowerCase() === r.from.toLowerCase()) {
+        if (oldKey.registeredAt) {
+          try {
+            await this.ctx.builder.removeKeyWith(oldKey.accountId, await toKey(oldKey), oldKey.orderlyKey);
+            this.ctx.log.info({ bookId: b.bookId, accountId: oldKey.accountId, key: prefixOf(oldKey) }, "previous IF account's ops key removed from Orderly");
+          } catch (err) {
+            this.ctx.log.warn({ bookId: b.bookId, accountId: oldKey.accountId, key: prefixOf(oldKey), err: errMsg(err) }, "could not remove the previous IF account's ops key (remove it in Orderly One)");
+          }
+        }
+        this.ctx.keys.addHistory(b.bookId, oldKey, "if_account_switched", this.ctx.now());
+      }
+      if (tradable(b) && (b.listing?.phase === "listed" || (this.ctx.settings.listingMode ?? "api") === "api")) this.provisioner.noteReassign(b, r.from);
+      // a fresh binding gets a fresh prior-equity verdict
+      const pe = this.ctx.sagas.get().ifPriorEquity;
+      if (pe?.[b.adapter.toLowerCase()]) {
+        delete pe[b.adapter.toLowerCase()];
+        this.ctx.sagas.save();
       }
     }
     // retry books whose provisioning failed earlier
@@ -96,6 +125,7 @@ export class OpsService {
     for (const b of this.registry.list()) {
       if (b.ifBinding !== "builder" || b.state === "Cancelled" || b.state === "Retired") continue;
       await this.provisioner.checkBuilderIfKey(b).catch((err) => this.ctx.log.debug({ bookId: b.bookId, err: errMsg(err) }, "builder IF key check failed"));
+      await this.provisioner.checkPriorEquity(b).catch((err) => this.ctx.log.debug({ bookId: b.bookId, err: errMsg(err) }, "builder IF prior-equity check failed"));
     }
     await this.provisioner.listing.check(this.registry.list());
     await this.registry.publishStatus();

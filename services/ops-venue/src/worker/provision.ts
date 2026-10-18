@@ -27,6 +27,8 @@ export class Provisioner {
   /** builder IF mode: IF ops keys the operator has not registered yet (bookId -> key, first / last check) */
   private readonly ifKeyPending = new Map<number, { accountId: string; orderlyKey: string; owner: string; since: number; checkedAt: number }>();
   private readonly ifIssueLogged = new Map<number, string>();
+  private readonly priorCheckedAt = new Map<number, number>();
+  private readonly reassign = new Map<number, { from: string; to: string; since: number }>();
   /** per-symbol listing check (both modes; the only listing step in manual mode) */
   readonly listing: ListingTracker;
 
@@ -202,6 +204,50 @@ export class Provisioner {
       );
     }
     return false;
+  }
+
+  /**
+   * Builder IF mode, while the book is in Subscription (before its IF deposit) and the IF key is registered: equity
+   * already on the EOA's Orderly account would be reported as book insurance, so it is recorded (saga store
+   * ifPriorEquity, survives restarts) and the book's reports are refused until the timelock binds a fresh account.
+   */
+  async checkPriorEquity(book: TrackedBook): Promise<void> {
+    const { keys, sagas, log, settings } = this.ctx;
+    if (book.ifBinding !== "builder" || book.ifAccountError || book.state !== "Subscription") return;
+    const k = keys.loadBook(book.bookId)?.ops.if;
+    if (!k?.registeredAt) return;
+    const now = this.ctx.now();
+    if (now - (this.priorCheckedAt.get(book.bookId) ?? 0) < (settings.ifOperatorRecheckMs ?? 60_000)) return;
+    this.priorCheckedAt.set(book.bookId, now);
+    let equity: bigint;
+    try {
+      equity = (await this.ctx.readAccount(book.accounts.if, book.symbol, await keys.opsKey(book.bookId, "if"))).equityUsd;
+    } catch (err) {
+      log.debug({ bookId: book.bookId, err: errMsg(err) }, "builder IF prior-equity check failed");
+      return;
+    }
+    const f = await this.ctx.chain.adapterFlowState(book.adapter);
+    if (equity <= 0n || f.insuranceUsd !== 0n) return;
+    const st = sagas.get();
+    const a = book.adapter.toLowerCase();
+    if (st.ifPriorEquity?.[a]) return;
+    st.ifPriorEquity = { ...(st.ifPriorEquity ?? {}), [a]: { usd: equity.toString(), at: now } };
+    sagas.save();
+    log.error({ bookId: book.bookId, accountId: book.accounts.if, owner: book.owners.if, equityUsd: equity.toString() }, "builder IF account already holds equity before the book's IF deposit: it would be reported as book insurance — the book's reports are refused; bind a fresh EOA account (timelock adapter.setIfAccountOwner)");
+  }
+
+  /** After an IF account switch: the market keeps its old IF account on Orderly until the admin re-assigns it. */
+  noteReassign(book: TrackedBook, from: string): void {
+    this.reassign.set(book.bookId, { from, to: book.accounts.if, since: this.ctx.now() });
+    this.ctx.log.warn({ bookId: book.bookId, symbol: book.symbol, from, to: book.accounts.if }, "IF account switched: if the market was already listed, the admin must re-assign the market's IF account in Orderly One to the new account (api mode: createSymbol does not change it)");
+  }
+
+  /** Books whose market may still be assigned the previous IF account (published for OPS_IF_REASSIGN_NOTICE_MS). */
+  pendingReassign(): Array<{ bookId: number; from: string; to: string; since: number }> {
+    const now = this.ctx.now();
+    const keep = this.ctx.settings.ifReassignNoticeMs ?? 86_400_000;
+    for (const [id, r] of this.reassign) if (now - r.since >= keep) this.reassign.delete(id);
+    return [...this.reassign.entries()].map(([bookId, r]) => ({ bookId, ...r }));
   }
 
   /** Builder IF mode: books whose IF ops key the operator has not registered yet (published for alerts). */

@@ -138,13 +138,17 @@ export interface VenueSymbolIssuesMsg {
    * does not match ORDERLY_IF_MODE / ORDERLY_IF_BUILDER_ACCOUNTS; key_pending = builder mode, ops-venue's IF ops key is
    * not registered for the builder IF account yet (the operator's wallet must add it; `since` unix ms).
    */
-  ifAccounts?: Array<{ bookId: number; accountId: string; binding: "devnet" | "contract" | "builder"; issue: "mismatch" | "key_pending"; detail: string; since?: number }>;
+  ifAccounts?: Array<{ bookId: number; accountId: string; binding: "devnet" | "contract" | "builder"; issue: "mismatch" | "key_pending" | "prior_equity" | "reassign"; detail: string; since?: number }>;
   /**
    * Builder IF mode: IF withdrawals waiting for the operator (alerts venue_if_operator_pending). step withdraw: withdraw
    * `amount` (USD 6dp) from the builder IF account on Orderly (paid to its EOA); return: transfer it from the EOA to the
    * book's adapter. `since` unix ms.
    */
-  ifOperatorWaits?: Array<{ bookId: number; nonce: string; step: "withdraw" | "return"; amount: string; owner: string; adapter: string; since: number }>;
+  ifOperatorWaits?: Array<{ bookId: number; nonce: string; step: "withdraw" | "return"; amount: string; owner: string; adapter: string; since: number; writtenOffAt?: number }>;
+  /** Builder IF mode: Orderly withdrawals from the builder IF account no on-chain request asked for (alerts venue_if_unadopted_withdrawal) */
+  ifUnadopted?: Array<{ bookId: number; accountId: string; id: string; amount: string; status: string; createdAt: number | null }>;
+  /** Builder IF mode: venue IF equity below the adapter's insurance with no on-chain flow (alerts venue_if_equity_drop) */
+  ifEquityDrops?: Array<{ bookId: number; accountId: string; expectedUsd: string; venueUsd: string; at: number }>;
 }
 
 /**

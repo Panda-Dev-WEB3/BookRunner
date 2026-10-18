@@ -127,11 +127,37 @@ describe("insurance-fund account (ops-venue ORDERLY_IF_MODE, VERIFY O10)", () =>
     const w = (step: "withdraw" | "return", ageMs: number) => ({ nonce: "4", step, amount: "10000000000", owner: "0xE0A", adapter: "0xAD", since: NOW - ageMs });
     const a = venueIfAccount(snap({ books: [book({ ifOperatorWaits: [w("withdraw", 600_000)] })] }), rules());
     expect(ks(a)).toEqual([["venue_if_operator_pending:3:4", "warning"]]);
-    expect(a[0]?.summary).toContain("withdraw it on Orderly from the builder IF account (wallet 0xE0A), then transfer it to the adapter 0xAD");
+    expect(a[0]?.summary).toContain("withdraw it promptly on Orderly from the builder IF account (wallet 0xE0A;");
+    expect(a[0]?.summary).toContain("then transfer it to the adapter 0xAD");
     expect(a[0]?.summary).toContain("10,000 USD");
     const r = venueIfAccount(snap({ books: [book({ ifOperatorWaits: [w("return", 21_600_000)] })] }), rules());
     expect(ks(r)).toEqual([["venue_if_operator_pending:3:4", "critical"]]);
-    expect(r[0]?.summary).toContain("transfer it to the adapter 0xAD");
+    expect(r[0]?.summary).toContain("transfer it (one transfer, the full amount) to the adapter 0xAD");
+  });
+
+  test("written off from NAV: critical at once; unadopted withdrawal and IF equity drop: critical; prior_equity critical, reassign warning", () => {
+    const wo = venueIfAccount(snap({ books: [book({ ifOperatorWaits: [{ nonce: "4", step: "return", amount: "1000000", owner: "0xE0A", adapter: "0xAD", since: NOW - 60_000, writtenOffAt: NOW - 1_000 }] })] }), rules());
+    expect(ks(wo)).toEqual([["venue_if_operator_pending:3:4", "critical"]]);
+    expect(wo[0]?.summary).toContain("WRITTEN OFF from NAV");
+    const u = venueIfAccount(snap({ books: [book({ ifUnadopted: [{ id: "90", amount: "7000000", status: "COMPLETED", createdAt: 1 }] })] }), rules());
+    expect(ks(u)).toEqual([["venue_if_unadopted_withdrawal:3:90", "critical"]]);
+    expect(u[0]?.summary).toContain("without any on-chain request");
+    const d = venueIfAccount(snap({ books: [book({ ifEquityDrop: { expectedUsd: "30000000000", venueUsd: "25000000000", at: NOW } })] }), rules());
+    expect(ks(d)).toEqual([["venue_if_equity_drop:3", "critical"]]);
+    expect(d[0]?.summary).toContain("25,000 USD is below the adapter's insurance 30,000 USD");
+    expect(ks(venueIfAccount(snap({ books: [book({ ifAccountIssue: { issue: "prior_equity", detail: "held 3", accountId: "0xaa", since: NOW } })] }), rules()))).toEqual([["venue_if_account:3", "critical"]]);
+    expect(ks(venueIfAccount(snap({ books: [book({ ifAccountIssue: { issue: "reassign", detail: "re-assign", accountId: "0xaa", since: NOW } })] }), rules()))).toEqual([["venue_if_account:3", "warning"]]);
+  });
+
+  test("venue_market_restricted POST_ONLY text follows AGENT_VENUE_POST_ONLY_QUOTE when set", () => {
+    const live = { ts: NOW, mode: "live" as const, builderPush: true, listingMode: "manual" as const };
+    const m = { symbol: "PERP_NVDA_USDC_bookrunner", bookIds: [3], phase: "listed" as const, venueStatus: "POST_ONLY", openForRisk: false, everListed: true, since: NOW, checkedAt: NOW, failures: 0, error: null };
+    const text = (c: ReturnType<typeof rules>) => venueListing(snap({ venueOps: live, books: [book({ venueMarket: m })] }), c)[0]?.summary ?? "";
+    expect(text(rules())).toContain("maker-only");
+    expect(text(rules({ venuePostOnlyQuote: false }))).toContain("reduce-only");
+    expect(text(rules({ venuePostOnlyQuote: false }))).not.toContain("maker-only");
+    expect(loadConfig({ NETWORK: "testnet", CHAIN_ID: "46630", AGENT_VENUE_POST_ONLY_QUOTE: "false" }).rules.venuePostOnlyQuote).toBe(false);
+    expect(loadConfig({ NETWORK: "testnet", CHAIN_ID: "46630" }).rules.venuePostOnlyQuote).toBeUndefined();
   });
 
   test("parseIfAccounts: per book, malformed entries dropped", () => {
@@ -141,7 +167,19 @@ describe("insurance-fund account (ops-venue ORDERLY_IF_MODE, VERIFY O10)", () =>
     });
     const p = parseIfAccounts(raw);
     expect([...p.issues]).toEqual([[3, { issue: "key_pending", detail: "d", accountId: "0xaa", since: 5 }]]);
-    expect(p.waits.get(3)).toEqual([{ nonce: "1", step: "return", amount: "5", owner: "0xE", adapter: "0xA", since: 9 }]);
+    expect(p.waits.get(3)).toEqual([{ nonce: "1", step: "return", amount: "5", owner: "0xE", adapter: "0xA", since: 9, writtenOffAt: null }]);
+    const more = parseIfAccounts(
+      JSON.stringify({
+        ifAccounts: [{ bookId: 3, accountId: "0xaa", issue: "reassign", detail: "r" }, { bookId: 3, accountId: "0xaa", issue: "mismatch", detail: "m" }],
+        ifUnadopted: [{ bookId: 3, accountId: "0xaa", id: "90", amount: "7", status: "COMPLETED", createdAt: 5 }, { bookId: 3 }],
+        ifEquityDrops: [{ bookId: 3, accountId: "0xaa", expectedUsd: "2", venueUsd: "1", at: 7 }, { bookId: 4 }],
+        ifOperatorWaits: [{ bookId: 3, nonce: "1", step: "return", amount: "5", owner: "0xE", adapter: "0xA", since: 9, writtenOffAt: 10 }],
+      }),
+    );
+    expect(more.issues.get(3)?.issue).toBe("mismatch"); // a mismatch outranks a notice
+    expect(more.unadopted.get(3)).toEqual([{ id: "90", amount: "7", status: "COMPLETED", createdAt: 5 }]);
+    expect([...more.drops]).toEqual([[3, { expectedUsd: "2", venueUsd: "1", at: 7 }]]);
+    expect(more.waits.get(3)?.[0]?.writtenOffAt).toBe(10);
     expect(parseIfAccounts("{bad").issues.size).toBe(0);
     expect(parseIfAccounts(null).waits.size).toBe(0);
   });

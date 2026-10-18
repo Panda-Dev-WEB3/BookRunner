@@ -421,6 +421,16 @@ export class OrderlyBuilderClient implements OrderlyBuilderApi {
     return (r.rows ?? []).map((k) => ({ orderlyKey: k.orderly_key, scope: k.scope, status: k.key_status }));
   }
 
+  /** Remove `orderlyKey` from `accountId`, authenticated with `key` itself (a retired key no longer in the store). Idempotent. */
+  async removeKeyWith(accountId: string, key: Ed25519Key, orderlyKey: string): Promise<void> {
+    try {
+      await this.http.request("POST", ORDERLY_PATHS.removeKey, { body: { orderly_key: orderlyKey }, accountId, key, retries: 1 });
+    } catch (err) {
+      if (err instanceof OrderlyHttpError && (err.code === -1006 || /not found/i.test(err.message))) return;
+      throw err;
+    }
+  }
+
   /** Remove the trade key whose prefix matches (authenticated with the account's ops key). Idempotent. */
   async revokeTradeKey(p: { accountId: string; keyPrefix: string; orderlyKey?: string }): Promise<void> {
     let full = p.orderlyKey;

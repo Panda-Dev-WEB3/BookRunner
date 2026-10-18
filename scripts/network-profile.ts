@@ -283,6 +283,10 @@ export function mainnetProfile(inherited: Env, root: string, only: readonly stri
     errors.push("DEPLOYER_PRIVATE_KEY / BKRN_TESTNET_FUNDER_PK must not be in the mainnet service environment");
   }
   if (inherited.BKRN_ALLOW_ADMIN_KEY) errors.push("BKRN_ALLOW_ADMIN_KEY must not be set on mainnet");
+  // builder IF mode is a fallback (IF custody with one operator key, docs/VERIFY.md O10): only with the owner's sign-off
+  if (inherited.ORDERLY_IF_MODE === "builder" && inherited.ORDERLY_IF_MODE_BUILDER_ACK !== "1") {
+    errors.push("ORDERLY_IF_MODE=builder is not for mainnet without the owner's explicit sign-off (it moves the insurance fund into one operator key): set ORDERLY_IF_MODE_BUILDER_ACK=1 only after that sign-off");
+  }
 
   const depFile = resolve(root, MAINNET_FIXED.DEPLOYMENT_FILE!);
   if (!existsSync(depFile)) {

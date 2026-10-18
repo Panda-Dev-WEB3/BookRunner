@@ -62,9 +62,13 @@ export interface BookSnap {
   /** ops-venue (KEYS.venueSymbolIssues delistWaits): unix ms since the book's IF withdrawal waits for the admin's delisting in Orderly One */
   delistWaitSince?: number | null;
   /** ops-venue (KEYS.venueSymbolIssues ifAccounts): the book's IF account cannot be provisioned (ORDERLY_IF_MODE, VERIFY O10) */
-  ifAccountIssue?: { issue: "mismatch" | "key_pending"; detail: string; accountId: string; since: number | null } | null;
+  ifAccountIssue?: { issue: "mismatch" | "key_pending" | "prior_equity" | "reassign"; detail: string; accountId: string; since: number | null } | null;
   /** ops-venue (KEYS.venueSymbolIssues ifOperatorWaits): builder IF mode, IF withdrawals waiting for the operator */
-  ifOperatorWaits?: Array<{ nonce: string; step: "withdraw" | "return"; amount: string; owner: string; adapter: string; since: number }>;
+  ifOperatorWaits?: Array<{ nonce: string; step: "withdraw" | "return"; amount: string; owner: string; adapter: string; since: number; writtenOffAt?: number | null }>;
+  /** ops-venue (KEYS.venueSymbolIssues ifUnadopted): builder IF withdrawals no on-chain request asked for */
+  ifUnadopted?: Array<{ id: string; amount: string; status: string; createdAt: number | null }>;
+  /** ops-venue (KEYS.venueSymbolIssues ifEquityDrops): builder IF equity below the adapter's insurance */
+  ifEquityDrop?: { expectedUsd: string; venueUsd: string; at: number } | null;
 }
 
 export interface KillEventSnap {

@@ -41,6 +41,7 @@ export const mockVaultExtraAbi = parseAbi([
 export const accountDelegateEvent = parseAbiItem(
   "event AccountDelegate(address indexed delegateContract, bytes32 indexed brokerHash, address indexed delegateSigner, uint256 chainId, uint256 blockNumber)",
 );
+const transferEvent = parseAbiItem("event Transfer(address indexed from, address indexed to, uint256 value)");
 const LEDGER_VIEW_CANDIDATES = ["balanceOf", "balances", "ledger", "accountBalance"] as const;
 const ledgerViewAbi = (name: string) => parseAbi([`function ${name}(bytes32 accountId) view returns (uint256)`]) as Abi;
 
@@ -98,7 +99,7 @@ export interface WriteOpts {
 export type TxState = "success" | "reverted" | "pending" | "dropped" | "replaced";
 
 /** OrderlyAdapter.WithdrawStatus. */
-export const WITHDRAW_STATUS = { None: 0, Requested: 1, Confirmed: 2, Cancelled: 3, Failed: 4 } as const;
+export const WITHDRAW_STATUS = { None: 0, Requested: 1, Confirmed: 2, Cancelled: 3, Failed: 4, WrittenOff: 5 } as const;
 export const withdrawStatusName = (s: number) => Object.entries(WITHDRAW_STATUS).find(([, v]) => v === s)?.[0] ?? `Unknown(${s})`;
 
 export interface WithdrawRequestView {
@@ -114,7 +115,18 @@ export interface AdapterFlowState {
   pendingWithdrawUsd: bigint; // requested, not yet confirmed (IF + MM)
   inTransitUsd: bigint;
   pendingFeesUsd: bigint;
+  /** USDC the adapter attributes: its own balance plus payouts parked on its OrderlyIFAccount (never a builder EOA's) */
   usdcBalance: bigint;
+  /** adapter.insuranceEquityUsd(): the last report adjusted by on-chain flows since (builder IF drop check) */
+  insuranceUsd: bigint;
+}
+
+/** A settlement-token Transfer log (builder IF mode: the operator returning a payout to the adapter). */
+export interface TokenTransfer {
+  txHash: Hex;
+  logIndex: number;
+  block: bigint;
+  amount: bigint;
 }
 
 /** What the workers need from the chain (faked in unit tests). */
@@ -153,6 +165,10 @@ export interface ChainPort {
   /** adapter.withdrawRequest(nonce): the on-chain status is the authority for every withdraw step. */
   withdrawStatus(adapter: Address, nonce: bigint): Promise<WithdrawRequestView>;
   adapterFlowState(adapter: Address): Promise<AdapterFlowState>;
+  /** Settlement-token Transfer(from, to) logs in [fromBlock, toBlock] (builder IF returns: EOA -> adapter). */
+  tokenTransfers(from: Address, to: Address, fromBlock: bigint, toBlock: bigint): Promise<TokenTransfer[]>;
+  /** Builder IF mode: adapter.writeOffOperatorPayout(nonce) (an unreturned operator payout leaves NAV). */
+  writeOffOperatorPayout(adapter: Address, nonce: bigint, opts?: WriteOpts): Promise<Hex>;
   feeSweptForPeriod(adapter: Address, period: bigint): Promise<bigint>;
   forwardableFees(adapter: Address): Promise<bigint>;
   /** What became of a tx recorded via `onSent` (see TxState). */
@@ -409,18 +425,29 @@ export class ViemChain implements ChainPort {
 
   async adapterFlowState(adapter: Address): Promise<AdapterFlowState> {
     const read = (functionName: string, args: readonly unknown[] = []) => this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName, args } as never) as Promise<bigint>;
-    const [lastFlowAt, pIf, pMm, inTransitUsd, pendingFeesUsd, usdcBalance, owners] = await Promise.all([
+    const [lastFlowAt, pIf, pMm, inTransitUsd, pendingFeesUsd, insuranceUsd, usdcBalance, ifContract] = await Promise.all([
       read("lastFlowAt"),
       read("pendingWithdrawUsd", [0]),
       read("pendingWithdrawUsd", [1]),
       read("inTransitUsd"),
       read("pendingFeesUsd"),
+      read("insuranceEquityUsd"),
       this.usdcBalance(adapter),
-      this.accountOwners(adapter),
+      this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "ifAccount" }).catch(() => null), // pre-v3: none
     ]);
-    // USDC the adapter attributes: its own plus payouts parked on the OrderlyIFAccount (v3)
-    const parked = owners.if.toLowerCase() === adapter.toLowerCase() ? 0n : await this.usdcBalance(owners.if);
-    return { lastFlowAt: BigInt(lastFlowAt), pendingWithdrawUsd: pIf + pMm, inTransitUsd, pendingFeesUsd, usdcBalance: usdcBalance + parked };
+    // USDC the adapter attributes (OrderlyAdapter._usdcBalance): its own plus payouts parked on its OrderlyIFAccount
+    // CONTRACT (v3). Never accountOwner(IF): in builder IF mode that is the operator's EOA, whose wallet is not ours.
+    const parked = ifContract && ifContract !== "0x0000000000000000000000000000000000000000" ? await this.usdcBalance(ifContract) : 0n;
+    return { lastFlowAt: BigInt(lastFlowAt), pendingWithdrawUsd: pIf + pMm, inTransitUsd, pendingFeesUsd, usdcBalance: usdcBalance + parked, insuranceUsd };
+  }
+
+  async tokenTransfers(from: Address, to: Address, fromBlock: bigint, toBlock: bigint): Promise<TokenTransfer[]> {
+    const logs = await this.pc.getLogs({ address: this.usdc, event: transferEvent, args: { from, to }, fromBlock, toBlock });
+    return logs.map((l) => ({ txHash: l.transactionHash as Hex, logIndex: Number(l.logIndex), block: l.blockNumber as bigint, amount: (l.args as { value: bigint }).value }));
+  }
+
+  async writeOffOperatorPayout(adapter: Address, nonce: bigint, opts?: WriteOpts): Promise<Hex> {
+    return (await this.send("adapter.writeOffOperatorPayout", { address: adapter, abi: orderlyAdapterAbi, functionName: "writeOffOperatorPayout", args: [nonce] }, opts)).txHash;
   }
 
   feeSweptForPeriod(adapter: Address, period: bigint): Promise<bigint> {

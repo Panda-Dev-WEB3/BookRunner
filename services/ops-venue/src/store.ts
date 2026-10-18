@@ -133,6 +133,10 @@ export interface SagaState {
   lastAsOf: Record<string, string>;
   /** last reported venue value per adapter + consecutive suspicious readings (drop guard) */
   reportGuard: Record<string, { value: string; at: number; suspect: number }>;
+  /** builder IF mode: Orderly withdrawal ids adopted by a saga, per IF account id (never pruned: the unadopted scan) */
+  ifAdopted?: Record<string, string[]>;
+  /** builder IF mode: per adapter, equity found on the builder IF account before the book's IF deposit (refused) */
+  ifPriorEquity?: Record<string, { usd: string; at: number }>;
 }
 
 const emptySagaState = (): SagaState => ({ withdrawals: {}, fees: {}, lastAsOf: {}, reportGuard: {} });

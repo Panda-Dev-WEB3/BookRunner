@@ -101,6 +101,13 @@ async function main() {
       ifBuilderAccounts: parseIfBuilderAccounts(env.ORDERLY_IF_BUILDER_ACCOUNTS),
       ifRequirementUsd: resolveIfRequirementUsd(env.ORDERLY_BASE_URL, env.ORDERLY_IF_REQUIREMENT_USD),
       ifOperatorRecheckMs: env.OPS_IF_OPERATOR_RECHECK_MS,
+      ifReturnWriteOffMs: env.OPS_IF_RETURN_WRITE_OFF_MS,
+      ifUnadoptedGraceMs: env.OPS_IF_UNADOPTED_GRACE_MS,
+      ifWithdrawAck: new Set(env.OPS_IF_WITHDRAW_ACK.split(",").map((x) => x.trim()).filter(Boolean)),
+      ifDropToleranceUsd: env.OPS_IF_DROP_TOLERANCE_USD,
+      ifDropAlertMs: env.OPS_IF_DROP_ALERT_MS,
+      ifBindingRecheckMs: env.OPS_IF_BINDING_RECHECK_MS,
+      ifReassignNoticeMs: env.OPS_IF_REASSIGN_NOTICE_MS,
       native: { topUpMaxWei: env.OPS_NATIVE_TOPUP_MAX_WEI, headroom: env.OPS_NATIVE_FEE_HEADROOM, cooldownMs: env.OPS_NATIVE_TOPUP_COOLDOWN_MS },
     },
     chain,
@@ -117,7 +124,7 @@ async function main() {
     reportPublisher: new RedisReportPublisher(redis),
     status: statusPublisher,
   };
-  if (env.ORDERLY_IF_MODE === "builder") log.warn({ books: [...parseIfBuilderAccounts(env.ORDERLY_IF_BUILDER_ACCOUNTS).keys()] }, "ORDERLY_IF_MODE=builder: IF accounts are operator-EOA accounts (adapter.setIfAccountOwner); the operator registers ops-venue's IF keys and performs IF withdrawals (VERIFY O10)");
+  if (env.ORDERLY_IF_MODE === "builder") log.warn({ books: [...parseIfBuilderAccounts(env.ORDERLY_IF_BUILDER_ACCOUNTS).keys()] }, "ORDERLY_IF_MODE=builder (FALLBACK): IF accounts are operator-EOA accounts (adapter.setIfAccountOwner), i.e. IF custody with one operator key; the operator registers ops-venue's IF keys and performs IF withdrawals (VERIFY O10)");
   const service = new OpsService(ctx, new Provisioner(ctx, builderKey));
   log.info({ ops: ops.address, builderAccountId, books: dep.books.length, reportMode: env.OPS_REPORT_MODE }, "deployment loaded");
 

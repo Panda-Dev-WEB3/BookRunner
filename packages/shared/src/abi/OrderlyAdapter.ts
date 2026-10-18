@@ -126,6 +126,19 @@ export const orderlyAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "WRITE_OFF_MIN_AGE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "accountId",
     "inputs": [
       {
@@ -1140,6 +1153,19 @@ export const orderlyAdapterAbi = [
     "stateMutability": "view"
   },
   {
+    "type": "function",
+    "name": "writeOffOperatorPayout",
+    "inputs": [
+      {
+        "name": "requestNonce",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
     "type": "event",
     "name": "AdapterInitialized",
     "inputs": [
@@ -1362,6 +1388,25 @@ export const orderlyAdapterAbi = [
         "type": "address",
         "indexed": true,
         "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "OperatorPayoutWrittenOff",
+    "inputs": [
+      {
+        "name": "requestNonce",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
       },
       {
         "name": "amount",
@@ -1824,6 +1869,17 @@ export const orderlyAdapterAbi = [
   },
   {
     "type": "error",
+    "name": "NotBuilderIfPayout",
+    "inputs": [
+      {
+        "name": "requestNonce",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "NotFactory",
     "inputs": []
   },
@@ -2186,6 +2242,22 @@ export const orderlyAdapterAbi = [
         "name": "pendingUsd",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "WriteOffTooEarly",
+    "inputs": [
+      {
+        "name": "requestNonce",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "earliest",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ]
   },

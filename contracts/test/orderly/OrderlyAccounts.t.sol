@@ -9,6 +9,7 @@ import {BRTypes} from "../../src/interfaces/BRTypes.sol";
 
 import {OrderlyFixture} from "./utils/OrderlyFixture.sol";
 import {OrderlyMockUWVault} from "./utils/OrderlyTestMocks.sol";
+import {OrderlyAdapterV3} from "./utils/OrderlyAdapterV3.sol";
 
 /// @notice VERIFY O6/O9: the adapter uses Orderly's real accounts (MockOrderlyVault strict mode, as on the real
 ///         Vault): MM = keccak256(abi.encode(adapter, brokerHash)), IF = keccak256(abi.encode(ifAccount,
@@ -270,6 +271,92 @@ contract OrderlyAccountsTest is OrderlyFixture {
         adapter.setIfAccountOwner(address(0));
     }
 
+    function test_ifMode_setOwner_bumpsLastFlowAt_soOldSnapshotsCannotLand() public {
+        vm.warp(block.timestamp + 100);
+        _setIfOwner(BUILDER_IF_EOA);
+        assertEq(adapter.lastFlowAt(), uint64(block.timestamp));
+        // a snapshot of the previous (contract) IF account taken before the switch is refused
+        vm.prank(ops);
+        vm.expectRevert(
+            abi.encodeWithSelector(OrderlyAdapter.ReportPredatesFlow.selector, uint64(block.timestamp), uint64(block.timestamp))
+        );
+        adapter.report(1e6, 0, 0, uint64(block.timestamp));
+    }
+
+    // ---- builder IF payouts not returned by the operator: written off from NAV
+
+    function _paidToEoa(uint256 amount) internal returns (uint256 n) {
+        _setIfOwner(BUILDER_IF_EOA);
+        _deploy(IF, 25_001e6);
+        n = _recall(IF, amount);
+        _confirm(n);
+        _payOut(IF, amount); // Orderly pays the EOA
+    }
+
+    function test_writeOff_removesUnreturnedPayoutFromNav_andNotifiesTheVault() public {
+        uint256 n = _paidToEoa(10_000e6);
+        uint256 navBefore = adapter.deployedValueUsd();
+        uint64 nonceBefore = bookMock.flowNonce();
+        vm.warp(block.timestamp + adapter.WRITE_OFF_MIN_AGE());
+        vm.expectEmit(true, false, false, true, address(adapter));
+        emit OrderlyAdapter.OperatorPayoutWrittenOff(n, 10_000e6);
+        vm.prank(ops);
+        adapter.writeOffOperatorPayout(n);
+        assertEq(uint8(adapter.withdrawRequest(n).status), uint8(OrderlyAdapter.WithdrawStatus.WrittenOff));
+        assertEq(adapter.inTransitUsd(), 0);
+        assertEq(adapter.deployedValueUsd(), navBefore - 10_000e6, "NAV no longer counts the operator's wallet");
+        assertEq(bookMock.flowNonce(), nonceBefore + 1, "a mark valued with it can no longer be applied");
+        assertEq(adapter.lastFlowAt(), uint64(block.timestamp));
+        // a late return is unattributed USDC: swept to the vault as a gain
+        vm.prank(BUILDER_IF_EOA);
+        usdc.transfer(address(adapter), 10_000e6);
+        uint256 idleBefore = uwVault.idle();
+        assertEq(adapter.sweepToVault(), 10_000e6);
+        assertEq(uwVault.idle(), idleBefore + 10_000e6);
+        // terminal: never written off twice
+        vm.prank(ops);
+        vm.expectRevert(
+            abi.encodeWithSelector(OrderlyAdapter.RequestNotConfirmed.selector, n, OrderlyAdapter.WithdrawStatus.WrittenOff)
+        );
+        adapter.writeOffOperatorPayout(n);
+    }
+
+    function test_writeOff_guards() public {
+        uint256 n = _paidToEoa(1_000e6);
+        vm.prank(alice);
+        vm.expectRevert(OrderlyAdapter.NotOpsVenueOrTimelock.selector);
+        adapter.writeOffOperatorPayout(n);
+        uint64 earliest = adapter.withdrawRequest(n).confirmedAt + adapter.WRITE_OFF_MIN_AGE();
+        vm.prank(ops);
+        vm.expectRevert(abi.encodeWithSelector(OrderlyAdapter.WriteOffTooEarly.selector, n, earliest));
+        adapter.writeOffOperatorPayout(n);
+        vm.warp(earliest);
+        // an MM request is never an operator payout
+        _deploy(MM, 75_000e6);
+        uint256 m = _recall(MM, 1_000e6);
+        _confirm(m);
+        vm.prank(ops);
+        vm.expectRevert(abi.encodeWithSelector(OrderlyAdapter.NotBuilderIfPayout.selector, m));
+        adapter.writeOffOperatorPayout(m);
+        // a pending (Requested) request cannot be written off
+        uint256 q = _recall(IF, 1_000e6);
+        vm.prank(timelock);
+        vm.expectRevert(abi.encodeWithSelector(OrderlyAdapter.RequestNotConfirmed.selector, q, OrderlyAdapter.WithdrawStatus.Requested));
+        adapter.writeOffOperatorPayout(q);
+        vm.prank(timelock); // the timelock may write off too
+        adapter.writeOffOperatorPayout(n);
+    }
+
+    function test_writeOff_refusedInContractMode() public {
+        _deploy(IF, 25_001e6);
+        uint256 n = _recall(IF, 1_000e6);
+        _confirm(n);
+        vm.warp(block.timestamp + 1 days);
+        vm.prank(ops);
+        vm.expectRevert(abi.encodeWithSelector(OrderlyAdapter.NotBuilderIfPayout.selector, n));
+        adapter.writeOffOperatorPayout(n);
+    }
+
     function test_ifMode_setOwner_refusedOnLegacyProxy() public {
         ov.setStrictAccountIds(false);
         _makeLegacy(adapter);
@@ -467,5 +554,83 @@ contract OrderlyDepositFeeTest is OrderlyFixture {
         vm.prank(address(ov));
         (bool ok,) = address(adapter).call{value: 0.1 ether}("");
         assertTrue(ok, "venue / cross-chain manager refunds land on the adapter");
+    }
+}
+
+/// @notice v3 -> v4 (IF account mode): a proxy running the frozen v3 implementation with state (IF + MM venue-side,
+///         a pending MM request, an IF payout in transit, its OrderlyIFAccount) keeps every value after the upgrade, is in
+///         contract mode (`ifAccountOwner() == 0`) and keeps working; the new slot is untouched by v3 state.
+contract OrderlyV4UpgradeTest is OrderlyFixture {
+    function setUp() public override {
+        super.setUp();
+        // redeploy the book's adapter from the v3 implementation
+        impl = OrderlyAdapter(payable(address(new OrderlyAdapterV3(BROKER_HASH, TOKEN_HASH))));
+        bookMock.setBookId(BOOK_ID + 7);
+        adapter = _deployAdapter(BOOK_ID + 7, true);
+        uwVault.setAdapter(address(adapter));
+        usdc.watch(address(adapter), address(uwVault), address(router), address(ov));
+        usdc.setIfAccount(adapter.ifAccount());
+    }
+
+    struct Snap {
+        address ifAcc;
+        bytes32 ifId;
+        bytes32 mmId;
+        uint256 ins;
+        int256 margin;
+        uint256 transit;
+        uint256 pendMm;
+        uint64 flowAt;
+        uint256 wn;
+        uint256 nav;
+        uint256 sweepable;
+    }
+
+    function _snap() internal view returns (Snap memory x) {
+        x.ifAcc = adapter.ifAccount();
+        x.ifId = adapter.accountId(IF);
+        x.mmId = adapter.accountId(MM);
+        x.ins = adapter.insuranceEquityUsd();
+        x.margin = adapter.marginEquityUsd();
+        x.transit = adapter.inTransitUsd();
+        x.pendMm = adapter.pendingWithdrawUsd(MM);
+        x.flowAt = adapter.lastFlowAt();
+        x.wn = adapter.withdrawNonce();
+        x.nav = adapter.deployedValueUsd();
+        x.sweepable = adapter.sweepableToVault();
+    }
+
+    function test_upgradeV3ToV4_preservesState_contractMode() public {
+        _deploy(IF, 25_001e6);
+        _deploy(MM, 75_000e6);
+        uint256 nIf = _recall(IF, 5_000e6);
+        _confirm(nIf);
+        _payOut(IF, 2_000e6); // part of the payout parked on the IF contract
+        uint256 nMm = _recall(MM, 1_000e6); // still Requested
+        vm.warp(block.timestamp + 10);
+
+        Snap memory before = _snap();
+        OrderlyAdapter v4 = new OrderlyAdapter(BROKER_HASH, TOKEN_HASH);
+        vm.prank(timelock);
+        adapter.upgradeToAndCall(address(v4), "");
+        Snap memory afterUp = _snap();
+
+        assertEq(adapter.ifAccountOwner(), address(0), "contract mode after the upgrade");
+        assertEq(adapter.accountOwner(IF), before.ifAcc);
+        assertEq(keccak256(abi.encode(afterUp)), keccak256(abi.encode(before)), "every view unchanged");
+        assertEq(uint8(adapter.withdrawRequest(nIf).status), uint8(OrderlyAdapter.WithdrawStatus.Confirmed));
+        assertEq(uint8(adapter.withdrawRequest(nMm).status), uint8(OrderlyAdapter.WithdrawStatus.Requested));
+
+        // flows continue: the rest of the IF payout lands, the MM request confirms, everything sweeps
+        _payOut(IF, 3_000e6);
+        _confirm(nMm);
+        _payOut(MM, 1_000e6);
+        assertEq(adapter.sweepToVault(), 6_000e6);
+        assertEq(adapter.inTransitUsd(), 0);
+        assertEq(usdc.violations(), 0);
+        // the builder switch is refused while insurance is venue-side
+        vm.prank(timelock);
+        vm.expectRevert(OrderlyAdapter.VenueStateNotEmpty.selector);
+        adapter.setIfAccountOwner(address(0xB1F0));
     }
 }

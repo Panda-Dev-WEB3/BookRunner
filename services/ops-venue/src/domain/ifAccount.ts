@@ -7,11 +7,20 @@
 //                       account: ops-venue confirms its delegate signer (POST /v1/delegate_signer), registers the IF ops
 //                       key (delegate_orderly_key) and executes IF withdrawals (Orderly pays the contract itself).
 //   builder             adapter.accountId(IF) = keccak256(abi.encode(eoa, brokerHash)) once the timelock has called
-//                       adapter.setIfAccountOwner(eoa): the Orderly account of an operator EOA held behind the multisig.
+//                       adapter.setIfAccountOwner(eoa): the Orderly account of an operator EOA. An EOA is ONE private key:
+//                       the multisig / timelock controls only the binding, never the EOA or what it does on Orderly. A
+//                       FALLBACK (if Orderly refuses a contract IF account), never for mainnet without the owner's
+//                       explicit sign-off (ORDERLY_IF_MODE_BUILDER_ACK=1 on CHAIN_ID 4663, also the mainnet preflight).
 //                       ORDERLY_IF_BUILDER_ACCOUNTS states the expected account id per book and must match the chain.
 //                       ops-venue never holds that EOA's key, so the operator registers the account, ops-venue's IF ops
 //                       key (read only: reports) and performs each IF withdrawal (Orderly pays the EOA) and returns the
-//                       USDG to the adapter; ops-venue recognises the withdrawal, confirms it on-chain and sweeps.
+//                       USDG to the adapter (one transfer of at least the amount, tracked as that Transfer log); ops-venue
+//                       recognises the withdrawal, confirms it on-chain and sweeps. Safeguards: any withdrawal from the
+//                       account no on-chain request asked for, and any IF equity drop below the adapter's insurance, page
+//                       critical; a payout unreturned past OPS_IF_RETURN_WRITE_OFF_MS (24 h) is written off from NAV
+//                       on-chain (adapter.writeOffOperatorPayout); an account holding equity before the book's deposit is
+//                       never reported (prior_equity). The binding is re-read every OPS_IF_BINDING_RECHECK_MS; a switch
+//                       re-provisions the book, removes the old IF key and asks the admin to re-assign the market's IF account.
 //
 // In both modes the IF capital reaches Orderly on-chain: adapter.depositToVenue(IF) -> Vault.depositTo(owner, accountId)
 // at window close, recorded by the adapter's OrderlyDeposit(IF, accountId, amount, fee) event.

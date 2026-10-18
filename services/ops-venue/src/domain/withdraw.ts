@@ -19,14 +19,17 @@
 // Builder IF mode (`operatorIf`, domain/ifAccount.ts): the IF account belongs to an operator EOA whose key ops-venue never
 // holds, so `request` waits for the operator's own Orderly withdrawal of the amount (recognised in the IF account's
 // withdrawal history, paid to the EOA) instead of POSTing one, and `pay` waits, after Orderly paid the EOA, until the
-// operator has returned the USDG to the adapter. Neither wait burns an attempt (published: ifOperatorWaits).
+// operator has returned it: a settlement-token Transfer(EOA -> adapter) of at least the amount, after the on-chain
+// request, claimed by no other saga (never the adapter-wide balance, which also holds fees / MM payouts). Neither wait
+// burns an attempt (published: ifOperatorWaits). Unreturned past OPS_IF_RETURN_WRITE_OFF_MS, the payout is written off
+// from NAV on-chain (adapter.writeOffOperatorPayout; a later return is swept as a gain).
 // Every on-chain write is recorded (hash + nonce) before its receipt is awaited and inspected on retry.
 import type { Address, Hex } from "viem";
 import type { SentTx } from "../chain";
 
 export type WithdrawStage = "detected" | "requested" | "confirmed" | "paid" | "swept" | "skipped" | "cancelled" | "failed";
 
-export type WithdrawTxSlot = "confirm" | "mint" | "credit" | "pay" | "sweep" | "cancel";
+export type WithdrawTxSlot = "confirm" | "mint" | "credit" | "pay" | "sweep" | "cancel" | "writeoff";
 
 export interface WithdrawSaga {
   key: string; // `${adapter}:${nonce}` (lowercase adapter)
@@ -63,6 +66,14 @@ export interface WithdrawSaga {
   operatorWaitSince?: number;
   /** Builder IF mode: unix ms since the saga waits for the operator to return the payout to the adapter (pay step). */
   returnWaitSince?: number;
+  /** Block of the on-chain WithdrawRequested (return transfers are searched from here). */
+  requestBlock?: string;
+  /** Builder IF mode: return transfers EOA -> adapter scanned up to this block (inclusive). */
+  returnScannedTo?: string;
+  /** Builder IF mode: the operator's return transfers claimed by this saga (`txHash:logIndex`, raw amount). */
+  returns?: Array<{ id: string; amount: string }>;
+  /** Builder IF mode: unix ms the unreturned payout was written off from NAV (adapter.writeOffOperatorPayout). */
+  writtenOffAt?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -83,7 +94,7 @@ export const sagaReceiver = (s: Pick<WithdrawSaga, "adapter" | "owner">): Addres
 
 export const sagaKey = (adapter: Address, nonce: bigint | string) => `${adapter.toLowerCase()}:${nonce.toString()}`;
 
-export function newWithdrawSaga(p: { bookId: number; adapter: Address; account: number; accountId: Hex; owner?: Address; amount: bigint; nonce: bigint; txHash?: Hex; operatorIf?: boolean }, now: number): WithdrawSaga {
+export function newWithdrawSaga(p: { bookId: number; adapter: Address; account: number; accountId: Hex; owner?: Address; amount: bigint; nonce: bigint; txHash?: Hex; operatorIf?: boolean; block?: bigint }, now: number): WithdrawSaga {
   return {
     key: sagaKey(p.adapter, p.nonce),
     bookId: p.bookId,
@@ -97,6 +108,7 @@ export function newWithdrawSaga(p: { bookId: number; adapter: Address; account: 
     attempts: 0,
     ...(p.txHash ? { detectedTx: p.txHash } : {}),
     ...(p.operatorIf ? { operatorIf: true } : {}),
+    ...(p.block !== undefined ? { requestBlock: p.block.toString() } : {}),
     createdAt: now,
     updatedAt: now,
   };

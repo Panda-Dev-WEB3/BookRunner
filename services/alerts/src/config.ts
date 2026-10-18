@@ -132,6 +132,11 @@ const shape = {
   ALERT_DELIST_WAIT_CRITICAL_SECONDS: int(21_600),
   /** venue_if_operator_pending: a builder-IF withdrawal waiting this long for the operator pages critical (warning before) */
   ALERT_IF_OPERATOR_WAIT_CRITICAL_SECONDS: int(21_600),
+  /**
+   * The agents' AGENT_VENUE_POST_ONLY_QUOTE (same stack env): POST_ONLY markets are quoted maker-only (true) or
+   * reduce-only (false). Unset: the agent's default, true with ops-venue in live mode (venue_market_restricted text).
+   */
+  AGENT_VENUE_POST_ONLY_QUOTE: z.stringbool().optional(),
   ALERT_RISK_WARN: bool(false),
   ALERT_VENUE_REPORT_MAX_AGE_SECONDS: z.coerce.number().int().min(1).optional(),
   ALERT_RESTART_WINDOW_SECONDS: int(900),
@@ -189,6 +194,8 @@ export interface RuleConfig {
   delistWaitCriticalSec: number;
   /** venue_if_operator_pending: wait (s) before critical */
   ifOperatorWaitCriticalSec: number;
+  /** the agents' AGENT_VENUE_POST_ONLY_QUOTE when set (undefined: the agent default, true with ops-venue live) */
+  venuePostOnlyQuote?: boolean;
   restartWindowSec: number;
   restartMax: number;
   exitWindowSec: number;
@@ -304,6 +311,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       listingCheckFailures: e.ALERT_LISTING_CHECK_FAILURES,
       delistWaitCriticalSec: e.ALERT_DELIST_WAIT_CRITICAL_SECONDS,
       ifOperatorWaitCriticalSec: e.ALERT_IF_OPERATOR_WAIT_CRITICAL_SECONDS,
+      ...(e.AGENT_VENUE_POST_ONLY_QUOTE !== undefined ? { venuePostOnlyQuote: e.AGENT_VENUE_POST_ONLY_QUOTE } : {}),
       restartWindowSec: e.ALERT_RESTART_WINDOW_SECONDS,
       restartMax: e.ALERT_RESTART_MAX,
       exitWindowSec: e.ALERT_EXIT_WINDOW_SECONDS,
