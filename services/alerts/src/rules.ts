@@ -246,6 +246,50 @@ export function venueListing(s: Snapshot, c: RuleConfig): Condition[] {
 }
 
 /**
+ * Insurance-fund account of each Orderly book (ops-venue ORDERLY_IF_MODE, KEYS.venueSymbolIssues ifAccounts /
+ * ifOperatorWaits; docs/VERIFY.md O10). Cancelled / Retired books are ignored.
+ * - venue_if_account:<bookId> mismatch (the adapter's on-chain IF binding does not match ORDERLY_IF_MODE /
+ *   ORDERLY_IF_BUILDER_ACCOUNTS: no IF provisioning, no api-mode listing): WARNING in Subscription, CRITICAL once Live /
+ *   Retiring (the IF capital sits on an account ops-venue does not manage). key_pending (builder mode: ops-venue's IF key
+ *   is not registered for the builder IF account yet, so the book's venue reports fail): WARNING.
+ * - venue_if_operator_pending:<bookId>:<nonce> (builder mode): an IF withdrawal waits for the operator (withdraw on Orderly
+ *   to the IF account's wallet / transfer it back to the adapter): WARNING, CRITICAL after ALERT_IF_OPERATOR_WAIT_CRITICAL_SECONDS (6 h).
+ */
+export function venueIfAccount(s: Snapshot, c: RuleConfig): Condition[] {
+  const out: Condition[] = [];
+  for (const b of s.books ?? []) {
+    if (b.venue !== "orderly" || !LISTED_STATES.has(b.state)) continue;
+    const i = b.ifAccountIssue;
+    if (i) {
+      const live = b.state === "Live" || b.state === "Retiring";
+      out.push({
+        key: `venue_if_account:${b.bookId}`,
+        rule: "venue_if_account",
+        severity: i.issue === "mismatch" && live ? "critical" : "warning",
+        summary:
+          i.issue === "mismatch"
+            ? `${bookLabel(b)} (state ${b.state}): its insurance-fund account ${i.accountId} does not match ops-venue's ORDERLY_IF_MODE: ${i.detail}`
+            : `${bookLabel(b)} (state ${b.state}): builder IF account ${i.accountId} waits${i.since != null ? ` ${dur((s.now - i.since) / 1000)}` : ""} for ops-venue's Orderly key (${i.detail}); until then its venue reports fail`,
+      });
+    }
+    for (const w of b.ifOperatorWaits ?? []) {
+      const wait = (s.now - w.since) / 1000;
+      const usd = Number(w.amount) / 1e6;
+      out.push({
+        key: `venue_if_operator_pending:${b.bookId}:${w.nonce}`,
+        rule: "venue_if_operator_pending",
+        severity: wait >= c.ifOperatorWaitCriticalSec ? "critical" : "warning",
+        summary:
+          w.step === "withdraw"
+            ? `${bookLabel(b)} (state ${b.state}): insurance-fund withdrawal #${w.nonce} (${usd.toLocaleString("en-US")} USD) has waited ${dur(wait)} for the operator: withdraw it on Orderly from the builder IF account (wallet ${w.owner}), then transfer it to the adapter ${w.adapter}`
+            : `${bookLabel(b)} (state ${b.state}): Orderly paid insurance-fund withdrawal #${w.nonce} (${usd.toLocaleString("en-US")} USD) to the operator's wallet ${w.owner} ${dur(wait)} ago: transfer it to the adapter ${w.adapter}`,
+      });
+    }
+  }
+  return out;
+}
+
+/**
  * Live builder price push (ops-venue -> Orderly Builder Oracle, docs/VERIFY.md O18). Orderly needs >= 1 price/s per
  * builder market while the session is open, else it can restrict the market (reduce-only). held (session closed) is
  * not a failure. The span is measured up to ops-venue's own status time (never grows on a stale status); the status key
@@ -697,6 +741,7 @@ export const RULES = {
   venue_report_stale: venueReportAge,
   venue_symbol_unmapped: venueSymbol,
   venue_listing: venueListing,
+  venue_if_account: venueIfAccount,
   builder_price_push: builderPricePush,
   processes,
   balances,

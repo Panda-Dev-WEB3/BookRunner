@@ -82,6 +82,19 @@ interface IVaultFlowNotify {
 ///         account))` (accepted only by MockOrderlyVault in non-strict mode) until the timelock calls
 ///         `migrateToOrderlyAccounts` (only while nothing is venue-side).
 ///
+///         IF account mode (v4, docs/VERIFY.md O10: whether Orderly accepts a contract account as a market's IF
+///         account is unconfirmed, so both models are supported; ops-venue's ORDERLY_IF_MODE must match):
+///           contract (default)  the IF account is the per-book `OrderlyIFAccount`'s Orderly account,
+///                               keccak256(abi.encode(ifAccount, brokerHash)); payouts land on that contract.
+///           builder             `setIfAccountOwner(eoa)` (timelock): the IF account is the Orderly account of an
+///                               operator EOA (held behind the multisig), keccak256(abi.encode(eoa, brokerHash)).
+///                               IF deposits still go through `depositToVenue` (`Vault.depositTo(eoa, ...)`, recorded
+///                               by `OrderlyDeposit(IF, accountId, ...)` like any deposit), but Orderly pays IF
+///                               withdrawals to the EOA, which returns them to this adapter by a plain transfer
+///                               (operator step; the attribution rules above apply on arrival). Builder mode
+///                               therefore moves IF custody off the adapter to the operator's EOA: use it only if
+///                               Orderly refuses a contract account as the IF account.
+///
 ///         Settlement token: `config.usdc()` (USDC on devnet, USDG on Robinhood Chain: any 6-decimals token the
 ///         Orderly Vault lists under `tokenHash`); "USDC" in names below means that settlement token.
 /// @custom:oz-upgrades-unsafe-allow constructor state-variable-immutable
@@ -146,6 +159,8 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         uint64 lastSweptPeriod;
         // appended (v3): owner of the Orderly IF account (OrderlyIFAccount); address(0) = devnet derivation
         address ifAccount;
+        // appended (v4): builder IF mode, the operator EOA owning the IF account; address(0) = contract mode
+        address ifAccountOwner;
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -213,6 +228,9 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     event CapitalFlowNotifyFailed(address indexed vault);
     /// @notice The book's Orderly accounts: MM = this adapter's account, IF = `ifAccount`'s account.
     event OrderlyAccountsBound(address indexed ifAccount, bytes32 ifAccountId, bytes32 mmAccountId);
+    /// @notice IF account mode changed (`setIfAccountOwner`): `owner` = the builder EOA, address(0) = contract mode
+    ///         (the OrderlyIFAccount). `ifAccountId` is the book's IF account from now on.
+    event IfAccountOwnerSet(address indexed owner, bytes32 ifAccountId);
     /// @notice ETH added for Orderly deposit fees (`fundNative`).
     event NativeFunded(address indexed from, uint256 amount, uint256 balance);
 
@@ -260,6 +278,8 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     error UnsupportedTokenDecimals(uint8 decimals);
     error AlreadyOrderlyAccounts(address ifAccount);
     error VenueStateNotEmpty();
+    error OrderlyAccountsNotBound();
+    error IfOwnerNotEoa(address owner);
 
     // ---------------------------------------------------------------------------------------------
     // Construction / initialization
@@ -664,6 +684,25 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         if (signer != address(0)) OrderlyIFAccount(ifAcc).delegateSigner(address($.orderlyVault), $.brokerHash, signer);
     }
 
+    /// @notice Timelock. IF account mode (see the contract notes, VERIFY O10). `owner != 0`: builder mode, the IF
+    ///         account becomes the Orderly account of the operator EOA `owner` (it must have registered that account
+    ///         with Orderly itself; IF deposits go `Vault.depositTo(owner, ...)`, its withdrawals are paid to `owner`).
+    ///         `owner == 0`: back to contract mode (the book's OrderlyIFAccount). The IF account id changes, so only on
+    ///         a migrated (v3) proxy while the IF account holds nothing on our books: no insurance, no IF withdrawal
+    ///         pending. A confirmed IF payout still in transit arrives from the previous owner and is attributed as usual.
+    /// @param owner The builder EOA, or address(0) for contract mode.
+    function setIfAccountOwner(address owner) external {
+        _checkTimelock();
+        AdapterStorage storage $ = _s();
+        if ($.ifAccount == address(0)) revert OrderlyAccountsNotBound();
+        if (owner != address(0) && owner.code.length != 0) revert IfOwnerNotEoa(owner); // incl. this adapter and the IF contract
+        if ($.insuranceUsd != 0 || $.pendingWithdrawUsd[BRTypes.ACCOUNT_IF] != 0) revert VenueStateNotEmpty();
+        $.ifAccountOwner = owner;
+        bytes32 ifId = _accountId(BRTypes.ACCOUNT_IF);
+        emit IfAccountOwnerSet(owner, ifId);
+        emit OrderlyAccountsBound(_accountOwner($, BRTypes.ACCOUNT_IF), ifId, _accountId(BRTypes.ACCOUNT_MM));
+    }
+
     /// @notice Timelock. Sets the per-period fee sweep cap (0 disables fee sweeps).
     /// @param cap New cap in USDC 6dp.
     function setMaxFeeSweepPerPeriodUsd(uint256 cap) external {
@@ -725,7 +764,8 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
 
     /// @notice Address that owns `account`'s Orderly account: the receiver of its deposits, the
     ///         `delegateContract` of its API keys and withdrawals, and the address Orderly pays withdrawals to.
-    ///         MM (and both accounts before migration) = this adapter; IF = `ifAccount()`.
+    ///         MM (and both accounts before migration) = this adapter; IF = `ifAccount()` (contract mode) or
+    ///         `ifAccountOwner()` (builder mode).
     function accountOwner(uint8 account) external view returns (address) {
         _checkAccount(account);
         return _accountOwner(_s(), account);
@@ -734,6 +774,12 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     /// @notice The book's OrderlyIFAccount (owner of the IF account); address(0) = devnet derivation (pre-v3).
     function ifAccount() external view returns (address) {
         return _s().ifAccount;
+    }
+
+    /// @notice Builder IF mode: the operator EOA owning the book's IF account; address(0) = contract mode
+    ///         (the IF account is `ifAccount()`'s). See `setIfAccountOwner`.
+    function ifAccountOwner() external view returns (address) {
+        return _s().ifAccountOwner;
     }
 
     /// @notice Native (ETH) fee the venue charges for depositing `amount` into `account` now
@@ -986,9 +1032,12 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         return keccak256(abi.encode(_accountOwner($, account), $.brokerHash));
     }
 
+    /// @dev IF: the builder EOA (builder mode), else the OrderlyIFAccount (contract mode), else (pre-v3) this adapter.
     function _accountOwner(AdapterStorage storage $, uint8 account) private view returns (address) {
         address ifAcc = $.ifAccount;
-        return (account == BRTypes.ACCOUNT_IF && ifAcc != address(0)) ? ifAcc : address(this);
+        if (account != BRTypes.ACCOUNT_IF || ifAcc == address(0)) return address(this);
+        address builderOwner = $.ifAccountOwner;
+        return builderOwner != address(0) ? builderOwner : ifAcc;
     }
 
     /// @dev Deploys the book's OrderlyIFAccount (CREATE2 from this proxy, salt = bookId) and binds it.

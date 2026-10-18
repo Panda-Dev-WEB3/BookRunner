@@ -522,6 +522,19 @@ export const orderlyAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "ifAccountOwner",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "inTransitUsd",
     "inputs": [],
     "outputs": [
@@ -838,6 +851,19 @@ export const orderlyAdapterAbi = [
     "inputs": [
       {
         "name": "signer",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setIfAccountOwner",
+    "inputs": [
+      {
+        "name": "owner",
         "type": "address",
         "internalType": "address"
       }
@@ -1228,6 +1254,25 @@ export const orderlyAdapterAbi = [
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "IfAccountOwnerSet",
+    "inputs": [
+      {
+        "name": "owner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "ifAccountId",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
       }
     ],
     "anonymous": false
@@ -1721,6 +1766,17 @@ export const orderlyAdapterAbi = [
   },
   {
     "type": "error",
+    "name": "IfOwnerNotEoa",
+    "inputs": [
+      {
+        "name": "owner",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "InsufficientNativeForFee",
     "inputs": [
       {
@@ -1805,6 +1861,11 @@ export const orderlyAdapterAbi = [
   {
     "type": "error",
     "name": "NotVault",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OrderlyAccountsNotBound",
     "inputs": []
   },
   {

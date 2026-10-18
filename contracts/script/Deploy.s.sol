@@ -29,6 +29,7 @@ import {MockOrderlyVault} from "../src/mocks/MockOrderlyVault.sol";
 import {MockSwapRouter} from "../src/mocks/MockSwapRouter.sol";
 import {IAttestedOracle} from "../src/interfaces/IAttestedOracle.sol";
 import {IStockTokenRegistry} from "../src/interfaces/IStockTokenRegistry.sol";
+import {BRTypes} from "../src/interfaces/BRTypes.sol";
 
 /// @title Deploy — devnet (anvil 31337) and Robinhood Chain TESTNET (46630) deployment of the Bookrunner core.
 /// @notice Mainnet (RHC 4663) deployment is NOT done by this script (it refuses any chain but 31337 / 46630
@@ -65,6 +66,10 @@ contract Deploy is Script {
     /// @dev Max buyback slippage vs the reference price, and the per-call USDC cap.
     uint16 internal constant BUYBACK_MAX_SLIPPAGE_BPS = 500;
     uint256 internal constant BUYBACK_MAX_PER_CALL = 250_000e6;
+    /// @dev Orderly's per-market insurance-fund requirement (VERIFY O10): the IF must be STRICTLY above it, 100 USDG on
+    ///      testnet, 25,000 on mainnet. The charter rule is `ifTargetUsd >= venueMinIf`, so the minimum sits 1 above.
+    uint256 internal constant ORDERLY_TESTNET_IF_REQUIREMENT = 100e6;
+    uint256 internal constant ORDERLY_MAINNET_IF_REQUIREMENT = 25_000e6;
 
     // ---- role addresses (devkeys.ts indices) ----
     address internal deployer;
@@ -144,6 +149,19 @@ contract Deploy is Script {
         _writeDeployment();
     }
 
+    /// @dev venueMinIf[Orderly] for this network: DEPLOY_VENUE_MIN_IF_ORDERLY (6 dp) if set, else 101e6 on testnet (Orderly
+    ///      testnet requires > 100 USDG per market) and 25,001e6 on devnet (the mainnet figure, as the launch charters
+    ///      assume). Refused at or below the network's Orderly requirement (devnet: the mainnet one).
+    function _venueMinIfOrderly(bool testnet) internal view returns (uint256) {
+        return _checkedVenueMinIfOrderly(testnet, vm.envOr("DEPLOY_VENUE_MIN_IF_ORDERLY", testnet ? 101e6 : 25_001e6));
+    }
+
+    function _checkedVenueMinIfOrderly(bool testnet, uint256 minIf) internal pure returns (uint256) {
+        uint256 requirement = testnet ? ORDERLY_TESTNET_IF_REQUIREMENT : ORDERLY_MAINNET_IF_REQUIREMENT;
+        require(minIf > requirement, "Deploy.s.sol: venueMinIf[Orderly] must be above Orderly's IF requirement (VERIFY O10)");
+        return minIf;
+    }
+
     function _roles(uint256 deployerKey, string memory mnemonic) internal {
         deployer = vm.addr(deployerKey);
         markSigner = vm.addr(vm.deriveKey(mnemonic, 1));
@@ -165,6 +183,9 @@ contract Deploy is Script {
     function _deployCore(uint32 markInterval) internal {
         // admin = deployer, recorded as timelock() (devnet: 0s delay). Mainnet: TimelockController 48h.
         config = new BookrunnerConfig(deployer);
+        // per network (the config's constructor default is the mainnet 25,001e6): testnet 101e6
+        uint256 minIfOrderly = _venueMinIfOrderly(block.chainid == 46630);
+        if (minIfOrderly != config.venueMinIfUsd(BRTypes.VENUE_ORDERLY)) config.setVenueMinIf(BRTypes.VENUE_ORDERLY, minIfOrderly);
 
         usdc = new MockERC20("USD Coin (devnet)", "USDC", 6);
         usdg = new MockERC20("Global Dollar (devnet)", "USDG", 6);

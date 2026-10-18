@@ -61,6 +61,10 @@ export interface BookSnap {
   venueMarket?: VenueMarketMsg | null;
   /** ops-venue (KEYS.venueSymbolIssues delistWaits): unix ms since the book's IF withdrawal waits for the admin's delisting in Orderly One */
   delistWaitSince?: number | null;
+  /** ops-venue (KEYS.venueSymbolIssues ifAccounts): the book's IF account cannot be provisioned (ORDERLY_IF_MODE, VERIFY O10) */
+  ifAccountIssue?: { issue: "mismatch" | "key_pending"; detail: string; accountId: string; since: number | null } | null;
+  /** ops-venue (KEYS.venueSymbolIssues ifOperatorWaits): builder IF mode, IF withdrawals waiting for the operator */
+  ifOperatorWaits?: Array<{ nonce: string; step: "withdraw" | "return"; amount: string; owner: string; adapter: string; since: number }>;
 }
 
 export interface KillEventSnap {

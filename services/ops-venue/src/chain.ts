@@ -24,6 +24,7 @@ import {
   toFunctionSelector,
   type WalletClient,
 } from "viem";
+import { eoaOrNull } from "./domain/ifAccount";
 import { errMsg, Mutex } from "./util";
 
 /** MockOrderlyVault surface beyond IOrderlyVault (ARCHITECTURE §2.9). VERIFY against the A-orderly implementation. */
@@ -131,6 +132,11 @@ export interface ChainPort {
    * MM = the adapter. Pre-v3 adapters (no accountOwner): the adapter for both.
    */
   accountOwners(adapter: Address): Promise<{ if: Address; mm: Address }>;
+  /**
+   * Builder IF mode (v4 adapter.ifAccountOwner): the operator EOA owning the book's IF account; null = contract mode,
+   * or an implementation before v4 (no such view).
+   */
+  ifAccountOwner(adapter: Address): Promise<Address | null>;
   /** Adapter ETH vs the Orderly native deposit fee for the given deposits (adapter.depositNativeFee). */
   nativeFeeState(adapter: Address, deposits: Array<{ account: number; amount: bigint }>): Promise<{ balance: bigint; required: bigint }>;
   /** adapter.fundNative{value}() from the ops account. */
@@ -285,6 +291,16 @@ export class ViemChain implements ChainPort {
       this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "accountId", args: [1] }),
     ]);
     return { if: ifId.toLowerCase() as Hex, mm: mmId.toLowerCase() as Hex };
+  }
+
+  async ifAccountOwner(adapter: Address): Promise<Address | null> {
+    try {
+      return eoaOrNull(await this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "ifAccountOwner" }));
+    } catch (err) {
+      // pre-v4 implementation (no view): contract mode. Any other failure must not read as "contract mode".
+      if (/returned no data|reverted|does not have the function|ContractFunctionZeroData|execution reverted/i.test(errMsg(err))) return null;
+      throw err;
+    }
   }
 
   async accountOwners(adapter: Address): Promise<{ if: Address; mm: Address }> {

@@ -168,6 +168,31 @@ export function parseDelistWaits(raw: string | null): Map<number, number> {
   return out;
 }
 
+/** KEYS.venueSymbolIssues JSON ifAccounts / ifOperatorWaits -> per book (ORDERLY_IF_MODE, VERIFY O10); malformed entries dropped. */
+export function parseIfAccounts(raw: string | null): { issues: Map<number, NonNullable<BookSnap["ifAccountIssue"]>>; waits: Map<number, NonNullable<BookSnap["ifOperatorWaits"]>> } {
+  const issues = new Map<number, NonNullable<BookSnap["ifAccountIssue"]>>();
+  const waits = new Map<number, NonNullable<BookSnap["ifOperatorWaits"]>>();
+  if (!raw) return { issues, waits };
+  try {
+    const o = JSON.parse(raw) as { ifAccounts?: unknown; ifOperatorWaits?: unknown };
+    for (const x of Array.isArray(o.ifAccounts) ? (o.ifAccounts as Array<Record<string, unknown> | null>) : []) {
+      const id = num(x?.bookId);
+      if (id === null || (x?.issue !== "mismatch" && x?.issue !== "key_pending") || typeof x.detail !== "string") continue;
+      issues.set(id, { issue: x.issue, detail: x.detail, accountId: typeof x.accountId === "string" ? x.accountId : "", since: num(x.since) });
+    }
+    for (const x of Array.isArray(o.ifOperatorWaits) ? (o.ifOperatorWaits as Array<Record<string, unknown> | null>) : []) {
+      const id = num(x?.bookId);
+      const since = num(x?.since);
+      if (id === null || since === null || (x?.step !== "withdraw" && x?.step !== "return")) continue;
+      const s = (v: unknown) => (typeof v === "string" ? v : "");
+      waits.set(id, [...(waits.get(id) ?? []), { nonce: s(x.nonce), step: x.step, amount: s(x.amount), owner: s(x.owner), adapter: s(x.adapter), since }]);
+    }
+  } catch {
+    // ignore: an unreadable status is not an alert of its own
+  }
+  return { issues, waits };
+}
+
 /** KEYS.venueSymbolIssues JSON -> ops-venue mode + builder push flag + listing mode; malformed / absent -> null. */
 export function parseVenueOps(raw: string | null): VenueOpsSnap | null {
   if (!raw) return null;
@@ -375,6 +400,7 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
   let symbolIssues = new Map<number, string>();
   let markets = new Map<number, VenueMarketMsg>();
   let delistWaits = new Map<number, number>();
+  let ifAccounts: ReturnType<typeof parseIfAccounts> = { issues: new Map(), waits: new Map() };
   let builderFeed: Snapshot["builderFeed"];
   let venueOps: Snapshot["venueOps"];
   try {
@@ -390,6 +416,7 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
     symbolIssues = parseVenueSymbolIssues(issues);
     markets = parseMarketsByBook(issues);
     delistWaits = parseDelistWaits(issues);
+    ifAccounts = parseIfAccounts(issues);
     builderFeed = parseBuilderFeed(feed);
     venueOps = parseVenueOps(issues);
     supervisor = parseSupervisorStatus(sup);
@@ -415,6 +442,8 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
       venueSymbolError: symbolIssues.get(Number(b.id)) ?? null,
       venueMarket: markets.get(Number(b.id)) ?? null,
       delistWaitSince: delistWaits.get(Number(b.id)) ?? null,
+      ifAccountIssue: ifAccounts.issues.get(Number(b.id)) ?? null,
+      ifOperatorWaits: ifAccounts.waits.get(Number(b.id)) ?? [],
     }));
   }
 

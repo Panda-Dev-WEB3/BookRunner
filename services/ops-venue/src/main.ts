@@ -20,6 +20,7 @@ import { builderPushEnabled, startBuilderPriceFeed } from "./builderOracle/wire"
 import { ViemChain } from "./chain";
 import { OrderlyBuilderClient, OrderlyVenue } from "./client";
 import { loadOpsEnv, resolveListingMode } from "./config";
+import { parseIfBuilderAccounts, resolveIfRequirementUsd } from "./domain/ifAccount";
 import { KeyStore, resolveKeysDir } from "./keys";
 import { keyFromSecret } from "./orderly/auth";
 import { orderlyAccountId } from "./orderly/convert";
@@ -96,6 +97,10 @@ async function main() {
       listingMode,
       listingRecheck: { recheckMs: env.OPS_LISTING_RECHECK_MS, recheckMaxMs: env.OPS_LISTING_RECHECK_MAX_MS, timeoutMs: env.OPS_LISTING_CHECK_TIMEOUT_MS, concurrency: env.OPS_LISTING_CHECK_CONCURRENCY },
       delistWaitMaxMs: env.OPS_DELIST_WAIT_MAX_MS,
+      ifMode: env.ORDERLY_IF_MODE,
+      ifBuilderAccounts: parseIfBuilderAccounts(env.ORDERLY_IF_BUILDER_ACCOUNTS),
+      ifRequirementUsd: resolveIfRequirementUsd(env.ORDERLY_BASE_URL, env.ORDERLY_IF_REQUIREMENT_USD),
+      ifOperatorRecheckMs: env.OPS_IF_OPERATOR_RECHECK_MS,
       native: { topUpMaxWei: env.OPS_NATIVE_TOPUP_MAX_WEI, headroom: env.OPS_NATIVE_FEE_HEADROOM, cooldownMs: env.OPS_NATIVE_TOPUP_COOLDOWN_MS },
     },
     chain,
@@ -112,6 +117,7 @@ async function main() {
     reportPublisher: new RedisReportPublisher(redis),
     status: statusPublisher,
   };
+  if (env.ORDERLY_IF_MODE === "builder") log.warn({ books: [...parseIfBuilderAccounts(env.ORDERLY_IF_BUILDER_ACCOUNTS).keys()] }, "ORDERLY_IF_MODE=builder: IF accounts are operator-EOA accounts (adapter.setIfAccountOwner); the operator registers ops-venue's IF keys and performs IF withdrawals (VERIFY O10)");
   const service = new OpsService(ctx, new Provisioner(ctx, builderKey));
   log.info({ ops: ops.address, builderAccountId, books: dep.books.length, reportMode: env.OPS_REPORT_MODE }, "deployment loaded");
 

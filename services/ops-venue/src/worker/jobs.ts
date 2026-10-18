@@ -1,5 +1,6 @@
 // QUEUES.venueOps job dispatch (BullMQ). Payload: VenueOpsJob (packages/shared/src/queues.ts).
 import type { VenueOpsJob } from "@bookrunner/shared";
+import { ifAboveRequirement } from "../domain/ifAccount";
 import type { BookRegistry } from "./books";
 import { type OpsContext, tradable } from "./context";
 import type { FeeSweeper } from "./fees";
@@ -47,11 +48,15 @@ export async function handleVenueOpsJob(job: VenueOpsJob, d: JobDeps): Promise<R
         const acct = await d.ctx.readAccount(book.accounts.if, book.symbol, await d.ctx.keys.opsKey(book.bookId, "if"));
         return { balanceUsd: acct.equityUsd.toString(), targetUsd: book.ifTargetUsd.toString(), funded: acct.equityUsd >= book.ifTargetUsd, listed: false };
       }
-      // IF capital is deposited on-chain by the vault (closeWindow -> deployToVenue(IF)); verify it landed.
+      // IF capital is deposited on-chain by the vault (closeWindow -> deployToVenue(IF)); verify it landed, at or above the
+      // charter target and strictly above Orderly's per-market requirement (one market per book IF account, VERIFY O10)
       const r = await d.ctx.builder.insuranceFund(book.symbol);
-      const ok = r.balanceUsd >= book.ifTargetUsd;
-      d.ctx.log[ok ? "info" : "warn"]({ bookId: book.bookId, balanceUsd: r.balanceUsd.toString(), targetUsd: book.ifTargetUsd.toString() }, "insurance fund check");
-      return { balanceUsd: r.balanceUsd.toString(), targetUsd: book.ifTargetUsd.toString(), funded: ok };
+      const req = d.ctx.settings.ifRequirementUsd ?? null;
+      const above = req === null ? null : ifAboveRequirement(r.balanceUsd, req);
+      const ok = r.balanceUsd >= book.ifTargetUsd && above !== false && !book.ifAccountError;
+      const ifInfo = { ifMode: d.ctx.settings.ifMode ?? "contract", ifAccountId: book.accounts.if, ...(book.ifAccountError ? { ifAccountError: book.ifAccountError } : {}) };
+      d.ctx.log[ok ? "info" : "warn"]({ bookId: book.bookId, balanceUsd: r.balanceUsd.toString(), targetUsd: book.ifTargetUsd.toString(), requirementUsd: req?.toString() ?? null, ...ifInfo }, "insurance fund check");
+      return { balanceUsd: r.balanceUsd.toString(), targetUsd: book.ifTargetUsd.toString(), funded: ok, ...(req !== null ? { requirementUsd: req.toString(), aboveRequirement: above } : {}), ...ifInfo };
     }
     case "deposit_mm": {
       const acct = await d.ctx.readAccount(book.accounts.mm, book.symbol, await d.ctx.keys.opsKey(book.bookId, "mm"));

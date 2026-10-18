@@ -6,6 +6,9 @@
 // delegateContract (v3: the adapter for MM, the OrderlyIFAccount for IF; see chain.accountOwners).
 // A book without an Orderly market (TrackedBook.venueSymbolError) gets its accounts, delegates and ops keys (reports,
 // withdrawals) but no trade key registration and no listing.
+// IF account mode (ORDERLY_IF_MODE, domain/ifAccount.ts): contract = the OrderlyIFAccount delegate account as above;
+// builder = an operator EOA's account: no delegate, and the IF ops key is registered by the operator's wallet (ops-venue
+// only checks for it). A book whose IF binding does not match the mode gets no IF provisioning and no api-mode listing.
 // ORDERLY_LISTING_MODE=manual (VERIFY O20): the admin lists the market in Orderly One. Provisioning then never calls
 // createSymbol or setSymbolStatus: it sets up accounts and keys and leaves the listing to the ListingTracker, which
 // re-checks /v1/public/info with backoff until the market is there (log + Redis status + alert venue_listing_pending),
@@ -21,6 +24,9 @@ import { ListingTracker } from "./listing";
 export class Provisioner {
   private readonly done = new Map<number, string>();
   private builderReady = false;
+  /** builder IF mode: IF ops keys the operator has not registered yet (bookId -> key, first / last check) */
+  private readonly ifKeyPending = new Map<number, { accountId: string; orderlyKey: string; owner: string; since: number; checkedAt: number }>();
+  private readonly ifIssueLogged = new Map<number, string>();
   /** per-symbol listing check (both modes; the only listing step in manual mode) */
   readonly listing: ListingTracker;
 
@@ -65,14 +71,27 @@ export class Provisioner {
       if (!this.done.has(book.bookId)) {
         await store.upsertVenueAccount({ bookId: book.bookId, kind: "mm", accountId: book.accounts.mm, keyPrefix: tradePrefix, status: tradeRevoked ? "revoked" : "pending" });
       }
+      const ifIssue = book.ifAccountError ?? null;
+      const builderIf = book.ifBinding === "builder";
+      if (ifIssue && this.ifIssueLogged.get(book.bookId) !== ifIssue) {
+        this.ifIssueLogged.set(book.bookId, ifIssue);
+        log.error({ bookId: book.bookId, ifAccount: book.accounts.if, ifBinding: book.ifBinding, err: ifIssue }, "IF account not provisioned (ORDERLY_IF_MODE mismatch): no IF delegate / key registration and no api-mode listing for this book; MM provisioning continues");
+      }
       if (settings.mode === "mock") {
-        await builder.mockRegisterAccount({ accountId: book.accounts.if, owner: book.owners.if, kind: "if", delegateSigner: chain.opsAddress });
+        // mock-orderly stands in for the operator's own registration of a builder IF account
+        if (!ifIssue) await builder.mockRegisterAccount({ accountId: book.accounts.if, owner: book.owners.if, kind: "if", ...(builderIf ? {} : { delegateSigner: chain.opsAddress }) });
         await builder.mockRegisterAccount({ accountId: book.accounts.mm, owner: book.owners.mm, kind: "mm", delegateSigner: chain.opsAddress });
       } else {
         await this.ensureDelegates(book);
       }
       for (const which of ["if", "mm"] as const) {
         const k = f.ops[which];
+        if (which === "if" && ifIssue) continue;
+        if (which === "if" && builderIf) {
+          // an EOA account: only its own wallet can add keys (ops-venue never holds it), so the operator registers it
+          if (k && !k.registeredAt) await this.checkBuilderIfKey(book, true);
+          continue;
+        }
         if (k && !k.registeredAt) {
           await builder.addKey({ accountId: k.accountId, orderlyKey: k.orderlyKey, scope: k.scope, expirationMs: k.expiration, delegateContract: book.owners[which] });
           keys.markRegistered(book.bookId, which, this.ctx.now());
@@ -84,7 +103,9 @@ export class Provisioner {
       }
       const manual = this.manualListing;
       let sym: { symbol: string; status?: string } = { symbol: book.symbol, status: "NOT_LISTED" };
-      if (trades && !manual) {
+      if (trades && !manual && ifIssue) {
+        log.warn({ bookId: book.bookId, symbol: book.symbol }, "api listing skipped: the book's IF account does not match ORDERLY_IF_MODE (the market would be assigned the wrong IF account)");
+      } else if (trades && !manual) {
         try {
           sym = await builder.createSymbol({ symbol: book.symbol, baseAsset: book.baseAsset, priceSource: settings.priceSource, sessions: book.sessions, ifAccountId: book.accounts.if });
         } catch (err) {
@@ -126,7 +147,9 @@ export class Provisioner {
    */
   private async ensureDelegates(book: TrackedBook): Promise<void> {
     const { builder, keys, chain, log } = this.ctx;
-    const owners = [...new Set([book.owners.mm, book.owners.if].map((a) => a.toLowerCase()))] as Address[];
+    // builder IF mode: the IF account belongs to an EOA (no delegate); a mismatched IF binding is not touched
+    const ifOwners = book.ifAccountError || book.ifBinding === "builder" ? [] : [book.owners.if];
+    const owners = [...new Set([book.owners.mm, ...ifOwners].map((a) => a.toLowerCase()))] as Address[];
     for (const owner of owners) {
       if (keys.delegateRegistered(book.bookId, owner)) continue;
       const txHash = await chain.delegateTx(owner, chain.opsAddress);
@@ -135,6 +158,55 @@ export class Provisioner {
       keys.markDelegateRegistered(book.bookId, owner, this.ctx.now());
       log.info({ bookId: book.bookId, delegateContract: owner, accountId: r.accountId, tx: txHash }, "Orderly delegate signer confirmed");
     }
+  }
+
+  /**
+   * Builder IF mode: is ops-venue's IF ops key registered for the builder IF account (public GET /v1/get_orderly_key)?
+   * Only the account's own wallet (the operator EOA) can add it, so until then the book is listed in `pendingIfKeys` (alert
+   * venue_if_account key_pending) and its venue reports, which read the IF account with that key, fail. Re-checked at most
+   * every OPS_IF_OPERATOR_RECHECK_MS (`force`: now).
+   */
+  async checkBuilderIfKey(book: TrackedBook, force = false): Promise<boolean> {
+    const { keys, builder, log, settings } = this.ctx;
+    if (book.ifBinding !== "builder" || book.ifAccountError) {
+      this.ifKeyPending.delete(book.bookId);
+      return false;
+    }
+    const k = keys.loadBook(book.bookId)?.ops.if;
+    if (!k) return false;
+    if (k.registeredAt) {
+      this.ifKeyPending.delete(book.bookId);
+      return true;
+    }
+    const now = this.ctx.now();
+    const pending = this.ifKeyPending.get(book.bookId);
+    if (pending && pending.orderlyKey === k.orderlyKey && !force && now - pending.checkedAt < (settings.ifOperatorRecheckMs ?? 60_000)) return false;
+    let found: Awaited<ReturnType<typeof builder.getOrderlyKey>> = null;
+    try {
+      found = await builder.getOrderlyKey(k.accountId, k.orderlyKey);
+    } catch (err) {
+      log.debug({ bookId: book.bookId, err: errMsg(err) }, "builder IF key check failed");
+    }
+    if (found) {
+      keys.markRegistered(book.bookId, "if", now);
+      this.ifKeyPending.delete(book.bookId);
+      log.info({ bookId: book.bookId, accountId: k.accountId, key: prefixOf(k), scope: found.scope }, "builder IF account: ops-venue's IF key is registered (reports can read the IF account)");
+      return true;
+    }
+    const first = !pending || pending.orderlyKey !== k.orderlyKey;
+    this.ifKeyPending.set(book.bookId, { accountId: k.accountId, orderlyKey: k.orderlyKey, owner: book.owners.if, since: first ? now : (pending?.since ?? now), checkedAt: now });
+    if (first) {
+      log.warn(
+        { bookId: book.bookId, accountId: k.accountId, owner: book.owners.if, orderlyKey: k.orderlyKey, scope: "read" },
+        "builder IF account: the operator must register this Orderly key for the IF account from its wallet (Orderly One or POST /v1/orderly_key signed by that wallet, scope read); ops-venue re-checks every minute",
+      );
+    }
+    return false;
+  }
+
+  /** Builder IF mode: books whose IF ops key the operator has not registered yet (published for alerts). */
+  pendingIfKeys(): Array<{ bookId: number; accountId: string; owner: string; since: number }> {
+    return [...this.ifKeyPending.entries()].map(([bookId, p]) => ({ bookId, accountId: p.accountId, owner: p.owner, since: p.since }));
   }
 
   /** After a re-mandate: replace a revoked trade key (only while the mandate is not killed). */

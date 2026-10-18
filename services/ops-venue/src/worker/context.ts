@@ -2,6 +2,7 @@ import type { BookState, ListingMode, Logger, VenueAccount, VenueSymbolIssuesMsg
 import type { Address, Hex } from "viem";
 import type { ChainPort, OrderlyBook } from "../chain";
 import type { FeeSettlement, OrderlyBuilderClient } from "../client";
+import type { IfBinding, IfMode } from "../domain/ifAccount";
 import type { KeyStore } from "../keys";
 import type { Ed25519Key } from "../orderly/auth";
 import type { SignedVenueReportJson, VenueReportValues } from "../report712";
@@ -13,7 +14,7 @@ import type { NativeFeeSettings } from "./native";
 /** Builder/ops venue operations the workers use (OrderlyBuilderClient satisfies it; tests fake it). */
 export type BuilderPort = Pick<
   OrderlyBuilderClient,
-  "createSymbol" | "listingStatus" | "setSymbolStatus" | "insuranceFund" | "addKey" | "keyInfo" | "revokeTradeKey" | "requestWithdraw" | "withdrawal" | "withdrawals" | "mockCompleteWithdraw" | "mockRegisterAccount" | "registerDelegateSigner"
+  "createSymbol" | "listingStatus" | "setSymbolStatus" | "insuranceFund" | "addKey" | "getOrderlyKey" | "keyInfo" | "revokeTradeKey" | "requestWithdraw" | "withdrawal" | "withdrawals" | "mockCompleteWithdraw" | "mockRegisterAccount" | "registerDelegateSigner"
 > & { feeSettlements(sinceMs: number): Promise<FeeSettlement[]> };
 
 /** Venue account read for (accountId, symbol) authenticated with `key` (ops key). */
@@ -52,6 +53,16 @@ export interface OpsSettings {
   listingRecheck?: Partial<ListingSchedule>;
   /** manual listing mode: how long an IF withdrawal may wait for the admin's delisting before errors count (OPS_DELIST_WAIT_MAX_MS) */
   delistWaitMaxMs?: number;
+  /**
+   * ORDERLY_IF_MODE (default contract) and, in builder mode, ORDERLY_IF_BUILDER_ACCOUNTS (bookId -> expected IF account
+   * id). Where the IF account id comes from in each mode: domain/ifAccount.ts.
+   */
+  ifMode?: IfMode;
+  ifBuilderAccounts?: ReadonlyMap<number, string>;
+  /** Orderly's per-market IF requirement, USD 6dp (strictly above; null = none checked, e.g. mock-orderly) */
+  ifRequirementUsd?: bigint | null;
+  /** builder IF mode: re-check period of an IF withdrawal waiting for the operator (OPS_IF_OPERATOR_RECHECK_MS) */
+  ifOperatorRecheckMs?: number;
   /** Orderly native deposit-fee keeper (worker/native.ts); default: warn only. */
   native?: NativeFeeSettings;
 }
@@ -109,6 +120,16 @@ export interface TrackedBook extends OrderlyBook {
   accounts: { if: Hex; mm: Hex };
   /** Owner (deposit receiver / delegateContract / payout address) of each Orderly account (chain.accountOwners). */
   owners: { if: Address; mm: Address };
+  /**
+   * The adapter's on-chain IF binding (domain/ifAccount.ts): devnet (pre-v3), contract (OrderlyIFAccount) or builder
+   * (operator EOA, adapter.setIfAccountOwner). Absent = contract / devnet as `owners` says (older fixtures).
+   */
+  ifBinding?: IfBinding;
+  /**
+   * The binding does not match ORDERLY_IF_MODE / ORDERLY_IF_BUILDER_ACCOUNTS: no IF provisioning for this book (published
+   * for alerts, re-read every book poll until fixed). null / absent = consistent.
+   */
+  ifAccountError?: string | null;
   /**
    * The venue symbol's listing on Orderly (worker/listing.ts, GET /v1/public/info/{symbol}); undefined / null = not
    * checked yet (or every check failed so far). Shared by every book on the symbol.

@@ -16,6 +16,10 @@
 //             materialise venue PnL the mock vault never received); live -> wait for Orderly to pay
 //             (asset history COMPLETED). IF payouts land on the OrderlyIFAccount; sweepToVault pulls them.
 //   sweep   : adapter.sweepToVault() (waits while the mark-window gate is closed)
+// Builder IF mode (`operatorIf`, domain/ifAccount.ts): the IF account belongs to an operator EOA whose key ops-venue never
+// holds, so `request` waits for the operator's own Orderly withdrawal of the amount (recognised in the IF account's
+// withdrawal history, paid to the EOA) instead of POSTing one, and `pay` waits, after Orderly paid the EOA, until the
+// operator has returned the USDG to the adapter. Neither wait burns an attempt (published: ifOperatorWaits).
 // Every on-chain write is recorded (hash + nonce) before its receipt is awaited and inspected on retry.
 import type { Address, Hex } from "viem";
 import type { SentTx } from "../chain";
@@ -53,6 +57,12 @@ export interface WithdrawSaga {
    * market in Orderly One (persisted so a restart neither re-asks nor resets the ceiling).
    */
   delistWaitSince?: number;
+  /** Builder IF mode: the operator withdraws on Orderly and returns the payout to the adapter (no venue POST by us). */
+  operatorIf?: boolean;
+  /** Builder IF mode: unix ms since the saga waits for the operator's Orderly withdrawal (request step). */
+  operatorWaitSince?: number;
+  /** Builder IF mode: unix ms since the saga waits for the operator to return the payout to the adapter (pay step). */
+  returnWaitSince?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -73,7 +83,7 @@ export const sagaReceiver = (s: Pick<WithdrawSaga, "adapter" | "owner">): Addres
 
 export const sagaKey = (adapter: Address, nonce: bigint | string) => `${adapter.toLowerCase()}:${nonce.toString()}`;
 
-export function newWithdrawSaga(p: { bookId: number; adapter: Address; account: number; accountId: Hex; owner?: Address; amount: bigint; nonce: bigint; txHash?: Hex }, now: number): WithdrawSaga {
+export function newWithdrawSaga(p: { bookId: number; adapter: Address; account: number; accountId: Hex; owner?: Address; amount: bigint; nonce: bigint; txHash?: Hex; operatorIf?: boolean }, now: number): WithdrawSaga {
   return {
     key: sagaKey(p.adapter, p.nonce),
     bookId: p.bookId,
@@ -86,6 +96,7 @@ export function newWithdrawSaga(p: { bookId: number; adapter: Address; account: 
     stage: "detected",
     attempts: 0,
     ...(p.txHash ? { detectedTx: p.txHash } : {}),
+    ...(p.operatorIf ? { operatorIf: true } : {}),
     createdAt: now,
     updatedAt: now,
   };

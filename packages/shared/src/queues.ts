@@ -131,6 +131,20 @@ export interface VenueSymbolIssuesMsg {
    * (alerts venue_delist_pending).
    */
   delistWaits?: Array<{ bookId: number; symbol: string; since: number }>;
+  /** ORDERLY_IF_MODE (absent: an older ops-venue, contract): the insurance-fund account model (docs/VERIFY.md O10) */
+  ifMode?: "contract" | "builder";
+  /**
+   * Books whose IF account cannot be provisioned (alerts venue_if_account): mismatch = the adapter's on-chain IF binding
+   * does not match ORDERLY_IF_MODE / ORDERLY_IF_BUILDER_ACCOUNTS; key_pending = builder mode, ops-venue's IF ops key is
+   * not registered for the builder IF account yet (the operator's wallet must add it; `since` unix ms).
+   */
+  ifAccounts?: Array<{ bookId: number; accountId: string; binding: "devnet" | "contract" | "builder"; issue: "mismatch" | "key_pending"; detail: string; since?: number }>;
+  /**
+   * Builder IF mode: IF withdrawals waiting for the operator (alerts venue_if_operator_pending). step withdraw: withdraw
+   * `amount` (USD 6dp) from the builder IF account on Orderly (paid to its EOA); return: transfer it from the EOA to the
+   * book's adapter. `since` unix ms.
+   */
+  ifOperatorWaits?: Array<{ bookId: number; nonce: string; step: "withdraw" | "return"; amount: string; owner: string; adapter: string; since: number }>;
 }
 
 /**

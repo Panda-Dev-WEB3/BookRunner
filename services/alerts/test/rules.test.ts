@@ -18,12 +18,13 @@ import {
   riskStale,
   riskState,
   rpc,
+  venueIfAccount,
   venueReportAge,
   venueListing,
   venueSymbol,
 } from "../src/rules";
 import { BUILDER_FEED_STATUS_TTL_SEC, type BuilderFeedStatusMsg, KEYS, VENUE_SYMBOL_ISSUES_TTL_SEC } from "@bookrunner/shared/queues";
-import { collect, emptyMemory, oracleDown } from "../src/collect";
+import { collect, emptyMemory, oracleDown, parseIfAccounts } from "../src/collect";
 import { loadConfig } from "../src/config";
 import type { VenueMarketMsg } from "@bookrunner/shared/venueMarket";
 import type { BuilderFeedSnap, VenueOpsSnap, OracleConfirmSnap, OracleProbe, OracleSourceSnap } from "../src/types";
@@ -102,6 +103,47 @@ describe("risk_state / kill journal / kill events / risk_stale", () => {
     expect(keys(riskStale(snap({ books: [risk({ ts: NOW - 301_000 })] }), rules()))).toEqual(["risk_stale:3"]);
     expect(riskStale(snap({ books: [risk({ ts: NOW - 299_000 })] }), rules())).toEqual([]);
     expect(riskStale(snap({ books: [book({ state: "Subscription", risk: null })] }), rules())).toEqual([]);
+  });
+});
+
+describe("insurance-fund account (ops-venue ORDERLY_IF_MODE, VERIFY O10)", () => {
+  const ks = (cs: ReturnType<typeof venueIfAccount>) => cs.map((x) => [x.key, x.severity]);
+  const mismatch = { issue: "mismatch" as const, detail: "ORDERLY_IF_MODE=builder but the adapter's IF account is the OrderlyIFAccount", accountId: "0xaa", since: null };
+  const pending = { issue: "key_pending" as const, detail: "the operator (wallet 0xE0A) must register ops-venue's IF key for 0xaa", accountId: "0xaa", since: NOW - 3_600_000 };
+
+  test("venue_if_account: mismatch warning in Subscription, critical Live / Retiring; key_pending warning; Cancelled / Retired quiet", () => {
+    expect(ks(venueIfAccount(snap({ books: [book({ state: "Subscription", ifAccountIssue: mismatch })] }), rules()))).toEqual([["venue_if_account:3", "warning"]]);
+    expect(ks(venueIfAccount(snap({ books: [book({ ifAccountIssue: mismatch })] }), rules()))).toEqual([["venue_if_account:3", "critical"]]);
+    expect(ks(venueIfAccount(snap({ books: [book({ state: "Retiring", ifAccountIssue: mismatch })] }), rules()))).toEqual([["venue_if_account:3", "critical"]]);
+    const p = venueIfAccount(snap({ books: [book({ ifAccountIssue: pending })] }), rules());
+    expect(ks(p)).toEqual([["venue_if_account:3", "warning"]]);
+    expect(p[0]?.summary).toContain("waits 60m");
+    for (const state of ["Cancelled", "Retired"]) expect(venueIfAccount(snap({ books: [book({ state, ifAccountIssue: mismatch })] }), rules())).toEqual([]);
+    expect(venueIfAccount(snap({ books: [book({ venue: "pool_engine", ifAccountIssue: mismatch })] }), rules())).toEqual([]);
+    expect(venueIfAccount(snap({ books: [book()] }), rules())).toEqual([]);
+  });
+
+  test("venue_if_operator_pending: warning, critical after 6 h; withdraw vs return wording", () => {
+    const w = (step: "withdraw" | "return", ageMs: number) => ({ nonce: "4", step, amount: "10000000000", owner: "0xE0A", adapter: "0xAD", since: NOW - ageMs });
+    const a = venueIfAccount(snap({ books: [book({ ifOperatorWaits: [w("withdraw", 600_000)] })] }), rules());
+    expect(ks(a)).toEqual([["venue_if_operator_pending:3:4", "warning"]]);
+    expect(a[0]?.summary).toContain("withdraw it on Orderly from the builder IF account (wallet 0xE0A), then transfer it to the adapter 0xAD");
+    expect(a[0]?.summary).toContain("10,000 USD");
+    const r = venueIfAccount(snap({ books: [book({ ifOperatorWaits: [w("return", 21_600_000)] })] }), rules());
+    expect(ks(r)).toEqual([["venue_if_operator_pending:3:4", "critical"]]);
+    expect(r[0]?.summary).toContain("transfer it to the adapter 0xAD");
+  });
+
+  test("parseIfAccounts: per book, malformed entries dropped", () => {
+    const raw = JSON.stringify({
+      ifAccounts: [{ bookId: 3, accountId: "0xaa", binding: "builder", issue: "key_pending", detail: "d", since: 5 }, { bookId: 4, issue: "weird", detail: "x" }, null],
+      ifOperatorWaits: [{ bookId: 3, nonce: "1", step: "return", amount: "5", owner: "0xE", adapter: "0xA", since: 9 }, { bookId: 3, step: "withdraw" }],
+    });
+    const p = parseIfAccounts(raw);
+    expect([...p.issues]).toEqual([[3, { issue: "key_pending", detail: "d", accountId: "0xaa", since: 5 }]]);
+    expect(p.waits.get(3)).toEqual([{ nonce: "1", step: "return", amount: "5", owner: "0xE", adapter: "0xA", since: 9 }]);
+    expect(parseIfAccounts("{bad").issues.size).toBe(0);
+    expect(parseIfAccounts(null).waits.size).toBe(0);
   });
 });
 

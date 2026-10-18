@@ -32,7 +32,9 @@ only (it deploys mocks and refuses 4663). Tick every box in order; two people fo
 - [ ] VERIFY O6 (Orderly accountId) and O9 (withdraw receiver): done in OrderlyAdapter v3 (MM = the adapter's
       own account, IF = the per-book `OrderlyIFAccount`). Remaining (VERIFY O10): Orderly confirms that the
       book's OrderlyIFAccount (a contract / delegate account) can be assigned as the symbol's IF account. Until
-      then do not charter Orderly books (PoolEngine books are unaffected).
+      then do not charter Orderly books (PoolEngine books are unaffected), or decide (2P, owner sign-off) to run
+      the builder IF mode (OrderlyAdapter v4 `setIfAccountOwner`, `ORDERLY_IF_MODE=builder`: IF custody with an
+      operator EOA per book, testnet step 2.4).
 - [ ] Uniswap v3 SwapRouter02 / factory / QuoterV2 on RHC and the Stock Token pools for each hedge asset (route,
       depth: `scripts/check-pools.ts`, VERIFY U1-U5); USDG (settlement token).
 - [ ] VERIFY C2: `source-check` green against a mainnet RPC ("Real prices" below): the oracle publishes
@@ -520,12 +522,34 @@ the Orderly testnet vault, NVDA and TSLA chartered again on it (new book ids, Or
    listing (alert `venue_listing_pending`, `/health` `orderlyListing`) and picks it up within 5 minutes once the market
    shows on `GET /v1/public/info/PERP_<T>_USDC_bookrunner` with a launched status; in POST_ONLY the agent quotes
    maker-only to build the launch depth (`AGENT_VENUE_POST_ONLY_QUOTE`), then normally once it is ACTIVE.
-4. **IF accounts**: each symbol is assigned to one IF account, funded strictly above 100 USDG per effective symbol on
-   testnet (VERIFY O10). The protocol's IF account is the book's `OrderlyIFAccount` (`adapter.accountId(0)`, owner
-   `adapter.ifAccount()`). It exists only once the new book is created and its delegate signer confirmed (step 3.4),
-   and the book funds it itself at window close (`depositToVenue(IF)` = `Vault.depositTo(ifAccount, …)`), so assign
-   it after step 3.4. Confirm with Orderly first that a contract (delegate) account can be a symbol's IF account
-   (VERIFY O10, open); a builder-held IF account is not implemented (G5).
+4. **IF accounts** (G5, VERIFY O10): each symbol is assigned to exactly one IF account in Orderly One, funded strictly
+   above 100 USDG per effective symbol on testnet (25,000 on mainnet). The book funds its IF account itself at window
+   close (`depositToVenue(IF)` = `Vault.depositTo(owner, …)`, event `OrderlyDeposit(0, accountId, amount, fee)`), so the
+   charter's `ifTargetUsd >= venueMinIf` (testnet 101 USDG, step 3.1) covers the requirement. One IF account per book:
+   do not assign two markets to one account (the adapter reports the account's whole equity as that book's insurance).
+   Two models, chosen with `ORDERLY_IF_MODE` (ops-venue) and the adapter's on-chain binding, which must agree (else
+   alert `venue_if_account` and no IF provisioning for that book; other books are unaffected):
+   - **contract** (default; needs Orderly to accept a contract / delegate account as a market's IF account, VERIFY
+     O10 open): the IF account is the book's `OrderlyIFAccount` (`adapter.accountId(0)`, owner `adapter.ifAccount()`).
+     It exists once the book is created and its delegate signer confirmed (step 3.4). Admin in Orderly One: when
+     listing the market (step 2.3) pick that account (`adapter.accountId(0)`) as the market's IF account. Withdrawals
+     are automatic (ops-venue, delegate signer).
+   - **builder** (fallback if Orderly refuses a contract account): the IF account is the Orderly account of an
+     operator EOA held behind the multisig (one EOA per book: Orderly derives one account per wallet and broker).
+     Operator, per book: (a) register the EOA with Orderly for broker `bookrunner` (Orderly One / `POST
+     /v1/register_account` signed by the EOA); its account id is `keccak256(abi.encode(eoa, keccak256("bookrunner")))`;
+     (b) the timelock calls `adapter.setIfAccountOwner(eoa)` while the book's IF is empty (before the window
+     closes; refused once IF capital or an IF withdrawal is on the adapter); (c) add `<bookId>=<accountId>` to
+     `ORDERLY_IF_BUILDER_ACCOUNTS` and set `ORDERLY_IF_MODE=builder` (step 3.6), restart ops-venue; (d) register the
+     Orderly key ops-venue logs (`builder IF account: the operator must register this Orderly key`, scope `read`)
+     for that account from the EOA (Orderly One or `POST /v1/orderly_key` signed by the EOA): until then the book's
+     venue reports fail (alert `venue_if_account` key_pending). Admin in Orderly One: assign that account as the
+     market's IF account (step 2.3). IF withdrawals (recall / retirement): ops-venue cannot sign for the EOA, so the
+     operator withdraws the requested amount on Orderly (paid to the EOA; delist first on a retiring book), then
+     transfers it to the adapter (plain USDG transfer); ops-venue recognises the withdrawal, confirms it on-chain and
+     sweeps once the USDG is back (alert `venue_if_operator_pending`, critical after 6 h). This moves IF custody off
+     the adapter to that EOA: every deposit is still on-chain (`OrderlyDeposit`), every return a transfer to the
+     adapter.
 
 ### 3. Operator side (testnet: the deployer is `config.timelock()`)
 
@@ -534,8 +558,10 @@ the Orderly testnet vault, NVDA and TSLA chartered again on it (new book ids, Or
    and `DEPLOY_ORDERLY_TOKEN=USDG` (a fresh deployment has v3 adapters: no migration). Keep the current record as
    `contracts/deployments/46630.mock.json` for the rollback (dev.ts always reads `contracts/deployments/46630.json` on
    testnet). Testnet USDG for LPs, IF and MM has to come from somewhere (VERIFY O17). The charter rule
-   `ifTargetUsd >= venueMinIf` defaults to 25,001 USDG; on testnet the deployer may lower it
-   (`config.setVenueMinIf(0, 101e6)`, above the 100 USDG testnet requirement).
+   `ifTargetUsd >= venueMinIf`: `Deploy.s.sol` sets `venueMinIf[Orderly]` per network, 101 USDG on testnet (Orderly
+   testnet requires > 100 per market) and 25,001 on devnet; `DEPLOY_VENUE_MIN_IF_ORDERLY` (6 dp) overrides it and is
+   refused at or below the requirement. Mainnet: `DeployMainnet` input `params.venueMinIfOrderly` > 25,000e6. An
+   existing deployment: `config.setVenueMinIf(0, 101e6)` (timelock).
 2. **`UpgradeOrderlyAdapters.s.sol`** applies only to an existing deployment whose config already points at the real
    vault and USDG (none today):
    ```bash
@@ -572,6 +598,8 @@ the Orderly testnet vault, NVDA and TSLA chartered again on it (new book ids, Or
    ORDERLY_BUILDER_ACCOUNT_ID=0xaa04410b18eb0856e02832221f24b2cd37fde7c6f6f8eec83fe95a2f62702e5c
    ORDERLY_BUILDER_KEY_SECRET=<base58 seed of the admin account's Orderly key, step 2.2>
    OPS_FEE_SWEEP_AUTO=false   # G6: the admin account is not the ops-venue key's
+   # ORDERLY_IF_MODE=contract (default) | builder (step 2.4); builder: ORDERLY_IF_BUILDER_ACCOUNTS=<bookId>=<accountId>,...
+   # ORDERLY_IF_REQUIREMENT_USD defaults to 100 for testnet-api.orderly.org (fund_if job: IF strictly above it)
    # ORDERLY_ORACLE_WS_URL=wss://testnet-ws-oracle.orderly.org   # default for testnet-api.orderly.org; undocumented (VERIFY O18)
    # ORDERLY_ORACLE_ACCOUNT_ID / ORDERLY_ORACLE_KEY_SECRET: the account that pushes ORACLE_bookrunner (default: the builder account + key above)
    # ORDERLY_EIP712_CHAIN_ID defaults to CHAIN_ID (46630)
@@ -585,7 +613,9 @@ the Orderly testnet vault, NVDA and TSLA chartered again on it (new book ids, Or
 - ops-venue log: `ops-venue starting` with `mode: live` and the testnet base URL, `builder account ready`,
   `Orderly delegate signer confirmed` (twice per book: adapter and OrderlyIFAccount), `book venue provisioned`.
 - `GET https://testnet-api.orderly.org/v1/get_account?address=<adapter>&broker_id=bookrunner&chain_type=EVM` returns
-  `adapter.accountId(1)`; with `address=<adapter.ifAccount()>` it returns `adapter.accountId(0)`.
+  `adapter.accountId(1)`; with `address=<adapter.accountOwner(0)>` (the OrderlyIFAccount, or the builder EOA in
+  `ORDERLY_IF_MODE=builder`, where the delegate is confirmed once per book: the adapter only) it returns
+  `adapter.accountId(0)`.
 - After the window closes: the signed venue reports (Redis `bkrn:venue:report:<bookId>`) show IF and MM equal to the
   deposits, the symbols turn `ACTIVE` (readiness `symbol` rows PASS), the agent quotes, and the first mark reconciles
   against Orderly's statement (Operations "Mark reconciliation break").
@@ -608,7 +638,7 @@ the Orderly testnet vault, NVDA and TSLA chartered again on it (new book ids, Or
 | G2 | **Closed in code (2026-10-18).** Builder-pushed index price: the oracle publishes its signed price per venue symbol every tick (`bkrn:oracle:venue-feed`); ops-venue pushes it to the Builder Oracle WebSocket (`src/builderOracle`, documented auth / message / ping) every second in session, re-sending the latest signed price between oracle ticks (testnet: every 2 s) and stopping when the oracle holds (session closed) or has no fresh price (a held price older than 10 s / 3 ticks counts as no price); alert `builder_price_push` after 30 s (a market never listed on Orderly yet, G4: logged only), or when the push status is old or missing. The session in which the oracle holds follows the charter sessions: they must equal the Orderly One market session of each listing (step 3). Still to confirm with Orderly: the testnet host (default `wss://testnet-ws-oracle.orderly.org`, undocumented), the auth / reject message shapes, and whether the builder account (vs the admin account, G6) may push `ORACLE_bookrunner`. | O18 |
 | G3 | **Closed (2026-10-18).** Symbol naming: one mapping (`packages/shared/src/venueSymbol.ts`) used by ops-venue, the agent and risk: `ORDERLY_MODE=live` -> `PERP_<T>_USDC_<ORDERLY_BROKER_ID>` (`PERP_NVDA_USDC_bookrunner`), mock -> the charter symbol verbatim. Charters, marks and the UI keep `PERP_NVDA_USDC`. Charters with a symbol no Orderly market can carry are rejected at filing (API) and blocked by the jury; a live book without a market is tracked for reports / withdrawals only (alert `venue_symbol_unmapped`). | O19 |
 | G4 | **Closed in code (2026-10-18).** `ORDERLY_LISTING_MODE=manual` (default with `ORDERLY_MODE=live`; `api` stays the default in mock mode): the admin lists each market in Orderly One (step 2.3); ops-venue never calls a listing or symbol-status endpoint, provisions the book's accounts and keys and follows `GET /v1/public/info/{symbol}` per symbol (15 s doubling to 5 min, 5 s timeout, 4 at once: a book waiting for its listing never holds up another). State per symbol (awaiting / listed / missing, open for new risk or restricted) in `bkrn:ops-venue:symbol-issues` and the API's `/health` `orderlyListing`. Alerts: `venue_listing_pending` (warning; critical after a Live book has had no market for 30 min), `venue_market_restricted` (REDUCE_ONLY / POST_ONLY warning, DELISTING / DELISTED on a Live book critical), `venue_market_missing` (a listed market gone: Live critical), `venue_listing_check` (5 failed checks), `venue_delist_pending`. The agent quotes and hedges reduce-only while its market is not open (`AGENT_VENUE_MARKET_GATE`); in Orderly's POST_ONLY launch phase it quotes both sides maker-only (POST_ONLY orders within the mandate) to provide the launch depth (`AGENT_VENUE_POST_ONLY_QUOTE`, default true with `ORDERLY_MODE=live`; false = reduce-only); the builder price push pages for a listed market that went missing or restricted. Retirement: set the market REDUCE_ONLY in Orderly One if needed and delist it there when the IF withdrawal of a retiring book waits on it (alert `venue_delist_pending`; ops-venue retries every minute, 24 h ceiling). | O20 |
-| G5 | IF account: whether an OrderlyIFAccount (contract / delegate account) can be a symbol's IF account is not confirmed; no builder-held IF fallback. | O10 |
+| G5 | **Closed in code (2026-10-18)**; Orderly's answer still open. IF account mode: `ORDERLY_IF_MODE=contract` (default, the per-book OrderlyIFAccount delegate account) or `builder` (an operator EOA's Orderly account bound by the timelock's `adapter.setIfAccountOwner(eoa)` (OrderlyAdapter v4), listed per book in `ORDERLY_IF_BUILDER_ACCOUNTS`; deposits unchanged on-chain via `Vault.depositTo(eoa, …)`; the operator registers ops-venue's IF key and performs IF withdrawals, returning the USDG to the adapter, ops-venue confirms and sweeps). Mode / binding mismatch: alert `venue_if_account`, no IF provisioning for that book only. Admin clicks per mode: step 2.4. `venueMinIf[Orderly]` per network in `Deploy.s.sol` (testnet 101 USDG). Still to ask Orderly: may a contract (delegate) account be a market's IF account? | O10 |
 | G6 | The builder admin account belongs to `0x9c1B…e8b9`, not to the ops-venue key: ops-venue's builder fee withdrawal signs a plain `Withdraw` with the ops-venue key and fails; sweep manually (`OPS_FEE_SWEEP_AUTO=false`). | O21 |
 | G7 | dev.ts testnet profile: `ORDERLY_MODE=mock` unless `.env.testnet` sets it, no `ORDERLY_*` live values, mock-orderly always started (trader-sim unless `--no-sim`). Workable through `.env.testnet` (step 3.6); no live-venue profile switch. | O22 |
 | G8 | Orderly's testnet itself: chain 46630 in `chain_info`, USDG and the broker allowed on the vault (Orderly action). | O1-O3, O7 |

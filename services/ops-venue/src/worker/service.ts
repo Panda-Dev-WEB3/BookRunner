@@ -38,6 +38,8 @@ export class OpsService {
     this.reporter = new Reporter(ctx);
     this.withdrawals = new WithdrawProcessor(ctx, this.registry);
     this.registry.delistWaits = () => this.withdrawals.delistWaits();
+    this.registry.ifOperatorWaits = () => this.withdrawals.ifOperatorWaits();
+    this.registry.ifKeysPending = () => this.provisioner.pendingIfKeys();
     this.fees = new FeeSweeper(ctx, this.registry);
     this.revoker = new Revoker(ctx, this.registry);
     this.native = new NativeFeeKeeper(ctx, ctx.settings.native ?? { topUpMaxWei: 0n, headroom: 2n, cooldownMs: 3_600_000 });
@@ -75,6 +77,13 @@ export class OpsService {
         this.ctx.log.warn({ bookId: b.bookId, err: errMsg(err) }, "provisioning failed (will retry)");
       }
     }
+    for (const b of delta.rebound) {
+      try {
+        await this.provisioner.ensure(b, true); // new IF account id: new IF ops key, delegates / registration again
+      } catch (err) {
+        this.ctx.log.warn({ bookId: b.bookId, err: errMsg(err) }, "re-provisioning after an IF account change failed (will retry)");
+      }
+    }
     // retry books whose provisioning failed earlier
     for (const b of this.registry.list()) {
       try {
@@ -82,6 +91,11 @@ export class OpsService {
       } catch (err) {
         this.ctx.log.debug({ bookId: b.bookId, err: errMsg(err) }, "provisioning retry failed");
       }
+    }
+    // builder IF mode: has the operator registered ops-venue's IF key yet? (throttled per book)
+    for (const b of this.registry.list()) {
+      if (b.ifBinding !== "builder" || b.state === "Cancelled" || b.state === "Retired") continue;
+      await this.provisioner.checkBuilderIfKey(b).catch((err) => this.ctx.log.debug({ bookId: b.bookId, err: errMsg(err) }, "builder IF key check failed"));
     }
     await this.provisioner.listing.check(this.registry.list());
     await this.registry.publishStatus();

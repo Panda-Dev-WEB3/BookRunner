@@ -1,5 +1,6 @@
 import { baseEnvSchema } from "@bookrunner/shared";
 import { z } from "zod";
+import { parseIfBuilderAccounts } from "./domain/ifAccount";
 
 const bool = (d: boolean) =>
   z
@@ -75,6 +76,18 @@ export const opsEnvSchema = baseEnvSchema.extend({
   // manual listing mode: an IF withdrawal of a retiring book waits this long for the admin's delisting in Orderly One
   // (re-tried every minute, no attempt burnt, alert venue_delist_pending); past it the venue error counts again
   OPS_DELIST_WAIT_MAX_MS: z.coerce.number().int().min(60_000).default(86_400_000),
+  // Insurance-fund account model (src/domain/ifAccount.ts, docs/VERIFY.md O10). contract: the book's OrderlyIFAccount
+  // (delegate account, today's path); builder: an operator EOA's Orderly account bound on-chain by the timelock's
+  // adapter.setIfAccountOwner(eoa), listed per book in ORDERLY_IF_BUILDER_ACCOUNTS (<bookId>=<accountId>,...; must match
+  // the chain). builder needs ORDERLY_MODE=live (the mock venue has no operator-wallet flows).
+  ORDERLY_IF_MODE: z.enum(["contract", "builder"]).default("contract"),
+  ORDERLY_IF_BUILDER_ACCOUNTS: z.string().optional(),
+  // Orderly's per-market IF requirement in whole USD (the IF must be strictly above it): default from ORDERLY_BASE_URL
+  // (testnet-api.orderly.org 100, api.orderly.org 25,000; none for mock-orderly). Checked by the fund_if job.
+  ORDERLY_IF_REQUIREMENT_USD: z.coerce.number().min(0).optional(),
+  // builder IF mode: an IF withdrawal waiting for the operator (withdraw on Orderly, return the USDG to the adapter) is
+  // re-checked this often (no attempt burnt; alert venue_if_operator_pending)
+  OPS_IF_OPERATOR_RECHECK_MS: z.coerce.number().int().min(1_000).default(60_000),
   // Settlement token symbol on Orderly (holding rows, withdraw / transfer messages): USDC on devnet, USDG on
   // Robinhood Chain (VERIFY O3/O7). Must match the OrderlyAdapter tokenHash (keccak256 of this symbol).
   ORDERLY_TOKEN: z.string().default("USDC"),
@@ -102,6 +115,14 @@ export function loadOpsEnv(source: Record<string, string | undefined> = process.
   }
   if (e.OPS_BUILDER_ORACLE_LIVENESS_MS > 0 && e.OPS_BUILDER_ORACLE_LIVENESS_TIMEOUT_MS <= e.OPS_BUILDER_ORACLE_LIVENESS_MS) {
     throw new Error("invalid environment: OPS_BUILDER_ORACLE_LIVENESS_TIMEOUT_MS must exceed OPS_BUILDER_ORACLE_LIVENESS_MS");
+  }
+  if (e.ORDERLY_IF_MODE === "builder" && e.ORDERLY_MODE !== "live") {
+    throw new Error("invalid environment: ORDERLY_IF_MODE=builder needs ORDERLY_MODE=live (the mock venue has no operator-wallet IF flows)");
+  }
+  try {
+    parseIfBuilderAccounts(e.ORDERLY_IF_BUILDER_ACCOUNTS);
+  } catch (err) {
+    throw new Error(`invalid environment: ${(err as Error).message}`);
   }
   if (e.OPS_LISTING_RECHECK_MAX_MS < e.OPS_LISTING_RECHECK_MS) {
     throw new Error("invalid environment: OPS_LISTING_RECHECK_MAX_MS must be >= OPS_LISTING_RECHECK_MS");

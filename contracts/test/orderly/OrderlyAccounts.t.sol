@@ -163,6 +163,126 @@ contract OrderlyAccountsTest is OrderlyFixture {
         assertEq(junk.balanceOf(address(_ifAcc())), 0);
     }
 
+    // ------------------------------------------------------------------ IF account mode (v4, VERIFY O10)
+
+    address internal constant BUILDER_IF_EOA = address(0xB1F0);
+
+    function _setIfOwner(address owner) internal {
+        vm.prank(timelock);
+        adapter.setIfAccountOwner(owner);
+    }
+
+    function test_ifMode_defaultIsContract() public view {
+        assertEq(adapter.ifAccountOwner(), address(0));
+        assertEq(adapter.accountOwner(IF), address(_ifAcc()));
+        assertEq(adapter.accountId(IF), keccak256(abi.encode(address(_ifAcc()), BROKER_HASH)));
+    }
+
+    function test_ifMode_builder_bindsEoaAccount_andEmits() public {
+        bytes32 ifId = keccak256(abi.encode(BUILDER_IF_EOA, BROKER_HASH));
+        vm.expectEmit(true, false, false, true, address(adapter));
+        emit OrderlyAdapter.IfAccountOwnerSet(BUILDER_IF_EOA, ifId);
+        vm.expectEmit(true, false, false, true, address(adapter));
+        emit OrderlyAdapter.OrderlyAccountsBound(BUILDER_IF_EOA, ifId, adapter.accountId(MM));
+        _setIfOwner(BUILDER_IF_EOA);
+        assertEq(adapter.ifAccountOwner(), BUILDER_IF_EOA);
+        assertEq(adapter.accountOwner(IF), BUILDER_IF_EOA);
+        assertEq(adapter.accountId(IF), ifId);
+        assertEq(adapter.accountOwner(MM), address(adapter), "MM unchanged");
+        assertEq(adapter.accountId(MM), keccak256(abi.encode(address(adapter), BROKER_HASH)), "MM unchanged");
+        assertEq(adapter.ifAccount(), address(_ifAcc()), "the IF contract stays deployed (contract mode fallback)");
+    }
+
+    function test_ifMode_builder_depositViaDepositTo_recordedOnChain() public {
+        _setIfOwner(BUILDER_IF_EOA);
+        bytes32 ifId = adapter.accountId(IF);
+        vm.expectEmit(true, true, false, true, address(adapter));
+        emit OrderlyAdapter.OrderlyDeposit(IF, ifId, 25_001e6, 0);
+        _deploy(IF, 25_001e6); // strict vault: depositTo(eoa, accountId = keccak256(eoa, brokerHash))
+        assertEq(ov.accountOwner(ifId), BUILDER_IF_EOA, "the builder EOA owns the IF account");
+        assertEq(ov.balanceOf(ifId), 25_001e6);
+        assertEq(adapter.insuranceEquityUsd(), 25_001e6);
+        assertEq(usdc.balanceOf(BUILDER_IF_EOA), 0, "nothing paid to the EOA by a deposit");
+        assertEq(usdc.violations(), 0);
+    }
+
+    function test_ifMode_builder_withdrawal_paidToEoa_returnedByOperator() public {
+        _setIfOwner(BUILDER_IF_EOA);
+        _deploy(IF, 25_001e6);
+        uint256 n = _recall(IF, 10_000e6);
+        _confirm(n);
+        _payOut(IF, 10_000e6); // Orderly pays the EOA account's owner
+        assertEq(usdc.balanceOf(BUILDER_IF_EOA), 10_000e6);
+        assertEq(adapter.sweepableToVault(), 0, "nothing on the adapter until the operator returns it");
+        assertEq(adapter.inTransitUsd(), 10_000e6);
+        vm.prank(BUILDER_IF_EOA);
+        usdc.transfer(address(adapter), 10_000e6); // operator step: back to the adapter
+        uint256 navBefore = _navUsd();
+        uint256 idleBefore = uwVault.idle();
+        assertEq(adapter.sweepToVault(), 10_000e6);
+        assertEq(uwVault.idle(), idleBefore + 10_000e6);
+        assertEq(adapter.inTransitUsd(), 0);
+        assertEq(_navUsd(), navBefore);
+    }
+
+    function test_ifMode_setOwner_guards() public {
+        vm.prank(ops);
+        vm.expectRevert(OrderlyAdapter.NotTimelock.selector);
+        adapter.setIfAccountOwner(BUILDER_IF_EOA);
+        // contracts (incl. the adapter and its IF contract) are refused: builder mode is an EOA-owned account
+        for (uint256 i = 0; i < 3; i++) {
+            address c = i == 0 ? address(adapter) : i == 1 ? address(_ifAcc()) : address(usdc);
+            vm.prank(timelock);
+            vm.expectRevert(abi.encodeWithSelector(OrderlyAdapter.IfOwnerNotEoa.selector, c));
+            adapter.setIfAccountOwner(c);
+        }
+        // not while the IF account holds capital on our books
+        _deploy(IF, 25_001e6);
+        vm.prank(timelock);
+        vm.expectRevert(OrderlyAdapter.VenueStateNotEmpty.selector);
+        adapter.setIfAccountOwner(BUILDER_IF_EOA);
+    }
+
+    function test_ifMode_mmCapitalDoesNotBlock_switchBackOnceEmpty() public {
+        _deploy(MM, 75_000e6);
+        _setIfOwner(BUILDER_IF_EOA); // MM capital does not block: the MM account id never changes
+        _deploy(IF, 1_000e6);
+        uint256 n = _recall(IF, 1_000e6);
+        // confirmation moves the IF amount venue-side -> in transit; the payout goes to the EOA
+        _confirm(n);
+        _payOut(IF, 1_000e6);
+        assertEq(adapter.insuranceEquityUsd(), 0);
+        _recallNone();
+        vm.prank(BUILDER_IF_EOA);
+        usdc.transfer(address(adapter), 1_000e6);
+        assertEq(adapter.sweepToVault(), 1_000e6);
+        _setIfOwner(address(0)); // back to contract mode once empty
+        assertEq(adapter.accountOwner(IF), address(_ifAcc()));
+        assertEq(adapter.accountId(IF), keccak256(abi.encode(address(_ifAcc()), BROKER_HASH)));
+    }
+
+    function test_ifMode_setOwner_refusedWhileIfRequestPending() public {
+        _setIfOwner(BUILDER_IF_EOA);
+        _deploy(IF, 1_000e6);
+        _recall(IF, 1_000e6);
+        vm.prank(timelock);
+        vm.expectRevert(OrderlyAdapter.VenueStateNotEmpty.selector);
+        adapter.setIfAccountOwner(address(0));
+    }
+
+    function test_ifMode_setOwner_refusedOnLegacyProxy() public {
+        ov.setStrictAccountIds(false);
+        _makeLegacy(adapter);
+        vm.prank(timelock);
+        vm.expectRevert(OrderlyAdapter.OrderlyAccountsNotBound.selector);
+        adapter.setIfAccountOwner(BUILDER_IF_EOA);
+    }
+
+    /// @dev Nothing left pending on the IF account (keeps the switch-back test explicit).
+    function _recallNone() internal view {
+        assertEq(adapter.pendingWithdrawUsd(IF), 0);
+    }
+
     // ------------------------------------------------------------------ migration of pre-v3 proxies
 
     function test_migrate_onlyTimelock_once_andOnlyWhenEmpty() public {

@@ -130,6 +130,8 @@ const shape = {
   ALERT_LISTING_CHECK_FAILURES: int(5),
   /** venue_delist_pending: an IF withdrawal waiting this long for the admin's delisting pages critical (warning before) */
   ALERT_DELIST_WAIT_CRITICAL_SECONDS: int(21_600),
+  /** venue_if_operator_pending: a builder-IF withdrawal waiting this long for the operator pages critical (warning before) */
+  ALERT_IF_OPERATOR_WAIT_CRITICAL_SECONDS: int(21_600),
   ALERT_RISK_WARN: bool(false),
   ALERT_VENUE_REPORT_MAX_AGE_SECONDS: z.coerce.number().int().min(1).optional(),
   ALERT_RESTART_WINDOW_SECONDS: int(900),
@@ -185,6 +187,8 @@ export interface RuleConfig {
   listingCheckFailures: number;
   /** venue_delist_pending: wait (s) before critical */
   delistWaitCriticalSec: number;
+  /** venue_if_operator_pending: wait (s) before critical */
+  ifOperatorWaitCriticalSec: number;
   restartWindowSec: number;
   restartMax: number;
   exitWindowSec: number;
@@ -299,6 +303,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       listingLiveGraceSec: e.ALERT_LISTING_LIVE_GRACE_SECONDS,
       listingCheckFailures: e.ALERT_LISTING_CHECK_FAILURES,
       delistWaitCriticalSec: e.ALERT_DELIST_WAIT_CRITICAL_SECONDS,
+      ifOperatorWaitCriticalSec: e.ALERT_IF_OPERATOR_WAIT_CRITICAL_SECONDS,
       restartWindowSec: e.ALERT_RESTART_WINDOW_SECONDS,
       restartMax: e.ALERT_RESTART_MAX,
       exitWindowSec: e.ALERT_EXIT_WINDOW_SECONDS,

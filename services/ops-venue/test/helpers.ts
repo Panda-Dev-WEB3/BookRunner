@@ -249,7 +249,12 @@ export class FakeChain implements ChainPort {
     return { if: IF_ID, mm: MM_ID };
   }
   async accountOwners(adapter: Address) {
-    return { if: this.ifOwners.get(adapter.toLowerCase()) ?? adapter, mm: adapter };
+    return { if: this.builderIfOwners.get(adapter.toLowerCase()) ?? this.ifOwners.get(adapter.toLowerCase()) ?? adapter, mm: adapter };
+  }
+  /** builder IF mode: adapter -> operator EOA (adapter.setIfAccountOwner); IF payouts go to the EOA, not the IF contract */
+  builderIfOwners = new Map<string, Address>();
+  async ifAccountOwner(adapter: Address) {
+    return this.builderIfOwners.get(adapter.toLowerCase()) ?? null;
   }
   async nativeFeeState(adapter: Address, deposits: Array<{ account: number; amount: bigint }>) {
     return { balance: this.native.get(adapter.toLowerCase()) ?? 0n, required: this.depositFee * BigInt(deposits.length) };
