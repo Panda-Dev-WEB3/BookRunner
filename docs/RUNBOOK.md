@@ -545,7 +545,8 @@ the Orderly testnet vault, NVDA and TSLA chartered again on it (new book ids, Or
    today's deployment**: the mock vault only allows `keccak256("USDC")`, so with `DEPLOY_ORDERLY_TOKEN=USDG` every new
    Orderly book would revert `TokenNotAllowedByVenue` at `initialize` (charter finalize fails), and books 1 and 2 are
    skipped by the migration (not empty).
-3. **Charter NVDA and TSLA** on the new deployment with the Orderly symbols (G3), `ifTargetUsd` above 100 USDG and
+3. **Charter NVDA and TSLA** on the new deployment (charter symbols `PERP_NVDA_USDC` / `PERP_TSLA_USDC`: with
+   `ORDERLY_MODE=live` the services trade `PERP_<T>_USDC_<ORDERLY_BROKER_ID>`, G3), `ifTargetUsd` above 100 USDG and
    `>= venueMinIf`; then `scripts/record-books.ts`.
 4. **Delegate signer, per new Orderly book**: `adapter.setDelegateSigner(<OPS_VENUE address>)` registers the ops-venue
    EOA on the vault for the adapter (MM account) and its OrderlyIFAccount (IF account) and emits `AccountDelegate`.
@@ -600,8 +601,8 @@ the Orderly testnet vault, NVDA and TSLA chartered again on it (new book ids, Or
 | # | Gap | VERIFY |
 |---|---|---|
 | G1 | No deployment path for "real Orderly, mocks elsewhere" on testnet: `Deploy.s.sol` always deploys MockERC20 USDC + MockOrderlyVault; `DeployMainnet` `REHEARSAL=1` takes real externals but needs Stock Tokens, Chainlink feeds and Uniswap v3 on testnet, which are not published there (VERIFY T3, C4). Adapters cannot be rebound to another vault / token. Source of testnet USDG unknown. | O17 |
-| G2 | Builder-pushed index price: the oracle's live client (`services/oracle/src/adapters/venue.ts`) throws `NotConfiguredError`. ops-venue's `OrderlyBuilderClient.setBuilderPrice` has a WebSocket push (ed25519 builder key, topic `indexpricefeed`) that nothing calls; it defaults to the mainnet host, derives `base_ccy` by stripping a trailing `_USDC` (wrong for `_bookrunner` symbols), and its sign format is VERIFY. Orderly wants at least 1 update/s while the session is open (the testnet oracle ticks every 2 s). | O18 |
-| G3 | Symbol naming: ops-venue, the agent and risk use the charter symbol (`PERP_NVDA_USDC`) verbatim for orders, positions and trades; Orderly names builder markets `PERP_NVDA_USDC_bookrunner`, and ops-venue's base-asset parse (`^PERP_(.+)_USDC$`) does not match that form. | O19 |
+| G2 | Builder-pushed index price: the oracle's live client (`services/oracle/src/adapters/venue.ts`) throws `NotConfiguredError`. ops-venue's `OrderlyBuilderClient.setBuilderPrice` has a WebSocket push (ed25519 builder key, topic `indexpricefeed`) that nothing calls; it defaults to the mainnet host, derives `base_ccy` with the shared symbol parser (accepts `_bookrunner` symbols since G3), and its sign format is VERIFY. Orderly wants at least 1 update/s while the session is open (the testnet oracle ticks every 2 s). | O18 |
+| G3 | **Closed (2026-10-18).** Symbol naming: one mapping (`packages/shared/src/venueSymbol.ts`) used by ops-venue, the agent and risk: `ORDERLY_MODE=live` -> `PERP_<T>_USDC_<ORDERLY_BROKER_ID>` (`PERP_NVDA_USDC_bookrunner`), mock -> the charter symbol verbatim. Charters, marks and the UI keep `PERP_NVDA_USDC`. | O19 |
 | G4 | Listing: live `createSymbol` posts to `/v1/broker/listing/*` (bodies VERIFY) on every provisioning and aborts the book's provisioning on any error other than "exists"; the listing is done in Orderly One. There is no "listed in Orderly One" mode (skip, check `/v1/public/info`). Live `setSymbolStatus` (REDUCE_ONLY at retirement) has no confirmed endpoint: do it in Orderly One. | O20 |
 | G5 | IF account: whether an OrderlyIFAccount (contract / delegate account) can be a symbol's IF account is not confirmed; no builder-held IF fallback. | O10 |
 | G6 | The builder admin account belongs to `0x9c1B…e8b9`, not to the ops-venue key: ops-venue's builder fee withdrawal signs a plain `Withdraw` with the ops-venue key and fails; sweep manually (`OPS_FEE_SWEEP_AUTO=false`). | O21 |

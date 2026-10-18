@@ -4,7 +4,7 @@
 //                         Used by bookrunner-agent and risk.
 //   OrderlyBuilderClient  implements OrderlyBuilderApi (ops-venue): symbols, builder price, IF, fee
 //                         settlements, withdrawals (EIP-712 via the delegate signer), key revocation.
-import type { OrderlyBuilderApi, QuotingVenue, TwoSidedQuote, VenueAccount, VenueFill } from "@bookrunner/shared";
+import { baseAssetOf, type OrderlyBuilderApi, type QuotingVenue, type TwoSidedQuote, type VenueAccount, type VenueFill } from "@bookrunner/shared";
 import type { Address, LocalAccount } from "viem";
 import { KeyStore, resolveKeysDir } from "./keys";
 import { type Ed25519Key, keyFromSecret, keyPrefix, signMessage } from "./orderly/auth";
@@ -333,7 +333,7 @@ export class OrderlyBuilderClient implements OrderlyBuilderApi {
     // freezes the index while OFF_MARKET, so we simply stop publishing while held.
     if (p.held) return;
     const ws = await this.oracleSocket();
-    const base = p.symbol.replace(/^PERP_/, "").replace(/_USDC$/, "");
+    const base = baseAssetOf(p.symbol) ?? p.symbol; // PERP_NVDA_USDC[_<broker>] -> NVDA (base_ccy)
     ws.send(JSON.stringify({ id: `px_${base}_${p.ts}`, event: "publish", topic: ORDERLY_ORACLE_WS.topic, ts: p.ts, data: { base_ccy: base, price: p.price } }));
   }
 

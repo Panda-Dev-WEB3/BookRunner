@@ -85,6 +85,7 @@ async function main(): Promise<void> {
     makeVenues: (chain: ChainGateway) =>
       new OrderlyVenueProvider({
         mode: env.ORDERLY_MODE,
+        brokerId: env.ORDERLY_BROKER_ID,
         baseUrl: env.ORDERLY_BASE_URL,
         signer,
         timeoutMs: env.RISK_VENUE_TIMEOUT_MS,

@@ -6,7 +6,7 @@
 // and nonce right after broadcast, BEFORE the receipt is awaited, so the saga can persist it. On retry the
 // saga inspects that tx (`txState`) instead of re-sending; a dropped tx is replaced with its own nonce
 // (`opts.nonce`), so at most one of the two can ever be mined.
-import { BOOK_STATE, type BookState, bytes32ToStr, type Deployment, type Logger, publicClientFor, VENUE, walletClientFor } from "@bookrunner/shared";
+import { BOOK_STATE, type BookState, baseAssetOf, bytes32ToStr, type Deployment, type Logger, publicClientFor, VENUE, walletClientFor } from "@bookrunner/shared";
 import { bookAbi, bookFactoryAbi, bookrunnerConfigAbi, mMMandateAbi, mockERC20Abi, orderlyAdapterAbi } from "@bookrunner/shared/abi";
 import {
   type Abi,
@@ -50,7 +50,9 @@ export interface OrderlyBook {
   mandate: Address;
   vault: Address;
   router: Address;
-  symbol: string;
+  /** Charter symbol as stored on-chain (PERP_NVDA_USDC); the registry maps it to the venue symbol (TrackedBook.symbol). */
+  charterSymbol: string;
+  /** Orderly base_ccy (NVDA), from either symbol form; the charter symbol itself when it is not an Orderly perp symbol. */
   baseAsset: string;
   sessions: Hex;
   underlying: Hex;
@@ -255,8 +257,7 @@ export class ViemChain implements ChainPort {
     const comps = fromDep ?? (await this.pc.readContract({ address: this.dep.contracts.factory, abi: bookFactoryAbi, functionName: "componentsOf", args: [BigInt(bookId)] }));
     const charter = await this.pc.readContract({ address: comps.book, abi: bookAbi, functionName: "getCharter" });
     if (charter.venue !== VENUE.ORDERLY) return null;
-    const symbol = bytes32ToStr(charter.symbol);
-    const m = /^PERP_(.+)_USDC$/.exec(symbol);
+    const charterSymbol = bytes32ToStr(charter.symbol);
     return {
       bookId,
       book: comps.book,
@@ -264,8 +265,8 @@ export class ViemChain implements ChainPort {
       mandate: comps.mandate,
       vault: comps.vault,
       router: comps.router,
-      symbol,
-      baseAsset: m?.[1] ?? symbol,
+      charterSymbol,
+      baseAsset: baseAssetOf(charterSymbol) ?? charterSymbol,
       sessions: charter.sessions,
       underlying: charter.underlying,
       ifTargetUsd: charter.ifTargetUsd,

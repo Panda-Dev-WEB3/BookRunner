@@ -73,6 +73,11 @@ export interface OpsContext {
 }
 
 export interface TrackedBook extends OrderlyBook {
+  /**
+   * Venue symbol: what every Orderly call and match uses (orders, positions, trades, listing, IF, fee rows).
+   * `venueSymbol` of the charter symbol: PERP_NVDA_USDC_<broker> with ORDERLY_MODE=live, the charter symbol in mock mode.
+   */
+  symbol: string;
   state: BookState;
   accounts: { if: Hex; mm: Hex };
   /** Owner (deposit receiver / delegateContract / payout address) of each Orderly account (chain.accountOwners). */

@@ -1,6 +1,7 @@
 // Book discovery (poll): Orderly-venue books from deployment.books + BookFactory.bookIds(), their
-// adapter account ids and lifecycle state. Non-Orderly books are remembered and skipped.
-import type { BookState } from "@bookrunner/shared";
+// adapter account ids and lifecycle state. Non-Orderly books are remembered and skipped. Each book's charter symbol is
+// mapped once here to its venue symbol (@bookrunner/shared venueSymbol: ORDERLY_MODE + ORDERLY_BROKER_ID).
+import { type BookState, venueSymbol } from "@bookrunner/shared";
 import { errMsg } from "../util";
 import { lc, type OpsContext, type TrackedBook } from "./context";
 
@@ -41,11 +42,20 @@ export class BookRegistry {
           this.skipped.add(id);
           continue;
         }
+        let symbol: string;
+        try {
+          symbol = venueSymbol({ charterSymbol: b.charterSymbol, mode: this.ctx.settings.mode, brokerId: this.ctx.settings.brokerId });
+        } catch (err) {
+          // the charter symbol is immutable: this book can never trade on this venue; other books are unaffected
+          this.skipped.add(id);
+          this.ctx.log.error({ bookId: id, charterSymbol: b.charterSymbol, err: errMsg(err) }, "Orderly book skipped: no venue symbol for its charter symbol");
+          continue;
+        }
         const [state, accounts, owners] = await Promise.all([this.ctx.chain.bookState(b.book), this.ctx.chain.accountIds(b.adapter), this.ctx.chain.accountOwners(b.adapter)]);
-        const tb: TrackedBook = { ...b, state, accounts, owners };
+        const tb: TrackedBook = { ...b, symbol, state, accounts, owners };
         this.books.set(id, tb);
         delta.added.push(tb);
-        this.ctx.log.info({ bookId: id, symbol: b.symbol, state, adapter: b.adapter }, "tracking Orderly book");
+        this.ctx.log.info({ bookId: id, symbol, charterSymbol: b.charterSymbol, state, adapter: b.adapter }, "tracking Orderly book");
       } catch (err) {
         this.ctx.log.warn({ bookId: id, err: errMsg(err) }, "book load failed (will retry)");
       }

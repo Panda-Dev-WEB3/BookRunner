@@ -58,6 +58,7 @@ export function trackedBook(state: BookState = "Live"): TrackedBook {
     mandate: MANDATE,
     vault: VAULT,
     router: ROUTER,
+    charterSymbol: SYMBOL,
     symbol: SYMBOL,
     baseAsset: "NVDA",
     sessions: `0x${"00".repeat(32)}`,

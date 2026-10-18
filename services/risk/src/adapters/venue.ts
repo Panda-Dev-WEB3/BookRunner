@@ -16,6 +16,7 @@ import {
   type VenueFill,
   type VenuePosition,
   usd,
+  venueSymbol,
 } from "@bookrunner/shared";
 import type { VenueProvider } from "../ports";
 import type { BookRef } from "../types";
@@ -73,6 +74,11 @@ export class OrderlyRiskVenue implements QuotingVenue {
   constructor(private readonly o: OrderlyRiskVenueOptions) {
     this.fetchImpl = o.fetchImpl ?? fetch;
     this.now = o.nowMs ?? (() => Date.now());
+  }
+
+  /** Venue (Orderly) symbol this client cancels and reads. */
+  get symbol(): string {
+    return this.o.symbol;
   }
 
   async replaceQuote(_q: TwoSidedQuote): Promise<void> {
@@ -155,13 +161,10 @@ export class OrderlyRiskVenue implements QuotingVenue {
   }
 }
 
-/** Charter symbol -> Orderly symbol. VERIFY naming (devnet/mock: PERP_<TICKER>_USDC). */
-export function venueSymbol(symbol: string): string {
-  return symbol.startsWith("PERP_") ? symbol : `PERP_${symbol}_USDC`;
-}
-
 export interface OrderlyVenueProviderOptions {
   mode: "mock" | "live";
+  /** ORDERLY_BROKER_ID: live books trade their builder market PERP_<T>_USDC_<broker> (shared venueSymbol, VERIFY O19). */
+  brokerId: string;
   baseUrl: string;
   signer: OrderlySigner | null;
   timeoutMs: number;
@@ -172,6 +175,7 @@ export interface OrderlyVenueProviderOptions {
 
 export class OrderlyVenueProvider implements VenueProvider {
   private warnedNoKey = false;
+  private readonly badSymbol = new Set<number>();
 
   constructor(private readonly o: OrderlyVenueProviderOptions) {}
 
@@ -190,10 +194,19 @@ export class OrderlyVenueProvider implements VenueProvider {
       throw err;
     }
     if (!accountId) return null;
+    let symbol: string;
+    try {
+      symbol = venueSymbol({ charterSymbol: ref.symbol, mode: this.o.mode, brokerId: this.o.brokerId });
+    } catch (err) {
+      // no Orderly market for this charter symbol: adapter reports only for this book
+      if (!this.badSymbol.has(ref.bookId)) this.o.log.error({ bookId: ref.bookId, symbol: ref.symbol, err: errMsg(err) }, "no Orderly venue symbol for the book's charter symbol");
+      this.badSymbol.add(ref.bookId);
+      return null;
+    }
     return new OrderlyRiskVenue({
       baseUrl: this.o.baseUrl,
       accountId,
-      symbol: venueSymbol(ref.symbol),
+      symbol,
       signer: this.o.signer,
       timeoutMs: this.o.timeoutMs,
     });

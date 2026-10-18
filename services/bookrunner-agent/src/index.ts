@@ -24,6 +24,7 @@ import {
   roleAccount,
   tryLoadDeployment,
   underlyingToToken,
+  venueSymbol,
   walletClientFor,
 } from "@bookrunner/shared";
 import type { Hex, LocalAccount, PublicClient } from "viem";
@@ -215,7 +216,11 @@ async function runOnce(
     log.info({ marketId: engineChain.marketId.toString() }, "venue: in-house PoolEngine (desk SetQuote)");
   } else {
     const accountId = env.ORDERLY_ACCOUNT_ID ?? (await ctx.chain.orderlyMmAccountId().catch(() => null)) ?? String(ctx.bookId);
-    venue = await createOrderlyVenue({ bookId: ctx.bookId, symbol: ctx.symbol, accountId, baseUrl: env.ORDERLY_BASE_URL, mode: env.ORDERLY_MODE, env: process.env }, log);
+    // the charter symbol stays the book's label (logs, marks, UI); Orderly is spoken to with the venue symbol
+    // (PERP_<T>_USDC_<broker> with ORDERLY_MODE=live, VERIFY O19)
+    const symbol = venueSymbol({ charterSymbol: ctx.symbol, mode: env.ORDERLY_MODE, brokerId: env.ORDERLY_BROKER_ID });
+    log.info({ venueSymbol: symbol }, "venue: Orderly");
+    venue = await createOrderlyVenue({ bookId: ctx.bookId, symbol, accountId, baseUrl: env.ORDERLY_BASE_URL, mode: env.ORDERLY_MODE, env: process.env }, log);
   }
 
   // Orderly books (low-gas): the on-chain venue view only advances at marks, so plan from the latest signed

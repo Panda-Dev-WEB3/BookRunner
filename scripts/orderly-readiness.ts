@@ -25,6 +25,7 @@ import { bookFactoryAbi, bookrunnerConfigAbi, orderlyAdapterAbi } from "../packa
 import { publicClientFor } from "../packages/shared/src/clients";
 import { deploymentPath, tryLoadDeployment } from "../packages/shared/src/deployments";
 import type { Deployment } from "../packages/shared/src/types";
+import { baseAssetOf, venueSymbol } from "../packages/shared/src/venueSymbol";
 
 // ============================================================================================ model
 
@@ -88,7 +89,11 @@ export const EFFECTIVE_SYMBOL_STATUSES = new Set(["NEW", "PENDING", "POST_ONLY",
 
 /** Builder (Perp Anything) symbols carry the broker id: PERP_<BASE>_USDC_<broker> (seen live 2026-10-18). */
 export function builderSymbol(base: string, brokerId: string): string {
-  return `PERP_${base.toUpperCase()}_USDC_${brokerId}`;
+  try {
+    return venueSymbol({ charterSymbol: base.toUpperCase(), mode: "live", brokerId }); // the services' mapping
+  } catch {
+    return `PERP_${base.toUpperCase()}_USDC_${brokerId}`; // not a valid base / broker id: shown as is (row stays FAIL)
+  }
 }
 
 /** PERP_<BASE>_<QUOTE>[_<broker>] -> parts; null when not a perp symbol. */
@@ -99,7 +104,7 @@ export function parseSymbol(symbol: string): { base: string; quote: string; brok
 
 /** Base asset of a charter symbol (PERP_NVDA_USDC or PERP_NVDA_USDC_<broker>). */
 export function charterBase(symbol: string): string | null {
-  return parseSymbol(symbol)?.base ?? null;
+  return baseAssetOf(symbol);
 }
 
 /** US equities / ETFs (heuristic list, used only to list existing equity markets). */

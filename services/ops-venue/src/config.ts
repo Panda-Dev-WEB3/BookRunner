@@ -33,7 +33,7 @@ export const opsEnvSchema = baseEnvSchema.extend({
   OPS_OPS_KEY_TTL_DAYS: z.coerce.number().default(365),
   OPS_WITHDRAW_MAX_ATTEMPTS: z.coerce.number().default(40),
   OPS_WORKER_CONCURRENCY: z.coerce.number().default(2),
-  ORDERLY_BROKER_ID: z.string().default("bookrunner"),
+  // ORDERLY_BROKER_ID: shared base env (packages/shared/src/env.ts)
   ORDERLY_BUILDER_ACCOUNT_ID: z.string().optional(),
   ORDERLY_BUILDER_KEY_SECRET: z.string().optional(), // base58 ed25519 seed (else generated into OPS_KEYS_DIR/builder.json)
   ORDERLY_EIP712_CHAIN_ID: z.coerce.number().optional(), // chainId in Orderly messages (default CHAIN_ID) — VERIFY for RHC

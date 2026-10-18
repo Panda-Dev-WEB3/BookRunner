@@ -3,7 +3,7 @@ import { VENUE, usd } from "@bookrunner/shared";
 import * as ed from "@noble/ed25519";
 import { base58Decode, base58Encode, createOrderlySigner, orderlyAuthHeaders } from "../src/adapters/orderlyAuth";
 import { parseQuote } from "../src/adapters/redis";
-import { OrderlyRiskVenue, OrderlyVenueProvider, venueSymbol } from "../src/adapters/venue";
+import { OrderlyRiskVenue, OrderlyVenueProvider } from "../src/adapters/venue";
 import { receiptRow } from "../src/domain/records";
 import { makeRef, silentLog } from "./fakes";
 
@@ -85,19 +85,38 @@ describe("orderly auth", () => {
 
 describe("venue provider", () => {
   test("engine books get no venue client; Orderly books get one per MM account", async () => {
-    const p = new OrderlyVenueProvider({ mode: "mock", baseUrl: "http://mock", signer: null, timeoutMs: 1000, log: silentLog, accountIdOf: async () => "0xacc" });
+    const p = new OrderlyVenueProvider({ mode: "mock", brokerId: "bookrunner", baseUrl: "http://mock", signer: null, timeoutMs: 1000, log: silentLog, accountIdOf: async () => "0xacc" });
     expect(await p.forBook(makeRef(3, VENUE.POOL_ENGINE))).toBeNull();
     expect((await p.forBook(makeRef(1, VENUE.ORDERLY)))?.kind).toBe("orderly");
   });
 
   test("live mode without a signing key falls back to adapter reports", async () => {
-    const p = new OrderlyVenueProvider({ mode: "live", baseUrl: "http://x", signer: null, timeoutMs: 1000, log: silentLog, accountIdOf: async () => "0xacc" });
+    const p = new OrderlyVenueProvider({ mode: "live", brokerId: "bookrunner", baseUrl: "http://x", signer: null, timeoutMs: 1000, log: silentLog, accountIdOf: async () => "0xacc" });
     expect(await p.forBook(makeRef(1, VENUE.ORDERLY))).toBeNull();
   });
 
-  test("symbol mapping", () => {
-    expect(venueSymbol("PERP_NVDA_USDC")).toBe("PERP_NVDA_USDC");
-    expect(venueSymbol("NVDA")).toBe("PERP_NVDA_USDC");
+  test("symbol mapping: mock keeps the charter symbol, live uses the builder market (VERIFY O19)", async () => {
+    const signer = await createOrderlySigner(`ed25519:${base58Encode(new Uint8Array(32).fill(7))}`);
+    const opts = { baseUrl: "http://x", timeoutMs: 1000, log: silentLog, accountIdOf: async () => "0xacc" };
+    const mock = new OrderlyVenueProvider({ ...opts, mode: "mock", brokerId: "bookrunner", signer: null });
+    const live = new OrderlyVenueProvider({ ...opts, mode: "live", brokerId: "bookrunner", signer });
+    const sym = async (p: OrderlyVenueProvider, symbol: string) => ((await p.forBook({ ...makeRef(1, VENUE.ORDERLY), symbol })) as OrderlyRiskVenue | null)?.symbol ?? null;
+    expect(await sym(mock, "PERP_NVDA_USDC")).toBe("PERP_NVDA_USDC");
+    expect(await sym(mock, "NVDA")).toBe("PERP_NVDA_USDC");
+    expect(await sym(live, "PERP_NVDA_USDC")).toBe("PERP_NVDA_USDC_bookrunner");
+    expect(await sym(live, "PERP_NVDA_USDC_bookrunner")).toBe("PERP_NVDA_USDC_bookrunner");
+    // not an Orderly perp symbol / another broker's market: no venue client for that book (adapter reports only)
+    expect(await sym(live, "NVDA-PERP")).toBeNull();
+    expect(await sym(live, "PERP_AAPL_USDC_mythos")).toBeNull();
+  });
+
+  test("live: cancel / reads go to the builder market", async () => {
+    const calls: Call[] = [];
+    const v = new OrderlyRiskVenue({ baseUrl: "http://x", accountId: "0xacc", symbol: "PERP_NVDA_USDC_bookrunner", signer: null, timeoutMs: 1000, fetchImpl: fakeFetch({ "DELETE /v1/orders": {}, "GET /v1/positions": { rows: [{ symbol: "PERP_NVDA_USDC", position_qty: 5, mark_price: 190 }, { symbol: "PERP_NVDA_USDC_bookrunner", position_qty: -3, mark_price: 190 }] }, "GET /v1/client/holding": { holding: [] } }, calls) });
+    await v.cancelAll();
+    expect(calls[0]?.url).toBe("http://x/v1/orders?symbol=PERP_NVDA_USDC_bookrunner");
+    // Orderly's own PERP_NVDA_USDC row is not the book's position
+    expect((await v.account()).position?.netQty).toBe(-3);
   });
 });
 

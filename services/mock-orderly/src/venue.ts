@@ -249,14 +249,21 @@ export function normalizeAccountId(id: string): string {
   return /^0x[0-9a-fA-F]+$/.test(t) ? t.toLowerCase() : t;
 }
 
+/** Builder (Perp Anything) market, as live Orderly names it: PERP_<BASE>_USDC_<broker_id> (docs/VERIFY.md O14). */
+const BUILDER_SYMBOL_RE = /^PERP_([^_]+)_USDC_(.+)$/i;
+
 export function baseAssetOf(symbolOrBase: string): string {
   const s = symbolOrBase.trim().toUpperCase();
-  const m = /^PERP_(.+)_USDC$/.exec(s);
+  const m = /^PERP_(.+)_USDC$/.exec(s) ?? BUILDER_SYMBOL_RE.exec(s);
   return m?.[1] ?? s;
 }
 
+/** Canonical symbol: PERP_<BASE>_USDC, or PERP_<BASE>_USDC_<broker> with the broker id kept lowercase. */
 export function symbolOf(symbolOrBase: string): string {
-  const s = symbolOrBase.trim().toUpperCase();
+  const t = symbolOrBase.trim();
+  const b = BUILDER_SYMBOL_RE.exec(t);
+  if (b) return `PERP_${(b[1] as string).toUpperCase()}_USDC_${(b[2] as string).toLowerCase()}`;
+  const s = t.toUpperCase();
   return s.startsWith("PERP_") ? s : `PERP_${s}_USDC`;
 }
 
@@ -392,7 +399,7 @@ export class MockVenue {
   // ------------------------------------------------------------------ symbols & prices
   createSymbol(p: { symbol: string; baseAsset?: string; priceSource?: string; sessions?: string; ifAccountId?: string; builderAccountId?: string }): SymbolState {
     const symbol = symbolOf(p.symbol);
-    if (!/^PERP_[A-Z0-9]{1,24}_USDC$/.test(symbol)) throw new VenueError(400, ERR.INVALID_PARAM, `invalid symbol ${p.symbol}`);
+    if (!/^PERP_[A-Z0-9]{1,24}_USDC(_[a-z0-9][a-z0-9_-]*)?$/.test(symbol)) throw new VenueError(400, ERR.INVALID_PARAM, `invalid symbol ${p.symbol}`);
     if (p.builderAccountId) this.setBuilder(p.builderAccountId);
     let s = this.symbols.get(symbol);
     if (!s) {
