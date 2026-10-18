@@ -56,6 +56,8 @@ export interface ConfirmResult {
   /** largest |confirmer - primary| / primary among fresh confirmers (bps); null when none */
   diffBps: number | null;
   primaryPrice: number | null;
+  /** the primary observation's own timestamp (Chainlink: the round's updatedAt), unix ms */
+  primaryTs: number | null;
   confirmers: Array<{ name: string; price: number; ts: number; diffBps: number }>;
 }
 

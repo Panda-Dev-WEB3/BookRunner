@@ -33,6 +33,8 @@ export function errorClass(msg: string): string {
 export class SourceHealth {
   private readonly state = new Map<string, SourceHealthView>();
   private readonly lastWarnAt = new Map<string, number>();
+  /** start of the current healthy stretch inside a failure run (hysteresis) */
+  private readonly healthySince = new Map<string, number>();
 
   constructor(
     sources: ReadonlyArray<{ name: string; kind?: string; role?: string }>,
@@ -40,6 +42,11 @@ export class SourceHealth {
     private readonly warnEveryMs = 60_000,
     /** a failure run must last this long before it is logged (single-tick dropouts stay quiet) */
     private readonly warnAfterMs = 10_000,
+    /**
+     * a failure run ends only after this long without a failure (a one-tick success does not reset `failingSince`, so
+     * the alert timers keep running through a flapping source); 0 = end at the first clean tick
+     */
+    private readonly clearAfterMs = 0,
   ) {
     for (const s of sources) {
       this.state.set(s.name, { name: s.name, kind: s.kind ?? "http", role: s.role ?? "median", lastOkAt: null, failingSince: null, failingTickers: [], lastError: null, lastErrorAt: null });
@@ -48,7 +55,8 @@ export class SourceHealth {
 
   /**
    * One tick: outcomes per ticker per source name, and which tickers were in session. Failures on closed tickers are
-   * ignored; a tick without any in-session ticker resets `failingSince` (nothing to fail).
+   * ignored; a tick without any in-session ticker resets `failingSince` (nothing to fail); otherwise a run ends only after
+ * `clearAfterMs` without a failure (its last failing tickers stay listed meanwhile).
    */
   update(nowMs: number, outcomes: ReadonlyMap<string, ReadonlyMap<string, SourceOutcome>>, openTickers: ReadonlySet<string>): void {
     for (const h of this.state.values()) {
@@ -63,11 +71,19 @@ export class SourceHealth {
           error ??= o.error;
         }
       }
-      h.failingTickers = failing.sort();
       if (failing.length === 0) {
+        if (h.failingSince !== null && openTickers.size > 0) {
+          const healthy = this.healthySince.get(h.name) ?? nowMs;
+          this.healthySince.set(h.name, healthy);
+          if (nowMs - healthy < this.clearAfterMs) continue;
+        }
+        h.failingTickers = [];
         h.failingSince = null;
+        this.healthySince.delete(h.name);
         continue;
       }
+      this.healthySince.delete(h.name);
+      h.failingTickers = failing.sort();
       h.failingSince ??= nowMs;
       h.lastError = error;
       h.lastErrorAt = nowMs;

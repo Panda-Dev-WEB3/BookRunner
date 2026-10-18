@@ -1,11 +1,12 @@
 // DEX TWAP confirm source (sources/dex-twap.ts): Uniswap v3 TWAP math in both orientations, decimals, negative
-// ticks, per-share conversion through uiMultiplier, liquidity floor, observation history, block-time stamps.
+// ticks, per-share conversion through uiMultiplier, 2% depth floor, factory authenticity, observation history, last
+// swap inside the window, block-time stamps.
 import { describe, expect, test } from "bun:test";
 import { MULTIPLIER_VECTOR as V, WAD, loadChainPriceConfig } from "@bookrunner/shared";
 import { getAddress } from "viem";
 import { loadOracleConfig, resolveDexPools } from "../src/config";
-import { DexTwapSource, arithmeticMeanTick, perSharePrice, priceToWad, tokenPriceAtTick } from "../src/sources/dex-twap";
-import { FakeDexReader, USDG, dexPool, tickFor } from "./dex-fakes";
+import { DexTwapSource, arithmeticMeanTick, depthQuote, perSharePrice, priceToWad, tokenPriceAtTick } from "../src/sources/dex-twap";
+import { FACTORY, FakeDexReader, USDG, dexPool, sqrtPriceX96At, tickFor } from "./dex-fakes";
 
 const NVDA = getAddress("0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC");
 const TSLA = getAddress("0x322F0929c4625eD5bAd873c95208D54E1c003b2d");
@@ -70,7 +71,7 @@ function setup(o: { tokenIsToken0?: boolean; tokenPrice?: number; multiplier?: b
   r.addPool(POOL_A, { token0: t0 ? NVDA : USDG, token1: t0 ? USDG : NVDA, meanTick: tickFor(price, t0) });
   r.setToken(NVDA, { uiMultiplier: o.multiplier ?? WAD });
   let clock = r.blockNow.timestamp * 1000 + 800;
-  const src = new DexTwapSource({ NVDA: dexPool(POOL_A, NVDA) }, r, { maxAgeMs: 60_000, now: () => clock });
+  const src = new DexTwapSource({ NVDA: dexPool(POOL_A, NVDA) }, r, { maxAgeMs: 60_000, factory: FACTORY, now: () => clock });
   return { r, src, advance: (ms: number) => (clock += ms) };
 }
 
@@ -84,7 +85,8 @@ describe("DexTwapSource", () => {
       expect(o.price).toBeCloseTo(o.tokenPrice / (Number(V.uiMultiplierWad) / 1e18), 6);
       expect(o.ts).toBe(r.blockNow.timestamp * 1000);
       expect(o.twapSec).toBe(600);
-      expect(o.quoteLiquidity).toBe(500_000);
+      expect(o.depthQuote).toBeCloseTo(500_000, -1);
+      expect(o.lastSwapAgeSec).toBe(30);
       expect(o.cardinality).toBe(7200);
       expect(o.historySec).toBe(86_400);
       expect([...r.pinned]).toEqual([r.blockNow.number]);
@@ -97,7 +99,7 @@ describe("DexTwapSource", () => {
     const { r, src, advance } = setup();
     r.addPool(POOL_B, { token0: TSLA, token1: USDG, meanTick: tickFor(349.8, true) });
     r.setToken(TSLA);
-    const two = new DexTwapSource({ NVDA: dexPool(POOL_A, NVDA), TSLA: dexPool(POOL_B, TSLA) }, r, { maxAgeMs: 60_000, now: () => 5_000 });
+    const two = new DexTwapSource({ NVDA: dexPool(POOL_A, NVDA), TSLA: dexPool(POOL_B, TSLA) }, r, { maxAgeMs: 60_000, factory: FACTORY, now: () => 5_000 });
     await Promise.all([two.fetch("NVDA"), two.fetch("TSLA")]);
     expect(r.calls.block).toBe(1);
     await src.fetch("NVDA");
@@ -107,15 +109,67 @@ describe("DexTwapSource", () => {
     expect(r.calls.block).toBe(3);
   });
 
-  test("liquidity floor: a pool with less quote token than minQuoteLiquidity confirms nothing", async () => {
+  test("depth floor: quote needed to move the price 2% (in-range liquidity), not the pool's token balance", async () => {
+    for (const tokenIsToken0 of [false, true]) {
+      const { r, src } = setup({ tokenIsToken0 });
+      r.pools.get(POOL_A.toLowerCase())!.depthUsd = 49_000;
+      const o = await src.observe("NVDA");
+      expect(o.ok).toBe(false);
+      expect(!o.ok && o.reason).toMatch(/^insufficient depth: \$49,0\d\d moves the price 2% \(floor \$50,000\)$/);
+      await expect(src.fetch("NVDA")).rejects.toThrow("insufficient depth");
+      r.pools.get(POOL_A.toLowerCase())!.depthUsd = 51_000;
+      expect((await src.observe("NVDA")).ok).toBe(true);
+    }
+  });
+
+  test("depthQuote: constant-L math in both orientations; the smaller (price-down) side; scales with L", () => {
+    // quote = token1: base = L * sqrtP; quote = token0: base = L / sqrtP (raw units, / 10^decimals)
+    const sq = sqrtPriceX96At(-217_747); // TSLA pool: token0 TSLA, token1 USDG
+    const L = 10n ** 18n;
+    const sqrtP = Number(sq) / 2 ** 96;
+    const r = Math.sqrt(1.02);
+    expect(depthQuote(L, sq, false, 6)).toBeCloseTo((1e18 * sqrtP * (1 - 1 / r)) / 1e6, 6);
+    const sq0 = sqrtPriceX96At(222_698); // NVDA pool: token0 USDG
+    const sqrtP0 = Number(sq0) / 2 ** 96;
+    expect(depthQuote(L, sq0, true, 6)).toBeCloseTo((1e18 / sqrtP0) * (1 - 1 / r) / 1e6, 6);
+    expect(depthQuote(2n * L, sq, false, 6)).toBeCloseTo(2 * depthQuote(L, sq, false, 6), 6);
+    // a wider move needs more quote; up (r - 1) > down (1 - 1/r): the returned figure is the down side
+    expect(depthQuote(L, sq, false, 6, 400)).toBeGreaterThan(depthQuote(L, sq, false, 6, 200));
+    expect(depthQuote(0n, sq, false, 6)).toBe(0);
+  });
+
+  test("factory check: the pool must be factory.getPool(stockToken, quoteToken, fee) (once per pool)", async () => {
     const { r, src } = setup();
-    r.pools.get(POOL_A.toLowerCase())!.quoteBalance = 49_999n * 10n ** 6n;
-    const o = await src.observe("NVDA");
-    expect(o).toMatchObject({ ok: false, quoteLiquidity: 49_999 });
-    expect(!o.ok && o.reason).toBe("insufficient liquidity: $49,999 quote tokens in the pool < floor $50,000");
-    await expect(src.fetch("NVDA")).rejects.toThrow("insufficient liquidity");
-    r.pools.get(POOL_A.toLowerCase())!.quoteBalance = 50_000n * 10n ** 6n;
     expect((await src.observe("NVDA")).ok).toBe(true);
+    await src.observe("NVDA");
+    expect(r.calls.getPool).toBe(1);
+    const look = new FakeDexReader();
+    look.addPool(POOL_A, { token0: USDG, token1: NVDA, meanTick: tickFor(213.2, false) });
+    look.setToken(NVDA);
+    look.factoryPools.set(`${[NVDA.toLowerCase(), USDG.toLowerCase()].sort().join("|")}|3000`, POOL_B);
+    const fake = new DexTwapSource({ NVDA: dexPool(POOL_A, NVDA) }, look, { maxAgeMs: 60_000, factory: FACTORY });
+    const o = await fake.observe("NVDA");
+    expect(!o.ok && o.reason).toBe(`pool ${POOL_A} is not the factory's pool for (Stock Token, quote token, fee 3000): getPool returned ${POOL_B}`);
+    // a wrong fee tier in the config: getPool returns the zero address
+    const wrongFee = new DexTwapSource({ NVDA: dexPool(POOL_A, NVDA, { fee: 500 }) }, r, { maxAgeMs: 60_000, factory: FACTORY });
+    expect((await wrongFee.observe("NVDA")).ok).toBe(false);
+    // no factory known (devnet): not checked
+    const unchecked = new DexTwapSource({ NVDA: dexPool(POOL_A, NVDA) }, look, { maxAgeMs: 60_000, factory: null });
+    expect((await unchecked.observe("NVDA")).ok).toBe(true);
+    expect(unchecked.factoryChecked()).toBe(false);
+  });
+
+  test("no swap inside the TWAP window: unavailable, never an old trade presented as fresh", async () => {
+    const { r, src } = setup();
+    const p = r.pools.get(POOL_A.toLowerCase())!;
+    p.newestTs = r.blockNow.timestamp - 600;
+    let o = await src.observe("NVDA");
+    expect(!o.ok && o.reason).toBe("no swap in the 600s TWAP window (last swap 600s ago): the TWAP would be an old trade");
+    expect(o).toMatchObject({ lastSwapAgeSec: 600, historySec: 86_400 });
+    p.observationIndex = 20; // a new swap: new index, the cached ring is re-read
+    p.newestTs = r.blockNow.timestamp - 599;
+    o = await src.observe("NVDA");
+    expect(o.ok).toBe(true);
   });
 
   test("observation history must cover the window (oldest slot; slot 0 when the ring is not full)", async () => {
@@ -140,10 +194,10 @@ describe("DexTwapSource", () => {
     const { r, src } = setup();
     await src.observe("NVDA");
     await src.observe("NVDA");
-    expect(r.calls.observation).toBe(1);
+    expect(r.calls.observation).toBe(2);
     r.pools.get(POOL_A.toLowerCase())!.observationIndex = 99;
     await src.observe("NVDA");
-    expect(r.calls.observation).toBe(2);
+    expect(r.calls.observation).toBe(4);
   });
 
   test("observe() reverting (OLD) is a reason, never a throw out of observe()", async () => {
@@ -170,8 +224,11 @@ describe("DexTwapSource", () => {
   });
 
   test("a pool whose tokens are not the Stock Token and the quote token is refused", async () => {
-    const { r, src } = setup();
-    r.pools.get(POOL_A.toLowerCase())!.token1 = TSLA;
+    const r = new FakeDexReader();
+    r.addPool(POOL_A, { token0: USDG, token1: TSLA, meanTick: tickFor(213.2, false) });
+    r.setToken(NVDA);
+    // not checked against the factory here (it would refuse first): the token pair check on its own
+    const src = new DexTwapSource({ NVDA: dexPool(POOL_A, NVDA) }, r, { maxAgeMs: 60_000, factory: null });
     const o = await src.observe("NVDA");
     expect(!o.ok && o.reason).toContain("are not the Stock Token");
     expect(await src.observe("AAPL")).toEqual({ ok: false, reason: "no DEX confirm pool configured" });
@@ -180,7 +237,7 @@ describe("DexTwapSource", () => {
   test("an unreadable pool is a reason", async () => {
     const r = new FakeDexReader();
     r.setToken(NVDA);
-    const src = new DexTwapSource({ NVDA: dexPool(POOL_A, NVDA) }, r, { maxAgeMs: 60_000 });
+    const src = new DexTwapSource({ NVDA: dexPool(POOL_A, NVDA) }, r, { maxAgeMs: 60_000, factory: null });
     const o = await src.observe("NVDA");
     expect(!o.ok && o.reason).toBe("pool not readable: execution reverted (no pool)");
   });
@@ -197,7 +254,7 @@ describe("dexConfirm config", () => {
       tokenDecimals: 18,
       quoteToken: USDG,
       twapSec: 600,
-      minQuoteLiquidity: 50_000,
+      minDepthUsd: 50_000,
       fee: 500,
     });
     expect(cfg.dexConfirm?.readAt).toBe("2026-10-17");

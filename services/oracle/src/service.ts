@@ -10,7 +10,7 @@ import type { PriceStore } from "./adapters/db";
 import type { PricePublisher } from "./adapters/redis";
 import { type BuilderPriceClient, NotConfiguredError } from "./adapters/venue";
 import { type AggregateResult, type CollectedQuote, type ConfirmResult, type ConfirmStatus, aggregate } from "./domain/aggregate";
-import { primaryConfirm } from "./domain/confirm";
+import { type ConfirmRun, nextConfirmRun, primaryConfirm } from "./domain/confirm";
 import { type Decision, type LastOpen, decide, marketOpen } from "./domain/hold";
 import { type ComponentPrice, indexAsAggregate, indexLevel } from "./domain/index-level";
 import { roundPrice, toPriceWad } from "./domain/price";
@@ -44,6 +44,10 @@ export interface OracleSettings {
   confirmUnavailableWarnMs?: number;
   /** primary-confirm: per-ticker interval of the repeated divergence / unavailable warnings (default 60 s) */
   confirmWarnEveryMs?: number;
+  /** primary-confirm: a confirm gap above this (bps) is tracked as a lag run (ORACLE_PRIMARY_LAG_BPS, default 100) */
+  primaryLagBps?: number;
+  /** a diverged / unavailable / lag run (and a source failure / unpublished run) ends only after this long (default 60 s) */
+  hysteresisMs?: number;
   /**
    * Mainnet rules (production.ts): no synthetic source may be wired in (the constructor throws), and no
    * price — held or not, off-hours seeding included — is signed with fewer than the minimum sources.
@@ -120,17 +124,28 @@ export function buildBundle(
 const errMsg = (e: unknown) => (e instanceof Error ? e.message.split("\n")[0] : String(e));
 
 export const DEFAULT_CONFIRM_BPS = 200;
+export const DEFAULT_PRIMARY_LAG_BPS = 100;
+export const DEFAULT_HYSTERESIS_MS = 60_000;
 
-/** Per-ticker confirm state as served by /health (services/alerts oracle_confirm_*). */
+/** Per-ticker confirm state as served by /health (services/alerts oracle_confirm_*, oracle_primary_suspect_stale). */
 export interface ConfirmView {
   priceId: string;
-  /** closed = off-hours (not evaluated: Chainlink holds while the DEX may trade); no-primary = no fresh Chainlink */
+  /**
+   * Run status (sticky: a diverged / unavailable run ends only after the other status held for the hysteresis).
+   * closed = off-hours (not evaluated: Chainlink holds while the DEX may trade); no-primary = no fresh Chainlink.
+   */
   status: ConfirmStatus | "closed";
+  /** this tick's raw status */
+  current: ConfirmStatus | "closed";
   diffBps: number | null;
-  /** start (unix ms) of the current run of this status */
+  /** start (unix ms) of the current run of `status` */
   since: number;
   checkedAt: number;
   primaryPrice: number | null;
+  /** Chainlink round updatedAt (unix ms) behind primaryPrice */
+  primaryTs: number | null;
+  /** start (unix ms) of the run with a confirm gap > primaryLagBps (null = none); see ConfirmRun */
+  lagSince: number | null;
   confirmers: Array<{ name: string; price: number; diffBps: number }>;
 }
 
@@ -152,9 +167,10 @@ export class OracleService {
   private readonly onchainAt = new Map<string, number>();
   private readonly skipSince = new Map<string, number>();
   /** in-session price ids without a publishable price: since (unix ms) + the latest reason */
-  private readonly unpublished = new Map<string, { since: number; reason: string }>();
+  private readonly unpublished = new Map<string, { since: number; reason: string; publishedAt: number | null }>();
   /** primary-confirm: latest confirm evaluation per equity price id */
   private readonly confirmState = new Map<string, ConfirmView>();
+  private readonly confirmRuns = new Map<string, ConfirmRun>();
   private readonly confirmWarnAt = new Map<string, number>();
   private readonly venueInFlight = new Set<string>();
   private bundle: OracleBundleMsg | null = null;
@@ -183,6 +199,9 @@ export class OracleService {
     this.sourceHealth = new SourceHealth(
       deps.sources.map((src) => ({ name: src.name, kind: sourceKind(src), role: sourceRole(policy, src) })),
       (fields, msg) => this.log.warn(fields, msg),
+      60_000,
+      10_000,
+      deps.settings.hysteresisMs ?? DEFAULT_HYSTERESIS_MS,
     );
     this.now = deps.now ?? Date.now;
     if (deps.settings.production) {
@@ -350,7 +369,7 @@ export class OracleService {
         // in session and nothing publishable: /health `unpublished` (services/alerts oracle_price_missing)
         if (open) {
           const u = this.unpublished.get(e.priceId);
-          this.unpublished.set(e.priceId, { since: u?.since ?? nowMs, reason: d.reason });
+          this.unpublished.set(e.priceId, { since: u?.since ?? nowMs, reason: d.reason, publishedAt: null });
         } else this.unpublished.delete(e.priceId);
         this.noteSkip(e.priceId, d.reason, nowMs, agg);
         // an index may still use this component's recent publication
@@ -361,7 +380,12 @@ export class OracleService {
         continue;
       }
       this.skipSince.delete(e.priceId);
-      this.unpublished.delete(e.priceId);
+      // the unpublished run ends only after publishing held for the hysteresis (a one-tick publish keeps its `since`)
+      const u = this.unpublished.get(e.priceId);
+      if (u) {
+        u.publishedAt ??= nowMs;
+        if (!open || nowMs - u.publishedAt >= (s.hysteresisMs ?? DEFAULT_HYSTERESIS_MS)) this.unpublished.delete(e.priceId);
+      }
       if (d.seeded) this.log.warn({ priceId: e.priceId, price: d.price }, "off-hours start without history: holding at the currently observed price");
       this.lastOpen.set(e.priceId, d.lastOpen);
       const msg = await this.buildMsg(ctx, e, d, publishedAt);
@@ -410,19 +434,28 @@ export class OracleService {
 
   private recordConfirm(priceId: string, c: ConfirmResult, open: boolean, nowMs: number, confirmBps: number): void {
     const s = this.deps.settings;
-    const status: ConfirmView["status"] = open ? c.status : "closed";
+    const prevRun = this.confirmRuns.get(priceId) ?? null;
+    const run = nextConfirmRun(prevRun, c, open, nowMs, {
+      hysteresisMs: s.hysteresisMs ?? DEFAULT_HYSTERESIS_MS,
+      lagBps: s.primaryLagBps ?? DEFAULT_PRIMARY_LAG_BPS,
+    });
+    this.confirmRuns.set(priceId, run);
     const prev = this.confirmState.get(priceId);
-    const since = prev && prev.status === status ? prev.since : nowMs;
+    const { status, since } = run;
     const view: ConfirmView = {
       priceId,
       status,
+      current: open ? c.status : "closed",
       diffBps: c.diffBps === null ? null : Math.round(c.diffBps * 10) / 10,
       since,
       checkedAt: nowMs,
       primaryPrice: c.primaryPrice,
+      primaryTs: c.primaryTs,
+      lagSince: run.lagSince,
       confirmers: c.confirmers.map((x) => ({ name: x.name, price: x.price, diffBps: Math.round(x.diffBps * 10) / 10 })),
     };
     this.confirmState.set(priceId, view);
+    this.warnLag(view, nowMs);
     if (prev?.status === "diverged" && status === "ok") {
       this.log.info({ priceId, diffBps: view.diffBps, divergedForMs: nowMs - prev.since }, "confirm sources agree with Chainlink again");
     }
@@ -443,6 +476,25 @@ export class OracleService {
     } else {
       this.log.warn({ priceId, chainlink: c.primaryPrice, unavailableForMs: nowMs - since }, "no confirm source for an in-session ticker: Chainlink is published unconfirmed");
     }
+  }
+
+  /**
+   * A confirm gap above primaryLagBps for confirmUnavailableWarnMs (10 min) with no Chainlink round since it began:
+   * the feed may have silently stopped updating (it still answers, so it stays "fresh" up to heartbeat + grace).
+   * Logged (rate-limited); services/alerts raises oracle_primary_suspect_stale. The price is never changed.
+   */
+  private warnLag(v: ConfirmView, nowMs: number): void {
+    const s = this.deps.settings;
+    if (v.lagSince === null || v.primaryTs === null || v.primaryTs > v.lagSince) return;
+    if (nowMs - v.lagSince < (s.confirmUnavailableWarnMs ?? 600_000)) return;
+    const key = `${v.priceId}:lag`;
+    const last = this.confirmWarnAt.get(key);
+    if (last !== undefined && nowMs - last < (s.confirmWarnEveryMs ?? 60_000)) return;
+    this.confirmWarnAt.set(key, nowMs);
+    this.log.warn(
+      { priceId: v.priceId, chainlink: v.primaryPrice, chainlinkRoundAgeMs: nowMs - v.primaryTs, diffBps: v.diffBps, lagForMs: nowMs - v.lagSince },
+      "Chainlink suspect stale: the confirm gap exceeds ORACLE_PRIMARY_LAG_BPS with no new round since it began (the price is still Chainlink)",
+    );
   }
 
   private async collect(ticker: string, nowMs: number): Promise<{ quotes: CollectedQuote[]; outcomes: Map<string, SourceOutcome> }> {
@@ -687,6 +739,7 @@ export class OracleService {
       /** median | primary-confirm (Chainlink signs; role confirm sources are compared only) */
       policy: this.policy(),
       confirmBps: this.policy() === "primary-confirm" ? (this.deps.settings.confirmBps ?? DEFAULT_CONFIRM_BPS) : null,
+      primaryLagBps: this.policy() === "primary-confirm" ? (this.deps.settings.primaryLagBps ?? DEFAULT_PRIMARY_LAG_BPS) : null,
       /** per live source: role, last fresh observation, current failure run (in-session tickers only), last error class */
       sources: this.sourceHealth.view(),
       /** primary-confirm: per equity, how the confirm sources compare with Chainlink */

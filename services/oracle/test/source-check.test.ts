@@ -8,7 +8,7 @@ import type { PriceSource } from "../src/domain/types";
 import { type CheckRow, type RegistryView, type SourceCheckReader, formatTable, runSourceCheck } from "../src/source-check";
 import type { RoundData, TokenState } from "../src/sources/chainlink";
 import { DexTwapSource } from "../src/sources/dex-twap";
-import { FakeDexReader, USDG, dexPool, tickFor } from "./dex-fakes";
+import { FACTORY, FakeDexReader, USDG, dexPool, tickFor } from "./dex-fakes";
 
 const CONFIG = loadChainPriceConfig(4663)!;
 const FEEDS = resolveFeeds(CONFIG, {}, { defaultMaxAgeMs: 3_600_000, heartbeatGraceMs: 600_000 }).feeds;
@@ -70,7 +70,7 @@ function dexAt(factor = 1, tickers = Object.keys(CONFIG.stockTokens)) {
     r.setToken(token, { uiMultiplier: V.uiMultiplierWad });
     pools[id] = dexPool(pool, token);
   });
-  return { r, dex: new DexTwapSource(pools, r, { maxAgeMs: 60_000 }) };
+  return { r, dex: new DexTwapSource(pools, r, { maxAgeMs: 60_000, factory: FACTORY }) };
 }
 
 const rowsFor = (rows: CheckRow[], subject: string) => rows.filter((r) => r.subject === subject);
@@ -266,7 +266,7 @@ describe("primary-confirm in source-check (mainnet default)", () => {
     let rows = await run({ dex: dexAt(1.005).dex });
     expect(dexRow(rows).status).toBe("PASS");
     expect(dexRow(rows).detail).toMatch(/^TWAP 600s \$\d+\.\d{4}\/share vs Chainlink \$184\.9801: 5\d\.\d bps \(threshold 200\)/);
-    expect(dexRow(rows).detail).toContain("depth $500,000 quote (floor $50,000); cardinality 7200, history 86400s");
+    expect(dexRow(rows).detail).toMatch(/2% depth \$(499,9\d\d|500,0\d\d) quote \(floor \$50,000\); cardinality 7200, history 86400s, last swap 30s ago; pool 0x\w+ \(fee 3000\), factory getPool verified$/);
     rows = await run({ dex: dexAt(1.03).dex });
     expect(dexRow(rows).status).toBe("WARN"); // ~300 bps: alerts at runtime, the price stays Chainlink
     rows = await run({ dex: dexAt(1.03).dex, confirmBps: 400 });
@@ -281,10 +281,10 @@ describe("primary-confirm in source-check (mainnet default)", () => {
     rows = await run({ dex: dexAt(1, ["TSLA"]).dex });
     expect(dexRow(rows).status).toBe("FAIL");
     const shallow = dexAt();
-    for (const pool of shallow.r.pools.values()) pool.quoteBalance = 10_000n * 10n ** 6n;
+    for (const pool of shallow.r.pools.values()) pool.depthUsd = 10_000;
     rows = await run({ dex: shallow.dex });
     expect(dexRow(rows).status).toBe("FAIL");
-    expect(dexRow(rows).detail).toContain("insufficient liquidity: $10,000 quote tokens in the pool < floor $50,000");
+    expect(dexRow(rows).detail).toMatch(/^insufficient depth: \$(9,9\d\d|10,0\d\d) moves the price 2% \(floor \$50,000\)/);
     const young = dexAt();
     for (const pool of young.r.pools.values()) pool.oldestTs = young.r.blockNow.timestamp - 100;
     rows = await run({ dex: young.dex });

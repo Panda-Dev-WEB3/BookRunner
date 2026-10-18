@@ -113,12 +113,16 @@ describe("OracleService primary-confirm", () => {
     expect(h.confirm("NVDA")).toEqual({
       priceId: "NVDA",
       status: "ok",
+      current: "ok",
       diffBps: 21.1,
       since: T0,
       checkedAt: T0,
       primaryPrice: 190,
+      primaryTs: T0,
+      lagSince: null,
       confirmers: [{ name: "dex-twap", price: 190.4, diffBps: 21.1 }],
     });
+    expect(health.primaryLagBps).toBe(100);
     expect(health.onchain.minSourcesProblem).toBeNull();
     expect(warn).not.toHaveBeenCalled();
   });
@@ -140,10 +144,17 @@ describe("OracleService primary-confirm", () => {
     await h.tick(T0 + 61_000);
     expect(divergenceWarns()).toBe(2);
     expect(h.parts.publisher!.last.get("NVDA")!.price).toBe(190);
-    // back within the band: ok, a new run starts
+    // back within the band: the diverged run ends only after ok held 60 s (no reset on a one-tick flap)
     h.dex.set("NVDA", { price: 190.2 });
     await h.tick(T0 + 62_000);
-    expect(h.confirm("NVDA")).toMatchObject({ status: "ok", since: T0 + 62_000 });
+    expect(h.confirm("NVDA")).toMatchObject({ status: "diverged", current: "ok", since: T0 });
+    h.dex.set("NVDA", { price: 171 });
+    await h.tick(T0 + 63_000);
+    expect(h.confirm("NVDA")).toMatchObject({ status: "diverged", current: "diverged", since: T0 });
+    h.dex.set("NVDA", { price: 190.2 });
+    await h.tick(T0 + 64_000);
+    await h.tick(T0 + 124_000);
+    expect(h.confirm("NVDA")).toMatchObject({ status: "ok", current: "ok", since: T0 + 64_000 });
   });
 
   test("Chainlink stale in session: no price even though the DEX is fresh; /health no-primary + unpublished", async () => {
@@ -176,6 +187,48 @@ describe("OracleService primary-confirm", () => {
     const dexHealth = h.svc.health().sources.find((s) => s.name === "dex-twap")!;
     expect(dexHealth).toMatchObject({ role: "confirm", failingTickers: ["NVDA"] });
     expect(dexHealth.lastError).toContain("insufficient liquidity");
+  });
+
+  test("a frozen Chainlink round with a sustained gap > ORACLE_PRIMARY_LAG_BPS: /health lagSince + primaryTs, warned after 10 min", async () => {
+    const round = T0 - 3_600_000; // the round the feed keeps answering (an hour old, inside heartbeat + grace)
+    // the Chainlink observation is accepted (within its max age): the price is published; the DEX at 192.5 is
+    // 131.6 bps away, above the 100 bps lag threshold and below the 200 bps band
+    const lagHarness = new Harness({ maxSourceAgeMs: 90_000_000 });
+    await lagHarness.start();
+    for (const x of [lagHarness.chainlink, lagHarness.dex]) {
+      x.set("NVDA", x === lagHarness.chainlink ? { price: 190, ts: round } : { price: 192.5 });
+      x.set("TSLA", { price: 440 });
+    }
+    await lagHarness.tick();
+    expect(lagHarness.confirm("NVDA")).toMatchObject({ status: "ok", primaryTs: round, lagSince: T0 });
+    expect(lagHarness.parts.publisher!.last.get("NVDA")!.price).toBe(190); // never moved
+    const lagWarns = () => warn.mock.calls.filter((c: unknown[]) => String(c[1]).startsWith("Chainlink suspect stale")).length;
+    await lagHarness.tick(T0 + 599_000);
+    expect(lagWarns()).toBe(0);
+    await lagHarness.tick(T0 + 600_000);
+    expect(lagWarns()).toBe(1);
+    expect(warn.mock.calls.find((c: unknown[]) => String(c[1]).startsWith("Chainlink suspect stale"))![0]).toMatchObject({ priceId: "NVDA", chainlinkRoundAgeMs: 4_200_000 });
+    // a new Chainlink round after the gap began: alive, no further warning (and the alert rule needs primaryTs <= lagSince)
+    for (const x of [lagHarness.chainlink]) x.set("NVDA", { price: 192.4 });
+    await lagHarness.tick(T0 + 700_000);
+    expect(lagHarness.confirm("NVDA")!.primaryTs).toBe(T0 + 700_000);
+    expect(lagWarns()).toBe(1);
+  });
+
+  test("unpublished runs survive a one-tick publish (alert timers do not reset)", async () => {
+    h.chainlink.set("NVDA", null);
+    h.chainlink.set("TSLA", { price: 440 });
+    await h.tick();
+    h.chainlink.set("NVDA", { price: 190 });
+    await h.tick(T0 + 30_000);
+    expect(h.svc.health().unpublished.find((u) => u.priceId === "NVDA")).toMatchObject({ since: T0 });
+    h.chainlink.set("NVDA", null);
+    await h.tick(T0 + 31_000);
+    expect(h.svc.health().unpublished.find((u) => u.priceId === "NVDA")).toMatchObject({ since: T0 });
+    h.chainlink.set("NVDA", { price: 190 });
+    await h.tick(T0 + 32_000);
+    await h.tick(T0 + 92_000);
+    expect(h.svc.health().unpublished.find((u) => u.priceId === "NVDA")).toBeUndefined();
   });
 
   test("off-hours: confirm not evaluated (closed); the hold stays at the last Chainlink price", async () => {

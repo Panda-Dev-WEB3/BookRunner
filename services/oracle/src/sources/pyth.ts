@@ -1,4 +1,5 @@
-// Pyth Pro (Pyth Lazer) price source: one of the mainnet's three live sources (Chainlink, Pyth, one more; VERIFY C6).
+// Pyth Pro (Pyth Lazer) price source: an optional confirm source on mainnet (primary-confirm: Chainlink alone signs, the
+// DEX TWAP and Pyth only confirm; VERIFY C6), a median vote under ORACLE_POLICY=median.
 //
 //   POST <ORACLE_PYTH_URL>  (default https://pyth-lazer.dourolabs.app/v1/latest_price)
 //   Authorization: Bearer <PYTH_API_KEY>

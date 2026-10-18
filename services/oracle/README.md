@@ -21,7 +21,14 @@ recorded in `oracle_prices` (history), and — in heartbeat mode only — sent t
   unconfirmed, logged after `ORACLE_CONFIRM_UNAVAILABLE_WARN_MS`, 10 min). No fresh Chainlink observation = no
   price (`no-primary`): a confirmer never substitutes; in session the ticker is skipped (the last signed price ages
   to `StalePrice` after `maxPriceAge`), off-hours the hold continues (a start off-hours without history seeds from
-  Chainlink only). `sourcesHash` covers Chainlink **and** every fresh confirmer.
+  Chainlink only). `sourcesHash` covers Chainlink **and** every fresh confirmer. "No fresh Chainlink" means a read
+  failure, `oraclePaused()`, a failed sequencer check or a round older than heartbeat + grace (24 h 10 min with the
+  defaults): a feed that stops updating but keeps answering is signed as a fresh, non-held price until then. The
+  signal for it is the confirm gap: above `ORACLE_PRIMARY_LAG_BPS` (100, below `ORACLE_CONFIRM_BPS`) a lag run
+  starts (`confirm[].lagSince`); with no Chainlink round since (`primaryTs <= lagSince`) for 10 min the oracle logs
+  "Chainlink suspect stale" (`services/alerts` `oracle_primary_suspect_stale`). The price never changes; the oracle
+  never switches source. A diverged / unavailable run, the lag run, a source failure run and an unpublished run end
+  only after the other state held `ORACLE_CONFIRM_HYSTERESIS_MS` (60 s).
 - **`median`** (default off mainnet: devnet / testnet / tests): median of fresh observations, sources further than
   `ORACLE_OUTLIER_BPS` (150) from it rejected, ≥ `max(ORACLE_MIN_SOURCES, AttestedOracle.minSources())` accepted
   (`ORACLE_MIN_SOURCES` default 3); with only two accepted a non-held price is refused when they are more
@@ -92,8 +99,8 @@ Every source reports USD per **share** of the equity (the AttestedOracle unit).
 | `synthetic-a/b/c` | `ORACLE_SYNTHETIC=1` (default; 31337, or 46630 with a secret `ORACLE_SEED`) | one seeded GBM path per ticker (`ORACLE_SEED`, vols NVDA 45% TSLA 60% AAPL 25% MSFT 25% AMZN 30%, `ORACLE_VOL_SCALE`), per-source noise, dropouts, rare spikes. **Impossible on 4663**: never constructed, the service refuses to start |
 | `pyth` (Pyth Pro) | `ORACLE_PYTH=1` + `PYTH_API_KEY` (optional `ORACLE_PYTH_URL`, `ORACLE_PYTH_CHANNEL`, `ORACLE_PYTH_FEEDS`, `ORACLE_PYTH_MAX_AGE_MS`) | optional (`src/sources/pyth.ts`): under primary-confirm an extra confirm source, never counted for signing; a median vote elsewhere. One batched `POST /v1/latest_price` (Bearer token) per tick for every ticker; feed ids `Equity.US.<T>/USD` NVDA 1314, TSLA 1435, AAPL 922, MSFT 1292, AMZN 954 (`ORACLE_PYTH_FEEDS` overrides); price = mantissa × 10^exponent; timestamp = the feed's own `feedUpdateTimestamp` (Pyth repeats the last price when it cannot aggregate, so freshness never comes from the receive time); no observation when the session is `closed` or the feed is missing; an in-session print older than 10 s, below the publisher floor, wider than the confidence limit or without a known session is a failure with a reason. The token is never logged. Licence for on-chain use: VERIFY C6 |
 | HTTP JSON | `ORACLE_HTTP_SOURCES` JSON array, `ORACLE_HTTP_FINNHUB=1` + key | optional; a confirm source under primary-confirm; must quote per share; VERIFY endpoints, symbols, licensing. Mainnet: `tsPath` (the vendor's own quote timestamp) and `maxAgeMs` ≤ 30 s are required; the Finnhub preset is refused (regular session only) |
-| `chainlink` | `config/chains/<CHAIN_ID>.json` (`ORACLE_CHAIN_CONFIG`) + `ORACLE_CHAINLINK_FEEDS` overlay | per feed: `proxy`, `basis` (`per-token`: Robinhood tokenized-equity feed = share price × `uiMultiplier()`, divided by the token's on-chain `uiMultiplier()`; `per-share`: used as is), `token`, pinned `decimals` (checked against `decimals()`), `heartbeatSec` (in-session max age = heartbeat + `ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS`). A multiplier that became effective after the feed's last round is undone with the multiplier observed with that round (no observation if that round was never seen). No observation while the token's `oraclePaused()` is set, or when the L2 sequencer feed (if configured) is down / in its grace period. `held` never comes from the feed (session calendar only). Reads of one tick are JSON-RPC batched. The only signing source under primary-confirm (role `primary`). None on devnet |
-| `dex-twap` (Uniswap v3 TWAP) | `config/chains/<CHAIN_ID>.json` `dexConfirm.pools` (`pool`, `fee`, `quoteToken`, `twapSec`, `minQuoteLiquidityUsd`); `ORACLE_DEX_CONFIRM` (default 1, cannot be 0 on 4663), `ORACLE_DEX_TWAP_SEC` (overrides `twapSec`), `ORACLE_DEX_MAX_AGE_MS` (60 s), `ORACLE_DEX_RPC_URL` (default `ORACLE_CHAINLINK_RPC_URL`, else `RPC_URL`) | confirm source only, never signs (`src/sources/dex-twap.ts`). Per ticker the deepest Stock Token / USDG pool; all reads pinned to one block: `observe([twapSec, 0])` → arithmetic-mean tick (rounded toward −∞) → price of one token in USDG (orientation from `token0`, quote decimals read on-chain) → divided by the token's `uiMultiplier()` like the Chainlink per-token feeds. No observation when the pool's USDG balance is below `minQuoteLiquidityUsd` (USDG assumed = $1), the oldest observation is younger than the window, the token is `oraclePaused()` or its multiplier changed inside the window. Timestamp = block time. Mainnet pools: VERIFY C6 |
+| `chainlink` | `config/chains/<CHAIN_ID>.json` (`ORACLE_CHAIN_CONFIG`) + `ORACLE_CHAINLINK_FEEDS` overlay | per feed: `proxy`, `basis` (`per-token`: Robinhood tokenized-equity feed = share price × `uiMultiplier()`, divided by the token's on-chain `uiMultiplier()`; `per-share`: used as is), `token`, pinned `decimals` (checked against `decimals()`), `heartbeatSec` (in-session max age = heartbeat + `ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS`, default 10 min; at most heartbeat + 1 h on 4663). A multiplier that became effective after the feed's last round is undone with the multiplier observed with that round (no observation if that round was never seen). No observation while the token's `oraclePaused()` is set, or when the L2 sequencer feed (if configured) is down / in its grace period. `held` never comes from the feed (session calendar only). Reads of one tick are JSON-RPC batched. The only signing source under primary-confirm (role `primary`). None on devnet |
+| `dex-twap` (Uniswap v3 TWAP) | `config/chains/<CHAIN_ID>.json` `dexConfirm.pools` (`pool`, `fee` (required), `quoteToken`, `twapSec`, `minDepthUsd`); `ORACLE_DEX_CONFIRM` (default 1, cannot be 0 on 4663), `ORACLE_DEX_TWAP_SEC` (overrides `twapSec`; 300–3600 s on 4663), `ORACLE_DEX_MAX_AGE_MS` (60 s; ≤ 120 s on 4663), `ORACLE_DEX_RPC_URL` (default `ORACLE_CHAINLINK_RPC_URL`, else `RPC_URL`) | confirm source only, never signs (`src/sources/dex-twap.ts`); built only under `ORACLE_POLICY=primary-confirm` (under `median` it would become a vote). Per ticker the deepest Stock Token / USDG pool, checked once against Uniswap's v3 factory (`getPool(stockToken, quoteToken, fee) == pool`, and its tokens); all reads pinned to one block, the Stock Token state included: `observe([twapSec, 0])` → arithmetic-mean tick (rounded toward −∞) → price of one token in USDG (orientation from `token0`, quote decimals read on-chain) → divided by the token's `uiMultiplier()` like the Chainlink per-token feeds. No observation when the 2% depth (quote needed to move the pool price 2% up or down, the smaller, within the active range, from in-range `liquidity()` and `sqrtPriceX96`; USDG assumed = $1) is below `minDepthUsd`, the oldest observation is younger than the window, no swap landed inside the window (newest observation older than `twapSec`), the token is `oraclePaused()` or its multiplier changed inside the window, or the pool is not the factory's. Timestamp = block time. Mainnet pools and depths: VERIFY C6 |
 
 ### Mainnet (4663) production rules (`src/production.ts`)
 
@@ -101,9 +108,12 @@ The service refuses to start unless: `ORACLE_SYNTHETIC=0` and no synthetic sourc
 `ORACLE_MIN_SOURCES=1`; the on-chain `AttestedOracle.minSources()` is exactly 1 (read at startup from the
 deployment's oracle, an unreadable contract refuses too; a later change shows as `/health`
 `onchain.minSourcesProblem`); a Chainlink feed with an explicit basis for every `ORACLE_TICKERS` entry (a plain
-address in `ORACLE_CHAINLINK_FEEDS` is refused); `ORACLE_DEX_CONFIRM` on and a DEX confirm pool for every ticker with
-`minQuoteLiquidityUsd` ≥ 10,000 (the live depth is checked by `source-check` and every tick); `ORACLE_CONFIRM_BPS` ≤
-500; `SESSIONS_MODE` is not `24x7`. Optional confirmers keep their own rules: `ORACLE_PYTH=1` needs `PYTH_API_KEY`,
+address in `ORACLE_CHAINLINK_FEEDS` is refused) and an in-session max age ≤ its heartbeat + 1 h (no `heartbeatSec`:
+24 h + 1 h; `ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS` ≤ 3,600,000, `ORACLE_CHAINLINK_MAX_AGE_MS` ≤ 90,000,000:
+`chainlinkAgeProblems`, a wider bound signs an old round as fresh); `ORACLE_DEX_CONFIRM` on and a DEX confirm pool
+for every ticker with `minDepthUsd` ≥ 10,000 (the live depth is checked by `source-check` and every tick), a TWAP
+window of 300–3600 s and `ORACLE_DEX_MAX_AGE_MS` ≤ 120,000; `ORACLE_CONFIRM_BPS` ≤ 500 and `ORACLE_PRIMARY_LAG_BPS`
+below it; `SESSIONS_MODE` is not `24x7`. The preflight `scripts/network-profile.ts` checks the same bounds. Optional confirmers keep their own rules: `ORACLE_PYTH=1` needs `PYTH_API_KEY`,
 an https `ORACLE_PYTH_URL` and a feed id per ticker; every HTTP source needs `tsPath` (the vendor's own quote
 timestamp) and `maxAgeMs` ≤ 30 s; the Finnhub preset is refused. Pyth and any other extra source are not required.
 At runtime (`settings.production`) no synthetic source can be wired in and no price — held, restored or seeded
@@ -114,7 +124,8 @@ off-hours — is signed with fewer than `max(ORACLE_MIN_SOURCES, AttestedOracle.
 `failingSince`, `failingTickers`, `lastError`; in-session tickers only) feeds `oracle_source_failing` (the Chainlink
 primary: critical; a confirm source: warning after 10 min); a source failing for > 10 s is logged at warn once a
 minute (never a key). `confirm[]` feeds `oracle_confirm_divergence` (2 min in session; critical above 2×
-`ORACLE_CONFIRM_BPS` or ≥ 3 tickers at once) and `oracle_confirm_unavailable` (10 min). Pyth prints below Pyth's
+`ORACLE_CONFIRM_BPS` or ≥ 3 tickers at once), `oracle_confirm_unavailable` (10 min) and
+`oracle_primary_suspect_stale` (`lagSince` / `primaryTs`, `ALERT_ORACLE_PRIMARY_LAG_SECONDS` 600). Pyth prints below Pyth's
 session publisher minimum (`ORACLE_PYTH_MIN_PUBLISHERS` 3 / `ORACLE_PYTH_MIN_PUBLISHERS_EXTENDED` 2) or with a
 confidence wider than `ORACLE_PYTH_MAX_CONF_BPS` (50) are failures with a reason.
 
@@ -122,8 +133,9 @@ confidence wider than `ORACLE_PYTH_MAX_CONF_BPS` (50) are failures with a reason
 
 ```
 # every configured feed + Stock Token read live, pass/fail table, exit 1 on FAIL (VERIFY C4/C6/T2/T3); per ticker a
-# `dex confirm` row (TWAP vs Chainlink per share, diff bps, USDG depth vs floor, cardinality, history; FAIL on 4663
-# when a pool is missing / below its floor / too young / unreadable, WARN above ORACLE_CONFIRM_BPS) and the summary
+# `dex confirm` row (TWAP vs Chainlink per share, diff bps, 2% depth vs floor, cardinality, history, last swap age,
+# "factory getPool verified"; FAIL on 4663 when a pool is missing / not the factory's / below its depth floor / too
+# young / unreadable; WARN on no swap in the window / token paused / multiplier change, and above ORACLE_CONFIRM_BPS) and the summary
 # rows `sources primary` / `sources confirm`; Pyth / HTTP confirmers and the `pyth calendar` row only WARN / SKIP
 # under primary-confirm (Pyth when PYTH_API_KEY is set: bun --env-file=../../.env.pyth src/cli/source-check.ts ...)
 bun run source-check --chain 4663 --rpc $RHC_RPC_URL [--registry 0x…] [--config file] [--json] [--no-service-config]
@@ -137,8 +149,10 @@ bun run attest register    --chain 4663 --oracle 0x… --doc attestation.json
 Bound to `ORACLE_HOST` (default `127.0.0.1`, set `0.0.0.0` only behind a proxy / firewall).
 
 - `GET /health` — status, universe, last push (tx), on-chain + venue state; `policy`, `confirmBps`,
-  `sources[]` (with `role`), `confirm[]` (primary-confirm: per equity `status` ok / diverged / unavailable /
-  no-primary / closed, `diffBps`, `since`, `primaryPrice`, confirmers), `unpublished[]`.
+  `primaryLagBps`, `sources[]` (with `role`, `failingSince`), `confirm[]` (primary-confirm: per equity `status`
+  ok / diverged / unavailable / no-primary / closed (sticky, hysteresis), `current` (this tick's raw status),
+  `diffBps`, `since`, `primaryPrice`, `primaryTs` (Chainlink round `updatedAt`), `lagSince`, confirmers),
+  `unpublished[]`.
 - `GET /prices`, `GET /prices/:priceId` — per key, without its signature: pull mode the latest price;
   heartbeat mode the last price that has LANDED on-chain (with on-chain pushes disabled: the latest) —
   there a fresher signed update the chain has not seen is never served (a trader could trade at the

@@ -61,7 +61,8 @@ export interface TokenState {
 export interface AggregatorReader {
   decimals(feed: Address): Promise<number>;
   latestRoundData(feed: Address): Promise<RoundData>;
-  tokenState(token: Address): Promise<TokenState>;
+  /** `blockNumber`: read at that block (the DEX source pins every read of a tick to one block); default latest */
+  tokenState(token: Address, blockNumber?: bigint): Promise<TokenState>;
 }
 
 /**
@@ -100,12 +101,13 @@ export function viemAggregatorReader(pub: PublicClient): AggregatorReader {
       const [, answer, startedAt, updatedAt] = await pub.readContract({ address: feed, abi: aggregatorV3Abi, functionName: "latestRoundData" });
       return { answer, startedAt, updatedAt };
     },
-    async tokenState(token) {
+    async tokenState(token, blockNumber) {
+      const at = blockNumber === undefined ? {} : { blockNumber };
       const [uiMultiplier, newUIMultiplier, effectiveAt, oraclePaused] = await Promise.all([
-        pub.readContract({ address: token, abi: stockTokenAbi, functionName: "uiMultiplier" }),
-        optional(pub.readContract({ address: token, abi: stockTokenAbi, functionName: "newUIMultiplier" })),
-        optional(pub.readContract({ address: token, abi: stockTokenAbi, functionName: "effectiveAt" })),
-        optional(pub.readContract({ address: token, abi: stockTokenAbi, functionName: "oraclePaused" })),
+        pub.readContract({ address: token, abi: stockTokenAbi, functionName: "uiMultiplier", ...at }),
+        optional(pub.readContract({ address: token, abi: stockTokenAbi, functionName: "newUIMultiplier", ...at })),
+        optional(pub.readContract({ address: token, abi: stockTokenAbi, functionName: "effectiveAt", ...at })),
+        optional(pub.readContract({ address: token, abi: stockTokenAbi, functionName: "oraclePaused", ...at })),
       ]);
       return { uiMultiplier, newUIMultiplier, effectiveAt, oraclePaused };
     },
@@ -115,6 +117,8 @@ export function viemAggregatorReader(pub: PublicClient): AggregatorReader {
 /** A configured feed, resolved (token address + in-session max age). */
 export interface ResolvedFeed {
   proxy: Address;
+  /** configured Chainlink heartbeat (s), when known: bounds maxAgeMs on mainnet (production.ts) */
+  heartbeatSec?: number;
   basis: FeedConfig["basis"];
   token: Address | null;
   decimals?: number;

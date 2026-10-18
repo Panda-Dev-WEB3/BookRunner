@@ -67,8 +67,8 @@ export interface SourceCheckInput {
   /**
    * Pyth's published market-session schedules per ticker (`/v1/symbols`), or why they could not be read: compared
    * with the session calendar over the next `calendarDays` (default 30). A minute the calendar treats as open
-   * while Pyth is closed leaves mainnet without its spare source and means the tables are out of date — FAIL on
-   * 4663, WARN elsewhere.
+   * while Pyth is closed means the holiday tables are out of date — FAIL on 4663 under the median policy (Pyth a
+   * required vote), WARN otherwise (primary-confirm: Pyth only confirms).
    */
   pythCalendar?: { schedules: ReadonlyMap<string, readonly PythSchedule[]> } | { error: string };
   calendarDays?: number;
@@ -325,9 +325,10 @@ const usd = (x: number, dp = 4) => `$${x.toFixed(dp)}`;
 const usd0 = (x: number) => `$${Math.round(x).toLocaleString("en-US")}`;
 
 /**
- * primary-confirm: the DEX TWAP vs the Chainlink per-share price for one ticker. Structural problems (no pool,
- * below the liquidity floor, history shorter than the window, unreadable) FAIL on mainnet (the DEX confirm is
- * required there) and WARN elsewhere; a diff beyond confirmBps WARNs (it alerts at runtime, the price stays
+ * primary-confirm: the DEX TWAP vs the Chainlink per-share price for one ticker. Structural problems (no pool, a
+ * pool that is not the factory's getPool(token, quote, fee), wrong tokens, 2% depth below the floor, history shorter
+ * than the window, unreadable) FAIL on mainnet (the DEX confirm is required there) and WARN elsewhere; transient ones
+ * (no swap in the window, token paused, multiplier change in the window) WARN; a diff beyond confirmBps WARNs (it alerts at runtime, the price stays
  * Chainlink). Returns whether the TWAP produced an observation.
  */
 async function checkDex(
@@ -346,14 +347,17 @@ async function checkDex(
     return false;
   }
   const o = await dex.observe(id);
-  const where = `pool ${pool.pool}${pool.fee !== undefined ? ` (fee ${pool.fee})` : ""}`;
+  const where = `pool ${pool.pool} (fee ${pool.fee})`;
+  const factoryChecked = dex.factoryChecked();
   if (!o.ok) {
+    const transient = /^(no swap in the|token oraclePaused|uiMultiplier changed)/.test(o.reason);
     const extra = [
-      o.quoteLiquidity !== undefined ? `depth ${usd0(o.quoteLiquidity)} (floor ${usd0(pool.minQuoteLiquidity)})` : null,
+      o.depthQuote !== undefined ? `2% depth ${usd0(o.depthQuote)} (floor ${usd0(pool.minDepthUsd)})` : null,
       o.cardinality !== undefined ? `cardinality ${o.cardinality}` : null,
       o.historySec !== undefined ? `history ${o.historySec}s` : null,
+      o.lastSwapAgeSec !== undefined ? `last swap ${o.lastSwapAgeSec}s ago` : null,
     ].filter(Boolean);
-    add(id, "dex confirm", bad, `${o.reason}; ${where}${extra.length > 0 ? `, ${extra.join(", ")}` : ""}`);
+    add(id, "dex confirm", transient ? "WARN" : bad, `${o.reason}; ${where}${extra.length > 0 ? `, ${extra.join(", ")}` : ""}`);
     return false;
   }
   const bps = deviationBps(o.price, chainlinkPerShare);
@@ -362,7 +366,7 @@ async function checkDex(
     id,
     "dex confirm",
     diverged ? "WARN" : "PASS",
-    `TWAP ${o.twapSec}s ${usd(o.price)}/share vs Chainlink ${usd(chainlinkPerShare)}: ${bps.toFixed(1)} bps (threshold ${confirmBps}${diverged && !marketOpen ? "; off-hours Chainlink holds" : ""}); token ${usd(o.tokenPrice)} TWAP / ${usd(o.spotTokenPrice)} spot; depth ${usd0(o.quoteLiquidity)} quote (floor ${usd0(pool.minQuoteLiquidity)}); cardinality ${o.cardinality}, history ${o.historySec}s; ${where}`,
+    `TWAP ${o.twapSec}s ${usd(o.price)}/share vs Chainlink ${usd(chainlinkPerShare)}: ${bps.toFixed(1)} bps (threshold ${confirmBps}${diverged && !marketOpen ? "; off-hours Chainlink holds" : ""}); token ${usd(o.tokenPrice)} TWAP / ${usd(o.spotTokenPrice)} spot; 2% depth ${usd0(o.depthQuote)} quote (floor ${usd0(pool.minDepthUsd)}); cardinality ${o.cardinality}, history ${o.historySec}s, last swap ${o.lastSwapAgeSec}s ago; ${where}${factoryChecked ? ", factory getPool verified" : ""}`,
   );
   return true;
 }

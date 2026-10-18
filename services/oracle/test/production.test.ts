@@ -6,6 +6,7 @@ import { loadOracleConfig } from "../src/config";
 import type { PriceSource } from "../src/domain/types";
 import {
   MAINNET_DEX_MIN_FLOOR_USD,
+  chainlinkAgeProblems,
   PRIMARY_CONFIRM_SOURCE_COUNT,
   liveSourceCount,
   onchainMinSourcesProblem,
@@ -71,9 +72,9 @@ describe("productionProblems", () => {
     const cfg = mainnet();
     const { AMZN: _amzn, ...four } = cfg.dexPools;
     expect(productionProblems({ ...cfg, dexPools: four }, BASE)).toEqual(["no DEX confirm pool for AMZN (dexConfirm.pools in the chain config)"]);
-    const shallow = { ...cfg.dexPools, TSLA: { ...cfg.dexPools.TSLA!, minQuoteLiquidity: MAINNET_DEX_MIN_FLOOR_USD - 1 } };
+    const shallow = { ...cfg.dexPools, TSLA: { ...cfg.dexPools.TSLA!, minDepthUsd: MAINNET_DEX_MIN_FLOOR_USD - 1 } };
     expect(productionProblems({ ...cfg, dexPools: shallow }, BASE)).toEqual([
-      `dexConfirm.pools.TSLA.minQuoteLiquidityUsd=${MAINNET_DEX_MIN_FLOOR_USD - 1} < ${MAINNET_DEX_MIN_FLOOR_USD} on mainnet (a shallow pool confirms nothing)`,
+      `dexConfirm.pools.TSLA.minDepthUsd=${MAINNET_DEX_MIN_FLOOR_USD - 1} < ${MAINNET_DEX_MIN_FLOOR_USD} on mainnet (a shallow pool is cheap to move)`,
     ]);
   });
 
@@ -95,6 +96,43 @@ describe("productionProblems", () => {
     const gme = mainnet({ ORACLE_PYTH: "1", PYTH_API_KEY: "k", ORACLE_TICKERS: "NVDA,GME" });
     expect(has(productionProblems(gme, [...BASE, pyth]), "no Pyth Pro feed id for GME")).toBe(true);
     for (const p of productionProblems(mainnet({ ORACLE_PYTH: "1", PYTH_API_KEY: "secret-k", ORACLE_MIN_SOURCES: "5" }), [chainlink])) expect(p).not.toContain("secret-k");
+  });
+
+  test("Chainlink freshness bound: heartbeat + 1 h at most (grace, default max age, per-feed maxAgeSec)", () => {
+    expect(chainlinkAgeProblems(mainnet())).toEqual([]);
+    expect(productionProblems(mainnet({ ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS: "3600000" }), BASE)).toEqual([]);
+    expect(productionProblems(mainnet({ ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS: "172800000" }), BASE)).toEqual([
+      "ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS=172800000 > 3600000 on mainnet: a wider grace signs an old Chainlink round as a fresh price",
+      ...["NVDA", "TSLA", "AAPL", "MSFT", "AMZN"].map(
+        (t) => `chainlink feed ${t}: in-session max age 259200000 ms > heartbeat + 1 h (90000000 ms) on mainnet: an old round would be signed as fresh`,
+      ),
+    ]);
+    // a per-feed maxAgeSec (env overlay) beyond heartbeat + 1 h
+    const wide = mainnet({ ORACLE_CHAINLINK_FEEDS: JSON.stringify({ NVDA: { proxy: "0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15", basis: "per-token", heartbeatSec: 86_400, maxAgeSec: 172_800 } }) });
+    expect(productionProblems(wide, BASE)).toEqual([
+      "chainlink feed NVDA: in-session max age 172800000 ms > heartbeat + 1 h (90000000 ms) on mainnet: an old round would be signed as fresh",
+    ]);
+    // a feed without heartbeatSec falls back to ORACLE_CHAINLINK_MAX_AGE_MS, itself bounded by 24 h + 1 h
+    const noHb = mainnet({ ORACLE_CHAINLINK_FEEDS: JSON.stringify({ NVDA: { proxy: "0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15", basis: "per-token" } }), ORACLE_CHAINLINK_MAX_AGE_MS: "100000000" });
+    expect(productionProblems(noHb, BASE)).toEqual([
+      "ORACLE_CHAINLINK_MAX_AGE_MS=100000000 > 90000000 on mainnet (24 h heartbeat + 1 h)",
+      "chainlink feed NVDA: in-session max age 100000000 ms > heartbeat + 1 h (90000000 ms) on mainnet: an old round would be signed as fresh",
+    ]);
+  });
+
+  test("DEX knobs: TWAP window 300-3600 s, observation max age <= 120 s, lag threshold below the confirm band", () => {
+    expect(productionProblems(mainnet({ ORACLE_DEX_TWAP_SEC: "300" }), BASE)).toEqual([]);
+    expect(productionProblems(mainnet({ ORACLE_DEX_TWAP_SEC: "120" }), BASE)).toEqual(
+      ["NVDA", "TSLA", "AAPL", "MSFT", "AMZN"].map((t) => `dexConfirm.pools.${t} TWAP window 120s outside 300-3600s on mainnet (twapSec / ORACLE_DEX_TWAP_SEC)`),
+    );
+    expect(productionProblems(mainnet({ ORACLE_DEX_TWAP_SEC: "7200" }), BASE)).toHaveLength(5);
+    expect(productionProblems(mainnet({ ORACLE_DEX_MAX_AGE_MS: "120000" }), BASE)).toEqual([]);
+    expect(productionProblems(mainnet({ ORACLE_DEX_MAX_AGE_MS: "120001" }), BASE)).toEqual([
+      "ORACLE_DEX_MAX_AGE_MS=120001 > 120000 on mainnet (an RPC stall would confirm with an old block)",
+    ]);
+    expect(productionProblems(mainnet({ ORACLE_PRIMARY_LAG_BPS: "200" }), BASE)).toEqual([
+      "ORACLE_PRIMARY_LAG_BPS=200 must be below ORACLE_CONFIRM_BPS=200 (the stalled-feed signal precedes divergence)",
+    ]);
   });
 
   test("feed basis must be explicit; 24x7 demo sessions refused", () => {

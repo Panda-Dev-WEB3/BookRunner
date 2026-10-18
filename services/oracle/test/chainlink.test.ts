@@ -275,5 +275,7 @@ describe("config: feeds from config/chains/<chainId>.json + ORACLE_CHAINLINK_FEE
     // Chainlink (the signing source) + the DEX TWAP confirm source of config/chains/4663.json
     expect(built.sources.map((s) => `${s.name}:${s.kind}`)).toEqual(["chainlink:chainlink", "dex-twap:dex"]);
     expect(buildSources(loadOracleConfig({ CHAIN_ID: "4663", ORACLE_SYNTHETIC: "0", ORACLE_DEX_CONFIRM: "0" }), silentLog).sources.map((s) => s.name)).toEqual(["chainlink"]);
+    // the DEX TWAP is a confirm source only: under the median policy it would be a vote, so it is not built
+    expect(buildSources(loadOracleConfig({ CHAIN_ID: "4663", ORACLE_SYNTHETIC: "0", ORACLE_POLICY: "median" }), silentLog).sources.map((s) => s.name)).toEqual(["chainlink"]);
   });
 });

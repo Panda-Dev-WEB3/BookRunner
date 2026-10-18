@@ -5,10 +5,16 @@
 //     ORACLE_MIN_SOURCES must be exactly 1 and the on-chain AttestedOracle.minSources() exactly 1
 //     (onchainMinSourcesProblem, checked at startup and on every chain-state refresh);
 //   - a Chainlink feed for every ticker, with an explicit basis (a plain ORACLE_CHAINLINK_FEEDS address is refused:
-//     per-token or per-share decides whether the multiplier is divided out — VERIFY C2);
-//   - a DEX confirm pool (Uniswap v3 TWAP, chain config dexConfirm.pools) for every ticker, with a liquidity floor
-//     of at least MAINNET_DEX_MIN_FLOOR_USD; the floor itself is checked live (source-check, and every tick);
-//   - ORACLE_CONFIRM_BPS at most MAINNET_MAX_CONFIRM_BPS (a wider band would hide a lagging feed);
+//     per-token or per-share decides whether the multiplier is divided out — VERIFY C2), and an in-session max age
+//     of at most heartbeat + MAINNET_CHAINLINK_MAX_GRACE_MS (1 h): Chainlink alone signs, so a widened bound would
+//     sign an old round as a fresh, non-held price (ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS and ORACLE_CHAINLINK_MAX_AGE_MS
+//     are bounded the same way);
+//   - a DEX confirm pool (Uniswap v3 TWAP, chain config dexConfirm.pools) for every ticker, with a 2% depth floor
+//     of at least MAINNET_DEX_MIN_FLOOR_USD (the depth itself is checked live: source-check, and every tick), a TWAP
+//     window within MAINNET_DEX_TWAP_SEC (a short window is cheap to push) and ORACLE_DEX_MAX_AGE_MS at most
+//     MAINNET_DEX_MAX_AGE_MS (an RPC stall must not confirm with an old block);
+//   - ORACLE_CONFIRM_BPS at most MAINNET_MAX_CONFIRM_BPS (a wider band would hide a lagging feed), and
+//     ORACLE_PRIMARY_LAG_BPS below it (the stalled-feed signal must fire before the divergence one);
 //   - Pyth Pro is OPTIONAL (an extra confirm source): when ORACLE_PYTH=1 it needs its key, https and feed ids;
 //   - HTTP confirm sources carry their own quote timestamp (tsPath) and an in-session max age <=
 //     MAINNET_HTTP_MAX_AGE_MS (a stale last trade stamped with our receive time would "confirm" anything); the
@@ -27,6 +33,14 @@ export const MAINNET_HTTP_MAX_AGE_MS = 30_000;
 export const MAINNET_DEX_MIN_FLOOR_USD = 10_000;
 /** Widest confirm band on mainnet (bps). */
 export const MAINNET_MAX_CONFIRM_BPS = 500;
+/** Largest grace beyond a Chainlink feed's heartbeat on mainnet (the in-session max age is heartbeat + grace). */
+export const MAINNET_CHAINLINK_MAX_GRACE_MS = 3_600_000;
+/** Heartbeat assumed for a feed whose heartbeatSec is not configured (the Robinhood equity feeds: 24 h). */
+export const MAINNET_CHAINLINK_DEFAULT_HEARTBEAT_SEC = 86_400;
+/** Allowed DEX TWAP window on mainnet (s). */
+export const MAINNET_DEX_TWAP_SEC = { min: 300, max: 3_600 } as const;
+/** Largest DEX observation age (block time vs now) on mainnet. */
+export const MAINNET_DEX_MAX_AGE_MS = 120_000;
 
 export const isProductionChain = (chainId: number): boolean => chainId === MAINNET_CHAIN_ID;
 
@@ -47,6 +61,10 @@ export type ProductionConfig = Pick<
       | "ORACLE_PYTH_URL"
       | "httpSources"
       | "ORACLE_HTTP_FINNHUB"
+      | "ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS"
+      | "ORACLE_CHAINLINK_MAX_AGE_MS"
+      | "ORACLE_DEX_MAX_AGE_MS"
+      | "ORACLE_PRIMARY_LAG_BPS"
     >
   >;
 
@@ -86,6 +104,9 @@ export function productionProblems(cfg: ProductionConfig, sources: readonly Pric
   if (cfg.ORACLE_CONFIRM_BPS !== undefined && cfg.ORACLE_CONFIRM_BPS > MAINNET_MAX_CONFIRM_BPS) {
     problems.push(`ORACLE_CONFIRM_BPS=${cfg.ORACLE_CONFIRM_BPS} > ${MAINNET_MAX_CONFIRM_BPS} on mainnet (a wider band would hide a lagging Chainlink feed)`);
   }
+  if (cfg.ORACLE_PRIMARY_LAG_BPS !== undefined && cfg.ORACLE_CONFIRM_BPS !== undefined && cfg.ORACLE_PRIMARY_LAG_BPS >= cfg.ORACLE_CONFIRM_BPS) {
+    problems.push(`ORACLE_PRIMARY_LAG_BPS=${cfg.ORACLE_PRIMARY_LAG_BPS} must be below ORACLE_CONFIRM_BPS=${cfg.ORACLE_CONFIRM_BPS} (the stalled-feed signal precedes divergence)`);
+  }
 
   // ---- primary: Chainlink, one feed per ticker ----
   const live = sources.filter((s) => sourceKind(s) !== "synthetic");
@@ -97,6 +118,7 @@ export function productionProblems(cfg: ProductionConfig, sources: readonly Pric
   }
   const missing = cfg.tickers.filter((t) => !cfg.chainlinkFeeds[t]);
   if (missing.length > 0) problems.push(`no Chainlink feed for ${missing.join(", ")}`);
+  problems.push(...chainlinkAgeProblems(cfg));
 
   // ---- confirm: the DEX TWAP, one pool per ticker ----
   if (cfg.ORACLE_DEX_CONFIRM === false) {
@@ -107,9 +129,15 @@ export function productionProblems(cfg: ProductionConfig, sources: readonly Pric
     const noPool = cfg.tickers.filter((t) => !pools[t]);
     if (noPool.length > 0) problems.push(`no DEX confirm pool for ${noPool.join(", ")} (dexConfirm.pools in the chain config)`);
     for (const [t, p] of Object.entries(pools)) {
-      if (p.minQuoteLiquidity < MAINNET_DEX_MIN_FLOOR_USD) {
-        problems.push(`dexConfirm.pools.${t}.minQuoteLiquidityUsd=${p.minQuoteLiquidity} < ${MAINNET_DEX_MIN_FLOOR_USD} on mainnet (a shallow pool confirms nothing)`);
+      if (p.minDepthUsd < MAINNET_DEX_MIN_FLOOR_USD) {
+        problems.push(`dexConfirm.pools.${t}.minDepthUsd=${p.minDepthUsd} < ${MAINNET_DEX_MIN_FLOOR_USD} on mainnet (a shallow pool is cheap to move)`);
       }
+      if (p.twapSec < MAINNET_DEX_TWAP_SEC.min || p.twapSec > MAINNET_DEX_TWAP_SEC.max) {
+        problems.push(`dexConfirm.pools.${t} TWAP window ${p.twapSec}s outside ${MAINNET_DEX_TWAP_SEC.min}-${MAINNET_DEX_TWAP_SEC.max}s on mainnet (twapSec / ORACLE_DEX_TWAP_SEC)`);
+      }
+    }
+    if (cfg.ORACLE_DEX_MAX_AGE_MS !== undefined && cfg.ORACLE_DEX_MAX_AGE_MS > MAINNET_DEX_MAX_AGE_MS) {
+      problems.push(`ORACLE_DEX_MAX_AGE_MS=${cfg.ORACLE_DEX_MAX_AGE_MS} > ${MAINNET_DEX_MAX_AGE_MS} on mainnet (an RPC stall would confirm with an old block)`);
     }
   }
 
@@ -134,6 +162,32 @@ export function productionProblems(cfg: ProductionConfig, sources: readonly Pric
     problems.push("SESSIONS_MODE=24x7 is a demo override: set SESSIONS_MODE=charter so prices hold off-hours (session calendar, VERIFY C3)");
   }
   return problems;
+}
+
+/**
+ * Mainnet bound on Chainlink freshness (null-free list of problems): Chainlink is the only signing source, so every
+ * feed's in-session max age must stay within its heartbeat + MAINNET_CHAINLINK_MAX_GRACE_MS (heartbeat unknown: the
+ * 24 h of the Robinhood feeds), and neither the grace nor the default max age may be widened beyond that.
+ */
+export function chainlinkAgeProblems(
+  cfg: Pick<ProductionConfig, "chainlinkFeeds"> & Partial<Pick<ProductionConfig, "ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS" | "ORACLE_CHAINLINK_MAX_AGE_MS">>,
+): string[] {
+  const out: string[] = [];
+  const grace = cfg.ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS;
+  if (grace !== undefined && grace > MAINNET_CHAINLINK_MAX_GRACE_MS) {
+    out.push(`ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS=${grace} > ${MAINNET_CHAINLINK_MAX_GRACE_MS} on mainnet: a wider grace signs an old Chainlink round as a fresh price`);
+  }
+  const defaultBound = MAINNET_CHAINLINK_DEFAULT_HEARTBEAT_SEC * 1000 + MAINNET_CHAINLINK_MAX_GRACE_MS;
+  if (cfg.ORACLE_CHAINLINK_MAX_AGE_MS !== undefined && cfg.ORACLE_CHAINLINK_MAX_AGE_MS > defaultBound) {
+    out.push(`ORACLE_CHAINLINK_MAX_AGE_MS=${cfg.ORACLE_CHAINLINK_MAX_AGE_MS} > ${defaultBound} on mainnet (24 h heartbeat + 1 h)`);
+  }
+  for (const [id, f] of Object.entries(cfg.chainlinkFeeds)) {
+    const bound = (f.heartbeatSec ?? MAINNET_CHAINLINK_DEFAULT_HEARTBEAT_SEC) * 1000 + MAINNET_CHAINLINK_MAX_GRACE_MS;
+    if (f.maxAgeMs > bound) {
+      out.push(`chainlink feed ${id}: in-session max age ${f.maxAgeMs} ms > heartbeat + 1 h (${bound} ms) on mainnet: an old round would be signed as fresh`);
+    }
+  }
+  return out;
 }
 
 /**

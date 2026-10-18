@@ -68,6 +68,14 @@ export const oracleEnvShape = {
   ORACLE_CONFIRM_BPS: z.coerce.number().positive().default(200),
   /** primary-confirm: an in-session ticker without any confirm source this long is logged (rate-limited). */
   ORACLE_CONFIRM_UNAVAILABLE_WARN_MS: z.coerce.number().int().positive().default(600_000),
+  /**
+   * primary-confirm: a confirm gap above this (bps, below ORACLE_CONFIRM_BPS) while no new Chainlink round arrives is
+   * the signature of a feed that silently stopped updating (its deviation rule is 50 bps): /health confirm[].lagSince,
+   * services/alerts oracle_primary_suspect_stale after 10 min. Never changes the price.
+   */
+  ORACLE_PRIMARY_LAG_BPS: z.coerce.number().positive().default(100),
+  /** primary-confirm: a diverged / unavailable / lagging run ends only after the other state held this long (no reset on a one-tick flap). */
+  ORACLE_CONFIRM_HYSTERESIS_MS: z.coerce.number().int().nonnegative().default(60_000),
   /** Sources further than this from the median are rejected (bps; median policy). */
   ORACLE_OUTLIER_BPS: z.coerce.number().positive().default(150),
   /**
@@ -138,7 +146,7 @@ export const oracleEnvShape = {
   /** JSON array of generic HTTP JSON sources (see sources/http.ts). */
   ORACLE_HTTP_SOURCES: z.string().default("[]"),
 
-  // ---- Pyth Pro (sources/pyth.ts): one of the mainnet's three live sources (VERIFY C6) ----
+  // ---- Pyth Pro (sources/pyth.ts): optional confirm source on mainnet (VERIFY C6), a vote under the median policy ----
   ORACLE_PYTH: flag(false),
   /** Pyth Pro access token (Authorization: Bearer). Secret: never logged; reaches the oracle process only. */
   PYTH_API_KEY: z.string().optional(),
@@ -287,9 +295,9 @@ export function resolveDexPools(chainConfig: ChainPriceConfig | null, twapSecOve
       tokenDecimals: st.decimals,
       quoteToken: getAddress(p.quoteToken),
       twapSec: twapSecOverride ?? p.twapSec,
-      minQuoteLiquidity: p.minQuoteLiquidityUsd,
+      minDepthUsd: p.minDepthUsd,
+      fee: p.fee,
     };
-    if (p.fee !== undefined) r.fee = p.fee;
     out[id] = r;
   }
   return out;
@@ -330,6 +338,7 @@ export function resolveFeeds(
     const maxAgeMs =
       f.maxAgeSec !== undefined ? f.maxAgeSec * 1000 : f.heartbeatSec !== undefined ? f.heartbeatSec * 1000 + o.heartbeatGraceMs : o.defaultMaxAgeMs;
     const r: ResolvedFeed = { proxy: getAddress(f.proxy), basis: f.basis, token: f.basis === "per-token" ? token : null, maxAgeMs };
+    if (f.heartbeatSec !== undefined) r.heartbeatSec = f.heartbeatSec;
     if (f.decimals !== undefined) r.decimals = f.decimals;
     if (f.description !== undefined) r.description = f.description;
     feeds[id] = r;

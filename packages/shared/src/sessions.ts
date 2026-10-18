@@ -81,8 +81,9 @@ export const EARLY_CLOSE_END_MINUTE = 17 * 60;
  * on NYSE days; overnight 20:00-04:00 Sun-Thu nights on the Blue Ocean ATS calendar),
  * https://docs.pyth.network/price-feeds/market-hours , and the per-feed `market_session_schedule` of
  * https://pyth.dourolabs.app/v1/symbols (e.g. over_night `1125/0000-0400`, `0117/C`, `1231/0000-0400`;
- * post_market `1127/1300-1700`). The market has no session there per Pyth (one of the mainnet's 3 sources, 2
- * required): the calendar closes too, so the oracle publishes HELD prices instead of depending on the rest. `source-check` compares this
+ * post_market `1127/1300-1700`). The market has no session there per Pyth (an optional confirm source on mainnet, where
+ * Chainlink alone signs): the calendar closes too, so the oracle publishes HELD prices there rather than live ones
+ * the US market does not quote. `source-check` compares this
  * calendar with Pyth's published schedule.
  */
 export const HOLIDAY_EVE_CLOSE_MINUTE = 20 * 60;

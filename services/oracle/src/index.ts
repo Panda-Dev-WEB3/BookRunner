@@ -81,6 +81,8 @@ const service = new OracleService({
     policy: cfg.ORACLE_POLICY,
     confirmBps: cfg.ORACLE_CONFIRM_BPS,
     confirmUnavailableWarnMs: cfg.ORACLE_CONFIRM_UNAVAILABLE_WARN_MS,
+    primaryLagBps: cfg.ORACLE_PRIMARY_LAG_BPS,
+    hysteresisMs: cfg.ORACLE_CONFIRM_HYSTERESIS_MS,
     minSources: cfg.ORACLE_MIN_SOURCES,
     maxSourceAgeMs: cfg.ORACLE_MAX_SOURCE_AGE_MS,
     sourceTimeoutMs: cfg.ORACLE_SOURCE_TIMEOUT_MS,

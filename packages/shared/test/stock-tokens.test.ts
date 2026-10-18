@@ -75,14 +75,16 @@ describe("chain price config", () => {
     expect(() => parseChainPriceConfig({ chainId: 1, stockTokens: { X: { token: "0x12" } } })).toThrow("stockTokens.X.token");
   });
 
-  test("dexConfirm: pools need a stockTokens entry, a positive liquidity floor, twapSec >= 60 (default 600)", () => {
+  test("dexConfirm: pools need a stockTokens entry, a fee tier, a positive depth floor, twapSec >= 60 (default 600)", () => {
     const token = { token: "0x00000000000000000000000000000000000000d1" };
-    const pool = { pool: "0x00000000000000000000000000000000000000e1", quoteToken: "0x00000000000000000000000000000000000000f1", minQuoteLiquidityUsd: 50_000 };
+    const pool = { pool: "0x00000000000000000000000000000000000000e1", quoteToken: "0x00000000000000000000000000000000000000f1", fee: 3000, minDepthUsd: 50_000 };
     const ok = parseChainPriceConfig({ chainId: 1, stockTokens: { NVDA: token }, dexConfirm: { readAt: "2026-10-17", pools: { NVDA: pool } } });
     expect(ok.dexConfirm?.pools.NVDA?.twapSec).toBe(600);
     expect(() => parseChainPriceConfig({ chainId: 1, dexConfirm: { pools: { NVDA: pool } } })).toThrow("DEX confirm pool needs a stockTokens entry");
-    expect(() => parseChainPriceConfig({ chainId: 1, stockTokens: { NVDA: token }, dexConfirm: { pools: { NVDA: { ...pool, minQuoteLiquidityUsd: 0 } } } })).toThrow("minQuoteLiquidityUsd");
+    expect(() => parseChainPriceConfig({ chainId: 1, stockTokens: { NVDA: token }, dexConfirm: { pools: { NVDA: { ...pool, minDepthUsd: 0 } } } })).toThrow("minDepthUsd");
     expect(() => parseChainPriceConfig({ chainId: 1, stockTokens: { NVDA: token }, dexConfirm: { pools: { NVDA: { ...pool, twapSec: 30 } } } })).toThrow("twapSec");
+    const { fee: _fee, ...noFee } = pool;
+    expect(() => parseChainPriceConfig({ chainId: 1, stockTokens: { NVDA: token }, dexConfirm: { pools: { NVDA: noFee } } })).toThrow("fee");
     expect(parseChainPriceConfig({ chainId: 1 }).dexConfirm).toBeUndefined();
   });
 });

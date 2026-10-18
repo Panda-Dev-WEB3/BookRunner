@@ -95,14 +95,19 @@ export const feedConfigSchema = z.object({
 export const dexConfirmPoolSchema = z.object({
   /** Uniswap v3 pool (token0 / token1 = the Stock Token and `quoteToken`, either order). */
   pool: address,
-  /** Pool fee tier (informational; source-check compares it with fee()). */
-  fee: z.number().int().positive().max(1_000_000).optional(),
+  /** Pool fee tier: the oracle and source-check require factory.getPool(stockToken, quoteToken, fee) == pool. */
+  fee: z.number().int().positive().max(1_000_000),
   /** Quote token (USDG on Robinhood Chain), assumed to be worth $1: a depeg shows up as divergence alerts. */
   quoteToken: address,
   /** TWAP window (s): observe([twapSec, 0]). The pool's observation history must cover it. */
   twapSec: z.number().int().min(60).max(86_400).default(600),
-  /** Liquidity floor: the pool's quote-token balance (whole tokens, ~USD) below which it confirms nothing. */
-  minQuoteLiquidityUsd: z.number().positive(),
+  /**
+   * Depth floor (whole quote tokens, ~USD): the smaller of the quote amounts that move the pool price 2% up or down
+   * within the active range (in-range liquidity() and sqrtPriceX96; services/oracle sources/dex-twap.ts depth2PctQuote).
+   * Below it the pool confirms nothing (status unavailable). Not the pool's token balance (out-of-range positions,
+   * uncollected fees and donations would count there).
+   */
+  minDepthUsd: z.number().positive(),
 });
 
 export const dexConfirmSchema = z.object({

@@ -11,7 +11,7 @@
 // Policy: ORACLE_POLICY (default primary-confirm on 4663: Chainlink signs, the DEX TWAP must confirm every ticker,
 // Pyth / HTTP are optional confirmers; median elsewhere).
 // Exit code 1 when any row FAILs. Sends no transaction and needs no key.
-import { createLogger, isMainnet } from "@bookrunner/shared";
+import { createLogger, isMainnet, uniswapV3For } from "@bookrunner/shared";
 import { stockTokenRegistryAbi } from "@bookrunner/shared/abi";
 import { type Address, BaseError, ContractFunctionRevertedError, type PublicClient, createPublicClient, getAddress, http } from "viem";
 import { type OracleConfig, loadOracleConfig } from "../config";
@@ -151,7 +151,7 @@ async function main(): Promise<number> {
     otherSources: others,
     policy: cfg.ORACLE_POLICY,
     confirmBps: cfg.ORACLE_CONFIRM_BPS,
-    dex: Object.keys(cfg.dexPools).length > 0 ? new DexTwapSource(cfg.dexPools, viemDexReader(pub), { maxAgeMs: cfg.ORACLE_DEX_MAX_AGE_MS }) : null,
+    dex: Object.keys(cfg.dexPools).length > 0 ? new DexTwapSource(cfg.dexPools, viemDexReader(pub), { maxAgeMs: cfg.ORACLE_DEX_MAX_AGE_MS, factory: uniswapV3For(args.chain)?.factory ?? null }) : null,
     pythKey: !!cfg.PYTH_API_KEY,
     ...(pythCalendar ? { pythCalendar } : {}),
     minSources: cfg.ORACLE_MIN_SOURCES,

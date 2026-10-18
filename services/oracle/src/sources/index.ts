@@ -1,7 +1,7 @@
 // Source assembly from config: synthetic GBM (devnet; testnet with a secret seed; never on mainnet),
 // HTTP sources, Pyth Pro (ORACLE_PYTH + PYTH_API_KEY), Chainlink feeds (config/chains/<chainId>.json +
 // ORACLE_CHAINLINK_FEEDS) and the Uniswap v3 TWAP confirm source (chain config dexConfirm.pools, ORACLE_DEX_CONFIRM).
-import { type Logger, isMainnet } from "@bookrunner/shared";
+import { type Logger, isMainnet, uniswapV3For } from "@bookrunner/shared";
 import { createPublicClient, http, type PublicClient } from "viem";
 import { type OracleConfig, syntheticSeedProblem } from "../config";
 import { csprngNormal } from "../domain/rng";
@@ -113,12 +113,16 @@ export function buildSources(cfg: OracleConfig, log: Logger, now: () => number =
     );
   }
 
-  const pools = cfg.dexPools;
+  // confirm source only: under the median policy a pool price would become a vote, so it is not built there
+  const pools = cfg.ORACLE_POLICY === "primary-confirm" ? cfg.dexPools : {};
+  if (Object.keys(cfg.dexPools).length > 0 && cfg.ORACLE_POLICY !== "primary-confirm") {
+    log.warn("dexConfirm pools configured but ORACLE_POLICY=median: the DEX TWAP is a confirm source only and is not used");
+  }
   if (Object.keys(pools).length > 0) {
     const pub = client(cfg.ORACLE_DEX_RPC_URL ?? cfg.ORACLE_CHAINLINK_RPC_URL ?? cfg.RPC_URL);
-    sources.push(new DexTwapSource(pools, viemDexReader(pub), { maxAgeMs: cfg.ORACLE_DEX_MAX_AGE_MS }));
+    sources.push(new DexTwapSource(pools, viemDexReader(pub), { maxAgeMs: cfg.ORACLE_DEX_MAX_AGE_MS, factory: uniswapV3For(cfg.CHAIN_ID)?.factory ?? null }));
     log.info(
-      { pools: Object.fromEntries(Object.entries(pools).map(([t, p]) => [t, { pool: p.pool, twapSec: p.twapSec, minQuoteLiquidity: p.minQuoteLiquidity }])) },
+      { pools: Object.fromEntries(Object.entries(pools).map(([t, p]) => [t, { pool: p.pool, fee: p.fee, twapSec: p.twapSec, minDepthUsd: p.minDepthUsd }])) },
       "DEX TWAP confirm source enabled (Uniswap v3; quote token assumed = $1: a USDG depeg shows up as confirm divergence)",
     );
   }

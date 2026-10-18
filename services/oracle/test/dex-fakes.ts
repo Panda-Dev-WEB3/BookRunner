@@ -2,9 +2,21 @@
 import { WAD } from "@bookrunner/shared";
 import { type Address, getAddress } from "viem";
 import type { TokenState } from "../src/sources/chainlink";
-import type { DexBlock, DexReader, ResolvedDexPool, Slot0 } from "../src/sources/dex-twap";
+import { type DexBlock, type DexReader, type ResolvedDexPool, type Slot0, depthQuote } from "../src/sources/dex-twap";
 
 export const USDG = getAddress("0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168");
+export const FACTORY = getAddress("0x1f7d7550b1b028f7571e69a784071f0205fd2efa");
+
+/** sqrtPriceX96 at a tick (float precision; enough for depth tests). */
+export function sqrtPriceX96At(tick: number): bigint {
+  return BigInt(Math.round(Math.sqrt(1.0001 ** tick) * 2 ** 96));
+}
+
+/** In-range liquidity whose 2% depth (depthQuote) is `depthUsd` quote tokens. */
+export function liquidityForDepth(depthUsd: number, sqrtPriceX96: bigint, quoteIsToken0: boolean, quoteDecimals = 6): bigint {
+  const unit = depthQuote(10n ** 24n, sqrtPriceX96, quoteIsToken0, quoteDecimals);
+  return BigInt(Math.round((depthUsd / unit) * 1e12)) * 10n ** 12n;
+}
 
 /** Tick whose price is `tokenPrice` whole quote tokens per whole Stock Token (rounded to the nearest tick). */
 export function tickFor(tokenPrice: number, tokenIsToken0: boolean, tokenDecimals = 18, quoteDecimals = 6): number {
@@ -26,7 +38,12 @@ export interface FakePool {
   oldestInitialized: boolean;
   /** blockTimestamp of slot 0 (used when the next slot is not initialized) */
   slot0Ts: number;
-  quoteBalance: bigint;
+  /** blockTimestamp of the newest observation (observationIndex): the last block with a swap */
+  newestTs: number;
+  /** quote tokens moving the price 2% (sets liquidity) */
+  depthUsd: number;
+  /** fee tier the fake factory registers the pool under */
+  fee: number;
   observeError: Error | null;
 }
 
@@ -35,7 +52,9 @@ export class FakeDexReader implements DexReader {
   pools = new Map<string, FakePool>();
   tokens = new Map<string, TokenState>();
   quoteDecimals = 6;
-  calls = { block: 0, observe: 0, observation: 0, poolTokens: 0 };
+  calls = { block: 0, observe: 0, observation: 0, poolTokens: 0, getPool: 0 };
+  /** factory.getPool answers: key token|quote|fee (lowercase) -> pool; default the pool whose tokens match */
+  factoryPools = new Map<string, Address>();
   /** block numbers every pinned read used */
   pinned = new Set<bigint>();
 
@@ -47,7 +66,9 @@ export class FakeDexReader implements DexReader {
       oldestTs: this.blockNow.timestamp - 86_400,
       oldestInitialized: true,
       slot0Ts: this.blockNow.timestamp - 86_400,
-      quoteBalance: 500_000n * 10n ** BigInt(this.quoteDecimals),
+      newestTs: this.blockNow.timestamp - 30,
+      depthUsd: 500_000,
+      fee: 3000,
       observeError: null,
       ...p,
     });
@@ -72,15 +93,31 @@ export class FakeDexReader implements DexReader {
   async decimals() {
     return this.quoteDecimals;
   }
+  async getPool(_factory: Address, a: Address, b: Address, fee: number) {
+    this.calls.getPool++;
+    const k = `${[a.toLowerCase(), b.toLowerCase()].sort().join("|")}|${fee}`;
+    const hit = this.factoryPools.get(k);
+    if (hit) return hit;
+    for (const [addr, p] of this.pools) {
+      if (`${[p.token0.toLowerCase(), p.token1.toLowerCase()].sort().join("|")}|${p.fee}` === k) return getAddress(addr);
+    }
+    return getAddress("0x0000000000000000000000000000000000000000");
+  }
   async slot0(a: Address, b: bigint): Promise<Slot0> {
     this.pinned.add(b);
     const p = this.pool(a);
-    return { tick: p.spotTick, observationIndex: p.observationIndex, observationCardinality: p.cardinality };
+    return { sqrtPriceX96: sqrtPriceX96At(p.spotTick), tick: p.spotTick, observationIndex: p.observationIndex, observationCardinality: p.cardinality };
+  }
+  async liquidity(a: Address, b: bigint) {
+    this.pinned.add(b);
+    const p = this.pool(a);
+    return liquidityForDepth(p.depthUsd, sqrtPriceX96At(p.spotTick), p.token0.toLowerCase() === USDG.toLowerCase(), this.quoteDecimals);
   }
   async observation(a: Address, index: number, b: bigint) {
     this.pinned.add(b);
     this.calls.observation++;
     const p = this.pool(a);
+    if (index === p.observationIndex) return { blockTimestamp: p.newestTs, initialized: true };
     if (index === 0) return { blockTimestamp: p.slot0Ts, initialized: true };
     return { blockTimestamp: p.oldestInitialized ? p.oldestTs : 0, initialized: p.oldestInitialized };
   }
@@ -93,11 +130,8 @@ export class FakeDexReader implements DexReader {
     // tickCumulative grows by meanTick per second
     return secondsAgos.map((ago) => base - BigInt(p.meanTick) * BigInt(ago));
   }
-  async balanceOf(_token: Address, owner: Address, b: bigint) {
+  async tokenState(token: Address, b: bigint) {
     this.pinned.add(b);
-    return this.pool(owner).quoteBalance;
-  }
-  async tokenState(token: Address) {
     const t = this.tokens.get(token.toLowerCase());
     if (!t) throw new Error("execution reverted (no token)");
     return t;
@@ -105,5 +139,5 @@ export class FakeDexReader implements DexReader {
 }
 
 export function dexPool(pool: Address, token: Address, over: Partial<ResolvedDexPool> = {}): ResolvedDexPool {
-  return { pool, token, tokenDecimals: 18, quoteToken: USDG, twapSec: 600, minQuoteLiquidity: 50_000, ...over };
+  return { pool, token, tokenDecimals: 18, quoteToken: USDG, fee: 3000, twapSec: 600, minDepthUsd: 50_000, ...over };
 }
