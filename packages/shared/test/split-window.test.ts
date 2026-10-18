@@ -61,3 +61,20 @@ describe("split window helpers", () => {
     expect(await readMultiplierAtBasis(broken as never, "0x00000000000000000000000000000000000000d1", { basisAt: FRI, nowSec: NOW, blockNumber: 100n })).toBeNull();
   });
 });
+
+describe("readMultiplierAtBasis paging", () => {
+  test("pages the lookback in bounded ranges (a provider range cap is never hit) and finds an event staged far back", async () => {
+    const ranges: Array<[bigint, bigint]> = [];
+    const pub = {
+      getLogs: async (a: { fromBlock: bigint; toBlock: bigint }) => {
+        ranges.push([a.fromBlock, a.toBlock]);
+        if (a.toBlock - a.fromBlock + 1n > 2_000n) throw new Error("range too large");
+        return a.fromBlock <= 1_000n && 1_000n <= a.toBlock ? [{ args: { oldMultiplier: WAD, newMultiplier: 10n * WAD, effectiveAtTimestamp: SAT } }] : [];
+      },
+    };
+    const r = await readMultiplierAtBasis(pub as never, "0x00000000000000000000000000000000000000d1", { basisAt: FRI, nowSec: NOW, blockNumber: 9_999n, lookbackBlocks: 9_999n });
+    expect(r).toEqual({ multiplierWad: WAD, firstChangeAt: SAT });
+    expect(ranges).toHaveLength(5);
+    expect(ranges.at(-1)).toEqual([8_000n, 9_999n]);
+  });
+});

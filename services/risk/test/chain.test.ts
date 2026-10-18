@@ -120,6 +120,7 @@ const RESULTS: Record<string, unknown> = {
   // audit M-2 split window reads (no change recorded: outside the window)
   [`${C.stockRegistry}:multiplierChangedAt`]: 0n,
   [`${C.oracle}:lastLiveAt`]: BigInt(T0),
+  [`${C.stockRegistry}:basisMultiplier`]: 0n,
   [`${C.mandate}:kill`]: undefined,
   [`${C.adapter}:setReduceOnly`]: undefined,
 };
@@ -329,9 +330,16 @@ describe("ViemChain reads", () => {
       const { chain } = makeChain(new Set([`${C.desk}:hedgeNotionalUsd`, `${C.desk}:valueUsd`]));
       const ref = await chain.loadRef(1);
       const h = await chain.deskHoldings(ref);
-      expect(h[0]).toMatchObject({ valueUsd: 0n, splitWindow: true });
+      expect(h[0]).toMatchObject({ valueUsd: 0n, splitWindow: true, splitValuationUnknown: true });
       const o = await chain.observe(ref);
-      expect(o.desk.splitWindow).toBe(true);
+      expect(o.desk).toMatchObject({ splitWindow: true, splitUntrusted: true });
+      // fix round 2: the on-chain basis multiplier values it (trusted), never at the new multiplier
+      RESULTS[`${C.stockRegistry}:basisMultiplier`] = wad(1);
+      const h2 = await chain.deskHoldings(ref);
+      expect(h2[0]).toMatchObject({ valueUsd: usd(1_900), splitWindow: true });
+      expect(h2[0]?.splitValuationUnknown).toBeUndefined();
+      expect((await chain.observe(ref)).desk.splitUntrusted).toBeUndefined();
+      RESULTS[`${C.stockRegistry}:basisMultiplier`] = 0n;
     } finally {
       for (const [k, v] of Object.entries(saved)) {
         if (v === undefined) delete RESULTS[k];

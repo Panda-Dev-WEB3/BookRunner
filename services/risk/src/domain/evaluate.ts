@@ -32,10 +32,10 @@ export function evaluate(obs: BookObservation, prevBand: HedgeBandState, o: Eval
   const offHours = isOffHours(obs.oracle);
   const quote = selectLiveQuote(obs.quote, oraclePrice(obs.oracle), obs.nowMs, o.quoteMaxAgeMs, m.maxSkewBps);
   const canHedgeLong = o.canHedgeLong ?? false;
-  // audit M-2 split window: a held token's price predates its multiplier change, so the desk valuation is not
-  // trusted (10x after a split, 1/10 after a reverse split at the audited valuation): the desk-dependent
-  // breaches (HEDGE_BAND clock, DRAWDOWN) do not run until the oracle reprices; the flatten skips the token.
-  const deskUntrusted = obs.deskSplitWindow === true;
+  // audit M-2 split window: a held token in it is valued at the multiplier of its price's basis (on-chain
+  // basisMultiplier) and never flattened. Only when that multiplier is unknown (valued at 0) is the desk valuation
+  // untrusted: then the desk-dependent breaches (HEDGE_BAND clock, DRAWDOWN) do not run until the oracle reprices.
+  const deskUntrusted = obs.deskSplitUntrusted === true;
   const inBand = deskUntrusted || hedgeBandOk(m, obs.netExposureUsd, obs.deskHedgeUsd, canHedgeLong);
   // the grace clock does not run while the mandate is killed: the desk keys are revoked, so nobody can
   // hedge, and a re-mandated book must get the full grace to hedge back into band (instead of being

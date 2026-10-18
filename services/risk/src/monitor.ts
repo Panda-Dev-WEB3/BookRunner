@@ -211,6 +211,7 @@ export class BookMonitor {
       deskHedgeUsd: c.desk.hedgeNotionalUsd,
       deskPriceStale: c.desk.priceStale === true,
       ...(c.desk.splitWindow ? { deskSplitWindow: true } : {}),
+      ...(c.desk.splitUntrusted ? { deskSplitUntrusted: true } : {}),
       nav: {
         vaultIdleUsd: c.vaultIdleUsd,
         unfundedClaimsUsd: c.unfundedClaimsUsd,

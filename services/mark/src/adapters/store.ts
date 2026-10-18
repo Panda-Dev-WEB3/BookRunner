@@ -66,6 +66,25 @@ export class PgMarkStore implements MarkStore {
     return parseUsd6(pnl?.pnl?.unrealizedUsd);
   }
 
+  async prevDeskPositions(bookId: number, periodEnd: number): Promise<Array<{ token: string; qtyRaw: bigint; valueUsd: bigint }>> {
+    const [row] = await this.db
+      .select({ pnl: marks.pnlJson })
+      .from(marks)
+      .where(and(eq(marks.bookId, bookId), lt(marks.periodEnd, date(periodEnd))))
+      .orderBy(desc(marks.periodEnd))
+      .limit(1);
+    const positions = (row?.pnl as Partial<MarkPnl> | undefined)?.desk?.positions ?? [];
+    const out: Array<{ token: string; qtyRaw: bigint; valueUsd: bigint }> = [];
+    for (const p of positions) {
+      try {
+        out.push({ token: p.token, qtyRaw: BigInt(p.qtyRaw), valueUsd: parseUsd6(p.valueUsd) });
+      } catch {
+        // a malformed row is skipped: that position then has no carried value
+      }
+    }
+    return out;
+  }
+
   async lastQuoteSkewBps(bookId: number, atOrBefore: number): Promise<number | null> {
     const [row] = await this.db
       .select({ skew: quotes.skewBps })

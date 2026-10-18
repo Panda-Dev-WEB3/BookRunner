@@ -22,7 +22,7 @@ import { buildMarkPnl, pnlJsonHash } from "./domain/pnl";
 import { previewTranches, type TranchePreview } from "./domain/preview";
 import { type SignedPrice, encodePriceData, newestByUnderlying } from "./domain/prices";
 import { venueReportAge } from "./domain/readiness";
-import { resolveSplitWindow } from "./domain/split";
+import { needsPrevPositions, resolveSplitWindow } from "./domain/split";
 import type { MarkSnapshot } from "./domain/types";
 import { applySignedVenueReport } from "./domain/venue";
 import type { MarkAppliedEvent, MarkChain, MarkFeeds, MarkRow, MarkSignerPort, MarkStore, ReceiptsRootPort } from "./ports";
@@ -247,8 +247,13 @@ export class MarkPipeline {
     if (overlay.rejected.length) log.debug({ rejected: overlay.rejected }, "signed venue reports not used for the valuation");
     // audit M-2 split window: positions priced before their multiplier change are revalued at the multiplier of
     // the price's basis (or 0), never at the new one; run() refuses the mark while the window is young
-    const split = resolveSplitWindow(overlay.snapshot.desk.positions, { nowSec: BigInt(overlay.snapshot.blockTimestamp), maxRefuseSec: BigInt(this.d.splitRefuseMaxSec ?? interval) });
+    const deskPositions = overlay.snapshot.desk.positions;
+    const prev = needsPrevPositions(deskPositions)
+      ? new Map((await this.d.store.prevDeskPositions(ref.bookId, periodEnd)).map((p) => [p.token.toLowerCase(), { qtyRaw: p.qtyRaw, valueUsd: p.valueUsd }] as const))
+      : undefined;
+    const split = resolveSplitWindow(deskPositions, { nowSec: BigInt(overlay.snapshot.blockTimestamp), maxRefuseSec: BigInt(this.d.splitRefuseMaxSec ?? interval), ...(prev ? { prev } : {}) });
     if (split.window.length) log.warn({ positions: split.window, refused: split.refuse.length > 0 }, "desk position priced before its multiplier change (split window): valued at the basis multiplier, the mark is held");
+    if (split.zeroed.length) log.error({ positions: split.zeroed }, "split window: no basis multiplier and no previous mark value; the position is valued at 0 (a held mark books it as a loss)");
     const splitSnap = split.window.length ? { ...overlay.snapshot, desk: { ...overlay.snapshot.desk, positions: split.positions } } : overlay.snapshot;
     const { snapshot, writtenOff } = writeOffRetiringDust(splitSnap, this.d.retireTokenDustUsd ?? RETIRE_TOKEN_DUST_USD);
     if (writtenOff.length) {

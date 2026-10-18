@@ -25,6 +25,8 @@ export interface Holding {
   /** audit M-2 split window: the price predates the token's multiplier change (valueUsd is at the basis
    *  multiplier, or 0); never flattened (the on-chain RISK flatten defers until the oracle reprices) */
   splitWindow?: boolean;
+  /** in the split window with no on-chain basis multiplier: valued at 0, the desk valuation is untrusted */
+  splitValuationUnknown?: boolean;
 }
 
 export interface FlattenOrder {

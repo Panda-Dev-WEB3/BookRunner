@@ -341,7 +341,7 @@ export class MarkChainAdapter implements MarkChain {
     ]);
     const positions: DeskPosition[] = [];
     for (const token of held) {
-      const { position, signed } = await this.position(token, desk, blockNumber, refTs, maxPriceAge, prices);
+      const { position, signed } = await this.position(token, desk, blockNumber, refTs, maxPriceAge, prices, blockTs);
       positions.push(position);
       if (signed) used.set(signed.underlying.toLowerCase(), signed);
     }
@@ -460,6 +460,7 @@ export class MarkChainAdapter implements MarkChain {
     refTs: bigint,
     maxPriceAge: bigint,
     prices?: ReadonlyMap<string, SignedPrice>,
+    blockTs: bigint = refTs,
   ): Promise<{ position: DeskPosition; signed: SignedPrice | null }> {
     const b = { blockNumber } as const;
     const [qtyRaw, info] = await Promise.all([
@@ -480,13 +481,23 @@ export class MarkChainAdapter implements MarkChain {
     const valueUsd = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "valueUsdAt", args: [token, qtyRaw, priceWad], ...b });
     const priceStale = priceIsStale(publishedAt, refTs, maxPriceAge);
     const basis = priceBasisAt({ held, publishedAt, lastLiveAt: BigInt(lastLiveAt) });
-    // split window: the multiplier in force at the basis, from the token's own update events (live mode; a
-    // stored-mode change is governance's and has no token event: unknown, valued at 0 by domain/split.ts)
+    // split window (audit M-2, fix round 2 N-I1): the multiplier in force at the basis, ON-CHAIN first
+    // (StockTokenRegistry.basisMultiplier: the recorded value before a registry-side change, else the pre-split
+    // anchor), then the token's update events (paged), else unknown (domain/split.ts carries the previous
+    // mark's value forward: no P&L, never a loss). The window starts at the change (the I-2 marker
+    // changedAt == block time means unknown: then the basis), so the refusal always ends.
     let split: Pick<DeskPosition, "basisMultiplierWad" | "splitWindowSince"> = {};
     if (qtyRaw > 0n && multiplierChangedAt > basis) {
-      const live = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "multiplierFromToken", args: [token], ...b });
-      const r = live ? await readMultiplierAtBasis(this.pc, token, { basisAt: basis, nowSec: refTs, blockNumber, lookbackBlocks: this.splitLogLookbackBlocks }) : null;
-      split = { basisMultiplierWad: r?.multiplierWad ?? null, splitWindowSince: r?.firstChangeAt ?? (multiplierChangedAt < refTs ? multiplierChangedAt : basis) };
+      const onchain = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "basisMultiplier", args: [token, basis], ...b });
+      let m: bigint | null = onchain > 0n ? onchain : null;
+      let first: bigint | null = null;
+      if (m === null) {
+        const live = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "multiplierFromToken", args: [token], ...b });
+        const r = live ? await readMultiplierAtBasis(this.pc, token, { basisAt: basis, nowSec: refTs, blockNumber, lookbackBlocks: this.splitLogLookbackBlocks }) : null;
+        m = r?.multiplierWad ?? null;
+        first = r?.firstChangeAt ?? null;
+      }
+      split = { basisMultiplierWad: m, splitWindowSince: first ?? (multiplierChangedAt < blockTs ? multiplierChangedAt : basis) };
     }
     return {
       position: {

@@ -61,25 +61,32 @@ export function multiplierAtBasis(events: readonly MultiplierUpdate[], basisAt: 
 }
 
 export const DEFAULT_SPLIT_LOG_LOOKBACK_BLOCKS = 200_000n;
+/** Per-request block range (providers cap getLogs ranges; the indexer pages at 2,000 too). */
+export const DEFAULT_SPLIT_LOG_CHUNK_BLOCKS = 2_000n;
 
 /**
- * Reads the token's update events over the last `lookbackBlocks` blocks before `blockNumber` and returns
- * {@link multiplierAtBasis}. null on any read failure (the caller then values the position at 0).
+ * Fallback after the on-chain StockTokenRegistry.basisMultiplier (fix round 2, N-I1): reads the token's update
+ * events over the last `lookbackBlocks` blocks before `blockNumber`, in `chunkBlocks` pages, and returns
+ * {@link multiplierAtBasis}. null on any read failure.
  */
 export async function readMultiplierAtBasis(
   pub: Pick<PublicClient, "getLogs">,
   token: Address,
-  o: { basisAt: bigint; nowSec: bigint; blockNumber: bigint; lookbackBlocks?: bigint },
+  o: { basisAt: bigint; nowSec: bigint; blockNumber: bigint; lookbackBlocks?: bigint; chunkBlocks?: bigint },
 ): Promise<{ multiplierWad: bigint; firstChangeAt: bigint } | null> {
   const lookback = o.lookbackBlocks ?? DEFAULT_SPLIT_LOG_LOOKBACK_BLOCKS;
-  const fromBlock = o.blockNumber > lookback ? o.blockNumber - lookback : 0n;
+  const chunk = o.chunkBlocks && o.chunkBlocks > 0n ? o.chunkBlocks : DEFAULT_SPLIT_LOG_CHUNK_BLOCKS;
+  const start = o.blockNumber > lookback ? o.blockNumber - lookback : 0n;
   try {
-    const logs = await pub.getLogs({ address: token, event: uiMultiplierUpdatedEvent, fromBlock, toBlock: o.blockNumber });
     const events: MultiplierUpdate[] = [];
-    for (const l of logs) {
-      const a = (l as { args?: { oldMultiplier?: bigint; newMultiplier?: bigint; effectiveAtTimestamp?: bigint } }).args;
-      if (a?.oldMultiplier === undefined || a.newMultiplier === undefined || a.effectiveAtTimestamp === undefined) continue;
-      events.push({ oldMultiplier: a.oldMultiplier, newMultiplier: a.newMultiplier, effectiveAt: a.effectiveAtTimestamp });
+    for (let from = start; from <= o.blockNumber; from += chunk) {
+      const to = from + chunk - 1n < o.blockNumber ? from + chunk - 1n : o.blockNumber;
+      const logs = await pub.getLogs({ address: token, event: uiMultiplierUpdatedEvent, fromBlock: from, toBlock: to });
+      for (const l of logs) {
+        const a = (l as { args?: { oldMultiplier?: bigint; newMultiplier?: bigint; effectiveAtTimestamp?: bigint } }).args;
+        if (a?.oldMultiplier === undefined || a.newMultiplier === undefined || a.effectiveAtTimestamp === undefined) continue;
+        events.push({ oldMultiplier: a.oldMultiplier, newMultiplier: a.newMultiplier, effectiveAt: a.effectiveAtTimestamp });
+      }
     }
     return multiplierAtBasis(events, o.basisAt, o.nowSec);
   } catch {

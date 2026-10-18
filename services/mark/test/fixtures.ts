@@ -196,6 +196,10 @@ export class FakeMarkStore implements MarkStore {
   async prevUnrealized() {
     return 0n;
   }
+  prevPositions: Array<{ token: string; qtyRaw: bigint; valueUsd: bigint }> = [];
+  async prevDeskPositions() {
+    return this.prevPositions;
+  }
   async lastQuoteSkewBps() {
     return 5;
   }

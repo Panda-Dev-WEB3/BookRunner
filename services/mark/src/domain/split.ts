@@ -1,12 +1,16 @@
-// Split window (pure; audit M-2, review I-1). A per-share oracle price is quoted in the share count of the moment
-// it was observed. After a split (or any multiplier change) it may only meet the multiplier of that moment:
-// Friday's held per-share price times a 10:1 split's new multiplier values each token at 10x. The registry's
-// strict view refuses it on-chain (StockTokenRegistry.valueUsd reverts MultiplierChangedSincePrice); the mark
-// service values through the pure valueUsdAt, so it applies the same rule here:
+// Split window (pure; audit M-2, review I-1, fix round 2 N-I1). A per-share oracle price is quoted in the share
+// count of the moment it was observed. After a split (or any multiplier change) it may only meet the multiplier
+// of that moment: Friday's held per-share price times a 10:1 split's new multiplier values each token at 10x. The
+// registry's strict view refuses it on-chain (StockTokenRegistry.valueUsd reverts MultiplierChangedSincePrice);
+// the mark service values through the pure valueUsdAt, so it applies the same rule here:
 //
-//   - every desk position in the window is REVALUED at the multiplier in force at its price's basis (from the
-//     token's UIMultiplierUpdated events; economically right, a split does not change a token's value), or at 0
-//     when that multiplier cannot be established. Never at the new multiplier;
+//   - every desk position in the window is REVALUED at the multiplier in force at its price's basis
+//     (StockTokenRegistry.basisMultiplier on-chain first, then the token's update events; economically right,
+//     a split does not change a token's value). Never at the new multiplier;
+//   - when that multiplier is unknown, the valuation is UNAVAILABLE: the position keeps the value of the previous
+//     mark (pro rata to its quantity), so the mark books no P&L for it. A held mark still runs the waterfall,
+//     backstop and drawdown kill on-chain, so a 0 would book a false loss, pull backstop USDC and could kill
+//     the book. Only with no previous value at all is it 0;
 //   - while the window is young (less than `maxRefuseSec` since the change, default one mark interval) and the
 //     price is still fresh, the mark is REFUSED (retryable): the oracle normally reprices at the open;
 //   - after that, or at once when the price is stale (the oracle is not publishing: no reprice is coming), the
@@ -27,26 +31,54 @@ export interface SplitWindowResult {
   window: string[];
   /** the lines of positions whose window is still young (the mark is refused while non-empty) */
   refuse: string[];
+  /** positions valued at 0: no basis multiplier and no previous value (logged as an error) */
+  zeroed: string[];
 }
 
-export function resolveSplitWindow(positions: readonly DeskPosition[], o: { nowSec: bigint; maxRefuseSec: bigint }): SplitWindowResult {
+/** Positions of the previous mark, by lowercase token address. */
+export type PrevPositions = ReadonlyMap<string, { qtyRaw: bigint; valueUsd: bigint }>;
+
+/** True when some valued desk position is in the split window with no known basis multiplier. */
+export function needsPrevPositions(positions: readonly DeskPosition[]): boolean {
+  return positions.some((p) => inWindow(p) && (p.basisMultiplierWad ?? null) === null);
+}
+
+function inWindow(p: DeskPosition): boolean {
+  return p.qtyRaw > 0n && p.priceWad > 0n && p.multiplierChangedAt !== undefined && p.priceBasisAt !== undefined && p.multiplierChangedAt > p.priceBasisAt;
+}
+
+export function resolveSplitWindow(positions: readonly DeskPosition[], o: { nowSec: bigint; maxRefuseSec: bigint; prev?: PrevPositions }): SplitWindowResult {
   const out: DeskPosition[] = [];
   const window: string[] = [];
   const refuse: string[] = [];
+  const zeroed: string[] = [];
   for (const p of positions) {
-    const changedAt = p.multiplierChangedAt;
-    const basis = p.priceBasisAt;
-    if (p.qtyRaw === 0n || p.priceWad === 0n || changedAt === undefined || basis === undefined || changedAt <= basis) {
+    if (!inWindow(p)) {
       out.push(p);
       continue;
     }
     const m = p.basisMultiplierWad ?? null;
-    const valueUsd = m === null ? 0n : valueAtMultiplier(p.qtyRaw, m, p.priceWad, p.decimals);
+    let valueUsd: bigint;
+    let how: string;
+    if (m !== null) {
+      valueUsd = valueAtMultiplier(p.qtyRaw, m, p.priceWad, p.decimals);
+      how = `the basis multiplier ${m}`;
+    } else {
+      const prev = o.prev?.get(p.token.toLowerCase());
+      if (prev && prev.qtyRaw > 0n) {
+        valueUsd = (prev.valueUsd * p.qtyRaw) / prev.qtyRaw;
+        how = "the previous mark's value (basis multiplier unknown: no P&L booked for it)";
+      } else {
+        valueUsd = 0n;
+        how = "0 (basis multiplier and previous value unknown)";
+      }
+    }
     out.push({ ...p, valueUsd, multiplierWad: m ?? 0n, splitWindow: true });
-    const since = p.splitWindowSince ?? changedAt;
-    const line = `${p.ticker}: price basis ${basis} predates the multiplier change at ${changedAt}; valued at ${m === null ? "0 (multiplier at the basis unknown)" : `the basis multiplier ${m}`}`;
+    const line = `${p.ticker}: price basis ${p.priceBasisAt} predates the multiplier change at ${p.multiplierChangedAt}; valued at ${how}`;
     window.push(line);
+    if (valueUsd === 0n && m === null) zeroed.push(line);
+    const since = p.splitWindowSince ?? p.multiplierChangedAt!;
     if (!p.priceStale && o.nowSec - since < o.maxRefuseSec) refuse.push(line);
   }
-  return { positions: out, window, refuse };
+  return { positions: out, window, refuse, zeroed };
 }

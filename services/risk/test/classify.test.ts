@@ -233,8 +233,12 @@ describe("audit M-2 split window (review I-4): no kill from a desk valuation the
     expect(ev.snapshot.breaches).toContain("DRAWDOWN");
     expect(ev.inBand).toBe(false);
   });
-  test("in the window: DRAWDOWN and the HEDGE_BAND clock are suppressed", () => {
-    const ev = evaluate(observation({ deskSplitWindow: true }, distorted()), { outOfBandSince: T0 - 3_600, lastObservedAt: T0 - 10 }, OPTS);
+  test("in the window with a trusted (basis-multiplier) valuation: breaches still run", () => {
+    const ev = evaluate(observation({ deskSplitWindow: true }, distorted()), IN_BAND, OPTS);
+    expect(ev.snapshot.breaches).toContain("DRAWDOWN");
+  });
+  test("in the window with an untrusted valuation (no basis multiplier): DRAWDOWN and the HEDGE_BAND clock are suppressed", () => {
+    const ev = evaluate(observation({ deskSplitWindow: true, deskSplitUntrusted: true }, distorted()), { outOfBandSince: T0 - 3_600, lastObservedAt: T0 - 10 }, OPTS);
     expect(ev.snapshot.breaches).toEqual([]);
     expect(ev.inBand).toBe(true);
     expect(ev.outOfBandSec).toBe(0);

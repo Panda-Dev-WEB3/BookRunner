@@ -205,16 +205,33 @@ describe("MarkPipeline", () => {
       expect(out.status === "applied" && out.input.held).toBe(true);
     });
 
-    test("a token that never reprices and whose basis multiplier is unknown: committed held marks value it at 0 (never 10x)", async () => {
-      const { chain, pipeline } = setup();
+    test("fix round 2 N-I1: basis multiplier unknown, token never reprices: committed held marks carry the previous mark's value (no P&L, no loss for the drawdown kill / backstop)", async () => {
+      const { chain, store, pipeline } = setup();
       const pos = chain.snap.desk.positions[0]!;
+      store.prevPositions = [{ token: pos.token, qtyRaw: pos.qtyRaw, valueUsd: pos.valueUsd }]; // last mark: $7,600
       chain.snap = { ...chain.snap, desk: { ...chain.snap.desk, onchainValueUsd: null, hedgeNotionalUsd: null, positions: [splitOf(pos, { since: BigInt(P - 30 * 86_400), basis: BigInt(P - 31 * 86_400), m: null })] } };
       const out = await pipeline.run({ bookId: 1, periodEnd: P });
       expect(out.status).toBe("applied");
       if (out.status !== "applied") return;
       expect(out.input.held).toBe(true);
-      expect(out.input.navUsd).toBe(usd("103000")); // 110,600 - the 7,600 token position
-      expect(chain.commitCalls).toBe(1);
+      expect(out.input.navUsd).toBe(usd("110600")); // the position keeps its previous value: no P&L for it
+    });
+
+    test("no basis multiplier and no previous value: 0 (the last resort, logged as an error)", async () => {
+      const { chain, pipeline } = setup();
+      const pos = chain.snap.desk.positions[0]!;
+      chain.snap = { ...chain.snap, desk: { ...chain.snap.desk, onchainValueUsd: null, hedgeNotionalUsd: null, positions: [splitOf(pos, { since: BigInt(P - 30 * 86_400), basis: BigInt(P - 31 * 86_400), m: null })] } };
+      const out = await pipeline.run({ bookId: 1, periodEnd: P });
+      expect(out.status === "applied" && out.input.navUsd).toBe(usd("103000")); // 110,600 - the 7,600 token position
+    });
+
+    test("fix round 2 minor: I-2 state (change time = block time) with no events: the window starts at the basis, so the refusal ends", async () => {
+      const { chain, pipeline } = setup();
+      const pos = chain.snap.desk.positions[0]!;
+      // the adapter sets splitWindowSince = basis when multiplierChangedAt is the block time (unknown)
+      const s = { ...splitOf(pos, { since: BigInt(P + 30) }), splitWindowSince: BigInt(P - 86_400) };
+      chain.snap = { ...chain.snap, desk: { ...chain.snap.desk, onchainValueUsd: null, hedgeNotionalUsd: null, positions: [s] } };
+      expect((await pipeline.run({ bookId: 1, periodEnd: P })).status).toBe("applied");
     });
   });
 
