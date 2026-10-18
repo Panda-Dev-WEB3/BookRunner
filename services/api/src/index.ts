@@ -59,6 +59,7 @@ export async function startApi(env: ApiConfig = loadApiConfig()) {
       markIntervalSeconds: env.MARK_INTERVAL_SECONDS,
       receiptsIntervalSeconds: env.RECEIPTS_INTERVAL_SECONDS,
       maxPriceAgeSeconds: env.MAX_PRICE_AGE_SECONDS,
+      receiptCacheLeaves: env.API_RECEIPT_CACHE_LEAVES,
       adminToken: env.API_ADMIN_TOKEN,
       webhookAllowHosts: [...parseAllowHosts(env.WEBHOOK_ALLOW_HOSTS)],
     },

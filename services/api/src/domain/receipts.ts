@@ -25,6 +25,33 @@ export function hourlyTree(rows: ReceiptRow[]): BuiltTree {
   return { root: tree.root as Hex, count: rows.length, tree };
 }
 
+/** An hour's tree with the lookups a proof needs (no linear scan per call; cached by receiptCache.ts). */
+export interface HourTree {
+  tree: BuiltTree;
+  ids: Set<number>;
+  /** leaf values key -> first index in the tree's values (proofFor's match rule) */
+  index: Map<string, number>;
+  /** built for an hour whose root is committed */
+  closed: boolean;
+}
+
+const leafKey = (values: ReadonlyArray<string | number | bigint>) => JSON.stringify(values.map((x) => String(x).toLowerCase()));
+
+export function hourTreeOf(rows: ReceiptRow[], closed: boolean): HourTree {
+  const tree = hourlyTree(rows);
+  const index = new Map<string, number>();
+  if (tree.tree) for (const [i, v] of tree.tree.entries()) if (!index.has(leafKey(v))) index.set(leafKey(v), i);
+  return { tree, ids: new Set(rows.map((r) => r.id)), index, closed };
+}
+
+/** Proof of `values` in the hour tree (the same leaf shared proofFor picks). */
+export function hourProof(h: HourTree, values: ReadonlyArray<string | number | bigint>): Hex[] {
+  if (!h.tree.tree) return [];
+  const i = h.index.get(leafKey(values));
+  if (i === undefined) throw new Error("hourProof: leaf not in tree");
+  return h.tree.tree.getProof(i) as Hex[];
+}
+
 export function periodBounds(periodEnd: Date, markInterval: number): { from: Date; to: Date } {
   return { from: new Date(periodEnd.getTime() - markInterval * 1000), to: periodEnd };
 }
@@ -66,17 +93,21 @@ export interface ReceiptProof {
 
 export interface ProofInputs {
   receipt: ReceiptRow;
-  hourRows: ReceiptRow[];
+  /** tree of the receipt's hour; must contain the receipt */
+  hour: HourTree;
   storedHourRoot: ReceiptRootRow | null;
   mark: MarkRow | null;
   periodRoots: ReceiptRootRow[];
+  /** receiptsRootOf(periodRoots) when already built (cached per mark) */
+  periodTree?: BuiltTree;
 }
 
 export function buildReceiptProof(i: ProofInputs): ReceiptProof {
   const r = i.receipt;
   const leafValues = receiptLeaf(r);
-  const tree = hourlyTree(i.hourRows.some((x) => x.id === r.id) ? i.hourRows : [...i.hourRows, r]);
-  const proof = proofFor(tree, leafValues);
+  if (!i.hour.ids.has(r.id)) throw new Error("buildReceiptProof: the hour tree does not contain the receipt");
+  const tree = i.hour.tree;
+  const proof = hourProof(i.hour, leafValues);
   const verified = verifyProof(tree.root, RECEIPT_LEAF, leafValues, proof);
   const leafHash = (tree.tree?.leafHash(strs(leafValues)) ?? zeroHash) as Hex;
   const storedRoot = (i.storedHourRoot?.root as Hex | undefined) ?? null;
@@ -85,10 +116,11 @@ export function buildReceiptProof(i: ProofInputs): ReceiptProof {
   if (i.mark) {
     // The period tree commits to the stored hourly roots; use the recomputed root for this hour when
     // the receipts service has not written it yet.
-    const roots = i.periodRoots.some((x) => x.hourStart.getTime() === r.hourStart.getTime())
+    const hasHour = i.periodRoots.some((x) => x.hourStart.getTime() === r.hourStart.getTime());
+    const roots = hasHour
       ? i.periodRoots
       : [...i.periodRoots, { id: 0, bookId: r.bookId, hourStart: r.hourStart, root: tree.root, leafCount: tree.count, createdAt: new Date(0) }];
-    const pTree = receiptsRootOf(roots);
+    const pTree = hasHour && i.periodTree ? i.periodTree : receiptsRootOf(roots);
     const hourRow = roots.find((x) => x.hourStart.getTime() === r.hourStart.getTime());
     const pLeaf = hourRow ? periodLeaf(hourRow) : null;
     const pProof = pLeaf ? proofFor(pTree, pLeaf) : [];
