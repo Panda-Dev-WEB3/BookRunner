@@ -4,7 +4,8 @@
 // posts a launch verdict if the service is not running) -> committee 2-of-3 -> BookFactory.create ->
 // subscriptions (sponsor >= 10% Junior + allocators) -> desk session keys (operator consent + sponsor
 // registerKey) -> window close (keeper service, fallback here) -> books appended to the deployment file.
-//   bun scripts/launch-devnet.ts            (idempotent: exits if books already launched)
+//   bun scripts/launch-devnet.ts            (idempotent: exits if books already launched; a launch that stopped part way
+//                                            resumes: launch.launched in the record, the book in progress from its charter)
 // Testnet (CHAIN_ID=46630): keys derive from BKRN_TESTNET_MNEMONIC; the deployer first distributes gas ETH
 // to every role/participant key, and LAUNCH_USER_WALLET (if set) receives test USDC + BKRN + a little gas.
 // The deployer is a protocol-admin key: on testnet it derives from the mnemonic only with
@@ -48,7 +49,7 @@ import { hedgeAllowTree } from "../packages/shared/src/merkle";
 import { SESSIONS_24X5, encodeSessions } from "../packages/shared/src/sessions";
 import { type BookComponents, type Deployment, liveVenueDeployment } from "../packages/shared/src/types";
 import { usd } from "../packages/shared/src/units";
-import { type BookSize, type Participant, launchBooks, launchSizes, settlementNeeds, transferPlan } from "./launch-plan";
+import { type BookSize, type Commit, type Participant, commitPlan, launchBooks, launchSizes, settlementNeeds, transferPlan } from "./launch-plan";
 
 const RPC = process.env.RPC_URL ?? "http://127.0.0.1:8547";
 const WINDOW = Number(process.env.LAUNCH_WINDOW_SECONDS ?? 120);
@@ -282,39 +283,75 @@ async function waitJury(committee: Address, id: bigint): Promise<void> {
   await send(acct.jury, committee, riskCommitteeAbi as Abi, "postJuryVerdict", [id, digest, true]);
 }
 
+const BYTES32_ZERO = /^0x0+$/;
+
+/**
+ * Resume: the latest charter of this spec (same symbol, our sponsor) still Filed or Approved, when a previous launch
+ * stopped part way through this book; null when there is none (file a new one).
+ */
+async function existingCharter(c: Deployment["contracts"], s: LaunchSpec): Promise<{ id: bigint; status: number } | null> {
+  const count = await read<bigint>(c.charter, marketCharterAbi as Abi, "count");
+  const sym = strToBytes32(s.symbol).toLowerCase();
+  for (let id = count; id >= 1n; id--) {
+    const r = await read<{ charter: { symbol: Hex; sponsor: Address }; status: number }>(c.charter, marketCharterAbi as Abi, "get", [id]);
+    if (r.charter.symbol.toLowerCase() === sym && r.charter.sponsor.toLowerCase() === acct.sponsor.address.toLowerCase() && (r.status === 1 || r.status === 2)) {
+      return { id, status: r.status };
+    }
+  }
+  return null;
+}
+
+/** One book, idempotent per step (a re-run after a failure continues where it stopped, never pays a second charter fee). */
 async function launchBook(d: Deployment, s: LaunchSpec) {
   const c = d.contracts;
-  const charter = buildCharter(s);
-  const fee = await read<bigint>(c.config, [{ type: "function", name: "charterFeeUsd", inputs: [], outputs: [{ type: "uint256" }], stateMutability: "view" }], "charterFeeUsd");
-  await send(acct.sponsor, c.usdc, mockERC20Abi as Abi, "approve", [c.charter, fee]);
-  const filed = await send(acct.sponsor, c.charter, marketCharterAbi as Abi, "file", [charter]);
-  const ev = parseEventLogs({ abi: marketCharterAbi as Abi, logs: filed.logs, eventName: "CharterFiled" })[0] as unknown as { args: { id: bigint } };
-  const id = ev.args.id;
-  log(`${s.name}: charter ${id} filed (fee ${Number(fee) / 1e6} USDC, bond locked)`);
+  const prior = await existingCharter(c, s);
+  let id: bigint;
+  if (prior) {
+    id = prior.id;
+    log(`${s.name}: resuming charter ${id} (${prior.status === 2 ? "approved" : "filed"})`);
+  } else {
+    const charter = buildCharter(s);
+    const fee = await configUint(c, "charterFeeUsd");
+    await send(acct.sponsor, c.usdc, mockERC20Abi as Abi, "approve", [c.charter, fee]);
+    const filed = await send(acct.sponsor, c.charter, marketCharterAbi as Abi, "file", [charter]);
+    const ev = parseEventLogs({ abi: marketCharterAbi as Abi, logs: filed.logs, eventName: "CharterFiled" })[0] as unknown as { args: { id: bigint } };
+    id = ev.args.id;
+    log(`${s.name}: charter ${id} filed (fee ${Number(fee) / 1e6} USDC, bond locked)`);
+  }
 
-  await waitJury(c.committee, id);
-  await send(acct.c0, c.committee, riskCommitteeAbi as Abi, "vote", [id, true]);
-  await send(acct.c1, c.committee, riskCommitteeAbi as Abi, "vote", [id, true]);
-  const comps = await read<BookComponents>(c.factory, bookFactoryAbi as Abi, "componentsOf", [id]);
-  if (!comps.book || /^0x0+$/.test(comps.book)) throw new Error(`${s.name}: book not created after committee approval`);
+  let comps = await read<BookComponents>(c.factory, bookFactoryAbi as Abi, "componentsOf", [id]);
+  if (!comps.book || BYTES32_ZERO.test(comps.book)) {
+    await waitJury(c.committee, id);
+    for (const m of [acct.c0, acct.c1]) {
+      if (!(await read<boolean>(c.committee, riskCommitteeAbi as Abi, "hasVoted", [id, m.address]))) await send(m, c.committee, riskCommitteeAbi as Abi, "vote", [id, true]);
+    }
+    comps = await read<BookComponents>(c.factory, bookFactoryAbi as Abi, "componentsOf", [id]);
+  }
+  if (!comps.book || BYTES32_ZERO.test(comps.book)) throw new Error(`${s.name}: book not created after committee approval`);
   log(`${s.name}: approved 2-of-3 -> book ${comps.book}`);
 
-  // subscriptions (senior oversubscribed to show pro-rata; sponsor ~29% of Junior commitments)
-  const commit = async (who: LocalAccount, tranche: Address, amount: number) => {
-    await send(who, c.usdc, mockERC20Abi as Abi, "approve", [tranche, usd(amount)]);
-    await send(who, tranche, trancheAbi as Abi, "deposit", [usd(amount), who.address]);
-  };
+  // subscriptions (scripts/launch-plan.ts commitPlan: the same amounts the up-front funding check used); a commit
+  // already made (tranche shares held) is not repeated
   const raise = Number((s.ifUsd + s.mmUsd) / 1_000_000n);
-  await commit(acct.sponsor, comps.junior, Math.round(raise * 0.12));
-  await commit(acct.a2, comps.junior, Math.round(raise * 0.3));
-  await commit(acct.a0, comps.senior, Math.round(raise * 0.5));
-  await commit(acct.a1, comps.senior, Math.round(raise * 0.4));
-  log(`${s.name}: subscriptions committed (raise ${raise.toLocaleString()} USDC)`);
+  if ((await read<number>(comps.book, bookAbi as Abi, "state")) === 0) {
+    const who: Record<Commit["who"], LocalAccount> = { sponsor: acct.sponsor, a0: acct.a0, a1: acct.a1, a2: acct.a2 };
+    for (const k of commitPlan(raise)) {
+      const tranche = k.tranche === "junior" ? comps.junior : comps.senior;
+      if ((await read<bigint>(tranche, trancheAbi as Abi, "balanceOf", [who[k.who].address])) > 0n) continue;
+      await send(who[k.who], c.usdc, mockERC20Abi as Abi, "approve", [tranche, usd(k.usd)]);
+      await send(who[k.who], tranche, trancheAbi as Abi, "deposit", [usd(k.usd), who[k.who].address]);
+    }
+    log(`${s.name}: subscriptions committed (raise ${raise.toLocaleString()} USDC)`);
+  } else {
+    log(`${s.name}: subscription window already closed — commitments left as they are`);
+  }
 
   // desk session key: operator consents to bond its stake, sponsor registers (tier >= maxInventory)
-  const validUntil = BigInt(Math.floor(Date.now() / 1000) + 365 * 86_400);
-  await send(acct.operator, comps.mandate, mMMandateAbi as Abi, "consentKey", [s.deskKey.address, true]);
-  await send(acct.sponsor, comps.mandate, mMMandateAbi as Abi, "registerKey", [s.deskKey.address, acct.operator.address, validUntil, s.maxInventoryUsd]);
+  if (!(await read<boolean>(comps.mandate, mMMandateAbi as Abi, "isActiveKey", [s.deskKey.address]))) {
+    const validUntil = BigInt(Math.floor(Date.now() / 1000) + 365 * 86_400);
+    await send(acct.operator, comps.mandate, mMMandateAbi as Abi, "consentKey", [s.deskKey.address, true]);
+    await send(acct.sponsor, comps.mandate, mMMandateAbi as Abi, "registerKey", [s.deskKey.address, acct.operator.address, validUntil, s.maxInventoryUsd]);
+  }
   log(`${s.name}: desk key ${s.deskKey.address} registered`);
   return { bookId: Number(id), name: s.name, symbol: s.symbol, venue: s.venue, components: comps };
 }
@@ -337,12 +374,13 @@ async function closeWindows(books: Array<{ name: string; components: BookCompone
 
 async function main() {
   const d = loadDeployment();
-  if (d.books.length > 0) {
+  if (d.books.length > 0 && d.launch?.complete !== false) {
     log(`already launched (${d.books.map((b) => b.name).join(", ")}) — nothing to do`);
     return;
   }
-  const count = await read<bigint>(d.contracts.charter, marketCharterAbi as Abi, "count");
-  if (count > 0n) throw new Error(`MarketCharter already has ${count} charters but the deployment lists no books — redeploy (bun run deploy:local)`);
+  // resume: books a previous run already chartered (launch.launched) are kept; a book it stopped in the middle of is
+  // picked up from its charter (launchBook); the rest is launched now
+  const launched = [...(d.launch?.launched ?? [])];
 
   const t = (sym: string) => {
     const e = d.stockTokens[sym];
@@ -375,17 +413,29 @@ async function main() {
   ].filter((s): s is LaunchSpec => s !== null);
 
   log(`network: chain ${CHAIN_ID} via ${RPC}; ${live ? "LIVE Orderly venue (real settlement token)" : "mock venue"}; books ${sizes.map((s) => `${s.name} (IF ${s.ifUsd}, MM ${s.mmUsd})`).join(", ")}`);
+  const todo = specs.filter((s) => !launched.some((b) => b.name === s.name));
+  if (launched.length) log(`resuming: already chartered ${launched.map((b) => b.name).join(", ")}; to do ${todo.map((s) => s.name).join(", ") || "none"}`);
   await fundGas();
-  await fundParticipants(d, sizes);
-  const books = [];
-  for (const s of specs) books.push(await launchBook(d, s));
-  await closeWindows(books);
-
+  await fundParticipants(d, sizes.filter((z) => todo.some((s) => s.name === z.name)));
   const path = deploymentPath();
-  const fresh = JSON.parse(readFileSync(path, "utf8")) as Deployment;
-  fresh.books = books;
-  writeFileSync(path, `${JSON.stringify(fresh, null, 2)}\n`);
-  log(`launched ${books.length} books -> ${path}`);
+  const saveProgress = (complete: boolean) => {
+    const fresh = JSON.parse(readFileSync(path, "utf8")) as Deployment;
+    if (complete) {
+      fresh.books = launched;
+      fresh.launch = { complete: true };
+    } else {
+      fresh.launch = { complete: false, launched };
+    }
+    writeFileSync(path, `${JSON.stringify(fresh, null, 2)}\n`);
+  };
+  saveProgress(false);
+  for (const s of todo) {
+    launched.push(await launchBook(d, s));
+    saveProgress(false); // a failure after this point resumes with the next book
+  }
+  await closeWindows(launched);
+  saveProgress(true);
+  log(`launched ${launched.length} books -> ${path}`);
 }
 
 main().catch((err) => {

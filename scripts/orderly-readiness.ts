@@ -7,6 +7,8 @@
 //   options: --json  --stage venue|builder|books (comma list; exit code from those stages only)
 //            --rpc <url>  --deployment <file>  --broker <id>  --admin <address>  --tickers NVDA,TSLA
 //            --builder-key ed25519:<base58 public key>   (checks it is registered for the admin account)
+//            --api <url>  our API (e.g. http://127.0.0.1:4500, the live stack): IF funded from the Orderly IF account as
+//                         ops-venue's signed venue report reads it (GET /v1/books/<id>/venue-report), not the adapter
 //
 // Stages (every row has one):
 //   venue   — what Orderly must enable: Vault code, Vault.getAllowedToken(keccak256("USDG")) == USDG,
@@ -298,6 +300,16 @@ export interface AdapterFacts {
   ifAccountOwner?: Address | null;
   /** Book.state(): 0 Subscription, 1 Cancelled, 2 Live, 3 Retiring, 4 Retired; null / absent = not read */
   bookState?: number | null;
+  /** The Orderly IF account's equity from ops-venue's latest signed venue report (--api); null / absent = not available */
+  venueIfUsd?: bigint | null;
+  venueIfAgeSec?: number | null;
+}
+
+/** "150.000000" (the API's 6-dp decimal string) -> 150_000_000n; null when not a non-negative decimal. */
+export function parseUsd6(v: unknown): bigint | null {
+  if (typeof v !== "string" || !/^\d+(\.\d{1,6})?$/.test(v)) return null;
+  const [w, f = ""] = v.split(".");
+  return BigInt(w as string) * 1_000_000n + BigInt(f.padEnd(6, "0"));
 }
 
 export const BOOK_STATES = ["Subscription", "Cancelled", "Live", "Retiring", "Retired"] as const;
@@ -391,13 +403,18 @@ export function bookRows(p: NetworkProfile, brokerId: string, book: { bookId: nu
   // On the real vault the 4th row is the IF funding (Orderly: strictly above the per-market requirement); on the mock
   // vault it stays the migration precondition (empty adapter).
   const req = BigInt(p.ifRequirementUsd) * 1_000_000n;
-  const funded = a.insuranceUsd > req;
+  // the Orderly IF account's equity when ops-venue's signed venue report is available (--api: GET /v1/books/<id>/venue-report;
+  // Orderly has no public per-account read: /v1/public/insurancefund is Orderly's own IF), else the adapter's figure
+  const venue = a.venueIfUsd !== undefined && a.venueIfUsd !== null;
+  const ifUsd = venue ? (a.venueIfUsd as bigint) : a.insuranceUsd;
+  const source = venue ? `Orderly IF account per ops-venue's signed report, ${a.venueIfAgeSec ?? "?"} s old` : "adapter: last relayed venue report + flows; --api for the Orderly account";
+  const funded = ifUsd > req;
   const ifRow: Row = real
     ? {
         stage: "books",
         check: `${tag} IF funded`,
         status: funded ? "PASS" : state === "Live" || state === "Retiring" ? "FAIL" : "INFO",
-        detail: `insurance ${usd(a.insuranceUsd)} USD (adapter, last venue report + flows) ${funded ? ">" : "<="} ${p.ifRequirementUsd} required per market${state ? `; book ${state}` : ""}${!funded && (state === null || state === "Subscription") ? " (deposited at window close: depositToVenue(IF))" : ""}${sym ? `; Orderly symbol ${builderSymbol(sym, brokerId)}` : ""}`,
+        detail: `insurance ${usd(ifUsd)} USD (${source}) ${funded ? ">" : "<="} ${p.ifRequirementUsd} required per market${state ? `; book ${state}` : ""}${!funded && (state === null || state === "Subscription") ? " (deposited at window close: depositToVenue(IF))" : ""}${sym ? `; Orderly symbol ${builderSymbol(sym, brokerId)}` : ""}`,
       }
     : {
         stage: "books",
@@ -498,6 +515,7 @@ export async function collect(argv: string[]): Promise<{ profile: NetworkProfile
   const admin = getAddress(adminArg);
   const stages = parseStages(arg(argv, "stage"));
   const builderKey = arg(argv, "builder-key");
+  const apiArg = arg(argv, "api")?.replace(/\/+$/, "");
   const pc = publicClientFor(profile.chainId, profile.rpcUrl);
   const api = profile.apiBase;
   const rows: Row[] = [];
@@ -613,6 +631,15 @@ export async function collect(argv: string[]): Promise<{ profile: NetworkProfile
           }),
         )
         .catch((e) => new Error(errText(e)));
+      if (apiArg && !(facts instanceof Error)) {
+        // read-only GET of our own API: ops-venue's signed venue report = the Orderly IF account as ops-venue reads it
+        const vr = await getJson<{ applicable?: boolean; report?: { insuranceUsd?: unknown; ageSeconds?: number } | null }>(`${apiArg}/v1/books/${b.bookId}/venue-report`).catch(() => null);
+        const v = parseUsd6(vr?.report?.insuranceUsd);
+        if (v !== null) {
+          facts.venueIfUsd = v;
+          facts.venueIfAgeSec = vr?.report?.ageSeconds ?? null;
+        }
+      }
       rows.push(...bookRows(profile, brokerId, { bookId: b.bookId, name: b.name, symbol: b.symbol, adapter }, facts));
     }
   }

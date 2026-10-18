@@ -18,6 +18,7 @@ import {
   exitCode,
   orderlyHash,
   parseStages,
+  parseUsd6,
   recordRows,
   symbolRows,
   tokenRows,
@@ -167,6 +168,12 @@ describe("book rows", () => {
     expect(live(0n, 4).status).toBe("INFO"); // Retired: recalled
     expect(bookRows(M, "bookrunner", book, { ...real, orderlyVault: M.vault, usdc: M.token.address, insuranceUsd: 25_000_000_000n, bookState: 2 })[3]!.status).toBe("FAIL");
     expect(bookRows(T, "bookrunner", book, { ...real, ifAccountOwner: A(0xe0a) })[2]!.detail).toContain("builder EOA");
+    // --api: the Orderly IF account (ops-venue's signed venue report) wins over the adapter's figure
+    const fromVenue = bookRows(T, "bookrunner", book, { ...real, insuranceUsd: 150_000_000n, venueIfUsd: 90_000_000n, venueIfAgeSec: 42, bookState: 2 })[3]!;
+    expect(fromVenue.status).toBe("FAIL");
+    expect(fromVenue.detail).toContain("insurance 90 USD (Orderly IF account per ops-venue's signed report, 42 s old)");
+    expect(live(150_000_000n, 2).detail).toContain("adapter: last relayed venue report + flows");
+    expect([parseUsd6("150.000000"), parseUsd6("0.5"), parseUsd6("12"), parseUsd6("-1.0"), parseUsd6(7), parseUsd6("1.1234567")]).toEqual([150_000_000n, 500_000n, 12_000_000n, null, null, null]);
     expect(bookRows(T, "bookrunner", book, { ...real, ifAccountOwner: zeroAddress })[2]!.detail).toContain("contract 0x000000");
   });
 

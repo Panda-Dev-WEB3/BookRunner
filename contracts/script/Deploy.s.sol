@@ -72,6 +72,8 @@ contract Deploy is Script {
     string internal tokenSymbol =
         vm.envOr("DEPLOY_ORDERLY_TOKEN", liveVault == address(0) ? string("USDC") : string("USDG"));
     bytes32 internal BROKER_HASH = keccak256(bytes(brokerId));
+    /// @dev DEPLOY_CHARTER_FEE_USD (6 dp); 0 = the config default (5,000e6)
+    uint256 internal charterFeeUsd = vm.envOr("DEPLOY_CHARTER_FEE_USD", uint256(0));
     bytes32 internal TOKEN_HASH = keccak256(bytes(tokenSymbol));
     uint32 internal constant TREASURY_INDEX = 22; // devkeys.ts DEV_ROLE_INDEX.treasury
     /// @dev Buyback pool fee tier pinned on BkrnFeeRouter (MockSwapRouter ignores it; mainnet: VERIFY pool).
@@ -141,8 +143,19 @@ contract Deploy is Script {
         uint256 deployerKey = vm.envOr("PRIVATE_KEY", uint256(0));
         if (deployerKey == 0) deployerKey = vm.deriveKey(mnemonic, 0);
         uint32 markInterval = uint32(vm.envOr("MARK_INTERVAL_SECONDS", uint256(300)));
+        _prepare(deployerKey, mnemonic); // roles + live-venue checks: before any broadcast
+
+        vm.startBroadcast(deployerKey);
+        _deploySteps(markInterval);
+        vm.stopBroadcast();
+
+        _writeDeployment();
+    }
+
+    /// @dev Role addresses, the live-venue preconditions (refused here, before any broadcast) and the launch tickers.
+    function _prepare(uint256 deployerKey, string memory mnemonic) internal {
         _roles(deployerKey, mnemonic);
-        if (liveVenue()) checkLiveVenue(liveVault, liveToken, TOKEN_HASH, BROKER_HASH); // before any broadcast
+        if (liveVenue()) checkLiveVenue(liveVault, liveToken, TOKEN_HASH, BROKER_HASH);
         startBlock = block.number; // NB: parent-chain block on Arbitrum Orbit (RHC) — deploy-testnet.sh rewrites it from receipts
 
         tickers.push("NVDA");
@@ -155,8 +168,10 @@ contract Deploy is Script {
         demoPrice["AAPL"] = 255e18;
         demoPrice["MSFT"] = 520e18;
         demoPrice["AMZN"] = 230e18;
+    }
 
-        vm.startBroadcast(deployerKey);
+    /// @dev Every deployment step, in order, as the deployer (run(): inside the broadcast).
+    function _deploySteps(uint32 markInterval) internal {
         _deployCore(markInterval);
         _deployVenuesAndGovernance();
         _registerImplementations();
@@ -165,9 +180,6 @@ contract Deploy is Script {
         // ERC-4337 EntryPoint v0.7 (canonical address) where deployed — RHC testnet has it (verified)
         address ep = 0x0000000071727De22E5E9d8BAf0edAc6f37da032;
         if (ep.code.length > 0) config.setAddress("entryPoint", ep);
-        vm.stopBroadcast();
-
-        _writeDeployment();
     }
 
     /// @dev venueMinIf[Orderly] for this network: DEPLOY_VENUE_MIN_IF_ORDERLY (6 dp) if set, else 101e6 on testnet (Orderly
@@ -290,7 +302,7 @@ contract Deploy is Script {
         vals[2] = 172_800;
         // charter fee in the settlement token (a live-venue rehearsal pays it in real testnet USDG: keep it small)
         keys[3] = "charterFeeUsd";
-        vals[3] = vm.envOr("DEPLOY_CHARTER_FEE_USD", config.charterFeeUsd());
+        vals[3] = charterFeeUsd == 0 ? config.charterFeeUsd() : charterFeeUsd;
         config.setParams(keys, vals);
     }
 

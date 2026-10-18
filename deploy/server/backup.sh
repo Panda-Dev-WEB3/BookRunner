@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Bookrunner backup: Postgres (pg_dump -Fc of bookrunner_<network>), Redis (BGSAVE snapshot), the state tree
 # .data/<network> (mock venue snapshot, ops keys, sagas; logs excluded) and contracts/deployments/*.json.
+# Testnet host: the live-Orderly rehearsal stack next to it (bookrunner@testnet-live) goes into the same set when its
+# database exists: postgres-live.dump (bookrunner_testnet_live) and .data/testnet-live (incl. the Orderly keys of accounts
+# holding REAL testnet USDG); its record 46630.live.json is one of the deployments/*.json; Redis db 2 is in redis.rdb.
 # Keeps 14 daily + 8 weekly sets; optional off-site copy (rsync over ssh and/or rclone). Records the outcome
 # in Redis (bkrn:backup:last) so services/alerts reports a missing, stale or failed backup.
 #
@@ -16,6 +19,7 @@
 #   BACKUP_DIR=/var/backups/bookrunner
 #   BACKUP_KEEP_DAILY=14  BACKUP_KEEP_WEEKLY=8
 #   BACKUP_REDIS_DB=1                 # db index the stack uses (status key); testnet 1, otherwise 0
+#   BACKUP_LIVE_REHEARSAL=auto        # testnet: also the live-Orderly rehearsal stack when its DB exists; off = never
 #   BACKUP_RSYNC_TARGET=backup@host:/srv/bookrunner/   BACKUP_RSYNC_SSH_KEY=/root/.ssh/bookrunner_backup
 #   BACKUP_RCLONE_REMOTE=crypt-remote:bookrunner       BACKUP_RCLONE_CONFIG=/root/.config/rclone/rclone.conf
 # The sets contain secret material (.data/<network>/keys): local copies are root-only (0700/0600); use an
@@ -38,6 +42,9 @@ if [ -z "${BACKUP_REDIS_DB:-}" ]; then
   if [ "$NETWORK" = testnet ]; then BACKUP_REDIS_DB=1; else BACKUP_REDIS_DB=0; fi
 fi
 STATUS_KEY="bkrn:backup:last"
+# live-Orderly rehearsal stack (scripts/network-profile.ts testnetLiveProfile; testnet host only)
+LIVE_DB=bookrunner_testnet_live
+LIVE_STATE=.data/testnet-live
 LOCK="${BACKUP_LOCK:-/run/bookrunner-backup.lock}"
 
 [ "$(id -u)" = 0 ] || { echo "run as root (sudo)" >&2; exit 1; }
@@ -113,6 +120,29 @@ verify_set() {
   psql_live -d postgres -c "DROP DATABASE IF EXISTS $scratch"
   log "    postgres: restored into $scratch and dropped"
 
+  # the live-Orderly rehearsal stack (when the set has it): its DB restores too, and its state holds the Orderly keys
+  if [ -f "$set/postgres-live.dump" ]; then
+    local lscratch=bookrunner_restore_check_live lrc=0
+    psql_live -d postgres -c "DROP DATABASE IF EXISTS $lscratch" -c "CREATE DATABASE $lscratch"
+    psql_live -d "$lscratch" -c "CREATE EXTENSION IF NOT EXISTS timescaledb" -c "SELECT timescaledb_pre_restore()" >/dev/null
+    docker cp "$set/postgres-live.dump" "$PG_CONTAINER:/tmp/restore-check-live.dump"
+    docker exec "$PG_CONTAINER" pg_restore -U bookrunner -d "$lscratch" --no-owner /tmp/restore-check-live.dump 2> "$set/.restore-check-live.log" || lrc=$?
+    docker exec "$PG_CONTAINER" rm -f /tmp/restore-check-live.dump
+    psql_live -d "$lscratch" -c "SELECT timescaledb_post_restore()" >/dev/null
+    [ "$lrc" = 0 ] || log "    live pg_restore reported errors (exit $lrc), see $set/.restore-check-live.log"
+    for t in books marks chain_cursor; do
+      restored="$(psql_live -d "$lscratch" -c "SELECT count(*) FROM $t" 2>/dev/null || echo "MISSING")"
+      live="$(psql_live -d "$LIVE_DB" -c "SELECT count(*) FROM $t" 2>/dev/null || echo "?")"
+      printf '    live %-12s restored %-10s live now %s\n' "$t" "$restored" "$live"
+      [ "$restored" != MISSING ] || { psql_live -d postgres -c "DROP DATABASE IF EXISTS $lscratch"; echo "!! table $t missing from the restored live DB" >&2; exit 1; }
+    done
+    psql_live -d postgres -c "DROP DATABASE IF EXISTS $lscratch"
+    log "    postgres (live rehearsal): restored into $lscratch and dropped"
+    local nkeys
+    nkeys="$(tar -tzf "$set/state.tar.gz" | grep -c "^\./$LIVE_STATE/keys/." || true)"
+    if [ "$nkeys" -gt 0 ]; then log "    state: $LIVE_STATE/keys present ($nkeys entries)"; else log "    state: no $LIVE_STATE/keys in the set (no book provisioned yet?)"; fi
+  fi
+
   # a throwaway Redis (no network, no AOF) loads the snapshot; the RDB is copied in (no host mount)
   local name=bookrunner-redis-restore-check
   docker rm -f "$name" >/dev/null 2>&1 || true
@@ -173,6 +203,18 @@ log "==> postgres: pg_dump -Fc $DB"
 docker exec "$PG_CONTAINER" pg_dump -U bookrunner -Fc -d "$DB" > "$WORK/postgres.dump"
 # the archive must list cleanly (truncated / corrupt dumps fail here, not on the day of the restore)
 docker exec -i "$PG_CONTAINER" pg_restore -l < "$WORK/postgres.dump" > /dev/null
+SUMS=(postgres.dump redis.rdb state.tar.gz MANIFEST)
+STATE_PATHS=("./.data/$NETWORK")
+LIVE=0
+if [ "$NETWORK" = testnet ] && [ "${BACKUP_LIVE_REHEARSAL:-auto}" != off ] \
+  && psql_live -d postgres -c "SELECT 1 FROM pg_database WHERE datname='$LIVE_DB'" | grep -q 1; then
+  LIVE=1
+  log "==> postgres: pg_dump -Fc $LIVE_DB (live-Orderly rehearsal stack)"
+  docker exec "$PG_CONTAINER" pg_dump -U bookrunner -Fc -d "$LIVE_DB" > "$WORK/postgres-live.dump"
+  docker exec -i "$PG_CONTAINER" pg_restore -l < "$WORK/postgres-live.dump" > /dev/null
+  SUMS+=(postgres-live.dump)
+  if [ -d "$APP/$LIVE_STATE" ]; then STATE_PATHS+=("./$LIVE_STATE"); fi
+fi
 
 log "==> redis: BGSAVE"
 before="$(rcli LASTSAVE)"
@@ -185,22 +227,24 @@ done
 [ "$(rcli INFO persistence | sed -n 's/^rdb_last_bgsave_status:\([a-z]*\).*/\1/p')" = ok ] || { log "!! BGSAVE failed"; false; }
 docker cp "$REDIS_CONTAINER:/data/dump.rdb" "$WORK/redis.rdb"
 
-log "==> state: $APP/.data/$NETWORK (logs excluded) + contracts/deployments/*.json"
+log "==> state: $APP ${STATE_PATHS[*]} (logs excluded) + contracts/deployments/*.json"
 # tar never follows symlinks: a link planted in the app tree cannot pull a root-only file into the set
+mapfile -t DEPLOYMENT_FILES < <(cd "$APP" && find ./contracts/deployments -maxdepth 1 -type f -name '*.json' 2>/dev/null)
 tar -C "$APP" -czf "$WORK/state.tar.gz" \
-  --exclude="./.data/$NETWORK/dev.log*" --exclude='*.log' --exclude='*.log.*' \
-  "./.data/$NETWORK" $(cd "$APP" && find ./contracts/deployments -maxdepth 1 -type f -name '*.json' 2>/dev/null)
+  --exclude="./.data/$NETWORK/dev.log*" --exclude="./$LIVE_STATE/dev.log*" --exclude='*.log' --exclude='*.log.*' \
+  "${STATE_PATHS[@]}" "${DEPLOYMENT_FILES[@]}"
 
 {
   echo "created=$STAMP"
   echo "network=$NETWORK"
   echo "database=$DB"
+  [ "$LIVE" = 0 ] || echo "live_database=$LIVE_DB"
   echo "redis_db=$BACKUP_REDIS_DB"
   echo "app_commit=$(git -C "$APP" -c safe.directory="$APP" rev-parse HEAD 2>/dev/null || echo unknown)"
   echo "postgres_image=$(docker inspect -f '{{.Config.Image}}' "$PG_CONTAINER" 2>/dev/null || echo unknown)"
   echo "redis_image=$(docker inspect -f '{{.Config.Image}}' "$REDIS_CONTAINER" 2>/dev/null || echo unknown)"
 } > "$WORK/MANIFEST"
-( cd "$WORK" && sha256sum postgres.dump redis.rdb state.tar.gz MANIFEST > SHA256SUMS )
+( cd "$WORK" && sha256sum "${SUMS[@]}" > SHA256SUMS )
 chmod 0600 "$WORK"/*
 mv "$WORK" "$OUT"
 BYTES="$(du -sb "$OUT" | cut -f1)"

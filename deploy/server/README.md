@@ -10,17 +10,20 @@ operator steps to move an existing server: [HARDENING.md](HARDENING.md).
 
 Mainnet (Robinhood Chain 4663) runs on a separate host with the network-parametrised unit
 [`bookrunner@.service`](bookrunner@.service) (`bookrunner@mainnet`), KMS role keys and no simulators:
-[MAINNET.md](MAINNET.md). This testnet host keeps `bookrunner.service`.
+[MAINNET.md](MAINNET.md). This testnet host keeps `bookrunner.service`. It may also run the live-Orderly rehearsal
+stack `bookrunner@testnet-live` NEXT TO it (same template + drop-in `bookrunner@testnet-live.service.d/`; its own
+mnemonic, record, database, Redis db, state and loopback ports; nginx routes no public traffic to it): docs/RUNBOOK.md
+"Testnet rehearsal on real Orderly".
 
 | Piece | Where |
 |---|---|
 | Code | `/opt/bookrunner/app` (git clone of this repo, user `bookrunner`; built and run as that user) |
 | Deploy scripts / units / nginx conf / compose, as root runs them | `/usr/local/lib/bookrunner-src` (root-owned clone) → `/usr/local/lib/bookrunner-deploy` (root-owned copy of `deploy/server`) |
-| Secrets + state (never in git) | `.env.testnet` (mode 600: mnemonic, `ORACLE_SEED`, ...), `contracts/deployments/46630.json`, `.data/testnet/`; infra passwords in `/usr/local/lib/bookrunner-deploy/.env.infra` (root, 600) |
-| Stack | `bookrunner.service` (user `bookrunner`, sandboxed) → `scripts/dev.ts --network testnet --no-web` (cap 2.5 GB RAM) |
+| Secrets + state (never in git) | `.env.testnet` (mode 600: mnemonic, `ORACLE_SEED`, ...), `contracts/deployments/46630.json`, `.data/testnet/`; infra passwords in `/usr/local/lib/bookrunner-deploy/.env.infra` (root, 600). Rehearsal stack: `.env.testnet-live` (mode 600: `BKRN_TESTNET_LIVE_MNEMONIC`, its `ORACLE_SEED`, `ORDERLY_BUILDER_KEY_SECRET`), `contracts/deployments/46630.live.json`, `.data/testnet-live/` (Orderly keys of accounts holding real testnet USDG), DB `bookrunner_testnet_live` (all in the daily backup, RESTORE.md) |
+| Stack | `bookrunner.service` (user `bookrunner`, sandboxed) → `scripts/dev.ts --network testnet --no-web` (cap 2.5 GB RAM); optional `bookrunner@testnet-live` → `scripts/dev.ts --network testnet-live --no-web` (cap 2 GB, API 127.0.0.1:4500, oracle 4510, charter 4530; installed, not enabled) |
 | Infra | `bookrunner-infra.service` (root) → `docker-compose.yml` → Postgres 127.0.0.1:54400, Redis 127.0.0.1:63790 (both password-protected) |
 | Web | site → `/var/www/bookrunner/`, app → `/var/www/bookrunner/app/`; nginx site `bookrunner` + snippet `/etc/nginx/snippets/bookrunner-locations.conf` + rate-limit zones `/etc/nginx/conf.d/bookrunner-ratelimit.conf` |
-| Logs | `/opt/bookrunner/app/.data/testnet/dev.log` (logrotate daily, 7 kept) |
+| Logs | `/opt/bookrunner/app/.data/testnet/dev.log`, `/opt/bookrunner/app/.data/testnet-live/dev.log` (logrotate daily, 7 kept) |
 
 ## URL layout
 
@@ -125,6 +128,7 @@ template no longer lists them.)
 sudo systemctl status bookrunner bookrunner-infra   # stack, infra
 sudo tail -f /opt/bookrunner/app/.data/testnet/dev.log
 sudo systemctl restart bookrunner
+sudo systemctl start bookrunner@testnet-live              # rehearsal stack next to it (stop: systemctl stop bookrunner@testnet-live)
 sudo /usr/local/lib/bookrunner-deploy/update.sh            # deploy origin/main
 sudo /usr/local/lib/bookrunner-deploy/update.sh --web-only # site + app + nginx + units, no restart
 ```

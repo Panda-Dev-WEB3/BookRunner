@@ -128,6 +128,11 @@ export interface Deployment {
    * Vault and its settlement token (config.usdc(), not mintable), DEPLOY_ORDERLY_VAULT / DEPLOY_SETTLEMENT_TOKEN.
    */
   orderly?: { venue: "mock" | "live"; vault: Address; brokerId: string; token: string; settlementToken: Address };
+  /**
+   * scripts/launch-devnet.ts progress: `complete: false` while a launch is under way or stopped part way (`launched` = the
+   * books already chartered, moved to `books` once every window is closed); dev.ts re-runs the launch, which resumes.
+   */
+  launch?: { complete: boolean; launched?: Deployment["books"] };
 }
 
 /** True when the record's Orderly books are bound to the real Orderly vault (no mock venue, no mintable settlement token). */

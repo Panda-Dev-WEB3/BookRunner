@@ -348,7 +348,7 @@ describe("config", () => {
 
   test("the testnet dev profile runs the low-gas modes (signed reports, pull oracle) and keeps its mark interval", () => {
     const src = readFileSync(resolve(import.meta.dir, "../../../scripts/dev.ts"), "utf8");
-    const profile = src.slice(src.indexOf('if (network === "testnet")'), src.indexOf("loadEnvFile(\".env\", false)"));
+    const profile = src.slice(src.indexOf("if (testnetLike) {"), src.indexOf("loadEnvFile(\".env\", false)"));
     expect(profile).toContain('OPS_REPORT_MODE: "signed"');
     expect(profile).toContain('ORACLE_PUSH_MODE: "pull"');
     expect(profile).toContain('MARK_INTERVAL_SECONDS: "3600"');

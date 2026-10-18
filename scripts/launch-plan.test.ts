@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { LIVE_SIZES, MOCK_SIZES, launchBooks, launchSizes, settlementNeeds, transferPlan } from "./launch-plan";
+import { COMMIT_SHARES, LIVE_SIZES, MOCK_SIZES, commitPlan, launchBooks, launchSizes, settlementNeeds, transferPlan } from "./launch-plan";
 
 const testnetMin = (v: 0 | 1) => (v === 0 ? 101 : 10_000);
 
@@ -26,6 +26,21 @@ describe("launch plan (mock venue vs live Orderly rehearsal, VERIFY O17)", () =>
       { name: "RHX5", ifUsd: 10_000, mmUsd: 200, maxInventoryUsd: 250 },
     ]);
     expect(() => launchSizes(true, ["NVDA"], testnetMin, { LAUNCH_MM_USD: "-1" })).toThrow("LAUNCH_MM_USD");
+    // whole USD only: launchBook works in whole USD (a fractional amount would be truncated after the funding check)
+    expect(() => launchSizes(true, ["NVDA"], testnetMin, { LAUNCH_IF_USD: "150.5" })).toThrow("not a positive whole number of USD");
+    expect(() => launchSizes(true, ["NVDA"], testnetMin, { LAUNCH_MAX_INVENTORY_USD: "1e-3" })).toThrow("LAUNCH_MAX_INVENTORY_USD");
+  });
+
+  test("commit plan: the one source of the subscription amounts (launchBook and the funding check)", () => {
+    expect(commitPlan(650)).toEqual([
+      { who: "sponsor", tranche: "junior", usd: 78 },
+      { who: "a2", tranche: "junior", usd: 195 },
+      { who: "a0", tranche: "senior", usd: 325 },
+      { who: "a1", tranche: "senior", usd: 260 },
+    ]);
+    expect(commitPlan(1000).map((c) => c.usd)).toEqual([COMMIT_SHARES.sponsorJunior, COMMIT_SHARES.a2Junior, COMMIT_SHARES.a0Senior, COMMIT_SHARES.a1Senior].map((x) => x * 1000));
+    const needs = settlementNeeds([{ name: "NVDA", ifUsd: 150, mmUsd: 500, maxInventoryUsd: 250 }], 0);
+    for (const c of commitPlan(650)) expect(needs[c.who]).toBe(c.usd);
   });
 
   test("settlement needs and the deployer's transfers (only the gaps)", () => {

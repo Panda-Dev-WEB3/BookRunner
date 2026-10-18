@@ -24,21 +24,15 @@ contract LiveVenueDeployHarness is Deploy {
         BROKER_HASH = keccak256(bytes(broker));
     }
 
-    /// @dev run() without the broadcast and the file write; returns the deployment record JSON.
+    function setCharterFee(uint256 fee) external {
+        charterFeeUsd = fee; // what DEPLOY_CHARTER_FEE_USD sets
+    }
+
+    /// @dev run() without the broadcast and the file write (the same _prepare / _deploySteps); returns the record JSON.
     function deployAll() external returns (string memory) {
-        _roles(vm.deriveKey(DEFAULT_MNEMONIC, 0), DEFAULT_MNEMONIC);
-        if (liveVenue()) checkLiveVenue(liveVault, liveToken, TOKEN_HASH, BROKER_HASH);
-        string[5] memory ts = ["NVDA", "TSLA", "AAPL", "MSFT", "AMZN"]; // RHX5 weights 5 x 2000 bps
-        for (uint256 i; i < ts.length; ++i) {
-            tickers.push(ts[i]);
-            demoPrice[ts[i]] = (100 + i) * 1e18;
-        }
+        _prepare(vm.deriveKey(DEFAULT_MNEMONIC, 0), DEFAULT_MNEMONIC);
         vm.startPrank(deployer);
-        _deployCore(300);
-        _deployVenuesAndGovernance();
-        _registerImplementations();
-        _grantRoles();
-        _setupStockTokens();
+        _deploySteps(300);
         vm.stopPrank();
         return _deploymentJson();
     }
@@ -176,6 +170,18 @@ contract DeployLiveVenueTest is Test {
         LiveVenueDeployHarness h = _harness(address(vault), address(usdg), "USDG");
         vm.expectRevert(bytes("Deploy.s.sol: live venue on devnet / testnet only"));
         h.deployAll();
+    }
+
+    function test_charterFee_override() public {
+        // DEPLOY_CHARTER_FEE_USD: the live-venue rehearsal pays its charter fee in real testnet USDG (deploy-testnet.sh: 10)
+        LiveVenueDeployHarness h = _harness(address(vault), address(usdg), "USDG");
+        h.setCharterFee(10e6);
+        h.deployAll();
+        assertEq(h.cfg().charterFeeUsd(), 10e6);
+        LiveVenueDeployHarness m = new LiveVenueDeployHarness(); // mock venue: the override applies on any network
+        m.setCharterFee(1e6);
+        m.deployAll();
+        assertEq(m.cfg().charterFeeUsd(), 1e6);
     }
 
     function test_testnet_liveVenue_keepsTheTestnetMinIf() public {

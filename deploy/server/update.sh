@@ -113,7 +113,8 @@ fi
 
 # ---- systemd units (from the root-owned copy)
 units_changed=0
-for u in bookrunner.service bookrunner-infra.service bookrunner-backup.service bookrunner-backup.timer; do
+for u in bookrunner.service bookrunner@.service bookrunner-infra.service bookrunner-backup.service bookrunner-backup.timer bookrunner@testnet-live.service.d/override.conf; do
+  install -d -m 0755 "/etc/systemd/system/$(dirname "$u")"
   if ! cmp -s "$DEPLOY/$u" "/etc/systemd/system/$u"; then
     install -m 0644 "$DEPLOY/$u" "/etc/systemd/system/$u"
     units_changed=1
@@ -132,5 +133,7 @@ if [ "${1:-}" != "--web-only" ]; then
   systemctl reload bookrunner-infra
   echo "==> restart stack"
   systemctl restart bookrunner
+  # the live-Orderly rehearsal stack (if running) follows the same code
+  if systemctl is-active --quiet bookrunner@testnet-live; then echo "==> restart bookrunner@testnet-live"; systemctl restart bookrunner@testnet-live; fi
 fi
 echo "==> done ($WANT)"

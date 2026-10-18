@@ -1,5 +1,7 @@
 # Bookrunner stack, parametrised by network: bookrunner@mainnet (the MAINNET host) or bookrunner@testnet.
-# %i is passed to scripts/dev.ts --network %i. The live testnet host keeps bookrunner.service (unchanged);
+# %i is passed to scripts/dev.ts --network %i. The live testnet host keeps bookrunner.service (unchanged) and may run
+# bookrunner@testnet-live next to it (the live-Orderly rehearsal: own keys, record, DB, state, ports; drop-in
+# bookrunner@testnet-live.service.d/override.conf);
 # the mainnet host runs ONLY bookrunner@mainnet (separate host, separate keys, never both networks on one
 # machine). See MAINNET.md.
 #

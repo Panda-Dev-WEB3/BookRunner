@@ -22,8 +22,25 @@ export const MOCK_SIZES: Record<LaunchBookName, { ifUsd: number; mmUsd: number; 
 /** Rehearsal sizes (whole USD) on the live venue: real USDG, Orderly testnet IF requirement > 100 per market. */
 export const LIVE_SIZES = { ifUsd: 150, mmUsd: 500, maxInventoryUsd: 250 } as const;
 
-/** Share of a book's raise (IF + MM) each participant commits (launch-devnet.ts launchBook). */
+/** Share of a book's raise (IF + MM) each participant commits: the ONE source for launchBook and settlementNeeds. */
 export const COMMIT_SHARES = { sponsorJunior: 0.12, a2Junior: 0.3, a0Senior: 0.5, a1Senior: 0.4 } as const;
+
+export interface Commit {
+  who: "sponsor" | "a0" | "a1" | "a2";
+  tranche: "junior" | "senior";
+  /** whole USD */
+  usd: number;
+}
+
+/** The subscriptions launchBook commits for a raise of `raiseUsd` whole USD (senior oversubscribed to show pro-rata). */
+export function commitPlan(raiseUsd: number): Commit[] {
+  return [
+    { who: "sponsor", tranche: "junior", usd: Math.round(raiseUsd * COMMIT_SHARES.sponsorJunior) },
+    { who: "a2", tranche: "junior", usd: Math.round(raiseUsd * COMMIT_SHARES.a2Junior) },
+    { who: "a0", tranche: "senior", usd: Math.round(raiseUsd * COMMIT_SHARES.a0Senior) },
+    { who: "a1", tranche: "senior", usd: Math.round(raiseUsd * COMMIT_SHARES.a1Senior) },
+  ];
+}
 
 export interface BookSize {
   name: LaunchBookName;
@@ -38,7 +55,7 @@ function positive(env: Env, key: string): number | undefined {
   const v = env[key];
   if (v === undefined || v === "") return undefined;
   const n = Number(v);
-  if (!Number.isFinite(n) || n <= 0) throw new Error(`${key}: not a positive number of USD (${v})`);
+  if (!Number.isInteger(n) || n <= 0) throw new Error(`${key}: not a positive whole number of USD (${v})`);
   return n;
 }
 
@@ -72,13 +89,7 @@ export type Participant = "sponsor" | "a0" | "a1" | "a2";
 /** Settlement token (whole USD, rounded per commit as launchBook rounds) each participant spends: commits + charter fees. */
 export function settlementNeeds(sizes: BookSize[], charterFeeUsd: number): Record<Participant, number> {
   const out: Record<Participant, number> = { sponsor: charterFeeUsd * sizes.length, a0: 0, a1: 0, a2: 0 };
-  for (const s of sizes) {
-    const raise = s.ifUsd + s.mmUsd;
-    out.sponsor += Math.round(raise * COMMIT_SHARES.sponsorJunior);
-    out.a2 += Math.round(raise * COMMIT_SHARES.a2Junior);
-    out.a0 += Math.round(raise * COMMIT_SHARES.a0Senior);
-    out.a1 += Math.round(raise * COMMIT_SHARES.a1Senior);
-  }
+  for (const s of sizes) for (const c of commitPlan(s.ifUsd + s.mmUsd)) out[c.who] += c.usd;
   return out;
 }
 

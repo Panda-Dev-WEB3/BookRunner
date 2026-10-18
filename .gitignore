@@ -17,6 +17,8 @@ contracts/deployments/31337.json
 .data/
 .claude/worktrees/
 .env.testnet
+# live-Orderly rehearsal stack (scripts/network-profile.ts testnetLiveProfile): its own mnemonic, ORACLE_SEED, builder key
+.env.testnet-live
 # server infra passwords (deploy/server/install.sh generates it in the root-owned deploy copy)
 .env.infra
 .data/
@@ -25,6 +27,8 @@ contracts/broadcast/
 contracts/deployments/46630.json
 contracts/deployments/46630.live.json
 contracts/deployments/46630.mock.json
+# archived live records (deploy-testnet.sh ORDERLY_VENUE=live REDEPLOY=1)
+contracts/deployments/46630.live.*.json
 # mainnet record: host-local (record-books.ts appends books); archive a copy after each change (docs/RUNBOOK.md)
 contracts/deployments/4663.json
 # DeployMainnet dry runs / forge test scratch files

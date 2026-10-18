@@ -28,4 +28,10 @@ describe("supervisor status", () => {
     expect(parseSupervisorStatus(JSON.stringify({ v: 2 }))).toBeNull();
     expect(parseSupervisorStatus(null)).toBeNull();
   });
+
+  test("testnet variants carry their deployer address (the other variant refuses to start on the same keys)", () => {
+    const s = supervisorStatus("testnet-live", T, [newProc("api", T)], T + 10, "0x00000000000000000000000000000000000000aa");
+    expect(parseSupervisorStatus(JSON.stringify(s))?.deployer).toBe("0x00000000000000000000000000000000000000aa");
+    expect("deployer" in supervisorStatus("devnet", T, [], T)).toBe(false);
+  });
 });
