@@ -49,11 +49,6 @@ export function quoteStraddlesOracle(q: QuoteProposal): boolean {
   return ((q.bidPx - q.oraclePx) / q.oraclePx) * 10_000 <= 1e-9 && ((q.oraclePx - q.askPx) / q.oraclePx) * 10_000 <= 1e-9;
 }
 
-/** Audit M-3: charter rule, maxSkewBps <= minQuoteWidthBps / 2 (MarketCharter.validate / validateMandate). */
-export function skewWithinHalfWidth(m: Pick<Mandate, "maxSkewBps" | "minQuoteWidthBps">): boolean {
-  return m.maxSkewBps * 2 <= m.minQuoteWidthBps;
-}
-
 export function checkQuote(m: Mandate, q: QuoteProposal): QuoteCheck {
   const widthBps = quoteWidthBps(q);
   const skewBps = quoteSkewBps(q);

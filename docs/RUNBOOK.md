@@ -434,7 +434,14 @@ can redo it during the timelock delay from the published quote.
 - **Kill switch for new business**: `BookrunnerConfig.setNewBooksPaused(true)` (GUARDIAN or timelock)
   — pauses new charters, books and deposits. Redemptions keep working; there is no switch for them.
 - **Re-mandate after a kill**: committee `proposeAction(bookId, "REMANDATE", abi.encode(mandate))`,
-  2-of-3 approve; the sponsor re-registers desk keys.
+  2-of-3 approve; the sponsor re-registers desk keys. Terms must have `maxSkewBps <= minQuoteWidthBps / 2`
+  (audit M-3; a re-mandate of the pre-fix devnet terms 8/25, 12/30, 10/25 reverts `InvalidMandate`).
+- **Engine loss budget spent** (in-house books, audit M-3): traders' new risk reverts `LossBudgetExceeded`
+  once the pool has lost more than |killAtDrawdownBps| of its equity at the period's first trade, until the
+  next `markInterval` period; reductions, closes and liquidations keep working. Read
+  `PoolEngine.lossBudget(marketId)` (anchor, loss, budget, blocked). The kill path is unchanged: the drawdown
+  kill at the next mark, or a RISK / committee kill if the loss is not market movement. The budget never
+  needs lifting by hand.
 - **Mark reconciliation break** (Day-30 kill criterion): freeze new charters until clean; compare the
   mark's `pnl_json` venue section against the venue statement for the period.
 - **Wind-down**: `MarketCharter.retire(bookId)` → agents flatten → keeper recalls IF + MM → final

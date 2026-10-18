@@ -304,7 +304,8 @@ Every deploy/recall/fundDesk and desk `ReturnToVault` calls `book.onCapitalFlow(
   `BAD_ORACLE`, `BAD_BPS` (hurdle/cap > 1e4 or cap == 0), `BAD_WINDOW` (window < 60s or > 30d),
   `BAD_NOTICE` (< `config.markInterval()` or > 30d; the minimum is defence in depth beside held marks,
   audit M-1: a Junior request always bears at least one full mark period of P&L), `BAD_MANDATE` (maxInventory == 0, minQuoteWidth == 0, band min > max,
-  killAtDrawdownBps >= 0 or < -5000, maxSkewBps <= 0), `BAD_UNDERLYING` (not canonical token, not
+  killAtDrawdownBps >= 0 or < -5000, maxSkewBps <= 0, maxSkewBps > minQuoteWidthBps / 2: audit M-3, a quote at the
+  minimum width and the maximum skew must still straddle the oracle), `BAD_UNDERLYING` (not canonical token, not
   registered index), `BAD_SYMBOL` (zero), `BAD_FEES` (in-house taker fee > 100 bps).
 - `decide(id, ok, juryCid)` only committee. Approve → fee forwarded to `expenseRecipient`
   (committee review + oracle setup), `factory.create(id, charter)`, record book, status Approved.
@@ -329,12 +330,12 @@ Every deploy/recall/fundDesk and desk `ReturnToVault` calls `book.onCapitalFlow(
 | Field | Meaning | Enforced |
 |---|---|---|
 | `maxInventoryUsd` | max \|net venue position notional\| | engine: hard cap (`maxNetExposureUsd`); Orderly: risk monitor + venue position caps; key tier must be ≥ it |
-| `maxSkewBps` | max \|quote mid − oracle\| / oracle | engine `checkQuote`; agent pre-trade; risk monitor |
+| `maxSkewBps` | max \|quote mid − oracle\| / oracle; ≤ minQuoteWidthBps / 2 (audit M-3) | engine `checkQuote` (also 2 × \|skew\| ≤ spread); agent pre-trade; risk monitor (a quote not straddling the oracle is a SKEW breach) |
 | `minQuoteWidthBps` | min (ask − bid)/mid | engine `checkQuote` (spreadBps); agent; risk |
 | `maxHedgeLeverage` | perp hedge legs, 0.01x units; spot = 100 | `checkHedge` |
 | `hedgeRatioMin/MaxBps` | \|offsetting hedge\| / \|exposure\|; enforced when \|exposure\| ≥ 5% of maxInventory | `checkHedge`: post-trade in band OR strictly closer to band |
 | `noNewRiskOffHours` | oracle `held` or stale ⇒ reduce-only | engine, `checkHedge` (must reduce \|exposure+hedge\|), `checkInventoryMove` (toVenue blocked), agent |
-| `killAtDrawdownBps` | drawdown of perf index from high-water ≤ this ⇒ kill | book at mark (on-chain), risk intra-mark |
+| `killAtDrawdownBps` | drawdown of perf index from high-water ≤ this ⇒ kill | book at mark (on-chain), risk intra-mark; engine books: also the per-period pool loss budget (\|kill\| bps of the pool equity, audit M-3) |
 | `hedgeAllowRoot` | StandardMerkleTree over `(bytes32 asset, bytes32 venue)` | `checkHedge` with proof |
 
 Spot Stock Tokens are long-only (not borrowable): a spot hedge can only offset a **short** venue
@@ -348,7 +349,9 @@ IF: `insuranceEquity + amount <= charter.ifTargetUsd`; MM: `max(marginEquity,0) 
 charter.mmInventoryUsd`; off-hours + noNewRiskOffHours blocks toVenue. Recalls (toVenue=false) are
 always allowed to an active key, the RISK role, KEEPER and the book.
 `FundDesk`: desk value after ≤ `maxInventoryUsd * hedgeRatioMaxBps / 1e4`.
-`checkQuote`: spread ≥ minQuoteWidthBps, |skew| ≤ maxSkewBps, maxNetExposure ≤ maxInventoryUsd.
+`checkQuote`: spread ≥ minQuoteWidthBps, |skew| ≤ maxSkewBps, 2 × |skew| ≤ spread (`QuoteOneSided`, audit M-3:
+the quote straddles the oracle, so buy fill ≥ oracle ≥ sell fill; holds for a mandate cached before the charter
+rule too), maxNetExposure ≤ maxInventoryUsd. PoolEngine.setQuote enforces 2 × |skew| ≤ spread itself.
 
 Keys: `registerKey` (sponsor) requires `inventoryTierUsd >= mandate.maxInventoryUsd` and locks
 `config.agentTierBond(inventoryTierUsd)` from `operator` (lockId = keccak(bookId, key)) on
@@ -424,7 +427,15 @@ engine (audit N-1, below).
 - `PoolEngine` per `IPoolEngine` (pool-vs-trader, isolated margin, aggregate accounting O(1)):
   - fill price: buy (trader long) at `oracle * (1e4 + spread/2 + skew) / 1e4`, sell at
     `oracle * (1e4 - spread/2 + skew) / 1e4` — skew (signed bps) shifts both sides; reverts if worse
-    than `acceptablePriceWad`.
+    than `acceptablePriceWad`. `setQuote` requires 2 × |skew| ≤ spread (audit M-3): buy fill ≥ oracle ≥
+    sell fill, so at a constant oracle price no fill can cost the pool (invariant
+    `test/audit/ext2026/M3PoolEquityInvariant.t.sol`).
+  - per-period loss budget (audit M-3): the first trade of each `config.markInterval()`-long period (Unix-time
+    buckets) anchors the pool equity at the oracle; liquidity the adapter moves shifts the anchor. New risk reverts
+    `LossBudgetExceeded` while `anchor - poolEquity > lossBudgetBps × anchor` (reductions, closes, liquidations
+    and `forceClose` stay open); the next period re-anchors. `lossBudgetBps` = |mandate.killAtDrawdownBps| (set
+    by the adapter at `initialize` and on every re-mandate; 800 until then, 1..5000). Cost: one SLOAD and a
+    config read per trade, one SSTORE per period. View `lossBudget(marketId)`.
   - split gate (audit N-1): positions are per share and never rebased, so while an out-of-band multiplier
     change of the market's token (any component, for an index) is pre-approved or staged, new risk (and margin
     withdrawal with a position) reverts `SplitPending` (close-only); while the price predates the change every
