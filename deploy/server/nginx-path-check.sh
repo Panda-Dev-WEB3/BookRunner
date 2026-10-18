@@ -54,10 +54,17 @@ nginx -c /t/nginx.conf
 sleep 0.5
 fails=0
 # raw request: prints "<status> <body first line>"
+# A request nginx rejects while parsing (e.g. %00) can be answered and reset before `cat` reads the reply:
+# retry an empty read a few times.
 raw() {
-  exec 3<>/dev/tcp/127.0.0.1/8080
-  printf 'GET %s HTTP/1.1\r\nHost: bookrunner.tech\r\nConnection: close\r\n\r\n' "$1" >&3
-  local resp; resp="$(cat <&3)"; exec 3<&-
+  local resp="" try
+  for try in 1 2 3 4 5; do
+    exec 3<>/dev/tcp/127.0.0.1/8080
+    printf 'GET %s HTTP/1.1\r\nHost: bookrunner.tech\r\nConnection: close\r\n\r\n' "$1" >&3
+    resp="$(cat <&3 2>/dev/null)"; exec 3<&-
+    [ -n "$resp" ] && break
+    sleep 0.2
+  done
   local status; status="$(printf '%s' "$resp" | head -n1 | awk '{print $2}')"
   local body; body="$(printf '%s' "$resp" | sed -n '/^\r$/,$p' | sed -n '2p' | tr -d '\r')"
   printf '%s %s' "$status" "$body"

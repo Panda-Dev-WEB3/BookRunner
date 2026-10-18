@@ -19,16 +19,19 @@ export const TRPC_MAX_BATCH = 10;
  */
 export const isHeavyProcedure = (path: string) => path.startsWith("receipts.");
 
+/** Links of the typed client: receipts.* unbatched, everything else batched up to TRPC_MAX_BATCH. */
+export function trpcLinks() {
+  return [
+    splitLink<AppRouter>({
+      condition: (op) => isHeavyProcedure(op.path),
+      true: httpLink({ url: trpcUrl, transformer: superjson }),
+      false: httpBatchLink({ url: trpcUrl, transformer: superjson, maxURLLength: 4000, maxItems: TRPC_MAX_BATCH }),
+    }),
+  ];
+}
+
 export function createTrpcClient() {
-  return trpc.createClient({
-    links: [
-      splitLink({
-        condition: (op) => isHeavyProcedure(op.path),
-        true: httpLink({ url: trpcUrl, transformer: superjson }),
-        false: httpBatchLink({ url: trpcUrl, transformer: superjson, maxURLLength: 4000, maxItems: TRPC_MAX_BATCH }),
-      }),
-    ],
-  });
+  return trpc.createClient({ links: trpcLinks() });
 }
 
 /** Unbatched, untyped client for optional procedures (an unknown path must not fail a batch). */

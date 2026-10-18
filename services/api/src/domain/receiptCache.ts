@@ -74,9 +74,13 @@ export class WeightedLru<V> {
     return s.value;
   }
 
-  /** false when the value alone exceeds the weight bound (not cached). */
-  set(key: string, value: V, weight: number, expiresAt: number | null = null): boolean {
+  /**
+   * false when the value alone exceeds the weight bound (not cached). Expired entries are dropped first
+   * (when `now` is given), so short-lived entries never push out live ones.
+   */
+  set(key: string, value: V, weight: number, expiresAt: number | null = null, now?: number): boolean {
     this.delete(key);
+    if (now !== undefined) this.purgeExpired(now);
     if (weight > this.maxWeight) return false;
     this.slots.set(key, { value, weight, expiresAt });
     this.total += weight;
@@ -86,6 +90,10 @@ export class WeightedLru<V> {
       this.stats.evictions++;
     }
     return true;
+  }
+
+  purgeExpired(now: number) {
+    for (const [k, s] of this.slots) if (s.expiresAt !== null && now >= s.expiresAt) this.delete(k);
   }
 
   delete(key: string) {
@@ -106,7 +114,7 @@ export interface ReceiptCaches {
   hours: WeightedLru<HourTree>;
   periods: WeightedLru<PeriodRoots>;
   /** one build per hour at a time, however many requests ask for it together */
-  inflight: Map<string, Promise<{ hour: HourTree; rows: ReceiptRow[] }>>;
+  inflight: Map<string, Promise<{ committed: HourTree; all: HourTree; rows: ReceiptRow[] }>>;
 }
 
 const perDeps = new WeakMap<ApiDeps, ReceiptCaches>();
@@ -126,9 +134,19 @@ export function receiptCaches(deps: ApiDeps): ReceiptCaches {
 }
 
 /**
- * The tree of one book-hour. `stored` is its receipt_roots row (null while the hour is open). A cached tree
- * is reused when it was built for a closed hour (or the hour is still open and the entry fresh) and holds
- * `mustContain`; otherwise the leaves are read and the tree rebuilt (`rows` is then set).
+ * The tree of one book-hour. `stored` is its receipt_roots row (null while the hour is open).
+ *
+ * Closed hour (root committed, window ended): the cached tree is the COMMITTED one: the hour's leaves, or,
+ * when receipts were written into the hour after its root (a producer clock fault), the first
+ * `stored.leafCount` leaves by id, the receipts service's own rule (services/receipts roots.ts). It is never
+ * replaced by a tree that no longer matches the stored root, so every proof of a committed receipt reports
+ * the same hourly root whatever was asked before. A late receipt is proven against the tree of all the
+ * hour's leaves, cached separately (`<key>:all`); it does not match the stored root, which is the truth.
+ * When neither the leaves nor that prefix reproduce the stored root the hour is inconsistent: logged, and
+ * the tree of all leaves serves (every proof then reports matchesStored false, consistently).
+ *
+ * Open hour (no root yet): cached for openTtlMs; an hour without any leaf is never cached (an arbitrary
+ * hourStart must not evict real trees). A receipt the cached tree lacks forces a rebuild.
  */
 export async function hourTreeFor(
   deps: ApiDeps,
@@ -139,19 +157,40 @@ export async function hourTreeFor(
 ): Promise<{ hour: HourTree; rows: ReceiptRow[] | null }> {
   const c = receiptCaches(deps);
   const key = `${bookId}:${hourStart.getTime()}`;
+  const allKey = `${key}:all`;
   const now = deps.now();
   const closed = stored !== null && hourStart.getTime() + deps.settings.receiptsIntervalSeconds * 1000 <= now;
+  const holds = (h: HourTree | undefined) => h !== undefined && (mustContain === undefined || h.ids.has(mustContain));
   const hit = c.hours.get(key, now);
-  if (hit && (hit.closed || !closed) && (mustContain === undefined || hit.ids.has(mustContain))) return { hour: hit, rows: null };
+  if (hit && (hit.closed || !closed) && holds(hit)) return { hour: hit, rows: null };
+  if (closed && hit?.closed) {
+    const all = c.hours.get(allKey, now);
+    if (all && holds(all)) return { hour: all, rows: null };
+  }
   let p = c.inflight.get(key);
   if (!p) {
     p = (async () => {
       const rows = await deps.data.receiptsInHour(bookId, hourStart);
-      const hour = hourTreeOf(rows, closed);
-      c.hours.set(key, hour, Math.max(1, rows.length), closed ? null : deps.now() + RECEIPT_TREE_CACHE.openTtlMs);
-      return { hour, rows };
+      const t = deps.now();
+      if (!closed || !stored) {
+        const hour = hourTreeOf(rows, false);
+        if (rows.length > 0) c.hours.set(key, hour, rows.length, t + RECEIPT_TREE_CACHE.openTtlMs, t);
+        return { committed: hour, all: hour, rows };
+      }
+      const all = hourTreeOf(rows, true);
+      const want = stored.root.toLowerCase();
+      let committed = all;
+      if (all.tree.root.toLowerCase() !== want) {
+        const prefix = stored.leafCount < rows.length ? hourTreeOf(rows.slice(0, stored.leafCount), true) : null;
+        if (prefix && prefix.tree.root.toLowerCase() === want) committed = prefix;
+        else deps.log.warn({ bookId, hourStart: hourStart.toISOString(), stored: stored.root, storedLeafCount: stored.leafCount, computed: all.tree.root, leaves: rows.length }, "receipt hour does not reproduce its committed root");
+      }
+      c.hours.set(key, committed, Math.max(1, committed.ids.size), null, t);
+      if (committed !== all) c.hours.set(allKey, all, Math.max(1, rows.length), null, t);
+      return { committed, all, rows };
     })().finally(() => c.inflight.delete(key));
     c.inflight.set(key, p);
   }
-  return p;
+  const built = await p;
+  return { hour: holds(built.committed) ? built.committed : built.all, rows: built.rows };
 }

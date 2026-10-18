@@ -138,5 +138,17 @@ describe("audit L-3: MCP batch cap", () => {
     const a = app();
     const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: { pad: "x".repeat(MCP_MAX_BODY_BYTES) } });
     expect((await a.request("/mcp", { method: "POST", headers: HEADERS, body })).status).toBe(413);
+    // streamed without content-length: refused once the cap is crossed (multi-byte characters count as bytes)
+    const pulled = { chunks: 0 };
+    const stream = new ReadableStream<Uint8Array>({
+      pull(c) {
+        pulled.chunks++;
+        if (pulled.chunks > 1000) return c.close();
+        c.enqueue(new TextEncoder().encode("é".repeat(8 * 1024))); // 16 KiB per chunk
+      },
+    });
+    const res = await a.request("/mcp", { method: "POST", headers: HEADERS, body: stream, duplex: "half" } as RequestInit);
+    expect(res.status).toBe(413);
+    expect(pulled.chunks).toBeLessThan(10);
   });
 });
