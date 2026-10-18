@@ -3,7 +3,7 @@
 // liquidations keep a fresh (re-stamped) held price.
 import { SESSIONS_24X5, SESSIONS_24X7, SESSIONS_NYSE_RTH, decodeSessions, encodeSessions, isOpen, type Sessions } from "@bookrunner/shared";
 import type { Hex } from "viem";
-import { type AggregateResult, median, sourceCountOf } from "./aggregate";
+import { type AggregateResult, attestedOf, median, sourceCountOf } from "./aggregate";
 import type { SourceQuote } from "./types";
 
 export interface LastOpen {
@@ -51,8 +51,8 @@ export function decide(p: { open: boolean; agg: AggregateResult; lastOpen: LastO
   if (open) {
     if (agg.ok && agg.price !== null) {
       const sourceCount = sourceCountOf(agg);
-      const lo: LastOpen = { price: agg.price, sources: agg.accepted, sourceCount, ts: p.nowMs };
-      return { kind: "publish", price: agg.price, held: false, sources: agg.accepted, sourceCount, lastOpen: lo };
+      const lo: LastOpen = { price: agg.price, sources: attestedOf(agg), sourceCount, ts: p.nowMs };
+      return { kind: "publish", price: agg.price, held: false, sources: attestedOf(agg), sourceCount, lastOpen: lo };
     }
     return { kind: "skip", reason: agg.reason ?? "aggregation failed", lastOpen };
   }
@@ -67,8 +67,8 @@ export function decide(p: { open: boolean; agg: AggregateResult; lastOpen: LastO
     // an index level is a weighted sum, not a median of its components
     const price = agg.sourceCount !== undefined && agg.price !== null ? agg.price : median(agg.accepted.map((s) => s.price));
     const sourceCount = sourceCountOf(agg);
-    const lo: LastOpen = { price, sources: agg.accepted, sourceCount, ts: p.nowMs };
-    return { kind: "publish", price, held: true, sources: agg.accepted, sourceCount, lastOpen: lo, seeded: true };
+    const lo: LastOpen = { price, sources: attestedOf(agg), sourceCount, ts: p.nowMs };
+    return { kind: "publish", price, held: true, sources: attestedOf(agg), sourceCount, lastOpen: lo, seeded: true };
   }
   const seen = agg.accepted.length > 0 ? ` (${sourceCountOf(agg)} of ${seedMin} sources needed to seed a hold)` : "";
   return { kind: "skip", reason: `off-hours with no price history${seen}`, lastOpen: null };

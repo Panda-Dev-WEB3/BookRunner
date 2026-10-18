@@ -17,9 +17,28 @@ export interface SourceObservation {
 
 /**
  * synthetic = devnet / testnet GBM (impossible on mainnet); live = market data: chainlink (on-chain feeds),
- * pyth (Pyth Pro, sources/pyth.ts), http (generic / Finnhub, sources/http.ts).
+ * pyth (Pyth Pro, sources/pyth.ts), http (generic / Finnhub, sources/http.ts), dex (Uniswap v3 TWAP of the Stock
+ * Token, sources/dex-twap.ts: a confirm source only, never a signing one).
  */
-export type SourceKind = "synthetic" | "chainlink" | "pyth" | "http";
+export type SourceKind = "synthetic" | "chainlink" | "pyth" | "http" | "dex";
+
+/**
+ * Aggregation policy (domain/confirm.ts): median = the median of >= ORACLE_MIN_SOURCES agreeing sources (devnet,
+ * testnet, tests); primary-confirm = the primary source (Chainlink) alone sets and signs the price (sourceCount 1),
+ * every other live source only confirms it (divergence -> warning + alert, never a different price). Mainnet:
+ * primary-confirm.
+ */
+export type OraclePolicy = "median" | "primary-confirm";
+export const ORACLE_POLICIES = ["median", "primary-confirm"] as const;
+/** The signing source of the primary-confirm policy. */
+export const PRIMARY_SOURCE = "chainlink";
+/** Role of a source in /health: primary (signs), confirm (compared only), median (one vote). */
+export type SourceRole = "primary" | "confirm" | "median";
+
+export function sourceRole(policy: OraclePolicy, s: Pick<PriceSource, "name">): SourceRole {
+  if (policy === "median") return "median";
+  return s.name === PRIMARY_SOURCE ? "primary" : "confirm";
+}
 
 /** Pluggable price source. Returns null when the source has no (usable) observation. */
 export interface PriceSource {

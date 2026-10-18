@@ -67,9 +67,10 @@ describe("source-check: Pyth calendar rows", () => {
     tokenState: async () => ({ uiMultiplier: V.uiMultiplierWad, newUIMultiplier: V.uiMultiplierWad, effectiveAt: 0n, oraclePaused: false }),
   };
   const run = (p: Partial<Parameters<typeof runSourceCheck>[0]>) =>
-    runSourceCheck({ chainId: 4663, config: CONFIG, feeds: { NVDA: FEEDS.NVDA! }, reader, now: () => T0, ...p });
+    runSourceCheck({ chainId: 4663, config: CONFIG, feeds: { NVDA: FEEDS.NVDA! }, reader, now: () => T0, policy: "median", ...p });
 
-  test("PASS when the calendar is closed wherever Pyth is; FAIL on 4663 otherwise; unreadable schedules fail", async () => {
+  // the median policy (Pyth a required source) FAILs on 4663; primary-confirm (Pyth an optional confirmer) only WARNs
+  test("PASS when the calendar is closed wherever Pyth is; FAIL on 4663 otherwise (median policy); unreadable schedules fail", async () => {
     let rows = await run({ pythCalendar: { schedules: new Map([["NVDA", SCHEDULES]]) } });
     const row = rows.find((r) => r.check === "pyth calendar")!;
     expect(row).toMatchObject({ subject: "NVDA", status: "PASS" });
@@ -87,6 +88,8 @@ describe("source-check: Pyth calendar rows", () => {
     expect(rows.find((r) => r.subject === "pyth" && r.check === "calendar")).toMatchObject({ status: "FAIL" });
     rows = await run({ pythCalendar: { schedules: new Map([["NVDA", []]]) } });
     expect(rows.find((r) => r.check === "pyth calendar")!.status).toBe("FAIL");
+    rows = await run({ policy: "primary-confirm", sessions: SESSIONS_24X7, pythCalendar: { schedules: new Map([["NVDA", SCHEDULES]]) } });
+    expect(rows.find((r) => r.check === "pyth calendar")!.status).toBe("WARN");
   });
 
   test("the CLI reads the public symbols endpoint (no token) and maps feed ids to tickers", async () => {

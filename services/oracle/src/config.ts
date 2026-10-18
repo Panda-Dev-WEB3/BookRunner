@@ -1,8 +1,10 @@
 // Oracle service configuration: shared base env (baseEnvSchema) + oracle-specific fields.
-import { type ChainPriceConfig, type FeedConfig, baseEnvSchema, feedConfigSchema, feedToken, loadChainPriceConfig } from "@bookrunner/shared";
+import { type ChainPriceConfig, type FeedConfig, baseEnvSchema, feedConfigSchema, feedToken, isMainnet, loadChainPriceConfig } from "@bookrunner/shared";
 import { getAddress } from "viem";
 import { z } from "zod";
+import { ORACLE_POLICIES, type OraclePolicy } from "./domain/types";
 import type { ResolvedFeed } from "./sources/chainlink";
+import type { ResolvedDexPool } from "./sources/dex-twap";
 
 /** Devnet demo prices (ARCHITECTURE §7) — USD per share, devnet only. */
 export const DEFAULT_DEMO_PRICES: Record<string, number> = { NVDA: 190, TSLA: 440, AAPL: 255, MSFT: 520, AMZN: 230 };
@@ -56,10 +58,23 @@ export const oracleEnvShape = {
    * arbitrageable move.
    */
   ORACLE_PUSH_DEVIATION_BPS: z.coerce.number().nonnegative().default(10),
-  /** Sources further than this from the median are rejected (bps). */
+  /**
+   * Aggregation policy (domain/types.ts OraclePolicy): median (default off mainnet: devnet / testnet / tests) |
+   * primary-confirm (default and required on mainnet: Chainlink alone signs, sourceCount 1; the DEX TWAP and any
+   * other live source only confirm it).
+   */
+  ORACLE_POLICY: z.enum(ORACLE_POLICIES).optional(),
+  /** primary-confirm: a confirm source further than this from the Chainlink price (bps) = divergence (warn + alert). */
+  ORACLE_CONFIRM_BPS: z.coerce.number().positive().default(200),
+  /** primary-confirm: an in-session ticker without any confirm source this long is logged (rate-limited). */
+  ORACLE_CONFIRM_UNAVAILABLE_WARN_MS: z.coerce.number().int().positive().default(600_000),
+  /** Sources further than this from the median are rejected (bps; median policy). */
   ORACLE_OUTLIER_BPS: z.coerce.number().positive().default(150),
-  /** Minimum accepted sources for a non-held price (raised to AttestedOracle.minSources() if higher). */
-  ORACLE_MIN_SOURCES: z.coerce.number().int().positive().default(3),
+  /**
+   * Minimum accepted sources for a non-held price (raised to AttestedOracle.minSources() if higher). Default: 1 under
+   * primary-confirm (the only value it accepts on mainnet), 3 under median.
+   */
+  ORACLE_MIN_SOURCES: z.coerce.number().int().positive().optional(),
   /** Source observations older than this are ignored (per-source overrides, e.g. Chainlink). */
   ORACLE_MAX_SOURCE_AGE_MS: z.coerce.number().int().positive().default(15_000),
   ORACLE_SOURCE_TIMEOUT_MS: z.coerce.number().int().positive().default(2_000),
@@ -148,6 +163,16 @@ export const oracleEnvShape = {
    * an hour (beyond: no price rather than a price anchored on a possibly held round).
    */
   ORACLE_CHAINLINK_PAIR_MAX_AGE_MS: z.coerce.number().int().nonnegative().default(3_600_000),
+
+  // ---- DEX TWAP confirm source (sources/dex-twap.ts; pools: chain config dexConfirm.pools) ----
+  /** Uniswap v3 TWAP confirm source, active when the chain config lists dexConfirm pools (mainnet: required). */
+  ORACLE_DEX_CONFIRM: flag(true),
+  /** Overrides every pool's twapSec (s). */
+  ORACLE_DEX_TWAP_SEC: z.coerce.number().int().min(60).max(86_400).optional(),
+  /** A TWAP observation whose block is older than this (RPC / chain stalled) is ignored. */
+  ORACLE_DEX_MAX_AGE_MS: z.coerce.number().int().positive().default(60_000),
+  /** RPC of the DEX reads (default ORACLE_CHAINLINK_RPC_URL, else RPC_URL). */
+  ORACLE_DEX_RPC_URL: z.string().optional(),
 };
 
 /**
@@ -158,14 +183,14 @@ export const oracleEnvShape = {
 export const DEFAULT_PYTH_FEEDS: Readonly<Record<string, number>> = { NVDA: 1314, TSLA: 1435, AAPL: 922, MSFT: 1292, AMZN: 954 };
 
 /** Names of built-in sources: an HTTP source must not reuse them (one name = one vote in the median). */
-export const RESERVED_SOURCE_NAMES = ["chainlink", "pyth"] as const;
+export const RESERVED_SOURCE_NAMES = ["chainlink", "pyth", "dex-twap"] as const;
 
 export const httpSourceSpecSchema = z.object({
   name: z
     .string()
     .min(1)
     .refine((n) => !(RESERVED_SOURCE_NAMES as readonly string[]).includes(n.toLowerCase()) && !n.toLowerCase().startsWith("synthetic"), {
-      message: "reserved source name (chainlink, pyth, synthetic*)",
+      message: "reserved source name (chainlink, pyth, dex-twap, synthetic*)",
     }),
   /** URL template; `{ticker}` is replaced with the (mapped) symbol. */
   url: z.string().min(1),
@@ -224,8 +249,11 @@ export function loadOracleConfig(source: Record<string, string | undefined> = pr
     defaultMaxAgeMs: env.ORACLE_CHAINLINK_MAX_AGE_MS,
     heartbeatGraceMs: env.ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS,
   });
+  const policy: OraclePolicy = env.ORACLE_POLICY ?? (isMainnet(env.CHAIN_ID) ? "primary-confirm" : "median");
   return {
     ...env,
+    ORACLE_POLICY: policy,
+    ORACLE_MIN_SOURCES: env.ORACLE_MIN_SOURCES ?? (policy === "primary-confirm" ? 1 : 3),
     tickers,
     demoPrices: { ...DEFAULT_DEMO_PRICES, ...parseJson("ORACLE_DEMO_PRICES", env.ORACLE_DEMO_PRICES, numberMap, {}) },
     vols: { ...DEFAULT_VOLS, ...parseJson("ORACLE_VOLS", env.ORACLE_VOLS, numberMap, {}) },
@@ -242,7 +270,29 @@ export function loadOracleConfig(source: Record<string, string | undefined> = pr
       maxConfidenceBps: env.ORACLE_PYTH_MAX_CONF_BPS,
     },
     pythFeeds: { ...DEFAULT_PYTH_FEEDS, ...parseJson("ORACLE_PYTH_FEEDS", env.ORACLE_PYTH_FEEDS, pythFeedMap, {}) },
+    /** ticker -> confirm pool (chain config dexConfirm.pools); empty when ORACLE_DEX_CONFIRM=0 or none configured */
+    dexPools: env.ORACLE_DEX_CONFIRM ? resolveDexPools(chainConfig, env.ORACLE_DEX_TWAP_SEC) : {},
   };
+}
+
+/** The chain config's DEX confirm pools with their Stock Token (stockTokens[ticker]) and window resolved. */
+export function resolveDexPools(chainConfig: ChainPriceConfig | null, twapSecOverride?: number): Record<string, ResolvedDexPool> {
+  const out: Record<string, ResolvedDexPool> = {};
+  for (const [id, p] of Object.entries(chainConfig?.dexConfirm?.pools ?? {})) {
+    const st = chainConfig?.stockTokens[id];
+    if (!st) throw new Error(`invalid chain config: dexConfirm.pools.${id} has no stockTokens entry`);
+    const r: ResolvedDexPool = {
+      pool: getAddress(p.pool),
+      token: getAddress(st.token),
+      tokenDecimals: st.decimals,
+      quoteToken: getAddress(p.quoteToken),
+      twapSec: twapSecOverride ?? p.twapSec,
+      minQuoteLiquidity: p.minQuoteLiquidityUsd,
+    };
+    if (p.fee !== undefined) r.fee = p.fee;
+    out[id] = r;
+  }
+  return out;
 }
 
 export type OracleConfig = ReturnType<typeof loadOracleConfig>;

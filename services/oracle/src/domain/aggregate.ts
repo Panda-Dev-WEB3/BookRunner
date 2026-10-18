@@ -39,7 +39,28 @@ export interface AggregateResult {
   reason?: string;
   /** set when exactly two accepted sources were refused as a pair (disagreement / too old to pair): never seed from them */
   pairRefused?: boolean;
+  /**
+   * Observations the signed sourcesHash commits to when they differ from `accepted` (primary-confirm: the primary
+   * plus every fresh confirmer, so outsiders can see the confirm values; only the primary counts in sourceCount).
+   */
+  attested?: SourceQuote[];
+  /** primary-confirm only: how the confirm sources compare with the primary (domain/confirm.ts) */
+  confirm?: ConfirmResult;
 }
+
+/** primary-confirm: ok = every fresh confirmer within the band; no fresh confirmer = unavailable; no primary = no-primary. */
+export type ConfirmStatus = "ok" | "diverged" | "unavailable" | "no-primary";
+
+export interface ConfirmResult {
+  status: ConfirmStatus;
+  /** largest |confirmer - primary| / primary among fresh confirmers (bps); null when none */
+  diffBps: number | null;
+  primaryPrice: number | null;
+  confirmers: Array<{ name: string; price: number; ts: number; diffBps: number }>;
+}
+
+/** Observations behind a signed price (what sourcesHash commits to). */
+export const attestedOf = (a: AggregateResult): SourceQuote[] => a.attested ?? a.accepted;
 
 /** Number of independent sources behind an aggregate. */
 export const sourceCountOf = (a: AggregateResult): number => a.sourceCount ?? a.accepted.length;
@@ -63,7 +84,14 @@ export function exceedsBps(a: number, b: number, limitBps: number): boolean {
   return deviationBps(a, b) > limitBps + 1e-9;
 }
 
-export function aggregate(quotes: readonly CollectedQuote[], o: AggregateOptions): AggregateResult {
+/**
+ * Drops invalid (non-positive, non-finite, future-stamped) and stale observations and keeps one (the newest) per
+ * source name. Shared by both policies.
+ */
+export function freshQuotes(
+  quotes: readonly CollectedQuote[],
+  o: Pick<AggregateOptions, "nowMs" | "maxAgeMs" | "maxFutureMs">,
+): { fresh: SourceQuote[]; rejected: AggregateResult["rejected"] } {
   const rejected: AggregateResult["rejected"] = [];
   const byName = new Map<string, CollectedQuote>();
   const maxFuture = o.maxFutureMs ?? 5_000;
@@ -88,8 +116,11 @@ export function aggregate(quotes: readonly CollectedQuote[], o: AggregateOptions
     }
     byName.set(q.name, q);
   }
+  return { fresh: [...byName.values()].map((q) => ({ name: q.name, price: q.price, ts: q.ts })), rejected };
+}
 
-  const fresh = [...byName.values()].map((q) => ({ name: q.name, price: q.price, ts: q.ts }));
+export function aggregate(quotes: readonly CollectedQuote[], o: AggregateOptions): AggregateResult {
+  const { fresh, rejected } = freshQuotes(quotes, o);
   if (fresh.length === 0) return { ok: false, price: null, accepted: [], rejected, reason: "no fresh sources" };
 
   const m = median(fresh.map((q) => q.price));

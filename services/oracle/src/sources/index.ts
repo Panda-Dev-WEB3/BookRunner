@@ -1,12 +1,13 @@
 // Source assembly from config: synthetic GBM (devnet; testnet with a secret seed; never on mainnet),
-// HTTP sources, Pyth Pro (ORACLE_PYTH + PYTH_API_KEY) and Chainlink feeds (config/chains/<chainId>.json +
-// ORACLE_CHAINLINK_FEEDS).
+// HTTP sources, Pyth Pro (ORACLE_PYTH + PYTH_API_KEY), Chainlink feeds (config/chains/<chainId>.json +
+// ORACLE_CHAINLINK_FEEDS) and the Uniswap v3 TWAP confirm source (chain config dexConfirm.pools, ORACLE_DEX_CONFIRM).
 import { type Logger, isMainnet } from "@bookrunner/shared";
 import { createPublicClient, http, type PublicClient } from "viem";
 import { type OracleConfig, syntheticSeedProblem } from "../config";
 import { csprngNormal } from "../domain/rng";
 import type { PriceSource } from "../domain/types";
 import { ChainlinkSource, viemAggregatorReader } from "./chainlink";
+import { DexTwapSource, viemDexReader } from "./dex-twap";
 import { GenericHttpSource, finnhubSpec } from "./http";
 import { PythProSource } from "./pyth";
 import { SyntheticMarket, syntheticSources } from "./synthetic";
@@ -90,16 +91,35 @@ export function buildSources(cfg: OracleConfig, log: Logger, now: () => number =
     } else log.warn("ORACLE_PYTH=1 but PYTH_API_KEY is not set; Pyth Pro source skipped");
   }
 
+  // concurrent reads of one tick (round + token state per feed, pool reads) share one JSON-RPC batch request
+  const clients = new Map<string, PublicClient>();
+  const client = (url: string): PublicClient => {
+    let c = clients.get(url);
+    if (!c) {
+      c = createPublicClient({ transport: http(url, { batch: true }) }) as PublicClient;
+      clients.set(url, c);
+    }
+    return c;
+  };
   const feeds = cfg.chainlinkFeeds;
   if (Object.keys(feeds).length > 0) {
-    // concurrent reads of one tick (round + token state per feed) share one JSON-RPC batch request
-    const pub = createPublicClient({ transport: http(cfg.ORACLE_CHAINLINK_RPC_URL ?? cfg.RPC_URL, { batch: true }) }) as PublicClient;
+    const pub = client(cfg.ORACLE_CHAINLINK_RPC_URL ?? cfg.RPC_URL);
     sources.push(
       new ChainlinkSource(feeds, viemAggregatorReader(pub), { sequencerFeed: cfg.sequencerUptimeFeed, sequencerGraceMs: cfg.ORACLE_SEQUENCER_GRACE_MS }),
     );
     log.info(
       { feeds: Object.fromEntries(Object.entries(feeds).map(([t, f]) => [t, { proxy: f.proxy, basis: f.basis, token: f.token, maxAgeMs: f.maxAgeMs }])) },
       "Chainlink source enabled (per-token feeds divided by uiMultiplier; run source-check before mainnet)",
+    );
+  }
+
+  const pools = cfg.dexPools;
+  if (Object.keys(pools).length > 0) {
+    const pub = client(cfg.ORACLE_DEX_RPC_URL ?? cfg.ORACLE_CHAINLINK_RPC_URL ?? cfg.RPC_URL);
+    sources.push(new DexTwapSource(pools, viemDexReader(pub), { maxAgeMs: cfg.ORACLE_DEX_MAX_AGE_MS }));
+    log.info(
+      { pools: Object.fromEntries(Object.entries(pools).map(([t, p]) => [t, { pool: p.pool, twapSec: p.twapSec, minQuoteLiquidity: p.minQuoteLiquidity }])) },
+      "DEX TWAP confirm source enabled (Uniswap v3; quote token assumed = $1: a USDG depeg shows up as confirm divergence)",
     );
   }
 

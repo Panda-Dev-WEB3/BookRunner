@@ -64,6 +64,25 @@ export interface AggregatorReader {
   tokenState(token: Address): Promise<TokenState>;
 }
 
+/**
+ * Why a Stock Token's state forbids converting its per-token price to per share (null = usable). Shared by every
+ * per-token source (Chainlink per-token feeds, the DEX TWAP): no multiplier, or a corporate action in progress.
+ */
+export function tokenStateProblem(token: TokenState): string | null {
+  if (token.uiMultiplier <= 0n) return "uiMultiplier() = 0";
+  if (token.oraclePaused === true) return "token oraclePaused() (corporate action in progress)";
+  return null;
+}
+
+/** A multiplier change announced for the future (newUIMultiplier != uiMultiplier, effectiveAt ahead), else null. */
+export function pendingMultiplierOf(token: TokenState, nowMs: number): { value: bigint; effectiveAt: number } | null {
+  const eff = token.effectiveAt ?? 0n;
+  if (token.newUIMultiplier !== null && token.newUIMultiplier !== token.uiMultiplier && Number(eff) * 1000 > nowMs) {
+    return { value: token.newUIMultiplier, effectiveAt: Number(eff) };
+  }
+  return null;
+}
+
 const optional = async <T>(p: Promise<T>): Promise<T | null> => {
   try {
     return await p;
@@ -196,8 +215,8 @@ export class ChainlinkSource implements PriceSource {
     let multiplierUsed: bigint | null = null;
     if (f.basis === "per-token") {
       if (!f.token || !token) return { ok: false, reason: "per-token feed without a Stock Token (cannot divide by uiMultiplier)" };
-      if (token.uiMultiplier <= 0n) return { ok: false, reason: "uiMultiplier() = 0" };
-      if (token.oraclePaused === true) return { ok: false, reason: "token oraclePaused() (corporate action in progress)" };
+      const problem = tokenStateProblem(token);
+      if (problem) return { ok: false, reason: problem };
       const eff = token.effectiveAt ?? 0n;
       let multiplier = token.uiMultiplier;
       if (eff > round.updatedAt && Number(eff) * 1000 <= nowMs) {
@@ -211,9 +230,7 @@ export class ChainlinkSource implements PriceSource {
       } else {
         this.roundMultiplier.set(f.proxy, { updatedAt: round.updatedAt, multiplier });
       }
-      if (token.newUIMultiplier !== null && token.newUIMultiplier !== token.uiMultiplier && Number(eff) * 1000 > nowMs) {
-        pendingMultiplier = { value: token.newUIMultiplier, effectiveAt: Number(eff) };
-      }
+      pendingMultiplier = pendingMultiplierOf(token, nowMs);
       multiplierUsed = multiplier;
       priceWad = perSharePriceWad(answerWad, multiplier);
     }

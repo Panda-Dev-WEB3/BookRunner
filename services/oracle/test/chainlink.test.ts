@@ -272,6 +272,8 @@ describe("config: feeds from config/chains/<chainId>.json + ORACLE_CHAINLINK_FEE
     const built = buildSources(loadOracleConfig({ CHAIN_ID: "4663", ORACLE_SEED: "x".repeat(40) }), silentLog);
     expect(built.syntheticRefused).toContain("impossible on Robinhood Chain mainnet");
     expect(built.market).toBeNull();
-    expect(built.sources.map((s) => s.name)).toEqual(["chainlink"]);
+    // Chainlink (the signing source) + the DEX TWAP confirm source of config/chains/4663.json
+    expect(built.sources.map((s) => `${s.name}:${s.kind}`)).toEqual(["chainlink:chainlink", "dex-twap:dex"]);
+    expect(buildSources(loadOracleConfig({ CHAIN_ID: "4663", ORACLE_SYNTHETIC: "0", ORACLE_DEX_CONFIRM: "0" }), silentLog).sources.map((s) => s.name)).toEqual(["chainlink"]);
   });
 });

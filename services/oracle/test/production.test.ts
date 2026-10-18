@@ -1,11 +1,12 @@
-// Mainnet production rules (production.ts): synthetic impossible on 4663; the 3-source design (Chainlink +
-// Pyth Pro + one more, ORACLE_MIN_SOURCES=2, one spare); explicit feed basis; calendar holds.
+// Mainnet production rules (production.ts): synthetic impossible on 4663; primary-confirm (Chainlink signs with
+// sourceCount 1, a DEX confirm pool per ticker, ORACLE_MIN_SOURCES=1, on-chain minSources() == 1); Pyth optional;
+// explicit feed basis; calendar holds.
 import { describe, expect, test } from "bun:test";
 import { loadOracleConfig } from "../src/config";
 import type { PriceSource } from "../src/domain/types";
 import {
-  MAINNET_MIN_SOURCES_FLOOR,
-  MAINNET_SPARE_SOURCES,
+  MAINNET_DEX_MIN_FLOOR_USD,
+  PRIMARY_CONFIRM_SOURCE_COUNT,
   liveSourceCount,
   onchainMinSourcesProblem,
   productionProblems,
@@ -14,19 +15,19 @@ import {
 
 const src = (name: string, kind?: PriceSource["kind"]): PriceSource => ({ name, ...(kind ? { kind } : {}), fetch: async () => null });
 const chainlink = src("chainlink", "chainlink");
+const dex = src("dex-twap", "dex");
 const pyth = src("pyth", "pyth");
-const third = src("vendor", "http");
-const httpB = src("http-b");
-const THREE = [chainlink, pyth, third];
+const vendor = src("vendor", "http");
+const BASE = [chainlink, dex];
 
-const mainnet = (env: Record<string, string> = {}) =>
-  loadOracleConfig({ CHAIN_ID: "4663", ORACLE_SYNTHETIC: "0", SESSIONS_MODE: "charter", ORACLE_MIN_SOURCES: "2", ORACLE_PYTH: "1", PYTH_API_KEY: "k", ...env });
+const mainnet = (env: Record<string, string> = {}) => loadOracleConfig({ CHAIN_ID: "4663", ORACLE_SYNTHETIC: "0", SESSIONS_MODE: "charter", ...env });
 const has = (p: string[], s: string) => p.some((x) => x.includes(s));
 
 describe("productionProblems", () => {
-  test("the mainnet design (Chainlink + Pyth Pro + a third source, ORACLE_MIN_SOURCES=2) has none", () => {
-    expect(productionProblems(mainnet(), THREE)).toEqual([]);
-    expect(productionProblems(mainnet(), [...THREE, httpB])).toEqual([]);
+  test("the mainnet design (Chainlink + the DEX TWAP confirm, defaults) has none; Pyth / HTTP confirmers are optional", () => {
+    expect(productionProblems(mainnet(), BASE)).toEqual([]);
+    expect(productionProblems(mainnet({ ORACLE_PYTH: "1", PYTH_API_KEY: "k" }), [...BASE, pyth])).toEqual([]);
+    expect(productionProblems(mainnet({ ORACLE_POLICY: "primary-confirm", ORACLE_MIN_SOURCES: "1" }), BASE)).toEqual([]);
   });
 
   test("off mainnet nothing is enforced", () => {
@@ -35,90 +36,113 @@ describe("productionProblems", () => {
   });
 
   test("synthetic sources are impossible on 4663", () => {
-    const p = productionProblems(mainnet({ ORACLE_SYNTHETIC: "1" }), [...THREE, src("synthetic-a", "synthetic")]);
+    const p = productionProblems(mainnet({ ORACLE_SYNTHETIC: "1" }), [...BASE, src("synthetic-a", "synthetic")]);
     expect(has(p, "ORACLE_SYNTHETIC must be 0")).toBe(true);
     expect(has(p, "synthetic sources configured: synthetic-a")).toBe(true);
   });
 
-  test("Chainlink, Pyth Pro and a third source are each required; 3 distinct live sources and one spare", () => {
-    expect(productionProblems(mainnet(), [pyth, third, httpB])).toEqual(["no Chainlink feeds configured (config/chains/4663.json or ORACLE_CHAINLINK_FEEDS)"]);
-    expect(productionProblems(mainnet(), [chainlink, third, httpB])).toEqual(["no Pyth Pro source (ORACLE_PYTH=1 + PYTH_API_KEY)"]);
-    expect(productionProblems(mainnet(), [chainlink, pyth])).toEqual([
-      "no third live source besides Chainlink and Pyth Pro (ORACLE_HTTP_SOURCES or a preset): one source outage would stop every price",
-      "2 distinct live sources < 3 required on mainnet (Chainlink + Pyth Pro + >= 1 more; ORACLE_MIN_SOURCES=2 + 1 spare)",
+  test("primary-confirm only: ORACLE_POLICY=median and any minimum other than 1 are refused", () => {
+    expect(productionProblems(mainnet({ ORACLE_POLICY: "median" }), BASE)).toEqual([
+      "ORACLE_POLICY=median on mainnet: set ORACLE_POLICY=primary-confirm (Chainlink signs, the DEX TWAP / Pyth only confirm)",
+      "ORACLE_MIN_SOURCES=3 on mainnet: must be 1 (primary-confirm signs every price with sourceCount 1)",
     ]);
-    // a higher minimum needs a spare beyond it
-    expect(productionProblems(mainnet({ ORACLE_MIN_SOURCES: "3" }), THREE)).toEqual([
-      "3 distinct live sources < 4 required on mainnet (Chainlink + Pyth Pro + >= 1 more; ORACLE_MIN_SOURCES=3 + 1 spare)",
+    expect(productionProblems(mainnet({ ORACLE_MIN_SOURCES: "2" }), BASE)).toEqual([
+      "ORACLE_MIN_SOURCES=2 on mainnet: must be 1 (primary-confirm signs every price with sourceCount 1)",
     ]);
-    expect(has(productionProblems(mainnet({ ORACLE_MIN_SOURCES: "1" }), THREE), `below the mainnet floor ${MAINNET_MIN_SOURCES_FLOOR}`)).toBe(true);
+    expect(productionProblems(mainnet({ ORACLE_CONFIRM_BPS: "501" }), BASE)).toEqual([
+      "ORACLE_CONFIRM_BPS=501 > 500 on mainnet (a wider band would hide a lagging Chainlink feed)",
+    ]);
+    expect(productionProblems(mainnet({ ORACLE_CONFIRM_BPS: "500" }), BASE)).toEqual([]);
   });
 
-  test("every HTTP source carries its own quote timestamp and a tight in-session max age; Finnhub is refused", () => {
+  test("Chainlink is required (the only signing source), with a feed for every ticker", () => {
+    expect(productionProblems(mainnet(), [dex, pyth])).toEqual([
+      "no Chainlink feeds configured (config/chains/4663.json or ORACLE_CHAINLINK_FEEDS): Chainlink is the only signing source",
+    ]);
+    const gme = mainnet({ ORACLE_TICKERS: "NVDA,GME" });
+    expect(productionProblems(gme, BASE)).toEqual(["no Chainlink feed for GME", "no DEX confirm pool for GME (dexConfirm.pools in the chain config)"]);
+  });
+
+  test("a DEX confirm pool per ticker, with a real liquidity floor; ORACLE_DEX_CONFIRM=0 refused", () => {
+    expect(productionProblems(mainnet(), [chainlink])).toEqual(["no DEX confirm source (config/chains/4663.json dexConfirm.pools)"]);
+    expect(productionProblems(mainnet({ ORACLE_DEX_CONFIRM: "0" }), [chainlink])).toEqual([
+      "ORACLE_DEX_CONFIRM=0 on mainnet: the Uniswap v3 TWAP confirm source is required (a DEX confirm pool per ticker)",
+    ]);
+    const cfg = mainnet();
+    const { AMZN: _amzn, ...four } = cfg.dexPools;
+    expect(productionProblems({ ...cfg, dexPools: four }, BASE)).toEqual(["no DEX confirm pool for AMZN (dexConfirm.pools in the chain config)"]);
+    const shallow = { ...cfg.dexPools, TSLA: { ...cfg.dexPools.TSLA!, minQuoteLiquidity: MAINNET_DEX_MIN_FLOOR_USD - 1 } };
+    expect(productionProblems({ ...cfg, dexPools: shallow }, BASE)).toEqual([
+      `dexConfirm.pools.TSLA.minQuoteLiquidityUsd=${MAINNET_DEX_MIN_FLOOR_USD - 1} < ${MAINNET_DEX_MIN_FLOOR_USD} on mainnet (a shallow pool confirms nothing)`,
+    ]);
+  });
+
+  test("HTTP confirm sources carry their own quote timestamp and a tight max age; Finnhub is refused", () => {
     const spec = (over: Record<string, unknown>) =>
       mainnet({ ORACLE_HTTP_SOURCES: JSON.stringify([{ name: "vendor", url: "https://v.example/{ticker}", pricePath: "p", tsPath: "t", tsUnit: "ms", maxAgeMs: 10_000, ...over }]) });
-    expect(productionProblems(spec({}), THREE)).toEqual([]);
-    expect(productionProblems(spec({ maxAgeMs: 30_000 }), THREE)).toEqual([]);
-    expect(productionProblems(spec({ tsPath: undefined }), THREE)).toEqual([
+    expect(productionProblems(spec({}), [...BASE, vendor])).toEqual([]);
+    expect(productionProblems(spec({ tsPath: undefined }), [...BASE, vendor])).toEqual([
       "ORACLE_HTTP_SOURCES.vendor has no tsPath: on mainnet every quote must carry the vendor's own timestamp (receive time would make a stale last trade look fresh)",
     ]);
-    expect(productionProblems(spec({ maxAgeMs: 30_001 }), THREE)).toEqual(["ORACLE_HTTP_SOURCES.vendor needs maxAgeMs <= 30000 on mainnet (got 30001)"]);
-    expect(productionProblems(spec({ maxAgeMs: undefined }), THREE)).toEqual([
-      "ORACLE_HTTP_SOURCES.vendor needs maxAgeMs <= 30000 on mainnet (got unset: the 15 s default is not pinned)",
-    ]);
-    expect(has(productionProblems(mainnet({ ORACLE_HTTP_FINNHUB: "1", ORACLE_FINNHUB_API_KEY: "f" }), THREE), "ORACLE_HTTP_FINNHUB is not a mainnet source")).toBe(true);
+    expect(productionProblems(spec({ maxAgeMs: 30_001 }), [...BASE, vendor])).toEqual(["ORACLE_HTTP_SOURCES.vendor needs maxAgeMs <= 30000 on mainnet (got 30001)"]);
+    expect(has(productionProblems(mainnet({ ORACLE_HTTP_FINNHUB: "1", ORACLE_FINNHUB_API_KEY: "f" }), BASE), "ORACLE_HTTP_FINNHUB is not a mainnet source")).toBe(true);
   });
 
-  test("Pyth Pro configuration: key, feed ids per launch ticker, https, never the key in a problem", () => {
-    // ORACLE_PYTH=1 without a key is named (buildSources skipped the source)
-    const noKey = productionProblems(mainnet({ PYTH_API_KEY: "" }), [chainlink, third, httpB]);
-    expect(has(noKey, "ORACLE_PYTH=1 but PYTH_API_KEY is not set")).toBe(true);
-    const gme = mainnet({ ORACLE_TICKERS: "NVDA,GME", ORACLE_CHAINLINK_FEEDS: '{"GME":{"proxy":"0x00000000000000000000000000000000000000c1","basis":"per-share"}}' });
-    expect(productionProblems(gme, THREE)).toEqual(["no Pyth Pro feed id for GME (ORACLE_PYTH_FEEDS)"]);
-    const plainHttp = mainnet({ ORACLE_PYTH_URL: "http://pyth.example/v1/latest_price" });
-    expect(productionProblems(plainHttp, THREE)).toEqual(["ORACLE_PYTH_URL must be https:// on mainnet (the access token travels in its Authorization header)"]);
-    for (const p of productionProblems(mainnet({ PYTH_API_KEY: "secret-k", ORACLE_MIN_SOURCES: "5" }), [chainlink])) expect(p).not.toContain("secret-k");
+  test("optional Pyth Pro: when on it needs its key, https and feed ids; never the key in a problem", () => {
+    expect(has(productionProblems(mainnet({ ORACLE_PYTH: "1" }), BASE), "ORACLE_PYTH=1 but PYTH_API_KEY is not set")).toBe(true);
+    const plainHttp = mainnet({ ORACLE_PYTH: "1", PYTH_API_KEY: "k", ORACLE_PYTH_URL: "http://pyth.example/v1/latest_price" });
+    expect(productionProblems(plainHttp, [...BASE, pyth])).toEqual(["ORACLE_PYTH_URL must be https:// on mainnet (the access token travels in its Authorization header)"]);
+    const gme = mainnet({ ORACLE_PYTH: "1", PYTH_API_KEY: "k", ORACLE_TICKERS: "NVDA,GME" });
+    expect(has(productionProblems(gme, [...BASE, pyth]), "no Pyth Pro feed id for GME")).toBe(true);
+    for (const p of productionProblems(mainnet({ ORACLE_PYTH: "1", PYTH_API_KEY: "secret-k", ORACLE_MIN_SOURCES: "5" }), [chainlink])) expect(p).not.toContain("secret-k");
   });
 
-  test("on-chain minSources must leave one spare live source on mainnet", async () => {
-    expect(liveSourceCount([chainlink, pyth, src("synthetic-a", "synthetic"), src("pyth", "pyth")])).toBe(2);
-    expect(MAINNET_SPARE_SOURCES).toBe(1);
-    expect(onchainMinSourcesProblem(2, THREE, 1)).toBeNull();
-    expect(onchainMinSourcesProblem(2, [chainlink, pyth])).toBeNull(); // no spare asked (off mainnet)
-    expect(onchainMinSourcesProblem(2, [chainlink, pyth], 1)).toBe(
-      "AttestedOracle.minSources()=2 leaves no spare among 2 configured live sources: one source outage would stop every price (need 3; configure another source or lower it through the timelock)",
+  test("feed basis must be explicit; 24x7 demo sessions refused", () => {
+    const legacy = mainnet({ ORACLE_CHAINLINK_FEEDS: '{"NVDA":"0x00000000000000000000000000000000000000c1"}' });
+    expect(has(productionProblems(legacy, BASE), "ORACLE_CHAINLINK_FEEDS.NVDA is a plain address")).toBe(true);
+    expect(has(productionProblems(mainnet({ SESSIONS_MODE: "24x7" }), BASE), "SESSIONS_MODE=24x7")).toBe(true);
+  });
+});
+
+describe("on-chain minSources", () => {
+  test("primary-confirm: exactly 1 (anything above refuses every price on-chain)", () => {
+    expect(PRIMARY_CONFIRM_SOURCE_COUNT).toBe(1);
+    expect(onchainMinSourcesProblem(1, "primary-confirm", BASE)).toBeNull();
+    expect(onchainMinSourcesProblem(2, "primary-confirm", [...BASE, pyth])).toBe(
+      "AttestedOracle.minSources()=2 but primary-confirm signs every price with sourceCount 1 (Chainlink only): every price would be refused on-chain (setMinSources(1) through the timelock)",
     );
-    const p = onchainMinSourcesProblem(4, THREE, 1);
-    expect(p).toContain("AttestedOracle.minSources()=4 > 3 configured live sources");
-    expect(p).toContain("setMinSources(2)");
+    expect(onchainMinSourcesProblem(3, "primary-confirm", BASE)).toContain("every price would be refused on-chain");
+  });
 
-    expect(await startupOnchainMinSourcesProblem({ readMinSources: async () => 2, sources: THREE, spare: 1 })).toBeNull();
-    expect(await startupOnchainMinSourcesProblem({ readMinSources: async () => 3, sources: THREE, spare: 1 })).toContain("leaves no spare");
-    // RPC hiccups are retried; a contract that stays unreadable refuses the start
+  test("median: reachable by the live sources", () => {
+    expect(liveSourceCount([chainlink, pyth, src("synthetic-a", "synthetic"), src("pyth", "pyth")])).toBe(2);
+    expect(onchainMinSourcesProblem(2, "median", [chainlink, pyth])).toBeNull();
+    const p = onchainMinSourcesProblem(4, "median", [chainlink, pyth, vendor]);
+    expect(p).toContain("AttestedOracle.minSources()=4 > 3 configured live sources");
+    expect(p).toContain("setMinSources(3)");
+  });
+
+  test("startup gate: retried reads, an unreadable contract refuses the start", async () => {
+    expect(await startupOnchainMinSourcesProblem({ readMinSources: async () => 1, policy: "primary-confirm", sources: BASE })).toBeNull();
+    expect(await startupOnchainMinSourcesProblem({ readMinSources: async () => 3, policy: "primary-confirm", sources: BASE })).toContain("every price would be refused");
     let n = 0;
     const flaky = async () => {
       if (++n < 3) throw new Error("fetch failed");
-      return 2;
+      return 1;
     };
     const sleeps: number[] = [];
     const sleep = async (ms: number) => void sleeps.push(ms);
-    expect(await startupOnchainMinSourcesProblem({ readMinSources: flaky, sources: THREE, spare: 1, sleep, delayMs: 5 })).toBeNull();
+    expect(await startupOnchainMinSourcesProblem({ readMinSources: flaky, policy: "primary-confirm", sources: BASE, sleep, delayMs: 5 })).toBeNull();
     expect(sleeps).toEqual([5, 5]);
     const dead = await startupOnchainMinSourcesProblem({
       readMinSources: async () => {
         throw new Error(["execution reverted", "long trace"].join(String.fromCharCode(10)));
       },
-      sources: THREE,
+      policy: "primary-confirm",
+      sources: BASE,
       sleep,
       attempts: 2,
     });
     expect(dead).toBe("AttestedOracle.minSources() not readable (execution reverted): cannot check it against the configured sources");
-  });
-
-  test("feed basis must be explicit; every launch ticker needs a feed; 24x7 demo sessions refused", () => {
-    const legacy = mainnet({ ORACLE_CHAINLINK_FEEDS: '{"NVDA":"0x00000000000000000000000000000000000000c1"}' });
-    expect(has(productionProblems(legacy, THREE), "ORACLE_CHAINLINK_FEEDS.NVDA is a plain address")).toBe(true);
-    expect(has(productionProblems(mainnet({ ORACLE_TICKERS: "NVDA,GME", ORACLE_PYTH_FEEDS: '{"GME":7}' }), THREE), "no Chainlink feed for GME")).toBe(true);
-    expect(has(productionProblems(mainnet({ SESSIONS_MODE: "24x7" }), THREE), "SESSIONS_MODE=24x7")).toBe(true);
   });
 });
