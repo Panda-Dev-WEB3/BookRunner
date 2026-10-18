@@ -207,71 +207,115 @@ timelock); on mainnet deploy the new implementation from any key and put `setImp
 
 Units: AttestedOracle prices are USD per **share**; a Robinhood Chainlink feed quotes per **token**
 (share price × `uiMultiplier()`); the registry multiplies once by the token's live `uiMultiplier()`.
-The oracle divides per-token feeds by that same on-chain value before the median
-(`packages/shared/src/stockTokens.ts`). Never configure an HTTP source that quotes the Stock Token
-price: every non-Chainlink source must be a per-share US-equity price. Mainnet runs on **three** live sources —
-Chainlink + **Pyth Pro** (`Equity.US.<T>/USD`, per share; VERIFY C6) + one more licensed per-share source (vendor
-being chosen: `ORACLE_HTTP_SOURCES` or a preset) — and signs a non-held price backed by **two** agreeing ones
-(`ORACLE_MIN_SOURCES=2`, on-chain `AttestedOracle.minSources() == 2`; the oracle refuses to start without a
-spare live source). What that means in operation:
+The oracle divides per-token feeds by that same on-chain value, and the DEX confirm source divides the Stock
+Token / USDG price the same way (`packages/shared/src/stockTokens.ts`). Never configure an HTTP source that quotes
+the Stock Token price: every HTTP / Pyth source must be a per-share US-equity price.
 
-- **One source down = prices continue** from the remaining two, as long as they agree within `ORACLE_OUTLIER_BPS`
-  (150 bps): when only two quotes are accepted in a tick (third down, or rejected as an outlier) a non-held price
-  is refused if they are further apart — the same rule `source-check` reports pairwise — instead of signing their
-  midpoint. With three quotes the median and its 150 bps band isolate one bad source.
-- **Two sources down (or the remaining two disagree) = no price** for the affected tickers. Once the last published
-  price is older than `maxPriceAge` (300 s) on-chain, `priceOf` reverts `StalePrice`: valuations, trades on those
-  keys **and liquidations** revert until two sources agree again (reduce-only applies only to `held` prices,
-  i.e. off-hours).
-- **Alerts on any single failure.** The oracle logs every in-session source failure (warn, once a minute, never
-  the key) and reports it per source in `GET /health` (`sources[]`: `lastOkAt`, `failingSince`, `lastError`);
-  `services/alerts` raises `oracle_source_failing` when a live source has failed in-session tickers for more than
-  60 s — a warning while the other two carry the price (no spare left), critical when two fail on the same ticker.
-- **Stale pairs are refused.** Every HTTP source must carry the vendor's own quote timestamp (`tsPath`) with
-  `maxAgeMs` <= 30 s (production rule + preflight; the Finnhub preset is refused on mainnet), and when only two
-  sources are accepted a Chainlink round older than `ORACLE_CHAINLINK_PAIR_MAX_AGE_MS` (1 h) cannot back the price;
-  a refused pair never seeds an off-hours hold. `GET /health` `unpublished[]` lists in-session tickers without a
-  price; `services/alerts` raises `oracle_price_missing` (critical) after 2 min unless two failing sources already
-  explain it.
-- **Thin Pyth prints** are dropped (a failure with a reason): fewer publishers than Pyth's own session minimum
-  (`ORACLE_PYTH_MIN_PUBLISHERS` 3 in the regular session, `ORACLE_PYTH_MIN_PUBLISHERS_EXTENDED` 2 pre / post /
-  overnight), a confidence interval wider than `ORACLE_PYTH_MAX_CONF_BPS` (50 bps of the price), a missing or
-  unknown `marketSession`.
-- **Calendar.** Pyth has no session on holiday eves after 20:00 ET (incl. the Sunday before a Monday holiday) and
-  after 17:00 ET on early-close days; the 24/5 calendar closes there too (`NYSE_EARLY_CLOSES`, holiday-eve rule in
-  `packages/shared/src/sessions.ts`), so prices are **held** in those windows. `source-check` compares the
-  calendar with Pyth's published schedule for the next 30 days.
+Mainnet runs the **primary + confirm** policy (`ORACLE_POLICY=primary-confirm`, VERIFY C6; devnet / testnet keep
+`median`):
 
-**Pyth outage / token problem** (alert `oracle_source_failing:pyth`, `/health` `sources[].lastError`): HTTP 401 /
-403 → renew or re-entitle the token in the Pyth Pro dashboard, update `PYTH_API_KEY` in
-`/etc/bookrunner/mainnet.env`, restart `bookrunner@mainnet`; 429 / 5xx / timeout → Pyth status page and support;
-check with `source-check`. Prices continue from Chainlink + the third source meanwhile; fix it before a second
-source fails.
-**Corporate action** (Chainlink `oraclePaused()` on a token): that ticker runs on Pyth + the third source for the
-paused window (no spare); plan it with the corporate-actions steps below.
+- **Chainlink alone sets and signs each price** (`sourceCount` 1, `ORACLE_MIN_SOURCES=1`, on-chain
+  `AttestedOracle.minSources() == 1`; the oracle refuses to start otherwise).
+- **A Uniswap v3 TWAP confirms it**: per ticker the deepest Stock Token / USDG pool of `config/chains/4663.json`
+  `dexConfirm.pools` (600 s window, USDG floor 50,000). Pyth Pro (`ORACLE_PYTH=1` + `PYTH_API_KEY`) and
+  `ORACLE_HTTP_SOURCES` are optional extra confirmers; none of them ever counts for signing. `sourcesHash` commits
+  to Chainlink and every fresh confirmer.
+- **The DEX never moves the price.** A confirmer more than `ORACLE_CONFIRM_BPS` (200 bps) from Chainlink: Chainlink
+  is still published, the oracle warns (rate-limited) and `/health` `confirm[]` shows the ticker `diverged`.
+- **Chainlink stale / paused / down in session = no fresh price** for that ticker (the DEX never substitutes).
+  Once the last signed price is older than `maxPriceAge` (300 s) on-chain, `priceOf` reverts `StalePrice`:
+  valuations, trades on that key **and liquidations** revert until Chainlink is back (reduce-only applies only to
+  `held` prices, i.e. off-hours). Off-hours prices hold at the last Chainlink price; a start off-hours without
+  history seeds from Chainlink only.
+- **Health**: `GET /health` `sources[]` (role `primary` / `confirm`, `lastOkAt`, `failingSince`,
+  `failingTickers`, `lastError`; in-session tickers only), `confirm[]` (per ticker `ok` / `diverged` /
+  `unavailable` / `no-primary` / `closed` (off-hours, not evaluated), `diffBps`, `since`, confirmers),
+  `unpublished[]` (in-session tickers without a publishable price).
+- **Calendar.** Holiday eves after 20:00 ET (incl. the Sunday before a Monday holiday) and early-close days after
+  17:00 ET are closed in the 24/5 calendar (`NYSE_EARLY_CLOSES`, holiday-eve rule in
+  `packages/shared/src/sessions.ts`), so prices are **held** there (VERIFY C3).
 
-1. **Source check** (read-only, before anything is registered and again before launch):
+Alerts (`services/alerts`) and what to do:
+
+- **`oracle_source_failing:chainlink`** (critical, > 60 s in session, `ALERT_ORACLE_SOURCE_FAIL_SECONDS`): no price
+  for the listed tickers. `sources[].lastError` gives the cause: RPC errors → check `ORACLE_CHAINLINK_RPC_URL`
+  (or point it at another RHC RPC), restart `bookrunner@mainnet`; `oraclePaused()` → corporate action (below); a
+  round older than heartbeat + grace in session → Chainlink status / support, `source-check`. Nothing substitutes:
+  if it lasts beyond `maxPriceAge`, pause new business (GUARDIAN `setNewBooksPaused(true)`, "Rollback and
+  incidents").
+- **`oracle_price_missing:<id>`** (critical, 2 min, `ALERT_ORACLE_PRICE_MISSING_SECONDS`): an in-session ticker
+  without a publishable price that no Chainlink alert explains: `/health` `unpublished[].reason` and the oracle log.
+- **`oracle_confirm_divergence:<id>`** (warning after 2 min in session, `ALERT_ORACLE_CONFIRM_DIVERGENCE_SECONDS`;
+  critical above 2× `ORACLE_CONFIRM_BPS` or with ≥ 3 tickers at once, `ALERT_ORACLE_CONFIRM_CRITICAL_TICKERS`).
+  The published price is still Chainlink. Find which side is wrong (the code cannot tell them apart):
+  1. Chainlink: round age (`latestRoundData().updatedAt`, `source-check`): a round hours old in a moving market is
+     lag (up to ~50 bps without a new round, more in a fast move);
+  2. the DEX pool: spot vs TWAP (`source-check` `dex confirm` row prints both), USDG depth vs floor, recent large
+     swaps on the explorer;
+  3. the USDG peg: every ticker diverging in the same direction at once points at USDG, not the equities;
+  4. other markets: the underlying's public quote (regular, pre, post or overnight session).
+
+  Chainlink lagging in a fast market: the RHX5 PoolEngine fills at the lagging price (an arbitrage window against
+  the pool); stop new risk on the RHX5 book with the existing levers — risk kill on the book (reduce-only) or
+  GUARDIAN `setNewBooksPaused(true)` ("Rollback and incidents") — until Chainlink rounds again. DEX manipulated or
+  thin: nothing to do for prices (the DEX never moves them); if a pool is easy to move, raise its
+  `minQuoteLiquidityUsd` or choose a deeper pool / fee tier in `config/chains/4663.json`, then restart. USDG depeg:
+  prices are unaffected (Chainlink quotes USD); the alerts last until the peg recovers; assess the USDG exposure of
+  the books separately (VERIFY S1).
+- **`oracle_confirm_unavailable:<id>`** (warning, no confirm source for 10 min in session,
+  `ALERT_ORACLE_CONFIRM_UNAVAILABLE_SECONDS`; the oracle logs it after `ORACLE_CONFIRM_UNAVAILABLE_WARN_MS`):
+  Chainlink is published unconfirmed. Causes (`source-check` prints the reason per ticker): pool USDG below the
+  floor, observation history shorter than the window, token `oraclePaused()` or a multiplier change inside the
+  window, the DEX RPC (`ORACLE_DEX_RPC_URL`, default `ORACLE_CHAINLINK_RPC_URL`), a block older than
+  `ORACLE_DEX_MAX_AGE_MS`. A pool that stays below its floor: switch to a deeper pool / tier (`dexConfirm.pools`);
+  never lower the floor below 10,000.
+- **`oracle_source_failing:<confirm source>`** (warning, after 10 min; not for tickers already `unavailable` or
+  without Chainlink): one confirmer fails while others still confirm, e.g. Pyth Pro HTTP 401 / 403 → renew the token
+  in the Pyth Pro dashboard, update `PYTH_API_KEY` in `/etc/bookrunner/mainnet.env`, restart; 429 / 5xx / timeout →
+  Pyth status page. Prices continue from Chainlink.
+- **`oracle_min_sources`** (critical): `AttestedOracle.minSources()` is no longer 1: every price is refused
+  on-chain; restore it through the timelock (`setMinSources(1)`).
+
+Residual risks of the design (VERIFY C6): (a) Chainlink is a single point of failure: a pause
+(`oraclePaused()`, corporate action), a feed outage or a split / multiplier change mid-round leaves that ticker
+without a fresh price (hold off-hours, skip in session, `StalePrice` after `maxPriceAge`); (b) the 0.5% deviation /
+24 h heartbeat rule lets the signed price trail the market by up to ~50 bps in session without a new round (more
+in a fast move) and RHX5 trades on it: launch with small `maxNetExposureUsd` caps or RHX5 off until the lag has been
+observed; (c) USDG is assumed = $1: a depeg shows up as divergence alerts on every ticker, not as a price change;
+(d) DEX manipulation only raises alerts; a thin pool gives no confirmation (alert after 10 min); (e) a lagging
+Chainlink and a manipulated DEX look the same to the code: the operator decides (steps above).
+
+**Corporate action** (Chainlink `oraclePaused()` on a token): that ticker has **no price** for the paused window —
+held off-hours, skipped in session (then `StalePrice` after `maxPriceAge`); its DEX confirm stops too. Plan it with
+the corporate-actions steps below.
+
+1. **Source check** (read-only, before anything is registered and again right before launch):
    `bun run --cwd services/oracle source-check --chain 4663 --rpc $RHC_RPC_URL [--registry 0x<registry>]`
    reads every feed and token in `config/chains/4663.json` (proxy code, `decimals()`, `description()`,
    `latestRoundData()` age vs heartbeat in session, token code / `decimals() == 18` / `uiMultiplier()` /
-   `oraclePaused()` / pending multiplier, per-share price, Pyth Pro (when `PYTH_API_KEY` is set; FAIL on
-   4663 without it) and the HTTP sources from `ORACLE_HTTP_SOURCES` against Chainlink (150 bps), their
-   pairwise agreement, which sources are live, the mainnet production rules of the current `ORACLE_*` environment, and with
-   `--registry` the registration + live-multiplier mode). Exit code 1 on any FAIL; fix every FAIL. Off the
-   mainnet host, keep the token in the gitignored `.env.pyth` and pass it explicitly:
+   `oraclePaused()` / pending multiplier, per-share price), per ticker the `dex confirm` row (TWAP per share vs
+   Chainlink per share, diff in bps, USDG depth vs floor, cardinality, observation history; FAIL on 4663 when a
+   pool is missing, below its floor, too young for the window or unreadable; WARN above `ORACLE_CONFIRM_BPS`), the
+   optional confirmers (Pyth Pro when `PYTH_API_KEY` is set, `ORACLE_HTTP_SOURCES`: WARN only), the summary rows
+   `sources primary` / `sources confirm`, the `pyth calendar` row (WARN), the mainnet production rules of the
+   current `ORACLE_*` environment, and with `--registry` the registration + live-multiplier mode. Exit code 1 on
+   any FAIL; fix every FAIL. Off the mainnet host, a Pyth token stays in the gitignored `.env.pyth`:
    `cd services/oracle && bun --env-file=../../.env.pyth src/cli/source-check.ts --chain 4663 --rpc ...`.
 2. **Stock Tokens** (timelock, per token of `config/chains/4663.json`):
    `register(token, bytes32(<TICKER>), <current uiMultiplier()>, floatCapRaw)` then
    `setMultiplierSource(token, true)`. The stored value is the anchor; the live multiplier may drift
    `multiplierBandBps` (default 500 = 5%) from it before valuations fail closed.
 3. **Oracle environment** (`services/oracle`, chain 4663): `ORACLE_SYNTHETIC=0`, `SESSIONS_MODE=charter`,
-   `ORACLE_MIN_SOURCES=2` (the mainnet preflight requires exactly 2; the service also applies
-   `AttestedOracle.minSources()`, set to 2 by DeployMainnet from `params.oracleMinSources`, and refuses to
-   start unless it leaves one spare live source), `ORACLE_PYTH=1` + `PYTH_API_KEY` (Pyth Pro; licence
-   VERIFY C6), the third licensed per-share source (`ORACLE_HTTP_SOURCES` or its preset: the preflight refuses
-   fewer than 3 live sources), `ORACLE_CHAINLINK_RPC_URL` (or `RPC_URL`), `ORACLE_ATTESTATION_FILE`. The service refuses to start on 4663 when any
-   production rule fails (`services/oracle/src/production.ts`) and never signs a price, held or not, with
-   fewer than the minimum sources. Synthetic sources cannot be constructed on 4663.
+   `ORACLE_POLICY=primary-confirm` and `ORACLE_MIN_SOURCES=1` (both pinned by the mainnet profile,
+   `scripts/network-profile.ts`; a contradicting inherited value is refused; the service also requires
+   `AttestedOracle.minSources() == 1`, set by DeployMainnet from `params.oracleMinSources`), `ORACLE_CONFIRM_BPS`
+   (default 200, at most 500), the DEX confirm (`ORACLE_DEX_CONFIRM` default 1, cannot be 0 on 4663;
+   `ORACLE_DEX_TWAP_SEC` overrides the pools' 600 s; `ORACLE_DEX_MAX_AGE_MS` 60 s; `ORACLE_DEX_RPC_URL`, default
+   `ORACLE_CHAINLINK_RPC_URL`, else `RPC_URL`), `ORACLE_CHAINLINK_RPC_URL` (or `RPC_URL`),
+   `ORACLE_ATTESTATION_FILE`; optional: `ORACLE_PYTH=1` + `PYTH_API_KEY` (https only; licence VERIFY C6),
+   `ORACLE_HTTP_SOURCES` (`tsPath` + `maxAgeMs` ≤ 30 s; Finnhub refused). The service refuses to start on 4663 when
+   any production rule fails (`services/oracle/src/production.ts`: a Chainlink feed and a DEX confirm pool with a
+   floor ≥ 10,000 for every ticker). Synthetic sources cannot be constructed on 4663.
 
 ### Oracle signer attestation (VERIFY E1)
 
@@ -307,9 +351,10 @@ can redo it during the timelock delay from the published quote.
   `oraclePaused()`): `source-check` warns "pending multiplier". Before `effectiveAt`, propose
   `setNextMultiplierAnchor(token, newUIMultiplier)` so valuations keep working across the change; after
   it, `setMultiplier(token, new)` and `setNextMultiplierAnchor(token, 0)`. While `oraclePaused()` is set
-  the oracle drops the Chainlink observation for that ticker: Pyth + the third source carry its price (2 of 3,
-  within 150 bps of each other); if one of them fails too, nothing is signed and after `maxPriceAge` its
-  valuations, trades and liquidations revert `StalePrice` until two sources agree again.
+  the oracle drops the Chainlink observation (and the DEX confirm) for that ticker: Chainlink is the only signing
+  source, so nothing is signed for it in session and after `maxPriceAge` its valuations, trades and liquidations
+  revert `StalePrice` until the pause ends; off-hours the price stays held at the last Chainlink price. Expect
+  `oracle_source_failing:chainlink` for the ticker during the pause.
 
 ## Operations
 
