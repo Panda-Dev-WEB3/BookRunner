@@ -93,10 +93,22 @@ export interface ApiProbe {
   error: string | null;
 }
 
+/**
+ * How the oracle turns sources into a price (GET /health `policy`; absent on older oracles = "median").
+ * median: N live sources, M required, the median of those within the band (devnet / testnet).
+ * primary-confirm: the primary (Chainlink) alone sets and signs each price; confirm sources (DEX TWAP, Pyth) are
+ * only compared against it and never substitute (mainnet).
+ */
+export type OraclePolicy = "median" | "primary-confirm";
+
+/** A source's part in the policy (GET /health `sources[].role`; absent = "median"). */
+export type OracleSourceRole = "primary" | "confirm" | "median";
+
 /** One live price source as the oracle reports it (GET /health `sources`, services/oracle SourceHealth). */
 export interface OracleSourceSnap {
   name: string;
   kind: string;
+  role: OracleSourceRole;
   /** unix ms of the last fresh observation */
   lastOkAt: number | null;
   /** unix ms since when it fails in-session tickers; null = healthy */
@@ -106,10 +118,35 @@ export interface OracleSourceSnap {
   lastError: string | null;
 }
 
+/**
+ * primary-confirm: one ticker's comparison of the primary price with its confirm sources (GET /health `confirm`).
+ * "closed" = the ticker is off-hours (not evaluated); diverged / unavailable are only reported in session.
+ * "no-primary" = in session but the primary itself has no fresh observation (the primary source alert and
+ * oracle_price_missing cover it; never a confirm alert).
+ */
+export interface OracleConfirmSnap {
+  priceId: string;
+  status: "ok" | "diverged" | "unavailable" | "closed" | "no-primary";
+  /** max |confirmer - primary| / primary in bps among fresh confirmers; null when there is none */
+  diffBps: number | null;
+  /** unix ms: start of the current run of this status (in session) */
+  since: number | null;
+  /** unix ms of the last evaluation */
+  checkedAt: number | null;
+  primaryPrice: number | null;
+  confirmers: Array<{ name: string; price: number; diffBps: number }>;
+}
+
 export interface OracleProbe {
   ok: boolean;
   error: string | null;
+  /** "median" when the oracle does not report one (older oracles) */
+  policy: OraclePolicy;
+  /** primary-confirm: ORACLE_CONFIRM_BPS (divergence threshold); null when absent (median) */
+  confirmBps: number | null;
   sources: OracleSourceSnap[];
+  /** primary-confirm: per-ticker confirmation status; [] under median */
+  confirm: OracleConfirmSnap[];
   /** the oracle's on-chain minSources problem (minSources() above the live sources), if any */
   minSourcesProblem: string | null;
   /** in-session price ids without a publishable price (since = unix ms of the start of the run) */

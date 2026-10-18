@@ -1,6 +1,6 @@
 import type { SupervisorStatus } from "@bookrunner/shared/supervisor";
 import { type RuleConfig, loadConfig } from "../src/config";
-import type { BookSnap, Snapshot } from "../src/types";
+import type { BookSnap, OracleConfirmSnap, OracleProbe, OracleSourceSnap, Snapshot } from "../src/types";
 
 export const NOW = Date.UTC(2026, 9, 10, 12, 0, 0); // 2026-10-10T12:00:00Z
 export const NOW_S = NOW / 1000;
@@ -36,6 +36,31 @@ export function supervisor(over: Partial<SupervisorStatus> = {}): SupervisorStat
   };
 }
 
+/** A healthy mainnet-style primary-confirm oracle: chainlink primary, dex-twap + pyth confirm, every ticker confirmed. */
+export function confirmOracle(over: Partial<OracleProbe> = {}): OracleProbe {
+  const src = (name: string, kind: string, role: OracleSourceSnap["role"]): OracleSourceSnap => ({ name, kind, role, lastOkAt: NOW - 1_000, failingSince: null, failingTickers: [], lastError: null });
+  const ok = (priceId: string, price: number): OracleConfirmSnap => ({
+    priceId,
+    status: "ok",
+    diffBps: 10,
+    since: NOW - 3_600_000,
+    checkedAt: NOW - 1_000,
+    primaryPrice: price,
+    confirmers: [{ name: "dex-twap", price: price * 1.001, diffBps: 10 }],
+  });
+  return {
+    ok: true,
+    error: null,
+    policy: "primary-confirm",
+    confirmBps: 200,
+    sources: [src("chainlink", "chainlink", "primary"), src("dex-twap", "dex", "confirm"), src("pyth", "pyth", "confirm")],
+    confirm: [ok("NVDA", 180), ok("TSLA", 250), ok("AAPL", 230)],
+    minSourcesProblem: null,
+    unpublished: [],
+    ...over,
+  };
+}
+
 /** A healthy snapshot: every rule returns nothing. */
 export function snap(over: Partial<Snapshot> = {}): Snapshot {
   return {
@@ -58,10 +83,13 @@ export function snap(over: Partial<Snapshot> = {}): Snapshot {
     oracle: {
       ok: true,
       error: null,
+      policy: "median",
+      confirmBps: null,
       sources: [
-        { name: "chainlink", kind: "chainlink", lastOkAt: NOW - 1_000, failingSince: null, failingTickers: [], lastError: null },
-        { name: "pyth", kind: "pyth", lastOkAt: NOW - 1_000, failingSince: null, failingTickers: [], lastError: null },
+        { name: "chainlink", kind: "chainlink", role: "median", lastOkAt: NOW - 1_000, failingSince: null, failingTickers: [], lastError: null },
+        { name: "pyth", kind: "pyth", role: "median", lastOkAt: NOW - 1_000, failingSince: null, failingTickers: [], lastError: null },
       ],
+      confirm: [],
       minSourcesProblem: null,
       unpublished: [],
     },

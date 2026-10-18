@@ -3,7 +3,7 @@
 // "resolved" when it stops. Keys are stable per (rule, subject) so the same problem never alerts twice.
 import { formatEther } from "viem";
 import type { RuleConfig } from "./config";
-import type { BookSnap, Condition, Sample, Snapshot } from "./types";
+import type { BookSnap, Condition, OracleConfirmSnap, OracleProbe, OracleSourceSnap, Sample, Snapshot } from "./types";
 
 /** States in which a book is marked every period (Book.sol: Live and Retiring). */
 const MARKABLE = new Set(["Live", "Retiring"]);
@@ -333,13 +333,36 @@ export function apiHealth(s: Snapshot, c: RuleConfig): Condition[] {
 }
 
 // ------------------------------------------------------------------ oracle sources
+const lastOkText = (src: OracleSourceSnap) => (src.lastOkAt == null ? "never ok since start" : `last ok ${new Date(src.lastOkAt).toISOString()}`);
+/** a price for a message: 6 significant digits, no trailing zeros */
+const px = (p: number | null) => (p === null ? "?" : String(Number(p.toPrecision(6))));
+const bps = (b: number | null) => (b === null ? "?" : `${Math.round(b)} bps`);
+
 /**
- * A live oracle source (Chainlink, Pyth Pro, the third source) failing in-session tickers for longer than
- * oracleSourceFailSec. Mainnet runs 3 sources with 2 required: one failing source is a warning (prices continue
- * from the remaining two while they agree within the band, with no spare left); two or more failing on the same ticker
- * is critical (no price for it; after maxPriceAge valuations and liquidations revert). oracle_price_missing: an
- * in-session ticker without a publishable price for oraclePriceMissingSec that two failing sources do not explain.
- * Also: the oracle's /health unreachable, and an on-chain minSources the configured sources cannot reach.
+ * Oracle health (GET /health), by the oracle's `policy` (absent = median):
+ *
+ * median (devnet / testnet; N live sources, M required, median within the band): oracle_source_failing when a live
+ * source has failed in-session tickers for longer than oracleSourceFailSec: a warning while the remaining sources
+ * carry the price (with 3 live / 2 required: no spare left), critical when two or more fail on the same ticker (no
+ * price for it; after maxPriceAge valuations and liquidations revert). oracle_price_missing: an in-session ticker
+ * without a publishable price for oraclePriceMissingSec that two failing sources do not explain.
+ *
+ * primary-confirm (mainnet): Chainlink (role "primary") alone sets and signs each price; confirm sources (DEX TWAP,
+ * Pyth) are only compared against it and never substitute.
+ * - oracle_source_failing:<primary> CRITICAL after oracleSourceFailSec: no price for its tickers; the last signed
+ *   price ages until StalePrice after maxPriceAge.
+ * - oracle_source_failing:<confirm> WARNING after max(oracleSourceFailSec, oracleConfirmUnavailableSec), only for
+ *   its failing tickers whose confirm status is neither "unavailable" (oracle_confirm_unavailable's) nor "no-primary"
+ *   (the primary alert's); prices
+ *   continue from Chainlink. No "two sources failing on one ticker" escalation.
+ * - oracle_price_missing as above, but explained (suppressed) only by an alerting primary failure on that ticker.
+ * - oracle_confirm_divergence:<priceId>: "diverged" for oracleConfirmDivergenceSec; critical above 2x confirmBps or
+ *   when oracleConfirmCriticalTickers tickers are diverged that long at once. The price stays Chainlink.
+ * - oracle_confirm_unavailable:<priceId>: "unavailable" (no fresh confirm source) for oracleConfirmUnavailableSec:
+ *   Chainlink is published unconfirmed. "closed" (off-hours) and "no-primary" (Chainlink itself has no fresh
+ *   observation: the primary alert / oracle_price_missing cover it) entries never raise a confirm alert.
+ *
+ * Both: oracle_health (/health unreachable) and oracle_min_sources (on-chain minSources the sources cannot reach).
  */
 export function oracle(s: Snapshot, c: RuleConfig): Condition[] {
   const o = s.oracle;
@@ -347,6 +370,30 @@ export function oracle(s: Snapshot, c: RuleConfig): Condition[] {
   if (!o.ok) {
     return [{ key: "oracle_health", rule: "oracle_health", severity: "warning", forSec: 120, summary: `oracle /health unreachable: ${o.error ?? "?"}` }];
   }
+  const out = o.policy === "primary-confirm" ? oraclePrimaryConfirm(o, s, c) : oracleMedian(o, s, c);
+  if (o.minSourcesProblem) {
+    out.push({ key: "oracle_min_sources", rule: "oracle_min_sources", severity: "critical", summary: `oracle: ${o.minSourcesProblem}` });
+  }
+  return out;
+}
+
+/** in-session tickers without a publishable price for oraclePriceMissingSec, minus those `explained` by source alerts */
+function priceMissing(o: OracleProbe, s: Snapshot, c: RuleConfig, explained: Set<string>): Condition[] {
+  const out: Condition[] = [];
+  for (const u of o.unpublished) {
+    const age = (s.now - u.since) / 1000;
+    if (age < c.oraclePriceMissingSec || explained.has(u.priceId)) continue;
+    out.push({
+      key: `oracle_price_missing:${u.priceId}`,
+      rule: "oracle_price_missing",
+      severity: "critical",
+      summary: `oracle: no publishable price for ${u.priceId} for ${dur(age)} in session (${u.reason}); after maxPriceAge valuations and liquidations revert`,
+    });
+  }
+  return out;
+}
+
+function oracleMedian(o: OracleProbe, s: Snapshot, c: RuleConfig): Condition[] {
   const out: Condition[] = [];
   const failing = o.sources.filter((src) => src.failingSince != null && (s.now - src.failingSince) / 1000 >= c.oracleSourceFailSec);
   // tickers failed by 2+ sources at once: below 2 sources nothing is published for them
@@ -355,13 +402,12 @@ export function oracle(s: Snapshot, c: RuleConfig): Condition[] {
   const dark = new Set([...failedBy].filter(([, n]) => n >= 2).map(([t]) => t));
   for (const src of failing) {
     const age = (s.now - (src.failingSince ?? s.now)) / 1000;
-    const lastOk = src.lastOkAt == null ? "never ok since start" : `last ok ${new Date(src.lastOkAt).toISOString()}`;
     const shared = src.failingTickers.filter((t) => dark.has(t));
     out.push({
       key: `oracle_source_failing:${src.name}`,
       rule: "oracle_source_failing",
       severity: shared.length > 0 ? "critical" : "warning",
-      summary: `oracle source ${src.name} (${src.kind}) failing for ${dur(age)} on ${src.failingTickers.join(", ") || "?"} (${src.lastError ?? "?"}; ${lastOk}): ${
+      summary: `oracle source ${src.name} (${src.kind}) failing for ${dur(age)} on ${src.failingTickers.join(", ") || "?"} (${src.lastError ?? "?"}; ${lastOkText(src)}): ${
         shared.length > 0
           ? `another source fails on ${shared.join(", ")} too: below 2 sources no price is published; after maxPriceAge valuations and liquidations revert`
           : "prices continue from the remaining sources while they agree, with no spare left"
@@ -370,18 +416,74 @@ export function oracle(s: Snapshot, c: RuleConfig): Condition[] {
   }
   // a ticker with no publishable price in session that the source alerts do not already explain (e.g. three fresh
   // sources spread beyond the band, or one down and the other two disagreeing)
-  for (const u of o.unpublished) {
-    const age = (s.now - u.since) / 1000;
-    if (age < c.oraclePriceMissingSec || dark.has(u.priceId)) continue;
+  out.push(...priceMissing(o, s, c, dark));
+  return out;
+}
+
+function oraclePrimaryConfirm(o: OracleProbe, s: Snapshot, c: RuleConfig): Condition[] {
+  const out: Condition[] = [];
+  const statusOf = new Map(o.confirm.map((x) => [x.priceId, x.status]));
+  const primaryDark = new Set<string>();
+  const confirmFailSec = Math.max(c.oracleSourceFailSec, c.oracleConfirmUnavailableSec);
+  for (const src of o.sources) {
+    if (src.failingSince == null) continue;
+    const age = (s.now - src.failingSince) / 1000;
+    if (src.role === "primary") {
+      if (age < c.oracleSourceFailSec) continue;
+      for (const t of src.failingTickers) primaryDark.add(t);
+      const tickers = src.failingTickers.join(", ") || "?";
+      out.push({
+        key: `oracle_source_failing:${src.name}`,
+        rule: "oracle_source_failing",
+        severity: "critical",
+        summary: `oracle primary source ${src.name} (${src.kind}) failing for ${dur(age)} on ${tickers} (${src.lastError ?? "?"}; ${lastOkText(src)}): no price is published for ${tickers} (Chainlink is the only signing source; the DEX never substitutes); the last signed price ages until StalePrice after maxPriceAge, then valuations and liquidations revert`,
+      });
+    } else {
+      // a confirm source: its tickers left without any confirmer are oracle_confirm_unavailable's, and tickers without
+      // a Chainlink price (no-primary) are the primary alert's
+      if (age < confirmFailSec) continue;
+      const tickers = src.failingTickers.filter((t) => statusOf.get(t) !== "unavailable" && statusOf.get(t) !== "no-primary");
+      if (tickers.length === 0) continue;
+      out.push({
+        key: `oracle_source_failing:${src.name}`,
+        rule: "oracle_source_failing",
+        severity: "warning",
+        summary: `oracle confirm source ${src.name} (${src.kind}) failing for ${dur(age)} on ${tickers.join(", ")} (${src.lastError ?? "?"}; ${lastOkText(src)}): confirm source only: prices continue from Chainlink`,
+      });
+    }
+  }
+  out.push(...priceMissing(o, s, c, primaryDark));
+
+  // divergence: the confirm sources disagree with the published (Chainlink) price; no `since` = run length unknown
+  const runAge = (x: OracleConfirmSnap) => (x.since == null ? null : (s.now - x.since) / 1000);
+  const diverged = o.confirm.filter((x) => x.status === "diverged" && (runAge(x) ?? -1) >= c.oracleConfirmDivergenceSec);
+  const band = o.confirmBps ?? 200;
+  const many = diverged.length >= c.oracleConfirmCriticalTickers;
+  for (const x of diverged) {
+    const wide = x.diffBps !== null && x.diffBps > 2 * band;
+    const vs = x.confirmers.length ? x.confirmers.map((k) => `${k.name} ${px(k.price)} (${bps(k.diffBps)})`).join(", ") : "?";
+    const why = [wide ? `above 2x the ${band} bps limit` : null, many ? `${diverged.length} tickers diverged at once` : null].filter(Boolean).join("; ");
     out.push({
-      key: `oracle_price_missing:${u.priceId}`,
-      rule: "oracle_price_missing",
-      severity: "critical",
-      summary: `oracle: no publishable price for ${u.priceId} for ${dur(age)} in session (${u.reason}); after maxPriceAge valuations and liquidations revert`,
+      key: `oracle_confirm_divergence:${x.priceId}`,
+      rule: "oracle_confirm_divergence",
+      severity: wide || many ? "critical" : "warning",
+      summary: `oracle: ${x.priceId} Chainlink ${px(x.primaryPrice)} vs ${vs}: ${bps(x.diffBps)} apart (limit ${band} bps) for ${dur(runAge(x) ?? 0)} in session${why ? ` (${why})` : ""}; the published price is still Chainlink (the DEX never moves it). Check Chainlink lag (0.5% deviation / 24 h heartbeat update rule), the USDG peg, DEX pool manipulation; docs/RUNBOOK.md "Real prices"`,
     });
   }
-  if (o.minSourcesProblem) {
-    out.push({ key: "oracle_min_sources", rule: "oracle_min_sources", severity: "critical", summary: `oracle: ${o.minSourcesProblem}` });
+
+  // no fresh confirm source on an in-session ticker: Chainlink is published unconfirmed
+  const confirmFailing = o.sources.filter((src) => src.role !== "primary" && src.failingSince != null);
+  for (const x of o.confirm) {
+    const age = runAge(x);
+    if (x.status !== "unavailable" || age === null || age < c.oracleConfirmUnavailableSec) continue;
+    const onIt = confirmFailing.filter((src) => src.failingTickers.includes(x.priceId));
+    const why = (onIt.length ? onIt : confirmFailing).map((src) => `${src.name}: ${src.lastError ?? "?"}`);
+    out.push({
+      key: `oracle_confirm_unavailable:${x.priceId}`,
+      rule: "oracle_confirm_unavailable",
+      severity: "warning",
+      summary: `oracle: no confirm source for ${x.priceId} for ${dur(age)} in session: Chainlink is published unconfirmed${why.length ? ` (failing confirm sources: ${why.join("; ")})` : ""}`,
+    });
   }
   return out;
 }

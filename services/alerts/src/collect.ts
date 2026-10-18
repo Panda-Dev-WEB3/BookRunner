@@ -4,7 +4,20 @@
 // infra / rpc / api condition instead of blinding the other rules.
 import { KEYS } from "@bookrunner/shared/queues";
 import { SUPERVISOR_STATUS_KEY, parseSupervisorStatus } from "@bookrunner/shared/supervisor";
-import type { BackupSnap, BookSnap, IndexerCursorSnap, KillEventSnap, OracleProbe, OracleSourceSnap, RiskSnap, Sample, Snapshot } from "./types";
+import type {
+  BackupSnap,
+  BookSnap,
+  IndexerCursorSnap,
+  KillEventSnap,
+  OracleConfirmSnap,
+  OraclePolicy,
+  OracleProbe,
+  OracleSourceRole,
+  OracleSourceSnap,
+  RiskSnap,
+  Sample,
+  Snapshot,
+} from "./types";
 
 /** deploy/server/backup.sh records its outcome here (same Redis db as the stack). */
 export const BACKUP_STATUS_KEY = "bkrn:backup:last";
@@ -142,16 +155,54 @@ export function parseBackup(raw: string | null): BackupSnap | null {
   }
 }
 
-/** The oracle's GET /health body -> per-source health (unknown shapes -> not ok). */
+/** An oracle probe that saw no usable body (unreachable, HTTP error, unknown shape). */
+export const oracleDown = (error: string): OracleProbe => ({ ok: false, error, policy: "median", confirmBps: null, sources: [], confirm: [], minSourcesProblem: null, unpublished: [] });
+
+const ROLES = new Set<OracleSourceRole>(["primary", "confirm", "median"]);
+const CONFIRM_STATUS = new Set<OracleConfirmSnap["status"]>(["ok", "diverged", "unavailable", "closed", "no-primary"]);
+const isObj = (x: unknown): x is Record<string, unknown> => !!x && typeof x === "object" && !Array.isArray(x);
+
+/** GET /health `confirm[]` (primary-confirm): entries without a priceId or with an unknown status are dropped. */
+function parseConfirm(raw: unknown): OracleConfirmSnap[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((x): OracleConfirmSnap[] => {
+    if (!isObj(x) || typeof x.priceId !== "string" || x.priceId === "") return [];
+    const status = x.status as OracleConfirmSnap["status"];
+    if (!CONFIRM_STATUS.has(status)) return [];
+    const confirmers = Array.isArray(x.confirmers)
+      ? x.confirmers.flatMap((c) => {
+          if (!isObj(c) || typeof c.name !== "string") return [];
+          const price = num(c.price);
+          const diffBps = num(c.diffBps);
+          return price === null || diffBps === null ? [] : [{ name: c.name.slice(0, 64), price, diffBps }];
+        })
+      : [];
+    return [
+      {
+        priceId: x.priceId.slice(0, 64),
+        status,
+        diffBps: num(x.diffBps),
+        since: num(x.since),
+        checkedAt: num(x.checkedAt),
+        primaryPrice: num(x.primaryPrice),
+        confirmers: confirmers.slice(0, 8),
+      },
+    ];
+  });
+}
+
+/** The oracle's GET /health body -> policy + per-source health + confirm status (unknown shapes -> not ok). */
 export function parseOracleHealth(body: unknown): OracleProbe {
-  if (!body || typeof body !== "object") return { ok: false, error: "unexpected body", sources: [], minSourcesProblem: null, unpublished: [] };
-  const o = body as { sources?: unknown; onchain?: { minSourcesProblem?: unknown }; unpublished?: unknown };
+  if (!body || typeof body !== "object") return oracleDown("unexpected body");
+  const o = body as { policy?: unknown; confirmBps?: unknown; sources?: unknown; confirm?: unknown; onchain?: { minSourcesProblem?: unknown }; unpublished?: unknown };
+  const policy: OraclePolicy = o.policy === "primary-confirm" ? "primary-confirm" : "median";
   const sources: OracleSourceSnap[] = Array.isArray(o.sources)
     ? o.sources
         .filter((x): x is Record<string, unknown> => !!x && typeof x === "object" && typeof (x as { name?: unknown }).name === "string")
         .map((x) => ({
           name: String(x.name),
           kind: typeof x.kind === "string" ? x.kind : "?",
+          role: ROLES.has(x.role as OracleSourceRole) ? (x.role as OracleSourceRole) : "median",
           lastOkAt: num(x.lastOkAt),
           failingSince: num(x.failingSince),
           failingTickers: Array.isArray(x.failingTickers) ? x.failingTickers.map(String) : [],
@@ -167,7 +218,16 @@ export function parseOracleHealth(body: unknown): OracleProbe {
           return since === null ? [] : [{ priceId: String(x.priceId), since, reason: typeof x.reason === "string" ? x.reason.slice(0, 200) : "?" }];
         })
     : [];
-  return { ok: true, error: null, sources, minSourcesProblem: typeof msp === "string" ? msp : null, unpublished };
+  return {
+    ok: true,
+    error: null,
+    policy,
+    confirmBps: num(o.confirmBps),
+    sources,
+    confirm: parseConfirm(o.confirm),
+    minSourcesProblem: typeof msp === "string" ? msp : null,
+    unpublished,
+  };
 }
 
 /** Appends a sample and drops those older than `windowMs`. */
@@ -302,14 +362,14 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
     api = { ok: false, httpStatus: null, db: null, redis: null, error: errMsg(err) };
   }
 
-  // ---- oracle (per-source health: 3 live sources, 2 required on mainnet; one failure leaves no spare)
+  // ---- oracle (policy, per-source health, primary-confirm status: see rules.ts oracle)
   let oracle: Snapshot["oracle"] = null;
   if (st.oracleUrl) {
     try {
       const res = await d.fetch(`${st.oracleUrl}/health`, { signal: AbortSignal.timeout(5_000) });
-      oracle = res.ok ? parseOracleHealth(await res.json().catch(() => null)) : { ok: false, error: `HTTP ${res.status}`, sources: [], minSourcesProblem: null, unpublished: [] };
+      oracle = res.ok ? parseOracleHealth(await res.json().catch(() => null)) : oracleDown(`HTTP ${res.status}`);
     } catch (err) {
-      oracle = { ok: false, error: errMsg(err), sources: [], minSourcesProblem: null, unpublished: [] };
+      oracle = oracleDown(errMsg(err));
     }
   }
 
