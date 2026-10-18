@@ -418,6 +418,10 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
         if (o.amountIn > IERC20(o.token).balanceOf(address(this))) revert IMMMandate.SpotShortNotAllowed();
 
         IStockTokenRegistry reg = _registry();
+        // audit M-2 (fix round 2, N-I2): the split window defers the RISK flatten whatever the price's age (at
+        // the reopen the price is often stale too: the oracle drops pre-split rounds), so a stale price can
+        // never turn it into an unbounded sale at a pre-change reference
+        if (viaRisk) reg.checkPriceBasis(o.token);
         int256 before = viaRisk ? int256(0) : SafeCast.toInt256(_hedgeValue(reg));
         (uint256 spent, uint256 received) = _swap(o.venue, o.token, usdc, o.poolFee, o.amountIn, o.minAmountOut);
         _syncHeld(o.token);

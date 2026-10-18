@@ -52,6 +52,11 @@ interface IStockTokenRegistry {
     ///         change is pre-approved or staged), `window` = the price's share basis `basisAt` predates a change
     ///         (no voluntary trade).
     function splitGate(bytes32 priceId, uint64 basisAt) external view returns (bool pending, bool window);
+    /// @notice Multiplier in force at a price basis `basisAt` (0 = unknown): the on-chain source off-chain
+    ///         valuations use in the split window.
+    function basisMultiplier(address token, uint64 basisAt) external view returns (uint256);
+    /// @notice Reverts while the stored price's share basis predates the multiplier change (any price age).
+    function checkPriceBasis(address token) external view;
 
     event TokenRegistered(address indexed token, bytes32 indexed priceId, uint256 multiplierWad);
     event MultiplierSet(address indexed token, uint256 multiplierWad);

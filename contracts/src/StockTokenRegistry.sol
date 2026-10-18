@@ -70,6 +70,16 @@ contract StockTokenRegistry is IStockTokenRegistry {
     /// @dev Reverse indexes for {splitGate}: an engine market is keyed by its price id.
     mapping(bytes32 priceId => address[]) internal _tokensOfPriceId;
     mapping(bytes32 priceId => bytes32 indexId) internal _indexOfPriceId;
+    /// @dev Last registry-side change ({multiplierSetAt}) with the time of the one before it and the multiplier in
+    ///      force before it (stored mode: the previous stored value; live mode: the anchor before a split re-anchor
+    ///      or source switch), for {basisMultiplier} (fix round 2, N-I1).
+    struct MultiplierChange {
+        uint64 at;
+        uint64 prevAt;
+        uint256 before;
+    }
+
+    mapping(address token => MultiplierChange) internal _lastChange;
 
     error Unauthorized(address caller);
     error ZeroAddress();
@@ -152,9 +162,7 @@ contract StockTokenRegistry is IStockTokenRegistry {
         // audit M-2. Stored mode: this IS the valuation multiplier, a price observed before it must not meet
         // it. Live mode: an anchor moved beyond the band re-anchors a split; stamping it keeps the guard on
         // when the token later stops reporting that split's effectiveAt (a newer change staged).
-        if (multiplierFromToken[token] ? !_inBand(multiplierWad, old) : multiplierWad != old) {
-            multiplierSetAt[token] = uint64(block.timestamp);
-        }
+        if (multiplierFromToken[token] ? !_inBand(multiplierWad, old) : multiplierWad != old) _stamp(token, old);
         emit MultiplierSet(token, multiplierWad);
     }
 
@@ -165,7 +173,7 @@ contract StockTokenRegistry is IStockTokenRegistry {
     ///         actual switch counts as a change; a no-op re-call does not.
     function setMultiplierSource(address token, bool fromToken) external onlyGov {
         StockToken storage t = _registered(token);
-        if (multiplierFromToken[token] != fromToken) multiplierSetAt[token] = uint64(block.timestamp);
+        if (multiplierFromToken[token] != fromToken) _stamp(token, t.multiplierWad);
         multiplierFromToken[token] = fromToken;
         if (fromToken) {
             _effective(t);
@@ -288,6 +296,31 @@ contract StockTokenRegistry is IStockTokenRegistry {
     ///      {multiplierSetAt}.
     function multiplierChangedAt(address token) external view override returns (uint256 changedAt) {
         (, changedAt,) = _effective(_registered(token));
+    }
+
+    /// @notice Multiplier in force at `basisAt` (fix round 2, N-I1), 0 = unknown. No change since: the effective
+    ///         one. Latest change registry-side (stored `setMultiplier`, source switch, live split re-anchor): the
+    ///         recorded value before it, if it is the only registry change after `basisAt`. A token-side change
+    ///         (live mode): the stored anchor, which is the pre-split multiplier until the (stamped) re-anchor;
+    ///         for an in-band change it is within the band of both (approximate, at most the band off).
+    function basisMultiplier(address token, uint64 basisAt) external view override returns (uint256) {
+        StockToken storage t = _registered(token);
+        (uint256 mult, uint256 changedAt,) = _effective(t);
+        if (changedAt <= basisAt) return mult;
+        MultiplierChange storage c = _lastChange[token];
+        if (c.at > basisAt) return c.prevAt <= basisAt ? c.before : 0; // earliest change after the basis
+        return multiplierFromToken[token] ? t.multiplierWad : 0;
+    }
+
+    /// @notice Reverts MultiplierChangedSincePrice when the stored price's share basis predates the multiplier
+    ///         change, whatever its age (fix round 2, N-I2: the RISK flatten checks this before it may tolerate a
+    ///         stale price).
+    function checkPriceBasis(address token) external view override {
+        StockToken storage t = _registered(token);
+        (, uint256 changedAt,) = _effective(t);
+        if (changedAt == 0) return;
+        uint64 basis = _storedBasis(t);
+        if (changedAt > basis) revert MultiplierChangedSincePrice(token, basis, changedAt);
     }
 
     /// @notice Engine gate for a market keyed by `priceId` (a Stock Token's price id, or an index level's;
@@ -445,6 +478,22 @@ contract StockTokenRegistry is IStockTokenRegistry {
         } else if (!_inBand(mult, t.multiplierWad)) {
             changedAt = block.timestamp; // review I-2: an active split whose time a staged change hides
         }
+    }
+
+    /// @dev Records a registry-side multiplier change (audit M-2): its time, the previous one's, the value before.
+    function _stamp(address token, uint256 before) internal {
+        MultiplierChange storage c = _lastChange[token];
+        c.prevAt = c.at;
+        c.at = uint64(block.timestamp);
+        c.before = before;
+        multiplierSetAt[token] = uint64(block.timestamp);
+    }
+
+    /// @dev Share basis of the stored price of `t` (no staleness check): publishedAt, or lastLiveAt when held.
+    function _storedBasis(StockToken storage t) internal view returns (uint64 basis) {
+        IAttestedOracle o = IAttestedOracle(config.oracle());
+        IAttestedOracle.PriceData memory d = o.latest(t.priceId);
+        basis = d.held ? o.lastLiveAt(t.priceId) : d.publishedAt;
     }
 
     /// @dev {splitGate} for one token.

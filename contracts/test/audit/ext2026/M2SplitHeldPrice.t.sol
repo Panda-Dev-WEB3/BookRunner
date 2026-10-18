@@ -270,6 +270,43 @@ contract M2SplitHeldPriceTest is MandateBase {
         assertEq(nvda.balanceOf(address(desk)), 0);
     }
 
+    /// @notice Fix round 2, N-I2: the reopen with no post-split Chainlink round yet. The oracle drops the
+    ///         pre-split round, nothing is signed in session, the stored (pre-split) price goes stale: the RISK
+    ///         flatten used to tolerate the stale valuation (notional 0) and sell at 1/10 unbounded. Deferred.
+    function test_M2_riskFlatten_deferredWhenStaleInTheWindow() public {
+        _buy(9500e6);
+        adapter.setExposure(0);
+        _stageSplit(0.1e18);
+        _closedSessionUntil(SAT + 1 hours);
+        vm.warp(SAT + 2 days); // Monday open: no new round, the stored held price is far past maxPriceAge
+        router.setPrice(address(nvda), 19e18); // a pool bidding 1/10 of the token's value
+        vm.prank(risk);
+        vm.expectRevert(_changedErr(uint64(FRI_CLOSE), SAT));
+        desk.execute(_flattenAction(address(nvda), 50e18, 0));
+        assertEq(nvda.balanceOf(address(desk)), 50e18);
+    }
+
+    /// @notice Fix round 2, N-I1: the on-chain multiplier in force at a price basis (off-chain valuations use it
+    ///         in the split window instead of 0).
+    function test_M2_basisMultiplier_onChainSource() public {
+        _stageSplit(10e18);
+        _closedSessionUntil(SAT + 1 hours);
+        uint64 fri = uint64(FRI_CLOSE);
+        assertEq(registry.basisMultiplier(address(nvda), uint64(block.timestamp)), 10e18); // no change since
+        assertEq(registry.basisMultiplier(address(nvda), fri), 1e18); // token-side split: the pre-split anchor
+        st.updateMultiplier(10.01e18, SAT + 3 days); // I-2 state: change time hidden
+        assertEq(registry.basisMultiplier(address(nvda), fri), 1e18);
+        vm.prank(timelock);
+        registry.setMultiplier(address(nvda), 10e18); // stamped split re-anchor: records the anchor before it
+        assertEq(registry.basisMultiplier(address(nvda), fri), 1e18);
+        // stored mode: the recorded previous value for one change after the basis, unknown for two
+        vm.warp(block.timestamp + 10);
+        vm.prank(timelock);
+        registry.setMultiplierSource(address(nvda), false); // a second registry change after the basis
+        assertEq(registry.basisMultiplier(address(nvda), fri), 0);
+        assertEq(registry.basisMultiplier(address(nvda), uint64(block.timestamp - 5)), 10e18);
+    }
+
     /// @notice A stale price (no split) still never blocks the RISK Flatten (unchanged emergency behaviour).
     function test_M2_riskFlatten_stalePriceStillTolerated() public {
         _buy(9500e6);
