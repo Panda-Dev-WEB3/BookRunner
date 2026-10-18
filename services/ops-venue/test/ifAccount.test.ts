@@ -549,6 +549,28 @@ describe("fix round 2: the write-off never depends on reading the operator's Ord
     expect(t.wp.ifOperatorWaits()[0]?.step).toBe("return");
   });
 
+  test("written off without Orderly COMPLETED ever seen: reports no longer held; a later FAILED closes without failWithdraw", async () => {
+    const t = await confirmedSaga();
+    const book = t.svc.registry.get(1) as TrackedBook;
+    const byId = t.builder.withdrawal;
+    t.builder.withdrawal = async () => null; // the row never shows COMPLETED (key removed / history gap)
+    t.chain.adapter(ADAPTER).lastFlowAt = 0n;
+    expect(await t.svc.reporter.holdReason(book, t.chain.headTs)).toContain("withdrawal in flight");
+    t.advance(3_700_000); // past confirmation + 1 h
+    await t.wp.processNonce(1, "1");
+    expect(t.chain.count("writeOffOperatorPayout")).toBe(1);
+    expect([t.saga().stage, t.saga().returnWaitSince, typeof t.saga().writtenOffAt]).toEqual(["confirmed", undefined, "number"]);
+    t.chain.adapter(ADAPTER).lastFlowAt = 0n;
+    expect(await t.svc.reporter.holdReason(book, t.chain.headTs)).toBeNull();
+    expect(t.wp.ifOperatorWaits()[0]).toMatchObject({ step: "payout", nonce: "1" }); // still published (critical) until back
+    (t.rows[0] as VenueWithdrawRow).status = "FAILED"; // Orderly credits it back: venue-side again, counted by the report
+    t.builder.withdrawal = byId;
+    t.advance(61_000);
+    await t.wp.processNonce(1, "1");
+    expect(t.saga().stage).toBe("cancelled");
+    expect(t.chain.count("failWithdraw")).toBe(0);
+  });
+
   test("a FAILED withdraw saga is published for alerts", async () => {
     const t = await ifService({ mode: "contract", builderBound: false });
     await t.svc.syncBooks();

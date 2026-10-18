@@ -133,6 +133,12 @@ describe("insurance-fund account (ops-venue ORDERLY_IF_MODE, VERIFY O10)", () =>
     const r = venueIfAccount(snap({ books: [book({ ifOperatorWaits: [w("return", 21_600_000)] })] }), rules());
     expect(ks(r)).toEqual([["venue_if_operator_pending:3:4", "critical"]]);
     expect(r[0]?.summary).toContain("transfer it (one transfer, the full amount) to the adapter 0xAD");
+    // a Retired (or Cancelled) book keeps alerting while its last IF payout is unreturned
+    for (const state of ["Retired", "Cancelled"]) {
+      const ret = venueIfAccount(snap({ books: [book({ state, ifOperatorWaits: [w("return", 21_600_000)] })] }), rules());
+      expect(ks(ret)).toEqual([["venue_if_operator_pending:3:4", "critical"]]);
+      expect(ret[0]?.summary).toContain(`(state ${state})`);
+    }
   });
 
   test("written off from NAV: critical at once; unadopted withdrawal and IF equity drop: critical; prior_equity critical, reassign warning", () => {

@@ -19,7 +19,8 @@
 //     flow's own second may predate it).
 // The whole read -> sign/post runs under the book's lock, so it cannot interleave with a withdraw saga step.
 // Builder IF mode (domain/ifAccount.ts): a saga waiting for the operator to RETURN a payout Orderly has COMPLETED (stage
-// confirmed with returnWaitSince: the venue can no longer fail it and credit it back) does not hold the book's reports,
+// confirmed with returnWaitSince: the venue can no longer fail it and credit it back; or written off on-chain: the adapter
+// no longer counts it in transit) does not hold the book's reports,
 // which would otherwise freeze for as long as a person takes. Before COMPLETED it still holds them (a FAILED withdrawal
 // credited back would be counted venue-side by the report AND in transit until failWithdraw), and so does the operator's
 // withdrawal itself (stage detected, on-chain Requested: the adapter refuses reports; the operator must withdraw promptly). A builder IF account found
@@ -27,10 +28,20 @@
 // the venue's IF equity against the adapter's insurance (last report adjusted by on-chain flows): a lower venue figure
 // is an unexplained drop (operator key, ADL / insurance use), recorded for OPS_IF_DROP_ALERT_MS and alerted critical.
 import { computeReport, dropSuspicious, reportableState, reportedValue } from "../domain/report";
-import { isTerminal } from "../domain/withdraw";
+import { type WithdrawSaga, isTerminal } from "../domain/withdraw";
 import { toSignedVenueReportJson } from "../report712";
 import { errMsg } from "../util";
 import type { OpsContext, TrackedBook } from "./context";
+
+/**
+ * Builder IF pay stage that no longer holds the book's reports: Orderly COMPLETED was seen (returnWaitSince), or the
+ * payout was WRITTEN OFF on-chain (writtenOffAt: the adapter's in-transit is cleared, so a withdrawal Orderly later fails
+ * and credits back is counted once, by the venue report; the saga then closes without failWithdraw). Without the second
+ * case a written-off saga whose Orderly row never showed COMPLETED (key removed, row missing) held the reports forever.
+ */
+export function operatorReturnWait(w: WithdrawSaga): boolean {
+  return !!w.operatorIf && w.stage === "confirmed" && (w.returnWaitSince !== undefined || w.writtenOffAt !== undefined);
+}
 
 export interface ReportResult {
   mode: "signed" | "onchain";
@@ -65,7 +76,7 @@ export class Reporter {
   async holdReason(book: TrackedBook, headSec: bigint, asOfSec: bigint = headSec): Promise<string | null> {
     const prior = this.ctx.sagas.get().ifPriorEquity?.[book.adapter.toLowerCase()];
     if (prior) return `builder IF account ${book.accounts.if} held ${prior.usd} before the book's IF deposit (use a fresh EOA account)`;
-    const inflight = Object.values(this.ctx.sagas.get().withdrawals).filter((w) => w.bookId === book.bookId && !isTerminal(w) && !(w.operatorIf && w.stage === "confirmed" && w.returnWaitSince !== undefined));
+    const inflight = Object.values(this.ctx.sagas.get().withdrawals).filter((w) => w.bookId === book.bookId && !isTerminal(w) && !operatorReturnWait(w));
     if (inflight.length) return `withdrawal in flight (${inflight.map((w) => `${w.nonce}:${w.stage}`).join(",")})`;
     const f = await this.ctx.chain.adapterFlowState(book.adapter);
     if (f.pendingWithdrawUsd > 0n) return `adapter has ${f.pendingWithdrawUsd} requested-but-unconfirmed withdrawal`;
