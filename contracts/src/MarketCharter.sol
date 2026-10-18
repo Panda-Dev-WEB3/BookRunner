@@ -38,12 +38,14 @@ library CharterRules {
     uint256 internal constant MAX_ENGINE_TAKER_FEE_BPS = 100; // in-house venue taker fee cap (1%)
 
     /// @notice BAD_MANDATE when: maxInventoryUsd == 0, minQuoteWidthBps == 0, hedge band min > max,
-    ///         killAtDrawdownBps >= 0 or < -5000, maxSkewBps <= 0. Returns 0 when the mandate is valid.
+    ///         killAtDrawdownBps >= 0 or < -5000, maxSkewBps <= 0, or maxSkewBps > minQuoteWidthBps / 2 (audit
+    ///         M-3: a quote at the minimum width and the maximum skew must still straddle the oracle).
+    ///         Returns 0 when the mandate is valid.
     function mandateReason(BRTypes.Mandate memory m) internal pure returns (bytes32) {
         if (
             m.maxInventoryUsd == 0 || m.minQuoteWidthBps == 0 || m.hedgeRatioMinBps > m.hedgeRatioMaxBps
                 || m.killAtDrawdownBps >= 0 || m.killAtDrawdownBps < MIN_KILL_DRAWDOWN_BPS
-                || m.maxSkewBps <= 0
+                || m.maxSkewBps <= 0 || int256(m.maxSkewBps) * 2 > int256(uint256(m.minQuoteWidthBps))
         ) {
             return BAD_MANDATE;
         }

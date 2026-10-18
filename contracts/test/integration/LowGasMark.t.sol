@@ -310,7 +310,7 @@ abstract contract LowGasMarkBase is Test {
         c.mmInventoryUsd = MM_INVENTORY;
         c.mandate = BRTypes.Mandate({
             maxInventoryUsd: 50_000e6,
-            maxSkewBps: 25,
+            maxSkewBps: 4,
             minQuoteWidthBps: 8,
             maxHedgeLeverage: 100,
             hedgeRatioMinBps: 5000,

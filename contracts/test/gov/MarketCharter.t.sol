@@ -399,7 +399,9 @@ contract MarketCharterTest is GovBase {
         BRTypes.Charter memory c = _charter();
         c.mandate.killAtDrawdownBps = kill;
         c.mandate.maxSkewBps = skew;
-        bool bad = kill >= 0 || kill < -5000 || skew <= 0;
+        // audit M-3: maxSkew <= minQuoteWidth / 2 (the fixture's min width is 8)
+        bool bad = kill >= 0 || kill < -5000 || skew <= 0
+            || int256(skew) * 2 > int256(uint256(c.mandate.minQuoteWidthBps));
         assertEq(_reason(c), bad ? bytes32("BAD_MANDATE") : bytes32(0));
     }
 

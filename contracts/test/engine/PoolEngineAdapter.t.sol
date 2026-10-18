@@ -83,7 +83,7 @@ contract PoolEngineAdapterTest is EngineBase {
     function _mandate(uint128 maxInv, uint16 minWidth) internal pure returns (BRTypes.Mandate memory) {
         return BRTypes.Mandate({
             maxInventoryUsd: maxInv,
-            maxSkewBps: 25,
+            maxSkewBps: 5,
             minQuoteWidthBps: minWidth,
             maxHedgeLeverage: 100,
             hedgeRatioMinBps: 4000,

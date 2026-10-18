@@ -165,7 +165,7 @@ abstract contract GovBase is Test {
     function _mandate() internal pure returns (BRTypes.Mandate memory m) {
         m = BRTypes.Mandate({
             maxInventoryUsd: 50_000e6,
-            maxSkewBps: 25,
+            maxSkewBps: 4,
             minQuoteWidthBps: 8,
             maxHedgeLeverage: 100,
             hedgeRatioMinBps: 5000,

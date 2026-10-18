@@ -126,7 +126,7 @@ contract MandateRedTeamTest is MandateBase {
         );
         vm.expectRevert(abi.encodeWithSelector(IMMMandate.QuoteWidthTooNarrow.selector, uint16(0), uint16(8)));
         desk.execute(_act(IBookrunnerDesk.ActionKind.SetQuote, abi.encode(uint16(0), int16(0), uint128(1))));
-        vm.expectRevert(abi.encodeWithSelector(IMMMandate.SkewTooWide.selector, type(int16).min, int16(25)));
+        vm.expectRevert(abi.encodeWithSelector(IMMMandate.SkewTooWide.selector, type(int16).min, int16(4)));
         desk.execute(
             _act(IBookrunnerDesk.ActionKind.SetQuote, abi.encode(uint16(10), type(int16).min, uint128(1)))
         );

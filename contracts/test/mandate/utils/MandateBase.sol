@@ -155,7 +155,7 @@ abstract contract MandateBase is Test {
     function _defaultMandate() internal view returns (BRTypes.Mandate memory) {
         return BRTypes.Mandate({
             maxInventoryUsd: MAX_INV,
-            maxSkewBps: 25,
+            maxSkewBps: 4,
             minQuoteWidthBps: 8,
             maxHedgeLeverage: 300,
             hedgeRatioMinBps: 5000,

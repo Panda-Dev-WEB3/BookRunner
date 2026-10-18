@@ -39,7 +39,8 @@ contract PoolEngineFuzzTest is EngineBase {
     function testFuzz_fillPrice(uint256 price, uint16 spread, int16 skew) public {
         price = bound(price, 1, 1e30);
         spread = uint16(bound(spread, 0, 5000));
-        skew = int16(bound(skew, -2500, 2500));
+        // audit M-3: the engine only accepts quotes straddling the oracle (2 x |skew| <= spread)
+        skew = int16(bound(skew, -int256(uint256(spread / 2)), int256(uint256(spread / 2))));
         _price(PID_A, price);
         _setQuote(adA, mA, spread, skew, MAX_NET);
         uint256 buyF = uint256(int256(20_000 + uint256(spread)) + 2 * int256(skew));
@@ -49,6 +50,8 @@ contract PoolEngineFuzzTest is EngineBase {
         assertEq(buy, (price * buyF + 19_999) / 20_000);
         assertEq(sell, price * sellF / 20_000);
         assertGe(buy, sell);
+        assertGe(buy, price, "buy below the oracle");
+        assertLe(sell, price, "sell above the oracle");
     }
 
     // ------------------------------------------------------------------ round trips
@@ -58,7 +61,7 @@ contract PoolEngineFuzzTest is EngineBase {
     function testFuzz_roundTripNeverProfits(uint256 price, int256 size, uint16 spread, int16 skew) public {
         price = bound(price, 1e15, 1e24);
         spread = uint16(bound(spread, 0, 500));
-        skew = int16(bound(skew, -100, 100));
+        skew = int16(bound(skew, -int256(uint256(spread / 2)), int256(uint256(spread / 2))));
         uint256 maxUnits = uint256(MAX_NET) * 1e30 / price;
         size = bound(size, -int256(maxUnits), int256(maxUnits));
         vm.assume(size != 0);

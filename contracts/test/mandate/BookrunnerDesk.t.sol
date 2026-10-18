@@ -547,10 +547,10 @@ contract BookrunnerDeskTest is MandateBase {
     function test_setQuote_forwardsToAdapter() public {
         _exec(
             key,
-            _act(IBookrunnerDesk.ActionKind.SetQuote, abi.encode(uint16(12), int16(-7), uint128(40_000e6)))
+            _act(IBookrunnerDesk.ActionKind.SetQuote, abi.encode(uint16(12), int16(-4), uint128(40_000e6)))
         );
         assertEq(adapter.lastSpread(), 12);
-        assertEq(adapter.lastSkew(), -7);
+        assertEq(adapter.lastSkew(), -4);
         assertEq(adapter.lastMaxNet(), 40_000e6);
         assertEq(engine.maxNetExposureUsd(), 40_000e6);
     }
@@ -559,7 +559,7 @@ contract BookrunnerDeskTest is MandateBase {
         vm.startPrank(key);
         vm.expectRevert(abi.encodeWithSelector(IMMMandate.QuoteWidthTooNarrow.selector, uint16(7), uint16(8)));
         desk.execute(_act(IBookrunnerDesk.ActionKind.SetQuote, abi.encode(uint16(7), int16(0), uint128(1))));
-        vm.expectRevert(abi.encodeWithSelector(IMMMandate.SkewTooWide.selector, int16(30), int16(25)));
+        vm.expectRevert(abi.encodeWithSelector(IMMMandate.SkewTooWide.selector, int16(30), int16(4)));
         desk.execute(_act(IBookrunnerDesk.ActionKind.SetQuote, abi.encode(uint16(10), int16(30), uint128(1))));
         vm.stopPrank();
 

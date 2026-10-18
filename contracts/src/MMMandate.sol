@@ -142,6 +142,9 @@ contract MMMandate is IMMMandate, IMMMandateDesk, Initializable, ReentrancyGuard
     error NotCanonicalToken(bytes32 asset);
     error StaleVenueReport(uint64 valuationAt, uint256 maxAge);
     error InvalidMandate(bytes32 reason);
+    /// @notice Audit M-3: |skew| > spread / 2 puts the whole quote on one side of the oracle (the pool would
+    ///         sell below or buy above it), so flipping the skew around a trader's buy and sell drains the pool.
+    error QuoteOneSided(uint16 spreadBps, int16 skewBps);
 
     event OperatorConsentSet(address indexed operator, address indexed key, bool allowed);
     event BondReleased(address indexed key, address indexed operator, uint256 amount);
@@ -285,11 +288,14 @@ contract MMMandate is IMMMandate, IMMMandateDesk, Initializable, ReentrancyGuard
         return _mandate;
     }
 
-    /// @notice Same BAD_MANDATE rules as MarketCharter.validate: returns 0 when valid.
+    /// @notice Same BAD_MANDATE rules as MarketCharter.validate: returns 0 when valid. Audit M-3: maxSkewBps
+    ///         must not exceed half of minQuoteWidthBps (2 * maxSkew <= minWidth), so a quote at the minimum
+    ///         width and the maximum skew still straddles the oracle.
     function validateMandate(BRTypes.Mandate calldata m) public pure returns (bytes32) {
         if (
             m.maxInventoryUsd == 0 || m.minQuoteWidthBps == 0 || m.hedgeRatioMinBps > m.hedgeRatioMaxBps
                 || m.killAtDrawdownBps >= 0 || m.killAtDrawdownBps < -5000 || m.maxSkewBps <= 0
+                || int256(m.maxSkewBps) * 2 > int256(uint256(m.minQuoteWidthBps))
         ) return BAD_MANDATE;
         return bytes32(0);
     }
@@ -376,8 +382,10 @@ contract MMMandate is IMMMandate, IMMMandateDesk, Initializable, ReentrancyGuard
     }
 
     /// @inheritdoc IMMMandate
-    /// @dev Engine books only. spread >= minQuoteWidthBps, |skew| <= maxSkewBps, maxNetExposure <=
-    ///      maxInventoryUsd. Reduce-only regimes (off-hours with noNewRiskOffHours, or retiring) further
+    /// @dev Engine books only. spread >= minQuoteWidthBps, |skew| <= maxSkewBps, 2 * |skew| <= spread (audit
+    ///      M-3: the quote straddles the oracle, buy fill >= oracle >= sell fill, whatever the mandate's terms,
+    ///      including a mandate cached before validateMandate required maxSkew <= minWidth / 2), maxNetExposure
+    ///      <= maxInventoryUsd. Reduce-only regimes (off-hours with noNewRiskOffHours, or retiring) further
     ///      forbid narrowing the live engine spread or raising its max net exposure.
     function checkQuote(address key, uint16 spreadBps, int16 skewBps, uint128 maxNetExposureUsd)
         external
@@ -391,6 +399,7 @@ contract MMMandate is IMMMandate, IMMMandateDesk, Initializable, ReentrancyGuard
         if (SafeCast.toInt256(_absInt(int256(skewBps))) > int256(m.maxSkewBps)) {
             revert SkewTooWide(skewBps, m.maxSkewBps);
         }
+        if (_absInt(int256(skewBps)) * 2 > spreadBps) revert QuoteOneSided(spreadBps, skewBps);
         if (maxNetExposureUsd > m.maxInventoryUsd) {
             revert InventoryLimit(maxNetExposureUsd, m.maxInventoryUsd);
         }

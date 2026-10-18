@@ -57,7 +57,7 @@ contract EngineCloseOutTest is EngineBase {
         cfg.setStockRegistry(address(registry));
         cfg.grantRole(cfg.RISK_ROLE(), risk);
         mandate = new EngineMockMandate();
-        mandate.setMandate(_mandate(MAX_INV, 10, 25));
+        mandate.setMandate(_mandate(MAX_INV, 10, 5));
         router = new EngineMockRevenueRouter(address(usdc));
         vault = new EngineMockVault(address(usdc));
         PoolEngineAdapter impl = new PoolEngineAdapter(address(cfg));
@@ -66,7 +66,7 @@ contract EngineCloseOutTest is EngineBase {
         BRTypes.Charter memory c;
         c.underlying = UNDERLYING;
         c.venue = BRTypes.VENUE_POOL_ENGINE;
-        c.mandate = _mandate(MAX_INV, 10, 25);
+        c.mandate = _mandate(MAX_INV, 10, 5);
         c.symbol = bytes32("RHX5-PERP");
         c.takerFeeBps = 10;
         bookMock.setCharter(c);
@@ -330,14 +330,14 @@ contract EngineCloseOutTest is EngineBase {
 
     function test_applyMandate_clampsQuoteAndHoldsReduceOnlyUntilRequote() public {
         vm.prank(desk);
-        adapter.setQuote(12, 20, MAX_INV);
-        mandate.setMandate(_mandate(30_000e6, 15, 10));
+        adapter.setQuote(12, 6, MAX_INV);
+        mandate.setMandate(_mandate(30_000e6, 15, 4));
         vm.expectEmit(false, false, false, true, address(adapter));
-        emit MandateApplied(15, 10, 30_000e6, 30_000e6);
+        emit MandateApplied(15, 4, 30_000e6, 30_000e6);
         mandate.callAdapter(address(adapter), abi.encodeWithSignature("applyMandate()"));
         IPoolEngine.MarketState memory s = engine.state(mid);
         assertEq(s.spreadBps, 15);
-        assertEq(s.skewBps, 10);
+        assertEq(s.skewBps, 4);
         assertTrue(s.reduceOnly);
         assertEq(engine.config(mid).maxNetExposureUsd, 30_000e6);
         assertEq(engine.inventoryCapUsd(mid), 30_000e6);
@@ -358,7 +358,7 @@ contract EngineCloseOutTest is EngineBase {
 
     function test_applyMandate_negativeSkewClampedAndWiderSpreadKept() public {
         vm.prank(desk);
-        adapter.setQuote(40, -25, 50_000e6);
+        adapter.setQuote(40, -20, 50_000e6);
         mandate.setMandate(_mandate(60_000e6, 10, 5));
         mandate.callAdapter(address(adapter), abi.encodeWithSignature("applyMandate()"));
         IPoolEngine.MarketState memory s = engine.state(mid);

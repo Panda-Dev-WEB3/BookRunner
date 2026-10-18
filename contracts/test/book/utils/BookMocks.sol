@@ -277,7 +277,7 @@ contract MockMandate {
     function getMandate() external view returns (BRTypes.Mandate memory m) {
         require(!revertGetMandate, "MockMandate: getMandate");
         m.maxInventoryUsd = 50_000e6;
-        m.maxSkewBps = 25;
+        m.maxSkewBps = 4;
         m.minQuoteWidthBps = 8;
         m.maxHedgeLeverage = 100;
         m.hedgeRatioMinBps = 5000;
