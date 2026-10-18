@@ -325,7 +325,8 @@ contract Area7CrossContractTest is Test {
             flowNonce: nonce,
             inventoryRoot: keccak256("inventory"),
             pnlJsonHash: keccak256("pnl.json"),
-            receiptsRoot: keccak256("receipts")
+            receiptsRoot: keccak256("receipts"),
+            held: false
         });
     }
 

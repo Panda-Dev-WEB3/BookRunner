@@ -283,8 +283,13 @@ contract MarketCharterTest is GovBase {
         assertEq(_reason(c), bytes32("BAD_NOTICE"));
         c.juniorNoticeSeconds = 30 days;
         assertEq(_reason(c), bytes32(0));
-        c.juniorNoticeSeconds = 0;
+        // audit M-1: at least one mark interval (config.markInterval() == 300 here)
+        c.juniorNoticeSeconds = 300;
         assertEq(_reason(c), bytes32(0));
+        c.juniorNoticeSeconds = 299;
+        assertEq(_reason(c), bytes32("BAD_NOTICE"));
+        c.juniorNoticeSeconds = 0;
+        assertEq(_reason(c), bytes32("BAD_NOTICE"));
     }
 
     function test_validate_badMandate() public view {
@@ -378,7 +383,7 @@ contract MarketCharterTest is GovBase {
         c.juniorNoticeSeconds = notice;
         bytes32 expected;
         if (window < 60 || window > 30 days) expected = "BAD_WINDOW";
-        else if (notice > 30 days) expected = "BAD_NOTICE";
+        else if (notice < 300 || notice > 30 days) expected = "BAD_NOTICE";
         assertEq(_reason(c), expected);
     }
 

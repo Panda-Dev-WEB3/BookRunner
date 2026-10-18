@@ -259,9 +259,18 @@ contract BookHandler is Test {
     /// @param pnlBps venue P&L in bps of the deployed value, bounded to [-50%, +20%].
     /// @param extraRecallBps keeper recall beyond what claims need, bps of the deployed value.
     function mark(int256 pnlBps, uint256 extraRecallBps) external {
+        _mark(pnlBps, extraRecallBps, false);
+    }
+
+    /// @notice A mark valued at a held oracle price (audit M-1): P&L only, settlement deferred.
+    function heldMark(int256 pnlBps, uint256 extraRecallBps) external {
+        _mark(pnlBps, extraRecallBps, true);
+    }
+
+    function _mark(int256 pnlBps, uint256 extraRecallBps, bool held) internal {
         BRTypes.BookState st = _state();
         if (st != BRTypes.BookState.Live && st != BRTypes.BookState.Retiring) return;
-        _bump("mark");
+        _bump(held ? bytes32("heldMark") : bytes32("mark"));
         // keeper: recall so settled-but-unfunded claims are covered, plus an optional extra
         uint256 idle = env.vault.idle();
         uint256 owed = env.book.unfundedClaims();
@@ -281,10 +290,14 @@ contract BookHandler is Test {
         uint256 nv =
             bps >= 0 ? value + (value * uint256(bps)) / 10_000 : value - (value * uint256(-bps)) / 10_000;
         env.adapter.setValue(nv);
-        _applyMarkAt(nv, value);
+        _applyMarkAt(nv, value, held);
     }
 
     function _applyMarkAt(uint256 nv, uint256 prevValue) internal {
+        _applyMarkAt(nv, prevValue, false);
+    }
+
+    function _applyMarkAt(uint256 nv, uint256 prevValue, bool held) internal {
         uint64 pe = uint64((block.timestamp / env.interval) * env.interval);
         if (pe <= env.book.lastMarkPeriodEnd()) pe = env.book.lastMarkPeriodEnd() + env.interval;
         BRTypes.MarkInput memory m = BRTypes.MarkInput({
@@ -295,7 +308,8 @@ contract BookHandler is Test {
             flowNonce: env.book.flowNonce(),
             inventoryRoot: 0,
             pnlJsonHash: 0,
-            receiptsRoot: 0
+            receiptsRoot: 0,
+            held: held
         });
         uint256 id = env.registry.commit(m, "");
         (uint256 debtBefore,) = env.book.backstopDebt();

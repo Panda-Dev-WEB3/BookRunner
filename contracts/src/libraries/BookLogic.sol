@@ -35,6 +35,10 @@ library BookLogic {
     uint256 internal constant RETIRED_SETTLE_INDEX = (1 << 128) - 1;
     /// @dev == Book.KILL_DRAWDOWN
     bytes32 internal constant KILL_DRAWDOWN = "DRAWDOWN";
+    /// @notice Longest a run of held marks defers settlement (audit M-1). Covers every scheduled closed
+    ///         session (weekend + holiday is at most ~4 days) with margin; past it, held marks settle so a
+    ///         suspended or delisted underlying never blocks exits (a long hold defers, it never blocks).
+    uint256 internal constant MAX_HELD_DEFERRAL = 7 days;
 
     /// @notice Working summary of a mark application (memory only; emitted as MarkSettled).
     ///         Arrays are indexed by tranche kind.
@@ -123,7 +127,8 @@ library BookLogic {
 
         int256 pnl = _applyPnl($, cfg, sum);
         _maybeDrawdownKill($);
-        _settleAtMark($, sum);
+        if (_settles($, m.input.held, markId, sum.periodEnd)) _settleAtMark($, sum);
+        else _setPrices($, sum);
 
         $.lastMark = Book.LastMark({
             markId: markId,
@@ -285,12 +290,32 @@ library BookLogic {
         }
     }
 
-    function _settleAtMark(Book.BookStorage storage $, MarkSummary memory sum) private {
-        uint256 interval = $.markInterval;
-        uint256 upTo = Waterfall.settlesUpTo(sum.periodEnd, interval);
-        bool topUpDue = $.topUpOpen && upTo * interval >= $.topUpEndsAt;
-        // prices from the post-P&L NAVs, before any settlement
-        uint256 seniorSupply;
+    /// @dev Audit M-1: whether this mark settles redemption buckets and a due top-up round. A non-held mark
+    ///      always does (and ends a hold run). A held mark (valued at a held oracle price, e.g. a closed
+    ///      session) applies P&L only, so nobody can exit or enter at a value the reopen is about to
+    ///      reprice: the buckets / round wait for the first non-held mark, which settles every bucket due
+    ///      by then at its post-P&L prices. Bounded: once the run of held marks is MAX_HELD_DEFERRAL old,
+    ///      held marks settle again, so a long hold defers exits but never blocks them.
+    function _settles(Book.BookStorage storage $, bool held, uint256 markId, uint64 periodEnd)
+        private
+        returns (bool)
+    {
+        if (!held) {
+            if ($.heldSince != 0) $.heldSince = 0;
+            return true;
+        }
+        uint64 since = $.heldSince;
+        if (since == 0) $.heldSince = since = periodEnd;
+        bool settles = periodEnd - since >= MAX_HELD_DEFERRAL;
+        emit Book.MarkHeld($.bookId, markId, since, settles);
+        return settles;
+    }
+
+    /// @dev Share prices from the post-P&L NAVs, before any settlement; returns the Senior supply.
+    function _setPrices(Book.BookStorage storage $, MarkSummary memory sum)
+        private
+        returns (uint256 seniorSupply)
+    {
         for (uint8 k = 0; k < 2; k++) {
             uint256 supply = IERC20(tranche($, k)).totalSupply();
             if (k == S) seniorSupply = supply;
@@ -298,6 +323,13 @@ library BookLogic {
             $.price[k] = p;
             sum.priceWad[k] = p;
         }
+    }
+
+    function _settleAtMark(Book.BookStorage storage $, MarkSummary memory sum) private {
+        uint256 interval = $.markInterval;
+        uint256 upTo = Waterfall.settlesUpTo(sum.periodEnd, interval);
+        bool topUpDue = $.topUpOpen && upTo * interval >= $.topUpEndsAt;
+        uint256 seniorSupply = _setPrices($, sum);
         // Junior first so the Senior top-up cap sees the final Junior NAV
         _settleTranche($, sum, J, upTo, topUpDue ? $.topUpCapacity[J] : 0);
         // no Senior top-up while impaired: new shares would share the restoration owed to the old ones

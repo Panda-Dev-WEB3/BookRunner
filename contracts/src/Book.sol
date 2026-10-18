@@ -90,6 +90,9 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
         uint256 backstopDebt;
         /// @dev repayment owed to the backstop, netted from NAV, paid from vault idle once claims are funded
         uint256 backstopPayable;
+        /// @dev periodEnd of the first held mark of the current run of held marks (0 = last mark not held).
+        ///      Held marks defer settlement until periodEnd >= heldSince + BookLogic.MAX_HELD_DEFERRAL (M-1).
+        uint64 heldSince;
     }
 
     // keccak256(abi.encode(uint256(keccak256("bookrunner.storage.Book")) - 1)) & ~bytes32(uint256(0xff))
@@ -138,6 +141,10 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
         uint256[2] owed,
         uint256[2] topUp
     );
+    /// @notice A mark valued at a held oracle price was applied (audit M-1): its P&L is booked; `settled`
+    ///         false = redemption buckets and a due top-up round were left for the first non-held mark;
+    ///         true = the hold run (since `heldSince`) reached BookLogic.MAX_HELD_DEFERRAL, so they settled.
+    event MarkHeld(uint256 indexed bookId, uint256 indexed markId, uint64 heldSince, bool settled);
     event TopUpSettled(uint256 indexed bookId, uint256 seniorAccepted, uint256 juniorAccepted);
     event TopUpCancelled(uint256 indexed bookId);
     event BackstopCoverFailed(uint256 indexed bookId, uint256 shortfall);
@@ -277,6 +284,13 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
         return _s().lastMark;
     }
 
+    /// @notice periodEnd of the first mark of the current run of held marks (0 = the last applied mark
+    ///         was not held). While it is set and younger than BookLogic.MAX_HELD_DEFERRAL, held marks
+    ///         settle no redemption bucket and no top-up round (audit M-1).
+    function heldSince() external view returns (uint64) {
+        return _s().heldSince;
+    }
+
     /// @notice Vault cash owed out of the book and netted from its NAV: settled redemption assets owed to
     ///         tranche escrows but not yet funded, plus the backstop repayment not yet paid (the vault
     ///         reserves all of it from deployment).
@@ -345,7 +359,9 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
     ///         the last applied mark and computed against the current flowNonce. Runs P&L through the
     ///         waterfall (Junior -> Senior -> backstop, backstop debt repaid from gains), the drawdown kill
     ///         check, settles due redemption buckets and an ended top-up round at the post-P&L share prices
-    ///         and funds claims (then a backstop repayment owed) from vault idle.
+    ///         and funds claims (then a backstop repayment owed) from vault idle. A `held` mark (valued at a
+    ///         held oracle price) applies the P&L only: buckets and the round settle at the first non-held
+    ///         mark, or once the hold run is BookLogic.MAX_HELD_DEFERRAL old (audit M-1; emits MarkHeld).
     function applyMark(uint256 markId) external nonReentrant {
         BookLogic.applyMark(_s(), markId);
     }

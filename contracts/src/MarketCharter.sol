@@ -365,7 +365,14 @@ contract MarketCharter is IMarketCharter, ReentrancyGuardTransient {
             c.subscriptionWindow < CharterRules.MIN_SUBSCRIPTION_WINDOW
                 || c.subscriptionWindow > CharterRules.MAX_SUBSCRIPTION_WINDOW
         ) return CharterRules.BAD_WINDOW;
-        if (c.juniorNoticeSeconds > CharterRules.MAX_JUNIOR_NOTICE) return CharterRules.BAD_NOTICE;
+        // audit M-1 (defence in depth beside held marks): at least one mark interval of notice, so a Junior
+        // request always bears at least one full mark period of P&L before its bucket settles
+        if (
+            c.juniorNoticeSeconds < config.markInterval()
+                || c.juniorNoticeSeconds > CharterRules.MAX_JUNIOR_NOTICE
+        ) {
+            return CharterRules.BAD_NOTICE;
+        }
         bytes32 mandateReason = CharterRules.mandateReason(c.mandate);
         if (mandateReason != bytes32(0)) return mandateReason;
         if (!_underlyingOk(c.underlying)) return CharterRules.BAD_UNDERLYING;

@@ -107,6 +107,11 @@ library BRTypes {
         bytes32 inventoryRoot;
         bytes32 pnlJsonHash;
         bytes32 receiptsRoot;
+        /// @dev The valuation used a held price (the oracle's signed price state for the book's
+        ///      underlying: session closed / feed held). Book.applyMark then applies the P&L but defers
+        ///      redemption-bucket and top-up settlement to the first non-held mark (audit M-1), bounded
+        ///      by BookLogic.MAX_HELD_DEFERRAL so a long hold never blocks exits.
+        bool held;
     }
 
     struct Mark {

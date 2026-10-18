@@ -160,7 +160,8 @@ contract MarkRegistryCommitAndApplyTest is CoreFixture {
             flowNonce: nonce,
             inventoryRoot: keccak256("inv"),
             pnlJsonHash: keccak256("pnl"),
-            receiptsRoot: keccak256("receipts")
+            receiptsRoot: keccak256("receipts"),
+            held: false
         });
     }
 

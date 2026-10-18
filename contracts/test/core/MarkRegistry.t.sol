@@ -11,6 +11,9 @@ import {BRTypes} from "../../src/interfaces/BRTypes.sol";
 contract MarkRegistryTest is CoreFixture {
     uint32 internal constant INTERVAL = 300;
     uint32 internal constant MAX_AGE = 3600;
+    /// @dev == MARK_STRUCT_HASH_VECTOR in packages/shared/test/eip712.test.ts (viem hashStruct).
+    bytes32 internal constant MARK_STRUCT_HASH_VECTOR =
+        0x5ed67b6c5b3d7f71865d814669c6d89b6876b79c379bbad9b3a70759f4cc6de3;
 
     function setUp() public override {
         super.setUp();
@@ -35,7 +38,8 @@ contract MarkRegistryTest is CoreFixture {
             flowNonce: 3,
             inventoryRoot: keccak256("inv"),
             pnlJsonHash: keccak256("pnl"),
-            receiptsRoot: keccak256("receipts")
+            receiptsRoot: keccak256("receipts"),
+            held: false
         });
     }
 
@@ -54,7 +58,7 @@ contract MarkRegistryTest is CoreFixture {
         assertEq(
             registry.MARK_TYPEHASH(),
             keccak256(
-                "Mark(uint256 bookId,uint64 periodEnd,uint256 navUsd,uint256 deployedValueUsd,uint64 flowNonce,bytes32 inventoryRoot,bytes32 pnlJsonHash,bytes32 receiptsRoot)"
+                "Mark(uint256 bookId,uint64 periodEnd,uint256 navUsd,uint256 deployedValueUsd,uint64 flowNonce,bytes32 inventoryRoot,bytes32 pnlJsonHash,bytes32 receiptsRoot,bool held)"
             )
         );
     }
@@ -90,9 +94,55 @@ contract MarkRegistryTest is CoreFixture {
                 m.flowNonce,
                 m.inventoryRoot,
                 m.pnlJsonHash,
-                m.receiptsRoot
+                m.receiptsRoot,
+                m.held
             )
         );
+        assertEq(
+            registry.hashMark(m),
+            keccak256(abi.encodePacked("\x19\x01", registry.DOMAIN_SEPARATOR(), structHash))
+        );
+    }
+
+    /// @dev Audit M-1: `held` is signed. Flipping it changes the digest, so a relayer cannot turn a held
+    ///      mark into a settling one (or back) without the MARK_SIGNER.
+    function test_hashMark_heldIsSigned() public view {
+        BRTypes.MarkInput memory m = _mark(BOOK_ID, 600);
+        bytes32 notHeld = registry.hashMark(m);
+        m.held = true;
+        assertTrue(registry.hashMark(m) != notHeld);
+    }
+
+    /// @dev Solidity <-> TypeScript parity vector (packages/shared/test/eip712.test.ts "mark struct hash
+    ///      parity"): the EIP-712 struct hash of a fixed held mark. The digest additionally binds the
+    ///      domain (chain, registry), checked by test_hashMark_manual.
+    function test_markStructHash_parityVector() public view {
+        BRTypes.MarkInput memory m = BRTypes.MarkInput({
+            bookId: 7,
+            periodEnd: 1_700_006_400,
+            navUsd: 110_600e6,
+            deployedValueUsd: 108_600e6,
+            flowNonce: 3,
+            inventoryRoot: bytes32(uint256(0x11)),
+            pnlJsonHash: bytes32(uint256(0x22)),
+            receiptsRoot: bytes32(uint256(0x33)),
+            held: true
+        });
+        bytes32 structHash = keccak256(
+            abi.encode(
+                registry.MARK_TYPEHASH(),
+                m.bookId,
+                m.periodEnd,
+                m.navUsd,
+                m.deployedValueUsd,
+                m.flowNonce,
+                m.inventoryRoot,
+                m.pnlJsonHash,
+                m.receiptsRoot,
+                m.held
+            )
+        );
+        assertEq(structHash, MARK_STRUCT_HASH_VECTOR);
         assertEq(
             registry.hashMark(m),
             keccak256(abi.encodePacked("\x19\x01", registry.DOMAIN_SEPARATOR(), structHash))

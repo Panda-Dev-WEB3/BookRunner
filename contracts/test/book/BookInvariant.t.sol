@@ -61,7 +61,7 @@ contract BookInvariantTest is StdInvariant, BookFixture {
             actors
         );
         targetContract(address(handler));
-        bytes4[] memory selectors = new bytes4[](32);
+        bytes4[] memory selectors = new bytes4[](34);
         uint256 k;
         // weights: redemption requests x4, claims x4, marks x5, warps x2
         for (uint256 w = 0; w < 4; w++) {
@@ -71,6 +71,9 @@ contract BookInvariantTest is StdInvariant, BookFixture {
         for (uint256 w = 0; w < 5; w++) {
             selectors[k++] = BookHandler.mark.selector;
         }
+        // audit M-1: held marks (P&L only, settlement deferred) x2
+        selectors[k++] = BookHandler.heldMark.selector;
+        selectors[k++] = BookHandler.heldMark.selector;
         selectors[k++] = BookHandler.warp.selector;
         selectors[k++] = BookHandler.warp.selector;
         selectors[k++] = BookHandler.requestRedeemViaOperator.selector;

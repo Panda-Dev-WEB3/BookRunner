@@ -45,7 +45,8 @@ contract Area2MarkAuditTest is CoreFixture {
             flowNonce: NONCE,
             inventoryRoot: keccak256("inv"),
             pnlJsonHash: keccak256("pnl"),
-            receiptsRoot: keccak256("receipts")
+            receiptsRoot: keccak256("receipts"),
+            held: false
         });
     }
 
@@ -74,7 +75,7 @@ contract Area2MarkAuditTest is CoreFixture {
         vm.prank(keeper);
         (bool ok,) = address(registry).call(
             abi.encodeWithSignature(
-                "commitAndApply((uint256,uint64,uint256,uint256,uint64,bytes32,bytes32,bytes32),bytes,bytes,bytes)",
+                "commitAndApply((uint256,uint64,uint256,uint256,uint64,bytes32,bytes32,bytes32,bool),bytes,bytes,bytes)",
                 m,
                 sig,
                 priceData,
