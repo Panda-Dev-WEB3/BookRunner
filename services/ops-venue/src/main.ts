@@ -19,7 +19,7 @@ import type { Address } from "viem";
 import { builderPushEnabled, startBuilderPriceFeed } from "./builderOracle/wire";
 import { ViemChain } from "./chain";
 import { OrderlyBuilderClient, OrderlyVenue } from "./client";
-import { loadOpsEnv, resolveListingMode } from "./config";
+import { loadOpsEnv, resolveBuilderAccount, resolveListingMode } from "./config";
 import { parseIfBuilderAccounts, resolveIfRequirementUsd } from "./domain/ifAccount";
 import { KeyStore, resolveKeysDir } from "./keys";
 import { keyFromSecret } from "./orderly/auth";
@@ -58,7 +58,10 @@ async function main() {
 
   const ops = await roleSigner("opsVenue"); // local key or KMS (shared/signer.ts)
   const chain = new ViemChain(dep, ops, log, { chainId: env.CHAIN_ID, rpcUrl: env.RPC_URL, confirmations: env.OPS_CONFIRMATIONS, fallbackMarkInterval: env.MARK_INTERVAL_SECONDS, txPollMs: env.OPS_TX_POLL_MS });
-  const builderAccountId = (env.ORDERLY_BUILDER_ACCOUNT_ID ?? orderlyAccountId(ops.address, env.ORDERLY_BROKER_ID)).toLowerCase();
+  // G6: an admin-owned builder account needs the admin-registered key (ORDERLY_BUILDER_KEY_SECRET) and has no automated fee sweep
+  const builderAccount = resolveBuilderAccount(env, orderlyAccountId(ops.address, env.ORDERLY_BROKER_ID));
+  if (builderAccount.notice) log.warn({ builderAccountId: builderAccount.accountId }, builderAccount.notice);
+  const builderAccountId = builderAccount.accountId;
   const builderKey = await loadOrCreateBuilderKey(keys, builderAccountId, env.ORDERLY_BUILDER_KEY_SECRET, env.OPS_OPS_KEY_TTL_DAYS * DAY, keyFromSecret);
   const builder = new OrderlyBuilderClient({
     baseUrl: env.ORDERLY_BASE_URL,
@@ -85,7 +88,8 @@ async function main() {
       tradeKeyTtlMs: env.OPS_TRADE_KEY_TTL_DAYS * DAY,
       opsKeyTtlMs: env.OPS_OPS_KEY_TTL_DAYS * DAY,
       feeGraceSec: env.OPS_FEE_SETTLE_GRACE_S,
-      feeAuto: env.OPS_FEE_SWEEP_AUTO,
+      feeAuto: builderAccount.feeAuto,
+      builderAdminOwned: builderAccount.adminOwned && env.ORDERLY_MODE === "live",
       withdrawMaxAttempts: env.OPS_WITHDRAW_MAX_ATTEMPTS,
       priceSource: env.ORDERLY_SYMBOL_PRICE_SOURCE,
       logMaxRange: BigInt(env.OPS_LOG_MAX_RANGE),

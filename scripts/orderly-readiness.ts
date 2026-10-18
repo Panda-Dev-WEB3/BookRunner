@@ -1,5 +1,5 @@
 // Orderly readiness check for switching Orderly-venue books from the mock venue (services/mock-orderly +
-// MockOrderlyVault) to REAL Orderly (docs/RUNBOOK.md "Switching testnet books to real Orderly"). READ-ONLY:
+// MockOrderlyVault) to REAL Orderly (docs/RUNBOOK.md "Testnet rehearsal on real Orderly"). READ-ONLY:
 // eth_call / eth_getCode and public Orderly GETs only; never signs, never sends a transaction.
 //
 //   bun scripts/orderly-readiness.ts                    # testnet (46630, https://testnet-api.orderly.org)
@@ -15,13 +15,18 @@
 //   builder — what the builder admin does (Orderly One): broker in /v1/public/broker/name, the admin wallet's
 //             account (/v1/get_account), optional builder key, our builder symbols in /v1/public/info
 //             (PERP_<T>_USDC_<broker>) and the equity symbols already listed.
-//   books   — our contracts (deployment file via packages/shared deployments loader; skipped when absent):
-//             config.usdc() / config.orderlyVault() / the factory's OrderlyAdapter implementation hashes, and per
-//             Orderly book the adapter's vault, token, hashes, Orderly accounts (v3) and whether it is empty.
+//   books   — our contracts (deployment file via packages/shared deployments loader; skipped when absent; testnet
+//             default: the live-Orderly rehearsal record contracts/deployments/46630.live.json when it exists, else
+//             46630.json): config.usdc() / config.orderlyVault() / the factory's OrderlyAdapter implementation hashes,
+//             the record's `orderly` block (venue live, this vault, USDG, broker), and per Orderly book the adapter's
+//             vault, token, hashes, Orderly accounts (v3; builder IF EOA when bound) and, on the real vault, its IF
+//             funded strictly above Orderly's per-market requirement (FAIL once Live / Retiring; INFO before the
+//             window closes), on the mock vault whether it is empty (migration precondition).
 // Exit code: 0 = every gating row of the selected stages PASSes (FAIL gates; WARN / INFO / SKIP do not),
 // 1 = not ready, 2 = usage / internal error. Cron-able: see the RUNBOOK section.
 import { type Address, type Hex, erc20Abi, getAddress, isAddress, keccak256, stringToHex, zeroAddress } from "viem";
-import { bookFactoryAbi, bookrunnerConfigAbi, orderlyAdapterAbi } from "../packages/shared/src/abi";
+import { existsSync } from "node:fs";
+import { bookAbi, bookFactoryAbi, bookrunnerConfigAbi, orderlyAdapterAbi } from "../packages/shared/src/abi";
 import { publicClientFor } from "../packages/shared/src/clients";
 import { deploymentPath, tryLoadDeployment } from "../packages/shared/src/deployments";
 import type { Deployment } from "../packages/shared/src/types";
@@ -48,6 +53,8 @@ export interface NetworkProfile {
   vault: Address;
   token: { symbol: string; address: Address; decimals: number };
   deploymentFile: string;
+  /** testnet: the live-Orderly rehearsal record (Deploy.s.sol DEPLOY_ORDERLY_VAULT, scripts/deploy-testnet.sh ORDERLY_VENUE=live) */
+  liveDeploymentFile?: string;
   /** Strictly-greater IF requirement per effective symbol (USD, VERIFY O10). */
   ifRequirementUsd: number;
 }
@@ -62,6 +69,7 @@ export const PROFILES: Record<"testnet" | "mainnet", NetworkProfile> = {
     vault: "0x2A5b650A894409372DDeE241EDAC92d4152bE24d",
     token: { symbol: "USDG", address: "0x7E955252E15c84f5768B83c41a71F9eba181802F", decimals: 6 },
     deploymentFile: "contracts/deployments/46630.json",
+    liveDeploymentFile: "contracts/deployments/46630.live.json",
     ifRequirementUsd: 100,
   },
   mainnet: {
@@ -286,7 +294,13 @@ export interface AdapterFacts {
   inTransitUsd: bigint;
   pendingIfUsd: bigint;
   pendingMmUsd: bigint;
+  /** v4 builder IF binding (ORDERLY_IF_MODE=builder): the operator EOA; zero = contract mode; null / absent = not read (pre-v4) */
+  ifAccountOwner?: Address | null;
+  /** Book.state(): 0 Subscription, 1 Cancelled, 2 Live, 3 Retiring, 4 Retired; null / absent = not read */
+  bookState?: number | null;
 }
+
+export const BOOK_STATES = ["Subscription", "Cancelled", "Live", "Retiring", "Retired"] as const;
 
 export interface DeploymentFacts {
   configUsdc: Address | null;
@@ -325,6 +339,38 @@ export function deploymentRows(p: NetworkProfile, brokerId: string, file: string
   ];
 }
 
+/**
+ * The deployment record's `orderly` block (Deploy.s.sol; the live-venue rehearsal record contracts/deployments/46630.live.json):
+ * venue live, bound to this network's Orderly Vault, settling in its token, adapters hashed from our broker id and the
+ * token symbol, and the record's contracts.usdc / orderlyVault agreeing with it. A record without the block (older mock
+ * records, DeployMainnet) is INFO: the on-chain rows above decide.
+ */
+export function recordRows(p: NetworkProfile, brokerId: string, file: string, dep: Pick<Deployment, "orderly" | "contracts"> | null): Row[] {
+  if (!dep) return [];
+  const o = dep.orderly;
+  if (!o) return [{ stage: "books", check: "record orderly", status: "INFO", detail: `${file} has no orderly block (pre-rehearsal Deploy.s.sol or DeployMainnet): on-chain rows decide` }];
+  const problems: string[] = [];
+  if (o.venue !== "live") problems.push(`venue ${o.venue} (MockOrderlyVault)`);
+  if (!sameAddr(o.vault, p.vault)) problems.push(`vault ${o.vault} != ${p.vault}`);
+  if (!sameAddr(o.settlementToken, p.token.address)) problems.push(`settlement token ${o.settlementToken} != ${p.token.symbol} ${p.token.address}`);
+  if (o.token !== p.token.symbol) problems.push(`token symbol ${o.token} != ${p.token.symbol}`);
+  if (o.brokerId !== brokerId) problems.push(`broker ${o.brokerId} != ${brokerId}`);
+  if (!sameAddr(dep.contracts?.usdc, o.settlementToken) || !sameAddr(dep.contracts?.orderlyVault, o.vault)) problems.push("contracts.usdc / contracts.orderlyVault disagree with the orderly block");
+  return [
+    {
+      stage: "books",
+      check: "record orderly",
+      status: problems.length ? "FAIL" : "PASS",
+      detail: problems.length ? `${file}: ${problems.join("; ")}` : `${file}: live venue, Orderly Vault ${short(o.vault)}, ${o.token} ${short(o.settlementToken)}, broker ${o.brokerId} (no mock venue / settlement token)`,
+    },
+  ];
+}
+
+/** Default record: the live-venue rehearsal record when it exists (testnet), else the network's record. */
+export function defaultDeploymentFile(p: NetworkProfile, exists: (f: string) => boolean): string {
+  return p.liveDeploymentFile && exists(p.liveDeploymentFile) ? p.liveDeploymentFile : p.deploymentFile;
+}
+
 const usd = (v: bigint) => `${(Number(v) / 1e6).toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
 
 /** Empty = nothing venue-side or in flight (UpgradeOrderlyAdapters `_migrate` / migrateToOrderlyAccounts rule). */
@@ -336,11 +382,31 @@ export function bookRows(p: NetworkProfile, brokerId: string, book: { bookId: nu
   const tag = `book ${book.bookId} ${book.name}`;
   if (a instanceof Error) return [{ stage: "books", check: tag, status: "FAIL", detail: `adapter ${book.adapter}: read failed (${a.message})` }];
   const real = sameAddr(a.orderlyVault, p.vault);
-  const empty = adapterEmpty(a);
   const tokOk = sameAddr(a.usdc, p.token.address) && sameAddr(a.tokenHash, orderlyHash(p.token.symbol));
   const brokerOk = sameAddr(a.brokerHash, orderlyHash(brokerId));
   const v3 = a.ifAccount !== null && a.ifAccount !== zeroAddress;
   const sym = charterBase(book.symbol);
+  const builderIf = !!a.ifAccountOwner && a.ifAccountOwner !== zeroAddress;
+  const state = a.bookState === null || a.bookState === undefined ? null : (BOOK_STATES[a.bookState] ?? `state ${a.bookState}`);
+  // On the real vault the 4th row is the IF funding (Orderly: strictly above the per-market requirement); on the mock
+  // vault it stays the migration precondition (empty adapter).
+  const req = BigInt(p.ifRequirementUsd) * 1_000_000n;
+  const funded = a.insuranceUsd > req;
+  const ifRow: Row = real
+    ? {
+        stage: "books",
+        check: `${tag} IF funded`,
+        status: funded ? "PASS" : state === "Live" || state === "Retiring" ? "FAIL" : "INFO",
+        detail: `insurance ${usd(a.insuranceUsd)} USD (adapter, last venue report + flows) ${funded ? ">" : "<="} ${p.ifRequirementUsd} required per market${state ? `; book ${state}` : ""}${!funded && (state === null || state === "Subscription") ? " (deposited at window close: depositToVenue(IF))" : ""}${sym ? `; Orderly symbol ${builderSymbol(sym, brokerId)}` : ""}`,
+      }
+    : {
+        stage: "books",
+        check: `${tag} empty`,
+        status: adapterEmpty(a) ? "PASS" : "FAIL",
+        detail: adapterEmpty(a)
+          ? `nothing venue-side or in flight (migration precondition)${sym ? `; Orderly symbol ${builderSymbol(sym, brokerId)}` : ""}`
+          : `IF ${usd(a.insuranceUsd)}, MM ${usd(a.marginUsd)}, in transit ${usd(a.inTransitUsd)}, pending IF ${usd(a.pendingIfUsd)} / MM ${usd(a.pendingMmUsd)}: recall to the vault first (retire / wind down)`,
+      };
   return [
     {
       stage: "books",
@@ -359,19 +425,12 @@ export function bookRows(p: NetworkProfile, brokerId: string, book: { bookId: nu
       check: `${tag} accounts`,
       status: v3 ? "PASS" : "FAIL",
       detail: v3
-        ? `Orderly accounts (v3): IF account contract ${short(a.ifAccount ?? "")}, delegate signer ${a.delegateSigner === zeroAddress ? "unset" : short(a.delegateSigner)}`
+        ? `Orderly accounts (v3): IF account ${builderIf ? `builder EOA ${short(a.ifAccountOwner ?? "")} (ORDERLY_IF_MODE=builder)` : `contract ${short(a.ifAccount ?? "")}`}, delegate signer ${a.delegateSigner === zeroAddress ? "unset" : short(a.delegateSigner)}`
         : a.ifAccount === null
           ? "pre-v3 implementation (no ifAccount()): UpgradeOrderlyAdapters, then migrateToOrderlyAccounts (only while empty)"
           : "devnet account ids (ifAccount() = 0): needs migrateToOrderlyAccounts (only while empty)",
     },
-    {
-      stage: "books",
-      check: `${tag} empty`,
-      status: empty ? "PASS" : "FAIL",
-      detail: empty
-        ? `nothing venue-side or in flight (migration precondition)${sym ? `; Orderly symbol ${builderSymbol(sym, brokerId)}` : ""}`
-        : `IF ${usd(a.insuranceUsd)}, MM ${usd(a.marginUsd)}, in transit ${usd(a.inTransitUsd)}, pending IF ${usd(a.pendingIfUsd)} / MM ${usd(a.pendingMmUsd)}: recall to the vault first (retire / wind down)`,
-    },
+    ifRow,
   ];
 }
 
@@ -483,7 +542,7 @@ export async function collect(argv: string[]): Promise<{ profile: NetworkProfile
   rows.push(...builderKeyRows(builderKey, keyEnv));
 
   // ---- books: our deployment
-  const file = arg(argv, "deployment") ?? profile.deploymentFile;
+  const file = arg(argv, "deployment") ?? defaultDeploymentFile(profile, (f) => existsSync(deploymentPath(f)));
   const dep: Deployment | null = tryLoadDeployment(file);
   const orderlyBooks = (dep?.books ?? []).filter((b) => b.venue === 0);
   const tickersArg = arg(argv, "tickers");
@@ -516,6 +575,7 @@ export async function collect(argv: string[]): Promise<{ profile: NetworkProfile
         ])
       : [null, null];
     rows.push(...deploymentRows(profile, brokerId, shownFile, { configUsdc, configVault, implTokenHash, implBrokerHash }));
+    rows.push(...recordRows(profile, brokerId, shownFile, dep));
     if (orderlyBooks.length === 0) rows.push({ stage: "books", check: "orderly books", status: "INFO", detail: "no Orderly-venue book in the deployment file" });
     for (const b of orderlyBooks) {
       const adapter = b.components.adapter;
@@ -532,9 +592,11 @@ export async function collect(argv: string[]): Promise<{ profile: NetworkProfile
         r<bigint>("inTransitUsd"),
         r<bigint>("pendingWithdrawUsd", [0]),
         r<bigint>("pendingWithdrawUsd", [1]),
+        r<Address>("ifAccountOwner").catch(() => null), // pre-v4: no builder IF binding
+        pc.readContract({ address: b.components.book, abi: bookAbi, functionName: "state" }).then((x) => Number(x)).catch(() => null),
       ])
         .then(
-          ([orderlyVault, usdc, tokenHash, brokerHash, ifAccount, delegateSigner, insuranceUsd, marginUsd, inTransitUsd, pendingIfUsd, pendingMmUsd]): AdapterFacts => ({
+          ([orderlyVault, usdc, tokenHash, brokerHash, ifAccount, delegateSigner, insuranceUsd, marginUsd, inTransitUsd, pendingIfUsd, pendingMmUsd, ifAccountOwner, bookState]): AdapterFacts => ({
             orderlyVault,
             usdc,
             tokenHash,
@@ -546,6 +608,8 @@ export async function collect(argv: string[]): Promise<{ profile: NetworkProfile
             inTransitUsd,
             pendingIfUsd,
             pendingMmUsd,
+            ifAccountOwner,
+            bookState,
           }),
         )
         .catch((e) => new Error(errText(e)));

@@ -33,6 +33,8 @@ export interface OpsSettings {
   opsKeyTtlMs: number;
   feeGraceSec: number;
   feeAuto: boolean;
+  /** G6: the builder account is the broker admin wallet's (live mode): its fee withdrawal cannot be signed here (no fee sweep) */
+  builderAdminOwned?: boolean;
   withdrawMaxAttempts: number;
   priceSource: "builder" | "chainlink";
   logMaxRange: bigint;

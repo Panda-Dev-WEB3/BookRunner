@@ -3,7 +3,9 @@
 //   bun scripts/dev.ts                 # everything
 //   bun scripts/dev.ts api web         # only some
 //   bun scripts/dev.ts --no-sim        # without trader-sim
-//   bun scripts/dev.ts --network testnet   # Robinhood Chain testnet profile (.env.testnet)
+//   bun scripts/dev.ts --network testnet   # Robinhood Chain testnet profile (.env.testnet); ORDERLY_MODE=live there =
+//                                          # the live-Orderly rehearsal (real Orderly testnet, 46630.live.json, own DB /
+//                                          # state, no mock-orderly / trader-sim: scripts/network-profile.ts testnetLiveProfile)
 //   bun scripts/dev.ts --network mainnet   # Robinhood Chain MAINNET (4663): scripts/network-profile.ts
 //   bun scripts/dev.ts --no-web            # without the vite dev server (a server serves the built web app)
 //
@@ -36,7 +38,7 @@ import {
   supervisorStatus,
 } from "../packages/shared/src/supervisor";
 import { roleSigner } from "../packages/shared/src/signer";
-import { MAINNET_EXCLUDED, deskKeyEnvFor, mainnetProfile, watchedRoleAddresses } from "./network-profile";
+import { MAINNET_EXCLUDED, TESTNET_LIVE_EXCLUDED, deskKeyEnvFor, mainnetProfile, testnetLiveProfile, testnetOrderlyLive, watchedRoleAddresses } from "./network-profile";
 
 const ROOT = resolve(import.meta.dir, "..");
 const BUN = process.execPath; // the bun running this script
@@ -54,6 +56,8 @@ const noSim = mainnet || args.includes("--no-sim");
 const noWeb = mainnet || args.includes("--no-web");
 
 const env: Record<string, string> = { ...(process.env as Record<string, string>) };
+/** testnet with ORDERLY_MODE=live: the books trade on real Orderly (scripts/network-profile.ts testnetLiveProfile) */
+let liveVenue = false;
 /** Loads KEY=VALUE lines; returns the keys it defined (null when the file is missing). */
 function loadEnvFile(file: string, override: boolean): Set<string> | null {
   const path = resolve(ROOT, file);
@@ -124,6 +128,18 @@ if (network === "testnet") {
   };
   // testnet defaults win over anything inherited; only keys set explicitly in .env.testnet override them
   for (const [k, v] of Object.entries(t)) if (!testnetKeys.has(k) || k === "CHAIN_ID" || k === "DEPLOYMENT_FILE") env[k] = v;
+  // live-Orderly rehearsal (ORDERLY_MODE=live in .env.testnet): real Orderly testnet venue, separate record / DB / state
+  if (testnetOrderlyLive(env)) {
+    const live = testnetLiveProfile(env, testnetKeys, ROOT, only);
+    if (live.errors.length > 0) {
+      console.error(`[dev] refusing to start the testnet stack on LIVE Orderly (${live.errors.length} problem(s)):`);
+      for (const e of live.errors) console.error(`[dev]   - ${e}`);
+      process.exit(1);
+    }
+    Object.assign(env, live.env);
+    liveVenue = true;
+    console.log(`[dev] venue: LIVE Orderly testnet (${env.ORDERLY_BASE_URL}, broker ${env.ORDERLY_BROKER_ID}, ${env.DEPLOYMENT_FILE}); no mock-orderly / trader-sim`);
+  }
   if (/127\.0\.0\.1|localhost/.test(env.RPC_URL ?? "") || (env.DATABASE_URL ?? "").endsWith("/bookrunner")) {
     console.error(`[dev] refusing: testnet profile resolved to a local RPC or the devnet DB (${redactUrl(env.RPC_URL ?? "")}, ${redactUrl(env.DATABASE_URL ?? "")})`);
     process.exit(1);
@@ -169,6 +185,7 @@ const svc = (name: string, dir = `services/${name}`, script = "start"): Proc | n
 const procs: Proc[] = [];
 const add = (p: Proc | null) => {
   if (p && mainnet && MAINNET_EXCLUDED.has(p.name)) return; // simulators / mocks / testnet helpers
+  if (p && liveVenue && TESTNET_LIVE_EXCLUDED.has(p.name)) return; // no mock venue on the live-Orderly testnet profile
   if (p && (only.length === 0 || only.includes(p.name) || only.some((o) => p.name.startsWith(`${o}:`)))) procs.push(p);
 };
 
@@ -339,7 +356,7 @@ setInterval(() => {
     // a per-book desk key (DESK_KEY_PRIVATE_KEY_<bookId>) reaches that book's agent only
     start({ name: `agent:${b.name}`, cwd: agentDir, cmd: scriptCmd("services/bookrunner-agent", "start"), extraEnv: { BOOK_ID: String(b.bookId), ...deskKeyEnvFor(env, b.bookId) } });
   }
-  if (books.length > 0 && !simStarted && !noSim) {
+  if (books.length > 0 && !simStarted && !noSim && !liveVenue) {
     simStarted = true;
     start({ name: "trader-sim", cwd: agentDir, cmd: [BUN, "src/trader-sim.ts"] });
   }

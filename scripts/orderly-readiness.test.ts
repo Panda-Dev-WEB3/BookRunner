@@ -13,10 +13,12 @@ import {
   builderSymbol,
   chainInfoRows,
   charterBase,
+  defaultDeploymentFile,
   deploymentRows,
   exitCode,
   orderlyHash,
   parseStages,
+  recordRows,
   symbolRows,
   tokenRows,
   vaultRows,
@@ -147,10 +149,44 @@ describe("book rows", () => {
   };
   const book = { bookId: 1, name: "NVDA", symbol: "PERP_NVDA_USDC", adapter: A(42) };
 
-  test("an empty v3 adapter on the real vault with USDG passes", () => {
+  test("a v3 adapter on the real vault with USDG passes; its IF row: INFO before the window closes", () => {
     const rows = bookRows(T, "bookrunner", book, real);
-    expect(rows.map((r) => r.status)).toEqual(["PASS", "PASS", "PASS", "PASS"]);
+    expect(rows.map((r) => r.status)).toEqual(["PASS", "PASS", "PASS", "INFO"]);
+    expect(rows[3]!.check).toBe("book 1 NVDA IF funded");
     expect(rows[3]!.detail).toContain("PERP_NVDA_USDC_bookrunner");
+    expect(rows[3]!.detail).toContain("deposited at window close");
+    expect(bookRows(T, "bookrunner", book, { ...real, bookState: 0 })[3]!.status).toBe("INFO");
+  });
+
+  test("live-venue book: IF funded strictly above the requirement (testnet 100 USDG), FAIL once Live / Retiring", () => {
+    const live = (insuranceUsd: bigint, bookState: number) => bookRows(T, "bookrunner", book, { ...real, insuranceUsd, bookState })[3]!;
+    expect(live(150_000_000n, 2)).toMatchObject({ status: "PASS" });
+    expect(live(150_000_000n, 2).detail).toContain("insurance 150 USD");
+    expect(live(100_000_000n, 2).status).toBe("FAIL"); // exactly the requirement is not enough
+    expect(live(100_000_000n, 3).status).toBe("FAIL");
+    expect(live(0n, 4).status).toBe("INFO"); // Retired: recalled
+    expect(bookRows(M, "bookrunner", book, { ...real, orderlyVault: M.vault, usdc: M.token.address, insuranceUsd: 25_000_000_000n, bookState: 2 })[3]!.status).toBe("FAIL");
+    expect(bookRows(T, "bookrunner", book, { ...real, ifAccountOwner: A(0xe0a) })[2]!.detail).toContain("builder EOA");
+    expect(bookRows(T, "bookrunner", book, { ...real, ifAccountOwner: zeroAddress })[2]!.detail).toContain("contract 0x000000");
+  });
+
+  test("record rows: the live-venue record passes; mock / another vault / token / broker FAIL; no block is INFO", () => {
+    const o = { venue: "live" as const, vault: T.vault, brokerId: "bookrunner", token: "USDG", settlementToken: T.token.address };
+    const contracts = { usdc: T.token.address, orderlyVault: T.vault } as never;
+    expect(recordRows(T, "bookrunner", "r.json", { orderly: o, contracts })).toEqual([expect.objectContaining({ check: "record orderly", status: "PASS" })]);
+    const bad = recordRows(T, "bookrunner", "r.json", { orderly: { ...o, venue: "mock", vault: A(0xc488), settlementToken: A(0x04de), token: "USDC" }, contracts: { usdc: A(0x04de), orderlyVault: A(0xc488) } as never })[0]!;
+    expect(bad.status).toBe("FAIL");
+    for (const part of ["venue mock", "vault 0x", "settlement token", "token symbol USDC != USDG"]) expect(bad.detail).toContain(part);
+    expect(recordRows(T, "other", "r.json", { orderly: o, contracts })[0]!.detail).toContain("broker bookrunner != other");
+    expect(recordRows(T, "bookrunner", "r.json", { orderly: o, contracts: { usdc: A(1), orderlyVault: T.vault } as never })[0]!.detail).toContain("disagree");
+    expect(recordRows(T, "bookrunner", "r.json", { contracts } as never)[0]!.status).toBe("INFO");
+    expect(recordRows(T, "bookrunner", "r.json", null)).toEqual([]);
+  });
+
+  test("default record: the live rehearsal record when present (testnet), else the network's", () => {
+    expect(defaultDeploymentFile(T, () => true)).toBe("contracts/deployments/46630.live.json");
+    expect(defaultDeploymentFile(T, () => false)).toBe("contracts/deployments/46630.json");
+    expect(defaultDeploymentFile(M, () => true)).toBe("contracts/deployments/4663.json");
   });
 
   test("today's testnet book: mock vault, mock USDC, devnet accounts, funded", () => {

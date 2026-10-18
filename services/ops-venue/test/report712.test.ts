@@ -263,6 +263,14 @@ describe("Reporter, OPS_REPORT_MODE=signed", () => {
     expect(t.chain.count("report")).toBe(0);
   });
 
+  test("sweep_fees job refused for an admin-owned builder account (G6): nothing earmarked on-chain", async () => {
+    const t = await setupReporting("signed");
+    t.ctx.settings.builderAdminOwned = true;
+    const deps = { ctx: t.ctx, registry: t.svc.registry, provisioner: t.svc.provisioner, reporter: t.svc.reporter, withdrawals: t.svc.withdrawals, fees: t.svc.fees, revoker: t.svc.revoker };
+    await expect(handleVenueOpsJob({ kind: "sweep_fees", bookId: 1, period: 1 }, deps)).rejects.toThrow("builder account is admin-owned");
+    expect(t.chain.count("sweepFees")).toBe(0);
+  });
+
   test("onchain mode is unchanged (report tx, nothing published)", async () => {
     const t = await setupReporting("onchain");
     expect(await t.svc.reporter.report(t.book())).toMatch(/^0x/);

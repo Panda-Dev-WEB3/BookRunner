@@ -10,6 +10,10 @@
 // The deployer is a protocol-admin key: on testnet it derives from the mnemonic only with
 // BKRN_ALLOW_ADMIN_KEY=1 (scripts/dev.ts sets it for this one-shot process; set it yourself when running
 // this by hand) or from DEPLOYER_PRIVATE_KEY.
+// Live venue (deployment record orderly.venue = "live": Deploy.s.sol DEPLOY_ORDERLY_VAULT / DEPLOY_SETTLEMENT_TOKEN, the
+// real Orderly testnet vault + real testnet USDG): only NVDA and TSLA by default, at rehearsal sizes, and the deployer
+// TRANSFERS the settlement token to the sponsor / allocators (no mint; refused up front if it holds too little); no
+// trader or user-wallet funding. Sizes / books: scripts/launch-plan.ts (LAUNCH_BOOKS, LAUNCH_IF_USD, LAUNCH_MM_USD, ...).
 import { readFileSync, writeFileSync } from "node:fs";
 import {
   type Abi,
@@ -42,8 +46,9 @@ import { type DevRole, roleAccount } from "../packages/shared/src/devkeys";
 import { deploymentPath, loadDeployment } from "../packages/shared/src/deployments";
 import { hedgeAllowTree } from "../packages/shared/src/merkle";
 import { SESSIONS_24X5, encodeSessions } from "../packages/shared/src/sessions";
-import type { BookComponents, Deployment } from "../packages/shared/src/types";
+import { type BookComponents, type Deployment, liveVenueDeployment } from "../packages/shared/src/types";
 import { usd } from "../packages/shared/src/units";
+import { type BookSize, type Participant, launchBooks, launchSizes, settlementNeeds, transferPlan } from "./launch-plan";
 
 const RPC = process.env.RPC_URL ?? "http://127.0.0.1:8547";
 const WINDOW = Number(process.env.LAUNCH_WINDOW_SECONDS ?? 120);
@@ -187,23 +192,50 @@ async function fundGas() {
   }
 }
 
-async function fundParticipants(d: Deployment) {
+const configUint = (c: Deployment["contracts"], name: string, args: readonly unknown[] = [], inputs: Array<{ name: string; type: string }> = []) =>
+  read<bigint>(c.config, [{ type: "function", name, inputs, outputs: [{ name: "", type: "uint256" }], stateMutability: "view" }], name, args);
+
+/** Live venue: the settlement token is real (no mint): the deployer transfers each participant's need, all or nothing. */
+async function fundSettlementLive(d: Deployment, sizes: BookSize[]) {
+  const c = d.contracts;
+  const balOf = (who: Address) => read<bigint>(c.usdc, mockERC20Abi as Abi, "balanceOf", [who]);
+  const fee = Number(await configUint(c, "charterFeeUsd")) / 1e6;
+  const needs = settlementNeeds(sizes, fee);
+  const who: Record<Participant, LocalAccount> = { sponsor: acct.sponsor, a0: acct.a0, a1: acct.a1, a2: acct.a2 };
+  const parts = Object.keys(who) as Participant[];
+  const balances = Object.fromEntries(await Promise.all(parts.map(async (p) => [p, await balOf(who[p].address)] as const))) as Record<Participant, bigint>;
+  const { transfers, total } = transferPlan(needs, balances);
+  const have = await balOf(acct.deployer.address);
+  log(`live venue: settlement token ${c.usdc} (not mintable); needs ${JSON.stringify(needs)} USD (incl. charter fee ${fee} per book); deployer holds ${Number(have) / 1e6}, transfers ${Number(total) / 1e6}`);
+  if (have < total) {
+    throw new Error(
+      `deployer ${acct.deployer.address} holds ${Number(have) / 1e6} of the settlement token, the launch needs ${Number(total) / 1e6}: fund it first (testnet USDG source: docs/VERIFY.md O17) or lower LAUNCH_IF_USD / LAUNCH_MM_USD / DEPLOY_CHARTER_FEE_USD`,
+    );
+  }
+  for (const [p, amount] of transfers) await send(acct.deployer, c.usdc, mockERC20Abi as Abi, "transfer", [who[p].address, amount]);
+}
+
+async function fundParticipants(d: Deployment, sizes: BookSize[]) {
   const c = d.contracts;
   // Idempotent: a partially completed launch can be re-run (only missing balances/stakes/bonds are added).
   const balOf = (token: Address, who: Address) => read<bigint>(token, mockERC20Abi as Abi, "balanceOf", [who]);
-  // USDC (devnet mock: open mint)
-  const mints: Array<[LocalAccount, number]> = [
-    [acct.sponsor, 2_000_000],
-    [acct.a0, 500_000],
-    [acct.a1, 500_000],
-    [acct.a2, 500_000],
-    [acct.t0, 100_000],
-    [acct.t1, 100_000],
-    [acct.t2, 100_000],
-    [acct.t3, 100_000],
-  ];
-  for (const [who, amount] of mints) {
-    if ((await balOf(c.usdc, who.address)) < usd(amount)) await send(acct.deployer, c.usdc, mockERC20Abi as Abi, "mint", [who.address, usd(amount)]);
+  if (liveVenueDeployment(d)) {
+    await fundSettlementLive(d, sizes);
+  } else {
+    // USDC (devnet mock: open mint)
+    const mints: Array<[LocalAccount, number]> = [
+      [acct.sponsor, 2_000_000],
+      [acct.a0, 500_000],
+      [acct.a1, 500_000],
+      [acct.a2, 500_000],
+      [acct.t0, 100_000],
+      [acct.t1, 100_000],
+      [acct.t2, 100_000],
+      [acct.t3, 100_000],
+    ];
+    for (const [who, amount] of mints) {
+      if ((await balOf(c.usdc, who.address)) < usd(amount)) await send(acct.deployer, c.usdc, mockERC20Abi as Abi, "mint", [who.address, usd(amount)]);
+    }
   }
   // BKRN from the deployer's allocations to committee members and the agent operator
   const bk = 10n ** 18n;
@@ -226,7 +258,9 @@ async function fundParticipants(d: Deployment) {
     if (!(await read<boolean>(c.committee, riskCommitteeAbi as Abi, "isBonded", [who.address]))) await send(who, c.committee, riskCommitteeAbi as Abi, "bond");
   }
   await stakeAll(acct.operator, 300_000n * bk);
-  if (USER_WALLET) {
+  if (USER_WALLET && liveVenueDeployment(d)) {
+    log(`user wallet ${USER_WALLET}: no settlement token on the live venue (real USDG cannot be minted)`);
+  } else if (USER_WALLET) {
     if ((await balOf(c.usdc, USER_WALLET)) < usd(1_000_000)) await send(acct.deployer, c.usdc, mockERC20Abi as Abi, "mint", [USER_WALLET, usd(1_000_000)]);
     if ((await balOf(c.bkrn, USER_WALLET)) < 1_000_000n * bk) await send(acct.deployer, c.bkrn, bkrnTokenAbi as Abi, "transfer", [USER_WALLET, 1_000_000n * bk]);
     log(`user wallet ${USER_WALLET}: +1,000,000 test USDC, +1,000,000 BKRN`);
@@ -315,28 +349,34 @@ async function main() {
     if (!e) throw new Error(`stock token ${sym} missing from deployment`);
     return e.token;
   };
+  // sizes and books: scripts/launch-plan.ts (demo sizes on the mock venue, rehearsal sizes in real USDG on the live venue)
+  const live = liveVenueDeployment(d);
+  const minIfOf = async (venue: 0 | 1) => Number(await configUint(d.contracts, "venueMinIfUsd", [venue], [{ name: "venue", type: "uint8" }])) / 1e6;
+  const minIf = { 0: await minIfOf(0), 1: await minIfOf(1) };
+  const sizes = launchSizes(live, launchBooks(live), (v) => minIf[v]);
+  const sized = (s: Omit<LaunchSpec, "ifUsd" | "mmUsd" | "maxInventoryUsd">): LaunchSpec | null => {
+    const z = sizes.find((x) => x.name === s.name);
+    return z ? { ...s, ifUsd: usd(z.ifUsd), mmUsd: usd(z.mmUsd), maxInventoryUsd: usd(z.maxInventoryUsd) } : null;
+  };
   const specs: LaunchSpec[] = [
-    {
+    sized({
       name: "NVDA", symbol: "PERP_NVDA_USDC", venue: 0, underlying: tokenUnderlying(t("NVDA")), hedgeTokens: [t("NVDA")],
-      ifUsd: usd(30_000), mmUsd: usd(75_000), maxInventoryUsd: usd(50_000), maxSkewBps: 25, minQuoteWidthBps: 8,
-      hedgeRatioMinBps: 5000, hedgeRatioMaxBps: 12000, deskKey: devAccount("deskKeyNvda"), takerFeeBps: 0,
-    },
-    {
+      maxSkewBps: 25, minQuoteWidthBps: 8, hedgeRatioMinBps: 5000, hedgeRatioMaxBps: 12000, deskKey: devAccount("deskKeyNvda"), takerFeeBps: 0,
+    }),
+    sized({
       name: "TSLA", symbol: "PERP_TSLA_USDC", venue: 0, underlying: tokenUnderlying(t("TSLA")), hedgeTokens: [t("TSLA")],
-      ifUsd: usd(30_000), mmUsd: usd(75_000), maxInventoryUsd: usd(50_000), maxSkewBps: 30, minQuoteWidthBps: 12,
-      hedgeRatioMinBps: 5000, hedgeRatioMaxBps: 12000, deskKey: devAccount("deskKeyTsla"), takerFeeBps: 0,
-    },
-    {
+      maxSkewBps: 30, minQuoteWidthBps: 12, hedgeRatioMinBps: 5000, hedgeRatioMaxBps: 12000, deskKey: devAccount("deskKeyTsla"), takerFeeBps: 0,
+    }),
+    sized({
       name: "RHX5", symbol: "RHX5-PERP", venue: 1, underlying: indexUnderlying("RHX5"),
       hedgeTokens: ["NVDA", "TSLA", "AAPL", "MSFT", "AMZN"].map(t),
-      ifUsd: usd(30_000), mmUsd: usd(100_000), maxInventoryUsd: usd(75_000), maxSkewBps: 25, minQuoteWidthBps: 10,
-      hedgeRatioMinBps: 4000, hedgeRatioMaxBps: 12000, deskKey: devAccount("deskKeyIndex"), takerFeeBps: 6,
-    },
-  ];
+      maxSkewBps: 25, minQuoteWidthBps: 10, hedgeRatioMinBps: 4000, hedgeRatioMaxBps: 12000, deskKey: devAccount("deskKeyIndex"), takerFeeBps: 6,
+    }),
+  ].filter((s): s is LaunchSpec => s !== null);
 
-  log(`network: chain ${CHAIN_ID} via ${RPC}`);
+  log(`network: chain ${CHAIN_ID} via ${RPC}; ${live ? "LIVE Orderly venue (real settlement token)" : "mock venue"}; books ${sizes.map((s) => `${s.name} (IF ${s.ifUsd}, MM ${s.mmUsd})`).join(", ")}`);
   await fundGas();
-  await fundParticipants(d);
+  await fundParticipants(d, sizes);
   const books = [];
   for (const s of specs) books.push(await launchBook(d, s));
   await closeWindows(books);

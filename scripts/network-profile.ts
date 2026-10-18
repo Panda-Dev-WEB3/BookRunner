@@ -352,3 +352,93 @@ export function watchedRoleAddresses(env: Env, roles: readonly DevRole[]): { pai
   }
   return { pairs, kmsRoles };
 }
+
+// ============================================================================ testnet: live Orderly rehearsal
+// scripts/dev.ts --network testnet with ORDERLY_MODE=live in .env.testnet (VERIFY O22, RUNBOOK "Testnet rehearsal on
+// real Orderly"): the Orderly books trade on Orderly's REAL testnet (vault 0x2A5b…E24d, testnet USDG) while Stock Tokens
+// and prices stay mock / synthetic. A separate deployment record, database, Redis db and state directory, so the mock
+// testnet stack (contracts/deployments/46630.json, bookrunner_testnet, .data/testnet) is untouched and the rollback is
+// removing ORDERLY_MODE=live. No mock-orderly (nothing to serve), no trader-sim (it mints mock USDC and takes on the mock
+// venue). Builder admin key (G6): ops-venue uses ORDERLY_BUILDER_KEY_SECRET, the key the admin wallet registered for the
+// broker's admin account; its automated fee sweep is off.
+
+/** Orderly RH testnet externals (VERIFY O2 / O3; re-read on-chain by scripts/orderly-readiness.ts). */
+export const TESTNET_ORDERLY = {
+  vault: "0x2A5b650A894409372DDeE241EDAC92d4152bE24d",
+  usdg: "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+  brokerId: "bookrunner",
+  /** the broker admin wallet 0x9c1B…e8b9's Orderly account (builder admin account, G6) */
+  adminAccountId: "0xaa04410b18eb0856e02832221f24b2cd37fde7c6f6f8eec83fe95a2f62702e5c",
+} as const;
+
+/** Defaults of the live variant; a key set in .env.testnet overrides it (except TESTNET_LIVE_PINNED). */
+export const TESTNET_LIVE_DEFAULTS: Readonly<Record<string, string>> = {
+  ORDERLY_BASE_URL: "https://testnet-api.orderly.org",
+  ORDERLY_BROKER_ID: TESTNET_ORDERLY.brokerId, // venue symbols PERP_<T>_USDC_bookrunner (packages/shared venueSymbol)
+  ORDERLY_TOKEN: "USDG",
+  ORDERLY_LEDGER_ADDRESS: "0x1826B75e2ef249173FC735149AE4B8e9ea10abff", // testnet Ledger: Withdraw EIP-712 domain
+  ORDERLY_BUILDER_ACCOUNT_ID: TESTNET_ORDERLY.adminAccountId,
+  ORDERLY_LISTING_MODE: "manual", // the admin lists the markets in Orderly One (G4)
+  ORDERLY_IF_MODE: "contract", // per-book OrderlyIFAccount (G5); builder = fallback with ORDERLY_IF_BUILDER_ACCOUNTS
+};
+
+/** Pinned by the live variant whatever .env.testnet says (separate state; G6 fee sweep). */
+export const TESTNET_LIVE_PINNED: Readonly<Record<string, string>> = {
+  ORDERLY_MODE: "live",
+  OPS_FEE_SWEEP_AUTO: "false",
+  DEPLOYMENT_FILE: "contracts/deployments/46630.live.json",
+  OPS_KEYS_DIR: ".data/testnet-live/keys",
+  OPS_SAGA_FILE: ".data/testnet-live/ops-venue/sagas.json",
+};
+
+/** Processes the live variant never starts. */
+export const TESTNET_LIVE_EXCLUDED = new Set(["mock-orderly", "trader-sim"]);
+
+/** The live variant is on when the testnet profile resolved ORDERLY_MODE=live (set in .env.testnet). */
+export function testnetOrderlyLive(env: Env): boolean {
+  return env.ORDERLY_MODE === "live";
+}
+
+/**
+ * Live-Orderly variant of the testnet profile. `explicit` = keys set in .env.testnet (they override the defaults);
+ * `root` resolves the deployment record. Never throws: every problem is collected.
+ */
+export function testnetLiveProfile(inherited: Env, explicit: ReadonlySet<string>, root: string, only: readonly string[] = []): ProfileResult {
+  const errors: string[] = [];
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(TESTNET_LIVE_DEFAULTS)) env[k] = explicit.has(k) && inherited[k] ? (inherited[k] as string) : v;
+  Object.assign(env, TESTNET_LIVE_PINNED);
+  const pg = encodeURIComponent(inherited.POSTGRES_PASSWORD || "bookrunner");
+  const redisAuth = inherited.REDIS_PASSWORD ? `:${encodeURIComponent(inherited.REDIS_PASSWORD)}@` : "";
+  env.DATABASE_URL = `postgres://bookrunner:${pg}@127.0.0.1:54400/bookrunner_testnet_live`;
+  env.REDIS_URL = `redis://${redisAuth}127.0.0.1:63790/2`;
+
+  const base = env.ORDERLY_BASE_URL ?? "";
+  if (isLocal(base) || !base.startsWith("https://")) errors.push(`ORDERLY_BASE_URL must be Orderly's testnet API (https, not the mock): ${base}`);
+  if (!inherited.ORDERLY_BUILDER_KEY_SECRET?.trim()) {
+    errors.push("ORDERLY_BUILDER_KEY_SECRET is not set: the base58 secret of the Orderly key the admin wallet registered for the builder admin account (RUNBOOK \"builder admin key\")");
+  }
+  if (explicit.has("OPS_FEE_SWEEP_AUTO") && inherited.OPS_FEE_SWEEP_AUTO !== "false") {
+    errors.push("OPS_FEE_SWEEP_AUTO must stay false on the live testnet profile: the builder fee withdrawal needs the admin wallet's signature (G6 / VERIFY O21)");
+  }
+  for (const p of only) if (TESTNET_LIVE_EXCLUDED.has(p)) errors.push(`${p} does not run with ORDERLY_MODE=live (no mock venue)`);
+
+  const file = TESTNET_LIVE_PINNED.DEPLOYMENT_FILE!;
+  const depFile = resolve(root, file);
+  if (!existsSync(depFile)) {
+    errors.push(`${file} not found: deploy the rehearsal stack first (ORDERLY_VENUE=live bash scripts/deploy-testnet.sh)`);
+  } else {
+    try {
+      const dep = JSON.parse(readFileSync(depFile, "utf8")) as { chainId?: number; contracts?: { usdc?: string; orderlyVault?: string }; orderly?: { venue?: string; vault?: string; brokerId?: string; settlementToken?: string } };
+      const same = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
+      if (dep.chainId !== 46630) errors.push(`${file} is for chain ${dep.chainId}, not 46630`);
+      if (dep.orderly?.venue !== "live") errors.push(`${file} is not a live-venue deployment (orderly.venue = ${dep.orderly?.venue ?? "absent"}): its books sit on the mock vault`);
+      if (!same(dep.contracts?.orderlyVault, TESTNET_ORDERLY.vault)) errors.push(`${file}: orderlyVault ${dep.contracts?.orderlyVault} is not Orderly's testnet vault ${TESTNET_ORDERLY.vault}`);
+      if (!same(dep.contracts?.usdc, TESTNET_ORDERLY.usdg)) errors.push(`${file}: settlement token ${dep.contracts?.usdc} is not testnet USDG ${TESTNET_ORDERLY.usdg}`);
+      if (dep.orderly?.brokerId && dep.orderly.brokerId !== env.ORDERLY_BROKER_ID) errors.push(`${file}: adapters hashed broker ${dep.orderly.brokerId}, ORDERLY_BROKER_ID is ${env.ORDERLY_BROKER_ID}`);
+    } catch {
+      errors.push(`${file} is not valid JSON`);
+    }
+  }
+  return { env, errors };
+}

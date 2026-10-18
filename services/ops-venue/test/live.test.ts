@@ -7,6 +7,7 @@ import { recoverDelegateSignerLink, recoverWithdrawSigner } from "@bookrunner/mo
 import * as ed from "@noble/ed25519";
 import type { Address, Hex } from "viem";
 import { OrderlyBuilderClient, OrderlyVenue } from "../src/client";
+import { resolveBuilderAccount } from "../src/config";
 import { attributeBrokerWide, BROKER_WIDE, planFeeSweep, type SettlementRow } from "../src/domain/fees";
 import { base58Decode, base58Encode, keyFromSecret, signatureMessage, signMessage } from "../src/orderly/auth";
 import { dateWindows, FEE_REVENUE_MAX_DAYS, parseAssetHistory, parseDailyFeeRevenue, toVenueAccount } from "../src/orderly/convert";
@@ -271,5 +272,25 @@ describe("live endpoints against recorded fixtures", () => {
     await client.addKey({ accountId: "0xaa", orderlyKey: "ed25519:FRXntsPJBCy6dzKv9WPw4eYSw3rKU9Npz3T6UmvvJc9Z", scope: "read,asset", expirationMs: NOW + 86_400_000, delegateContract: IF_OWNER });
     const body = JSON.parse(calls[0]?.body ?? "{}");
     expect(body.message).toEqual({ brokerId: "bookrunner", chainId: 4663, orderlyKey: "ed25519:FRXntsPJBCy6dzKv9WPw4eYSw3rKU9Npz3T6UmvvJc9Z", scope: "read,asset", timestamp: NOW, expiration: NOW + 86_400_000, delegateContract: IF_OWNER });
+  });
+});
+
+describe("builder admin account (G6 / VERIFY O21)", () => {
+  const OWN = "0x00000000000000000000000000000000000000000000000000000000000000aa";
+  const ADMIN = "0xAA04410B18EB0856E02832221F24B2CD37FDE7C6F6F8EEC83FE95A2F62702E5C";
+  const base = { ORDERLY_MODE: "live" as const, OPS_FEE_SWEEP_AUTO: true, ORDERLY_BUILDER_ACCOUNT_ID: ADMIN, ORDERLY_BUILDER_KEY_SECRET: "seed" };
+
+  test("admin-owned builder account in live mode: the admin-registered key is required, the automated fee sweep is off", () => {
+    const r = resolveBuilderAccount(base, OWN);
+    expect(r).toMatchObject({ accountId: ADMIN.toLowerCase(), adminOwned: true, feeAuto: false });
+    expect(r.notice).toContain("automated builder fee sweep OFF");
+    expect(resolveBuilderAccount({ ...base, OPS_FEE_SWEEP_AUTO: false }, OWN)).toMatchObject({ feeAuto: false, notice: null });
+    expect(() => resolveBuilderAccount({ ...base, ORDERLY_BUILDER_KEY_SECRET: undefined }, OWN)).toThrow("set ORDERLY_BUILDER_KEY_SECRET");
+  });
+
+  test("ops-venue's own builder account, or mock mode: unchanged (OPS_FEE_SWEEP_AUTO honoured, a key may be generated)", () => {
+    expect(resolveBuilderAccount({ ...base, ORDERLY_BUILDER_ACCOUNT_ID: undefined, ORDERLY_BUILDER_KEY_SECRET: undefined }, OWN)).toEqual({ accountId: OWN, adminOwned: false, feeAuto: true, notice: null });
+    expect(resolveBuilderAccount({ ...base, ORDERLY_BUILDER_ACCOUNT_ID: OWN.toUpperCase().replace("0X", "0x") }, OWN).feeAuto).toBe(true);
+    expect(resolveBuilderAccount({ ...base, ORDERLY_MODE: "mock", ORDERLY_BUILDER_KEY_SECRET: undefined }, OWN)).toMatchObject({ adminOwned: true, feeAuto: true });
   });
 });

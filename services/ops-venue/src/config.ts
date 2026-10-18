@@ -125,6 +125,35 @@ export function resolveListingMode(e: Pick<OpsEnv, "ORDERLY_MODE" | "ORDERLY_LIS
   return e.ORDERLY_LISTING_MODE ?? (e.ORDERLY_MODE === "live" ? "manual" : "api");
 }
 
+/**
+ * Builder account and fee sweep (G6 / VERIFY O21). The builder account is ORDERLY_BUILDER_ACCOUNT_ID, else ops-venue's
+ * own Orderly account (keccak256(abi.encode(opsAddress, brokerHash))). In live mode with an ADMIN-owned builder account
+ * (the broker's admin wallet, which the system never holds): its Orderly key must come from ORDERLY_BUILDER_KEY_SECRET (the
+ * key the admin wallet registered once in Orderly One / POST /v1/orderly_key; a generated key would be registered by
+ * nobody and every builder call would fail auth), and the automated builder fee sweep is OFF whatever OPS_FEE_SWEEP_AUTO
+ * says (its Orderly withdrawal is an EIP-712 Withdraw only the account owner can sign: the fees are swept manually).
+ */
+export function resolveBuilderAccount(
+  e: Pick<OpsEnv, "ORDERLY_MODE" | "ORDERLY_BUILDER_ACCOUNT_ID" | "ORDERLY_BUILDER_KEY_SECRET" | "OPS_FEE_SWEEP_AUTO">,
+  opsAccountId: string,
+): { accountId: string; adminOwned: boolean; feeAuto: boolean; notice: string | null } {
+  const own = opsAccountId.toLowerCase();
+  const accountId = (e.ORDERLY_BUILDER_ACCOUNT_ID ?? own).toLowerCase();
+  const adminOwned = accountId !== own;
+  if (e.ORDERLY_MODE !== "live" || !adminOwned) return { accountId, adminOwned, feeAuto: e.OPS_FEE_SWEEP_AUTO, notice: null };
+  if (!e.ORDERLY_BUILDER_KEY_SECRET) {
+    throw new Error(`invalid environment: ORDERLY_BUILDER_ACCOUNT_ID ${accountId} is not ops-venue's own account: set ORDERLY_BUILDER_KEY_SECRET to the Orderly key the admin wallet registered for it (docs/RUNBOOK.md "builder admin key")`);
+  }
+  return {
+    accountId,
+    adminOwned,
+    feeAuto: false,
+    notice: e.OPS_FEE_SWEEP_AUTO
+      ? "admin-owned builder account: automated builder fee sweep OFF (its Orderly withdrawal needs the admin wallet's signature; sweep manually, VERIFY O21); set OPS_FEE_SWEEP_AUTO=false to silence this"
+      : null,
+  };
+}
+
 export function loadOpsEnv(source: Record<string, string | undefined> = process.env): OpsEnv {
   const parsed = opsEnvSchema.safeParse(source);
   if (!parsed.success) throw new Error(`invalid environment: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);

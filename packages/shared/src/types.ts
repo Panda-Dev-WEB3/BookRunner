@@ -123,4 +123,14 @@ export interface Deployment {
   };
   stockTokens: Record<string, { token: Address; priceId: Hex; multiplierWad: string }>;
   books: Array<{ bookId: number; name: string; symbol: string; venue: VenueId; components: BookComponents }>;
+  /**
+   * Which Orderly the books bind to (Deploy.s.sol; absent in older records = the mock venue). `live`: the real Orderly
+   * Vault and its settlement token (config.usdc(), not mintable), DEPLOY_ORDERLY_VAULT / DEPLOY_SETTLEMENT_TOKEN.
+   */
+  orderly?: { venue: "mock" | "live"; vault: Address; brokerId: string; token: string; settlementToken: Address };
+}
+
+/** True when the record's Orderly books are bound to the real Orderly vault (no mock venue, no mintable settlement token). */
+export function liveVenueDeployment(d: Pick<Deployment, "orderly">): boolean {
+  return d.orderly?.venue === "live";
 }

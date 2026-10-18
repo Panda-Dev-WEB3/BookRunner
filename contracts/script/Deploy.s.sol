@@ -44,7 +44,18 @@ import {BRTypes} from "../src/interfaces/BRTypes.sol";
 ///         DEV_MNEMONIC; the public anvil mnemonic is refused). Testnet uses the same protocol-owned mocks as
 ///         devnet for USDC, Stock Tokens, the swap router and the Orderly vault (real venue/token integration
 ///         needs an Orderly builder account and canonical Stock Tokens — see docs/VERIFY.md).
-///         Writes deployments/<chainId>.json; scripts/launch-devnet.ts then charters the launch books.
+///         LIVE-VENUE REHEARSAL (VERIFY O17, RUNBOOK "Testnet rehearsal on real Orderly"): DEPLOY_ORDERLY_VAULT=<Orderly
+///         Vault> and DEPLOY_SETTLEMENT_TOKEN=<its token> (both or neither) bind the deployment to the REAL Orderly vault
+///         and settle the WHOLE protocol in that token (config.usdc(): every book component, BkrnFeeRouter, Backstop and
+///         the PoolEngine cache it, so the RHX5 PoolEngine book settles in it too; there is no mixed-token design). No
+///         MockOrderlyVault and no mock settlement token are deployed then; Stock Tokens, the swap router and the oracle's
+///         prices stay mock / synthetic (no Stock Tokens / Chainlink / Uniswap on RH testnet). Refused unless the token has
+///         code and 6 decimals, `vault.getAllowedToken(keccak256(DEPLOY_ORDERLY_TOKEN))` returns it (token symbol default
+///         "USDG" in this mode) and `vault.getAllowedBroker(keccak256(DEPLOY_ORDERLY_BROKER_ID))` is true. The swap router
+///         has no mint for the real token: fund it with the token if hedge sells must fill (owner `withdraw` takes it back).
+///         DEPLOY_CHARTER_FEE_USD (6 dp, any network) overrides the 5,000 charter fee (paid in the settlement token).
+///         Writes deployments/<chainId>.json, or DEPLOY_OUT (with an `orderly` record: venue mock | live, vault, broker id, token
+///         symbol, settlement token); scripts/launch-devnet.ts then charters the launch books.
 ///
 ///   PRIVATE_KEY=<anvil #0> bash scripts/forge.sh script script/Deploy.s.sol:Deploy \
 ///       --rpc-url http://host.docker.internal:8547 --broadcast
@@ -54,8 +65,14 @@ contract Deploy is Script {
     ///      keccak256(bytes(s)). Devnet/testnet defaults "bookrunner" / "USDC"; Robinhood Chain mainnet uses the
     ///      broker id assigned at Orderly builder onboarding and "USDG" (keccak 0x50c06f78...5b02ea).
     ///      Overridable with DEPLOY_ORDERLY_BROKER_ID / DEPLOY_ORDERLY_TOKEN (passed through by scripts/forge.sh).
-    bytes32 internal BROKER_HASH = keccak256(bytes(vm.envOr("DEPLOY_ORDERLY_BROKER_ID", string("bookrunner"))));
-    bytes32 internal TOKEN_HASH = keccak256(bytes(vm.envOr("DEPLOY_ORDERLY_TOKEN", string("USDC"))));
+    string internal brokerId = vm.envOr("DEPLOY_ORDERLY_BROKER_ID", string("bookrunner"));
+    /// @dev Live venue (real Orderly vault + its settlement token) when both are set; zero = the devnet mocks.
+    address internal liveVault = vm.envOr("DEPLOY_ORDERLY_VAULT", address(0));
+    address internal liveToken = vm.envOr("DEPLOY_SETTLEMENT_TOKEN", address(0));
+    string internal tokenSymbol =
+        vm.envOr("DEPLOY_ORDERLY_TOKEN", liveVault == address(0) ? string("USDC") : string("USDG"));
+    bytes32 internal BROKER_HASH = keccak256(bytes(brokerId));
+    bytes32 internal TOKEN_HASH = keccak256(bytes(tokenSymbol));
     uint32 internal constant TREASURY_INDEX = 22; // devkeys.ts DEV_ROLE_INDEX.treasury
     /// @dev Buyback pool fee tier pinned on BkrnFeeRouter (MockSwapRouter ignores it; mainnet: VERIFY pool).
     uint24 internal constant BUYBACK_POOL_FEE = 3000;
@@ -87,8 +104,10 @@ contract Deploy is Script {
 
     // ---- deployed ----
     BookrunnerConfig internal config;
-    MockERC20 internal usdc;
-    MockERC20 internal usdg;
+    /// @dev config.usdc(): a MockERC20 (mock venue) or the live venue's settlement token
+    address internal usdc;
+    /// @dev record field `usdg`: a second MockERC20 (mock venue) or the settlement token itself (live venue)
+    address internal usdg;
     BkrnToken internal bkrn;
     BkrnStaking internal staking;
     BkrnFeeRouter internal feeRouter;
@@ -99,7 +118,8 @@ contract Deploy is Script {
     MockSwapRouter internal swapRouter;
     HedgeExecutor internal hedgeExecutor;
     PoolEngine internal poolEngine;
-    MockOrderlyVault internal orderlyVault;
+    /// @dev config.orderlyVault(): a MockOrderlyVault (mock venue) or the real Orderly Vault (live venue)
+    address internal orderlyVault;
     MarketCharter internal charter;
     RiskCommittee internal committee;
     BookFactory internal factory;
@@ -122,6 +142,7 @@ contract Deploy is Script {
         if (deployerKey == 0) deployerKey = vm.deriveKey(mnemonic, 0);
         uint32 markInterval = uint32(vm.envOr("MARK_INTERVAL_SECONDS", uint256(300)));
         _roles(deployerKey, mnemonic);
+        if (liveVenue()) checkLiveVenue(liveVault, liveToken, TOKEN_HASH, BROKER_HASH); // before any broadcast
         startBlock = block.number; // NB: parent-chain block on Arbitrum Orbit (RHC) — deploy-testnet.sh rewrites it from receipts
 
         tickers.push("NVDA");
@@ -162,6 +183,39 @@ contract Deploy is Script {
         return minIf;
     }
 
+    /// @notice True when DEPLOY_ORDERLY_VAULT / DEPLOY_SETTLEMENT_TOKEN bind this deployment to a real Orderly vault.
+    ///         Exactly one of them set is refused (the real vault never takes a mock token; a real token on the mock
+    ///         vault cannot be minted for the mock venue's PnL).
+    function liveVenue() public view returns (bool) {
+        require(
+            (liveVault == address(0)) == (liveToken == address(0)),
+            "Deploy.s.sol: DEPLOY_ORDERLY_VAULT and DEPLOY_SETTLEMENT_TOKEN go together (VERIFY O17)"
+        );
+        return liveVault != address(0);
+    }
+
+    /// @notice Live-venue preconditions (chain reads only; also what OrderlyAdapter.initialize and every deposit check):
+    ///         code at the vault and the token, `decimals() == 6`, `vault.getAllowedToken(tokenHash) == token` and
+    ///         `vault.getAllowedBroker(brokerHash)`. On RH testnet both fail until Orderly allows USDG and our broker
+    ///         (`scripts/orderly-readiness.ts --stage venue` exits 0 then).
+    function checkLiveVenue(address vault, address token, bytes32 tokenHash, bytes32 brokerHash) public view {
+        require(block.chainid == 31337 || block.chainid == 46630, "Deploy.s.sol: live venue on devnet / testnet only");
+        require(vault.code.length > 0, "Deploy.s.sol: DEPLOY_ORDERLY_VAULT has no code");
+        require(token.code.length > 0, "Deploy.s.sol: DEPLOY_SETTLEMENT_TOKEN has no code");
+        (bool ok, bytes memory ret) = token.staticcall(abi.encodeWithSignature("decimals()"));
+        require(ok && ret.length >= 32 && abi.decode(ret, (uint256)) == 6, "Deploy.s.sol: settlement token decimals != 6");
+        (ok, ret) = vault.staticcall(abi.encodeWithSignature("getAllowedToken(bytes32)", tokenHash));
+        require(
+            ok && ret.length >= 32 && abi.decode(ret, (address)) == token,
+            "Deploy.s.sol: vault.getAllowedToken(keccak256(DEPLOY_ORDERLY_TOKEN)) != DEPLOY_SETTLEMENT_TOKEN (VERIFY O3/O7)"
+        );
+        (ok, ret) = vault.staticcall(abi.encodeWithSignature("getAllowedBroker(bytes32)", brokerHash));
+        require(
+            ok && ret.length >= 32 && abi.decode(ret, (bool)),
+            "Deploy.s.sol: vault.getAllowedBroker(keccak256(DEPLOY_ORDERLY_BROKER_ID)) is false (VERIFY O7)"
+        );
+    }
+
     function _roles(uint256 deployerKey, string memory mnemonic) internal {
         deployer = vm.addr(deployerKey);
         markSigner = vm.addr(vm.deriveKey(mnemonic, 1));
@@ -187,9 +241,15 @@ contract Deploy is Script {
         uint256 minIfOrderly = _venueMinIfOrderly(block.chainid == 46630);
         if (minIfOrderly != config.venueMinIfUsd(BRTypes.VENUE_ORDERLY)) config.setVenueMinIf(BRTypes.VENUE_ORDERLY, minIfOrderly);
 
-        usdc = new MockERC20("USD Coin (devnet)", "USDC", 6);
-        usdg = new MockERC20("Global Dollar (devnet)", "USDG", 6);
-        config.setAddress("usdc", address(usdc));
+        if (liveVenue()) {
+            // the live venue's settlement token settles everything (no mock settlement token, VERIFY O17)
+            usdc = liveToken;
+            usdg = liveToken;
+        } else {
+            usdc = address(new MockERC20("USD Coin (devnet)", "USDC", 6));
+            usdg = address(new MockERC20("Global Dollar (devnet)", "USDG", 6));
+        }
+        config.setAddress("usdc", usdc);
 
         // 80 / 10 / 5 / 5: community, studio (sponsor treasury), liquidity, contributors
         bkrn = new BkrnToken(deployer, sponsor, deployer, deployer);
@@ -220,21 +280,29 @@ contract Deploy is Script {
         poolEngine = new PoolEngine(address(config));
         config.setAddress("poolEngine", address(poolEngine));
 
-        bytes32[] memory keys = new bytes32[](3);
-        uint256[] memory vals = new uint256[](3);
+        bytes32[] memory keys = new bytes32[](4);
+        uint256[] memory vals = new uint256[](4);
         keys[0] = "markInterval";
         vals[0] = markInterval;
         keys[1] = "maxMarkAge";
         vals[1] = markInterval * 2 > 3600 ? uint256(markInterval) * 2 : 3600;
         keys[2] = "committeeWindow";
         vals[2] = 172_800;
+        // charter fee in the settlement token (a live-venue rehearsal pays it in real testnet USDG: keep it small)
+        keys[3] = "charterFeeUsd";
+        vals[3] = vm.envOr("DEPLOY_CHARTER_FEE_USD", config.charterFeeUsd());
         config.setParams(keys, vals);
     }
 
     function _deployVenuesAndGovernance() internal {
-        orderlyVault = new MockOrderlyVault(deployer, address(usdc), TOKEN_HASH, BROKER_HASH);
-        orderlyVault.setOperator(opsVenue, true);
-        config.setAddress("orderlyVault", address(orderlyVault));
+        if (liveVenue()) {
+            orderlyVault = liveVault; // the real Orderly Vault: every OrderlyAdapter binds to it at initialize
+        } else {
+            MockOrderlyVault mockVault = new MockOrderlyVault(deployer, usdc, TOKEN_HASH, BROKER_HASH);
+            mockVault.setOperator(opsVenue, true);
+            orderlyVault = address(mockVault);
+        }
+        config.setAddress("orderlyVault", orderlyVault);
 
         charter = new MarketCharter(address(config));
         committee = new RiskCommittee(address(config), committeeMembers);
@@ -288,8 +356,9 @@ contract Deploy is Script {
         IStockTokenRegistry.IndexComponent[] memory comps = new IStockTokenRegistry.IndexComponent[](tickers.length);
         uint256 indexLevel;
 
-        swapRouter.setUsdPrice(address(usdc), 1e18);
-        swapRouter.setMintOnDemand(address(usdc), true);
+        swapRouter.setUsdPrice(usdc, 1e18);
+        // a real settlement token cannot be minted: the router pays hedge sells from the token it holds
+        if (!liveVenue()) swapRouter.setMintOnDemand(usdc, true);
 
         for (uint256 i = 0; i < tickers.length; i++) {
             string memory t = tickers[i];
@@ -316,7 +385,7 @@ contract Deploy is Script {
         oracle.pushMany(ups, sigs);
 
         // buybacks: 20 BKRN per USDC on the devnet router, funded from the liquidity allocation
-        swapRouter.setPriceBoth(address(usdc), address(bkrn), 20e18);
+        swapRouter.setPriceBoth(usdc, address(bkrn), 20e18);
         bkrn.transfer(address(swapRouter), 10_000_000e18);
     }
 
@@ -337,11 +406,21 @@ contract Deploy is Script {
     }
 
     function _writeDeployment() internal {
+        // DEPLOY_OUT (relative to contracts/): the live-venue rehearsal writes deployments/46630.live.json so the mock
+        // testnet record (46630.json) stays as it is (scripts/deploy-testnet.sh ORDERLY_VENUE=live)
+        string memory rel = vm.envOr("DEPLOY_OUT", string.concat("deployments/", vm.toString(block.chainid), ".json"));
+        string memory path = string.concat(vm.projectRoot(), "/", rel);
+        vm.writeJson(_deploymentJson(), path);
+        console2.log("deployment written:", path);
+    }
+
+    /// @dev The deployment record (deployments/<chainId>.json; packages/shared Deployment).
+    function _deploymentJson() internal returns (string memory) {
         string memory c = "contracts";
         vm.serializeAddress(c, "config", address(config));
         vm.serializeAddress(c, "timelock", deployer);
-        vm.serializeAddress(c, "usdc", address(usdc));
-        vm.serializeAddress(c, "usdg", address(usdg));
+        vm.serializeAddress(c, "usdc", usdc);
+        vm.serializeAddress(c, "usdg", usdg);
         vm.serializeAddress(c, "bkrn", address(bkrn));
         vm.serializeAddress(c, "staking", address(staking));
         vm.serializeAddress(c, "feeRouter", address(feeRouter));
@@ -354,7 +433,7 @@ contract Deploy is Script {
         vm.serializeAddress(c, "factory", address(factory));
         vm.serializeAddress(c, "poolEngine", address(poolEngine));
         vm.serializeAddress(c, "hedgeExecutor", address(hedgeExecutor));
-        vm.serializeAddress(c, "orderlyVault", address(orderlyVault));
+        vm.serializeAddress(c, "orderlyVault", orderlyVault);
         address ep = 0x0000000071727De22E5E9d8BAf0edAc6f37da032;
         if (ep.code.length > 0) vm.serializeAddress(c, "entryPoint", ep);
         string memory contractsJson = vm.serializeAddress(c, "swapRouter", address(swapRouter));
@@ -377,9 +456,14 @@ contract Deploy is Script {
         vm.serializeAddress(root, "expenseRecipient", treasury);
         vm.serializeAddress(root, "slashRecipient", slashTreasury);
         vm.serializeString(root, "contracts", contractsJson);
-        string memory out = vm.serializeString(root, "stockTokens", stJson);
-        string memory path = string.concat(vm.projectRoot(), "/deployments/", vm.toString(block.chainid), ".json");
-        vm.writeJson(out, path);
-        console2.log("deployment written:", path);
+        // which Orderly the books bind to (scripts/orderly-readiness.ts, dev.ts, launch-devnet.ts read it)
+        string memory ob = "orderly";
+        vm.serializeString(ob, "venue", liveVenue() ? "live" : "mock");
+        vm.serializeAddress(ob, "vault", orderlyVault);
+        vm.serializeString(ob, "brokerId", brokerId);
+        vm.serializeString(ob, "token", tokenSymbol);
+        string memory orderlyJson = vm.serializeAddress(ob, "settlementToken", usdc);
+        vm.serializeString(root, "orderly", orderlyJson);
+        return vm.serializeString(root, "stockTokens", stJson);
     }
 }

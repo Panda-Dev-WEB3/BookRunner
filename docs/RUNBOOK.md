@@ -445,13 +445,31 @@ timelock (48h); the multisig can `cancel` any scheduled operation during the del
 | Services host lost | Disable the KMS keys if the host may be compromised. | Rebuild from MAINNET.md (keys stay in KMS; restore env file, `4663.json`, DB dump). Never run two stacks with the same keys at once. |
 | Wind-down of the protocol | Pause new business. | Retire each book (Operations "Wind-down"); everything else stays timelock-governed. |
 
-## Switching testnet books to real Orderly (Robinhood Chain testnet 46630)
+## Testnet rehearsal on real Orderly (Robinhood Chain testnet 46630)
 
-Goal: the Orderly-venue books (NVDA = book 1, TSLA = book 2) leave the mock venue (`MockOrderlyVault` +
-`services/mock-orderly`) for Orderly's testnet. RHX5 (book 3) stays on the in-house PoolEngine and is not touched.
-**Status 2026-10-18: blocked.** Orderly has not enabled Robinhood testnet for us (venue stage below), and the
-code cannot yet do the switch end to end (gaps G1-G8 at the end of this section, VERIFY O17-O22). Nothing here
-sends a transaction before step 3.
+Goal: a testnet BookRunner whose Orderly-venue books (NVDA, TSLA) are bound to Orderly's REAL testnet vault and settle
+in REAL testnet USDG, while Stock Tokens, the swap router and prices stay mock / synthetic (no Stock Tokens, Chainlink
+feeds or Uniswap on Robinhood testnet, VERIFY T3 / C4). It is a **separate stack next to the mock testnet stack**: its
+own deployment record (`contracts/deployments/46630.live.json`), database (`bookrunner_testnet_live`), Redis db (2) and
+state (`.data/testnet-live/`); the mock stack (`46630.json`, books 1 and 2 on `MockOrderlyVault`, `bookrunner_testnet`,
+`.data/testnet/`) is not touched, and switching back is one line in `.env.testnet` (step 5). Never run both at once:
+they share the role keys (one `dev.ts` per host). **Status 2026-10-18: blocked on Orderly** (venue stage of the
+readiness check: no token and no broker allowed on the testnet vault, chain 46630 not listed). The code path is
+complete (G1-G7 below). Nothing in this section sends a transaction before step R4.
+
+### Rehearsal procedure (end to end)
+
+| Step | Who | What | Done when |
+|---|---|---|---|
+| R1 | operator | Readiness, read-only (step 0): `bun scripts/orderly-readiness.ts --stage venue` | exit 0 (Orderly enabled USDG + broker `bookrunner` on the testnet vault, chain 46630 listed) |
+| R2 | Orderly / admin wallet | Orderly side (step 2.1); builder admin key registered by the admin wallet (step 2.2) | readiness `--stage venue` 0; `--builder-key ed25519:<pub>` row `builder key` PASS |
+| R3 | operator | Testnet USDG for the rehearsal: deployer ETH (faucet) + USDG (open question, VERIFY O17) | deployer holds the launch budget (step 3.0) |
+| R4 | operator | Deploy: `ORDERLY_VENUE=live bash scripts/deploy-testnet.sh` (step 3.1) | `46630.live.json` written, `orderly.venue = "live"`; readiness `record orderly` PASS |
+| R5 | operator | `.env.testnet`: `ORDERLY_MODE=live` + `ORDERLY_BUILDER_KEY_SECRET` (step 3.6); start `dev.ts --network testnet` | `[dev] venue: LIVE Orderly testnet`; the launch charters NVDA / TSLA (rehearsal sizes, step 3.3) |
+| R6 | operator | Per book: delegate signer (step 3.4), native deposit fee if any (step 3.5) | ops-venue `Orderly delegate signer confirmed` x2 per book, `book venue provisioned` |
+| R7 | admin (Orderly One) | List `PERP_NVDA_USDC_bookrunner` / `PERP_TSLA_USDC_bookrunner` (step 2.3), assign each market's IF account (step 2.4) | readiness `symbol` rows listed; `venue_listing_pending` clears |
+| R8 | operator | Windows close: IF + MM deposited on the real vault; verify (step 4) | readiness all stages exit 0 (books: IF funded > 100 USDG); first mark reconciles |
+| R9 | operator | Rollback (step 5) whenever needed | mock testnet stack back, live books retired or left frozen |
 
 ### 0. Readiness check (read-only; run first and after every step)
 
@@ -459,6 +477,7 @@ sends a transaction before step 3.
 bun scripts/orderly-readiness.ts                      # testnet; --mainnet for 4663; --json for machines
 bun scripts/orderly-readiness.ts --stage venue        # exit 0 = Orderly has enabled the chain / token / broker
 bun scripts/orderly-readiness.ts --builder-key ed25519:<public key>   # also: that key is registered for the admin account
+bun scripts/orderly-readiness.ts --deployment contracts/deployments/46630.json   # the mock stack's record instead
 ```
 
 It reads (eth_call / public GET only): the Orderly Vault's code, `getAllowedToken(keccak256("USDG"))` (must be the
@@ -466,12 +485,15 @@ testnet USDG `0x7E95…802F`), `getAllowedBroker(keccak256("bookrunner"))`, the 
 this vault and `bookrunner` in its `broker_ids`), USDG for the chain in `/v1/public/token` (6 decimals, same
 contract) and USDG's on-chain `decimals()` (stage **venue**); the broker in `/v1/public/broker/name`, the admin
 wallet's account (`/v1/get_account`), our builder symbols `PERP_NVDA_USDC_bookrunner` / `PERP_TSLA_USDC_bookrunner`
-in `/v1/public/info` and the equity markets already listed (stage **builder**); and, from
-`contracts/deployments/46630.json` (`--deployment` overrides; skipped when absent), `config.usdc()`,
-`config.orderlyVault()`, the factory's OrderlyAdapter implementation hashes and, per Orderly book, the adapter's
-vault (mock or real), token and hashes, Orderly accounts (v3) and whether it is empty (stage **books**). Exit 0
-only when every row of the selected stages passes (FAIL gates; WARN / INFO / SKIP do not); 1 = not ready; 2 =
-usage error.
+in `/v1/public/info` and the equity markets already listed (stage **builder**); and, from the deployment record
+(testnet default: `contracts/deployments/46630.live.json` when it exists, else `46630.json`; `--deployment`
+overrides; skipped when absent), `config.usdc()`, `config.orderlyVault()`, the factory's OrderlyAdapter implementation
+hashes, the record's `orderly` block (`record orderly`: venue live, this vault, USDG, broker `bookrunner`, consistent
+with `contracts`) and, per Orderly book, the adapter's vault (mock or real), token and hashes, Orderly accounts (v3;
+the builder IF EOA when bound) and, on the real vault, **`IF funded`**: the adapter's insurance (last venue report +
+flows) strictly above 100 USDG (FAIL once the book is Live / Retiring, INFO before its window closes); on the mock
+vault the row is `empty` (migration precondition) instead (stage **books**). Exit 0 only when every row of the
+selected stages passes (FAIL gates; WARN / INFO / SKIP do not); 1 = not ready; 2 = usage error.
 
 Cron (testnet host, `bookrunner` user; read-only, outbound HTTPS only): poll the venue stage and keep the last
 result, so the day Orderly enables the chain shows up without anyone re-running it:
@@ -482,38 +504,59 @@ result, so the day Orderly enables the chain shows up without anyone re-running 
 
 There is no alerts rule: exit 0 of `--stage venue` (`"ready": true` in the JSON) is the signal; it does not page.
 
-Findings 2026-10-18 (testnet): vault code PASS; `getAllowedToken` is 0x0 for USDG and for USDC;
+Findings 2026-10-18 (testnet, re-run in Task 5): vault code PASS; `getAllowedToken` is 0x0 for USDG and for USDC;
 `getAllowedBroker("bookrunner")` false (`orderly`, `woofi_pro`, `mythos` true); chain 46630 absent from
 `chain_info`, USDG absent from `/v1/public/token`; broker `bookrunner` and the admin account `0xaa04…2e5c` exist; no
-`_bookrunner` symbol; the only equity market is Orderly's own `PERP_TSLA_USDC`; every books row FAILs (books 1 and 2
-on the mock vault, mock USDC, pre-v3 adapter implementation (devnet account ids), IF 30,000 + MM ~134,000-138,000 venue-side each). VERIFY O1-O3,
-O7, O14, O17.
+`_bookrunner` symbol; the only equity market is Orderly's own `PERP_TSLA_USDC`; with the mock record every books row
+FAILs (books 1 and 2 on the mock vault, mock USDC, pre-v3 adapter implementation (devnet account ids), IF 30,000 + MM
+~137,000-140,000 venue-side each). VERIFY O1-O3, O7, O14, O17.
 
-### 1. What the switch is (and why books 1 and 2 cannot be moved in place)
+### 1. What the rehearsal is (and why books 1 and 2 are not moved)
 
 - Every OrderlyAdapter stores the Orderly vault, the settlement token and its broker / token hashes at
   `initialize`; no function changes them, and `UpgradeOrderlyAdapters.s.sol` keeps them for existing proxies.
-- The protocol settles in `config.usdc()` (mock USDC on testnet, `0x04De…3523`), cached at construction by every
-  book component (UnderwritingVault, tranches, RevenueRouter, desk) and by BkrnFeeRouter, Backstop and the
-  PoolEngine. The real vault only takes the token `getAllowedToken(keccak256("USDG"))` returns: testnet USDG.
-- Books 1 and 2 hold balances venue-side, so even the account migration (`migrateToOrderlyAccounts`, empty
+- The protocol settles in ONE token, `config.usdc()`, cached at construction by every book component
+  (UnderwritingVault, tranches, RevenueRouter, desk) and by BkrnFeeRouter, Backstop and the PoolEngine (immutable):
+  there is no mixed-token design. The real vault only takes the token `getAllowedToken(keccak256("USDG"))` returns:
+  testnet USDG. **Decision (Task 5): on the live venue everything settles in testnet USDG, the RHX5 PoolEngine book
+  included**; RHX5 is not launched in the rehearsal by default (its PoolEngine `venueMinIf` is 10,000 USDG and
+  trader-sim, which mints mock USDC, does not run there): `LAUNCH_BOOKS=NVDA,TSLA,RHX5` adds it.
+- Books 1 and 2 hold balances venue-side (mock), so even the account migration (`migrateToOrderlyAccounts`, empty
   adapters only) is refused for them.
 
-So the switch is **a testnet deployment whose `config.usdc()` is testnet USDG and whose `config.orderlyVault()` is
-the Orderly testnet vault, NVDA and TSLA chartered again on it (new book ids, Orderly symbols
-`PERP_<T>_USDC_bookrunner`), and books 1 and 2 retired** (Operations "Wind-down"). No script deploys that today (G1).
+So the rehearsal is **a fresh deployment whose `config.usdc()` is testnet USDG and whose `config.orderlyVault()` is
+the Orderly testnet vault (`Deploy.s.sol` with `DEPLOY_ORDERLY_VAULT` / `DEPLOY_SETTLEMENT_TOKEN`, no MockOrderlyVault
+and no mock settlement token), NVDA and TSLA chartered on it (Orderly symbols `PERP_<T>_USDC_bookrunner`)**. Books 1
+and 2 stay on the mock stack; retire them there (Operations "Wind-down") only when the mock stack is decommissioned.
 
 ### 2. Orderly side (Orderly, then the builder admin in Orderly One)
 
 1. **Orderly** (request through the builder channel; nothing we can do on-chain): allow USDG
    `0x7E955252E15c84f5768B83c41a71F9eba181802F` and broker `bookrunner` on the Robinhood testnet Vault
    `0x2A5b650A894409372DDeE241EDAC92d4152bE24d`, and list chain 46630 in `chain_info` / `token`. Done when
-   `orderly-readiness.ts --stage venue` exits 0.
-2. **Admin registration** (admin wallet `0x9c1B7179554304995dD58bA9ba203b0cbA8fe8b9`): done, Orderly account
-   `0xaa04410b18eb0856e02832221f24b2cd37fde7c6f6f8eec83fe95a2f62702e5c` (builder row `admin account`). Create an
-   Orderly key for that account (scope `read,trading,asset`, signed by the admin wallet) and hand its base58 secret
-   to the operator as `ORDERLY_BUILDER_KEY_SECRET`: with the secret set, ops-venue treats the key as registered and
-   never registers it itself (`loadOrCreateBuilderKey`). Check it with `--builder-key`.
+   `orderly-readiness.ts --stage venue` exits 0. Also ask where testnet USDG for the rehearsal comes from (VERIFY O17).
+2. **Builder admin key** (G6, one-time; admin wallet `0x9c1B7179554304995dD58bA9ba203b0cbA8fe8b9`, which the system
+   never holds). The broker's admin account is that wallet's Orderly account
+   `0xaa04410b18eb0856e02832221f24b2cd37fde7c6f6f8eec83fe95a2f62702e5c` (builder row `admin account`, registered).
+   ops-venue acts as the builder through an Orderly key of that account:
+   1. On a trusted machine, generate an ed25519 key pair (Orderly One "API keys" does it in the browser; or any ed25519
+      tool: keep the base58 32-byte secret, the public key is `ed25519:<base58 public key>`).
+   2. The admin wallet registers it for broker `bookrunner` on the testnet: Orderly One (connected with the admin wallet,
+      network testnet) "API keys" -> add, or `POST https://testnet-api.orderly.org/v1/orderly_key` with the EIP-712
+      `AddOrderlyKey` message signed by the admin wallet (`brokerId bookrunner`, `chainId 46630`, `orderlyKey`, `scope
+      read,trading,asset`, `timestamp`, `expiration` <= 365 days). Note its expiry: re-register before it lapses.
+   3. Hand the base58 secret to the operator out of band; it goes into `.env.testnet` as `ORDERLY_BUILDER_KEY_SECRET`
+      (mode 600, never in git or logs). With the secret set ops-venue treats the key as registered and never generates
+      or registers one (`loadOrCreateBuilderKey`); with an admin-owned `ORDERLY_BUILDER_ACCOUNT_ID` and no secret
+      ops-venue refuses to start (`resolveBuilderAccount`), and so does dev.ts's live profile.
+   4. Check: `bun scripts/orderly-readiness.ts --builder-key ed25519:<public key>` (row `builder key` PASS, expiry shown).
+   **Builder fees are swept manually**: the builder fee withdrawal is an EIP-712 `Withdraw` only the account owner (the
+   admin wallet) can sign, so ops-venue's automated sweep is OFF for an admin-owned builder account whatever
+   `OPS_FEE_SWEEP_AUTO` says (logged once; the live testnet profile pins `OPS_FEE_SWEEP_AUTO=false`), and the
+   `sweep_fees` job is refused (it would earmark on-chain, then fail at the withdrawal). Builder fees accrue on the
+   admin account; settling them into the books (admin withdrawal to its wallet, then per book `adapter.sweepFees`
+   earmark + transfer + `forwardPendingFees`) is a manual, not yet scripted step: on the testnet rehearsal leave them on
+   the builder account (VERIFY O21; mainnet: decide who owns the builder admin account, O11).
 3. **List the markets** (Perp Anything): `PERP_NVDA_USDC_bookrunner` and `PERP_TSLA_USDC_bookrunner` (Orderly appends
    the broker id to builder symbols, VERIFY O14), market session 24/5 (RWA). Index price source: our
    builder-pushed oracle feed `ORACLE_bookrunner` (`base_ccy` NVDA / TSLA; pushed by ops-venue, G2 / O18). Testnet prices are
@@ -572,95 +615,126 @@ the Orderly testnet vault, NVDA and TSLA chartered again on it (new book ids, Or
      IF account's ops key from Orderly and publishes `venue_if_account` reassign: the admin must **re-assign the
      market's IF account in Orderly One** to the new account (api mode too: `createSymbol` does not change it), then
      check it with the `fund_if` job (the market's IF balance strictly above the requirement).
+   - **Never switch the IF mode (`ORDERLY_IF_MODE`, or the adapter's `setIfAccountOwner` binding) while an IF payout
+     is in transit**: no IF withdraw saga of the book may be open (requested, adopted, confirmed and not yet swept, or
+     written off and not yet returned; `ifOperatorWaits` / alert `venue_if_operator_pending` empty for the book). The
+     adapter refuses `setIfAccountOwner` while an IF withdrawal is on it, but a changed ops-venue mode would orphan a
+     builder-mode payout still in the operator's wallet (the return is only tracked in builder mode).
 
 ### 3. Operator side (testnet: the deployer is `config.timelock()`)
 
-1. **Deployment with the real externals** (G1, not implemented): testnet USDG as `config.usdc()`, the Orderly testnet
-   vault as `config.orderlyVault()`, the OrderlyAdapter implementation hashed from `DEPLOY_ORDERLY_BROKER_ID=bookrunner`
-   and `DEPLOY_ORDERLY_TOKEN=USDG` (a fresh deployment has v3 adapters: no migration). Keep the current record as
-   `contracts/deployments/46630.mock.json` for the rollback (dev.ts always reads `contracts/deployments/46630.json` on
-   testnet). Testnet USDG for LPs, IF and MM has to come from somewhere (VERIFY O17). The charter rule
-   `ifTargetUsd >= venueMinIf`: `Deploy.s.sol` sets `venueMinIf[Orderly]` per network, 101 USDG on testnet (Orderly
-   testnet requires > 100 per market) and 25,001 on devnet; `DEPLOY_VENUE_MIN_IF_ORDERLY` (6 dp) overrides it and is
-   refused at or below the requirement. Mainnet: `DeployMainnet` input `params.venueMinIfOrderly` > 25,000e6. An
-   existing deployment: `config.setVenueMinIf(0, 101e6)` (timelock).
-2. **`UpgradeOrderlyAdapters.s.sol`** applies only to an existing deployment whose config already points at the real
-   vault and USDG (none today):
+0. **Budget and testnet USDG** (VERIFY O17: the source of testnet USDG is an open question to Orderly / Paxos; there is
+   no faucet we know of). The deployer (devkeys index 0) must hold, before the launch: per Orderly book the charter fee
+   (`DEPLOY_CHARTER_FEE_USD`, 10 USDG by default on the live venue) + 132% of its raise (IF + MM: sponsor 12%, allocators
+   30% / 50% / 40%, the senior tranche oversubscribed as on devnet), i.e. 2 x (10 + 858) = **1,736 USDG** for NVDA + TSLA
+   at the rehearsal sizes (IF 150 > 100 required, MM 500; `LAUNCH_IF_USD` / `LAUNCH_MM_USD` /
+   `LAUNCH_MAX_INVENTORY_USD` override, `scripts/launch-plan.ts`), plus ETH for gas (faucet). The launch transfers each
+   participant's share from the deployer and refuses up front when it holds less. Optional: USDG on the MockSwapRouter
+   (`transfer(swapRouter, x)`; the owner's `withdraw` takes it back) if hedge SELLS must fill: the router cannot mint
+   the real token (hedge buys still mint the mock Stock Tokens); without it a hedge sell reverts `InsufficientLiquidity`.
+1. **Deployment with the real externals** (G1):
    ```bash
-   DEPLOY_ORDERLY_BROKER_ID=bookrunner DEPLOY_ORDERLY_TOKEN=USDG MIGRATE_ORDERLY_ACCOUNTS=true \
-   DEPLOY_OUT=deployments/46630.json PRIVATE_KEY=<deployer> \
-     bash scripts/forge.sh script script/UpgradeOrderlyAdapters.s.sol:UpgradeOrderlyAdapters --rpc-url $RPC --broadcast
+   ORDERLY_VENUE=live bash scripts/deploy-testnet.sh    # REDEPLOY=1 to replace an existing 46630.live.json
    ```
-   (`MIGRATE_ORDERLY_ACCOUNTS` is a forge bool: `true` / `false`.) It registers the new implementation for future
-   books, upgrades every Orderly proxy and migrates only empty, not-yet-migrated adapters. **Do not run it on
-   today's deployment**: the mock vault only allows `keccak256("USDC")`, so with `DEPLOY_ORDERLY_TOKEN=USDG` every new
-   Orderly book would revert `TokenNotAllowedByVenue` at `initialize` (charter finalize fails), and books 1 and 2 are
-   skipped by the migration (not empty).
-3. **Charter NVDA and TSLA** on the new deployment (charter symbols `PERP_NVDA_USDC` / `PERP_TSLA_USDC`: with
-   `ORDERLY_MODE=live` the services trade `PERP_<T>_USDC_<ORDERLY_BROKER_ID>`, G3), `ifTargetUsd` above 100 USDG and
-   `>= venueMinIf`; then `scripts/record-books.ts`.
+   It runs `orderly-readiness.ts --stage venue` first (exit 5 = Orderly not ready: nothing deployed), creates and
+   migrates the `bookrunner_testnet_live` database, and runs `Deploy.s.sol` with `DEPLOY_ORDERLY_VAULT=0x2A5b…E24d`,
+   `DEPLOY_SETTLEMENT_TOKEN=0x7E95…802F` (USDG), `DEPLOY_ORDERLY_TOKEN=USDG`, `DEPLOY_ORDERLY_BROKER_ID=bookrunner`,
+   `DEPLOY_CHARTER_FEE_USD=10000000` and `DEPLOY_OUT=deployments/46630.live.json` (each overridable). `Deploy.s.sol`
+   refuses before any broadcast unless the token has code and 6 decimals, `getAllowedToken(keccak256("USDG"))` returns
+   it and `getAllowedBroker(keccak256("bookrunner"))` is true; it deploys no MockOrderlyVault and no mock settlement
+   token (`config.usdc()` = `contracts.usdc` = `contracts.usdg` = USDG; the swap router never mints it), keeps the mock
+   Stock Tokens / router / synthetic oracle prices, sets `venueMinIf[Orderly]` to 101 USDG, and writes the record with
+   `"orderly": {"venue": "live", "vault", "brokerId", "token": "USDG", "settlementToken"}`. The script then checks
+   `config.usdc()` / `config.orderlyVault()` on-chain. A fresh deployment has v4 adapters (Orderly accounts: no
+   migration). The mock stack's `46630.json` is not touched. Mainnet: `DeployMainnet` input
+   `params.venueMinIfOrderly` > 25,000e6.
+2. **`UpgradeOrderlyAdapters.s.sol`** is not part of the rehearsal (the live deployment already has the current
+   implementation). **Never run it on the mock stack with `DEPLOY_ORDERLY_TOKEN=USDG`**: the mock vault only allows
+   `keccak256("USDC")`, so every new Orderly book would revert `TokenNotAllowedByVenue` at `initialize`, and books 1 and 2
+   are skipped by the migration (not empty).
+3. **Charter NVDA and TSLA**: the first `dev.ts --network testnet` start with the live profile (step 6) finds no books
+   in `46630.live.json` and runs `scripts/launch-devnet.ts` once: charter symbols `PERP_NVDA_USDC` / `PERP_TSLA_USDC`
+   (the services trade `PERP_<T>_USDC_bookrunner`, G3), IF 150 / MM 500 / max inventory 250 USDG per book (raised to
+   `venueMinIf` if lower), funded by transfer from the deployer, books appended to the record. `LAUNCH_BOOKS` picks the
+   books (default NVDA,TSLA on the live venue); `dev.ts --no-launch` skips it (charter by hand, then
+   `scripts/record-books.ts --deployment contracts/deployments/46630.live.json`).
 4. **Delegate signer, per new Orderly book**: `adapter.setDelegateSigner(<OPS_VENUE address>)` registers the ops-venue
    EOA on the vault for the adapter (MM account) and its OrderlyIFAccount (IF account) and emits `AccountDelegate`.
    ops-venue in live mode then, per contract: finds that log on the record's `orderlyVault` from `startBlock`, gets
    `GET /v1/registration_nonce`, signs EIP-712 `DelegateSigner` with the ops-venue key and posts
    `POST /v1/delegate_signer` (this creates the contract's Orderly account). It then generates the book's ed25519
-   keys in `OPS_KEYS_DIR` (MM trade key `read,trading`; IF / MM ops keys `read,asset`; TTL `OPS_TRADE_KEY_TTL_DAYS` 30
-   / `OPS_OPS_KEY_TTL_DAYS` 365) and registers each with `POST /v1/delegate_orderly_key` (EIP-712
-   `DelegateAddOrderlyKey`, `delegateContract` = the account's owner). The agent's OrderlyVenue loads the trade key
-   from the same key store. Then step 2.4 (assign the IF account).
+   keys in `OPS_KEYS_DIR` (`.data/testnet-live/keys`; MM trade key `read,trading`; IF / MM ops keys `read,asset`; TTL
+   `OPS_TRADE_KEY_TTL_DAYS` 30 / `OPS_OPS_KEY_TTL_DAYS` 365) and registers each with `POST /v1/delegate_orderly_key`
+   (EIP-712 `DelegateAddOrderlyKey`, `delegateContract` = the account's owner). The agent's OrderlyVenue loads the trade
+   key from the same key store. Then step 2.4 (assign the IF account).
 5. **Deposit fees**: the real vault may charge a native deposit fee (`adapter.depositNativeFee`): `fundNative` each
    adapter before the window closes, or set `OPS_NATIVE_TOPUP_MAX_WEI` (VERIFY O5).
-6. **Services, mock to live**: in `.env.testnet` (keys set there override the dev.ts testnet defaults), then restart:
+6. **Services: the live-Orderly testnet profile** (G7). In `.env.testnet` (mode 600), then (re)start the stack:
    ```bash
-   ORDERLY_MODE=live
-   ORDERLY_BASE_URL=https://testnet-api.orderly.org
-   ORDERLY_BROKER_ID=bookrunner
-   ORDERLY_TOKEN=USDG
-   ORDERLY_LEDGER_ADDRESS=0x1826B75e2ef249173FC735149AE4B8e9ea10abff   # testnet Ledger (withdraw EIP-712 domain); default = mainnet's
-   ORDERLY_BUILDER_ACCOUNT_ID=0xaa04410b18eb0856e02832221f24b2cd37fde7c6f6f8eec83fe95a2f62702e5c
-   ORDERLY_BUILDER_KEY_SECRET=<base58 seed of the admin account's Orderly key, step 2.2>
-   OPS_FEE_SWEEP_AUTO=false   # G6: the admin account is not the ops-venue key's
-   # ORDERLY_IF_MODE=contract (default) | builder (step 2.4); builder: ORDERLY_IF_BUILDER_ACCOUNTS=<bookId>=<accountId>,...
-   # ORDERLY_IF_REQUIREMENT_USD defaults to 100 for testnet-api.orderly.org (fund_if job: IF strictly above it)
+   ORDERLY_MODE=live                      # selects the live variant of the testnet profile (scripts/network-profile.ts testnetLiveProfile)
+   ORDERLY_BUILDER_KEY_SECRET=<base58 secret of the builder admin key, step 2.2>
+   # optional, defaults shown:
+   # ORDERLY_IF_MODE=contract             # | builder (step 2.4): ORDERLY_IF_BUILDER_ACCOUNTS=<bookId>=<accountId>,...
+   # ORDERLY_LISTING_MODE=manual
    # ORDERLY_ORACLE_WS_URL=wss://testnet-ws-oracle.orderly.org   # default for testnet-api.orderly.org; undocumented (VERIFY O18)
-   # ORDERLY_ORACLE_ACCOUNT_ID / ORDERLY_ORACLE_KEY_SECRET: the account that pushes ORACLE_bookrunner (default: the builder account + key above)
-   # ORDERLY_EIP712_CHAIN_ID defaults to CHAIN_ID (46630)
+   # ORDERLY_ORACLE_ACCOUNT_ID / ORDERLY_ORACLE_KEY_SECRET: the account that pushes ORACLE_bookrunner (default: the builder account + key)
    ```
-   dev.ts keeps starting mock-orderly (and trader-sim, unless `--no-sim`) on testnet whatever `ORDERLY_MODE` is (G7); they no longer
-   serve the Orderly books. In live mode the oracle publishes its signed prices per venue symbol (`bkrn:oracle:venue-feed`) and ops-venue pushes them to the Builder Oracle WebSocket at >= 1/s in session (log `live builder price push started`, state in `bkrn:ops-venue:builder-feed`, alert `builder_price_push`).
+   `dev.ts --network testnet` then sets: `ORDERLY_BASE_URL=https://testnet-api.orderly.org`, `ORDERLY_BROKER_ID=bookrunner`
+   (venue symbols `PERP_<T>_USDC_bookrunner`), `ORDERLY_TOKEN=USDG`, `ORDERLY_LEDGER_ADDRESS=0x1826B75e2ef249173FC735149AE4B8e9ea10abff`
+   (testnet Ledger, withdraw EIP-712 domain), `ORDERLY_BUILDER_ACCOUNT_ID=0xaa04…2e5c` (the admin account),
+   `ORDERLY_LISTING_MODE=manual`, `ORDERLY_IF_MODE=contract` (each overridable from `.env.testnet`) and pins
+   `OPS_FEE_SWEEP_AUTO=false`, `DEPLOYMENT_FILE=contracts/deployments/46630.live.json`, the database
+   `bookrunner_testnet_live`, Redis db 2 and `.data/testnet-live/{keys,ops-venue/sagas.json}`. It starts neither
+   mock-orderly nor trader-sim, and refuses to start while `ORDERLY_BUILDER_KEY_SECRET` is missing, the record is
+   missing or is not a live-venue record on this vault / USDG / broker, `ORDERLY_BASE_URL` is not https, or
+   `OPS_FEE_SWEEP_AUTO` is set to anything but false. ops-venue itself refuses an admin-owned builder account without
+   the key secret. `ORDERLY_IF_REQUIREMENT_USD` defaults to 100 for testnet-api.orderly.org (fund_if job: IF strictly
+   above it); `ORDERLY_EIP712_CHAIN_ID` defaults to `CHAIN_ID` (46630). In live mode the oracle publishes its signed
+   prices per venue symbol (`bkrn:oracle:venue-feed`) and ops-venue pushes them to the Builder Oracle WebSocket at
+   >= 1/s in session (log `live builder price push started`, state in `bkrn:ops-venue:builder-feed`, alert
+   `builder_price_push`); the agent quotes maker-only (POST_ONLY) while the market is in its POST_ONLY launch phase.
 
 ### 4. Verification
 
-- `bun scripts/orderly-readiness.ts` exits 0 (all stages).
-- ops-venue log: `ops-venue starting` with `mode: live` and the testnet base URL, `builder account ready`,
-  `Orderly delegate signer confirmed` (twice per book: adapter and OrderlyIFAccount), `book venue provisioned`.
+- `bun scripts/orderly-readiness.ts` exits 0 (all stages; the default record is `46630.live.json`).
+- `dev.ts` log: `[dev] venue: LIVE Orderly testnet (https://testnet-api.orderly.org, broker bookrunner,
+  contracts/deployments/46630.live.json); no mock-orderly / trader-sim`.
+- ops-venue log: `ops-venue starting` with `mode: live` and the testnet base URL, the fee-sweep notice only if
+  `OPS_FEE_SWEEP_AUTO` was left on, `builder account ready`, `Orderly delegate signer confirmed` (twice per book:
+  adapter and OrderlyIFAccount), `book venue provisioned`, `ORDERLY_LISTING_MODE=manual`.
 - `GET https://testnet-api.orderly.org/v1/get_account?address=<adapter>&broker_id=bookrunner&chain_type=EVM` returns
   `adapter.accountId(1)`; with `address=<adapter.accountOwner(0)>` (the OrderlyIFAccount, or the builder EOA in
   `ORDERLY_IF_MODE=builder`, where the delegate is confirmed once per book: the adapter only) it returns
   `adapter.accountId(0)`.
-- After the window closes: the signed venue reports (Redis `bkrn:venue:report:<bookId>`) show IF and MM equal to the
-  deposits, the symbols turn `ACTIVE` (readiness `symbol` rows PASS), the agent quotes, and the first mark reconciles
-  against Orderly's statement (Operations "Mark reconciliation break").
+- After the window closes: `OrderlyDeposit` events for IF and MM on each adapter, the vault's USDG balance up by the
+  deposits, the signed venue reports (Redis `bkrn:venue:report:<bookId>`, db 2) show IF and MM equal to the deposits,
+  readiness `IF funded` PASS (> 100 USDG), the symbols turn `ACTIVE` (readiness `symbol` rows PASS), the agent quotes,
+  and the first mark reconciles against Orderly's statement (Operations "Mark reconciliation break").
 
 ### 5. Rollback to the mock venue
 
-1. While real-venue books hold funds: GUARDIAN `setNewBooksPaused(true)`, then retire them (`MarketCharter.retire`;
-   ops-venue recalls IF and MM, final mark, holders redeem). Funds on Orderly are out of reach of the mock stack.
-2. Remove the step 3.6 keys from `.env.testnet`, restore the mock record
-   (`cp contracts/deployments/46630.mock.json contracts/deployments/46630.json`) and the matching `.data/testnet/` state
-   (mock venue snapshot, ops keys, sagas: back it up before step 3.6), restart the stack (ops-venue and mock-orderly
-   cache account ids).
-3. `orderly-readiness.ts`: the books rows show the mock vault again (FAIL expected there).
+1. Stop the stack. Remove `ORDERLY_MODE=live` from `.env.testnet` (keep `ORDERLY_BUILDER_KEY_SECRET` there or remove it:
+   the mock profile ignores it). Start `dev.ts --network testnet`: it reads `46630.json`, `bookrunner_testnet`, Redis
+   db 1 and `.data/testnet/` again, all untouched by the rehearsal; mock-orderly and trader-sim run again.
+2. The live books keep their funds on Orderly's testnet. To recover the USDG, run the live profile again and retire
+   them first (GUARDIAN `setNewBooksPaused(true)`, `MarketCharter.retire`; ops-venue recalls IF and MM, final mark,
+   holders redeem; in Orderly One set the markets REDUCE_ONLY / delist as the IF withdrawal requires, alert
+   `venue_delist_pending`). Funds on Orderly are out of reach of the mock stack. Builder IF mode: never leave an IF
+   payout in transit when switching back (step 2.4).
+3. A failed or abandoned rehearsal deployment: delete or rename `contracts/deployments/46630.live.json` (and drop the
+   `bookrunner_testnet_live` database / `.data/testnet-live/` if nothing was chartered); `REDEPLOY=1` replaces it.
+4. `orderly-readiness.ts --deployment contracts/deployments/46630.json`: the books rows show the mock vault again
+   (FAIL expected there).
 
-### Gaps between the switch and the code (2026-10-18)
+### Gaps between the rehearsal and the code (2026-10-18)
 
 | # | Gap | VERIFY |
 |---|---|---|
-| G1 | No deployment path for "real Orderly, mocks elsewhere" on testnet: `Deploy.s.sol` always deploys MockERC20 USDC + MockOrderlyVault; `DeployMainnet` `REHEARSAL=1` takes real externals but needs Stock Tokens, Chainlink feeds and Uniswap v3 on testnet, which are not published there (VERIFY T3, C4). Adapters cannot be rebound to another vault / token. Source of testnet USDG unknown. | O17 |
-| G2 | **Closed in code (2026-10-18).** Builder-pushed index price: the oracle publishes its signed price per venue symbol every tick (`bkrn:oracle:venue-feed`); ops-venue pushes it to the Builder Oracle WebSocket (`src/builderOracle`, documented auth / message / ping) every second in session, re-sending the latest signed price between oracle ticks (testnet: every 2 s) and stopping when the oracle holds (session closed) or has no fresh price (a held price older than 10 s / 3 ticks counts as no price); alert `builder_price_push` after 30 s (a market never listed on Orderly yet, G4: logged only), or when the push status is old or missing. The session in which the oracle holds follows the charter sessions: they must equal the Orderly One market session of each listing (step 3). Still to confirm with Orderly: the testnet host (default `wss://testnet-ws-oracle.orderly.org`, undocumented), the auth / reject message shapes, and whether the builder account (vs the admin account, G6) may push `ORACLE_bookrunner`. | O18 |
+| G1 | **Closed in code (2026-10-18).** Hybrid deployment: `Deploy.s.sol` `DEPLOY_ORDERLY_VAULT` + `DEPLOY_SETTLEMENT_TOKEN` (both or neither; `getAllowedToken` / `getAllowedBroker` / 6 decimals checked before any broadcast; no MockOrderlyVault, no mock settlement token; mock Stock Tokens / router / prices kept; `orderly` record block; `DEPLOY_OUT`), `scripts/deploy-testnet.sh ORDERLY_VENUE=live` (readiness gate, own record / DB), `scripts/launch-devnet.ts` live funding by transfer at rehearsal sizes (`scripts/launch-plan.ts`). Protocol-wide settlement in testnet USDG (the PoolEngine too; RHX5 not launched by default). Still open: the **source of testnet USDG** (ask Orderly / Paxos). Adapters still cannot be rebound to another vault / token (by design). | O17 |
+| G2 | **Closed in code (2026-10-18).** Builder-pushed index price: the oracle publishes its signed price per venue symbol every tick (`bkrn:oracle:venue-feed`); ops-venue pushes it to the Builder Oracle WebSocket (`src/builderOracle`, documented auth / message / ping) every second in session, re-sending the latest signed price between oracle ticks (testnet: every 2 s) and stopping when the oracle holds (session closed) or has no fresh price (a held price older than 10 s / 3 ticks counts as no price); alert `builder_price_push` after 30 s (a market never listed on Orderly yet, G4: logged only), or when the push status is old or missing. The session in which the oracle holds follows the charter sessions: they must equal the Orderly One market session of each listing (step 2.3). Still to confirm with Orderly: the testnet host (default `wss://testnet-ws-oracle.orderly.org`, undocumented), the auth / reject message shapes, and whether the builder account (vs the admin account, G6) may push `ORACLE_bookrunner`. | O18 |
 | G3 | **Closed (2026-10-18).** Symbol naming: one mapping (`packages/shared/src/venueSymbol.ts`) used by ops-venue, the agent and risk: `ORDERLY_MODE=live` -> `PERP_<T>_USDC_<ORDERLY_BROKER_ID>` (`PERP_NVDA_USDC_bookrunner`), mock -> the charter symbol verbatim. Charters, marks and the UI keep `PERP_NVDA_USDC`. Charters with a symbol no Orderly market can carry are rejected at filing (API) and blocked by the jury; a live book without a market is tracked for reports / withdrawals only (alert `venue_symbol_unmapped`). | O19 |
 | G4 | **Closed in code (2026-10-18).** `ORDERLY_LISTING_MODE=manual` (default with `ORDERLY_MODE=live`; `api` stays the default in mock mode): the admin lists each market in Orderly One (step 2.3); ops-venue never calls a listing or symbol-status endpoint, provisions the book's accounts and keys and follows `GET /v1/public/info/{symbol}` per symbol (15 s doubling to 5 min, 5 s timeout, 4 at once: a book waiting for its listing never holds up another). State per symbol (awaiting / listed / missing, open for new risk or restricted) in `bkrn:ops-venue:symbol-issues` and the API's `/health` `orderlyListing`. Alerts: `venue_listing_pending` (warning; critical after a Live book has had no market for 30 min), `venue_market_restricted` (REDUCE_ONLY / POST_ONLY warning, DELISTING / DELISTED on a Live book critical), `venue_market_missing` (a listed market gone: Live critical), `venue_listing_check` (5 failed checks), `venue_delist_pending`. The agent quotes and hedges reduce-only while its market is not open (`AGENT_VENUE_MARKET_GATE`); in Orderly's POST_ONLY launch phase it quotes both sides maker-only (POST_ONLY orders within the mandate) to provide the launch depth (`AGENT_VENUE_POST_ONLY_QUOTE`, default true with `ORDERLY_MODE=live`; false = reduce-only); the builder price push pages for a listed market that went missing or restricted. Retirement: set the market REDUCE_ONLY in Orderly One if needed and delist it there when the IF withdrawal of a retiring book waits on it (alert `venue_delist_pending`; ops-venue retries every minute, 24 h ceiling). | O20 |
 | G5 | **Closed in code (2026-10-18)**; Orderly's answer still open. IF account mode: `ORDERLY_IF_MODE=contract` (default, the per-book OrderlyIFAccount delegate account) or `builder` (FALLBACK, not for mainnet without the owner's sign-off, `ORDERLY_IF_MODE_BUILDER_ACK=1`; return tracking per Transfer log, write-off from NAV after 24 h, unadopted-withdrawal and IF-drop alerts: step 2.4; an operator EOA's Orderly account bound by the timelock's `adapter.setIfAccountOwner(eoa)` (OrderlyAdapter v4), listed per book in `ORDERLY_IF_BUILDER_ACCOUNTS`; deposits unchanged on-chain via `Vault.depositTo(eoa, …)`; the operator registers ops-venue's IF key and performs IF withdrawals, returning the USDG to the adapter, ops-venue confirms and sweeps). Mode / binding mismatch: alert `venue_if_account`, no IF provisioning for that book only. Admin clicks per mode: step 2.4. `venueMinIf[Orderly]` per network in `Deploy.s.sol` (testnet 101 USDG). Still to ask Orderly: may a contract (delegate) account be a market's IF account? | O10 |
-| G6 | The builder admin account belongs to `0x9c1B…e8b9`, not to the ops-venue key: ops-venue's builder fee withdrawal signs a plain `Withdraw` with the ops-venue key and fails; sweep manually (`OPS_FEE_SWEEP_AUTO=false`). | O21 |
-| G7 | dev.ts testnet profile: `ORDERLY_MODE=mock` unless `.env.testnet` sets it, no `ORDERLY_*` live values, mock-orderly always started (trader-sim unless `--no-sim`). Workable through `.env.testnet` (step 3.6); no live-venue profile switch. | O22 |
+| G6 | **Closed in code (2026-10-18).** Builder admin key: the admin wallet registers an Orderly key for its account once (step 2.2) and the operator sets `ORDERLY_BUILDER_KEY_SECRET`; ops-venue refuses an admin-owned `ORDERLY_BUILDER_ACCOUNT_ID` in live mode without it, turns its automated fee sweep off and refuses the `sweep_fees` job (the fee withdrawal needs the admin wallet's signature). Builder fee settlement into the books stays manual (not scripted). | O21 |
+| G7 | **Closed in code (2026-10-18).** dev.ts live-Orderly testnet profile: `ORDERLY_MODE=live` in `.env.testnet` (step 3.6): live Orderly testnet values, separate record / DB / Redis / state, no mock-orderly / trader-sim, preflight. Mock stays the default. | O22 |
 | G8 | Orderly's testnet itself: chain 46630 in `chain_info`, USDG and the broker allowed on the vault (Orderly action). | O1-O3, O7 |

@@ -74,6 +74,8 @@ export async function handleVenueOpsJob(job: VenueOpsJob, d: JobDeps): Promise<R
     }
     case "sweep_fees": {
       if (job.period === undefined) throw new Error("sweep_fees needs period");
+      // the saga would earmark on-chain, then fail at the builder withdrawal only the admin wallet can sign (VERIFY O21)
+      if (d.ctx.settings.builderAdminOwned) throw new Error("sweep_fees refused: the builder account is admin-owned (G6), its fee withdrawal needs the admin wallet; settle builder fees manually");
       const s = await d.fees.sweep(book.bookId, job.period);
       return { stage: s.stage, amount: s.amount, ...(s.sweepTx ? { tx: s.sweepTx } : {}) };
     }
