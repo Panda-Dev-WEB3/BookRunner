@@ -35,7 +35,7 @@ const DRAFT = {
   venue: "orderly",
   ifTargetUsd: "30000",
   mmInventoryUsd: "75000",
-  mandate: { maxInventoryUsd: "50000", maxSkewBps: 25, minQuoteWidthBps: 8, hedgeRatioMinBps: 5000, hedgeRatioMaxBps: 12000, killAtDrawdownBps: -800 },
+  mandate: { maxInventoryUsd: "50000", maxSkewBps: 4, minQuoteWidthBps: 8, hedgeRatioMinBps: 5000, hedgeRatioMaxBps: 12000, killAtDrawdownBps: -800 },
   seniorHurdleBps: 6000,
   seniorCapBps: 7000,
   subscriptionWindow: 600,

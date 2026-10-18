@@ -243,6 +243,72 @@ export const poolEngineAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "lossBudgetBps",
+    "inputs": [
+      {
+        "name": "m",
+        "type": "tuple",
+        "internalType": "struct BRTypes.Mandate",
+        "components": [
+          {
+            "name": "maxInventoryUsd",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "maxSkewBps",
+            "type": "int16",
+            "internalType": "int16"
+          },
+          {
+            "name": "minQuoteWidthBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "maxHedgeLeverage",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "hedgeRatioMinBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "hedgeRatioMaxBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "noNewRiskOffHours",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "killAtDrawdownBps",
+            "type": "int16",
+            "internalType": "int16"
+          },
+          {
+            "name": "hedgeAllowRoot",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "function",
     "name": "marginEquityUsd",
     "inputs": [],
     "outputs": [

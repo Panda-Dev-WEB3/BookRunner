@@ -244,12 +244,12 @@ describe("presetFromBook", () => {
 });
 
 describe("quoteDemo (shared checkQuote)", () => {
-  const limits = { minQuoteWidthBps: 8, maxSkewBps: 25 };
+  const limits = { minQuoteWidthBps: 8, maxSkewBps: 4 };
   test("a quote inside both limits passes", () => {
-    const d = quoteDemo(100, 12, 5, limits);
+    const d = quoteDemo(100, 12, 3, limits);
     expect(d.ok).toBe(true);
     expect(d.widthBps).toBeCloseTo(12, 6);
-    expect(d.skewBps).toBeCloseTo(5, 6);
+    expect(d.skewBps).toBeCloseTo(3, 6);
     expect(d.bid).toBeLessThan(d.ask);
   });
   test("too narrow, crossed or too far from the oracle fails", () => {
@@ -259,7 +259,14 @@ describe("quoteDemo (shared checkQuote)", () => {
     expect(quoteDemo(100, 12, -30, limits)).toMatchObject({ ok: false, skewOk: false });
   });
   test("the limits themselves are allowed", () => {
-    expect(quoteDemo(100, 8, 25, limits).ok).toBe(true);
-    expect(quoteDemo(100, 8, -25, limits).ok).toBe(true);
+    expect(quoteDemo(100, 8, 4, limits).ok).toBe(true);
+    // width is relative to the mid: at a negative skew the exact straddle limit is h / (1 + h), a hair under 4
+    expect(quoteDemo(100, 8, -3.99, limits).ok).toBe(true);
+  });
+  test("audit M-3: a quote entirely on one side of the oracle fails, even within a pre-fix max skew", () => {
+    const legacy = { minQuoteWidthBps: 8, maxSkewBps: 25 };
+    expect(quoteDemo(100, 8, 25, legacy)).toMatchObject({ ok: false, widthOk: true, skewOk: false });
+    expect(quoteDemo(100, 8, -25, legacy)).toMatchObject({ ok: false, skewOk: false });
+    expect(quoteDemo(100, 50, 25, legacy).ok).toBe(true);
   });
 });

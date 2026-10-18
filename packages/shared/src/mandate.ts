@@ -32,9 +32,26 @@ export function quoteSkewBps(q: QuoteProposal): number {
 
 export interface QuoteCheck {
   ok: boolean;
-  violations: Array<"WIDTH" | "SKEW" | "CROSSED">;
+  violations: Array<"WIDTH" | "SKEW" | "CROSSED" | "ONE_SIDED">;
   widthBps: number;
   skewBps: number;
+}
+
+/**
+ * Audit M-3: a quote must straddle the oracle (bid <= oracle <= ask). A quote entirely on one side of it
+ * (|skew| beyond half the width) loses on every fill, and flipping it around a colluding taker's buy and
+ * sell drains the pool at a constant price. On-chain: MMMandate.checkQuote / PoolEngine.setQuote require
+ * 2 x |skewBps| <= spreadBps (both relative to the oracle); validateMandate requires maxSkew <= minWidth / 2.
+ */
+export function quoteStraddlesOracle(q: QuoteProposal): boolean {
+  if (!(q.oraclePx > 0)) return false;
+  // 1e-9 bps tolerance for float rounding at the boundary
+  return ((q.bidPx - q.oraclePx) / q.oraclePx) * 10_000 <= 1e-9 && ((q.oraclePx - q.askPx) / q.oraclePx) * 10_000 <= 1e-9;
+}
+
+/** Audit M-3: charter rule, maxSkewBps <= minQuoteWidthBps / 2 (MarketCharter.validate / validateMandate). */
+export function skewWithinHalfWidth(m: Pick<Mandate, "maxSkewBps" | "minQuoteWidthBps">): boolean {
+  return m.maxSkewBps * 2 <= m.minQuoteWidthBps;
 }
 
 export function checkQuote(m: Mandate, q: QuoteProposal): QuoteCheck {
@@ -45,6 +62,7 @@ export function checkQuote(m: Mandate, q: QuoteProposal): QuoteCheck {
   // 1e-9 tolerance for float rounding at the boundary
   if (widthBps + 1e-9 < m.minQuoteWidthBps) violations.push("WIDTH");
   if (Math.abs(skewBps) > m.maxSkewBps + 1e-9) violations.push("SKEW");
+  if (!quoteStraddlesOracle(q)) violations.push("ONE_SIDED");
   return { ok: violations.length === 0, violations, widthBps, skewBps };
 }
 
@@ -170,7 +188,8 @@ export function classifyLimits(args: {
   const ratio = hedgeRatioBps(m, args.netExposureUsd, args.deskHedgeUsd);
   const breaches: string[] = [];
   if (util > 1) breaches.push("INVENTORY");
-  if (q && q.violations.includes("SKEW")) breaches.push("SKEW");
+  // a quote entirely on one side of the oracle (audit M-3) is a skew breach
+  if (q && (q.violations.includes("SKEW") || q.violations.includes("ONE_SIDED"))) breaches.push("SKEW");
   if (q && q.violations.includes("WIDTH")) breaches.push("WIDTH");
   if (m.killAtDrawdownBps < 0 && args.drawdownBps <= m.killAtDrawdownBps) breaches.push("DRAWDOWN");
   const inBand = hedgeBandOk(m, args.netExposureUsd, args.deskHedgeUsd, args.canHedgeLong ?? false);

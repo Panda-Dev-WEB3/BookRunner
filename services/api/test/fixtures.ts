@@ -32,7 +32,7 @@ export function sampleDraft(over: Partial<CharterDraftInput> = {}): CharterDraft
     mmInventoryUsd: "75000",
     mandate: {
       maxInventoryUsd: "50000",
-      maxSkewBps: 25,
+      maxSkewBps: 4,
       minQuoteWidthBps: 8,
       maxHedgeLeverage: 1,
       hedgeRatioMinBps: 5000,

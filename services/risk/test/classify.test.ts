@@ -74,6 +74,14 @@ describe("quote skew / width on a live quote", () => {
     expect(ev.snapshot.skewUtil).toBeGreaterThan(1);
   });
 
+  test("audit M-3: a quote entirely on one side of the oracle is a skew breach, even within maxSkewBps", () => {
+    // MANDATE is the pre-fix 25 / 8 (a cached mandate): mid 190.15 (+7.9 bps), width 10.5 bps, bid ABOVE 190
+    const ev = run({ quote: quoteAt(now - 1000, 190.05, 190.25) });
+    expect(ev.snapshot.skewUtil).toBeLessThan(1);
+    expect(ev.snapshot.breaches).toEqual(["SKEW"]);
+    expect(ev.snapshot.state).toBe("breach");
+  });
+
   test("width < minQuoteWidthBps is a breach", () => {
     // width 0.1 / 190 = 5.3 bps < 8
     const ev = run({ quote: quoteAt(now - 1000, 189.95, 190.05) });

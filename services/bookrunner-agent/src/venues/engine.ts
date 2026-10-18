@@ -78,7 +78,9 @@ export function engineParamsFromQuote(q: TwoSidedQuote & EngineQuoteMeta, ctx: E
   const skewRaw = ((mid - oracle) / oracle) * 10_000;
 
   const spreadBps = Math.min(0xffff, Math.max(m.minQuoteWidthBps, Math.ceil(widthBps - 1e-9)));
-  const maxSkew = Math.max(0, m.maxSkewBps);
+  // audit M-3: 2 x |skew| <= spread (MMMandate.checkQuote / PoolEngine.setQuote): the pool never fills on the
+  // wrong side of the oracle, whatever the (possibly cached, pre-fix) mandate allows
+  const maxSkew = Math.max(0, Math.min(m.maxSkewBps, Math.floor(spreadBps / 2)));
   const skewBps = Math.max(-maxSkew, Math.min(maxSkew, Math.trunc(skewRaw)));
 
   // exposure reachable through the quoted sizes (book perspective: bid fill +, ask fill -)
@@ -120,7 +122,12 @@ export const sameParams = (a: EngineQuoteParams | null | undefined, b: EngineQuo
   !!a && !!b && a.spreadBps === b.spreadBps && a.skewBps === b.skewBps && a.maxNetExposureUsd === b.maxNetExposureUsd;
 
 export function paramsWithinMandate(p: EngineQuoteParams, m: Mandate): boolean {
-  return p.spreadBps >= m.minQuoteWidthBps && Math.abs(p.skewBps) <= m.maxSkewBps && p.maxNetExposureUsd <= m.maxInventoryUsd;
+  return (
+    p.spreadBps >= m.minQuoteWidthBps &&
+    Math.abs(p.skewBps) <= m.maxSkewBps &&
+    Math.abs(p.skewBps) * 2 <= p.spreadBps && // audit M-3: the quote straddles the oracle
+    p.maxNetExposureUsd <= m.maxInventoryUsd
+  );
 }
 
 export interface SentState {

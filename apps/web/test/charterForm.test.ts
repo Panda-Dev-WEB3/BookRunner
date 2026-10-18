@@ -39,6 +39,16 @@ describe("charter form", () => {
     expect(notice(86_400, 86_400)).toEqual([]); // the default form passes a daily network
   });
 
+  test("audit M-3: max skew at most half the min quote width", () => {
+    const skew = (maxSkewBps: string, minQuoteWidthBps: string) =>
+      issuesFor(formIssues({ ...DEFAULT_FORM, sponsor: SPONSOR, mandate: { ...DEFAULT_FORM.mandate, maxSkewBps, minQuoteWidthBps } }), "mandate.maxSkewBps");
+    expect(skew("25", "8")).toHaveLength(1);
+    expect(skew("25", "8")[0]?.message).toContain("4 bps");
+    expect(skew("5", "8")).toHaveLength(1);
+    expect(skew("4", "8")).toEqual([]);
+    expect(skew("4", "9")).toEqual([]);
+  });
+
   test("in-house engine fees are capped at 100 bps", () => {
     const issues = formIssues({ ...DEFAULT_FORM, sponsor: SPONSOR, venue: "pool_engine", ifSizeUsd: "10000", takerFeeBps: "150" });
     expect(issues.map((i) => i.field)).toEqual(["takerFeeBps"]);
@@ -59,7 +69,7 @@ describe("charter form", () => {
       takerFeeBps: 0,
       meta: { name: "NVDA book" },
     });
-    expect(d.mandate).toMatchObject({ maxSkewBps: 25, minQuoteWidthBps: 8, killAtDrawdownBps: -800, hedgeAllow: [{ asset: "NVDA", venue: "UNIV3" }] });
+    expect(d.mandate).toMatchObject({ maxSkewBps: 4, minQuoteWidthBps: 8, killAtDrawdownBps: -800, hedgeAllow: [{ asset: "NVDA", venue: "UNIV3" }] });
     expect(formToDraft({ ...DEFAULT_FORM, underlyingKind: "index", underlying: "RHX5" }).underlying).toEqual({ index: "RHX5" });
   });
 

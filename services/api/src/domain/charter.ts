@@ -268,6 +268,10 @@ export function validateCharterLocal(c: Charter, ctx: ValidationContext = {}): C
     add("BAD_MANDATE", "mandate.killAtDrawdownBps", "Kill drawdown must be negative and no lower than -5000 bps");
   }
   if (m.maxSkewBps <= 0) add("BAD_MANDATE", "mandate.maxSkewBps", "Mandate max skew must be above 0 bps");
+  // audit M-3 (MarketCharter.validate): a quote at the min width and the max skew must still straddle the oracle
+  if (m.maxSkewBps > 0 && m.minQuoteWidthBps > 0 && m.maxSkewBps * 2 > m.minQuoteWidthBps) {
+    add("BAD_MANDATE", "mandate.maxSkewBps", "Mandate max skew must be at most half the min quote width");
+  }
 
   if (c.underlying === zeroHash || ctx.underlyingKnown === false) {
     add("BAD_UNDERLYING", "underlying", "Underlying is neither a canonical Stock Token nor a registered index");

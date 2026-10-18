@@ -66,7 +66,7 @@ export const DEFAULT_FORM: CharterForm = {
   mmInventoryUsd: "75000",
   mandate: {
     maxInventoryUsd: "50000",
-    maxSkewBps: "25",
+    maxSkewBps: "4",
     minQuoteWidthBps: "8",
     maxHedgeLeverage: "1",
     hedgeRatioMinBps: "5000",
@@ -99,7 +99,7 @@ export const FIELD_HELP: Record<string, string> = {
   ifSizeUsd: "Insurance fund size deployed first at window close; must meet the venue minimum",
   mmInventoryUsd: "Market-making inventory deployed after the insurance fund",
   "mandate.maxInventoryUsd": "Max |net venue position| notional. Desk key tiers must cover it",
-  "mandate.maxSkewBps": "Max distance of the quote mid from the oracle, in bps of the oracle price",
+  "mandate.maxSkewBps": "Max distance of the quote mid from the oracle, in bps of the oracle price; at most half the min quote width, so a quote always straddles the oracle",
   "mandate.minQuoteWidthBps": "Narrowest allowed quote: (ask - bid) / mid, in bps",
   "mandate.maxHedgeLeverage": "Leverage cap for perp hedge legs (spot hedges are 1.00x)",
   "mandate.hedgeRatio": "Share of venue exposure offset by desk hedges; enforced once exposure exceeds 5% of max inventory",
@@ -194,6 +194,10 @@ export function formIssues(f: CharterForm, ctx: { markIntervalSeconds?: number |
   if (!Number.isInteger(skew) || skew <= 0 || skew > 32_767) add("mandate.maxSkewBps", "Max skew must be a whole number of bps above 0");
   const width = int(m.minQuoteWidthBps);
   if (!Number.isInteger(width) || width <= 0 || width > 65_535) add("mandate.minQuoteWidthBps", "Min quote width must be a whole number of bps above 0");
+  // audit M-3: a quote at the min width and the max skew must still straddle the oracle
+  if (Number.isInteger(skew) && Number.isInteger(width) && skew > 0 && width > 0 && skew * 2 > width) {
+    add("mandate.maxSkewBps", `Max skew must be at most half the min quote width (${Math.floor(width / 2)} bps)`);
+  }
   const lev = Number(m.maxHedgeLeverage);
   if (!Number.isFinite(lev) || lev < 0 || lev > 655.35) add("mandate.maxHedgeLeverage", "Hedge leverage: a multiple between 0 and 655.35");
   const lo = int(m.hedgeRatioMinBps);

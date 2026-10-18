@@ -13,6 +13,32 @@ export const poolEngineAbi = [
   },
   {
     "type": "function",
+    "name": "DEFAULT_LOSS_BUDGET_BPS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "DEFAULT_LOSS_PERIOD",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "MAX_FEE_BPS",
     "inputs": [],
     "outputs": [
@@ -33,6 +59,19 @@ export const poolEngineAbi = [
         "name": "",
         "type": "uint32",
         "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MAX_LOSS_BUDGET_BPS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
       }
     ],
     "stateMutability": "view"
@@ -540,6 +579,50 @@ export const poolEngineAbi = [
   },
   {
     "type": "function",
+    "name": "lossBudget",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "budgetBps",
+        "type": "uint16",
+        "internalType": "uint16"
+      },
+      {
+        "name": "period",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "anchorEquityUsd",
+        "type": "int256",
+        "internalType": "int256"
+      },
+      {
+        "name": "lossUsd",
+        "type": "int256",
+        "internalType": "int256"
+      },
+      {
+        "name": "budgetUsd",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "blocked",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "marginRatioBps",
     "inputs": [
       {
@@ -747,6 +830,24 @@ export const poolEngineAbi = [
         "name": "capUsd",
         "type": "uint128",
         "internalType": "uint128"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setLossBudget",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "lossBudgetBps",
+        "type": "uint16",
+        "internalType": "uint16"
       }
     ],
     "outputs": [],
@@ -1364,6 +1465,50 @@ export const poolEngineAbi = [
   },
   {
     "type": "event",
+    "name": "LossBudgetSet",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "lossBudgetBps",
+        "type": "uint16",
+        "indexed": false,
+        "internalType": "uint16"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "LossPeriodStarted",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "period",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "anchorEquityUsd",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "MarginChanged",
     "inputs": [
       {
@@ -1626,6 +1771,17 @@ export const poolEngineAbi = [
   },
   {
     "type": "error",
+    "name": "InvalidLossBudget",
+    "inputs": [
+      {
+        "name": "lossBudgetBps",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "InvalidMarketConfig",
     "inputs": []
   },
@@ -1642,6 +1798,27 @@ export const poolEngineAbi = [
         "name": "skewBps",
         "type": "int16",
         "internalType": "int16"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "LossBudgetExceeded",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "lossUsd",
+        "type": "int256",
+        "internalType": "int256"
+      },
+      {
+        "name": "budgetUsd",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ]
   },
@@ -1780,6 +1957,22 @@ export const poolEngineAbi = [
     "type": "error",
     "name": "ReentrancyGuardReentrantCall",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "SafeCastOverflowedIntDowncast",
+    "inputs": [
+      {
+        "name": "bits",
+        "type": "uint8",
+        "internalType": "uint8"
+      },
+      {
+        "name": "value",
+        "type": "int256",
+        "internalType": "int256"
+      }
+    ]
   },
   {
     "type": "error",

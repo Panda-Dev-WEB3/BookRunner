@@ -88,6 +88,10 @@ export function validateCharter(c: Charter, ctx: ValidationContext): ValidationR
   if (m.killAtDrawdownBps >= 0) fail("BAD_MANDATE", `killAtDrawdownBps ${m.killAtDrawdownBps} must be negative`);
   if (m.killAtDrawdownBps < MIN_KILL_DRAWDOWN_BPS) fail("BAD_MANDATE", `killAtDrawdownBps ${m.killAtDrawdownBps} < ${MIN_KILL_DRAWDOWN_BPS}`);
   if (m.maxSkewBps <= 0) fail("BAD_MANDATE", `maxSkewBps ${m.maxSkewBps} must be positive`);
+  // audit M-3: a quote at the min width and the max skew must still straddle the oracle
+  if (m.maxSkewBps > 0 && m.minQuoteWidthBps > 0 && m.maxSkewBps * 2 > m.minQuoteWidthBps) {
+    fail("BAD_MANDATE", `maxSkewBps ${m.maxSkewBps} > half of minQuoteWidthBps ${m.minQuoteWidthBps}`);
+  }
 
   if (!underlyingKnown(c.underlying, ctx)) fail("BAD_UNDERLYING", "underlying is neither a canonical Stock Token nor a registered index");
 

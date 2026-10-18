@@ -320,18 +320,18 @@ async function main() {
   const specs: LaunchSpec[] = [
     {
       name: "NVDA", symbol: "PERP_NVDA_USDC", venue: 0, underlying: tokenUnderlying(t("NVDA")), hedgeTokens: [t("NVDA")],
-      ifUsd: usd(30_000), mmUsd: usd(75_000), maxInventoryUsd: usd(50_000), maxSkewBps: 25, minQuoteWidthBps: 8,
+      ifUsd: usd(30_000), mmUsd: usd(75_000), maxInventoryUsd: usd(50_000), maxSkewBps: 4, minQuoteWidthBps: 8,
       hedgeRatioMinBps: 5000, hedgeRatioMaxBps: 12000, deskKey: devAccount("deskKeyNvda"), takerFeeBps: 0,
     },
     {
       name: "TSLA", symbol: "PERP_TSLA_USDC", venue: 0, underlying: tokenUnderlying(t("TSLA")), hedgeTokens: [t("TSLA")],
-      ifUsd: usd(30_000), mmUsd: usd(75_000), maxInventoryUsd: usd(50_000), maxSkewBps: 30, minQuoteWidthBps: 12,
+      ifUsd: usd(30_000), mmUsd: usd(75_000), maxInventoryUsd: usd(50_000), maxSkewBps: 6, minQuoteWidthBps: 12,
       hedgeRatioMinBps: 5000, hedgeRatioMaxBps: 12000, deskKey: devAccount("deskKeyTsla"), takerFeeBps: 0,
     },
     {
       name: "RHX5", symbol: "RHX5-PERP", venue: 1, underlying: indexUnderlying("RHX5"),
       hedgeTokens: ["NVDA", "TSLA", "AAPL", "MSFT", "AMZN"].map(t),
-      ifUsd: usd(30_000), mmUsd: usd(100_000), maxInventoryUsd: usd(75_000), maxSkewBps: 25, minQuoteWidthBps: 10,
+      ifUsd: usd(30_000), mmUsd: usd(100_000), maxInventoryUsd: usd(75_000), maxSkewBps: 5, minQuoteWidthBps: 10,
       hedgeRatioMinBps: 4000, hedgeRatioMaxBps: 12000, deskKey: devAccount("deskKeyIndex"), takerFeeBps: 6,
     },
   ];

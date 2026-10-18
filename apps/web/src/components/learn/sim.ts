@@ -307,6 +307,6 @@ export function quoteDemo(oraclePx: number, widthBps: number, skewBps: number, l
     skewBps: c.skewBps,
     ok: c.ok,
     widthOk: !c.violations.includes("WIDTH") && !c.violations.includes("CROSSED"),
-    skewOk: !c.violations.includes("SKEW"),
+    skewOk: !c.violations.includes("SKEW") && !c.violations.includes("ONE_SIDED"),
   };
 }

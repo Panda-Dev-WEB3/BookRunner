@@ -551,7 +551,7 @@ function charterFileForm(): void {
       field("Junior notice · days (at least one mark interval)", "juniorNoticeDays", 7, "number", 'min="0.0001" max="30" step="0.0001" required') +
       amountField("Per-wallet cap · USD (0 = none)", "perWalletCapUsd", "250000", false) +
       amountField("Max inventory · USD", "maxInventoryUsd", "50000", false) +
-      field("Max skew · bps", "maxSkewBps", 25, "number", 'min="1" max="10000" required') +
+      field("Max skew · bps (at most half the min width)", "maxSkewBps", 4, "number", 'min="1" max="10000" required') +
       field("Minimum quote width · bps", "minQuoteWidthBps", 8, "number", 'min="1" required') +
       field("Max hedge leverage · ×", "maxHedgeLeverage", 1, "number", 'min="0" step="0.01" required') +
       field("Min hedge ratio · bps", "hedgeRatioMinBps", 5000, "number", 'min="0" max="65535" required') +
@@ -583,6 +583,10 @@ function charterFileForm(): void {
       const minNotice = juniorNoticeMinSeconds((store.books ?? []).find((b) => b.markSchedule?.intervalSeconds)?.markSchedule?.intervalSeconds ?? null);
       if (!Number.isFinite(noticeSeconds) || noticeSeconds < minNotice || noticeSeconds > 30 * 86_400) {
         throw new Error(`Junior notice must be between one mark interval (${minNotice} seconds) and 30 days.`);
+      }
+      // audit M-3 (MarketCharter.validate): a quote at the min width and the max skew must straddle the oracle
+      if (int("maxSkewBps") * 2 > int("minQuoteWidthBps")) {
+        throw new Error(`Max skew must be at most half the minimum quote width (${Math.floor(int("minQuoteWidthBps") / 2)} bps).`);
       }
       const draft = {
         sponsor,
