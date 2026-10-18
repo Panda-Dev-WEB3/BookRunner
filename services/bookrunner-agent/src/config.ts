@@ -69,9 +69,11 @@ export const agentEnvShape = {
   // Orderly books: stay reduce-only while ops-venue reports the market not open for new risk (not listed, missing,
   // POST_ONLY, REDUCE_ONLY, DELISTING, DELISTED; Redis bkrn:ops-venue:symbol-issues, docs/VERIFY.md O20)
   AGENT_VENUE_MARKET_GATE: flag(true),
-  // POST_ONLY (Orderly's launch phase: limit orders only until both sides hold the depth warning for 10 min) is gated
-  // too by default; true lets the agent quote (our quotes are limit orders) so the market can reach ACTIVE
-  AGENT_VENUE_POST_ONLY_QUOTE: flag(false),
+  // POST_ONLY (Orderly's launch phase: limit orders only until both sides hold the depth warning for 10 min): true =
+  // quote both sides maker-only (POST_ONLY orders, within the mandate; no taker risk) so the market can reach ACTIVE,
+  // false = reduce-only like the other restricted statuses. Default true with ORDERLY_MODE=live, false in mock mode
+  // (resolveVenuePostOnlyQuote)
+  AGENT_VENUE_POST_ONLY_QUOTE: z.stringbool().optional(),
   /** Signed prices older than this are not carried (the desk then runs on the stored price). */
   AGENT_PRICE_DATA_MAX_AGE_SECONDS: num(60),
   /**
@@ -144,6 +146,11 @@ export function loadAgentEnv(source: Record<string, string | undefined> = proces
   return parseEnv(agentEnvShape, source);
 }
 export type AgentEnv = ReturnType<typeof loadAgentEnv>;
+
+/** AGENT_VENUE_POST_ONLY_QUOTE, else true with ORDERLY_MODE=live (the book's market maker provides the launch depth). */
+export function resolveVenuePostOnlyQuote(env: Pick<AgentEnv, "AGENT_VENUE_POST_ONLY_QUOTE" | "ORDERLY_MODE">): boolean {
+  return env.AGENT_VENUE_POST_ONLY_QUOTE ?? env.ORDERLY_MODE === "live";
+}
 
 export function quotingConfigFrom(env: AgentEnv): QuotingConfig {
   return {

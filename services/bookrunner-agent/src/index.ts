@@ -40,7 +40,7 @@ import { DeskClient } from "./chain/desk-client";
 import { ViemEngineChain } from "./chain/engine-chain";
 import { EXECUTE_WITH_PRICES_SIG, supportsFunction } from "./chain/lowgas-abi";
 import { PullPrices, deskPriceData, freshestOracleLatest, httpBundleSource, redisBundleSource, resolvePullMode } from "./chain/pull-prices";
-import { type AgentEnv, engineVenueConfigFrom, hedgeConfigFrom, loadAgentEnv, quotingConfigFrom, sizingConfigFrom, volConfigFrom } from "./config";
+import { type AgentEnv, engineVenueConfigFrom, hedgeConfigFrom, loadAgentEnv, quotingConfigFrom, sizingConfigFrom, volConfigFrom, resolveVenuePostOnlyQuote } from "./config";
 import { type UniverseComponent, buildHedgeUniverse, parseAllowPairs } from "./domain/hedge-universe";
 import { RuleBasedSizing } from "./domain/sizing";
 import { EwmaVolatility } from "./domain/volatility";
@@ -317,7 +317,7 @@ async function runOnce(
       quoteTtlMs: Math.max(5_000, env.AGENT_QUOTE_INTERVAL_MS * 10),
       fillLookbackMs: 15 * 60_000,
       pullPrices: pull,
-      venueGate: { enabled: env.AGENT_VENUE_MARKET_GATE, allowPostOnly: env.AGENT_VENUE_POST_ONLY_QUOTE },
+      venueGate: { enabled: env.AGENT_VENUE_MARKET_GATE, allowPostOnly: resolveVenuePostOnlyQuote(env) },
     },
   );
   holder.agent = agent;

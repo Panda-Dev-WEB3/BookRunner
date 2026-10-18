@@ -85,6 +85,12 @@ export function parseVenueMarkets(raw: unknown): VenueMarketMsg[] {
   return out;
 }
 
+/** The book's market is listed and in Orderly's POST_ONLY launch phase (limit orders only, maker-only quoting). */
+export function venueMarketPostOnly(markets: VenueMarketMsg[], bookId: number): boolean {
+  const m = markets.find((x) => x.bookIds.includes(bookId));
+  return !!m && m.phase === "listed" && marketStatusClass(m.venueStatus) === "post_only";
+}
+
 /**
  * Agent gate: a reason to stop new risk (reduce-only quoting / hedging) on the book's Orderly market, null = no gate.
  * not listed (awaiting) or gone (missing) -> gate; listed POST_ONLY -> gate unless `allowPostOnly`; listed and

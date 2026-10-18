@@ -21,6 +21,8 @@ import type { HedgePlan } from "../src/domain/hedge-planner";
 import { DEFAULT_QUOTING_CONFIG } from "../src/domain/quoting";
 import { RuleBasedSizing } from "../src/domain/sizing";
 import { DEFAULT_VOL_CONFIG, EwmaVolatility } from "../src/domain/volatility";
+import { loadAgentEnv, resolveVenuePostOnlyQuote } from "../src/config";
+import { MockOrderlyHttpVenue } from "../src/venues/orderly";
 import { FakeBus, FakeStore, nvdaMandate, silentLog } from "./helpers";
 
 class FakeVenue implements QuotingVenue {
@@ -240,9 +242,48 @@ describe("BookAgent Orderly market gate (ops-venue listing check, VERIFY O20)", 
     }
   });
 
-  test("POST_ONLY can be allowed (AGENT_VENUE_POST_ONLY_QUOTE); engine books are never gated", async () => {
-    expect((await long(market("listed", "POST_ONLY"), { allowPostOnly: true })).q?.bid).toBeDefined();
+  test("POST_ONLY allowed (live default): both sides, maker-only; restricted / unlisted still reduce-only; engine never gated", async () => {
+    const po = await long(market("listed", "POST_ONLY"), { allowPostOnly: true });
+    expect([!!po.q?.bid, !!po.q?.ask, po.q?.postOnly, !!po.q?.reduceOnly]).toEqual([true, true, true, false]);
+    for (const [phase, status] of [["listed", "REDUCE_ONLY"], ["listed", "DELISTING"], ["listed", "DELISTED"], ["missing", null], ["awaiting", null]] as const) {
+      const { q } = await long(market(phase, status), { allowPostOnly: true });
+      expect([phase, status, q?.bid, q?.reduceOnly, q?.postOnly]).toEqual([phase, status, undefined, true, undefined]);
+    }
+    const active = await long(market("listed", "ACTIVE"), { allowPostOnly: true });
+    expect(active.q?.postOnly).toBeUndefined();
     expect((await long(market("awaiting", null), { kind: "engine" })).q?.bid).toBeDefined();
+  });
+
+  test("leaving POST_ONLY re-quotes as plain limit orders", async () => {
+    const t = setup();
+    (t.agent as unknown as { cfg: BookAgentConfig }).cfg.venueGate = { enabled: true, allowPostOnly: true };
+    t.bus.kv.set(KEYS.venueSymbolIssues, market("listed", "POST_ONLY"));
+    await t.agent.refreshState();
+    await t.agent.quoteTick();
+    expect(t.venue.replaced.at(-1)?.postOnly).toBe(true);
+    t.bus.kv.set(KEYS.venueSymbolIssues, market("listed", "ACTIVE"));
+    await t.agent.refreshState();
+    await t.agent.quoteTick();
+    expect(t.venue.replaced.length).toBe(2);
+    expect(t.venue.replaced.at(-1)?.postOnly).toBeUndefined();
+  });
+
+  test("AGENT_VENUE_POST_ONLY_QUOTE: default true with ORDERLY_MODE=live, false in mock mode, overridable", () => {
+    expect(resolveVenuePostOnlyQuote(loadAgentEnv({ ORDERLY_MODE: "live" }))).toBe(true);
+    expect(resolveVenuePostOnlyQuote(loadAgentEnv({ ORDERLY_MODE: "mock" }))).toBe(false);
+    expect(resolveVenuePostOnlyQuote(loadAgentEnv({ ORDERLY_MODE: "live", AGENT_VENUE_POST_ONLY_QUOTE: "false" }))).toBe(false);
+    expect(resolveVenuePostOnlyQuote(loadAgentEnv({ ORDERLY_MODE: "mock", AGENT_VENUE_POST_ONLY_QUOTE: "true" }))).toBe(true);
+  });
+
+  test("the mock-orderly fallback venue sends POST_ONLY orders for a postOnly quote, LIMIT otherwise (ops-venue's OrderlyVenue: POST_ONLY whatever its configured type)", async () => {
+    const bodies: Array<{ orders: Array<{ order_type: string; side: string }> }> = [];
+    const v = new MockOrderlyHttpVenue({ baseUrl: "http://orderly.test", accountId: "0xabc", bookId: 1, symbol: "PERP_NVDA_USDC_bookrunner" }, async (_url, init) => {
+      if (init?.method === "POST") bodies.push(JSON.parse(String(init.body)));
+      return { ok: true, status: 200, text: async () => JSON.stringify({ success: true, data: {} }) };
+    });
+    await v.replaceQuote({ bid: { px: 189, qty: 1 }, ask: { px: 191, qty: 1 }, postOnly: true });
+    await v.replaceQuote({ bid: { px: 189, qty: 1 }, ask: { px: 191, qty: 1 } });
+    expect(bodies.map((b) => b.orders.map((o) => o.order_type))).toEqual([["POST_ONLY", "POST_ONLY"], ["LIMIT", "LIMIT"]]);
   });
 
   test("the gate applies at the next state refresh and lifts once the market is open; hedging follows (reduce_only)", async () => {

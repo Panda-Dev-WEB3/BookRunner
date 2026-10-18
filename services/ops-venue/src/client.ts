@@ -128,7 +128,8 @@ export class OrderlyVenue implements QuotingVenue {
     await this.cancelAll();
     const orders = quoteOrders(q, {
       symbol: this.opts.symbol,
-      orderType: this.opts.quoteOrderType ?? "POST_ONLY",
+      // a postOnly quote (market in Orderly's POST_ONLY launch phase) is always maker-only, whatever the configured type
+      orderType: q.postOnly ? "POST_ONLY" : (this.opts.quoteOrderType ?? "POST_ONLY"),
       priceTick: ticks.price,
       qtyTick: ticks.qty,
       clientId: (s) => this.clientId(s),

@@ -27,6 +27,7 @@ import {
   parseVenueMarkets,
   usdToNumber,
   venueMarketGate,
+  venueMarketPostOnly,
 } from "@bookrunner/shared";
 import type { AgentBus } from "../adapters/bus";
 import type { AgentStore, FillRow } from "../adapters/store";
@@ -74,7 +75,9 @@ export interface BookAgentConfig {
   /**
    * Orderly books: read ops-venue's market state (Redis KEYS.venueSymbolIssues, every state refresh) and stay
    * reduce-only while the market is not open for new risk (shared venueMarketGate). It can only restrict the agent;
-   * an absent / unreadable key gates nothing. Default: on for the Orderly venue.
+   * an absent / unreadable key gates nothing. Default: on for the Orderly venue. allowPostOnly: in Orderly's POST_ONLY
+   * launch phase quote both sides maker-only (POST_ONLY orders, within the mandate) instead of reduce-only — the book's
+   * market maker provides the launch depth (AGENT_VENUE_POST_ONLY_QUOTE, default true with ORDERLY_MODE=live).
    */
   venueGate?: { enabled: boolean; allowPostOnly: boolean };
   /**
@@ -114,6 +117,8 @@ export class BookAgent {
   private riskState: LimitState | null = null;
   private killMsg: KillMsg | null = null;
   private venueGate: { reason: string; symbol: string } | null = null;
+  /** the market is in Orderly's POST_ONLY launch phase and quoting through it is allowed: maker-only orders */
+  private venuePostOnly = false;
 
   private resting: AgentQuote | null = null;
   private restingSince = 0;
@@ -321,7 +326,12 @@ export class BookAgent {
     const g = this.cfg.venueGate;
     if (this.d.venue.kind !== "orderly" || (g && !g.enabled)) return;
     const raw = await this.d.bus.getJson<unknown>(KEYS.venueSymbolIssues).catch(() => null);
-    const next = venueMarketGate(parseVenueMarkets(raw), this.d.bookId, { allowPostOnly: g?.allowPostOnly ?? false });
+    const markets = parseVenueMarkets(raw);
+    const allowPostOnly = g?.allowPostOnly ?? false;
+    const next = venueMarketGate(markets, this.d.bookId, { allowPostOnly });
+    const postOnly = allowPostOnly && venueMarketPostOnly(markets, this.d.bookId);
+    if (postOnly !== this.venuePostOnly) this.d.log.info({ postOnly }, postOnly ? "Orderly market in POST_ONLY: quoting maker-only (launch depth)" : "Orderly market left POST_ONLY");
+    this.venuePostOnly = postOnly;
     const prev = this.venueGate;
     this.venueGate = next;
     if ((prev?.reason ?? null) === (next?.reason ?? null)) return;
@@ -380,7 +390,7 @@ export class BookAgent {
       return this.ensureCancelled(decision.reason, false);
     }
     this.lastNoQuoteReason = "";
-    const q = decision.quote;
+    const q = this.venuePostOnly ? { ...decision.quote, postOnly: true } : decision.quote;
     const fc = finalCheck(this.mandate, q);
     if (!fc.ok) {
       this.d.log.error({ violations: fc.violations, widthBps: fc.widthBps, skewBps: fc.skewBps }, "final mandate check failed: not quoting");
@@ -404,6 +414,7 @@ export class BookAgent {
   private needsRequote(q: AgentQuote, oraclePx: number, now: number): boolean {
     if (this.d.venue.kind === "engine") return true; // EngineVenue applies its own change thresholds
     if (!this.resting || this.cancelled) return true;
+    if (!!this.resting.postOnly !== !!q.postOnly) return true; // order type changed (POST_ONLY phase entered / left)
     if (!finalCheck(this.mandate, { ...this.resting, oraclePx }).ok) return true; // drifted vs oracle
     if (now - this.restingSince >= this.cfg.requoteMaxMs) return true;
     return quoteChanged(this.resting, q, this.cfg.requoteBps, this.cfg.requoteSizeFrac);

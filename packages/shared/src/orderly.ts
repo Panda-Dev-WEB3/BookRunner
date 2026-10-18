@@ -33,6 +33,8 @@ export interface TwoSidedQuote {
   bid?: QuoteLevel;
   ask?: QuoteLevel;
   reduceOnly?: boolean;
+  /** Orderly: send both sides as POST_ONLY (maker only; the market is in Orderly's POST_ONLY launch phase) */
+  postOnly?: boolean;
 }
 
 export interface VenuePosition {
