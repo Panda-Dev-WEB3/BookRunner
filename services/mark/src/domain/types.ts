@@ -21,6 +21,12 @@ export interface DeskPosition {
   priceBasisAt?: bigint;
   /** StockTokenRegistry.multiplierChangedAt(token) at the snapshot block (0 = never). */
   multiplierChangedAt?: bigint;
+  /** in the split window: the multiplier in force at priceBasisAt (token events), null = unknown */
+  basisMultiplierWad?: bigint | null;
+  /** in the split window: when the first change after the basis took effect (the window's start) */
+  splitWindowSince?: bigint;
+  /** set by resolveSplitWindow: valued at the basis multiplier (or 0), the mark is held */
+  splitWindow?: boolean;
 }
 
 /** Everything a mark needs, read at ONE block. */

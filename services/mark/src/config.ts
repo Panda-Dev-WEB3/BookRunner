@@ -35,6 +35,14 @@ export const markEnvShape = {
    */
   MARK_MAX_VENUE_REPORT_AGE_SECONDS: z.coerce.number().int().min(0).default(1200),
   /**
+   * Audit M-2 split window: refuse (retry) a mark valuing a desk token whose price predates its multiplier change
+   * for at most this long after the change (default 0 = one mark interval: the refused period stays inside the
+   * mark_overdue warning), then commit it held with the token at the multiplier of the price's basis (or 0).
+   */
+  MARK_SPLIT_REFUSE_MAX_SECONDS: z.coerce.number().int().min(0).default(0),
+  /** Blocks scanned back for a Stock Token's UIMultiplierUpdated events (the multiplier at a price's basis). */
+  MARK_SPLIT_LOG_LOOKBACK_BLOCKS: z.coerce.bigint().default(200_000n),
+  /**
    * Retiring books: desk token positions worth less than this (USD 6dp; default 1000 = 0.001 USD,
    * the agent's Retiring flatten floor) are valued at 0 so the final mark can reach
    * deployedValueUsd == 0. 0 disables.

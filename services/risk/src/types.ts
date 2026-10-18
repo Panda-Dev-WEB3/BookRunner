@@ -49,7 +49,7 @@ export interface ChainObservation {
    * than the stored one). priceStale: some held token's newest price is older than maxPriceAge.
    * signedPrices: the desk used at least one signed print.
    */
-  desk: { hedgeNotionalUsd: bigint; valueUsd: bigint; priceStale?: boolean; signedPrices?: boolean };
+  desk: { hedgeNotionalUsd: bigint; valueUsd: bigint; priceStale?: boolean; signedPrices?: boolean; splitWindow?: boolean };
   vaultIdleUsd: bigint;
   unfundedClaimsUsd: bigint;
   seniorNavUsd: bigint;
@@ -78,6 +78,9 @@ export interface BookObservation {
   deskHedgeUsd: bigint;
   /** desk valued at the last attested price because the on-chain views reverted StalePrice */
   deskPriceStale?: boolean;
+  /** audit M-2: a held token is in the split window (its price predates its multiplier change): the desk valuation
+   *  is not trusted, desk-dependent breaches (DRAWDOWN, HEDGE_BAND) are suppressed and the flatten skips it */
+  deskSplitWindow?: boolean;
   nav: NavInputs;
   oracle: OracleReading;
   quote: QuoteObservation | null;

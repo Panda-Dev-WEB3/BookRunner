@@ -3,7 +3,7 @@
 // venue, HTTP on ORACLE_PORT (default 4410).
 import { createDb } from "@bookrunner/db";
 import { createLogger, publicClientFor, roleSigner, tryLoadDeployment } from "@bookrunner/shared";
-import { attestedOracleAbi } from "@bookrunner/shared/abi";
+import { attestedOracleAbi, stockTokenRegistryAbi } from "@bookrunner/shared/abi";
 import type { LocalAccount } from "viem";
 import { DrizzlePriceStore } from "./adapters/db";
 import { type AttestationDocument, loadAttestationDocument } from "./attestation";
@@ -16,6 +16,7 @@ import { Runtime } from "./runtime";
 import { isProductionChain, liveSourceCount, productionProblems, startupOnchainMinSourcesProblem } from "./production";
 import { OracleService } from "./service";
 import { accountSigner } from "./signing";
+import { ChainlinkSource } from "./sources/chainlink";
 import { buildSources } from "./sources/index";
 
 const cfg = loadOracleConfig();
@@ -65,6 +66,25 @@ if (production) {
   if (problem) {
     log.fatal({ chainId: cfg.CHAIN_ID, oracle: oracle ?? null, liveSources: liveSourceCount(sources) }, `refusing to start: ${problem}`);
     process.exit(1);
+  }
+}
+
+// audit M-2: the Chainlink source's split band follows the registry's governance band (multiplierBandBps)
+{
+  const dep = tryLoadDeployment(cfg.DEPLOYMENT_FILE);
+  const stockRegistry = dep?.chainId === cfg.CHAIN_ID ? dep.contracts?.stockRegistry : undefined;
+  const chainlink = sources.find((s): s is ChainlinkSource => s instanceof ChainlinkSource);
+  if (chainlink && stockRegistry) {
+    const readBand = async () => {
+      try {
+        const bps = await publicClientFor(cfg.CHAIN_ID, cfg.RPC_URL).readContract({ address: stockRegistry, abi: stockTokenRegistryAbi, functionName: "multiplierBandBps" });
+        chainlink.setSplitBandBps(Number(bps));
+      } catch (err) {
+        log.warn({ err: String(err), splitBandBps: chainlink.splitBand }, "could not read StockTokenRegistry.multiplierBandBps; keeping the Chainlink split band");
+      }
+    };
+    await readBand();
+    setInterval(() => void readBand(), 600_000).unref();
   }
 }
 

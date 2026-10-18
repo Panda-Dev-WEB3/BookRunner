@@ -117,6 +117,9 @@ const RESULTS: Record<string, unknown> = {
   [`${NVDA_TOKEN}:balanceOf`]: 10n * 10n ** 18n,
   [`${C.stockRegistry}:getToken`]: { token: NVDA_TOKEN, priceId: priceId("NVDA"), multiplierWad: wad(1), decimals: 18, active: true, floatCapRaw: 0n },
   [`${C.stockRegistry}:valueUsdAt`]: usd(1_900),
+  // audit M-2 split window reads (no change recorded: outside the window)
+  [`${C.stockRegistry}:multiplierChangedAt`]: 0n,
+  [`${C.oracle}:lastLiveAt`]: BigInt(T0),
   [`${C.mandate}:kill`]: undefined,
   [`${C.adapter}:setReduceOnly`]: undefined,
 };
@@ -312,6 +315,29 @@ describe("ViemChain reads", () => {
     // every other limit input is still observed, so venue-exposure limits and kills keep running
     expect(o.adapter.netExposureUsd).toBe(usd(-20_000));
     expect(o.mandate).toEqual(MANDATE);
+  });
+
+  test("audit M-2: a held token priced before its multiplier change is flagged and valued at the basis multiplier (unknown in stored mode: 0), never at the new one", async () => {
+    const extra = {
+      [`${C.stockRegistry}:multiplierChangedAt`]: BigInt(T0 + 10),
+      [`${C.oracle}:lastLiveAt`]: BigInt(T0),
+      [`${C.stockRegistry}:multiplierFromToken`]: false,
+    };
+    const saved = Object.fromEntries(Object.keys(extra).map((k) => [k, RESULTS[k]]));
+    Object.assign(RESULTS, extra);
+    try {
+      const { chain } = makeChain(new Set([`${C.desk}:hedgeNotionalUsd`, `${C.desk}:valueUsd`]));
+      const ref = await chain.loadRef(1);
+      const h = await chain.deskHoldings(ref);
+      expect(h[0]).toMatchObject({ valueUsd: 0n, splitWindow: true });
+      const o = await chain.observe(ref);
+      expect(o.desk.splitWindow).toBe(true);
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete RESULTS[k];
+        else RESULTS[k] = v;
+      }
+    }
   });
 
   test("latest Kill log and desk holdings (registry valuation)", async () => {

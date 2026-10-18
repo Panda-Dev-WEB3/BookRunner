@@ -20,4 +20,5 @@ export * from "./redact";
 export * from "./childenv";
 export * from "./uniswap";
 export * from "./stockTokens";
+export * from "./splitWindow";
 export * from "./signer";

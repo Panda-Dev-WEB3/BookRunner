@@ -223,3 +223,20 @@ describe("off-hours", () => {
     expect(ev.snapshot.state).toBe("breach");
   });
 });
+
+describe("audit M-2 split window (review I-4): no kill from a desk valuation the window distorts", () => {
+  // a reverse split at the audited valuation: the 16k hedge valued at 1/10 -> NAV 85.6k vs 100k accounted (-1440 bps)
+  const distorted = () =>
+    chainObs({ desk: { hedgeNotionalUsd: usd(1_600), valueUsd: usd(1_600) } });
+  test("outside the window the distorted valuation would breach DRAWDOWN (and leave the band)", () => {
+    const ev = evaluate(observation({}, distorted()), IN_BAND, OPTS);
+    expect(ev.snapshot.breaches).toContain("DRAWDOWN");
+    expect(ev.inBand).toBe(false);
+  });
+  test("in the window: DRAWDOWN and the HEDGE_BAND clock are suppressed", () => {
+    const ev = evaluate(observation({ deskSplitWindow: true }, distorted()), { outOfBandSince: T0 - 3_600, lastObservedAt: T0 - 10 }, OPTS);
+    expect(ev.snapshot.breaches).toEqual([]);
+    expect(ev.inBand).toBe(true);
+    expect(ev.outOfBandSec).toBe(0);
+  });
+});

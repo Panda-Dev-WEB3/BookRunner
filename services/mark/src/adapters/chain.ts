@@ -6,7 +6,7 @@
 // after AttestedOracle.update(priceData) (deployless Multicall3 aggregate, nothing is sent). The mark tx is
 // MarkRegistry.commitAndApply when the registry has it (feature-detected on its bytecode), else commit +
 // Book.applyMark.
-import { type Deployment, type Mandate, type MarkInput, VENUE, bytes32ToStr } from "@bookrunner/shared";
+import { type Deployment, type Mandate, type MarkInput, VENUE, bytes32ToStr, readMultiplierAtBasis } from "@bookrunner/shared";
 import {
   attestedOracleAbi,
   backstopAbi,
@@ -63,6 +63,8 @@ export class MarkChainAdapter implements MarkChain {
     private readonly deployment: Deployment,
     /** wall clock (ms): the valuation reference time for signed prices is max(snapshot block, now) */
     private readonly now: () => number = Date.now,
+    /** audit M-2 split window: blocks scanned back for the token's UIMultiplierUpdated events (MARK_SPLIT_LOG_LOOKBACK_BLOCKS) */
+    private readonly splitLogLookbackBlocks?: bigint,
   ) {
     for (const [ticker, t] of Object.entries(deployment.stockTokens ?? {})) this.tickers.set(t.token.toLowerCase(), ticker);
     this.raw = unbatchedClient(pc);
@@ -477,6 +479,15 @@ export class MarkChainAdapter implements MarkChain {
     const held = signed ? signed.held : latest.held;
     const valueUsd = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "valueUsdAt", args: [token, qtyRaw, priceWad], ...b });
     const priceStale = priceIsStale(publishedAt, refTs, maxPriceAge);
+    const basis = priceBasisAt({ held, publishedAt, lastLiveAt: BigInt(lastLiveAt) });
+    // split window: the multiplier in force at the basis, from the token's own update events (live mode; a
+    // stored-mode change is governance's and has no token event: unknown, valued at 0 by domain/split.ts)
+    let split: Pick<DeskPosition, "basisMultiplierWad" | "splitWindowSince"> = {};
+    if (qtyRaw > 0n && multiplierChangedAt > basis) {
+      const live = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "multiplierFromToken", args: [token], ...b });
+      const r = live ? await readMultiplierAtBasis(this.pc, token, { basisAt: basis, nowSec: refTs, blockNumber, lookbackBlocks: this.splitLogLookbackBlocks }) : null;
+      split = { basisMultiplierWad: r?.multiplierWad ?? null, splitWindowSince: r?.firstChangeAt ?? (multiplierChangedAt < refTs ? multiplierChangedAt : basis) };
+    }
     return {
       position: {
         token,
@@ -489,8 +500,9 @@ export class MarkChainAdapter implements MarkChain {
         priceStale,
         ...(signed ? { signedPrice: true } : {}),
         ...(held ? { priceHeld: true } : {}),
-        priceBasisAt: priceBasisAt({ held, publishedAt, lastLiveAt: BigInt(lastLiveAt) }),
+        priceBasisAt: basis,
         multiplierChangedAt,
+        ...split,
       },
       signed: signed && qtyRaw > 0n ? signed : null,
     };

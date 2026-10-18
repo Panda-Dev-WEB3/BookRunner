@@ -20,7 +20,7 @@ import {
   signMark,
 } from "../src/index";
 import { markHeld, priceIsStale } from "../src/domain/held";
-import { multiplierBasisProblems, priceBasisAt } from "../src/domain/split";
+import { priceBasisAt, resolveSplitWindow } from "../src/domain/split";
 import { NVDA, P, TSLA, USDC, snapshot } from "./fixtures";
 
 describe("NAV composition", () => {
@@ -278,28 +278,41 @@ describe("held marks (audit M-1, fail closed)", () => {
   });
 });
 
-describe("split window (audit M-2): a price whose share basis predates the multiplier change is not valued", () => {
-  const pos = snapshot().desk.positions[0]!;
-  const fridayClose = 1_000n;
-  const saturday = 2_000n;
+describe("split window (audit M-2, review I-1): revalue at the basis multiplier, refuse only while young", () => {
+  const pos = snapshot().desk.positions[0]!; // 40 NVDA at $190, multiplier 1: $7,600
+  const fri = 1_000n;
+  const sat = 2_000n;
+  const day = 86_400n;
+  // Friday's held per-share price after a 10:1 split: valueUsdAt (new multiplier) says $76,000
+  const split = { ...pos, multiplierWad: 10n * WAD, valueUsd: usd("76000"), priceHeld: true, priceBasisAt: fri, multiplierChangedAt: sat, basisMultiplierWad: WAD, splitWindowSince: sat };
 
-  test("priceBasisAt: a live price's own publishedAt, a held price's last live print (re-stamps say nothing)", () => {
-    expect(priceBasisAt({ held: false, publishedAt: 5_000n, lastLiveAt: fridayClose })).toBe(5_000n);
-    expect(priceBasisAt({ held: true, publishedAt: 5_000n, lastLiveAt: fridayClose })).toBe(fridayClose);
+  test("priceBasisAt: a live price's own publishedAt, a held price's last live print", () => {
+    expect(priceBasisAt({ held: false, publishedAt: 5_000n, lastLiveAt: fri })).toBe(5_000n);
+    expect(priceBasisAt({ held: true, publishedAt: 5_000n, lastLiveAt: fri })).toBe(fri);
   });
 
-  test("Friday's held price after a weekend split: the position is refused; a post-split live print clears it", () => {
-    const held = { ...pos, priceHeld: true, priceBasisAt: fridayClose, multiplierChangedAt: saturday };
-    expect(multiplierBasisProblems([held])).toEqual([`NVDA: price basis ${fridayClose} predates the multiplier change at ${saturday}`]);
-    expect(multiplierBasisProblems([{ ...held, priceHeld: false, priceBasisAt: saturday + 1n }])).toEqual([]);
-    // same second: the oracle read the token at that block, the change was already active
-    expect(multiplierBasisProblems([{ ...held, priceBasisAt: saturday }])).toEqual([]);
+  test("young window: valued at the basis multiplier (continuous $7,600, never 10x), refused", () => {
+    const r = resolveSplitWindow([split], { nowSec: sat + 3_600n, maxRefuseSec: day });
+    expect(r.positions[0]).toMatchObject({ valueUsd: usd("7600"), multiplierWad: WAD, splitWindow: true });
+    expect(r.window).toHaveLength(1);
+    expect(r.refuse).toEqual(r.window);
+    expect(r.window[0]).toContain("predates the multiplier change");
+    // and the mark is held
+    expect(markHeld({ ...snapshot(), desk: { ...snapshot().desk, positions: r.positions } }).reasons).toContain("desk_split:NVDA");
   });
 
-  test("no change recorded, empty or written-off positions, and fixtures without the fields do not count", () => {
-    expect(multiplierBasisProblems([{ ...pos, priceBasisAt: fridayClose, multiplierChangedAt: 0n }])).toEqual([]);
-    expect(multiplierBasisProblems([{ ...pos, qtyRaw: 0n, priceBasisAt: fridayClose, multiplierChangedAt: saturday }])).toEqual([]);
-    expect(multiplierBasisProblems([{ ...pos, valueUsd: 0n, priceBasisAt: fridayClose, multiplierChangedAt: saturday }])).toEqual([]);
-    expect(multiplierBasisProblems([pos])).toEqual([]);
+  test("past the refusal bound, or at a stale price: not refused (committed held); unknown multiplier: 0", () => {
+    expect(resolveSplitWindow([split], { nowSec: sat + day, maxRefuseSec: day }).refuse).toEqual([]);
+    expect(resolveSplitWindow([{ ...split, priceStale: true }], { nowSec: sat + 60n, maxRefuseSec: day }).refuse).toEqual([]);
+    const unknown = resolveSplitWindow([{ ...split, basisMultiplierWad: null }], { nowSec: sat + day, maxRefuseSec: day });
+    expect(unknown.positions[0]).toMatchObject({ valueUsd: 0n, splitWindow: true });
+    expect(unknown.window[0]).toContain("unknown");
+  });
+
+  test("outside the window: untouched (same-second change, no change, empty position, fixtures without the fields)", () => {
+    const keep = [{ ...split, priceBasisAt: sat }, { ...split, multiplierChangedAt: 0n }, { ...split, qtyRaw: 0n }, pos];
+    const r = resolveSplitWindow(keep, { nowSec: sat + 60n, maxRefuseSec: day });
+    expect(r.window).toEqual([]);
+    expect(r.positions).toEqual(keep);
   });
 });

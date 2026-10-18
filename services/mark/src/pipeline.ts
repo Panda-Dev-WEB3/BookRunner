@@ -22,7 +22,7 @@ import { buildMarkPnl, pnlJsonHash } from "./domain/pnl";
 import { previewTranches, type TranchePreview } from "./domain/preview";
 import { type SignedPrice, encodePriceData, newestByUnderlying } from "./domain/prices";
 import { venueReportAge } from "./domain/readiness";
-import { multiplierBasisProblems } from "./domain/split";
+import { resolveSplitWindow } from "./domain/split";
 import type { MarkSnapshot } from "./domain/types";
 import { applySignedVenueReport } from "./domain/venue";
 import type { MarkAppliedEvent, MarkChain, MarkFeeds, MarkRow, MarkSignerPort, MarkStore, ReceiptsRootPort } from "./ports";
@@ -53,6 +53,8 @@ export interface MarkPipelineDeps {
    * else the adapter's last on-chain report). Older -> RetryableMarkError, nothing committed. Default 1200; 0 disables.
    */
   maxVenueReportAgeSec?: number;
+  /** Audit M-2: max refusal (seconds after the multiplier change) of a split-window mark; default one mark interval. */
+  splitRefuseMaxSec?: number;
   /** Retiring books: desk token positions worth less than this are valued at 0 (domain/nav.ts). */
   retireTokenDustUsd?: bigint;
   spool?: MarkSpool;
@@ -87,6 +89,9 @@ export interface ComputedMark {
   pnl: MarkPnl;
   input: MarkInput;
   tx: MarkTxPlan;
+  /** audit M-2: desk positions in the split window (revalued at the basis multiplier; the mark is held) and those
+   *  whose window is still young (run() refuses the mark; a dry run shows them) */
+  splitWindow: { window: string[]; refuse: string[] };
 }
 
 export type MarkOutcome =
@@ -158,13 +163,12 @@ export class MarkPipeline {
       const c = await this.compute(ref, periodEnd, interval, opts);
       if (opts.dryRun) return { status: "dry_run", computed: c };
 
-      // audit M-2: never sign a NAV valuing a desk token at a price quoted before its multiplier changed (a
-      // weekend split: Friday's per-share price x the new multiplier = 10x). Not even as a held mark: it would
-      // still book the inflated P&L into the share prices. Retry until the oracle signs a post-change price.
-      const split = multiplierBasisProblems(c.snapshot.desk.positions);
-      if (split.length > 0) {
-        log.error({ positions: split }, "desk position priced before its multiplier change; refusing to commit the mark (retrying once the oracle reprices)");
-        throw new RetryableMarkError(`desk position priced before its multiplier change (audit M-2): ${split.join("; ")}`);
+      // audit M-2 (review I-1): a young split window is refused (the oracle normally reprices at the open); an
+      // old one, or one at a stale price, is committed held at the basis-multiplier valuation (compute), so
+      // M-1's bound keeps running for a token that never reprices. Expected (weekend dividends): warn, not error.
+      if (c.splitWindow.refuse.length > 0) {
+        log.warn({ positions: c.splitWindow.refuse }, "split window: refusing to commit the mark until the oracle reprices or the refusal bound passes");
+        throw new RetryableMarkError(`desk position priced before its multiplier change (audit M-2): ${c.splitWindow.refuse.join("; ")}`);
       }
 
       // never sign a NAV built on a stale venue valuation: a stalled reporter would otherwise
@@ -241,7 +245,12 @@ export class MarkPipeline {
     const raw = await this.d.chain.snapshot(ref, block, signedPrices);
     const overlay = applySignedVenueReport(raw, reports, { venue: ref.venue, adapter: ref.components.adapter, chainId: this.d.chainId ?? reports[0]?.chainId ?? 0 });
     if (overlay.rejected.length) log.debug({ rejected: overlay.rejected }, "signed venue reports not used for the valuation");
-    const { snapshot, writtenOff } = writeOffRetiringDust(overlay.snapshot, this.d.retireTokenDustUsd ?? RETIRE_TOKEN_DUST_USD);
+    // audit M-2 split window: positions priced before their multiplier change are revalued at the multiplier of
+    // the price's basis (or 0), never at the new one; run() refuses the mark while the window is young
+    const split = resolveSplitWindow(overlay.snapshot.desk.positions, { nowSec: BigInt(overlay.snapshot.blockTimestamp), maxRefuseSec: BigInt(this.d.splitRefuseMaxSec ?? interval) });
+    if (split.window.length) log.warn({ positions: split.window, refused: split.refuse.length > 0 }, "desk position priced before its multiplier change (split window): valued at the basis multiplier, the mark is held");
+    const splitSnap = split.window.length ? { ...overlay.snapshot, desk: { ...overlay.snapshot.desk, positions: split.positions } } : overlay.snapshot;
+    const { snapshot, writtenOff } = writeOffRetiringDust(splitSnap, this.d.retireTokenDustUsd ?? RETIRE_TOKEN_DUST_USD);
     if (writtenOff.length) {
       log.warn(
         { positions: writtenOff.map((p) => ({ token: p.token, qtyRaw: p.qtyRaw.toString(), valueUsd: usd6(p.valueUsd) })) },
@@ -317,7 +326,7 @@ export class MarkPipeline {
       },
       "mark computed",
     );
-    return { snapshot, nav, preview, inventoryRoot: inventory.root, receipts, pnl, input, tx };
+    return { snapshot, nav, preview, inventoryRoot: inventory.root, receipts, pnl, input, tx, splitWindow: { window: split.window, refuse: split.refuse } };
   }
 
   // ------------------------------------------------------------------ feeds

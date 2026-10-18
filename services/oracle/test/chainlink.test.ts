@@ -131,6 +131,16 @@ describe("ChainlinkSource: refusals", () => {
     if (!fresh.ok) throw new Error(fresh.reason);
     expect(fresh.uiMultiplier).toBe(10n * V.uiMultiplierWad);
     expect(fresh.price).toBeCloseTo(pre.price / 10, 6);
+    // review M-3: the split band follows the registry's governance band (setSplitBandBps), not a constant
+    const banded = setup();
+    expect(banded.src.splitBand).toBe(500);
+    expect((await banded.src.observe("NVDA")).ok).toBe(true);
+    banded.reader.token = { uiMultiplier: (V.uiMultiplierWad * 103n) / 100n, newUIMultiplier: (V.uiMultiplierWad * 103n) / 100n, effectiveAt: T0S - 30n, oraclePaused: false };
+    expect((await banded.src.observe("NVDA")).ok).toBe(true); // a 3% step: in the default 5% band
+    banded.src.setSplitBandBps(200); // governance narrowed the band to 2%
+    expect((await banded.src.observe("NVDA")).ok).toBe(false);
+    banded.src.setSplitBandBps(0); // invalid values are ignored
+    expect(banded.src.splitBand).toBe(200);
     // never seen (e.g. restart after the change): dropped
     const { reader, src } = setup();
     reader.token = { uiMultiplier: 10n * WAD, newUIMultiplier: 10n * WAD, effectiveAt: T0S - 30n, oraclePaused: false };

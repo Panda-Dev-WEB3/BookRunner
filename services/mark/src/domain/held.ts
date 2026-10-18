@@ -9,7 +9,8 @@
 //   - the underlying's price is older than config.maxPriceAge at the valuation time (the oracle stopped
 //     publishing, e.g. it went down before signing Friday's held transition: the stored price stays
 //     held=false at the Friday print, and without this rule the weekend marks would settle at it);
-//   - a desk Stock Token position the NAV values (qty > 0) is priced held or stale.
+//   - a desk Stock Token position the NAV values (qty > 0) is priced held or stale;
+//   - a desk position is in the split window (audit M-2, domain/split.ts: valued at the basis multiplier or 0).
 // A normal closed session is held through the oracle's flag: it re-stamps the held price, so it never goes
 // stale. The engine pool is valued at the underlying's price (covered above); an Orderly venue valuation older
 // than its bound is refused outright by the pipeline (venueReportAge), never marked.
@@ -18,7 +19,7 @@
 // statement (MarkPnl.held, hashed into pnlJsonHash) can never disagree.
 import type { MarkSnapshot } from "./types";
 
-export type HeldReason = "underlying_held" | "underlying_unknown" | "underlying_stale" | `desk_held:${string}` | `desk_stale:${string}`;
+export type HeldReason = "underlying_held" | "underlying_unknown" | "underlying_stale" | `desk_held:${string}` | `desk_stale:${string}` | `desk_split:${string}`;
 
 export interface MarkHeldResult {
   held: boolean;
@@ -44,6 +45,7 @@ export function markHeld(s: Pick<MarkSnapshot, "underlyingPrice" | "desk">): Mar
     if (p.qtyRaw === 0n) continue;
     if (p.priceHeld) reasons.push(`desk_held:${p.ticker}`);
     if (p.priceStale) reasons.push(`desk_stale:${p.ticker}`);
+    if (p.splitWindow) reasons.push(`desk_split:${p.ticker}`);
   }
   return { held: reasons.length > 0, reasons };
 }

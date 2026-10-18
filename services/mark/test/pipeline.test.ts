@@ -157,23 +157,65 @@ describe("MarkPipeline", () => {
     expect(chain.commitCalls).toBe(1);
   });
 
-  test("audit M-2: a desk position priced before its multiplier change (weekend split): retryable, nothing committed or settled; marks once the oracle reprices", async () => {
-    const { chain, pipeline } = setup();
-    const pos = chain.snap.desk.positions[0]!;
+  describe("audit M-2 split window (review I-1)", () => {
+    // 40 NVDA, Friday's per-share price re-stamped held after a 10:1 split: valueUsdAt says 10x ($76,000)
     const fridayClose = BigInt(P - 86_400);
-    const saturday = BigInt(P - 3_600);
-    // Friday's per-share price re-stamped as held, the 10:1 split live on the token: valueUsdAt would say 10x
-    const split = { ...pos, priceHeld: true, valueUsd: pos.valueUsd * 10n, priceBasisAt: fridayClose, multiplierChangedAt: saturday };
-    chain.snap = { ...chain.snap, desk: { ...chain.snap.desk, positions: [split] } };
-    await expect(pipeline.run({ bookId: 1, periodEnd: P })).rejects.toBeInstanceOf(RetryableMarkError);
-    await expect(pipeline.run({ bookId: 1, periodEnd: P })).rejects.toThrow("predates the multiplier change");
-    expect(chain.commitCalls).toBe(0);
-    expect(chain.applyCalls).toBe(0);
-    // the reopen: a live post-split print (basis after the change) values the position again
-    chain.snap = { ...chain.snap, desk: { ...chain.snap.desk, positions: [{ ...pos, priceBasisAt: saturday + 1n, multiplierChangedAt: saturday }] } };
-    const out = await pipeline.run({ bookId: 1, periodEnd: P });
-    expect(out.status).toBe("applied");
-    expect(chain.commitCalls).toBe(1);
+    const splitOf = (pos: ReturnType<typeof setup>["chain"]["snap"]["desk"]["positions"][number], o: { since: bigint; m?: bigint | null; stale?: boolean; basis?: bigint }) => ({
+      ...pos,
+      priceHeld: true,
+      priceStale: o.stale ?? false,
+      valueUsd: pos.valueUsd * 10n,
+      multiplierWad: 10n * pos.multiplierWad,
+      priceBasisAt: o.basis ?? fridayClose,
+      multiplierChangedAt: o.since,
+      basisMultiplierWad: o.m === undefined ? pos.multiplierWad : o.m,
+      splitWindowSince: o.since,
+    });
+
+    test("young window (fresh price, < one interval since the change): retryable, nothing committed; a dry run flags it at the basis valuation", async () => {
+      const { chain, pipeline } = setup();
+      const pos = chain.snap.desk.positions[0]!;
+      chain.snap = { ...chain.snap, desk: { ...chain.snap.desk, onchainValueUsd: null, hedgeNotionalUsd: null, positions: [splitOf(pos, { since: BigInt(P) })] } };
+      await expect(pipeline.run({ bookId: 1, periodEnd: P })).rejects.toBeInstanceOf(RetryableMarkError);
+      await expect(pipeline.run({ bookId: 1, periodEnd: P })).rejects.toThrow("predates the multiplier change");
+      expect(chain.commitCalls).toBe(0);
+      const dry = await pipeline.run({ bookId: 1, periodEnd: P }, { dryRun: true });
+      if (dry.status !== "dry_run") throw new Error(dry.status);
+      expect(dry.computed.splitWindow.refuse).toHaveLength(1);
+      expect(dry.computed.input.navUsd).toBe(usd("110600")); // the continuous value, not +$68,400
+      expect(dry.computed.input.held).toBe(true);
+    });
+
+    test("past the refusal bound: a HELD mark is committed with the token at the basis multiplier (M-1 bound keeps running)", async () => {
+      const { chain, pipeline } = setup();
+      const pos = chain.snap.desk.positions[0]!;
+      chain.snap = { ...chain.snap, desk: { ...chain.snap.desk, onchainValueUsd: null, hedgeNotionalUsd: null, positions: [splitOf(pos, { since: BigInt(P - 600) })] } };
+      const out = await pipeline.run({ bookId: 1, periodEnd: P });
+      expect(out.status).toBe("applied");
+      if (out.status !== "applied") return;
+      expect(out.input.held).toBe(true);
+      expect(out.input.navUsd).toBe(usd("110600"));
+    });
+
+    test("split window + stale price (the oracle stopped): held at once, never refused", async () => {
+      const { chain, pipeline } = setup();
+      const pos = chain.snap.desk.positions[0]!;
+      chain.snap = { ...chain.snap, desk: { ...chain.snap.desk, onchainValueUsd: null, hedgeNotionalUsd: null, positions: [splitOf(pos, { since: BigInt(P), stale: true })] } };
+      const out = await pipeline.run({ bookId: 1, periodEnd: P });
+      expect(out.status === "applied" && out.input.held).toBe(true);
+    });
+
+    test("a token that never reprices and whose basis multiplier is unknown: committed held marks value it at 0 (never 10x)", async () => {
+      const { chain, pipeline } = setup();
+      const pos = chain.snap.desk.positions[0]!;
+      chain.snap = { ...chain.snap, desk: { ...chain.snap.desk, onchainValueUsd: null, hedgeNotionalUsd: null, positions: [splitOf(pos, { since: BigInt(P - 30 * 86_400), basis: BigInt(P - 31 * 86_400), m: null })] } };
+      const out = await pipeline.run({ bookId: 1, periodEnd: P });
+      expect(out.status).toBe("applied");
+      if (out.status !== "applied") return;
+      expect(out.input.held).toBe(true);
+      expect(out.input.navUsd).toBe(usd("103000")); // 110,600 - the 7,600 token position
+      expect(chain.commitCalls).toBe(1);
+    });
   });
 
   test("Retiring wind-down: token dust below the flatten floor does not block deployedValueUsd == 0", async () => {

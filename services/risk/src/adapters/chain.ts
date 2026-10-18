@@ -12,7 +12,11 @@ import {
   VENUE,
   type VenueId,
   bytes32ToStr,
+  inSplitWindow,
+  priceBasisAt,
+  readMultiplierAtBasis,
   strToBytes32,
+  valueAtMultiplier,
 } from "@bookrunner/shared";
 import {
   attestedOracleAbi,
@@ -231,7 +235,8 @@ export class ViemChain implements ChainPort, DiscoveryPort {
     const held = holdings.filter((h) => h.qtyRaw > 0n);
     const hedge = held.reduce((sum, h) => sum + h.valueUsd, 0n);
     const priceStale = held.some((h) => !h.publishedAt || nowSec - h.publishedAt > maxPriceAgeSec);
-    return { hedgeNotionalUsd: hedge, valueUsd: usdc + hedge, priceStale, signedPrices: held.some((h) => h.signed === true) };
+    const splitWindow = held.some((h) => h.splitWindow === true);
+    return { hedgeNotionalUsd: hedge, valueUsd: usdc + hedge, priceStale, signedPrices: held.some((h) => h.signed === true), ...(splitWindow ? { splitWindow } : {}) };
   }
 
   /**
@@ -276,7 +281,8 @@ export class ViemChain implements ChainPort, DiscoveryPort {
       { bookId: ref.bookId, hedgeUsd: hedge.toString(), tokens: holdings.length },
       "desk valuation reverted (stale oracle price); using the last attested prices",
     );
-    return { hedgeNotionalUsd: hedge, valueUsd: usdc + hedge, priceStale: true };
+    const splitWindow = holdings.some((h) => h.qtyRaw > 0n && h.splitWindow === true);
+    return { hedgeNotionalUsd: hedge, valueUsd: usdc + hedge, priceStale: true, ...(splitWindow ? { splitWindow } : {}) };
   }
 
   private async readOracle(priceId: Hex): Promise<OracleReading | null> {
@@ -342,10 +348,12 @@ export class ViemChain implements ChainPort, DiscoveryPort {
         ]);
         let priceWad = 0n;
         let publishedAt = 0;
+        let held = false;
         try {
           const l = await this.pub.readContract({ address: this.c.oracle, abi: attestedOracleAbi, functionName: "latest", args: [info.priceId] });
           priceWad = l.priceWad;
           publishedAt = Number(l.publishedAt);
+          held = l.held;
         } catch (err) {
           this.o.log.warn({ token, err: errMsg(err) }, "no oracle price for desk token");
         }
@@ -354,6 +362,14 @@ export class ViemChain implements ChainPort, DiscoveryPort {
         if (signed) {
           priceWad = signed.priceWad;
           publishedAt = Number(signed.publishedAt);
+          held = signed.held;
+        }
+        const split = priceWad > 0n && qtyRaw > 0n ? await this.splitWindowOf(token, info.priceId, { held, publishedAt: BigInt(publishedAt), nowSec }) : null;
+        if (split) {
+          // audit M-2: the price predates the multiplier change; valued at the multiplier of its basis (or 0),
+          // never at the new one, and flagged so no kill / flatten acts on it
+          const valueUsd = split.multiplierWad === null ? 0n : valueAtMultiplier(qtyRaw, split.multiplierWad, priceWad, info.decimals);
+          return { token, qtyRaw, valueUsd, priceWad, multiplierWad: split.multiplierWad ?? 0n, decimals: info.decimals, publishedAt, splitWindow: true, ...(signed ? { signed: true } : {}) };
         }
         let valueUsd = 0n;
         if (priceWad > 0n && qtyRaw > 0n) {
@@ -372,6 +388,30 @@ export class ViemChain implements ChainPort, DiscoveryPort {
         return { token, qtyRaw, valueUsd, priceWad, multiplierWad: info.multiplierWad, decimals: info.decimals, publishedAt, ...(signed ? { signed: true } : {}) };
       }),
     );
+  }
+
+  /**
+   * Audit M-2 split window of a held token (the shared rule, packages/shared/src/splitWindow.ts): null when
+   * outside it, else the multiplier in force at the price's basis (null = unknown). A failed read (an older
+   * deployment) counts as outside, as before.
+   */
+  private async splitWindowOf(token: Address, priceId: Hex, p: { held: boolean; publishedAt: bigint; nowSec: bigint }): Promise<{ multiplierWad: bigint | null } | null> {
+    try {
+      const [changedAt, lastLiveAt] = await Promise.all([
+        this.pub.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "multiplierChangedAt", args: [token] }),
+        this.pub.readContract({ address: this.c.oracle, abi: attestedOracleAbi, functionName: "lastLiveAt", args: [priceId] }),
+      ]);
+      const basis = priceBasisAt({ held: p.held, publishedAt: p.publishedAt, lastLiveAt: BigInt(lastLiveAt) });
+      if (!inSplitWindow({ multiplierChangedAt: changedAt, priceBasisAt: basis })) return null;
+      const live = await this.pub.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "multiplierFromToken", args: [token] });
+      const blockNumber = await this.pub.getBlockNumber();
+      const r = live ? await readMultiplierAtBasis(this.pub, token, { basisAt: basis, nowSec: p.nowSec, blockNumber }) : null;
+      this.o.log.warn({ token, basis: basis.toString(), multiplierChangedAt: changedAt.toString(), basisMultiplier: r?.multiplierWad?.toString() ?? null }, "desk token in the split window (audit M-2): valued at the basis multiplier, no kill or flatten acts on it");
+      return { multiplierWad: r?.multiplierWad ?? null };
+    } catch (err) {
+      this.o.log.debug({ token, err: errMsg(err) }, "split-window reads failed; treated as outside the window");
+      return null;
+    }
   }
 
   // ------------------------------------------------------------------ writes (RISK role)

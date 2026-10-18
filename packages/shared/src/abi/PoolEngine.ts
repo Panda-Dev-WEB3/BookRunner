@@ -1799,6 +1799,28 @@ export const poolEngineAbi = [
   },
   {
     "type": "error",
+    "name": "SplitPending",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "SplitWindow",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "StalePrice",
     "inputs": [
       {

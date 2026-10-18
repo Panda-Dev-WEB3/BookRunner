@@ -257,7 +257,7 @@ export const stockTokenRegistryAbi = [
     ],
     "outputs": [
       {
-        "name": "",
+        "name": "changedAt",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -544,6 +544,35 @@ export const stockTokenRegistryAbi = [
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "splitGate",
+    "inputs": [
+      {
+        "name": "priceId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "basisAt",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "pending",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
+        "name": "window",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -924,6 +953,22 @@ export const stockTokenRegistryAbi = [
         "name": "token",
         "type": "address",
         "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "StalePrice",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "publishedAt",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ]
   },

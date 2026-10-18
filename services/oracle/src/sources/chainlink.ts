@@ -136,14 +136,15 @@ export interface ChainlinkOptions {
   sequencerGraceMs?: number;
   /** Tolerated lead of updatedAt over the local clock. */
   maxFutureMs?: number;
-  /** Multiplier step (bps of the round's multiplier) above which a change counts as a split (default 500). */
+  /** Initial split band (bps of the round's multiplier; default 500): the registry's governance band once {@link ChainlinkSource.setSplitBandBps} reads it. */
   splitBandBps?: number;
   now?: () => number;
 }
 
 /**
  * Multiplier step above which a change after the feed's last round is a split (the share unit changed) rather
- * than in-band drift: StockTokenRegistry.DEFAULT_MULTIPLIER_BAND_BPS (a split must be re-anchored, never absorbed).
+ * than in-band drift. Initial value: StockTokenRegistry.DEFAULT_MULTIPLIER_BAND_BPS; the service reads the live
+ * governance band (multiplierBandBps) at startup and every 10 min (setSplitBandBps).
  */
 export const MULTIPLIER_SPLIT_BAND_BPS = 500;
 
@@ -176,6 +177,8 @@ export class ChainlinkSource implements PriceSource {
   /** Multiplier in force when a feed round was first observed (the one the answer embeds). */
   private readonly roundMultiplier = new Map<Address, { updatedAt: bigint; multiplier: bigint }>();
   private readonly now: () => number;
+  /** audit M-2: StockTokenRegistry.multiplierBandBps (governance-settable), refreshed by the service */
+  private splitBandBps: number;
 
   constructor(
     private readonly feeds: Record<string, ResolvedFeed>,
@@ -183,6 +186,16 @@ export class ChainlinkSource implements PriceSource {
     private readonly opts: ChainlinkOptions = {},
   ) {
     this.now = opts.now ?? Date.now;
+    this.splitBandBps = opts.splitBandBps ?? MULTIPLIER_SPLIT_BAND_BPS;
+  }
+
+  /** The registry's live-multiplier band (StockTokenRegistry.multiplierBandBps): a step beyond it is a split. */
+  setSplitBandBps(bps: number): void {
+    if (Number.isInteger(bps) && bps > 0 && bps <= 10_000) this.splitBandBps = bps;
+  }
+
+  get splitBand(): number {
+    return this.splitBandBps;
   }
 
   tickers(): string[] {
@@ -248,8 +261,10 @@ export class ChainlinkSource implements PriceSource {
         // audit M-2: a step beyond the band is a split / reverse split: the share unit itself changed, so the
         // round's per-share price is in OLD shares and the registry would value it at the new multiplier
         // (10x for a 10:1 split). No observation until the feed's first round after the change. In-band drift
-        // (dividend reinvestment) keeps the share unit: the round's own multiplier stays exact.
-        if (!withinBand(token.uiMultiplier, seen.multiplier, this.opts.splitBandBps ?? MULTIPLIER_SPLIT_BAND_BPS)) {
+        // (dividend reinvestment) keeps the share unit, so the round's per-share price is still a valid share price,
+        // but it is the PRE-change one (before the ex-dividend move) under a fresh publishedAt the registry guard
+        // cannot see: the registry values it at the new multiplier, an error of at most the band (residual, D-M2-4).
+        if (!withinBand(token.uiMultiplier, seen.multiplier, this.splitBandBps)) {
           return {
             ok: false,
             reason: `multiplier ${seen.multiplier} -> ${token.uiMultiplier} at ${eff}, after the feed's last round (${round.updatedAt}): a split changes the share unit, no per-share price until the next round`,
