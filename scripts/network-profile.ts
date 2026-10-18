@@ -28,6 +28,9 @@ export const MAINNET_FIXED: Readonly<Record<string, string>> = {
   ORDERLY_MODE: "live",
   ORACLE_SYNTHETIC: "0",
   ORACLE_PUSH_MODE: "pull",
+  // primary-confirm: Chainlink alone signs (sourceCount 1), the DEX TWAP / Pyth only confirm (VERIFY C6)
+  ORACLE_POLICY: "primary-confirm",
+  ORACLE_MIN_SOURCES: "1",
   OPS_REPORT_MODE: "signed",
   INDEXER_CONFIRMATIONS: "2",
   OPS_KEYS_DIR: ".data/mainnet/keys",
@@ -61,17 +64,25 @@ export interface ProfileResult {
 const isLocal = (url: string) => /(^|\/\/|@)(127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\])(:|\/|$)/.test(url);
 
 /**
- * Oracle sources (mirrors services/oracle/src/production.ts so the stack refuses before the oracle crash-loops):
- * Chainlink feeds come from the chain price config the oracle loads on 4663 (ORACLE_CHAIN_CONFIG, else
- * config/chains/4663.json under `root`) overlaid by ORACLE_CHAINLINK_FEEDS, whose entries must state their basis
- * ({"proxy","basis","token"}: a plain address is refused, VERIFY C2). The mainnet design is 3 live sources with 2
- * required: Chainlink + Pyth Pro (ORACLE_PYTH=1 + PYTH_API_KEY) + at least one more independent per-share source
- * (ORACLE_HTTP_SOURCES entries with the vendor's own quote timestamp — tsPath — and maxAgeMs <=
- * MAINNET_HTTP_MAX_AGE_MS; the Finnhub preset is not a mainnet source), so one source outage is tolerated and the
- * 150 bps band can isolate one bad source. ORACLE_MIN_SOURCES must be exactly MAINNET_ORACLE_MIN_SOURCES (the oracle also refuses
- * to start unless the on-chain AttestedOracle.minSources() leaves one spare live source).
+ * Oracle sources (mirrors services/oracle/src/production.ts so the stack refuses before the oracle crash-loops). The
+ * mainnet design is primary-confirm: Chainlink is the only source that sets and signs a price (sourceCount 1), a
+ * Uniswap v3 TWAP confirms it (divergence -> alert, never a different price), Pyth Pro / HTTP sources are optional
+ * extra confirmers. So, for every ticker (ORACLE_TICKERS, default the five launch tickers): a Chainlink feed in the
+ * chain price config the oracle loads on 4663 (ORACLE_CHAIN_CONFIG, else config/chains/4663.json under `root`) or
+ * ORACLE_CHAINLINK_FEEDS (entries must state their basis, {"proxy","basis","token"}: a plain address is refused,
+ * VERIFY C2), and a DEX confirm pool in that config's dexConfirm.pools with a liquidity floor of at least
+ * MAINNET_DEX_MIN_FLOOR_USD (the floor itself is checked live by source-check and every tick). ORACLE_POLICY and
+ * ORACLE_MIN_SOURCES are pinned (MAINNET_FIXED); an inherited value contradicting them is refused rather than silently
+ * overridden. Optional confirmers keep their rules: Pyth needs its key and https; HTTP specs their own timestamp
+ * (tsPath) and maxAgeMs <= MAINNET_HTTP_MAX_AGE_MS; the Finnhub preset is refused. The oracle itself also refuses to
+ * start unless the on-chain AttestedOracle.minSources() is exactly 1.
  */
-export const MAINNET_ORACLE_MIN_SOURCES = 2;
+export const MAINNET_ORACLE_MIN_SOURCES = 1;
+export const MAINNET_ORACLE_POLICY = "primary-confirm";
+/** services/oracle production.ts MAINNET_DEX_MIN_FLOOR_USD */
+export const MAINNET_DEX_MIN_FLOOR_USD = 10_000;
+/** services/oracle config.ts ORACLE_TICKERS default */
+const DEFAULT_ORACLE_TICKERS = "NVDA,TSLA,AAPL,MSFT,AMZN";
 /** services/oracle production.ts MAINNET_HTTP_MAX_AGE_MS */
 export const MAINNET_HTTP_MAX_AGE_MS = 30_000;
 
@@ -100,20 +111,54 @@ function oracleSourcesProblems(env: Env, root: string): string[] {
 
   const cfgName = env.ORACLE_CHAIN_CONFIG?.trim() || "config/chains/4663.json";
   const cfgPath = isAbsolute(cfgName) ? cfgName : resolve(root, cfgName);
-  let cfgFeeds = 0;
+  let cfgFeeds: Record<string, unknown> = {};
+  let cfgPools: Record<string, { pool?: unknown; minQuoteLiquidityUsd?: unknown }> = {};
   if (existsSync(cfgPath)) {
     try {
-      const c = JSON.parse(readFileSync(cfgPath, "utf8")) as { chainId?: number; chainlink?: { feeds?: Record<string, unknown> } };
+      const c = JSON.parse(readFileSync(cfgPath, "utf8")) as {
+        chainId?: number;
+        chainlink?: { feeds?: Record<string, unknown> };
+        dexConfirm?: { pools?: Record<string, { pool?: unknown; minQuoteLiquidityUsd?: unknown }> };
+      };
       if (c.chainId !== MAINNET_CHAIN_ID) problems.push(`${cfgName} is for chain ${c.chainId}, not 4663`);
-      else cfgFeeds = Object.keys(c.chainlink?.feeds ?? {}).length;
+      else {
+        cfgFeeds = c.chainlink?.feeds ?? {};
+        cfgPools = c.dexConfirm?.pools ?? {};
+      }
     } catch {
       problems.push(`${cfgName} is not valid JSON`);
     }
   } else if (env.ORACLE_CHAIN_CONFIG?.trim()) {
     problems.push(`ORACLE_CHAIN_CONFIG ${cfgName} not found`);
   }
-  if (cfgFeeds + Object.keys(envFeeds).length === 0) {
-    problems.push("no Chainlink feed: config/chains/4663.json (ORACLE_CHAIN_CONFIG) or ORACLE_CHAINLINK_FEEDS");
+  const tickers = (env.ORACLE_TICKERS?.trim() || DEFAULT_ORACLE_TICKERS)
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
+  if (Object.keys(cfgFeeds).length + Object.keys(envFeeds).length === 0) {
+    problems.push("no Chainlink feed: config/chains/4663.json (ORACLE_CHAIN_CONFIG) or ORACLE_CHAINLINK_FEEDS (Chainlink is the only signing source)");
+  } else {
+    const noFeed = tickers.filter((t) => !(t in cfgFeeds) && !(t in envFeeds));
+    if (noFeed.length > 0) problems.push(`no Chainlink feed for ${noFeed.join(", ")} (${cfgName} or ORACLE_CHAINLINK_FEEDS)`);
+  }
+  if (env.ORACLE_DEX_CONFIRM !== undefined && env.ORACLE_DEX_CONFIRM.trim() !== "" && !isOn(env.ORACLE_DEX_CONFIRM)) {
+    problems.push("ORACLE_DEX_CONFIRM is off: mainnet requires the Uniswap v3 TWAP confirm source (a DEX confirm pool per ticker)");
+  }
+  const noPool = tickers.filter((t) => typeof cfgPools[t]?.pool !== "string");
+  if (noPool.length > 0) problems.push(`no DEX confirm pool for ${noPool.join(", ")} (${cfgName} dexConfirm.pools)`);
+  for (const t of tickers) {
+    const floor = cfgPools[t]?.minQuoteLiquidityUsd;
+    if (typeof cfgPools[t]?.pool === "string" && (typeof floor !== "number" || floor < MAINNET_DEX_MIN_FLOOR_USD)) {
+      problems.push(`dexConfirm.pools.${t}.minQuoteLiquidityUsd must be >= ${MAINNET_DEX_MIN_FLOOR_USD} (got ${String(floor)})`);
+    }
+  }
+  const policy = env.ORACLE_POLICY?.trim();
+  if (policy && policy !== MAINNET_ORACLE_POLICY) {
+    problems.push(`ORACLE_POLICY=${policy} contradicts the mainnet profile (${MAINNET_ORACLE_POLICY}: Chainlink signs, the DEX TWAP / Pyth only confirm): remove it`);
+  }
+  const confirmBps = env.ORACLE_CONFIRM_BPS?.trim();
+  if (confirmBps && !(Number(confirmBps) > 0 && Number(confirmBps) <= 500)) {
+    problems.push(`ORACLE_CONFIRM_BPS=${confirmBps} must be in (0, 500] on mainnet (default 200)`);
   }
   const finnhub = isOn(env.ORACLE_HTTP_FINNHUB);
   const pythOn = isOn(env.ORACLE_PYTH);
@@ -127,10 +172,8 @@ function oracleSourcesProblems(env: Env, root: string): string[] {
       problems.push('ORACLE_PYTH_FEEDS is not a JSON object of ticker -> Pyth Pro feed id (e.g. {"NVDA":1314})');
     }
   }
-  const pyth = pythOn && pythKey;
-  // HTTP sources count only when they stamp their own quotes and are in-session tight (with one source down the
-  // other two must both be live market data); Finnhub never counts on mainnet (regular session only, 120 s)
-  let thirdCount = 0;
+  // optional HTTP confirm sources: their own quote timestamp and in-session tight (a stale last trade stamped with
+  // our receive time would "confirm" anything); Finnhub never on mainnet (regular session only, 120 s)
   for (const spec of Array.isArray(http) ? (http as Array<Record<string, unknown>>) : []) {
     const name = typeof spec?.name === "string" ? spec.name : "?";
     const age = typeof spec?.maxAgeMs === "number" ? spec.maxAgeMs : undefined;
@@ -138,7 +181,7 @@ function oracleSourcesProblems(env: Env, root: string): string[] {
       problems.push(`ORACLE_HTTP_SOURCES.${name} has no tsPath: on mainnet every quote must carry the vendor's own timestamp`);
     } else if (age === undefined || age > MAINNET_HTTP_MAX_AGE_MS) {
       problems.push(`ORACLE_HTTP_SOURCES.${name} needs maxAgeMs <= ${MAINNET_HTTP_MAX_AGE_MS} on mainnet`);
-    } else thirdCount++;
+    }
   }
   if (finnhub) {
     problems.push(
@@ -147,16 +190,10 @@ function oracleSourcesProblems(env: Env, root: string): string[] {
         : "ORACLE_HTTP_FINNHUB=1 but ORACLE_FINNHUB_API_KEY is not set (and Finnhub is not a mainnet source)",
     );
   }
-  if (!pyth) problems.push("no Pyth Pro source: set ORACLE_PYTH=1 + PYTH_API_KEY (the mainnet design: Chainlink + Pyth Pro + a third source)");
-  if (thirdCount === 0) {
-    problems.push(
-      "no third oracle source besides Chainlink and Pyth Pro: set ORACLE_HTTP_SOURCES (licensed per-share US-equity prices) or a preset; the mainnet design needs 3 live sources (2 required) so one outage is tolerated",
-    );
-  }
   const min = env.ORACLE_MIN_SOURCES?.trim();
-  if (min !== String(MAINNET_ORACLE_MIN_SOURCES)) {
+  if (min && min !== String(MAINNET_ORACLE_MIN_SOURCES)) {
     problems.push(
-      `ORACLE_MIN_SOURCES must be ${MAINNET_ORACLE_MIN_SOURCES} on mainnet (2 of the 3 live sources; ${min ? `got ${min}` : "unset: the oracle default is 3"})`,
+      `ORACLE_MIN_SOURCES=${min} contradicts the mainnet profile (${MAINNET_ORACLE_MIN_SOURCES}: primary-confirm signs every price with sourceCount 1): remove it`,
     );
   }
   return problems;
