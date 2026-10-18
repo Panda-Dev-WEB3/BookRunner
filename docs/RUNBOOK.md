@@ -402,12 +402,14 @@ can redo it during the timelock delay from the published quote.
   held price is still in pre-change shares. During that window:
   - desk hedges and flattens of the token revert. That includes the RISK flatten, which is deferred until the
     reprice instead of selling unbounded;
-  - the risk service values the token at its pre-change multiplier, never sells it and suppresses the
-    `DRAWDOWN` / `HEDGE_BAND` breaches while it is in the window;
+  - the risk service values the token at its pre-change multiplier (on-chain `basisMultiplier`) and never sells
+    it; only when that multiplier is unknown does it hold back the `DRAWDOWN` / `HEDGE_BAND` breaches;
   - the mark service refuses for up to one mark interval (warn log "split window: refusing ..."), then commits
-    held marks with the token at the multiplier of the price's basis. The basis multiplier comes from the token's
-    `UIMultiplierUpdated` events; when it is unknown the token is valued at 0. Check the log line, and raise
-    `MARK_SPLIT_LOG_LOOKBACK_BLOCKS` if the events are out of range.
+    held marks with the token at the multiplier of the price's basis. That multiplier comes from
+    `StockTokenRegistry.basisMultiplier` (on-chain), else the token's `UIMultiplierUpdated` events (paged), else
+    the previous mark's value is carried forward (no P&L). Only with no previous value is the token valued at 0
+    (error log "no basis multiplier and no previous mark value"): then check the token and the
+    `MARK_SPLIT_LOG_LOOKBACK_BLOCKS` range.
 
   All of this is expected and clears by itself at the reprice. The Chainlink source also drops a round from
   before a split until the feed's next round. A dividend update during a hold has the same effect until the
@@ -420,7 +422,12 @@ can redo it during the timelock delay from the published quote.
   `setNextMultiplierAnchor(token, 0)`. Do the cleanup right after the first live post-split print. Existing
   positions are not rebased: wind down or cap engine markets before a split.
 - If the issuer stages another change before you re-anchor a split, valuations of the token stop until your
-  re-anchor plus the next live print: re-anchor promptly.
+  re-anchor plus the next live print, and so does every voluntary engine trade on its markets (closes and margin
+  withdrawals too; liquidations still run): re-anchor promptly.
+- The RISK flatten of a token in the split window waits for the reprice even when the price is stale (for example
+  the reopen before the feed's first post-split round); expect the kill sequence to retry it.
+- Stored-multiplier mode (devnet / testnet): give engine markets a close-only period by calling
+  `setNextMultiplierAnchor(token, new)` before `setMultiplier(token, new)`, and clear it afterwards.
 
 ## Operations
 
