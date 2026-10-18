@@ -316,17 +316,33 @@ describe("OracleService tick", () => {
     expect(hh.parts.publisher!.venueFeeds.at(-1)!.prices[0]).toMatchObject({ symbol: "PERP_NVDA_USDC_bookrunner", price: 190, held: true, stale: false });
   });
 
+  test("venue feed: mock mode (oracle-side venue client) writes none", async () => {
+    await started(h);
+    await h.tick();
+    await Bun.sleep(0);
+    expect(h.venueCalls).toHaveLength(1);
+    expect(h.parts.publisher!.venueFeeds).toHaveLength(0);
+  });
+
+  test("venue feed carries ORACLE_TICK_MS", async () => {
+    const hh = new Harness({ venue: null, settings: { tickMs: 2_000 } });
+    await started(hh);
+    await hh.tick();
+    expect(hh.parts.publisher!.venueFeeds[0]!.tickMs).toBe(2_000);
+  });
+
   test("venue feed: nothing published without Orderly books or with ORACLE_VENUE_PRICES=0", async () => {
     const off = new Harness({ venue: null, settings: { venuePrices: false } });
     await started(off);
     await off.tick();
     expect(off.parts.publisher!.venueFeeds).toHaveLength(0);
-    await h.svc.setDeployment({ chainId: 31337, oracle: ORACLE_ADDR, chain: h.chain });
-    await h.svc.setUniverse(universe().map((e) => ({ ...e, venueSymbols: [] })));
-    h.set("NVDA", 190);
-    h.set("TSLA", 440);
-    await h.tick();
-    expect(h.parts.publisher!.venueFeeds).toHaveLength(0);
+    const none = new Harness({ venue: null });
+    await none.svc.setDeployment({ chainId: 31337, oracle: ORACLE_ADDR, chain: none.chain });
+    await none.svc.setUniverse(universe().map((e) => ({ ...e, venueSymbols: [] })));
+    none.set("NVDA", 190);
+    none.set("TSLA", 440);
+    await none.tick();
+    expect(none.parts.publisher!.venueFeeds).toHaveLength(0);
   });
 
   test("ORACLE_PUSH_ONCHAIN=0 (chain null): wall-clock timestamps, rows without tx", async () => {

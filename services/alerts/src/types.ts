@@ -202,7 +202,17 @@ export interface BuilderFeedSnap {
     /** unix ms: start of the failing run (null = pushing or held) */
     failingSince: number | null;
     error: string | null;
+    /** every book on it is in Subscription: the market may not be listed yet (not paged) */
+    preListing: boolean;
   }>;
+}
+
+/** ops-venue status (KEYS.venueSymbolIssues, every book poll, TTL 600 s): venue mode and whether the live builder price push runs. */
+export interface VenueOpsSnap {
+  ts: number;
+  mode: "mock" | "live";
+  /** the live builder price push is enabled: its status (builderFeed) must exist */
+  builderPush: boolean;
 }
 
 export interface Snapshot {
@@ -230,6 +240,8 @@ export interface Snapshot {
   backup: BackupSnap | null | undefined;
   /** null/absent: no live builder price push status (mock mode, or ops-venue not pushing); undefined: Redis read failed */
   builderFeed?: BuilderFeedSnap | null;
+  /** null/absent: no ops-venue status (or an older ops-venue) */
+  venueOps?: VenueOpsSnap | null;
   /** collection failures that are themselves worth an alert (db / redis unreachable) */
   infraErrors: Array<{ source: "db" | "redis"; error: string }>;
 }

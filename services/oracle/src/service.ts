@@ -29,8 +29,10 @@ export interface OracleSettings {
   pushIntervalMs: number;
   pushDeviationBps: number;
   sessionsMode: string | undefined;
-  /** builder prices for Orderly books: the venue feed (Redis, pushed live by ops-venue) + the mock venue client */
+  /** builder prices for Orderly books: mock venue client (mock), or the venue feed (Redis, pushed by ops-venue; live) */
   venuePrices: boolean;
+  /** ORACLE_TICK_MS, carried in the venue feed (ops-venue's staleness floor = 3 ticks) */
+  tickMs?: number;
   /** pull: never push on a timer (consumers carry the bundle); heartbeat: pushMany on the push policy */
   pushMode: PushMode;
   /** price ids whose latest signed update is older than this are left out of the bundle */
@@ -610,11 +612,13 @@ export class OracleService {
         prices.push({ symbol, priceId: e.priceId, price: m.price, held: m.held, stale, publishedAt: m.publishedAt, signedAt: this.latestAt.get(e.priceId) ?? m.publishedAt * 1000 });
       }
     }
-    return { v: 1, ts: nowMs, prices };
+    const tickMs = this.deps.settings.tickMs;
+    return { v: 1, ts: nowMs, ...(tickMs ? { tickMs } : {}), prices };
   }
 
+  /** Live only (no mock venue client): mock mode keeps its POST to mock-orderly and writes no feed. */
   private async publishVenueFeed(nowMs: number): Promise<void> {
-    if (!this.deps.publisher || !this.deps.settings.venuePrices) return;
+    if (!this.deps.publisher || !this.deps.settings.venuePrices || this.deps.venue) return;
     if (!this.universe.some((e) => e.venueSymbols.length > 0)) return;
     const msg = this.venueFeedMsg(nowMs);
     try {

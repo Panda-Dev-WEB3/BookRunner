@@ -21,9 +21,10 @@ import {
   venueReportAge,
   venueSymbol,
 } from "../src/rules";
-import { oracleDown } from "../src/collect";
+import { BUILDER_FEED_STATUS_TTL_SEC, type BuilderFeedStatusMsg, KEYS, VENUE_SYMBOL_ISSUES_TTL_SEC } from "@bookrunner/shared/queues";
+import { collect, emptyMemory, oracleDown } from "../src/collect";
 import { loadConfig } from "../src/config";
-import type { OracleConfirmSnap, OracleProbe, OracleSourceSnap } from "../src/types";
+import type { BuilderFeedSnap, OracleConfirmSnap, OracleProbe, OracleSourceSnap } from "../src/types";
 import { NOW, NOW_S, book, confirmOracle, rules, snap, supervisor } from "./fixtures";
 
 const keys = (cs: Array<{ key: string }>) => cs.map((c) => c.key);
@@ -122,8 +123,9 @@ describe("venue_report_stale", () => {
 });
 
 describe("builder_price_push (live Orderly builder prices, VERIFY O18)", () => {
-  const sym = (over: Record<string, unknown> = {}) => ({ symbol: "PERP_NVDA_USDC_bookrunner", bookIds: [3], state: "pushing", lastPushAt: NOW, failingSince: null, error: null, ...over });
-  const feed = (symbols: ReturnType<typeof sym>[], ts = NOW) => ({ ts, socket: { state: "ready", lastError: null }, symbols });
+  const sym = (over: Record<string, unknown> = {}) => ({ symbol: "PERP_NVDA_USDC_bookrunner", bookIds: [3], state: "pushing", lastPushAt: NOW, failingSince: null, error: null, preListing: false, ...over });
+  const feed = (symbols: ReturnType<typeof sym>[], ts = NOW) => ({ ts, socket: { state: "ready", lastError: null }, symbols }) as BuilderFeedSnap;
+  const liveOps = { ts: NOW, mode: "live" as const, builderPush: true };
   test("a symbol failing >= 30 s in session is critical; shorter, held or pushing is quiet", () => {
     const c = builderPricePush(snap({ builderFeed: feed([sym({ state: "disconnected", failingSince: NOW - 31_000, error: "auth failed" })]) }), rules());
     expect(c.map((x) => [x.key, x.severity])).toEqual([["builder_price_push:PERP_NVDA_USDC_bookrunner", "critical"]]);
@@ -133,15 +135,75 @@ describe("builder_price_push (live Orderly builder prices, VERIFY O18)", () => {
     expect(builderPricePush(snap({ builderFeed: null }), rules())).toEqual([]);
     expect(builderPricePush(snap(), rules())).toEqual([]);
   });
+  test("books still in Subscription (preListing) are not paged", () => {
+    expect(builderPricePush(snap({ builderFeed: feed([sym({ state: "rejected", failingSince: NOW - 300_000, preListing: true })]) }), rules())).toEqual([]);
+  });
   test("the span stops at ops-venue's status time; a status that stopped updating alerts on its own", () => {
     const old = feed([sym({ state: "stale", failingSince: NOW - 100_000 })], NOW - 90_000); // failing 10 s when last written
     expect(builderPricePush(snap({ builderFeed: old }), rules()).map((x) => x.key)).toEqual(["builder_price_push_status"]);
     expect(builderPricePush(snap({ builderFeed: feed([sym()], NOW - 59_000) }), rules())).toEqual([]);
   });
+  test("missing status: critical only when ops-venue reports live mode with the push on and an Orderly book is live", () => {
+    expect(builderPricePush(snap({ builderFeed: null, venueOps: liveOps }), rules()).map((x) => [x.key, x.severity])).toEqual([["builder_price_push_status", "critical"]]);
+    expect(builderPricePush(snap({ builderFeed: null, venueOps: { ...liveOps, builderPush: false } }), rules())).toEqual([]);
+    expect(builderPricePush(snap({ builderFeed: null, venueOps: { ...liveOps, mode: "mock" } }), rules())).toEqual([]);
+    expect(builderPricePush(snap({ builderFeed: null, venueOps: liveOps, books: [book({ state: "Subscription" })] }), rules())).toEqual([]);
+    expect(builderPricePush(snap({ builderFeed: null, venueOps: null }), rules())).toEqual([]);
+  });
   test("ALERT_BUILDER_PUSH_FAIL_SECONDS", () => {
     expect(loadConfig({}).rules.builderPushFailSec).toBe(30);
     const c = builderPricePush(snap({ builderFeed: feed([sym({ state: "stale", failingSince: NOW - 31_000 })]) }), rules({ builderPushFailSec: 60 }));
     expect(c).toEqual([]);
+  });
+
+  // Through the real key lifetimes: ops-venue writes the status / issues with their shared TTLs into a TTL-honouring
+  // store; collect() reads it back at later times (no hand-built snapshot).
+  test("through Redis TTLs: a stalled push loop alerts while its status lives, a stopped one as a missing status", async () => {
+    let clock = NOW;
+    const store = new Map<string, { v: string; exp: number }>();
+    const set = (k: string, v: unknown, ttlSec: number) => store.set(k, { v: JSON.stringify(v), exp: clock + ttlSec * 1000 });
+    const get = (k: string) => {
+      const e = store.get(k);
+      return e && e.exp > clock ? e.v : null;
+    };
+    const kv = { get: async (k: string) => get(k), mget: async (ks: string[]) => ks.map(get) };
+    const db = {
+      books: async () => [{ id: 3, name: "NVDA", symbol: "PERP_NVDA_USDC", state: "Live", venue: 0, subscriptionEnds: new Date(NOW - 86_400_000) }],
+      latestMarkPeriodEnds: async () => [],
+      killsSince: async () => [],
+      cursors: async () => [],
+    };
+    const chain = { head: async () => ({ number: 1, timestamp: clock / 1000 }), balance: async () => 0n, buybackPending: async () => null, markInterval: async () => 3600 };
+    const fetchOk = (async () => new Response(JSON.stringify({ ok: true }))) as unknown as typeof fetch;
+    const settings = { network: "testnet", chainId: 46630, apiUrl: "http://api", markIntervalSec: 3600, roles: [], rpcWindowSec: 900 };
+    const statusMsg = (ts: number): BuilderFeedStatusMsg => ({
+      v: 1,
+      ts,
+      intervalMs: 1000,
+      maxAgeMs: 10_000,
+      socket: { state: "ready", lastError: null, host: "ws-oracle.orderly.org" },
+      symbols: [{ symbol: "PERP_NVDA_USDC_bookrunner", base: "NVDA", bookIds: [3], state: "pushing", lastPushAt: ts, price: 190, failingSince: null, error: null, preListing: false }],
+    });
+    const issues = (ts: number) => ({ v: 1, ts, mode: "live", builderPush: true, books: [] });
+    const evalAt = async (t: number) => {
+      clock = t;
+      const { snapshot } = await collect({ db, kv, chain, fetch: fetchOk, now: () => clock }, settings, emptyMemory(), 86_400);
+      return builderPricePush(snapshot, rules()).map((x) => x.key);
+    };
+    // healthy: both written now
+    set(KEYS.builderFeedStatus, statusMsg(NOW), BUILDER_FEED_STATUS_TTL_SEC);
+    set(KEYS.venueSymbolIssues, issues(NOW), VENUE_SYMBOL_ISSUES_TTL_SEC);
+    expect(await evalAt(NOW)).toEqual([]);
+    // the push loop stalls (no status write) while the book poll keeps going: 90 s later the old status still exists
+    clock = NOW + 85_000;
+    set(KEYS.venueSymbolIssues, issues(clock), VENUE_SYMBOL_ISSUES_TTL_SEC);
+    expect(await evalAt(NOW + 90_000)).toEqual(["builder_price_push_status"]);
+    // past the status TTL the key is gone: the missing-status branch takes over (issues refreshed by the book poll)
+    clock = NOW + BUILDER_FEED_STATUS_TTL_SEC * 1000 - 5_000;
+    set(KEYS.venueSymbolIssues, issues(clock), VENUE_SYMBOL_ISSUES_TTL_SEC);
+    expect(await evalAt(NOW + BUILDER_FEED_STATUS_TTL_SEC * 1000 + 1)).toEqual(["builder_price_push_status"]);
+    expect(get(KEYS.builderFeedStatus)).toBeNull();
+    expect(BUILDER_FEED_STATUS_TTL_SEC).toBeGreaterThan(rules().builderPushFailSec + 30);
   });
 });
 

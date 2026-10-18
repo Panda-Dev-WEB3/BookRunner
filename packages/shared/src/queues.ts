@@ -34,8 +34,12 @@ export const KEYS = {
 
 /** The oracle refreshes KEYS.oracleVenueFeed every tick; a stopped oracle lets it expire (ops-venue then stops pushing). */
 export const ORACLE_VENUE_FEED_TTL_SEC = 30;
-/** ops-venue refreshes KEYS.builderFeedStatus every few seconds while it pushes live builder prices. */
-export const BUILDER_FEED_STATUS_TTL_SEC = 60;
+/**
+ * ops-venue refreshes KEYS.builderFeedStatus every few seconds while it pushes live builder prices. The TTL is far
+ * above the alert thresholds (services/alerts builder_price_push: 30 s failing, status older than 60 s) so a stalled
+ * push loop leaves an old status behind that alerts, instead of a missing one.
+ */
+export const BUILDER_FEED_STATUS_TTL_SEC = 600;
 
 /**
  * The oracle's signed prices keyed by Orderly venue symbol (the builder-price push targets of Orderly books), every
@@ -46,6 +50,8 @@ export const BUILDER_FEED_STATUS_TTL_SEC = 60;
 export interface OracleVenueFeedMsg {
   v: 1;
   ts: number; // unix ms (oracle tick)
+  /** ORACLE_TICK_MS: ops-venue never treats a price as stale before 3 ticks, whatever its own max age */
+  tickMs?: number;
   prices: OracleVenuePrice[];
 }
 
@@ -87,6 +93,11 @@ export interface BuilderFeedStatusMsg {
     /** unix ms: start of the current failing run (null = pushing or held) */
     failingSince: number | null;
     error: string | null;
+    /**
+     * every book on this symbol is still in Subscription: the builder market / ORACLE_<broker> feed may not be listed
+     * yet (manual Orderly One listing, VERIFY O20), so a failure is logged, not paged
+     */
+    preListing: boolean;
   }>;
 }
 
@@ -102,6 +113,8 @@ export interface VenueSymbolIssuesMsg {
   ts: number; // unix ms
   mode: "mock" | "live";
   books: Array<{ bookId: number; charterSymbol: string; error: string }>;
+  /** live builder price push enabled (KEYS.builderFeedStatus expected; alerts raise a missing status) */
+  builderPush?: boolean;
 }
 
 export interface OraclePriceMsg {

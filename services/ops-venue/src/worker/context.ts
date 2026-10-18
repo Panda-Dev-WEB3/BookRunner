@@ -40,6 +40,8 @@ export interface OpsSettings {
   reportSettleSec: number;
   /** OPS_REPORT_MODE (service default: signed). */
   reportMode: ReportMode;
+  /** live builder price push enabled (published in VenueSymbolIssuesMsg: alerts expect its status) */
+  builderPush?: boolean;
   /** Orderly native deposit-fee keeper (worker/native.ts); default: warn only. */
   native?: NativeFeeSettings;
 }

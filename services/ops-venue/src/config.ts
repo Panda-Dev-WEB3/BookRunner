@@ -49,10 +49,16 @@ export const opsEnvSchema = baseEnvSchema.extend({
   ORDERLY_ORACLE_KEY_SECRET: z.string().optional(),
   OPS_BUILDER_PRICE_PUSH: bool(true), // ORDERLY_MODE=live + ORDERLY_SYMBOL_PRICE_SOURCE=builder only
   OPS_BUILDER_PRICE_INTERVAL_MS: z.coerce.number().int().min(100).max(1_000).default(1_000), // Orderly: >= 1 publish/s in session
-  OPS_BUILDER_PRICE_MAX_AGE_MS: z.coerce.number().int().min(1_000).default(10_000), // older signed prices are not re-sent
+  // older signed prices (held or not) are not re-sent; never below 3 x the oracle's ORACLE_TICK_MS (carried in its feed;
+  // testnet ticks every 2 s, mainnet / devnet 1 s), so a slow oracle tick cannot make every price stale between ticks
+  OPS_BUILDER_PRICE_MAX_AGE_MS: z.coerce.number().int().min(1_000).default(10_000),
   OPS_BUILDER_ORACLE_RECONNECT_MS: z.coerce.number().int().min(100).default(5_000), // first retry (docs sample: 5 s), doubling
   OPS_BUILDER_ORACLE_MAX_RECONNECT_MS: z.coerce.number().int().min(100).default(60_000),
   OPS_BUILDER_ORACLE_IDLE_MS: z.coerce.number().int().min(0).default(60_000), // no server message (ping) this long: reconnect; 0 = off
+  // client WebSocket ping frames while authenticated; no pong / message for the timeout: reconnect. Detects a half-open
+  // connection (send() still succeeds) within ~20 s, inside the 30 s builder_price_push alert window. 0 = off
+  OPS_BUILDER_ORACLE_LIVENESS_MS: z.coerce.number().int().min(0).default(5_000),
+  OPS_BUILDER_ORACLE_LIVENESS_TIMEOUT_MS: z.coerce.number().int().min(1_000).default(15_000),
   ORDERLY_SYMBOL_PRICE_SOURCE: z.enum(["builder", "chainlink"]).default("builder"),
   // Settlement token symbol on Orderly (holding rows, withdraw / transfer messages): USDC on devnet, USDG on
   // Robinhood Chain (VERIFY O3/O7). Must match the OrderlyAdapter tokenHash (keccak256 of this symbol).
@@ -69,5 +75,13 @@ export type OpsEnv = z.infer<typeof opsEnvSchema>;
 export function loadOpsEnv(source: Record<string, string | undefined> = process.env): OpsEnv {
   const parsed = opsEnvSchema.safeParse(source);
   if (!parsed.success) throw new Error(`invalid environment: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
-  return parsed.data;
+  const e = parsed.data;
+  // a key of one account signing for another fails Orderly auth forever: both or neither
+  if (!!e.ORDERLY_ORACLE_ACCOUNT_ID !== !!e.ORDERLY_ORACLE_KEY_SECRET) {
+    throw new Error("invalid environment: ORDERLY_ORACLE_ACCOUNT_ID and ORDERLY_ORACLE_KEY_SECRET must be set together (the pushing account and its Orderly key)");
+  }
+  if (e.OPS_BUILDER_ORACLE_LIVENESS_MS > 0 && e.OPS_BUILDER_ORACLE_LIVENESS_TIMEOUT_MS <= e.OPS_BUILDER_ORACLE_LIVENESS_MS) {
+    throw new Error("invalid environment: OPS_BUILDER_ORACLE_LIVENESS_TIMEOUT_MS must exceed OPS_BUILDER_ORACLE_LIVENESS_MS");
+  }
+  return e;
 }

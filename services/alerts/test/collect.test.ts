@@ -102,10 +102,11 @@ describe("collect", () => {
       [4, "pool_engine", null, null, null],
     ]);
     expect(s.books!.map((b) => b.venueSymbolError)).toEqual(["no market", null]);
+    expect(s.venueOps).toEqual({ ts: NOW, mode: "live", builderPush: false });
     expect(s.builderFeed).toEqual({
       ts: NOW,
       socket: { state: "ready", lastError: null },
-      symbols: [{ symbol: "PERP_NVDA_USDC_bookrunner", bookIds: [3], state: "stale", lastPushAt: NOW - 40_000, failingSince: NOW - 35_000, error: "x" }],
+      symbols: [{ symbol: "PERP_NVDA_USDC_bookrunner", bookIds: [3], state: "stale", lastPushAt: NOW - 40_000, failingSince: NOW - 35_000, error: "x", preListing: false }],
     });
     expect(s.kills).toEqual([{ id: 9, bookId: 3, ts: NOW - 1000, reason: "DD", breaches: ["DRAWDOWN"] }]);
     expect(s.supervisor?.procs[0]!.name).toBe("mark");

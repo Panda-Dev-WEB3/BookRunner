@@ -3,7 +3,7 @@
 // second while the market session is open. Prices come only from the oracle's venue feed (Redis KEYS.oracleVenueFeed);
 // between oracle ticks the LATEST SIGNED price is re-sent, never a new one. Nothing is pushed for a symbol the oracle
 // holds (session closed: Orderly freezes the index OFF_MARKET and applies its own off-market handling), marks stale (no
-// publishable price this tick) or whose price is older than maxAgeMs. Per-symbol state goes to Redis
+// publishable price this tick) or whose price is older than maxAgeMs (held or not; never below 3 oracle ticks). Per-symbol state goes to Redis
 // KEYS.builderFeedStatus; services/alerts raises builder_price_push when a symbol fails for > 30 s in session.
 import { baseAssetOf, type BuilderFeedStatusMsg, type BuilderPushState, type Logger, type OracleVenueFeedMsg, type OracleVenuePrice } from "@bookrunner/shared";
 import { type TrackedBook, tradable } from "../worker/context";
@@ -22,6 +22,8 @@ export interface FeedSocket {
 export interface PushTarget {
   symbol: string;
   bookIds: number[];
+  /** every book on it is still in Subscription: the market / feed may not be listed yet (failures are not paged) */
+  preListing?: boolean;
 }
 
 export interface BuilderPriceFeedOptions {
@@ -34,14 +36,22 @@ export interface BuilderPriceFeedOptions {
   now?: () => number;
   /** push cadence; Orderly requires >= 1 publish/s while the session is open */
   intervalMs?: number;
-  /** a signed price older than this (oracle wall clock) is not re-sent */
+  /**
+   * a signed price older than this (oracle wall clock) is not re-sent, held or not (the oracle re-signs held prices
+   * every tick, so an old held price means the oracle stopped). Never below 3 oracle ticks (OracleVenueFeedMsg.tickMs).
+   */
   maxAgeMs?: number;
+  /** a rejected publish keeps the symbol "rejected" this long (reject latency jitter must not reset the failing run) */
+  rejectHoldMs?: number;
+  /** Redis reads / writes of the push loop run off the hot path and are abandoned after this long */
+  ioTimeoutMs?: number;
 }
 
 interface SymbolState {
   symbol: string;
   base: string;
   bookIds: number[];
+  preListing: boolean;
   state: BuilderPushState;
   lastPushAt: number | null;
   price: number | null;
@@ -55,29 +65,43 @@ const FED_STATES: ReadonlySet<string> = new Set(["Subscription", "Live", "Retiri
 
 /** Push targets: tradable Orderly books (they have a builder market) in a listed state, one entry per venue symbol. */
 export function builderFeedTargets(books: ReadonlyArray<Pick<TrackedBook, "bookId" | "symbol" | "state" | "venueSymbolError">>): PushTarget[] {
-  const by = new Map<string, number[]>();
+  const by = new Map<string, { bookIds: number[]; preListing: boolean }>();
   for (const b of books) {
     if (!tradable(b) || !FED_STATES.has(b.state)) continue;
-    by.set(b.symbol, [...(by.get(b.symbol) ?? []), b.bookId].sort((x, y) => x - y));
+    const cur = by.get(b.symbol) ?? { bookIds: [], preListing: true };
+    cur.bookIds = [...cur.bookIds, b.bookId].sort((x, y) => x - y);
+    cur.preListing &&= b.state === "Subscription";
+    by.set(b.symbol, cur);
   }
-  return [...by.entries()].map(([symbol, bookIds]) => ({ symbol, bookIds }));
+  return [...by.entries()].map(([symbol, v]) => ({ symbol, bookIds: v.bookIds, preListing: v.preListing }));
 }
 
 const FAILING: ReadonlySet<BuilderPushState> = new Set(["stale", "no-price", "invalid", "disconnected", "rejected", "not-configured"]);
 
+/** Waits at most `ms` for `p` (rejects after that; `p` keeps running but is no longer awaited). */
+function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let t: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([p, new Promise<never>((_, reject) => (t = setTimeout(() => reject(new Error(`${what} timed out after ${ms} ms`)), ms)))]).finally(() => clearTimeout(t));
+}
+
 export class BuilderPriceFeed {
-  private readonly prices = new Map<string, OracleVenuePrice & { feedTs: number }>();
+  private readonly prices = new Map<string, OracleVenuePrice & { feedTs: number; tickMs: number | null }>();
   private readonly states = new Map<string, SymbolState>();
-  /** rejects since the last tick, by base_ccy ("*" = not attributable) */
+  /** latest reject per base_ccy ("*" = not attributable) */
   private readonly rejects = new Map<string, PublishReject>();
   private readonly now: () => number;
+  private tickWarned = false;
   readonly intervalMs: number;
   readonly maxAgeMs: number;
+  readonly rejectHoldMs: number;
+  readonly ioTimeoutMs: number;
 
   constructor(private readonly o: BuilderPriceFeedOptions) {
     this.now = o.now ?? Date.now;
     this.intervalMs = o.intervalMs ?? 1_000;
     this.maxAgeMs = o.maxAgeMs ?? 10_000;
+    this.rejectHoldMs = o.rejectHoldMs ?? 5_000;
+    this.ioTimeoutMs = o.ioTimeoutMs ?? 500;
   }
 
   /**
@@ -86,10 +110,15 @@ export class BuilderPriceFeed {
    */
   onFeed(msg: OracleVenueFeedMsg): void {
     if (!msg || msg.v !== 1 || !Array.isArray(msg.prices) || typeof msg.ts !== "number") return;
+    const tickMs = typeof msg.tickMs === "number" && msg.tickMs > 0 ? msg.tickMs : null;
+    if (tickMs !== null && 3 * tickMs > this.maxAgeMs && !this.tickWarned) {
+      this.tickWarned = true;
+      this.o.log.warn({ oracleTickMs: tickMs, maxAgeMs: this.maxAgeMs, effectiveMaxAgeMs: 3 * tickMs }, "OPS_BUILDER_PRICE_MAX_AGE_MS is below 3 oracle ticks: using 3 x ORACLE_TICK_MS");
+    }
     for (const p of msg.prices) {
       if (!p || typeof p.symbol !== "string" || typeof p.signedAt !== "number" || typeof p.price !== "number") continue;
       const cur = this.prices.get(p.symbol);
-      if (!cur || msg.ts >= cur.feedTs) this.prices.set(p.symbol, { ...p, feedTs: msg.ts });
+      if (!cur || msg.ts >= cur.feedTs) this.prices.set(p.symbol, { ...p, feedTs: msg.ts, tickMs });
     }
   }
 
@@ -107,23 +136,40 @@ export class BuilderPriceFeed {
     this.rejects.set(r.base ?? "*", r);
   }
 
+  /** Effective staleness limit of one entry: maxAgeMs, never below 3 oracle ticks. */
+  private maxAgeOf(p: { tickMs: number | null }): number {
+    return Math.max(this.maxAgeMs, 3 * (p.tickMs ?? 0));
+  }
+
+  /** The latest reject for this base (or an unattributable one) within rejectHoldMs, if any. */
+  private rejectFor(base: string, now: number): PublishReject | null {
+    let best: PublishReject | null = null;
+    for (const k of [base, "*"]) {
+      const r = this.rejects.get(k);
+      if (r && now - r.at < this.rejectHoldMs && (!best || r.at > best.at)) best = r;
+    }
+    return best;
+  }
+
   /** One push round: every target, at most one publish per base_ccy. */
   tick(): void {
     const now = this.now();
     const targets = new Map<string, PushTarget>();
     for (const t of this.o.targets()) {
       const cur = targets.get(t.symbol);
-      targets.set(t.symbol, cur ? { symbol: t.symbol, bookIds: [...new Set([...cur.bookIds, ...t.bookIds])].sort((a, b) => a - b) } : t);
+      targets.set(
+        t.symbol,
+        cur ? { symbol: t.symbol, bookIds: [...new Set([...cur.bookIds, ...t.bookIds])].sort((a, b) => a - b), preListing: !!cur.preListing && !!t.preListing } : t,
+      );
     }
     for (const s of [...this.states.keys()]) if (!targets.has(s)) this.states.delete(s);
     const sentBase = new Set<string>();
-    const anyReject = this.rejects.get("*") ?? null;
     for (const t of targets.values()) {
       const base = baseAssetOf(t.symbol) ?? t.symbol;
-      const st = this.states.get(t.symbol) ?? { symbol: t.symbol, base, bookIds: t.bookIds, state: "no-price" as BuilderPushState, lastPushAt: null, price: null, failingSince: null, error: null };
+      const st = this.states.get(t.symbol) ?? { symbol: t.symbol, base, bookIds: t.bookIds, preListing: false, state: "no-price" as BuilderPushState, lastPushAt: null, price: null, failingSince: null, error: null };
       st.bookIds = t.bookIds;
+      st.preListing = !!t.preListing;
       this.states.set(t.symbol, st);
-      const reject = this.rejects.get(base) ?? anyReject;
       const p = this.prices.get(t.symbol);
       let next: BuilderPushState;
       let error: string | null = null;
@@ -133,14 +179,15 @@ export class BuilderPriceFeed {
       } else if (!p) {
         next = "no-price";
         error = "no oracle price for this symbol";
+      } else if (now - p.signedAt > this.maxAgeOf(p)) {
+        // before `held`: the oracle re-signs held prices every tick, so an old one (held or not) means it stopped
+        next = "stale";
+        error = `oracle price is ${Math.round((now - p.signedAt) / 1000)} s old (max ${Math.round(this.maxAgeOf(p) / 1000)} s)${p.held ? ", last seen held" : ""}`;
       } else if (p.held) {
         next = "held";
       } else if (p.stale) {
         next = "stale";
         error = "the oracle has no publishable price in session";
-      } else if (now - p.signedAt > this.maxAgeMs) {
-        next = "stale";
-        error = `oracle price is ${Math.round((now - p.signedAt) / 1000)} s old (max ${Math.round(this.maxAgeMs / 1000)} s)`;
       } else if (!Number.isFinite(p.price) || p.price <= 0) {
         next = "invalid";
         error = `invalid oracle price ${p.price}`;
@@ -152,6 +199,7 @@ export class BuilderPriceFeed {
         sentBase.add(base);
         st.lastPushAt = now;
         st.price = p.price;
+        const reject = this.rejectFor(base, now);
         next = reject ? "rejected" : "pushing";
         if (reject) error = reject.error;
       } else {
@@ -160,7 +208,6 @@ export class BuilderPriceFeed {
       }
       this.transition(st, next, error, now);
     }
-    this.rejects.clear();
   }
 
   private transition(st: SymbolState, next: BuilderPushState, error: string | null, now: number): void {
@@ -171,8 +218,8 @@ export class BuilderPriceFeed {
     else st.failingSince = null;
     if (prev === next && st.logged) return; // transitions only
     st.logged = true;
-    const fields = { symbol: st.symbol, base: st.base, bookIds: st.bookIds, from: prev, to: next, ...(error ? { err: error } : {}) };
-    if (FAILING.has(next)) this.o.log.warn(fields, "builder price push not running");
+    const fields = { symbol: st.symbol, base: st.base, bookIds: st.bookIds, from: prev, to: next, preListing: st.preListing, ...(error ? { err: error } : {}) };
+    if (FAILING.has(next)) this.o.log.warn(fields, st.preListing ? "builder price push not running (books in Subscription: market may not be listed yet)" : "builder price push not running");
     else this.o.log.info(fields, next === "held" ? "builder price push paused: session closed (oracle holds)" : "builder price push running");
   }
 
@@ -193,28 +240,45 @@ export class BuilderPriceFeed {
         price: x.price,
         failingSince: x.failingSince,
         error: x.error,
+        preListing: x.preListing,
       })),
     };
   }
 
   /**
-   * Push loop: tick every intervalMs (scheduled from the previous start, so the cadence holds), refresh() the oracle
-   * feed from Redis every refreshEvery ticks (covers missed pub/sub messages), status published every statusEvery ticks.
+   * Push loop: tick every intervalMs (scheduled from the previous start, so the cadence holds). Redis I/O never blocks
+   * a tick: refresh() (re-read of the oracle feed key, covers missed pub/sub messages) every refreshEvery ticks and the
+   * status write every statusEvery ticks run in the background, one at a time, abandoned after ioTimeoutMs.
    */
   async run(signal: AbortSignal, io: { refresh?: () => Promise<void>; publishStatus?: (s: BuilderFeedStatusMsg) => Promise<void>; refreshEvery?: number; statusEvery?: number; sleep?: (ms: number) => Promise<void> } = {}): Promise<void> {
     const sleep = io.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    let refreshing: Promise<void> | null = null;
+    let publishing: Promise<void> | null = null;
     let n = 0;
     while (!signal.aborted) {
       const start = this.now();
-      if (io.refresh && n % (io.refreshEvery ?? 5) === 0) await io.refresh().catch((err) => this.o.log.debug({ err: String(err) }, "builder feed: oracle feed read failed"));
+      if (io.refresh && !refreshing && n % (io.refreshEvery ?? 5) === 0) {
+        refreshing = withTimeout(io.refresh(), this.ioTimeoutMs, "oracle feed read")
+          .catch((err) => this.o.log.debug({ err: String(err) }, "builder feed: oracle feed read failed"))
+          .finally(() => {
+            refreshing = null;
+          });
+      }
       try {
         this.tick();
       } catch (err) {
         this.o.log.error({ err: err instanceof Error ? err.message : String(err) }, "builder feed tick failed");
       }
-      if (io.publishStatus && n % (io.statusEvery ?? 5) === 0) await io.publishStatus(this.status()).catch((err) => this.o.log.debug({ err: String(err) }, "builder feed status publish failed"));
+      if (io.publishStatus && !publishing && n % (io.statusEvery ?? 5) === 0) {
+        publishing = withTimeout(io.publishStatus(this.status()), this.ioTimeoutMs, "builder feed status write")
+          .catch((err) => this.o.log.debug({ err: String(err) }, "builder feed status publish failed"))
+          .finally(() => {
+            publishing = null;
+          });
+      }
       n++;
       await sleep(Math.max(0, this.intervalMs - (this.now() - start)));
     }
+    await Promise.all([refreshing, publishing]);
   }
 }

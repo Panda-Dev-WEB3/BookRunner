@@ -7,8 +7,12 @@
 //            documented, a rejection comes back as {event: "publish", success: false, ...}
 //   ping     server {event: "ping"} -> client {event: "pong"}
 //   cadence  at least one publish per second per feed while the market session is open (BuilderPriceFeed)
+// Liveness: Orderly's ping interval is not documented, so the client also sends WebSocket (RFC 6455) ping frames every
+// livenessMs and reconnects when nothing (pong or message) came back for livenessTimeoutMs: a half-open connection,
+// where send() still succeeds, is detected well inside the 30 s alert window.
+// Prices are rounded to 8 decimals (docs sample: round(price, 8)).
 // VERIFY: testnet domain (undocumented; DNS has testnet-ws-oracle.orderly.org), the exact auth / reject message shapes
-// (does a reject echo id / base_ccy?), the server ping interval (idle timeout below), price precision limits.
+// (does a reject echo id / base_ccy?), the server ping interval, price precision limits, ping frames through Cloudflare.
 import type { Logger } from "@bookrunner/shared";
 import { type Ed25519Key, signMessage } from "../orderly/auth";
 
@@ -57,6 +61,10 @@ export interface PublishReject {
   at: number;
 }
 
+/** Docs sample precision: round(price, 8). */
+export const PRICE_DP = 8;
+export const roundPushPrice = (p: number): number => Math.round(p * 10 ** PRICE_DP) / 10 ** PRICE_DP;
+
 export type OracleSocketState = "idle" | "connecting" | "authenticating" | "ready" | "backoff" | "stopped";
 
 type WsLike = Pick<WebSocket, "readyState" | "send" | "close" | "addEventListener">;
@@ -77,6 +85,10 @@ export interface BuilderOracleSocketOptions {
   authTimeoutMs?: number;
   /** no server message (ping) this long: assume a dead connection and reconnect; 0 = off */
   idleTimeoutMs?: number;
+  /** send a WebSocket ping frame this often while authenticated (0 = off; needs a client with ping(), as Bun's) */
+  livenessMs?: number;
+  /** no pong / message for this long while authenticated: reconnect */
+  livenessTimeoutMs?: number;
   onReject?: (r: PublishReject) => void;
   /** tests: the WebSocket constructor */
   webSocket?: WebSocketFactory;
@@ -92,6 +104,8 @@ export class BuilderOracleSocket {
   private timers = new Set<ReturnType<typeof setTimeout>>();
   private authTimer: ReturnType<typeof setTimeout> | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private liveTimer: ReturnType<typeof setInterval> | null = null;
+  private lastHeardAt = 0;
   /** recent publish ids -> base_ccy (to attribute a reject that echoes the id) */
   private readonly pending = new Map<string, string>();
   private seq = 0;
@@ -145,7 +159,7 @@ export class BuilderOracleSocket {
     const id = `${(this.seq++ & 0xffff).toString(16).padStart(4, "0")}${Math.floor(Math.random() * 0x10000)
       .toString(16)
       .padStart(4, "0")}`;
-    const msg = { id, event: "publish", topic: ORACLE_WS_TOPIC, ts: this.now(), data: { base_ccy: base, price } };
+    const msg = { id, event: "publish", topic: ORACLE_WS_TOPIC, ts: this.now(), data: { base_ccy: base, price: roundPushPrice(price) } };
     try {
       this.ws.send(JSON.stringify(msg));
     } catch (err) {
@@ -168,8 +182,31 @@ export class BuilderOracleSocket {
   private clearConnTimers(): void {
     if (this.authTimer) clearTimeout(this.authTimer);
     if (this.idleTimer) clearTimeout(this.idleTimer);
+    if (this.liveTimer) clearInterval(this.liveTimer);
     this.authTimer = null;
     this.idleTimer = null;
+    this.liveTimer = null;
+  }
+
+  /** While authenticated: ping frames every livenessMs; silence beyond livenessTimeoutMs fails the connection. */
+  private startLiveness(ws: WsLike): void {
+    const every = this.o.livenessMs ?? 5_000;
+    const ping = (ws as { ping?: () => void }).ping;
+    if (every <= 0 || typeof ping !== "function") return;
+    const timeout = this.o.livenessTimeoutMs ?? 15_000;
+    this.lastHeardAt = this.now();
+    this.liveTimer = setInterval(() => {
+      if (this.ws !== ws) return;
+      if (this.now() - this.lastHeardAt > timeout) {
+        this.fail(ws, `no pong or message for ${timeout} ms`);
+        return;
+      }
+      try {
+        ping.call(ws);
+      } catch {
+        // the close handler reconnects
+      }
+    }, every);
   }
 
   private armIdle(ws: WsLike): void {
@@ -199,6 +236,9 @@ export class BuilderOracleSocket {
       this.armIdle(ws);
     });
     ws.addEventListener("message", (ev: MessageEvent) => this.onMessage(ws, ev.data));
+    (ws.addEventListener as (t: string, l: () => void) => void)("pong", () => {
+      if (this.ws === ws) this.lastHeardAt = this.now();
+    });
     ws.addEventListener("error", () => {
       if (this.ws === ws) this.lastError = "websocket error";
     });
@@ -222,6 +262,7 @@ export class BuilderOracleSocket {
   private onMessage(ws: WsLike, data: unknown): void {
     if (this.ws !== ws) return;
     this.armIdle(ws);
+    this.lastHeardAt = this.now();
     let m: Record<string, unknown>;
     try {
       m = JSON.parse(typeof data === "string" ? data : Buffer.from(data as ArrayBuffer).toString("utf8")) as Record<string, unknown>;
@@ -245,6 +286,7 @@ export class BuilderOracleSocket {
         this.readySince = this.now();
         this.failures = 0;
         this.lastError = null;
+        this.startLiveness(ws);
         this.o.log.info({ host: this.host, accountId: this.o.accountId }, "builder oracle websocket authenticated");
       } else {
         this.fail(ws, `auth failed: ${errorText(m)}`);

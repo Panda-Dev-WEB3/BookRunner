@@ -10,12 +10,11 @@
 //           (src/builderOracle), state -> KEYS.builderFeedStatus for alerts
 // Idles (log + retry) until contracts/deployments/<chainId>.json exists.
 import { createDb } from "@bookrunner/db";
-import { assertVenueSymbolConfig, CHANNELS, createLogger, KEYS, QUEUES, roleSigner, tryLoadDeployment, type VenueOpsJob } from "@bookrunner/shared";
+import { assertVenueSymbolConfig, CHANNELS, createLogger, QUEUES, roleSigner, tryLoadDeployment, type VenueOpsJob } from "@bookrunner/shared";
 import { Worker } from "bullmq";
 import { Redis } from "ioredis";
 import type { Address } from "viem";
-import { BuilderPriceFeed, builderFeedTargets } from "./builderOracle/feed";
-import { BuilderOracleSocket, resolveOracleWsDomain } from "./builderOracle/socket";
+import { builderPushEnabled, startBuilderPriceFeed } from "./builderOracle/wire";
 import { ViemChain } from "./chain";
 import { OrderlyBuilderClient, OrderlyVenue } from "./client";
 import { loadOpsEnv } from "./config";
@@ -88,6 +87,7 @@ async function main() {
       reportDropConfirmations: env.OPS_REPORT_DROP_CONFIRMATIONS,
       reportSettleSec: env.OPS_REPORT_SETTLE_S,
       reportMode: env.OPS_REPORT_MODE,
+      builderPush: builderPushEnabled(env),
       native: { topUpMaxWei: env.OPS_NATIVE_TOPUP_MAX_WEI, headroom: env.OPS_NATIVE_FEE_HEADROOM, cooldownMs: env.OPS_NATIVE_TOPUP_COOLDOWN_MS },
     },
     chain,
@@ -126,51 +126,21 @@ async function main() {
   await sub.psubscribe(KILL_PATTERN).catch((err) => log.warn({ err: errMsg(err) }, "kill channel subscribe failed (redis down?) — revoke_key jobs and mandate Kill logs still apply"));
 
   // ---- live builder price push (docs/VERIFY.md O18)
-  let feedSocket: BuilderOracleSocket | null = null;
-  let feedRun: Promise<void> | null = null;
-  if (env.ORDERLY_MODE === "live" && env.OPS_BUILDER_PRICE_PUSH && env.ORDERLY_SYMBOL_PRICE_SOURCE === "builder") {
-    const domain = resolveOracleWsDomain(env.ORDERLY_BASE_URL, env.ORDERLY_ORACLE_WS_URL);
-    const oracleKey = env.ORDERLY_ORACLE_KEY_SECRET ? await keyFromSecret(env.ORDERLY_ORACLE_KEY_SECRET) : builderKey.key;
-    const oracleAccountId = (env.ORDERLY_ORACLE_ACCOUNT_ID ?? builderAccountId).toLowerCase();
-    let feed: BuilderPriceFeed | null = null;
-    if (domain) {
-      feedSocket = new BuilderOracleSocket({
-        domain,
-        accountId: oracleAccountId,
-        key: oracleKey,
-        log,
-        reconnectMs: env.OPS_BUILDER_ORACLE_RECONNECT_MS,
-        maxReconnectMs: env.OPS_BUILDER_ORACLE_MAX_RECONNECT_MS,
-        idleTimeoutMs: env.OPS_BUILDER_ORACLE_IDLE_MS,
-        onReject: (r) => feed?.onReject(r),
-      });
-    } else {
-      log.error({ baseUrl: env.ORDERLY_BASE_URL }, "live builder prices NOT pushed: no Builder Oracle WebSocket domain for this ORDERLY_BASE_URL (set ORDERLY_ORACLE_WS_URL)");
-    }
-    feed = new BuilderPriceFeed({
-      socket: feedSocket,
-      notConfigured: "no Builder Oracle WebSocket domain (ORDERLY_ORACLE_WS_URL)",
-      targets: () => builderFeedTargets(service.registry.list()),
-      log,
-      intervalMs: env.OPS_BUILDER_PRICE_INTERVAL_MS,
-      maxAgeMs: env.OPS_BUILDER_PRICE_MAX_AGE_MS,
-    });
-    const f = feed;
-    sub.on("message", (channel: string, message: string) => {
-      if (channel === KEYS.oracleVenueFeed) f.onFeedJson(message);
-    });
-    await sub.subscribe(KEYS.oracleVenueFeed).catch((err) => log.warn({ err: errMsg(err) }, "oracle venue feed subscribe failed (redis down?) — the key is re-read every few seconds"));
-    feedSocket?.start();
-    feedRun = f.run(abort.signal, {
-      refresh: async () => f.onFeedJson(await redis.get(KEYS.oracleVenueFeed)),
-      publishStatus: (s) => statusPublisher.builderFeed(s),
-    });
-    log.info({ domain, accountId: oracleAccountId, key: oracleKey.orderlyKey.slice(0, 16), intervalMs: f.intervalMs, maxAgeMs: f.maxAgeMs }, "live builder price push started");
-  }
+  const builderFeed = await startBuilderPriceFeed({
+    env,
+    log,
+    builderAccountId,
+    builderKey: builderKey.key,
+    keyFromSecret,
+    books: () => service.registry.list(),
+    redis,
+    sub,
+    publishStatus: (s) => statusPublisher.builderFeed(s),
+    signal: abort.signal,
+  });
 
   await service.run(abort.signal, { bookPollMs: env.OPS_BOOK_POLL_MS, logPollMs: env.OPS_LOG_POLL_MS, reportMs: env.OPS_REPORT_INTERVAL_MS, feePollMs: env.OPS_FEE_POLL_MS });
-  feedSocket?.stop();
-  await feedRun;
+  await builderFeed?.stop();
   await cleanup([() => worker.close(), () => sub.quit()], redis, pg.close);
 }
 

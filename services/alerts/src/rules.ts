@@ -155,26 +155,42 @@ export function venueSymbol(s: Snapshot, _c: RuleConfig): Condition[] {
 /**
  * Live builder price push (ops-venue -> Orderly Builder Oracle, docs/VERIFY.md O18). Orderly needs >= 1 price/s per
  * builder market while the session is open, else it can restrict the market (reduce-only). held (session closed) is
- * not a failure. The span is measured up to ops-venue's own status time (never grows on a stale status); a status
- * that stopped updating is its own alert.
- * - builder_price_push:<symbol> CRITICAL: failing (stale / no-price / disconnected / rejected / ...) >= builderPushFailSec
- * - builder_price_push_status CRITICAL: the status is older than builderPushFailSec + 30 s (ops-venue stuck)
+ * not a failure. The span is measured up to ops-venue's own status time (never grows on a stale status); the status key
+ * lives 600 s, far beyond these thresholds, so a stalled or stopped push is seen as an old status, then as a missing one.
+ * - builder_price_push:<symbol> CRITICAL: failing (stale / no-price / disconnected / rejected / ...) >= builderPushFailSec.
+ *   Not paged while every book on the symbol is in Subscription (preListing: the market / ORACLE_<broker> feed is
+ *   listed by hand in Orderly One, VERIFY O20; ops-venue logs it).
+ * - builder_price_push_status CRITICAL: the status is older than builderPushFailSec + 30 s (push loop stalled), or it is
+ *   missing while ops-venue reports live mode with the push enabled and an Orderly book is Live / Retiring.
  */
 export function builderPricePush(s: Snapshot, c: RuleConfig): Condition[] {
   const f = s.builderFeed;
-  if (!f) return [];
   const out: Condition[] = [];
+  if (!f) {
+    const ops = s.venueOps;
+    const fed = (s.books ?? []).filter((b) => b.venue === "orderly" && MARKABLE.has(b.state));
+    if (ops?.mode === "live" && ops.builderPush && fed.length > 0) {
+      out.push({
+        key: "builder_price_push_status",
+        rule: "builder_price_push",
+        severity: "critical",
+        forSec: 60,
+        summary: `no live builder price push status from ops-venue (ORDERLY_MODE=live, push enabled, ${fed.length} Orderly book${fed.length > 1 ? "s" : ""} live): Orderly builder markets may not be receiving prices`,
+      });
+    }
+    return out;
+  }
   const statusAge = (s.now - f.ts) / 1000;
   if (statusAge > c.builderPushFailSec + 30) {
     out.push({
       key: "builder_price_push_status",
       rule: "builder_price_push",
       severity: "critical",
-      summary: `ops-venue's live builder price push status is ${dur(statusAge)} old: Orderly builder markets may not be receiving prices`,
+      summary: `ops-venue's live builder price push status is ${dur(statusAge)} old (push loop stalled or ops-venue stopped): Orderly builder markets may not be receiving prices`,
     });
   }
   for (const x of f.symbols) {
-    if (x.failingSince == null) continue;
+    if (x.failingSince == null || x.preListing) continue;
     const span = (f.ts - x.failingSince) / 1000;
     if (span < c.builderPushFailSec) continue;
     const books = x.bookIds.length ? ` (book${x.bookIds.length > 1 ? "s" : ""} ${x.bookIds.join(", ")})` : "";

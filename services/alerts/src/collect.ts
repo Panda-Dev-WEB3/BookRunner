@@ -8,6 +8,7 @@ import type {
   BackupSnap,
   BookSnap,
   BuilderFeedSnap,
+  VenueOpsSnap,
   IndexerCursorSnap,
   KillEventSnap,
   OracleConfirmSnap,
@@ -142,6 +143,19 @@ export function parseVenueSymbolIssues(raw: string | null): Map<number, string> 
   return out;
 }
 
+/** KEYS.venueSymbolIssues JSON -> ops-venue mode + builder push flag; malformed / absent -> null. */
+export function parseVenueOps(raw: string | null): VenueOpsSnap | null {
+  if (!raw) return null;
+  try {
+    const o = JSON.parse(raw) as Record<string, unknown>;
+    const ts = num(o.ts);
+    if (ts === null || (o.mode !== "live" && o.mode !== "mock")) return null;
+    return { ts, mode: o.mode, builderPush: o.builderPush === true };
+  } catch {
+    return null;
+  }
+}
+
 /** KEYS.builderFeedStatus JSON (BuilderFeedStatusMsg, ops-venue); malformed -> null. */
 export function parseBuilderFeed(raw: string | null): BuilderFeedSnap | null {
   if (!raw) return null;
@@ -162,6 +176,7 @@ export function parseBuilderFeed(raw: string | null): BuilderFeedSnap | null {
           lastPushAt: num(x.lastPushAt),
           failingSince: num(x.failingSince),
           error: typeof x.error === "string" ? x.error : null,
+          preListing: x.preListing === true,
         })),
     };
   } catch {
@@ -334,6 +349,7 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
   let venueRaw: Array<string | null> = [];
   let symbolIssues = new Map<number, string>();
   let builderFeed: Snapshot["builderFeed"];
+  let venueOps: Snapshot["venueOps"];
   try {
     const ids = bookRows.map((b) => b.id);
     const [sup, bk, risk, venue, issues, feed] = await Promise.all([
@@ -346,6 +362,7 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
     ]);
     symbolIssues = parseVenueSymbolIssues(issues);
     builderFeed = parseBuilderFeed(feed);
+    venueOps = parseVenueOps(issues);
     supervisor = parseSupervisorStatus(sup);
     backup = parseBackup(bk);
     riskRaw = risk;
@@ -446,6 +463,7 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
     oracle,
     backup,
     builderFeed,
+    venueOps,
     infraErrors,
   };
   return { snapshot, memory: { rpcSamples, buybackSamples, markIntervalSec } };

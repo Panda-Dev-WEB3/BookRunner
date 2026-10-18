@@ -75,6 +75,7 @@ export class BookRegistry {
       v: 1,
       ts: this.ctx.now(),
       mode: this.ctx.settings.mode,
+      builderPush: this.ctx.settings.builderPush === true,
       books: this.untradable().map((b) => ({ bookId: b.bookId, charterSymbol: b.charterSymbol, error: b.venueSymbolError as string })),
     };
     try {
