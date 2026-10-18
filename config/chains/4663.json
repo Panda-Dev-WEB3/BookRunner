@@ -5,7 +5,8 @@
   "sources": {
     "stockTokens": "https://api.robinhood.com/rhj/assets (deployments[chainId=4663].contractAddress, tokenDecimals) — generated from Robinhood's on-chain asset registry, listed at https://docs.robinhood.com/chain/contracts",
     "feeds": "https://reference-data-directory.vercel.app/feeds-robinhood-mainnet.json (the data behind https://docs.chain.link/data-feeds/price-feeds/addresses?network=robinhood): proxyAddress, decimals, heartbeat, threshold",
-    "multiplier": "https://docs.robinhood.com/chain/building-with-stock-tokens (uiMultiplier 18 decimals, 1e18 = 1.0); https://docs.chain.link/data-feeds/tokenized-equity-feeds/robinhood (token price = equity price x uiMultiplier)"
+    "multiplier": "https://docs.robinhood.com/chain/building-with-stock-tokens (uiMultiplier 18 decimals, 1e18 = 1.0); https://docs.chain.link/data-feeds/tokenized-equity-feeds/robinhood (token price = equity price x uiMultiplier)",
+    "dexConfirm": "Uniswap v3 factory 0x1f7d7550b1b028f7571e69a784071f0205fd2efa getPool(stockToken, USDG, fee) over the 100/500/3000/10000 tiers, deepest pool kept; read on-chain with eth_call (token0/token1, slot0, observationCardinality, liquidity / sqrtPriceX96 depth)"
   },
   "note": "Copied from the sources above, not yet read on-chain. Run `bun run --cwd services/oracle source-check --chain 4663 --rpc <RHC_RPC_URL>` against a mainnet RPC before launch (VERIFY T3, C4).",
   "stockTokens": {
@@ -23,6 +24,17 @@
       "AAPL": { "proxy": "0x6B22A786bAa607d76728168703a39Ea9C99f2cD0", "basis": "per-token", "decimals": 8, "heartbeatSec": 86400, "deviationBps": 50, "description": "Robinhood AAPL / USD", "marketHours": "us_equities_24/5" },
       "MSFT": { "proxy": "0x45C3C877C15E6BA2EBB19eA114Ea508d14C1Af2E", "basis": "per-token", "decimals": 8, "heartbeatSec": 86400, "deviationBps": 50, "description": "Robinhood MSFT / USD", "marketHours": "us_equities_24/5" },
       "AMZN": { "proxy": "0xD5a1508ceD74c084eBf3cBe853e2C968fB2a651C", "basis": "per-token", "decimals": 8, "heartbeatSec": 86400, "deviationBps": 50, "description": "Robinhood AMZN / USD", "marketHours": "us_equities_24/5" }
+    }
+  },
+  "dexConfirm": {
+    "readAt": "2026-10-17",
+    "note": "Read on-chain on 2026-10-17 (chain 4663): the deepest Stock-Token / USDG pool per ticker (approx. size then: NVDA ~$3.0M, TSLA ~$475k, AAPL ~$255k, MSFT ~$415k, AMZN ~$470k), observationCardinality 7200 each, spot within 0.1-0.3% of Chainlink; factory getPool(stockToken, USDG, fee) == pool verified. minDepthUsd is the USDG needed to move the price 2% within the active range (in-range liquidity): read 2026-10-18 NVDA ~$296-314k, TSLA ~$46k, AAPL ~$62k, MSFT ~$44k, AMZN ~$83k, Floor $25k of 2% depth and a 1800 s TWAP window (2026-10-18 controller decision): recalibrated from the earlier balance-based $50k (the 2% depth measure is 2-5x stricter than the pool balance), and the DEX only confirms, so a thin pool can only cause false or missing alerts, never a price change; 1800 s also keeps a swap inside the window in quiet hours. Liquidity moves: re-check every pool (source-check) right before launch. These pools only CONFIRM the Chainlink price (primary-confirm): a divergence above ORACLE_CONFIRM_BPS alerts, it never moves the signed price. USDG is assumed to be $1.",
+    "pools": {
+      "NVDA": { "pool": "0xd4EB21209C4D6093f80B5b84f5C45cc093EA14a3", "fee": 500, "quoteToken": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168", "twapSec": 1800, "minDepthUsd": 25000 },
+      "TSLA": { "pool": "0xf4ACdAEEB7022862A763C9B1B885e11191c889E3", "fee": 3000, "quoteToken": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168", "twapSec": 1800, "minDepthUsd": 25000 },
+      "AAPL": { "pool": "0xAae0d815EE56e4092a5E5C2911E676Fea50B2d6D", "fee": 500, "quoteToken": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168", "twapSec": 1800, "minDepthUsd": 25000 },
+      "MSFT": { "pool": "0xeb60bCD1D920ad6E102690CCFC6fB488899E1510", "fee": 3000, "quoteToken": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168", "twapSec": 1800, "minDepthUsd": 25000 },
+      "AMZN": { "pool": "0x8AC92DA74AB5F3b1d024Dc1943Ad7e15Dc4179Ef", "fee": 3000, "quoteToken": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168", "twapSec": 1800, "minDepthUsd": 25000 }
     }
   }
 }

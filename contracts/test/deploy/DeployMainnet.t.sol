@@ -183,9 +183,9 @@ contract DeployMainnetTest is Test {
         assertEq(BkrnToken(d.bkrn).balanceOf(community), 800_000_000e18);
         assertEq(TimelockController(payable(d.timelock)).getMinDelay(), 48 hours);
         assertTrue(d.bkrnDeployed);
-        // 2 of 3 live sources (Chainlink + Pyth Pro + one more): set at deploy, below the contract default of 3
+        // primary-confirm (Chainlink alone signs, sourceCount 1): set at deploy, below the contract default of 3
         assertEq(AttestedOracle(d.oracle).DEFAULT_MIN_SOURCES(), 3);
-        assertEq(AttestedOracle(d.oracle).minSources(), 2);
+        assertEq(AttestedOracle(d.oracle).minSources(), 1);
     }
 
     /// Branches 2-4 wired from the input: hedge routes + v3 factory, buyback reference, live multipliers,
@@ -402,10 +402,13 @@ contract DeployMainnetTest is Test {
     function test_verify_flags_oracle_min_sources_drift() public {
         (DeployMainnet.Deployed memory d,) = _deployAndVerify(_mainnetOpts(), "min-sources");
         vm.prank(d.timelock);
-        AttestedOracle(d.oracle).setMinSources(3);
-        assertEq(_verify(_mainnetOpts(), d), 1); // "oracle minSources == input"
-        vm.prank(d.timelock);
         AttestedOracle(d.oracle).setMinSources(2);
+        assertEq(_verify(_mainnetOpts(), d), 2); // "oracle minSources == input" + "== 1 (mainnet primary-confirm)"
+        vm.prank(d.timelock);
+        AttestedOracle(d.oracle).setMinSources(3);
+        assertEq(_verify(_mainnetOpts(), d), 2);
+        vm.prank(d.timelock);
+        AttestedOracle(d.oracle).setMinSources(1);
         assertEq(_verify(_mainnetOpts(), d), 0);
     }
 
@@ -440,7 +443,7 @@ contract DeployMainnetTest is Test {
         assertEq(platform0, bytes32("INTEL_TDX"));
         assertTrue(reqAtt);
         assertEq(pc, CHAIN_CFG);
-        assertEq(s.parsedOracleMinSources(), 2); // 2 of the 3 live sources
+        assertEq(s.parsedOracleMinSources(), 1); // primary-confirm: Chainlink alone signs
     }
 
     function _assertExampleHead(DeployMainnetHarness s) internal view {
@@ -555,19 +558,23 @@ contract DeployMainnetTest is Test {
         _expectValidateRevert(o, "input: oracle.requireAttestations must be true on mainnet (VERIFY E1)");
     }
 
-    function test_refuses_oracle_min_sources_other_than_two_on_mainnet() public {
+    function test_refuses_oracle_min_sources_other_than_one_on_mainnet() public {
         Opts memory o = _mainnetOpts();
-        o.oracleMinSources = 3; // no spare among the 3 live sources: the oracle would refuse to start
-        _expectValidateRevert(o, "input: mainnet oracleMinSources must be 2 (2 of the 3 live sources; the oracle needs one spare to start)");
-        o.oracleMinSources = 1;
-        _expectValidateRevert(o, "input: mainnet oracleMinSources must be 2 (2 of the 3 live sources; the oracle needs one spare to start)");
+        o.oracleMinSources = 2; // the old 2-of-3 policy: the primary-confirm oracle signs sourceCount 1
+        _expectValidateRevert(o, "input: mainnet oracleMinSources must be 1 (primary-confirm: Chainlink alone signs, sourceCount 1)");
+        o.oracleMinSources = 3;
+        _expectValidateRevert(o, "input: mainnet oracleMinSources must be 1 (primary-confirm: Chainlink alone signs, sourceCount 1)");
         o.oracleMinSources = 0;
-        _expectValidateRevert(o, "input: mainnet oracleMinSources must be 2 (2 of the 3 live sources; the oracle needs one spare to start)");
-        // a rehearsal (46630) keeps only the generic floor: 1 is allowed there, 0 never
+        _expectValidateRevert(o, "input: mainnet oracleMinSources must be 1 (primary-confirm: Chainlink alone signs, sourceCount 1)");
+        // a rehearsal (46630) keeps only the generic floor: 0 never, 2 is allowed there
         vm.chainId(46630);
         o = _rehearsalOpts();
         o.oracleMinSources = 0;
         _expectValidateRevert(o, "input: oracleMinSources 0");
+        o.oracleMinSources = 2;
+        DeployMainnet s = new DeployMainnet();
+        s.loadInput(_json(o));
+        s.validateInput();
     }
 
     function test_refuses_mismatched_network() public {
@@ -670,7 +677,7 @@ contract DeployMainnetTest is Test {
         o.withPriceConfig = true;
         o.nRoutes = 5;
         o.univ3Factory = address(factory);
-        o.oracleMinSources = 2; // 2 of the 3 live sources
+        o.oracleMinSources = 1; // primary-confirm: Chainlink alone signs (sourceCount 1), TWAP / Pyth only confirm
     }
 
     function _rehearsalOpts() internal view returns (Opts memory o) {

@@ -1,14 +1,21 @@
 // scripts/dev.ts --network mainnet: the profile pins and the preflight that refuses an incomplete host.
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { privateKeyToAccount } from "viem/accounts";
-import { type Env, MAINNET_EXCLUDED, MAINNET_REQUIRED_ENV, deskKeyEnvFor, mainnetProfile, watchedRoleAddresses } from "./network-profile";
+import { type Env, MAINNET_EXCLUDED, MAINNET_FIXED, MAINNET_REQUIRED_ENV, deskKeyEnvFor, mainnetProfile, watchedRoleAddresses } from "./network-profile";
+
+/** The repo's mainnet price config: a Chainlink feed and a DEX confirm pool per launch ticker. */
+const GOOD_CFG = JSON.parse(readFileSync(join(import.meta.dir, "../config/chains/4663.json"), "utf8")) as {
+  chainId: number;
+  chainlink: { feeds: Record<string, unknown> };
+  dexConfirm: { pools: Record<string, { pool: string; minDepthUsd: number; twapSec: number }> };
+};
 
 const keys = Array.from({ length: 6 }, (_, i) => `0x${(i + 1).toString(16).padStart(64, "0")}`);
 
-function hostRoot(dep: object | null, chainConfig: object | null = null): string {
+function hostRoot(dep: object | null, chainConfig: object | null = GOOD_CFG): string {
   const root = mkdtempSync(join(tmpdir(), "bkrn-mainnet-"));
   if (dep) {
     mkdirSync(join(root, "contracts/deployments"), { recursive: true });
@@ -39,12 +46,8 @@ function goodEnv(): Env {
     ORDERLY_BROKER_ID: "bookrunner",
     ORDERLY_BUILDER_KEY_SECRET: "seed",
     ANTHROPIC_API_KEY: "sk",
+    // overlays the chain config's NVDA feed (primary-confirm: Chainlink signs, the DEX TWAP of the config confirms)
     ORACLE_CHAINLINK_FEEDS: JSON.stringify({ NVDA: { proxy: "0x0000000000000000000000000000000000000f01", basis: "per-token" } }),
-    // the mainnet design: Chainlink + Pyth Pro + a third source, 2 required
-    ORACLE_PYTH: "1",
-    PYTH_API_KEY: "pyth-test-token",
-    ORACLE_HTTP_SOURCES: JSON.stringify([{ name: "vendor", url: "https://prices.example/{ticker}", pricePath: "price", tsPath: "ts", tsUnit: "ms", maxAgeMs: 10_000 }]),
-    ORACLE_MIN_SOURCES: "2",
     MARK_SIGNER_KMS_KEY_ID: "alias/bkrn-mark",
     RISK_KMS_KEY_ID: "alias/bkrn-risk",
     OPS_VENUE_KMS_KEY_ID: "alias/bkrn-ops",
@@ -68,6 +71,9 @@ describe("mainnet profile (scripts/dev.ts --network mainnet)", () => {
     expect(env.ORDERLY_MODE).toBe("live");
     expect(env.ORACLE_SYNTHETIC).toBe("0");
     expect(env.SESSIONS_MODE).toBe("charter");
+    expect(env.ORACLE_POLICY).toBe("primary-confirm");
+    expect(env.ORACLE_MIN_SOURCES).toBe("1");
+    expect(MAINNET_FIXED.ORACLE_POLICY).toBe("primary-confirm");
     expect(env.DEPLOYMENT_FILE).toBe("contracts/deployments/4663.json");
     expect(env.RPC_URL).toBe(goodEnv().RHC_RPC_URL);
     expect(env.DATABASE_URL).toBe("postgres://bookrunner:p%40ss@127.0.0.1:54400/bookrunner_mainnet");
@@ -112,9 +118,15 @@ describe("mainnet profile (scripts/dev.ts --network mainnet)", () => {
   test("local RPC, mock venue, http origins and synthetic-only oracle are refused", () => {
     const { errors } = mainnetProfile(
       { ...goodEnv(), RHC_RPC_URL: "http://127.0.0.1:8547", ORDERLY_BASE_URL: "http://127.0.0.1:4420", WEB_ORIGIN: "http://x", ORACLE_CHAINLINK_FEEDS: "{}" },
-      hostRoot(GOOD_DEP),
+      hostRoot(GOOD_DEP, null),
     );
-    expect(errors).toHaveLength(4);
+    expect(errors).toEqual([
+      expect.stringMatching(/RHC_RPC_URL points at a local node/),
+      expect.stringMatching(/WEB_ORIGIN must list https/),
+      expect.stringMatching(/ORDERLY_BASE_URL must be the live Orderly API/),
+      expect.stringMatching(/no Chainlink feed: .*only signing source/),
+      expect.stringMatching(/no DEX confirm pool for NVDA, TSLA, AAPL, MSFT, AMZN/),
+    ]);
   });
 
   test("the DeployMainnet record must exist and be a mainnet record", () => {
@@ -123,80 +135,106 @@ describe("mainnet profile (scripts/dev.ts --network mainnet)", () => {
     expect(mainnetProfile(goodEnv(), hostRoot(testnetDep)).errors).toHaveLength(2);
   });
 
-  test("Chainlink feeds come from the chain price config the oracle loads (config/chains/4663.json)", () => {
+  test("Chainlink feeds and DEX confirm pools come from the chain price config the oracle loads (config/chains/4663.json)", () => {
     const e = { ...goodEnv(), ORACLE_CHAINLINK_FEEDS: "{}" };
-    const cfg = { chainId: 4663, stockTokens: {}, chainlink: { feeds: { NVDA: { proxy: "0x0000000000000000000000000000000000000f01", basis: "per-token" } } } };
-    expect(mainnetProfile(e, hostRoot(GOOD_DEP, cfg)).errors).toEqual([]);
-    expect(mainnetProfile(e, hostRoot(GOOD_DEP)).errors).toEqual([expect.stringMatching(/no Chainlink feed/)]);
-    expect(mainnetProfile(e, hostRoot(GOOD_DEP, { ...cfg, chainId: 46630 })).errors).toEqual([
+    expect(mainnetProfile(e, hostRoot(GOOD_DEP)).errors).toEqual([]);
+    expect(mainnetProfile(e, hostRoot(GOOD_DEP, null)).errors).toEqual([expect.stringMatching(/no Chainlink feed/), expect.stringMatching(/no DEX confirm pool/)]);
+    expect(mainnetProfile(e, hostRoot(GOOD_DEP, { ...GOOD_CFG, chainId: 46630 })).errors).toEqual([
       expect.stringMatching(/not 4663/),
       expect.stringMatching(/no Chainlink feed/),
+      expect.stringMatching(/no DEX confirm pool/),
     ]);
-    expect(mainnetProfile({ ...e, ORACLE_CHAIN_CONFIG: "config/chains/missing.json" }, hostRoot(GOOD_DEP, cfg)).errors).toEqual([
+    expect(mainnetProfile({ ...e, ORACLE_CHAIN_CONFIG: "config/chains/missing.json" }, hostRoot(GOOD_DEP)).errors).toEqual([
       expect.stringMatching(/ORACLE_CHAIN_CONFIG config\/chains\/missing.json not found/),
       expect.stringMatching(/no Chainlink feed/),
+      expect.stringMatching(/no DEX confirm pool/),
     ]);
   });
 
-  test("oracle production rules: feeds state their basis; Chainlink + Pyth Pro + a third source", () => {
+  test("primary-confirm rules: a Chainlink feed and a DEX confirm pool (real floor) for every ticker", () => {
+    const { AMZN: _f, ...fourFeeds } = GOOD_CFG.chainlink.feeds;
+    const noAmznFeed = { ...GOOD_CFG, chainlink: { ...GOOD_CFG.chainlink, feeds: fourFeeds } };
+    expect(mainnetProfile(goodEnv(), hostRoot(GOOD_DEP, noAmznFeed)).errors).toEqual([
+      "no Chainlink feed for AMZN (config/chains/4663.json or ORACLE_CHAINLINK_FEEDS)",
+    ]);
+    const { TSLA: _p, ...fourPools } = GOOD_CFG.dexConfirm.pools;
+    const noTslaPool = { ...GOOD_CFG, dexConfirm: { ...GOOD_CFG.dexConfirm, pools: fourPools } };
+    expect(mainnetProfile(goodEnv(), hostRoot(GOOD_DEP, noTslaPool)).errors).toEqual(["no DEX confirm pool for TSLA (config/chains/4663.json dexConfirm.pools)"]);
+    const shallow = { ...GOOD_CFG, dexConfirm: { ...GOOD_CFG.dexConfirm, pools: { ...GOOD_CFG.dexConfirm.pools, AAPL: { ...GOOD_CFG.dexConfirm.pools.AAPL!, minDepthUsd: 500 } } } };
+    expect(mainnetProfile(goodEnv(), hostRoot(GOOD_DEP, shallow)).errors).toEqual(["dexConfirm.pools.AAPL.minDepthUsd must be >= 10000 (got 500)"]);
+    // a narrower ticker list only needs its own feeds / pools
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_TICKERS: "NVDA,TSLA" }, hostRoot(GOOD_DEP, noAmznFeed)).errors).toEqual([]);
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_TICKERS: "NVDA,GME" }, hostRoot(GOOD_DEP)).errors).toEqual([
+      expect.stringMatching(/no Chainlink feed for GME/),
+      expect.stringMatching(/no DEX confirm pool for GME/),
+    ]);
+    // the DEX confirm cannot be switched off
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_DEX_CONFIRM: "0" }, hostRoot(GOOD_DEP)).errors).toEqual([expect.stringMatching(/ORACLE_DEX_CONFIRM is off/)]);
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_DEX_CONFIRM: "yes" }, hostRoot(GOOD_DEP)).errors).toEqual([]);
+    // feeds state their basis
     const plain = { ...goodEnv(), ORACLE_CHAINLINK_FEEDS: JSON.stringify({ NVDA: "0x0000000000000000000000000000000000000f01" }) };
     expect(mainnetProfile(plain, hostRoot(GOOD_DEP)).errors).toEqual([expect.stringMatching(/plain addresses for NVDA/)]);
-    // no third source: refused, the text says why
-    const two: Env = { ...goodEnv(), ORACLE_HTTP_SOURCES: "[]" };
-    const noThird = mainnetProfile(two, hostRoot(GOOD_DEP)).errors;
-    expect(noThird).toEqual([expect.stringMatching(/no third oracle source besides Chainlink and Pyth Pro/)]);
-    expect(noThird[0]).toContain("3 live sources (2 required)");
-    // Finnhub is never the third source on mainnet (regular session only); without its key it is named as such
-    expect(mainnetProfile({ ...two, ORACLE_HTTP_FINNHUB: "1" }, hostRoot(GOOD_DEP)).errors).toEqual([
-      expect.stringMatching(/ORACLE_HTTP_FINNHUB=1 but ORACLE_FINNHUB_API_KEY is not set/),
-      expect.stringMatching(/no third oracle source/),
+  });
+
+  test("freshness and DEX bounds: Chainlink max age <= heartbeat + 1 h, DEX TWAP 300-3600 s, DEX max age <= 120 s, lag < confirm", () => {
+    const ok = (e: Env) => expect(mainnetProfile({ ...goodEnv(), ...e }, hostRoot(GOOD_DEP)).errors).toEqual([]);
+    const bad = (e: Env, re: RegExp) => expect(mainnetProfile({ ...goodEnv(), ...e }, hostRoot(GOOD_DEP)).errors).toEqual([expect.stringMatching(re)]);
+    ok({ ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS: "3600000", ORACLE_CHAINLINK_MAX_AGE_MS: "90000000" });
+    bad({ ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS: "172800000" }, /ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS=172800000 must be <= 3600000/);
+    bad({ ORACLE_CHAINLINK_MAX_AGE_MS: "90000001" }, /ORACLE_CHAINLINK_MAX_AGE_MS=90000001 must be <= 90000000/);
+    const feeds = (over: Record<string, unknown>) =>
+      JSON.stringify({ NVDA: { proxy: "0x0000000000000000000000000000000000000f01", basis: "per-token", heartbeatSec: 86_400, ...over } });
+    ok({ ORACLE_CHAINLINK_FEEDS: feeds({ maxAgeSec: 90_000 }) });
+    bad({ ORACLE_CHAINLINK_FEEDS: feeds({ maxAgeSec: 172_800 }) }, /chainlink feed NVDA: maxAgeSec=172800 > heartbeat 86400 s \+ 1 h/);
+    // the chain config's own feeds are bounded too
+    const cfgWide = { ...GOOD_CFG, chainlink: { ...GOOD_CFG.chainlink, feeds: { ...GOOD_CFG.chainlink.feeds, TSLA: { ...(GOOD_CFG.chainlink.feeds.TSLA as object), maxAgeSec: 200_000 } } } };
+    expect(mainnetProfile(goodEnv(), hostRoot(GOOD_DEP, cfgWide)).errors).toEqual([expect.stringMatching(/chainlink feed TSLA: maxAgeSec=200000/)]);
+    ok({ ORACLE_DEX_TWAP_SEC: "300", ORACLE_DEX_MAX_AGE_MS: "120000", ORACLE_PRIMARY_LAG_BPS: "150" });
+    bad({ ORACLE_DEX_TWAP_SEC: "60" }, /ORACLE_DEX_TWAP_SEC=60 outside 300-3600 s/);
+    bad({ ORACLE_DEX_MAX_AGE_MS: "600000" }, /ORACLE_DEX_MAX_AGE_MS=600000 must be in \(0, 120000\]/);
+    bad({ ORACLE_PRIMARY_LAG_BPS: "250" }, /ORACLE_PRIMARY_LAG_BPS=250 must be positive and below ORACLE_CONFIRM_BPS \(200\)/);
+    const shortTwap = { ...GOOD_CFG, dexConfirm: { ...GOOD_CFG.dexConfirm, pools: { ...GOOD_CFG.dexConfirm.pools, MSFT: { ...GOOD_CFG.dexConfirm.pools.MSFT!, twapSec: 120 } } } };
+    expect(mainnetProfile(goodEnv(), hostRoot(GOOD_DEP, shortTwap)).errors).toEqual(["dexConfirm.pools.MSFT.twapSec=120 outside 300-3600 s on mainnet"]);
+  });
+
+  test("ORACLE_POLICY / ORACLE_MIN_SOURCES are pinned; a contradicting value is refused, not silently overridden", () => {
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_POLICY: "primary-confirm", ORACLE_MIN_SOURCES: "1" }, hostRoot(GOOD_DEP)).errors).toEqual([]);
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_POLICY: "median" }, hostRoot(GOOD_DEP)).errors).toEqual([
+      expect.stringMatching(/ORACLE_POLICY=median contradicts the mainnet profile \(primary-confirm/),
     ]);
-    expect(mainnetProfile({ ...two, ORACLE_HTTP_FINNHUB: "1", ORACLE_FINNHUB_API_KEY: "f" }, hostRoot(GOOD_DEP)).errors).toEqual([
-      expect.stringMatching(/ORACLE_HTTP_FINNHUB is not a mainnet source/),
-      expect.stringMatching(/no third oracle source/),
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_MIN_SOURCES: "2" }, hostRoot(GOOD_DEP)).errors).toEqual([
+      expect.stringMatching(/ORACLE_MIN_SOURCES=2 contradicts the mainnet profile \(1: primary-confirm signs every price with sourceCount 1\)/),
     ]);
-    // an HTTP source without its own quote timestamp, or with a loose max age, does not count
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_CONFIRM_BPS: "800" }, hostRoot(GOOD_DEP)).errors).toEqual([expect.stringMatching(/ORACLE_CONFIRM_BPS=800 must be in \(0, 500\]/)]);
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_CONFIRM_BPS: "150" }, hostRoot(GOOD_DEP)).errors).toEqual([]);
+  });
+
+  test("optional confirmers: Pyth Pro only with its token over https; HTTP specs timestamped and tight; no Finnhub", () => {
+    const pyth = { ...goodEnv(), ORACLE_PYTH: "1", PYTH_API_KEY: "pyth-test-token" };
+    expect(mainnetProfile(pyth, hostRoot(GOOD_DEP)).errors).toEqual([]);
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_PYTH: "yes" }, hostRoot(GOOD_DEP)).errors).toEqual([expect.stringMatching(/ORACLE_PYTH=1 but PYTH_API_KEY is not set/)]);
+    expect(mainnetProfile({ ...pyth, ORACLE_PYTH_FEEDS: '{"NVDA":"x"}' }, hostRoot(GOOD_DEP)).errors).toEqual([expect.stringMatching(/ORACLE_PYTH_FEEDS is not a JSON object/)]);
+    expect(mainnetProfile({ ...pyth, ORACLE_PYTH_FEEDS: '{"NVDA":1314}' }, hostRoot(GOOD_DEP)).errors).toEqual([]);
+    expect(mainnetProfile({ ...pyth, ORACLE_PYTH_URL: "http://pyth.example/v1/latest_price" }, hostRoot(GOOD_DEP)).errors).toEqual([
+      expect.stringMatching(/ORACLE_PYTH_URL must be https:\/\//),
+    ]);
     const spec = (over: Record<string, unknown>) =>
       JSON.stringify([{ name: "vendor", url: "https://prices.example/{ticker}", pricePath: "price", tsPath: "ts", maxAgeMs: 10_000, ...over }]);
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_HTTP_SOURCES: spec({}) }, hostRoot(GOOD_DEP)).errors).toEqual([]);
     expect(mainnetProfile({ ...goodEnv(), ORACLE_HTTP_SOURCES: spec({ tsPath: undefined }) }, hostRoot(GOOD_DEP)).errors).toEqual([
       expect.stringMatching(/ORACLE_HTTP_SOURCES.vendor has no tsPath/),
-      expect.stringMatching(/no third oracle source/),
     ]);
     expect(mainnetProfile({ ...goodEnv(), ORACLE_HTTP_SOURCES: spec({ maxAgeMs: 60_000 }) }, hostRoot(GOOD_DEP)).errors).toEqual([
       expect.stringMatching(/ORACLE_HTTP_SOURCES.vendor needs maxAgeMs <= 30000/),
-      expect.stringMatching(/no third oracle source/),
     ]);
-    // no Pyth: refused even with other sources
-    const noPyth = mainnetProfile({ ...goodEnv(), ORACLE_PYTH: undefined, PYTH_API_KEY: undefined }, hostRoot(GOOD_DEP)).errors;
-    expect(noPyth).toEqual([expect.stringMatching(/no Pyth Pro source: set ORACLE_PYTH=1 \+ PYTH_API_KEY/)]);
-    // Chainlink only: both missing
-    expect(mainnetProfile({ ...two, ORACLE_PYTH: undefined }, hostRoot(GOOD_DEP)).errors).toEqual([
-      expect.stringMatching(/no Pyth Pro source/),
-      expect.stringMatching(/no third oracle source/),
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_HTTP_FINNHUB: "1" }, hostRoot(GOOD_DEP)).errors).toEqual([
+      expect.stringMatching(/ORACLE_HTTP_FINNHUB=1 but ORACLE_FINNHUB_API_KEY is not set/),
     ]);
-  });
-
-  test("Pyth Pro counts only with its access token; ORACLE_MIN_SOURCES must be 2", () => {
-    const noKey = mainnetProfile({ ...goodEnv(), PYTH_API_KEY: "" }, hostRoot(GOOD_DEP)).errors;
-    expect(noKey).toEqual([expect.stringMatching(/ORACLE_PYTH=1 but PYTH_API_KEY is not set/), expect.stringMatching(/no Pyth Pro source/)]);
-    expect(mainnetProfile({ ...goodEnv(), ORACLE_PYTH_FEEDS: '{"NVDA":"x"}' }, hostRoot(GOOD_DEP)).errors).toEqual([
-      expect.stringMatching(/ORACLE_PYTH_FEEDS is not a JSON object/),
-    ]);
-    expect(mainnetProfile({ ...goodEnv(), ORACLE_PYTH_FEEDS: '{"NVDA":1314}' }, hostRoot(GOOD_DEP)).errors).toEqual([]);
-    expect(mainnetProfile({ ...goodEnv(), ORACLE_MIN_SOURCES: "3" }, hostRoot(GOOD_DEP)).errors).toEqual([
-      expect.stringMatching(/ORACLE_MIN_SOURCES must be 2 on mainnet \(2 of the 3 live sources; got 3\)/),
-    ]);
-    expect(mainnetProfile({ ...goodEnv(), ORACLE_MIN_SOURCES: undefined }, hostRoot(GOOD_DEP)).errors).toEqual([
-      expect.stringMatching(/ORACLE_MIN_SOURCES must be 2 on mainnet .*unset/),
-    ]);
-    // flags parse like the oracle's z.stringbool(); the token only over https
-    expect(mainnetProfile({ ...goodEnv(), ORACLE_PYTH: "yes" }, hostRoot(GOOD_DEP)).errors).toEqual([]);
-    expect(mainnetProfile({ ...goodEnv(), ORACLE_PYTH: "off" }, hostRoot(GOOD_DEP)).errors).toEqual([expect.stringMatching(/no Pyth Pro source/)]);
-    expect(mainnetProfile({ ...goodEnv(), ORACLE_PYTH_URL: "http://pyth.example/v1/latest_price" }, hostRoot(GOOD_DEP)).errors).toEqual([
-      expect.stringMatching(/ORACLE_PYTH_URL must be https:\/\//),
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_HTTP_FINNHUB: "1", ORACLE_FINNHUB_API_KEY: "f" }, hostRoot(GOOD_DEP)).errors).toEqual([
+      expect.stringMatching(/ORACLE_HTTP_FINNHUB is not a mainnet source/),
     ]);
     // the access token is never echoed in an error
-    for (const e of mainnetProfile({ ...goodEnv(), ORACLE_MIN_SOURCES: "9", ORACLE_HTTP_SOURCES: "[]" }, hostRoot(GOOD_DEP)).errors) expect(e).not.toContain("pyth-test-token");
+    for (const e of mainnetProfile({ ...pyth, ORACLE_MIN_SOURCES: "9", ORACLE_PYTH_URL: "http://x" }, hostRoot(GOOD_DEP)).errors) expect(e).not.toContain("pyth-test-token");
   });
 
   test("alerts watch role ADDRESSES: local keys and per-book desk keys derived, KMS roles left to dev.ts", () => {

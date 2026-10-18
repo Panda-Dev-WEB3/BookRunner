@@ -61,7 +61,27 @@ export interface TokenState {
 export interface AggregatorReader {
   decimals(feed: Address): Promise<number>;
   latestRoundData(feed: Address): Promise<RoundData>;
-  tokenState(token: Address): Promise<TokenState>;
+  /** `blockNumber`: read at that block (the DEX source pins every read of a tick to one block); default latest */
+  tokenState(token: Address, blockNumber?: bigint): Promise<TokenState>;
+}
+
+/**
+ * Why a Stock Token's state forbids converting its per-token price to per share (null = usable). Shared by every
+ * per-token source (Chainlink per-token feeds, the DEX TWAP): no multiplier, or a corporate action in progress.
+ */
+export function tokenStateProblem(token: TokenState): string | null {
+  if (token.uiMultiplier <= 0n) return "uiMultiplier() = 0";
+  if (token.oraclePaused === true) return "token oraclePaused() (corporate action in progress)";
+  return null;
+}
+
+/** A multiplier change announced for the future (newUIMultiplier != uiMultiplier, effectiveAt ahead), else null. */
+export function pendingMultiplierOf(token: TokenState, nowMs: number): { value: bigint; effectiveAt: number } | null {
+  const eff = token.effectiveAt ?? 0n;
+  if (token.newUIMultiplier !== null && token.newUIMultiplier !== token.uiMultiplier && Number(eff) * 1000 > nowMs) {
+    return { value: token.newUIMultiplier, effectiveAt: Number(eff) };
+  }
+  return null;
 }
 
 const optional = async <T>(p: Promise<T>): Promise<T | null> => {
@@ -81,12 +101,13 @@ export function viemAggregatorReader(pub: PublicClient): AggregatorReader {
       const [, answer, startedAt, updatedAt] = await pub.readContract({ address: feed, abi: aggregatorV3Abi, functionName: "latestRoundData" });
       return { answer, startedAt, updatedAt };
     },
-    async tokenState(token) {
+    async tokenState(token, blockNumber) {
+      const at = blockNumber === undefined ? {} : { blockNumber };
       const [uiMultiplier, newUIMultiplier, effectiveAt, oraclePaused] = await Promise.all([
-        pub.readContract({ address: token, abi: stockTokenAbi, functionName: "uiMultiplier" }),
-        optional(pub.readContract({ address: token, abi: stockTokenAbi, functionName: "newUIMultiplier" })),
-        optional(pub.readContract({ address: token, abi: stockTokenAbi, functionName: "effectiveAt" })),
-        optional(pub.readContract({ address: token, abi: stockTokenAbi, functionName: "oraclePaused" })),
+        pub.readContract({ address: token, abi: stockTokenAbi, functionName: "uiMultiplier", ...at }),
+        optional(pub.readContract({ address: token, abi: stockTokenAbi, functionName: "newUIMultiplier", ...at })),
+        optional(pub.readContract({ address: token, abi: stockTokenAbi, functionName: "effectiveAt", ...at })),
+        optional(pub.readContract({ address: token, abi: stockTokenAbi, functionName: "oraclePaused", ...at })),
       ]);
       return { uiMultiplier, newUIMultiplier, effectiveAt, oraclePaused };
     },
@@ -96,6 +117,8 @@ export function viemAggregatorReader(pub: PublicClient): AggregatorReader {
 /** A configured feed, resolved (token address + in-session max age). */
 export interface ResolvedFeed {
   proxy: Address;
+  /** configured Chainlink heartbeat (s), when known: bounds maxAgeMs on mainnet (production.ts) */
+  heartbeatSec?: number;
   basis: FeedConfig["basis"];
   token: Address | null;
   decimals?: number;
@@ -196,8 +219,8 @@ export class ChainlinkSource implements PriceSource {
     let multiplierUsed: bigint | null = null;
     if (f.basis === "per-token") {
       if (!f.token || !token) return { ok: false, reason: "per-token feed without a Stock Token (cannot divide by uiMultiplier)" };
-      if (token.uiMultiplier <= 0n) return { ok: false, reason: "uiMultiplier() = 0" };
-      if (token.oraclePaused === true) return { ok: false, reason: "token oraclePaused() (corporate action in progress)" };
+      const problem = tokenStateProblem(token);
+      if (problem) return { ok: false, reason: problem };
       const eff = token.effectiveAt ?? 0n;
       let multiplier = token.uiMultiplier;
       if (eff > round.updatedAt && Number(eff) * 1000 <= nowMs) {
@@ -211,9 +234,7 @@ export class ChainlinkSource implements PriceSource {
       } else {
         this.roundMultiplier.set(f.proxy, { updatedAt: round.updatedAt, multiplier });
       }
-      if (token.newUIMultiplier !== null && token.newUIMultiplier !== token.uiMultiplier && Number(eff) * 1000 > nowMs) {
-        pendingMultiplier = { value: token.newUIMultiplier, effectiveAt: Number(eff) };
-      }
+      pendingMultiplier = pendingMultiplierOf(token, nowMs);
       multiplierUsed = multiplier;
       priceWad = perSharePriceWad(answerWad, multiplier);
     }

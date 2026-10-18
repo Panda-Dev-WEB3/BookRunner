@@ -12,14 +12,17 @@ never on a developer PC. Same layout and hardening as the testnet host ([README.
 | Deployer | devkeys index 0, stays `config.timelock()` | one-shot EOA used by `scripts/deploy-mainnet.sh` from the operator machine; holds nothing afterwards |
 | Processes | all services + agents + trader-sim + mock-orderly + gas-keeper + launch | services + agents only: no trader-sim, mock-orderly, gas-keeper, launch, web dev server |
 | Cadence | marks hourly (3600) | marks daily (86400, the on-chain `markInterval`) |
-| Oracle | synthetic GBM (secret seed) | real sources only, three live: Chainlink feeds of `config/chains/4663.json` (or `ORACLE_CHAIN_CONFIG`) + Pyth Pro (`ORACLE_PYTH=1` + `PYTH_API_KEY`) + one more licensed per-share source (`ORACLE_HTTP_SOURCES` / preset), 2 required (`ORACLE_MIN_SOURCES=2`, on-chain `minSources() == 2`), `ORACLE_SYNTHETIC=0` (services/oracle production rules; licences VERIFY C6) |
+| Oracle | synthetic GBM (secret seed) | real sources only, primary + confirm (`ORACLE_POLICY=primary-confirm`): the Chainlink feeds of `config/chains/4663.json` (or `ORACLE_CHAIN_CONFIG`) alone set and sign each price (`ORACLE_MIN_SOURCES=1`, pinned; on-chain `minSources() == 1`), a Uniswap v3 TWAP per ticker (`dexConfirm.pools`) confirms it (divergence > `ORACLE_CONFIRM_BPS` alerts, never moves the price); Pyth Pro optional; `ORACLE_SYNTHETIC=0` (services/oracle production rules; VERIFY C6) |
 | Alerts | `services/alerts` (role addresses derived from the mnemonic) | `services/alerts` (role addresses: local keys derived, KMS roles resolved by dev.ts, or `ALERT_ROLE_ADDRESSES`); delivery credentials reach the alerts process only |
 | Orderly | mock | live (`ORDERLY_MODE=live`, builder key from the env file) |
 | Deployment record | `contracts/deployments/46630.json` (launch appends books) | `contracts/deployments/4663.json` (copied from the deploy machine; `scripts/record-books.ts` appends chartered books; read-only to the stack) |
 | Database / Redis | `bookrunner_testnet`, Redis db 1 | `bookrunner_mainnet`, Redis db 0, passwords required |
 
 `scripts/dev.ts --network mainnet` refuses to start while any required env var, any role signer, the oracle
-sources (Chainlink + Pyth Pro + a third source, `ORACLE_MIN_SOURCES=2`) or the DeployMainnet
+sources (a Chainlink feed and a DEX confirm pool per ticker; `ORACLE_POLICY=primary-confirm` and
+`ORACLE_MIN_SOURCES=1` pinned, a contradicting value refused; Chainlink max age ≤ heartbeat + 1 h, DEX TWAP
+300-3600 s, `ORACLE_DEX_MAX_AGE_MS` ≤ 120 s, `minDepthUsd` ≥ 10,000, `ORACLE_PRIMARY_LAG_BPS` < `ORACLE_CONFIRM_BPS`)
+or the DeployMainnet
 record is missing, while two roles share a key, or while any `*MNEMONIC*`, the deployer key, the funder key or
 `BKRN_ALLOW_ADMIN_KEY` is in the environment (scripts/network-profile.ts).
 
@@ -77,19 +80,35 @@ ORDERLY_BASE_URL=https://api.orderly.org               # VERIFY: RHC endpoint
 ORDERLY_BROKER_ID=<builder broker id>                  # == deploy input externals.orderlyBrokerId
 ORDERLY_BUILDER_KEY_SECRET=<base58 ed25519 seed>
 ANTHROPIC_API_KEY=<key>                                # charter jury
-# oracle (RUNBOOK "Real prices"): Chainlink feeds come from config/chains/4663.json in the app tree (the
-# DeployMainnet input was checked against it); ORACLE_CHAINLINK_FEEDS only overrides, and only in the
-# {"proxy","basis","token"} form (a plain address is refused). Plus two independent per-share sources: Pyth Pro
-# (Equity.US.<T>/USD feed ids built in; ORACLE_PYTH_FEEDS overrides) and a third vendor. Licences: VERIFY C6.
-ORACLE_PYTH=1
-PYTH_API_KEY=<Pyth Pro access token>                   # reaches the oracle process only (childenv.ts), never logged
-ORACLE_MIN_SOURCES=2                                    # exactly 2 of the 3 live sources; on-chain minSources() is 2 too
-# optional Pyth print floor (defaults shown): ORACLE_PYTH_MIN_PUBLISHERS=3 ORACLE_PYTH_MIN_PUBLISHERS_EXTENDED=2
-# ORACLE_PYTH_MAX_CONF_BPS=50; ORACLE_PYTH_URL must stay https. One source down: prices continue from the other two;
-# two down: no price after maxPriceAge (RUNBOOK "Real prices"). services/alerts: oracle_source_failing after 60 s.
-# the third licensed per-share source (required; or its preset once added):
-# tsPath (the vendor's own quote time) and maxAgeMs <= 30000 are required on mainnet; the Finnhub preset is refused
-ORACLE_HTTP_SOURCES='[{"name":"<vendor>","url":"https://.../{ticker}","pricePath":"...","tsPath":"...","tsUnit":"ms","maxAgeMs":15000,"headers":{"X-Api-Key":"..."}}]'
+# oracle (RUNBOOK "Real prices", VERIFY C6): primary + confirm. Chainlink feeds come from config/chains/4663.json in
+# the app tree (the DeployMainnet input was checked against it); ORACLE_CHAINLINK_FEEDS only overrides, and only in
+# the {"proxy","basis","token"} form (a plain address is refused). Chainlink alone signs (sourceCount 1); the DEX
+# confirm pools (Uniswap v3 TWAP over 1800 s, factory-verified, 2% depth floor minDepthUsd $25k: recalibrated from the
+# balance-based $50k; confirm-only, so a thin pool can only cause false alerts) come from the same file's dexConfirm.pools. Chainlink
+# read failure / oraclePaused / round older than heartbeat + grace in session: no price for that ticker (StalePrice
+# after maxPriceAge); the DEX never substitutes. A feed that stops updating but keeps answering is signed as fresh for
+# up to heartbeat + grace (24 h 10 min): only the confirm gap shows it. services/alerts: oracle_source_failing:chainlink
+# (critical, 60 s; can page at the Sunday 20:00 ET open, expected: do not widen the grace), oracle_primary_suspect_stale
+# (gap > ORACLE_PRIMARY_LAG_BPS, no new round, 10 min), oracle_confirm_divergence (> 200 bps, 2 min),
+# oracle_confirm_unavailable (10 min). Actions: docs/RUNBOOK.md "Real prices".
+# ORACLE_POLICY=primary-confirm                         # pinned by the mainnet profile: leave unset (another value is refused)
+# ORACLE_MIN_SOURCES=1                                  # pinned likewise; on-chain AttestedOracle.minSources() is 1 too
+# ORACLE_CONFIRM_BPS=200                                # divergence threshold (bps of Chainlink), at most 500 on mainnet
+# ORACLE_PRIMARY_LAG_BPS=100                            # stalled-feed gap (oracle_primary_suspect_stale), below ORACLE_CONFIRM_BPS
+# ORACLE_CONFIRM_HYSTERESIS_MS=60000                    # a diverged / unavailable / lag / failure run ends only after this
+# ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS=600000            # in-session max age = heartbeat + grace; at most 3600000 on mainnet
+# ORACLE_CHAINLINK_MAX_AGE_MS=3600000                   # feeds without heartbeatSec; at most 90000000 on mainnet
+# ORACLE_DEX_CONFIRM=1                                  # default; cannot be 0 on mainnet
+# ORACLE_DEX_TWAP_SEC=600                               # overrides every pool's twapSec; 300-3600 on mainnet
+# ORACLE_DEX_MAX_AGE_MS=60000                           # at most 120000 on mainnet
+# ALERT_ORACLE_PRIMARY_LAG_SECONDS=600                  # services/alerts: suspect-stale gap duration in session
+# ORACLE_DEX_RPC_URL=https://<rpc>                      # default ORACLE_CHAINLINK_RPC_URL, else RPC_URL
+# optional extra confirm source, only if bought (never counts for signing; licence VERIFY C6):
+# ORACLE_PYTH=1
+# PYTH_API_KEY=<Pyth Pro access token>                  # reaches the oracle process only (childenv.ts), never logged
+# ORACLE_PYTH_MIN_PUBLISHERS=3 ORACLE_PYTH_MIN_PUBLISHERS_EXTENDED=2 ORACLE_PYTH_MAX_CONF_BPS=50; ORACLE_PYTH_URL https only
+# optional HTTP confirm sources: tsPath (the vendor's own quote time) and maxAgeMs <= 30000 required; Finnhub refused
+# ORACLE_HTTP_SOURCES='[{"name":"<vendor>","url":"https://.../{ticker}","pricePath":"...","tsPath":"...","tsUnit":"ms","maxAgeMs":15000,"headers":{"X-Api-Key":"..."}}]'
 ORACLE_ATTESTATION_FILE=/etc/bookrunner/attestation.json   # served at GET /attestation (VERIFY E1)
 # alerts (services/alerts): delivery + optional explicit role addresses (default: derived / resolved by dev.ts)
 ALERT_EMAIL_TO=<ops address>

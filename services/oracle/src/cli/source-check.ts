@@ -5,12 +5,13 @@
 //
 // Feeds/tokens come from the chain price config (default config/chains/<chain>.json) overlaid with
 // ORACLE_CHAINLINK_FEEDS; the service-config rows (mainnet production rules) and the live sources compared
-// against Chainlink (Pyth Pro when PYTH_API_KEY is set, ORACLE_HTTP_SOURCES) come from the current process
-// environment (ORACLE_* / PYTH_API_KEY), never from a file the CLI reads itself: pass a gitignored key file
-// explicitly, e.g. `bun --env-file=../../.env.pyth src/cli/source-check.ts ...`. Without PYTH_API_KEY the Pyth row
-// FAILs on 4663 and is skipped elsewhere.
+// against Chainlink (the Uniswap v3 TWAP of the chain config's dexConfirm.pools, always; Pyth Pro when PYTH_API_KEY is
+// set; ORACLE_HTTP_SOURCES) come from the current process environment (ORACLE_* / PYTH_API_KEY), never from a file
+// the CLI reads itself: pass a gitignored key file explicitly, e.g. `bun --env-file=../../.env.pyth src/cli/source-check.ts ...`.
+// Policy: ORACLE_POLICY (default primary-confirm on 4663: Chainlink signs, the DEX TWAP must confirm every ticker,
+// Pyth / HTTP are optional confirmers; median elsewhere).
 // Exit code 1 when any row FAILs. Sends no transaction and needs no key.
-import { createLogger, isMainnet } from "@bookrunner/shared";
+import { createLogger, isMainnet, uniswapV3For } from "@bookrunner/shared";
 import { stockTokenRegistryAbi } from "@bookrunner/shared/abi";
 import { type Address, BaseError, ContractFunctionRevertedError, type PublicClient, createPublicClient, getAddress, http } from "viem";
 import { type OracleConfig, loadOracleConfig } from "../config";
@@ -19,6 +20,7 @@ import { productionProblems } from "../production";
 import { type RegistryView, type SourceCheckReader, formatTable, runSourceCheck } from "../source-check";
 import { buildSources } from "../sources";
 import { aggregatorV3Abi, stockTokenAbi, viemAggregatorReader } from "../sources/chainlink";
+import { DexTwapSource, viemDexReader } from "../sources/dex-twap";
 import { PYTH_SYMBOLS_URL, type PythSchedule, schedulesById } from "../pyth-schedule";
 import { PythProSource } from "../sources/pyth";
 
@@ -83,11 +85,11 @@ export function viemRegistryView(pub: PublicClient, registry: Address): Registry
 }
 
 /**
- * Live sources compared with Chainlink: every configured non-Chainlink live source (Pyth Pro, HTTP), plus Pyth
- * Pro whenever an access token is present even without ORACLE_PYTH=1 (it is one of the mainnet's three live sources).
+ * Live sources compared with Chainlink besides the DEX TWAP (checked on its own): every configured Pyth Pro / HTTP
+ * source, plus Pyth Pro whenever an access token is present even without ORACLE_PYTH=1 (an optional confirm source).
  */
 export function checkedOtherSources(cfg: OracleConfig, configured: readonly PriceSource[]): PriceSource[] {
-  const others = configured.filter((s) => s.kind !== "chainlink" && s.kind !== "synthetic");
+  const others = configured.filter((s) => s.kind !== "chainlink" && s.kind !== "synthetic" && s.kind !== "dex");
   if (cfg.PYTH_API_KEY && !others.some((s) => s.kind === "pyth")) {
     others.push(
       new PythProSource({
@@ -147,6 +149,9 @@ async function main(): Promise<number> {
     sequencerGraceMs: cfg.ORACLE_SEQUENCER_GRACE_MS,
     registry: args.registry ? viemRegistryView(pub, args.registry) : null,
     otherSources: others,
+    policy: cfg.ORACLE_POLICY,
+    confirmBps: cfg.ORACLE_CONFIRM_BPS,
+    dex: Object.keys(cfg.dexPools).length > 0 ? new DexTwapSource(cfg.dexPools, viemDexReader(pub), { maxAgeMs: cfg.ORACLE_DEX_MAX_AGE_MS, factory: uniswapV3For(args.chain)?.factory ?? null }) : null,
     pythKey: !!cfg.PYTH_API_KEY,
     ...(pythCalendar ? { pythCalendar } : {}),
     minSources: cfg.ORACLE_MIN_SOURCES,

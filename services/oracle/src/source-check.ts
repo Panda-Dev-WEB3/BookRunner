@@ -1,12 +1,16 @@
-// Read-only pre-launch check of every configured price source (VERIFY C4 / T2 / T3): run by the operator
-// against a mainnet RPC (`bun run source-check --chain 4663 --rpc <url>`, cli/source-check.ts). Pure over
+// Read-only pre-launch check of every configured price source (VERIFY C4 / C6 / T2 / T3): run by the operator
+// against a mainnet RPC. Under primary-confirm (mainnet) it shows per ticker the Chainlink per-share price (the only
+// signing source), the Uniswap v3 TWAP per share with its diff, pool depth and observation history (FAIL on mainnet
+// when a pool is missing, below its liquidity floor or cannot serve the window; WARN beyond ORACLE_CONFIRM_BPS),
+// and the optional confirm sources (Pyth Pro / HTTP: WARN only) (`bun run source-check --chain 4663 --rpc <url>`, cli/source-check.ts). Pure over
 // an injected reader so it is unit-tested with fakes; never sends a transaction.
 import { type ChainPriceConfig, MAINNET_CHAIN_ID, SESSIONS_24X5, type Sessions, WAD, isOpen } from "@bookrunner/shared";
 import type { Address } from "viem";
-import { exceedsBps } from "./domain/aggregate";
-import type { PriceSource } from "./domain/types";
+import { deviationBps, exceedsBps } from "./domain/aggregate";
+import type { OraclePolicy, PriceSource } from "./domain/types";
 import { type PythSchedule, compareCalendars } from "./pyth-schedule";
 import { type AggregatorReader, ChainlinkSource, type ResolvedFeed } from "./sources/chainlink";
+import type { DexTwapSource } from "./sources/dex-twap";
 
 export type CheckStatus = "PASS" | "WARN" | "FAIL" | "SKIP";
 
@@ -44,8 +48,18 @@ export interface SourceCheckInput {
   /** Other live sources (Pyth Pro, HTTP) compared with the Chainlink per-share price. */
   otherSources?: readonly PriceSource[];
   /**
-   * Whether a Pyth Pro access token (PYTH_API_KEY) is available; undefined = not evaluated. Without one the
-   * Pyth row FAILs on mainnet (one of the three required live sources) and is SKIPped elsewhere.
+   * Aggregation policy checked against (default: primary-confirm on mainnet, median elsewhere). primary-confirm:
+   * Chainlink must be live, the DEX TWAP must confirm every ticker on mainnet, other sources are optional confirmers
+   * (WARN beyond confirmBps). median: every source within outlierBps of Chainlink and of each other.
+   */
+  policy?: OraclePolicy;
+  /** The Uniswap v3 TWAP confirm source (chain config dexConfirm.pools); null / undefined = none configured. */
+  dex?: DexTwapSource | null;
+  /** primary-confirm divergence threshold (ORACLE_CONFIRM_BPS, default 200). */
+  confirmBps?: number;
+  /**
+   * Whether a Pyth Pro access token (PYTH_API_KEY) is available; undefined = not evaluated. Without one the Pyth
+   * row FAILs on mainnet under the median policy and is SKIPped otherwise (primary-confirm: an optional confirmer).
    */
   pythKey?: boolean;
   /** Minimum live sources (ORACLE_MIN_SOURCES): adds the "sources / live" summary row when set. */
@@ -53,8 +67,8 @@ export interface SourceCheckInput {
   /**
    * Pyth's published market-session schedules per ticker (`/v1/symbols`), or why they could not be read: compared
    * with the session calendar over the next `calendarDays` (default 30). A minute the calendar treats as open
-   * while Pyth is closed leaves mainnet without its spare source and means the tables are out of date — FAIL on
-   * 4663, WARN elsewhere.
+   * while Pyth is closed means the holiday tables are out of date — FAIL on 4663 under the median policy (Pyth a
+   * required vote), WARN otherwise (primary-confirm: Pyth only confirms).
    */
   pythCalendar?: { schedules: ReadonlyMap<string, readonly PythSchedule[]> } | { error: string };
   calendarDays?: number;
@@ -67,6 +81,9 @@ const errMsg = (e: unknown): string => (e instanceof Error ? (e.message.split("\
 const fmtWad = (x: bigint, dp = 6) => (Number(x) / 1e18).toFixed(dp);
 
 export async function runSourceCheck(p: SourceCheckInput): Promise<CheckRow[]> {
+  const policy: OraclePolicy = p.policy ?? (p.chainId === MAINNET_CHAIN_ID ? "primary-confirm" : "median");
+  const mainnet = p.chainId === MAINNET_CHAIN_ID;
+  const confirmBps = p.confirmBps ?? 200;
   const rows: CheckRow[] = [];
   const add = (subject: string, check: string, status: CheckStatus, detail: string) => rows.push({ subject, check, status, detail });
   const now = p.now ?? Date.now;
@@ -97,16 +114,22 @@ export async function runSourceCheck(p: SourceCheckInput): Promise<CheckRow[]> {
 
   for (const msg of p.configProblems ?? []) add("service config", "production rule", "FAIL", msg);
   if (p.pythKey === false) {
-    const mainnet = p.chainId === MAINNET_CHAIN_ID;
-    add("pyth", "access token", mainnet ? "FAIL" : "SKIP", `PYTH_API_KEY not set${mainnet ? ": Pyth Pro is one of the mainnet's three live sources (ORACLE_PYTH=1 + PYTH_API_KEY)" : ""}`);
+    const required = mainnet && policy === "median";
+    add(
+      "pyth",
+      "access token",
+      required ? "FAIL" : "SKIP",
+      `PYTH_API_KEY not set${required ? ": Pyth Pro is required by the median policy on mainnet" : policy === "primary-confirm" ? " (optional confirm source under primary-confirm)" : ""}`,
+    );
   }
-  if (p.pythCalendar) checkPythCalendar(p, now(), add);
+  if (p.pythCalendar) checkPythCalendar(p, now(), mainnet && policy === "median" ? "FAIL" : "WARN", add);
 
   // sources that produced a fresh observation for at least one feed
   const live = new Set<string>();
 
   // ---- config coverage ----
   for (const id of Object.keys(p.config.stockTokens)) if (!p.feeds[id]) add(id, "coverage", "WARN", "Stock Token without a Chainlink feed");
+  const confirmsLive = new Set<string>();
 
   const source = new ChainlinkSource(p.feeds, p.reader, { now, sequencerFeed: null });
   for (const [id, f] of Object.entries(p.feeds)) {
@@ -163,6 +186,13 @@ export async function runSourceCheck(p: SourceCheckInput): Promise<CheckRow[]> {
         const basis = f.basis === "per-token" ? `per share = feed / uiMultiplier` : "per share";
         add(id, "observation", status, `$${o.price.toFixed(4)} ${basis}, ${age}${o.stale && !marketOpen ? ", held off-hours" : ""}`);
         if (!o.stale) live.add(source.name);
+        if (policy === "primary-confirm") {
+          if (await checkDex(p.dex ?? null, id, o.price, confirmBps, mainnet, marketOpen, add)) confirmsLive.add("dex-twap");
+          for (const other of p.otherSources ?? []) {
+            if ((await confirmCompare(other, id, o.price, confirmBps, marketOpen, add)) !== null) confirmsLive.add(other.name);
+          }
+          continue;
+        }
         const seen: Array<{ name: string; price: number }> = [];
         for (const other of p.otherSources ?? []) {
           const price = await compare(other, id, o.price, p.outlierBps ?? 150, marketOpen, add);
@@ -186,6 +216,23 @@ export async function runSourceCheck(p: SourceCheckInput): Promise<CheckRow[]> {
       add(id, "observation", "FAIL", errMsg(e));
     }
   }
+  if (policy === "primary-confirm") {
+    const feeds = Object.keys(p.feeds).length;
+    add(
+      "sources",
+      "primary",
+      live.has("chainlink") ? "PASS" : marketOpen ? "FAIL" : "WARN",
+      `chainlink ${live.has("chainlink") ? "live" : "not live"} (${feeds} feed${feeds === 1 ? "" : "s"}; the only signing source, sourceCount 1)`,
+    );
+    const configured = [...(p.dex ? ["dex-twap"] : []), ...(p.otherSources ?? []).map((x) => x.name)];
+    add(
+      "sources",
+      "confirm",
+      confirmsLive.size > 0 ? "PASS" : mainnet ? "FAIL" : "WARN",
+      `${confirmsLive.size > 0 ? [...confirmsLive].sort().join(", ") : "none"} live (configured: ${configured.join(", ") || "none"}; threshold ${confirmBps} bps)`,
+    );
+    return rows;
+  }
   if (p.minSources !== undefined) {
     const configured = ["chainlink", ...(p.otherSources ?? []).map((s) => s.name)];
     const names = [...live].sort();
@@ -203,10 +250,9 @@ export async function runSourceCheck(p: SourceCheckInput): Promise<CheckRow[]> {
 const fmtEt = (ms: number) =>
   new Date(ms).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "2-digit", weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 
-function checkPythCalendar(p: SourceCheckInput, nowMs: number, add: (s: string, c: string, st: CheckStatus, d: string) => void): void {
+function checkPythCalendar(p: SourceCheckInput, nowMs: number, bad: CheckStatus, add: (s: string, c: string, st: CheckStatus, d: string) => void): void {
   const cal = p.pythCalendar;
   if (!cal) return;
-  const bad: CheckStatus = p.chainId === MAINNET_CHAIN_ID ? "FAIL" : "WARN";
   if ("error" in cal) {
     add("pyth", "calendar", bad, `Pyth market-session schedules not readable: ${cal.error}`);
     return;
@@ -271,6 +317,80 @@ async function compare(
     return r.price;
   } catch (e) {
     add(id, `vs ${other.name}`, "FAIL", errMsg(e));
+    return null;
+  }
+}
+
+const usd = (x: number, dp = 4) => `$${x.toFixed(dp)}`;
+const usd0 = (x: number) => `$${Math.round(x).toLocaleString("en-US")}`;
+
+/**
+ * primary-confirm: the DEX TWAP vs the Chainlink per-share price for one ticker. Structural problems (no pool, a
+ * pool that is not the factory's getPool(token, quote, fee), wrong tokens, 2% depth below the floor, history shorter
+ * than the window, unreadable) FAIL on mainnet (the DEX confirm is required there) and WARN elsewhere; transient ones
+ * (no swap in the window, token paused, multiplier change in the window) WARN; a diff beyond confirmBps WARNs (it alerts at runtime, the price stays
+ * Chainlink). Returns whether the TWAP produced an observation.
+ */
+async function checkDex(
+  dex: DexTwapSource | null,
+  id: string,
+  chainlinkPerShare: number,
+  confirmBps: number,
+  mainnet: boolean,
+  marketOpen: boolean,
+  add: (s: string, c: string, st: CheckStatus, d: string) => void,
+): Promise<boolean> {
+  const bad: CheckStatus = mainnet ? "FAIL" : "WARN";
+  const pool = dex?.pool(id);
+  if (!dex || !pool) {
+    if (mainnet || dex) add(id, "dex confirm", bad, "no DEX confirm pool (config/chains/<chain>.json dexConfirm.pools)");
+    return false;
+  }
+  const o = await dex.observe(id);
+  const where = `pool ${pool.pool} (fee ${pool.fee})`;
+  const factoryChecked = dex.factoryChecked();
+  if (!o.ok) {
+    const transient = /^(no swap in the|token oraclePaused|uiMultiplier changed)/.test(o.reason);
+    const extra = [
+      o.depthQuote !== undefined ? `2% depth ${usd0(o.depthQuote)} (floor ${usd0(pool.minDepthUsd)})` : null,
+      o.cardinality !== undefined ? `cardinality ${o.cardinality}` : null,
+      o.historySec !== undefined ? `history ${o.historySec}s` : null,
+      o.lastSwapAgeSec !== undefined ? `last swap ${o.lastSwapAgeSec}s ago` : null,
+    ].filter(Boolean);
+    add(id, "dex confirm", transient ? "WARN" : bad, `${o.reason}; ${where}${extra.length > 0 ? `, ${extra.join(", ")}` : ""}`);
+    return false;
+  }
+  const bps = deviationBps(o.price, chainlinkPerShare);
+  const diverged = exceedsBps(o.price, chainlinkPerShare, confirmBps);
+  add(
+    id,
+    "dex confirm",
+    diverged ? "WARN" : "PASS",
+    `TWAP ${o.twapSec}s ${usd(o.price)}/share vs Chainlink ${usd(chainlinkPerShare)}: ${bps.toFixed(1)} bps (threshold ${confirmBps}${diverged && !marketOpen ? "; off-hours Chainlink holds" : ""}); token ${usd(o.tokenPrice)} TWAP / ${usd(o.spotTokenPrice)} spot; 2% depth ${usd0(o.depthQuote)} quote (floor ${usd0(pool.minDepthUsd)}); cardinality ${o.cardinality}, history ${o.historySec}s, last swap ${o.lastSwapAgeSec}s ago; ${where}${factoryChecked ? ", factory getPool verified" : ""}`,
+  );
+  return true;
+}
+
+/** primary-confirm: an optional confirm source (Pyth Pro, HTTP) vs Chainlink per share: WARN only. */
+async function confirmCompare(
+  other: PriceSource,
+  id: string,
+  chainlinkPerShare: number,
+  confirmBps: number,
+  marketOpen: boolean,
+  add: (s: string, c: string, st: CheckStatus, d: string) => void,
+): Promise<number | null> {
+  try {
+    const r = await other.fetch(id);
+    if (!r) {
+      add(id, `vs ${other.name}`, "WARN", marketOpen ? "no observation (optional confirm source)" : "no fresh observation (off-hours)");
+      return null;
+    }
+    const bps = deviationBps(r.price, chainlinkPerShare);
+    add(id, `vs ${other.name}`, exceedsBps(r.price, chainlinkPerShare, confirmBps) ? "WARN" : "PASS", `${usd(r.price)} (${bps.toFixed(1)} bps from Chainlink per share; confirm threshold ${confirmBps})`);
+    return r.price;
+  } catch (e) {
+    add(id, `vs ${other.name}`, "WARN", `${errMsg(e)} (optional confirm source)`);
     return null;
   }
 }

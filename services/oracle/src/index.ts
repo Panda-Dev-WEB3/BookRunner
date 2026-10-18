@@ -13,7 +13,7 @@ import { loadOracleConfig } from "./config";
 import { MAX_SAFE_PUSH_DEVIATION_BPS, createApp, serveOptions } from "./http";
 import { startLoop } from "./loop";
 import { Runtime } from "./runtime";
-import { MAINNET_SPARE_SOURCES, isProductionChain, liveSourceCount, productionProblems, startupOnchainMinSourcesProblem } from "./production";
+import { isProductionChain, liveSourceCount, productionProblems, startupOnchainMinSourcesProblem } from "./production";
 import { OracleService } from "./service";
 import { accountSigner } from "./signing";
 import { buildSources } from "./sources/index";
@@ -46,12 +46,12 @@ if (syntheticRefused) {
 const production = isProductionChain(cfg.CHAIN_ID);
 const problems = productionProblems(cfg, sources);
 if (problems.length > 0) {
-  // mainnet: Chainlink + an independent source, >= the minimum sources, no synthetic prices, calendar holds
+  // mainnet: primary-confirm (Chainlink feed + DEX confirm pool per ticker, minimum 1), no synthetic prices, calendar holds
   log.fatal({ chainId: cfg.CHAIN_ID, problems }, "refusing to start: mainnet oracle configuration is not production-ready");
   process.exit(1);
 }
 if (production) {
-  // the on-chain minimum must be reachable: AttestedOracle refuses every non-held price below minSources()
+  // the on-chain minimum must accept what is signed: AttestedOracle refuses every non-held price below minSources() (primary-confirm: exactly 1)
   const dep = tryLoadDeployment(cfg.DEPLOYMENT_FILE);
   const oracle = dep?.chainId === cfg.CHAIN_ID ? dep.contracts?.oracle : undefined;
   const problem = !oracle
@@ -59,8 +59,8 @@ if (production) {
     : await startupOnchainMinSourcesProblem({
         readMinSources: async () =>
           Number(await publicClientFor(cfg.CHAIN_ID, cfg.RPC_URL).readContract({ address: oracle, abi: attestedOracleAbi, functionName: "minSources" })),
+        policy: cfg.ORACLE_POLICY,
         sources,
-        spare: MAINNET_SPARE_SOURCES,
       });
   if (problem) {
     log.fatal({ chainId: cfg.CHAIN_ID, oracle: oracle ?? null, liveSources: liveSourceCount(sources) }, `refusing to start: ${problem}`);
@@ -78,6 +78,11 @@ const service = new OracleService({
   settings: {
     outlierBps: cfg.ORACLE_OUTLIER_BPS,
     pairMaxAgeMs: { chainlink: cfg.ORACLE_CHAINLINK_PAIR_MAX_AGE_MS },
+    policy: cfg.ORACLE_POLICY,
+    confirmBps: cfg.ORACLE_CONFIRM_BPS,
+    confirmUnavailableWarnMs: cfg.ORACLE_CONFIRM_UNAVAILABLE_WARN_MS,
+    primaryLagBps: cfg.ORACLE_PRIMARY_LAG_BPS,
+    hysteresisMs: cfg.ORACLE_CONFIRM_HYSTERESIS_MS,
     minSources: cfg.ORACLE_MIN_SOURCES,
     maxSourceAgeMs: cfg.ORACLE_MAX_SOURCE_AGE_MS,
     sourceTimeoutMs: cfg.ORACLE_SOURCE_TIMEOUT_MS,
@@ -116,6 +121,7 @@ log.info(
     signer: account.address,
     chainId: cfg.CHAIN_ID,
     pushMode: cfg.ORACLE_PUSH_MODE,
+    policy: cfg.ORACLE_POLICY,
     sessionsMode: cfg.SESSIONS_MODE,
     orderlyMode: cfg.ORDERLY_MODE,
   },

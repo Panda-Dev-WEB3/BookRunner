@@ -88,6 +88,36 @@ export const feedConfigSchema = z.object({
   marketHours: z.string().optional(),
 });
 
+/**
+ * One DEX confirm pool (services/oracle sources/dex-twap.ts): a Uniswap v3 Stock-Token / quote-token pool whose
+ * time-weighted average price CONFIRMS the Chainlink price (primary-confirm policy). It never sets or moves it.
+ */
+export const dexConfirmPoolSchema = z.object({
+  /** Uniswap v3 pool (token0 / token1 = the Stock Token and `quoteToken`, either order). */
+  pool: address,
+  /** Pool fee tier: the oracle and source-check require factory.getPool(stockToken, quoteToken, fee) == pool. */
+  fee: z.number().int().positive().max(1_000_000),
+  /** Quote token (USDG on Robinhood Chain), assumed to be worth $1: a depeg shows up as divergence alerts. */
+  quoteToken: address,
+  /** TWAP window (s): observe([twapSec, 0]). The pool's observation history must cover it. */
+  twapSec: z.number().int().min(60).max(86_400).default(1800),
+  /**
+   * Depth floor (whole quote tokens, ~USD): the smaller of the quote amounts that move the pool price 2% up or down
+   * within the active range (in-range liquidity() and sqrtPriceX96; services/oracle sources/dex-twap.ts depthQuote).
+   * Below it the pool confirms nothing (status unavailable). Not the pool's token balance (out-of-range positions,
+   * uncollected fees and donations would count there).
+   */
+  minDepthUsd: z.number().positive(),
+});
+
+export const dexConfirmSchema = z.object({
+  /** When the pools below were read on-chain (re-check before launch: liquidity moves). */
+  readAt: z.string().optional(),
+  note: z.string().optional(),
+  /** ticker -> its confirm pool (the deepest Stock-Token / USDG pool). */
+  pools: z.record(z.string(), dexConfirmPoolSchema).default({}),
+});
+
 export const chainPriceConfigSchema = z
   .object({
     chainId: z.number().int().positive(),
@@ -103,6 +133,8 @@ export const chainPriceConfigSchema = z
         feeds: z.record(z.string(), feedConfigSchema).default({}),
       })
       .default({ sequencerUptimeFeed: null, feeds: {} }),
+    /** Uniswap v3 TWAP pools confirming the Chainlink price per ticker (mainnet: one per ticker, VERIFY C6). */
+    dexConfirm: dexConfirmSchema.optional(),
   })
   .superRefine((c, ctx) => {
     for (const [id, f] of Object.entries(c.chainlink.feeds)) {
@@ -110,11 +142,18 @@ export const chainPriceConfigSchema = z
         ctx.addIssue({ code: "custom", path: ["chainlink", "feeds", id], message: "per-token feed needs `token` or a stockTokens entry (its uiMultiplier converts the feed to per share)" });
       }
     }
+    for (const id of Object.keys(c.dexConfirm?.pools ?? {})) {
+      if (!c.stockTokens[id]) {
+        ctx.addIssue({ code: "custom", path: ["dexConfirm", "pools", id], message: "DEX confirm pool needs a stockTokens entry (the pool's other token, divided by its uiMultiplier)" });
+      }
+    }
   });
 
 export type ChainPriceConfig = z.infer<typeof chainPriceConfigSchema>;
 export type FeedConfig = z.infer<typeof feedConfigSchema>;
 export type StockTokenConfig = z.infer<typeof stockTokenConfigSchema>;
+export type DexConfirmPoolConfig = z.infer<typeof dexConfirmPoolSchema>;
+export type DexConfirmConfig = z.infer<typeof dexConfirmSchema>;
 
 /** Default location of a chain's price config: <repo>/config/chains/<chainId>.json. */
 export function chainPriceConfigPath(chainId: number, file?: string): string {

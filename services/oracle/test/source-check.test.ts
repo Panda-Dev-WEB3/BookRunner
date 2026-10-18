@@ -1,12 +1,14 @@
 // --source-check (read-only operator CLI): pass/fail table over every configured feed.
 import { describe, expect, test } from "bun:test";
 import { MULTIPLIER_VECTOR as V, WAD, loadChainPriceConfig } from "@bookrunner/shared";
-import type { Address } from "viem";
+import { type Address, getAddress } from "viem";
 import { checkedOtherSources, parseArgs } from "../src/cli/source-check";
 import { loadOracleConfig, resolveFeeds } from "../src/config";
 import type { PriceSource } from "../src/domain/types";
 import { type CheckRow, type RegistryView, type SourceCheckReader, formatTable, runSourceCheck } from "../src/source-check";
 import type { RoundData, TokenState } from "../src/sources/chainlink";
+import { DexTwapSource } from "../src/sources/dex-twap";
+import { FACTORY, FakeDexReader, USDG, dexPool, tickFor } from "./dex-fakes";
 
 const CONFIG = loadChainPriceConfig(4663)!;
 const FEEDS = resolveFeeds(CONFIG, {}, { defaultMaxAgeMs: 3_600_000, heartbeatGraceMs: 600_000 }).feeds;
@@ -56,12 +58,27 @@ class FakeCheckReader implements SourceCheckReader {
   }
 }
 
+/** A DEX TWAP confirm source over fake USDG pools, priced at `factor` x the Chainlink per-share price. */
+function dexAt(factor = 1, tickers = Object.keys(CONFIG.stockTokens)) {
+  const r = new FakeDexReader();
+  const pools: Record<string, ReturnType<typeof dexPool>> = {};
+  tickers.forEach((id, i) => {
+    const token = getAddress(CONFIG.stockTokens[id]!.token);
+    const pool = getAddress(`0x${(0xd000 + i).toString(16).padStart(40, "0")}`);
+    const tokenPrice = V.perSharePrice * factor * (Number(V.uiMultiplierWad) / 1e18);
+    r.addPool(pool, { token0: USDG, token1: token, meanTick: tickFor(tokenPrice, false) });
+    r.setToken(token, { uiMultiplier: V.uiMultiplierWad });
+    pools[id] = dexPool(pool, token);
+  });
+  return { r, dex: new DexTwapSource(pools, r, { maxAgeMs: 60_000, factory: FACTORY }) };
+}
+
 const rowsFor = (rows: CheckRow[], subject: string) => rows.filter((r) => r.subject === subject);
 const status = (rows: CheckRow[], subject: string, check: string) => rows.find((r) => r.subject === subject && r.check === check)?.status;
 
 describe("runSourceCheck", () => {
-  test("healthy mainnet config: every row passes except the documented sequencer warning", async () => {
-    const rows = await runSourceCheck({ chainId: 4663, config: CONFIG, feeds: FEEDS, reader: new FakeCheckReader(), now: () => T0 });
+  test("healthy mainnet config (primary-confirm): every row passes except the documented sequencer warning", async () => {
+    const rows = await runSourceCheck({ chainId: 4663, config: CONFIG, feeds: FEEDS, reader: new FakeCheckReader(), now: () => T0, dex: dexAt().dex });
     const bad = rows.filter((r) => r.status !== "PASS");
     expect(bad.map((r) => `${r.subject}/${r.check}`)).toEqual(["chain/L2 sequencer"]);
     for (const id of ["NVDA", "TSLA", "AAPL", "MSFT", "AMZN"]) {
@@ -74,8 +91,10 @@ describe("runSourceCheck", () => {
         "uiMultiplier",
         "oraclePaused",
         "observation",
+        "dex confirm",
       ]);
     }
+    expect(rows.filter((r) => r.subject === "sources").map((r) => `${r.check}:${r.status}`)).toEqual(["primary:PASS", "confirm:PASS"]);
     const obs = rows.find((r) => r.subject === "NVDA" && r.check === "observation")!;
     expect(obs.detail).toContain(`$${V.perSharePrice.toFixed(4)} per share = feed / uiMultiplier`);
     expect(formatTable(rows)).toContain("0 fail -> OK");
@@ -144,7 +163,7 @@ describe("runSourceCheck", () => {
     expect(rows.find((x) => x.subject === "NVDA" && x.check === "registry")!.detail).toContain("outside the band");
   });
 
-  test("other live sources are compared with the Chainlink per-share price; config problems are listed", async () => {
+  test("median policy: other live sources are compared with the Chainlink per-share price; config problems are listed", async () => {
     const near: PriceSource = { name: "http-a", kind: "http", fetch: async () => ({ price: V.perSharePrice * 1.001, ts: T0 }) };
     const far: PriceSource = { name: "http-b", kind: "http", fetch: async () => ({ price: V.perSharePrice * 1.05, ts: T0 }) };
     const rows = await runSourceCheck({
@@ -155,6 +174,7 @@ describe("runSourceCheck", () => {
       now: () => T0,
       otherSources: [near, far],
       configProblems: ["SESSIONS_MODE=24x7 is a demo override"],
+      policy: "median",
     });
     expect(status(rows, "NVDA", "vs http-a")).toBe("PASS");
     expect(status(rows, "NVDA", "vs http-b")).toBe("FAIL");
@@ -170,7 +190,7 @@ describe("Pyth Pro in source-check", () => {
     fetch: async () => (factor === null ? null : { price: V.perSharePrice * factor, ts: T0 - 400 }),
   });
   const run = (p: Partial<Parameters<typeof runSourceCheck>[0]>) =>
-    runSourceCheck({ chainId: 4663, config: CONFIG, feeds: { NVDA: FEEDS.NVDA! }, reader: new FakeCheckReader(), now: () => T0, ...p });
+    runSourceCheck({ chainId: 4663, config: CONFIG, feeds: { NVDA: FEEDS.NVDA! }, reader: new FakeCheckReader(), now: () => T0, policy: "median", ...p });
 
   test("compared with Chainlink per share on the 150 bps rule; the live sources are listed", async () => {
     let rows = await run({ otherSources: [pythAt(1.004)], pythKey: true, minSources: 2 });
@@ -215,6 +235,9 @@ describe("Pyth Pro in source-check", () => {
   test("without PYTH_API_KEY: FAIL on the mainnet profile, SKIP elsewhere", async () => {
     let rows = await run({ pythKey: false });
     expect(rows.find((r) => r.subject === "pyth")).toMatchObject({ check: "access token", status: "FAIL" });
+    // primary-confirm (the mainnet default): Pyth is an optional confirm source
+    rows = await run({ pythKey: false, policy: undefined });
+    expect(rows.find((r) => r.subject === "pyth")).toMatchObject({ check: "access token", status: "SKIP", detail: "PYTH_API_KEY not set (optional confirm source under primary-confirm)" });
     const reader = new FakeCheckReader();
     reader.chain = 46630;
     rows = await runSourceCheck({ chainId: 46630, config: CONFIG, feeds: { NVDA: FEEDS.NVDA! }, reader, now: () => T0, pythKey: false });
@@ -231,6 +254,67 @@ describe("Pyth Pro in source-check", () => {
     expect(withKey.map((s) => `${s.name}:${s.kind}`)).toEqual(["vendor:http", "pyth:pyth"]);
     const pythOn: PriceSource = { name: "pyth", kind: "pyth", fetch: async () => null };
     expect(checkedOtherSources(loadOracleConfig({ ...base, PYTH_API_KEY: "k" }), [cl, pythOn])).toEqual([pythOn]);
+  });
+});
+
+describe("primary-confirm in source-check (mainnet default)", () => {
+  const run = (p: Partial<Parameters<typeof runSourceCheck>[0]>) =>
+    runSourceCheck({ chainId: 4663, config: CONFIG, feeds: { NVDA: FEEDS.NVDA! }, reader: new FakeCheckReader(), now: () => T0, ...p });
+  const dexRow = (rows: CheckRow[]) => rows.find((r) => r.subject === "NVDA" && r.check === "dex confirm")!;
+
+  test("DEX TWAP vs Chainlink per share: diff, pool depth, cardinality, history in the row; WARN beyond the threshold", async () => {
+    let rows = await run({ dex: dexAt(1.005).dex });
+    expect(dexRow(rows).status).toBe("PASS");
+    expect(dexRow(rows).detail).toMatch(/^TWAP 600s \$\d+\.\d{4}\/share vs Chainlink \$184\.9801: 5\d\.\d bps \(threshold 200\)/);
+    expect(dexRow(rows).detail).toMatch(/2% depth \$(499,9\d\d|500,0\d\d) quote \(floor \$50,000\); cardinality 7200, history 86400s, last swap 30s ago; pool 0x\w+ \(fee 3000\), factory getPool verified$/);
+    rows = await run({ dex: dexAt(1.03).dex });
+    expect(dexRow(rows).status).toBe("WARN"); // ~300 bps: alerts at runtime, the price stays Chainlink
+    rows = await run({ dex: dexAt(1.03).dex, confirmBps: 400 });
+    expect(dexRow(rows).status).toBe("PASS");
+    expect(formatTable(rows)).toContain("0 fail -> OK");
+  });
+
+  test("mainnet FAILs a missing pool, a pool below its floor, a history shorter than the window", async () => {
+    let rows = await run({ dex: null });
+    expect(dexRow(rows)).toMatchObject({ status: "FAIL", detail: "no DEX confirm pool (config/chains/<chain>.json dexConfirm.pools)" });
+    expect(rows.find((r) => r.subject === "sources" && r.check === "confirm")).toMatchObject({ status: "FAIL", detail: "none live (configured: none; threshold 200 bps)" });
+    rows = await run({ dex: dexAt(1, ["TSLA"]).dex });
+    expect(dexRow(rows).status).toBe("FAIL");
+    const shallow = dexAt();
+    for (const pool of shallow.r.pools.values()) pool.depthUsd = 10_000;
+    rows = await run({ dex: shallow.dex });
+    expect(dexRow(rows).status).toBe("FAIL");
+    expect(dexRow(rows).detail).toMatch(/^insufficient depth: \$(9,9\d\d|10,0\d\d) moves the price 2% \(floor \$50,000\)/);
+    const young = dexAt();
+    for (const pool of young.r.pools.values()) pool.oldestTs = young.r.blockNow.timestamp - 100;
+    rows = await run({ dex: young.dex });
+    expect(dexRow(rows).detail).toContain("observation history 100s < TWAP window 600s");
+    expect(dexRow(rows).status).toBe("FAIL");
+    // off mainnet the same problems only warn
+    const reader = new FakeCheckReader();
+    reader.chain = 46630;
+    rows = await runSourceCheck({ chainId: 46630, config: CONFIG, feeds: { NVDA: FEEDS.NVDA! }, reader, now: () => T0, policy: "primary-confirm", dex: shallow.dex });
+    expect(dexRow(rows).status).toBe("WARN");
+  });
+
+  test("optional confirmers (Pyth / HTTP) only WARN; Chainlink not live in session FAILs the primary row", async () => {
+    const pyth: PriceSource = { name: "pyth", kind: "pyth", fetch: async () => ({ price: V.perSharePrice * 1.05, ts: T0 }) };
+    const dead: PriceSource = { name: "vendor", kind: "http", fetch: async () => null };
+    let rows = await run({ dex: dexAt().dex, otherSources: [pyth, dead] });
+    expect(status(rows, "NVDA", "vs pyth")).toBe("WARN");
+    expect(status(rows, "NVDA", "vs vendor")).toBe("WARN");
+    expect(rows.some((r) => r.check === "pyth vs vendor")).toBe(false); // no pairwise rule: nothing is a median
+    expect(rows.find((r) => r.subject === "sources" && r.check === "confirm")!.detail).toBe("dex-twap, pyth live (configured: dex-twap, pyth, vendor; threshold 200 bps)");
+    const r = new FakeCheckReader();
+    r.rounds.set(FEEDS.NVDA!.proxy.toLowerCase(), { answer: V.feedAnswer, startedAt: T0S - 200_000n, updatedAt: T0S - 200_000n });
+    rows = await run({ reader: r, dex: dexAt().dex });
+    expect(status(rows, "sources", "primary")).toBe("FAIL");
+  });
+
+  test("CLI source list never includes the DEX source (checked on its own)", () => {
+    const cl: PriceSource = { name: "chainlink", kind: "chainlink", fetch: async () => null };
+    const dx: PriceSource = { name: "dex-twap", kind: "dex", fetch: async () => null };
+    expect(checkedOtherSources(loadOracleConfig({ CHAIN_ID: "4663", ORACLE_SYNTHETIC: "0" }), [cl, dx])).toEqual([]);
   });
 });
 
