@@ -397,6 +397,14 @@ can redo it during the timelock delay from the published quote.
   source, so nothing is signed for it in session and after `maxPriceAge` its valuations, trades and liquidations
   revert `StalePrice` until the pause ends; off-hours the price stays held at the last Chainlink price. Expect
   `oracle_source_failing:chainlink` for the ticker during the pause.
+- Split window (audit M-2): from `effectiveAt` until the oracle signs the first live price after it (normally
+  the next open), `StockTokenRegistry.valueUsd` for that token reverts `MultiplierChangedSincePrice` (the held
+  price is still in pre-change shares): desk hedges and desk-key flattens of the token revert, the RISK
+  flatten still runs, and the mark service logs "desk position priced before its multiplier change" and
+  retries (no mark, nothing settles) for books holding it. This is expected and clears by itself. The
+  Chainlink source also drops a round from before a split until the feed's next round. A dividend update
+  during a hold has the same effect until the open. In stored-multiplier mode (devnet / testnet) a
+  `setMultiplier` counts as the change.
 
 ## Operations
 

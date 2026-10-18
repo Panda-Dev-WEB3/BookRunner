@@ -404,12 +404,19 @@ are oracle keys published by the oracle service as the weighted index level. Mul
 token: stored, or (mainnet) the token's ERC-8056 `uiMultiplier()` read live within `multiplierBandBps`
 of the stored anchor (`setMultiplierSource`, `setNextMultiplierAnchor`); Robinhood's per-token Chainlink
 prices are divided by that same value in the oracle service (VERIFY C2/T2, `packages/shared/src/stockTokens.ts`).
+Split window (audit M-2, docs/AUDIT-2026-10.md): `valueUsd` reverts `MultiplierChangedSincePrice` while the
+price's share basis (its `publishedAt`, or `AttestedOracle.lastLiveAt` for a held price) predates
+`multiplierChangedAt(token)` (live mode: the token's passed `effectiveAt()`; stored mode: the last
+`setMultiplier` / source switch), until the oracle signs a live price after the change; the mark service
+refuses a mark valuing such a position. `valueUsdAt` is the pure valuation at a given price.
 
 ### 2.8 AttestedOracle, PoolEngine, PoolEngineAdapter [A-engine]
 
 - `AttestedOracle` per `IAttestedOracle` (EIP-712 typed price). `push` requires an active signer,
   `publishedAt > stored.publishedAt`, `publishedAt <= block.timestamp + 5`, and
   `sourceCount >= minSources` unless `held`. `priceOf` reverts `StalePrice` beyond `maxPriceAge`.
+  `lastLiveAt(id)` = publishedAt of the newest stored price signed not held (the share basis of a held
+  price, which re-stamps the last open-session print; StockTokenRegistry split guard, audit M-2).
   Signer registry: timelock `setSigner(signer, active, attestation)`; the attestation hash is the
   TEE quote digest (verification flow VERIFY; devnet uses a plain key).
 - `PoolEngine` per `IPoolEngine` (pool-vs-trader, isolated margin, aggregate accounting O(1)):
