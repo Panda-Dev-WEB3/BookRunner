@@ -224,6 +224,16 @@ Subscription --closeWindow ok--> Live --retire--> Retiring --finalizeRetirement-
   `assetsOwed`, fund owed assets from vault idle to the tranche escrow (remainder → `unfundedClaims`);
   increase S/J by top-up accepted (cash moved escrow → vault). `registry.markApplied(markId)`.
   In **Retired** state redemption requests settle immediately at the final price.
+- **Held marks [ext, audit M-1]**: `MarkInput.held` (signed, part of the EIP-712 `Mark`) is set by the
+  mark service when the valuation used a price the oracle signed as `held` (the book's underlying or a
+  desk Stock Token position: session closed / feed held). A held mark applies the P&L (waterfall,
+  backstop, drawdown kill, share prices) but settles **no redemption bucket and no top-up round**; they
+  wait for the first non-held mark, which settles every bucket due by then at its post-P&L prices (so
+  a reopen gap is shared by everyone who was in the book when the session closed). `heldSince` = the
+  first held mark's periodEnd of the current run (0 after a non-held mark); once
+  `periodEnd − heldSince ≥ MAX_HELD_DEFERRAL` (7 days) held marks settle again, so a long hold (a
+  suspended or delisted underlying) defers exits but never blocks them. Each held mark emits
+  `MarkHeld(bookId, markId, heldSince, settled)`. `requestRedeem` and claims are unaffected.
 - **Senior impairment follows the outstanding shares [ext]**: whenever Senior shares are burned at a
   settlement (redemption buckets at a mark, the Retired backlog, Retired immediate redemptions) the
   impairment is scaled pro-rata, `imp' = floor(imp · (supply − burned) / supply)` (0 once no Senior
@@ -286,7 +296,8 @@ Every deploy/recall/fundDesk and desk `ReturnToVault` calls `book.onCapitalFlow(
   `charterFeeUsd` USDC into escrow; `staking.lock(sponsor, bondLockId(id), sponsorBondBkrn)`;
   status Filed. `validate` reasons (bytes32 short strings): `IF_BELOW_VENUE_MIN`, `BAD_VENUE`,
   `BAD_ORACLE`, `BAD_BPS` (hurdle/cap > 1e4 or cap == 0), `BAD_WINDOW` (window < 60s or > 30d),
-  `BAD_NOTICE` (> 30d), `BAD_MANDATE` (maxInventory == 0, minQuoteWidth == 0, band min > max,
+  `BAD_NOTICE` (< `config.markInterval()` or > 30d; the minimum is defence in depth beside held marks,
+  audit M-1: a Junior request always bears at least one full mark period of P&L), `BAD_MANDATE` (maxInventory == 0, minQuoteWidth == 0, band min > max,
   killAtDrawdownBps >= 0 or < -5000, maxSkewBps <= 0), `BAD_UNDERLYING` (not canonical token, not
   registered index), `BAD_SYMBOL` (zero), `BAD_FEES` (in-house taker fee > 100 bps).
 - `decide(id, ok, juryCid)` only committee. Approve → fee forwarded to `expenseRecipient`
