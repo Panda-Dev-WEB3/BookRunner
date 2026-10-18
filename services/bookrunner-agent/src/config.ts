@@ -69,6 +69,9 @@ export const agentEnvShape = {
   // Orderly books: stay reduce-only while ops-venue reports the market not open for new risk (not listed, missing,
   // POST_ONLY, REDUCE_ONLY, DELISTING, DELISTED; Redis bkrn:ops-venue:symbol-issues, docs/VERIFY.md O20)
   AGENT_VENUE_MARKET_GATE: flag(true),
+  // the market data disappears (key gone / TTL expired, read failed, no entry, phase unknown): a reduce-only / POST_ONLY
+  // restriction already in force is kept this long after the data was last seen, then lifted
+  AGENT_VENUE_GATE_HOLD_MS: num(300_000),
   // POST_ONLY (Orderly's launch phase: limit orders only until both sides hold the depth warning for 10 min): true =
   // quote both sides maker-only (POST_ONLY orders, within the mandate; no taker risk) so the market can reach ACTIVE,
   // false = reduce-only like the other restricted statuses. Default true with ORDERLY_MODE=live, false in mock mode

@@ -286,6 +286,57 @@ describe("BookAgent Orderly market gate (ops-venue listing check, VERIFY O20)", 
     expect(bodies.map((b) => b.orders.map((o) => o.order_type))).toEqual([["POST_ONLY", "POST_ONLY"], ["LIMIT", "LIMIT"]]);
   });
 
+  test("gated then key removed stays gated until the hold expires", async () => {
+    const t = setup();
+    (t.agent as unknown as { cfg: BookAgentConfig }).cfg.venueGate = { enabled: true, allowPostOnly: true, holdMs: 300_000 };
+    t.venue.exposure = usd(10_000);
+    const tick = async (advanceMs = 0) => {
+      t.advance(advanceMs);
+      t.price.ingest(priceMsg(190, t.now() / 1000)); // keep the price fresh across the advance
+      await t.agent.refreshState();
+      await t.agent.quoteTick();
+      return t.venue.replaced.at(-1);
+    };
+    t.bus.kv.set(KEYS.venueSymbolIssues, market("listed", "REDUCE_ONLY"));
+    expect((await tick())?.bid).toBeUndefined();
+    t.bus.kv.delete(KEYS.venueSymbolIssues); // TTL expired / key removed
+    expect((await tick(60_000))?.bid).toBeUndefined();
+    t.bus.kv.set(KEYS.venueSymbolIssues, "{not json"); // malformed
+    expect((await tick(60_000))?.bid).toBeUndefined();
+    t.bus.kv.set(KEYS.venueSymbolIssues, market("unknown", null)); // ops-venue restarted, no check yet
+    expect((await tick(60_000))?.bid).toBeUndefined();
+    t.bus.kv.set(KEYS.venueSymbolIssues, market("listed", "ACTIVE", [2])); // no entry for this book
+    expect((await tick(119_000))?.bid).toBeUndefined(); // 299 s after the data was last seen
+    t.bus.kv.delete(KEYS.venueSymbolIssues);
+    const lifted = await tick(1_000); // 300 s: the hold expired
+    expect([!!lifted?.bid, !!lifted?.ask, !!lifted?.reduceOnly]).toEqual([true, true, false]);
+  });
+
+  test("the hold restarts from fresh data, a failed read holds POST_ONLY too, and open data lifts at once", async () => {
+    const t = setup();
+    (t.agent as unknown as { cfg: BookAgentConfig }).cfg.venueGate = { enabled: true, allowPostOnly: true, holdMs: 300_000 };
+    const tick = async (advanceMs = 0) => {
+      t.advance(advanceMs);
+      t.price.ingest(priceMsg(190, t.now() / 1000));
+      await t.agent.refreshState();
+      await t.agent.quoteTick();
+      return t.venue.replaced.at(-1);
+    };
+    t.bus.kv.set(KEYS.venueSymbolIssues, market("listed", "POST_ONLY"));
+    expect((await tick())?.postOnly).toBe(true);
+    const getJson = t.bus.getJson.bind(t.bus);
+    t.bus.getJson = (async () => {
+      throw new Error("redis down");
+    }) as typeof t.bus.getJson;
+    expect((await tick(200_000))?.postOnly).toBe(true); // read failed: still maker-only
+    t.bus.getJson = getJson;
+    expect((await tick(50_000))?.postOnly).toBe(true); // fresh POST_ONLY data at 250 s: the hold restarts
+    t.bus.kv.delete(KEYS.venueSymbolIssues);
+    expect((await tick(299_000))?.postOnly).toBe(true);
+    t.bus.kv.set(KEYS.venueSymbolIssues, market("listed", "ACTIVE"));
+    expect((await tick(1_000))?.postOnly).toBeUndefined(); // open data: lifted without waiting
+  });
+
   test("the gate applies at the next state refresh and lifts once the market is open; hedging follows (reduce_only)", async () => {
     const t = setup({ hedger: true });
     t.venue.exposure = usd(10_000);

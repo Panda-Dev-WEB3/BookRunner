@@ -166,9 +166,10 @@ const LISTED_STATES = new Set(["Subscription", "Live", "Retiring"]);
  *   (1800) Live; CRITICAL after that (capital is on the venue with no market). Api mode: only with ORDERLY_MODE=live and
  *   a Live book (warning, then critical after the same grace); api + mock (devnet) never alerts (PENDING until the IF is
  *   funded is normal there).
- * - venue_market_restricted:<bookId> (listed, not open for new risk; the agent is reduce-only): a Live book on DELISTING /
- *   DELISTED = CRITICAL; REDUCE_ONLY, POST_ONLY or an undocumented status = WARNING; a Subscription book on a
- *   REDUCE_ONLY / DELISTING / DELISTED market = WARNING; Retiring books are expected to wind down (no alert).
+ * - venue_market_restricted:<bookId> (listed, not open for new risk; the agent is reduce-only, except POST_ONLY with
+ *   ORDERLY_MODE=live where it quotes maker-only by default): a Live book on DELISTING / DELISTED = CRITICAL; REDUCE_ONLY,
+ *   POST_ONLY or an undocumented status = WARNING; a Subscription book on a REDUCE_ONLY / DELISTING / DELISTED market =
+ *   WARNING; Retiring books are expected to wind down (no alert).
  * - venue_market_missing:<bookId> (was listed, now absent from /v1/public/info): Live = CRITICAL; Retiring = WARNING
  *   once (one-off: the admin may have delisted it for the retirement; ops-venue logs the IF withdrawal completing).
  * - venue_listing_check:<bookId>: the market's listing check failed ALERT_LISTING_CHECK_FAILURES (5) times in a row
@@ -230,11 +231,14 @@ export function venueListing(s: Snapshot, c: RuleConfig): Condition[] {
       const ending = st === "DELISTING" || st === "DELISTED";
       if (b.state === "Retiring") continue;
       if (b.state === "Subscription" && !(ending || st === "REDUCE_ONLY")) continue;
+      // POST_ONLY in live mode: the agent's default (AGENT_VENUE_POST_ONLY_QUOTE true with ORDERLY_MODE=live) is maker-only
+      // two-sided quoting, not reduce-only
+      const postOnlyQuoted = st === "POST_ONLY" && ops.mode === "live";
       out.push({
         key: `venue_market_restricted:${b.bookId}`,
         rule: "venue_market_restricted",
         severity: b.state === "Live" && ending ? "critical" : "warning",
-        summary: `${bookLabel(b)} (state ${b.state}): Orderly market ${m.symbol} is ${m.venueStatus ?? "restricted"} since ${new Date(m.since).toISOString()}: no new risk (the agent is reduce-only)${ending ? "; the market is being delisted" : st === "POST_ONLY" ? "; limit orders only until the depth warning holds" : ""}`,
+        summary: `${bookLabel(b)} (state ${b.state}): Orderly market ${m.symbol} is ${m.venueStatus ?? "restricted"} since ${new Date(m.since).toISOString()}: ${postOnlyQuoted ? "limit orders only until the depth warning holds; the agent quotes both sides maker-only (POST_ONLY orders, AGENT_VENUE_POST_ONLY_QUOTE) to build the launch depth" : `no new risk (the agent is reduce-only)${ending ? "; the market is being delisted" : st === "POST_ONLY" ? "; limit orders only until the depth warning holds" : ""}`}`,
       });
     }
   }

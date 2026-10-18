@@ -78,8 +78,13 @@ export interface BookAgentConfig {
    * an absent / unreadable key gates nothing. Default: on for the Orderly venue. allowPostOnly: in Orderly's POST_ONLY
    * launch phase quote both sides maker-only (POST_ONLY orders, within the mandate) instead of reduce-only — the book's
    * market maker provides the launch depth (AGENT_VENUE_POST_ONLY_QUOTE, default true with ORDERLY_MODE=live).
+   * holdMs: when the book's market data disappears (key gone / TTL expired, read failed, malformed, no entry for the
+   * book or phase unknown after an ops-venue restart) a restrictive state already in force (reduce-only or POST_ONLY
+   * maker-only) is kept this long after the data was last seen, then lifted (AGENT_VENUE_GATE_HOLD_MS, default
+   * 5 min); data that says the market is open lifts it at once. Like the risk key, missing data never widens the
+   * agent before the hold expires.
    */
-  venueGate?: { enabled: boolean; allowPostOnly: boolean };
+  venueGate?: { enabled: boolean; allowPostOnly: boolean; holdMs?: number };
   /**
    * Pull oracle: the desk carries signed prices in every price-checked tx, so the mandate evaluates
    * off-hours after the in-tx update. The on-chain `mandate.offHours()` view (stored price stale because
@@ -105,6 +110,9 @@ export interface BookAgentDeps {
   now?: () => number;
 }
 
+/** AGENT_VENUE_GATE_HOLD_MS default: how long a venue restriction outlives its market data (BookAgentConfig.venueGate). */
+export const DEFAULT_VENUE_GATE_HOLD_MS = 5 * 60_000;
+
 const LIMIT_STATES: readonly LimitState[] = ["ok", "warn", "reduce_only", "breach", "killed"];
 const MAX_SEEN = 20_000;
 const ACCOUNT_FAILURES_BEFORE_CANCEL = 3;
@@ -119,6 +127,10 @@ export class BookAgent {
   private venueGate: { reason: string; symbol: string } | null = null;
   /** the market is in Orderly's POST_ONLY launch phase and quoting through it is allowed: maker-only orders */
   private venuePostOnly = false;
+  /** unix ms the book's market entry was last readable (a known phase); the gate hold counts from here */
+  private venueDataAt = 0;
+  /** the current hold (data gone while restricted) was logged */
+  private venueHoldLogged = false;
 
   private resting: AgentQuote | null = null;
   private restingSince = 0;
@@ -327,6 +339,22 @@ export class BookAgent {
     if (this.d.venue.kind !== "orderly" || (g && !g.enabled)) return;
     const raw = await this.d.bus.getJson<unknown>(KEYS.venueSymbolIssues).catch(() => null);
     const markets = parseVenueMarkets(raw);
+    const now = this.now();
+    const entry = markets.find((m) => m.bookIds.includes(this.d.bookId) && m.phase !== "unknown");
+    if (!entry && (this.venueGate || this.venuePostOnly)) {
+      // no usable data for the book: keep the restriction in force until the hold expires (never widen on missing data)
+      const holdMs = g?.holdMs ?? DEFAULT_VENUE_GATE_HOLD_MS;
+      if (now - this.venueDataAt < holdMs) {
+        if (!this.venueHoldLogged) {
+          this.venueHoldLogged = true;
+          this.d.log.warn({ reason: this.venueGate?.reason ?? "VENUE_POST_ONLY", holdMs }, "Orderly market state unavailable: keeping the venue restriction until the hold expires");
+        }
+        return;
+      }
+      this.d.log.warn({ reason: this.venueGate?.reason ?? "VENUE_POST_ONLY", heldMs: now - this.venueDataAt }, "Orderly market state unavailable past the hold: venue restriction lifted");
+    }
+    if (entry) this.venueDataAt = now;
+    this.venueHoldLogged = false;
     const allowPostOnly = g?.allowPostOnly ?? false;
     const next = venueMarketGate(markets, this.d.bookId, { allowPostOnly });
     const postOnly = allowPostOnly && venueMarketPostOnly(markets, this.d.bookId);

@@ -170,6 +170,12 @@ describe("venue_report_stale", () => {
       expect(run(manual, { state: "Retiring", venueMarket: listed("DELISTED") })).toEqual([]);
       expect(ks(run(manual, { state: "Subscription", venueMarket: listed("REDUCE_ONLY") }))).toEqual([["venue_market_restricted:3", "warning"]]);
       expect(run(manual, { state: "Subscription", venueMarket: listed("POST_ONLY") })).toEqual([]); // launch phase
+      // POST_ONLY in live mode: the agent quotes maker-only (AGENT_VENUE_POST_ONLY_QUOTE default), never "reduce-only"
+      const po = run(manual, { venueMarket: listed("POST_ONLY") })[0]?.summary ?? "";
+      expect(po).toContain("maker-only");
+      expect(po).not.toContain("reduce-only");
+      expect(run(apiMock, { venueMarket: listed("POST_ONLY") })[0]?.summary).toContain("reduce-only"); // mock default: reduce-only
+      expect(run(manual, { venueMarket: listed("REDUCE_ONLY") })[0]?.summary).toContain("reduce-only");
       expect(run(manual, { venueMarket: mk({ phase: "listed", venueStatus: "ACTIVE", everListed: true, openForRisk: true }) })).toEqual([]);
     });
 
