@@ -29,6 +29,16 @@ describe("charter form", () => {
     expect(issuesFor(bad, "mandate").length).toBeGreaterThan(3);
   });
 
+  test("audit M-1: Junior notice of at least one mark interval (the network's when known, else > 0)", () => {
+    const notice = (s: number, markIntervalSeconds?: number | null) => issuesFor(formIssues({ ...DEFAULT_FORM, sponsor: SPONSOR, juniorNoticeSeconds: String(s) }, { markIntervalSeconds }), "juniorNoticeSeconds");
+    expect(notice(3599, 3600)).toHaveLength(1);
+    expect(notice(3599, 3600)[0]?.message).toContain("1 h");
+    expect(notice(3600, 3600)).toEqual([]);
+    expect(notice(0)).toHaveLength(1);
+    expect(notice(100)).toEqual([]); // interval unknown: the API and MarketCharter.validate still check it
+    expect(notice(86_400, 86_400)).toEqual([]); // the default form passes a daily network
+  });
+
   test("in-house engine fees are capped at 100 bps", () => {
     const issues = formIssues({ ...DEFAULT_FORM, sponsor: SPONSOR, venue: "pool_engine", ifSizeUsd: "10000", takerFeeBps: "150" });
     expect(issues.map((i) => i.field)).toEqual(["takerFeeBps"]);

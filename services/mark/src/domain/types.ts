@@ -73,7 +73,11 @@ export interface MarkSnapshot {
   backstopBalance: bigint;
   mandate: Mandate;
   killed: boolean;
-  underlyingPrice: { priceId: Hex; priceWad: bigint; publishedAt: number; held: boolean } | null;
+  /**
+   * The underlying's price the valuation used (the signed bundle print when newer than the stored one), null
+   * when unreadable. `stale`: older than config.maxPriceAge at the valuation time (domain/held.ts: held).
+   */
+  underlyingPrice: { priceId: Hex; priceWad: bigint; publishedAt: number; held: boolean; stale: boolean } | null;
   /**
    * Signed oracle prices this valuation used that are newer than the chain's stored ones (desk tokens,
    * engine underlying). They form the mark tx's priceData so the chain ends up on the prices the NAV used.

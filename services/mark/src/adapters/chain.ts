@@ -24,6 +24,7 @@ import {
 import { type BookRef, type TxSender, bookStateName, codeHasSelector, describeRevert, scanEvents } from "@bookrunner/waterfall";
 import { type Abi, type Address, type Hex, type PublicClient, encodeFunctionData, erc20Abi, isAddressEqual, parseEventLogs, zeroHash } from "viem";
 import type { AdapterReportState } from "../../../ops-venue/src/report712";
+import { priceIsStale } from "../domain/held";
 import { type SignedPrice, encodePriceData, pickSignedPrice, valuationRefTs } from "../domain/prices";
 import type { DeskPosition, MarkSnapshot } from "../domain/types";
 import type { AtomicMarkResult, CommittedMark, MarkAppliedEvent, MarkChain, SimulationResult } from "../ports";
@@ -277,6 +278,7 @@ export class MarkChainAdapter implements MarkChain {
       this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "valuationAt", ...b }),
     ]);
 
+    const maxPriceAge = BigInt(await this.maxPriceAge());
     let underlyingPrice: MarkSnapshot["underlyingPrice"] = null;
     let underlyingPriceId: Hex | null = null;
     let onchainUnderlying: { priceWad: bigint; publishedAt: bigint; held: boolean } | null = null;
@@ -284,13 +286,13 @@ export class MarkChainAdapter implements MarkChain {
       underlyingPriceId = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "priceIdOf", args: [charter.underlying], ...b });
       const p = await this.pc.readContract({ address: this.c.oracle, abi: attestedOracleAbi, functionName: "latest", args: [underlyingPriceId], ...b });
       onchainUnderlying = { priceWad: p.priceWad, publishedAt: BigInt(p.publishedAt), held: p.held };
-      underlyingPrice = { priceId: underlyingPriceId, priceWad: p.priceWad, publishedAt: Number(p.publishedAt), held: p.held };
+      underlyingPrice = { priceId: underlyingPriceId, priceWad: p.priceWad, publishedAt: Number(p.publishedAt), held: p.held, stale: priceIsStale(p.publishedAt, refTs, maxPriceAge) };
     } catch {
       underlyingPrice = null;
     }
     const signedUnderlying = underlyingPriceId ? pickSignedPrice(prices, underlyingPriceId, onchainUnderlying?.publishedAt ?? 0n, refTs) : null;
     if (signedUnderlying && underlyingPriceId) {
-      underlyingPrice = { priceId: underlyingPriceId, priceWad: signedUnderlying.priceWad, publishedAt: Number(signedUnderlying.publishedAt), held: signedUnderlying.held };
+      underlyingPrice = { priceId: underlyingPriceId, priceWad: signedUnderlying.priceWad, publishedAt: Number(signedUnderlying.publishedAt), held: signedUnderlying.held, stale: priceIsStale(signedUnderlying.publishedAt, refTs, maxPriceAge) };
     }
 
     let poolCashUsd: bigint | null = null;
@@ -334,7 +336,6 @@ export class MarkChainAdapter implements MarkChain {
       this.pc.readContract({ address: desk, abi: bookrunnerDeskAbi, functionName: "valueUsd", ...b }).catch(() => null),
       this.pc.readContract({ address: desk, abi: bookrunnerDeskAbi, functionName: "hedgeNotionalUsd", ...b }).catch(() => null),
     ]);
-    const maxPriceAge = BigInt(await this.maxPriceAge());
     const positions: DeskPosition[] = [];
     for (const token of held) {
       const { position, signed } = await this.position(token, desk, blockNumber, refTs, maxPriceAge, prices);
@@ -467,7 +468,7 @@ export class MarkChainAdapter implements MarkChain {
     const priceWad = signed ? signed.priceWad : latest.priceWad;
     const publishedAt = signed ? signed.publishedAt : BigInt(latest.publishedAt);
     const valueUsd = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "valueUsdAt", args: [token, qtyRaw, priceWad], ...b });
-    const priceStale = publishedAt === 0n || refTs > publishedAt + maxPriceAge;
+    const priceStale = priceIsStale(publishedAt, refTs, maxPriceAge);
     return {
       position: {
         token,

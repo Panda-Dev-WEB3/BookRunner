@@ -251,12 +251,17 @@ export class MarkPipeline {
     }
     if (!receipts.complete && !opts.allowIncompleteReceipts) throw new RetryableMarkError(`receipts windows of period ${periodEnd} not all closed yet`);
 
+    // audit M-1: computed ONCE (fail closed: held / unreadable / stale prices); signed as input.held and
+    // published as pnl.held
+    const hold = markHeld(snapshot);
+    if (hold.held) log.warn({ reasons: hold.reasons }, "valuation at a held, unreadable or stale price: the mark is held (P&L only, no settlement)");
     const dist = await this.d.store.distribution(ref.bookId, periodEnd);
     const pnl = buildMarkPnl({
       snapshot,
       periodEnd,
       nav,
       preview,
+      held: hold.held,
       extras: {
         feeFlowUsd: dist ? dist.senior + dist.junior : 0n,
         fundingUsd: await this.d.store.fundingInPeriod(ref.bookId, periodEnd - interval, periodEnd),
@@ -264,9 +269,6 @@ export class MarkPipeline {
         lastQuoteSkewBps: await this.d.store.lastQuoteSkewBps(ref.bookId, periodEnd),
       },
     });
-    // audit M-1: a valuation at a held price settles nothing on-chain (signed into the mark; == pnl.held)
-    const hold = markHeld(snapshot);
-    if (hold.underlyingUnknown) log.warn("underlying price state unreadable at the snapshot block; mark not flagged held for it");
     const input: MarkInput = {
       bookId: BigInt(ref.bookId),
       periodEnd: BigInt(periodEnd),

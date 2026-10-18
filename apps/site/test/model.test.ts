@@ -7,6 +7,7 @@ import {
   chartGeometry,
   depositWindow,
   firstMarkAtOrAfter,
+  juniorNoticeMinSeconds,
   markRow,
   overview,
   parseTopUp,
@@ -197,4 +198,13 @@ test("agent rows flag keys the chain no longer holds", () => {
   expect(rows[0]?.tierUsd).toBe(50000);
   expect(rows[1]?.status).toBe("revoked");
   expect(rows[1]?.tierUsd).toBeNull();
+});
+
+describe("juniorNoticeMinSeconds (audit M-1: MarketCharter.validate minimum)", () => {
+  test("the network's mark interval when the books report it, else 1 second", () => {
+    expect(juniorNoticeMinSeconds(3600)).toBe(3600);
+    expect(juniorNoticeMinSeconds(86_400)).toBe(86_400);
+    expect(juniorNoticeMinSeconds(null)).toBe(1);
+    expect(juniorNoticeMinSeconds(0)).toBe(1);
+  });
 });

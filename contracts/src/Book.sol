@@ -143,7 +143,8 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
     );
     /// @notice A mark valued at a held oracle price was applied (audit M-1): its P&L is booked; `settled`
     ///         false = redemption buckets and a due top-up round were left for the first non-held mark;
-    ///         true = the hold run (since `heldSince`) reached BookLogic.MAX_HELD_DEFERRAL, so they settled.
+    ///         true = the hold run (since `heldSince`) reached BookLogic.MAX_HELD_DEFERRAL (30 days) and no
+    ///         governance settle-at-price is set, so they settled at the held valuation.
     event MarkHeld(uint256 indexed bookId, uint256 indexed markId, uint64 heldSince, bool settled);
     event TopUpSettled(uint256 indexed bookId, uint256 seniorAccepted, uint256 juniorAccepted);
     event TopUpCancelled(uint256 indexed bookId);

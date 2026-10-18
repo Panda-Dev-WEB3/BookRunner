@@ -108,6 +108,18 @@ describe("MarkPipeline", () => {
     expect(await signer.recover({ ...row.input, held: false }, row.signature)).not.toBe(signer.address);
   });
 
+  test("audit M-1 fail closed: an unreadable or stale underlying price commits a held mark (signed and published)", async () => {
+    for (const underlyingPrice of [null, { ...setup().chain.snap.underlyingPrice!, stale: true }]) {
+      const { chain, store, pipeline } = setup();
+      chain.snap = { ...chain.snap, underlyingPrice };
+      const out = await pipeline.run({ bookId: 1, periodEnd: P });
+      expect(out.status).toBe("applied");
+      if (out.status !== "applied") return;
+      expect(out.input.held).toBe(true);
+      expect(store.rows.get(1)!.pnl.held).toBe(true);
+    }
+  });
+
   test("live prices: the mark is not held", async () => {
     const { pipeline } = setup();
     const out = await pipeline.run({ bookId: 1, periodEnd: P });

@@ -13,7 +13,6 @@
 import { BPS, type Mandate, type MarkPnl, absBig, canonicalJson, inventoryUtil } from "@bookrunner/shared";
 import { usd6, wad18 } from "@bookrunner/waterfall";
 import { type Hex, getAddress, keccak256, stringToHex } from "viem";
-import { markHeld } from "./held";
 import type { NavComposition } from "./nav";
 import type { TranchePreview } from "./preview";
 import type { MarkSnapshot } from "./types";
@@ -49,14 +48,15 @@ export function limitsSection(mandate: Mandate, netExposureUsd: bigint, deskHedg
   };
 }
 
-export function buildMarkPnl(args: { snapshot: MarkSnapshot; periodEnd: number; nav: NavComposition; preview: TranchePreview; extras: PnlExtras }): MarkPnl {
+/** `held`: domain/held.ts markHeld(snapshot).held, computed once by the caller and also signed as MarkInput.held. */
+export function buildMarkPnl(args: { snapshot: MarkSnapshot; periodEnd: number; nav: NavComposition; preview: TranchePreview; extras: PnlExtras; held: boolean }): MarkPnl {
   const { snapshot: s, nav, preview, extras } = args;
   const markPnl = preview.result.pnl;
   const unrealized = unrealizedUsd(s);
   const realized = markPnl - extras.fundingUsd - (unrealized - extras.prevUnrealizedUsd);
   const hedgeNotional = s.desk.hedgeNotionalUsd ?? nav.deskHedgeValueUsd;
   return {
-    held: markHeld(s).held,
+    held: args.held,
     bookId: String(s.bookId),
     periodEnd: args.periodEnd,
     navUsd: usd6(nav.navUsd),

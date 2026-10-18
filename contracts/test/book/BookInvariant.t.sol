@@ -116,6 +116,14 @@ contract BookInvariantTest is StdInvariant, BookFixture {
         assertFalse(handler.finalizeViolation(), handler.lastViolationTag());
     }
 
+    /// @dev audit M-1: held marks inside the deferral bound settle nothing (lastSettledIndex and the top-up round
+    ///      untouched); the first settling mark clears every due bucket (within MAX_SETTLE_BUCKETS per tranche).
+    /// forge-config: default.invariant.fail-on-revert = true
+    function invariant_heldMarksDeferSettlement() public view {
+        assertFalse(handler.heldSettlementViolation(), "a held mark inside the bound settled something");
+        assertFalse(handler.dueBucketViolation(), "a settling mark left a due bucket pending");
+    }
+
     /// @dev book accounting identity (venue value is always marked immediately by the handler).
     /// forge-config: default.invariant.fail-on-revert = true
     function invariant_accountingIdentity() public view {
@@ -190,6 +198,16 @@ contract BookInvariantTest is StdInvariant, BookFixture {
         handler.recall(0);
         handler.mark(0, 0);
         handler.claim(1, 0, 1, 0);
+
+        // audit M-1: a request during a held session defers to the first non-held mark
+        handler.requestRedeem(1, 0, 1000e6, 1); // bob senior
+        handler.heldMark(-100, 0);
+        handler.heldMark(0, 0);
+        assertGt(handler.heldDeferred(), 1, "held marks deferred");
+        handler.mark(0, 0);
+        assertGt(handler.settlingMarksWithDue(), 0, "a settling mark cleared due buckets");
+        assertFalse(handler.heldSettlementViolation());
+        assertFalse(handler.dueBucketViolation());
 
         // losses through Junior into Senior with a backstop
         handler.fundBackstop(20_000e6);

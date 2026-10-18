@@ -92,7 +92,10 @@ export function FileCharterPage() {
   const [form, setForm] = useState<CharterForm>(loadDraft);
   const [step, setStep] = useState<StepId>("market");
   const file = trpc.charter.file.useMutation();
-  const issues = useMemo(() => formIssues(form), [form]);
+  // audit M-1: the network's mark interval (every book reports it) is the minimum Junior notice
+  const books = trpc.book.list.useQuery(undefined, { staleTime: 60_000 });
+  const markIntervalSeconds = books.data?.find((b) => b.markSchedule?.intervalSeconds)?.markSchedule.intervalSeconds ?? null;
+  const issues = useMemo(() => formIssues(form, { markIntervalSeconds }), [form, markIntervalSeconds]);
   const errors = issues.filter((i) => i.severity === "error");
 
   useEffect(() => {

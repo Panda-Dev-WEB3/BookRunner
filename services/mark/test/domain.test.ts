@@ -19,7 +19,7 @@ import {
   recoverMarkSigner,
   signMark,
 } from "../src/index";
-import { markHeld } from "../src/domain/held";
+import { markHeld, priceIsStale } from "../src/domain/held";
 import { NVDA, P, TSLA, USDC, snapshot } from "./fixtures";
 
 describe("NAV composition", () => {
@@ -116,7 +116,7 @@ describe("MarkPnl JSON", () => {
   const build = (over = {}) => {
     const s = snapshot(over);
     const nav = composeNav(s);
-    return buildMarkPnl({ snapshot: s, periodEnd: P, nav, preview: previewTranches(s, nav.navUsd), extras: { feeFlowUsd: usd("10"), fundingUsd: 0n, prevUnrealizedUsd: 0n, lastQuoteSkewBps: -5 } });
+    return buildMarkPnl({ snapshot: s, periodEnd: P, nav, preview: previewTranches(s, nav.navUsd), held: false, extras: { feeFlowUsd: usd("10"), fundingUsd: 0n, prevUnrealizedUsd: 0n, lastQuoteSkewBps: -5 } });
   };
 
   test("shape and formats", () => {
@@ -150,6 +150,7 @@ describe("MarkPnl JSON", () => {
       periodEnd: P,
       nav: composeNav(s),
       preview: previewTranches(s, composeNav(s).navUsd),
+      held: false,
       extras: { feeFlowUsd: 0n, fundingUsd: usd("100"), prevUnrealizedUsd: usd("200"), lastQuoteSkewBps: null },
     });
     expect(pnl.pnl.unrealizedUsd).toBe("500.000000");
@@ -221,37 +222,57 @@ describe("venue report freshness (Orderly)", () => {
   });
 });
 
-describe("held marks (audit M-1)", () => {
+describe("held marks (audit M-1, fail closed)", () => {
   const s = snapshot();
   const pos = s.desk.positions[0]!;
+  const u = s.underlyingPrice!;
 
-  test("not held when every price the valuation used is live", () => {
-    expect(markHeld(s)).toEqual({ held: false, reasons: [], underlyingUnknown: false });
+  test("not held when every price the valuation used is known, live and fresh", () => {
+    expect(markHeld(s)).toEqual({ held: false, reasons: [] });
   });
 
-  test("held when the oracle signed the underlying's price as held", () => {
-    const h = markHeld({ ...s, underlyingPrice: { ...s.underlyingPrice!, held: true } });
-    expect(h).toEqual({ held: true, reasons: ["underlying"], underlyingUnknown: false });
+  test("held: the oracle signed the underlying's price as held (closed session)", () => {
+    expect(markHeld({ ...s, underlyingPrice: { ...u, held: true } })).toEqual({ held: true, reasons: ["underlying_held"] });
   });
 
-  test("held when a desk position is valued at a held price; empty positions do not count", () => {
-    expect(markHeld({ ...s, desk: { ...s.desk, positions: [{ ...pos, priceHeld: true }] } }).reasons).toEqual(["NVDA"]);
-    expect(markHeld({ ...s, desk: { ...s.desk, positions: [{ ...pos, qtyRaw: 0n, priceHeld: true }] } }).held).toBe(false);
+  test("held: the underlying's price state is unreadable", () => {
+    expect(markHeld({ ...s, underlyingPrice: null })).toEqual({ held: true, reasons: ["underlying_unknown"] });
   });
 
-  test("unknown underlying price state is reported, not treated as held", () => {
-    expect(markHeld({ ...s, underlyingPrice: null })).toEqual({ held: false, reasons: [], underlyingUnknown: true });
+  test("held: the underlying's price is older than maxPriceAge", () => {
+    expect(markHeld({ ...s, underlyingPrice: { ...u, stale: true } })).toEqual({ held: true, reasons: ["underlying_stale"] });
   });
 
-  test("the MarkPnl statement records the flag (hashed into pnlJsonHash)", () => {
-    const build = (snap: typeof s) => {
-      const nav = composeNav(snap);
-      return buildMarkPnl({ snapshot: snap, periodEnd: P, nav, preview: previewTranches(snap, nav.navUsd), extras: { feeFlowUsd: 0n, fundingUsd: 0n, prevUnrealizedUsd: 0n, lastQuoteSkewBps: null } });
+  test("held: oracle down over the weekend (last print Friday 20:00 UTC, held transition never signed)", () => {
+    const fridayClose = 1_760_731_200; // Fri 2025-10-17 20:00 UTC
+    const saturdayMark = fridayClose + 4 * 3600; // Sat 00:00 UTC
+    const maxPriceAge = 300;
+    const stale = priceIsStale(fridayClose, saturdayMark, maxPriceAge);
+    expect(stale).toBe(true);
+    // the stored price still says held=false (the oracle never signed the held transition)
+    const h = markHeld({ ...s, underlyingPrice: { ...u, publishedAt: fridayClose, held: false, stale } });
+    expect(h).toEqual({ held: true, reasons: ["underlying_stale"] });
+  });
+
+  test("priceIsStale: never published, at the bound, past the bound", () => {
+    expect(priceIsStale(0, 1_000, 300)).toBe(true);
+    expect(priceIsStale(700, 1_000, 300)).toBe(false);
+    expect(priceIsStale(699n, 1_000n, 300n)).toBe(true);
+  });
+
+  test("held: a desk position the NAV values is priced held or stale; empty positions do not count", () => {
+    expect(markHeld({ ...s, desk: { ...s.desk, positions: [{ ...pos, priceHeld: true }] } }).reasons).toEqual(["desk_held:NVDA"]);
+    expect(markHeld({ ...s, desk: { ...s.desk, positions: [{ ...pos, priceStale: true }] } }).reasons).toEqual(["desk_stale:NVDA"]);
+    expect(markHeld({ ...s, desk: { ...s.desk, positions: [{ ...pos, qtyRaw: 0n, priceHeld: true, priceStale: true }] } }).held).toBe(false);
+  });
+
+  test("the MarkPnl statement records the flag the caller computed (hashed into pnlJsonHash)", () => {
+    const build = (held: boolean) => {
+      const nav = composeNav(s);
+      return buildMarkPnl({ snapshot: s, periodEnd: P, nav, preview: previewTranches(s, nav.navUsd), held, extras: { feeFlowUsd: 0n, fundingUsd: 0n, prevUnrealizedUsd: 0n, lastQuoteSkewBps: null } });
     };
-    const live = build(s);
-    const held = build({ ...s, underlyingPrice: { ...s.underlyingPrice!, held: true } });
-    expect(live.held).toBe(false);
-    expect(held.held).toBe(true);
-    expect(pnlJsonHash(held)).not.toBe(pnlJsonHash(live));
+    expect(build(false).held).toBe(false);
+    expect(build(true).held).toBe(true);
+    expect(pnlJsonHash(build(true))).not.toBe(pnlJsonHash(build(false)));
   });
 });

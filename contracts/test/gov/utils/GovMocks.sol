@@ -50,6 +50,11 @@ contract GovMockConfig is IBookrunnerConfig {
     uint256 public committeeBondBkrn;
     uint32 public markInterval = 300;
     uint32 public maxMarkAge = 3600;
+
+    function setMarkInterval(uint32 v) external {
+        markInterval = v;
+    }
+
     uint32 public maxPriceAge = 300;
     uint32 public committeeWindow;
     mapping(uint8 => uint256) public venueMinIfUsd;

@@ -10,7 +10,7 @@ import { type ProtocolContracts, publicClient, readBookParts, readProtocol, wait
 import { CHAIN, txUrl } from "./config";
 import { date, dateTime, duration, esc, short, usd } from "./format";
 import { badge, notice, splitList } from "./html";
-import { bookTicker, depositWindow, markRow, positionView, termsView } from "./model";
+import { bookTicker, depositWindow, juniorNoticeMinSeconds, markRow, positionView, termsView } from "./model";
 import { errText } from "./revert";
 import { type Role, ROLES, selected, store } from "./store";
 import { settlementSymbol } from "./token";
@@ -548,7 +548,7 @@ function charterFileForm(): void {
       field("Senior hurdle share · bps", "seniorHurdleBps", 6000, "number", 'min="0" max="10000" required') +
       field("Senior capital cap · bps", "seniorCapBps", 7000, "number", 'min="0" max="10000" required') +
       field("Subscription window · hours", "subscriptionHours", 24, "number", 'min="0.02" step="0.01" required') +
-      field("Junior notice · days", "juniorNoticeDays", 7, "number", 'min="0" step="0.01" required') +
+      field("Junior notice · days (at least one mark interval)", "juniorNoticeDays", 7, "number", 'min="0.0001" max="30" step="0.0001" required') +
       amountField("Per-wallet cap · USD (0 = none)", "perWalletCapUsd", "250000", false) +
       amountField("Max inventory · USD", "maxInventoryUsd", "50000", false) +
       field("Max skew · bps", "maxSkewBps", 25, "number", 'min="1" max="10000" required') +
@@ -579,6 +579,11 @@ function charterFileForm(): void {
       if (!u) throw new Error("Enter the underlying.");
       const underlying = kind === "token" ? (isAddress(u) ? { token: u } : null) : kind === "index" ? { index: u } : { ticker: u.toUpperCase() };
       if (!underlying) throw new Error("A Stock Token must be a 0x address.");
+      const noticeSeconds = Math.round(Number(v.juniorNoticeDays) * 86_400);
+      const minNotice = juniorNoticeMinSeconds((store.books ?? []).find((b) => b.markSchedule?.intervalSeconds)?.markSchedule?.intervalSeconds ?? null);
+      if (!Number.isFinite(noticeSeconds) || noticeSeconds < minNotice || noticeSeconds > 30 * 86_400) {
+        throw new Error(`Junior notice must be between one mark interval (${minNotice} seconds) and 30 days.`);
+      }
       const draft = {
         sponsor,
         underlying,
@@ -601,7 +606,7 @@ function charterFileForm(): void {
         seniorHurdleBps: int("seniorHurdleBps"),
         seniorCapBps: int("seniorCapBps"),
         subscriptionWindowSeconds: Math.round(Number(v.subscriptionHours) * 3600),
-        juniorNoticeSeconds: Math.round(Number(v.juniorNoticeDays) * 86_400),
+        juniorNoticeSeconds: noticeSeconds,
         perWalletCapUsd: usdOf("perWalletCapUsd"),
         symbol: (v.symbol ?? "").trim(),
       };

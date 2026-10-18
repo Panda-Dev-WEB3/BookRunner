@@ -7,6 +7,7 @@ import {Vm} from "forge-std/Vm.sol";
 import {BRTypes} from "../../../src/interfaces/BRTypes.sol";
 import {ITranche} from "../../../src/interfaces/ITranche.sol";
 import {Book} from "../../../src/Book.sol";
+import {BookLogic} from "../../../src/libraries/BookLogic.sol";
 import {Tranche} from "../../../src/Tranche.sol";
 import {UnderwritingVault} from "../../../src/UnderwritingVault.sol";
 import {MockERC20} from "../../../src/mocks/MockERC20.sol";
@@ -52,6 +53,15 @@ contract BookHandler is Test {
     bool public permissionViolation;
     bool public conservationViolation;
     bool public markViolation;
+    /// @dev audit M-1: a held mark inside the deferral bound moved lastSettledIndex or the top-up round
+    bool public heldSettlementViolation;
+    /// @dev audit M-1: a settling mark left a due bucket (<= upTo) pending although <= MAX_SETTLE_BUCKETS were due
+    bool public dueBucketViolation;
+    uint256 public heldDeferred;
+    uint256 public settlingMarksWithDue;
+    /// @dev ghost: every normal (non-Retired) bucket a request went into, per tranche kind
+    mapping(uint8 => uint256[]) internal _ghostBuckets;
+    mapping(uint8 => mapping(uint256 => bool)) internal _ghostSeen;
     bool public finalizeViolation;
     bytes public lastViolation;
     string public lastViolationTag;
@@ -128,10 +138,28 @@ contract BookHandler is Test {
         address controller = _actor(controllerSeed);
         _bump("requestRedeem");
         _countRequestContext(t);
+        bool retired = _state() == BRTypes.BookState.Retired;
         vm.prank(owner);
-        try t.requestRedeem(shares, controller, owner) {}
-        catch (bytes memory err) {
+        try t.requestRedeem(shares, controller, owner) returns (uint256 rid) {
+            if (!retired) _ghost(t, rid);
+        } catch (bytes memory err) {
             _flag("requestRedeem", err);
+        }
+    }
+
+    function _ghost(Tranche t, uint256 rid) internal {
+        uint8 k = t == env.senior ? BRTypes.SENIOR : BRTypes.JUNIOR;
+        if (_ghostSeen[k][rid]) return;
+        _ghostSeen[k][rid] = true;
+        _ghostBuckets[k].push(rid);
+    }
+
+    /// @dev Unsettled ghost buckets of tranche `k` with index <= upTo.
+    function _dueUnsettled(uint8 k, uint256 upTo) internal view returns (uint256 n) {
+        Tranche t = k == BRTypes.SENIOR ? env.senior : env.junior;
+        uint256[] storage bs = _ghostBuckets[k];
+        for (uint256 i = 0; i < bs.length; i++) {
+            if (bs[i] <= upTo && !t.bucketInfo(bs[i]).settled) n++;
         }
     }
 
@@ -155,9 +183,11 @@ contract BookHandler is Test {
         _bump("requestRedeemOp");
         vm.prank(owner);
         t.setOperator(op, true);
+        bool retired = _state() == BRTypes.BookState.Retired;
         vm.prank(op);
-        try t.requestRedeem(shares, owner, owner) {}
-        catch (bytes memory err) {
+        try t.requestRedeem(shares, owner, owner) returns (uint256 rid) {
+            if (!retired) _ghost(t, rid);
+        } catch (bytes memory err) {
             _flag("requestRedeemViaOperator", err);
         }
     }
@@ -313,15 +343,55 @@ contract BookHandler is Test {
         });
         uint256 id = env.registry.commit(m, "");
         (uint256 debtBefore,) = env.book.backstopDebt();
+        uint256 upTo = pe / env.interval;
+        uint256[2] memory lastBefore = [env.senior.lastSettledIndex(), env.junior.lastSettledIndex()];
+        uint256[2] memory dueBefore =
+            [_dueUnsettled(BRTypes.SENIOR, upTo), _dueUnsettled(BRTypes.JUNIOR, upTo)];
+        (bool roundOpenBefore,,,) = env.book.topUp();
         vm.recordLogs();
         try env.book.applyMark(id) {
             marksApplied++;
             _checkConservation(debtBefore);
+            _checkHeldSettlement(held, pe, upTo, lastBefore, dueBefore, roundOpenBefore);
         } catch (bytes memory err) {
             markViolation = true;
             lastViolation = err;
             lastViolationTag = "applyMark";
             env.adapter.setValue(prevValue);
+        }
+    }
+
+    /// @dev Audit M-1: a held mark inside MAX_HELD_DEFERRAL leaves lastSettledIndex and the top-up round
+    ///      untouched; a settling mark clears every due bucket (all of them when <= MAX_SETTLE_BUCKETS were due;
+    ///      beyond that the rest spill to the next mark).
+    function _checkHeldSettlement(
+        bool held,
+        uint64 pe,
+        uint256 upTo,
+        uint256[2] memory lastBefore,
+        uint256[2] memory dueBefore,
+        bool roundOpenBefore
+    ) internal {
+        uint64 since = env.book.heldSince();
+        bool deferred = held && since != 0 && pe - since < BookLogic.MAX_HELD_DEFERRAL;
+        (bool roundOpenAfter,,,) = env.book.topUp();
+        if (deferred) {
+            heldDeferred++;
+            if (
+                env.senior.lastSettledIndex() != lastBefore[0]
+                    || env.junior.lastSettledIndex() != lastBefore[1]
+            ) {
+                heldSettlementViolation = true;
+            }
+            if (roundOpenAfter != roundOpenBefore) heldSettlementViolation = true;
+            return;
+        }
+        uint256 cap = env.senior.MAX_SETTLE_BUCKETS();
+        for (uint8 k = 0; k < 2; k++) {
+            if (dueBefore[k] == 0) continue;
+            settlingMarksWithDue++;
+            uint256 left = _dueUnsettled(k, upTo);
+            if (dueBefore[k] <= cap ? left != 0 : left != dueBefore[k] - cap) dueBucketViolation = true;
         }
     }
 

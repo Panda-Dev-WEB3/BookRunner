@@ -407,6 +407,27 @@ contract MarketCharterTest is GovBase {
     // decide
     // ------------------------------------------------------------------------------------------
 
+    /// @dev Audit M-1: the notice is re-checked at approval against the interval the book will cache.
+    function test_decide_noticeBelowIntervalRaisedAfterFiling_reverts() public {
+        BRTypes.Charter memory c = _charter();
+        c.juniorNoticeSeconds = 300; // == markInterval at filing: valid
+        uint256 id = _file(c);
+        cfg.setMarkInterval(600);
+        vm.prank(address(committee));
+        vm.expectRevert(abi.encodeWithSelector(IMarketCharter.InvalidCharter.selector, bytes32("BAD_NOTICE")));
+        charter.decide(id, true, CID);
+        // rejection still works (fee refunded, bond released)
+        vm.prank(address(committee));
+        charter.decide(id, false, CID);
+        assertEq(uint8(_status(id)), uint8(BRTypes.CharterStatus.Rejected));
+        // at the unchanged interval it is approved
+        cfg.setMarkInterval(300);
+        uint256 id2 = _file(c);
+        vm.prank(address(committee));
+        charter.decide(id2, true, CID);
+        assertEq(uint8(_status(id2)), uint8(BRTypes.CharterStatus.Approved));
+    }
+
     function test_decide_onlyCommittee() public {
         uint256 id = _file();
         vm.prank(outsider);

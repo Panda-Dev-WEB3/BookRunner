@@ -100,8 +100,11 @@ export interface MarkPnl {
   pnl: { realizedUsd: string; unrealizedUsd: string; feeFlowUsd: string; fundingUsd: string; markPnlUsd: string };
   tranches: { seniorNav: string; juniorNav: string; seniorPrice: string; juniorPrice: string };
   limits: { inventoryUtil: number; skewUtil: number; hedgeRatioBps: number; drawdownBps: number };
-  /** == MarkInput.held: valued at a held oracle price, so the mark settles no redemption / top-up (audit M-1). */
-  held: boolean;
+  /**
+   * == MarkInput.held: valued at a held, unreadable or stale price, so the mark settles no redemption / top-up
+   * (audit M-1). Absent on statements published before the change: read as false.
+   */
+  held?: boolean;
 }
 
 /** Deployment file written by contracts/script/Deploy.s.sol + LaunchBooks.s.sol. */

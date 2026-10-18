@@ -188,6 +188,13 @@ contract MarketCharter is IMarketCharter, ReentrancyGuardTransient {
 
         if (juryCid == bytes32(0)) revert MissingJuryCid();
         if (cfg.newBooksPaused()) revert NewBooksPaused();
+        // audit M-1: the book caches config.markInterval() at creation (this transaction), and validate() checked
+        // the notice against the interval at filing; an interval raised in between must not yield a book whose
+        // Junior notice is below its own interval. (A later config change never affects a created book: Book and
+        // Tranche settle on their cached interval.)
+        if (r.charter.juniorNoticeSeconds < cfg.markInterval()) {
+            revert InvalidCharter(CharterRules.BAD_NOTICE);
+        }
         address recipient = cfg.expenseRecipient();
         if (recipient == address(0)) revert ZeroAddress();
         r.status = BRTypes.CharterStatus.Approved;

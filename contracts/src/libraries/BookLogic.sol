@@ -35,10 +35,13 @@ library BookLogic {
     uint256 internal constant RETIRED_SETTLE_INDEX = (1 << 128) - 1;
     /// @dev == Book.KILL_DRAWDOWN
     bytes32 internal constant KILL_DRAWDOWN = "DRAWDOWN";
-    /// @notice Longest a run of held marks defers settlement (audit M-1). Covers every scheduled closed
-    ///         session (weekend + holiday is at most ~4 days) with margin; past it, held marks settle so a
-    ///         suspended or delisted underlying never blocks exits (a long hold defers, it never blocks).
-    uint256 internal constant MAX_HELD_DEFERRAL = 7 days;
+    /// @notice Longest a run of held marks defers settlement (audit M-1; decision in docs/AUDIT-2026-10.md).
+    ///         30 days: above every scheduled closed session (a weekend + holiday is ~4 days) and above the
+    ///         longest SEC single-name trading suspension (10 business days, ~14 calendar days), so a held
+    ///         price never settles a bucket during either. Past it, held marks settle at the held valuation
+    ///         for liveness of exits (a long hold defers them, it never blocks them), unless governance set a
+    ///         settle-at-price for the book (_governanceSettlePriceSet; Task 7).
+    uint256 internal constant MAX_HELD_DEFERRAL = 30 days;
 
     /// @notice Working summary of a mark application (memory only; emitted as MarkSettled).
     ///         Arrays are indexed by tranche kind.
@@ -294,8 +297,11 @@ library BookLogic {
     ///      always does (and ends a hold run). A held mark (valued at a held oracle price, e.g. a closed
     ///      session) applies P&L only, so nobody can exit or enter at a value the reopen is about to
     ///      reprice: the buckets / round wait for the first non-held mark, which settles every bucket due
-    ///      by then at its post-P&L prices. Bounded: once the run of held marks is MAX_HELD_DEFERRAL old,
-    ///      held marks settle again, so a long hold defers exits but never blocks them.
+    ///      by then at its post-P&L prices (at most Tranche.MAX_SETTLE_BUCKETS per tranche per mark; any
+    ///      further due bucket settles at the next mark, still a post-hold price). Bounded: once the run of
+    ///      held marks is MAX_HELD_DEFERRAL old, held marks settle again at the held valuation (liveness of
+    ///      exits), unless governance has set a settle-at-price for this book, in which case they keep
+    ///      deferring and that path settles the buckets instead.
     function _settles(Book.BookStorage storage $, bool held, uint256 markId, uint64 periodEnd)
         private
         returns (bool)
@@ -306,9 +312,18 @@ library BookLogic {
         }
         uint64 since = $.heldSince;
         if (since == 0) $.heldSince = since = periodEnd;
-        bool settles = periodEnd - since >= MAX_HELD_DEFERRAL;
+        bool settles = periodEnd - since >= MAX_HELD_DEFERRAL && !_governanceSettlePriceSet($);
         emit Book.MarkHeld($.bookId, markId, since, settles);
         return settles;
+    }
+
+    /// @dev HOOK (audit M-1 x Task 7): true once governance (timelock) has set a settle-at-price for this book
+    ///      (the delisted / permanently held market path). Past MAX_HELD_DEFERRAL a held mark then does NOT
+    ///      settle at the held valuation; the governance price path settles the buckets.
+    // TODO(Task 7, audit lead "settle path for delisted / permanently held markets"): read the book's
+    //      timelocked settle-at-price state (appended BookStorage field) here and settle through it.
+    function _governanceSettlePriceSet(Book.BookStorage storage) private pure returns (bool) {
+        return false;
     }
 
     /// @dev Share prices from the post-P&L NAVs, before any settlement; returns the Senior supply.

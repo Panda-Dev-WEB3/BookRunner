@@ -155,8 +155,12 @@ export function suggestSymbol(ticker: string, venue: CharterForm["venue"]): stri
   return venue === "orderly" ? `PERP_${t}_USDC` : `${t}-PERP`;
 }
 
-/** Client-side hints for every field (errors block "Review"; warnings do not). */
-export function formIssues(f: CharterForm): FieldIssue[] {
+/**
+ * Client-side hints for every field (errors block "Review"; warnings do not). `markIntervalSeconds`: the
+ * network's mark interval (the books' markSchedule) — MarketCharter.validate rejects a Junior notice below it
+ * (audit M-1); unknown: at least 1 second (the interval is never 0).
+ */
+export function formIssues(f: CharterForm, ctx: { markIntervalSeconds?: number | null } = {}): FieldIssue[] {
   const out: FieldIssue[] = [];
   const add = (field: string, message: string, severity: FieldIssue["severity"] = "error") => out.push({ field, step: stepOf(field), message, severity });
   const usdField = (field: string, v: string, label: string, positive = false) => {
@@ -211,7 +215,10 @@ export function formIssues(f: CharterForm): FieldIssue[] {
   const win = int(f.windowSeconds);
   if (!Number.isInteger(win) || win < 60 || win > THIRTY_DAYS) add("windowSeconds", "Subscription window must be between 60 seconds and 30 days");
   const notice = int(f.juniorNoticeSeconds);
-  if (!Number.isInteger(notice) || notice < 0 || notice > THIRTY_DAYS) add("juniorNoticeSeconds", "Junior notice must be between one mark interval and 30 days");
+  const minNotice = ctx.markIntervalSeconds && ctx.markIntervalSeconds > 0 ? ctx.markIntervalSeconds : 1;
+  if (!Number.isInteger(notice) || notice < minNotice || notice > THIRTY_DAYS) {
+    add("juniorNoticeSeconds", `Junior notice must be between one mark interval (${fmtNoticeMin(minNotice)}) and 30 days`);
+  }
   if (!USD_RE.test(f.perWalletCapUsd.trim())) add("perWalletCapUsd", "Per-wallet cap: a USD amount (0 = none)");
   return out;
 }
@@ -269,4 +276,10 @@ export function splitDuration(seconds: number): { value: number; unit: "s" | "mi
     if (seconds >= u.seconds && seconds % u.seconds === 0) return { value: seconds / u.seconds, unit: u.id };
   }
   return { value: seconds, unit: "s" };
+}
+
+/** "1 h", "15 min", "1 d", "45 s": the minimum notice in the form's own units. */
+function fmtNoticeMin(seconds: number): string {
+  const d = splitDuration(seconds);
+  return `${d.value} ${d.unit}`;
 }
