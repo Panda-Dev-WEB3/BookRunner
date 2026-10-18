@@ -181,6 +181,53 @@ contract M2SplitHeldPriceTest is MandateBase {
         assertEq(registry.valueUsd(address(nvda), 50e18), 9500e6);
     }
 
+    /// @notice Review I-2: after the pre-approved split took effect, the issuer stages a further update with a
+    ///         future effectiveAt, so the token no longer reports when the split took effect. The active
+    ///         multiplier is still the split (only in the pre-approved anchor's band): the time of the change is
+    ///         unknown, so the guard must stay on (audited fix: the guard fell back to the old registry stamp and
+    ///         the PoC returned). It stays on through the governance re-anchor (stamped) until a live print.
+    function test_M2_stagedFollowUpChange_doesNotHideTheSplit() public {
+        _buy(9500e6);
+        _stageSplit(10e18);
+        _closedSessionUntil(SAT + 1 hours);
+        st.updateMultiplier(10.01e18, SAT + 3 days); // a later update staged before the reopen
+        assertEq(registry.multiplierOf(address(nvda)), 10e18); // the split is the active multiplier
+        vm.expectRevert(_changedErr(uint64(FRI_CLOSE), block.timestamp));
+        registry.valueUsd(address(nvda), 50e18);
+        router.setPrice(address(nvda), 1900e18);
+        vm.prank(key);
+        vm.expectRevert(_changedErr(uint64(FRI_CLOSE), block.timestamp));
+        desk.execute(_hedgeAction(address(nvda), true, SPEND, 0));
+        // governance re-anchors the split (beyond the band of the old anchor: stamped as a change)
+        vm.warp(block.timestamp + 1 hours);
+        vm.prank(timelock);
+        registry.setMultiplier(address(nvda), 10e18);
+        assertEq(registry.multiplierSetAt(address(nvda)), block.timestamp);
+        oracle.set(NVDA_ID, NVDA_PX, uint64(block.timestamp), true); // still Friday's held price
+        vm.expectRevert(_changedErr(uint64(FRI_CLOSE), block.timestamp));
+        registry.valueUsd(address(nvda), 50e18);
+        // the reopen: a live post-split print values it again
+        vm.warp(block.timestamp + 1);
+        oracle.set(NVDA_ID, NVDA_PX / 10, uint64(block.timestamp), false);
+        assertEq(registry.valueUsd(address(nvda), 50e18), 9500e6);
+    }
+
+    /// @notice Review M-1: a no-op `setMultiplierSource` re-call and an in-band live re-anchor are not changes
+    ///         (a weekend governance no-op must not pause valuation); an out-of-band live re-anchor is.
+    function test_M2_registryStamps_onlyRealChanges() public {
+        uint64 before = registry.multiplierSetAt(address(nvda)); // setUp's switch to live mode
+        vm.warp(block.timestamp + 1 hours);
+        vm.startPrank(timelock);
+        registry.setMultiplierSource(address(nvda), true); // no-op
+        assertEq(registry.multiplierSetAt(address(nvda)), before);
+        registry.setMultiplier(address(nvda), 1.02e18); // in-band re-anchor
+        assertEq(registry.multiplierSetAt(address(nvda)), before);
+        registry.setNextMultiplierAnchor(address(nvda), 10e18);
+        registry.setMultiplier(address(nvda), 10e18); // out-of-band re-anchor (a split)
+        assertEq(registry.multiplierSetAt(address(nvda)), block.timestamp);
+        vm.stopPrank();
+    }
+
     /// @notice A held price with no multiplier change in the hold is still a valid valuation price.
     function test_M2_heldPrice_noChange_stillValued() public {
         _buy(9500e6);
@@ -198,16 +245,37 @@ contract M2SplitHeldPriceTest is MandateBase {
         assertEq(registry.valueUsd(address(nvda), 50e18), 9500e6);
     }
 
-    /// @notice Exits / emergency: the RISK Flatten path never depends on the valuation (it tolerates a failed
-    ///         one, like a stale price), so the window cannot trap inventory.
-    function test_M2_riskFlatten_stillRunsInTheWindow() public {
+    /// @notice Review I-4: the RISK Flatten tolerated a failed valuation with notional 0, so in a split window
+    ///         (reverse split: 1/10 reference) it sold with no slippage bound at all. It now defers until the
+    ///         oracle reprices (LP exits never depend on a flatten), then runs bounded at the repriced value.
+    function test_M2_riskFlatten_deferredInTheWindow_boundedAfterReprice() public {
         _buy(9500e6);
         adapter.setExposure(0);
-        _stageSplit(10e18);
+        _stageSplit(0.1e18);
         _closedSessionUntil(SAT + 1 hours);
+        router.setPrice(address(nvda), 19e18); // a pool bidding 1/10 of the token's value
+        vm.prank(risk);
         vm.expectRevert(_changedErr(uint64(FRI_CLOSE), SAT));
-        desk.valueUsd();
-        _exec(risk, _flattenAction(address(nvda), 50e18, 0)); // fair pool: $190 per token
+        desk.execute(_flattenAction(address(nvda), 50e18, 0));
+        assertEq(nvda.balanceOf(address(desk)), 50e18);
+        // repriced (reverse split: per share x10): the 1/10 bid is now refused by the RISK slippage bound
+        vm.warp(SAT + 2 days);
+        oracle.set(NVDA_ID, NVDA_PX * 10, uint64(block.timestamp), false);
+        assertEq(registry.valueUsd(address(nvda), 50e18), 9500e6);
+        vm.prank(risk);
+        vm.expectRevert(abi.encodeWithSelector(BookrunnerDesk.SlippageTooHigh.selector, 9500e6, 950e6));
+        desk.execute(_flattenAction(address(nvda), 50e18, 0));
+        router.setPrice(address(nvda), 190e18); // fair pool
+        _exec(risk, _flattenAction(address(nvda), 50e18, 0));
+        assertEq(nvda.balanceOf(address(desk)), 0);
+    }
+
+    /// @notice A stale price (no split) still never blocks the RISK Flatten (unchanged emergency behaviour).
+    function test_M2_riskFlatten_stalePriceStillTolerated() public {
+        _buy(9500e6);
+        adapter.setExposure(0);
+        vm.warp(block.timestamp + 1 days); // the stored price is far past maxPriceAge
+        _exec(risk, _flattenAction(address(nvda), 50e18, 0));
         assertEq(nvda.balanceOf(address(desk)), 0);
     }
 

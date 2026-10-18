@@ -48,6 +48,10 @@ interface IStockTokenRegistry {
     /// @notice When the effective multiplier last changed (unix seconds; 0 = never or unknown). Audit M-2:
     ///         `valueUsd` refuses a price whose share basis predates it.
     function multiplierChangedAt(address token) external view returns (uint256);
+    /// @notice Engine split gate for a market's price id (audit N-1): `pending` = close-only (an out-of-band
+    ///         change is pre-approved or staged), `window` = the price's share basis `basisAt` predates a change
+    ///         (no voluntary trade).
+    function splitGate(bytes32 priceId, uint64 basisAt) external view returns (bool pending, bool window);
 
     event TokenRegistered(address indexed token, bytes32 indexed priceId, uint256 multiplierWad);
     event MultiplierSet(address indexed token, uint256 multiplierWad);

@@ -80,6 +80,9 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
     bytes32 internal constant RISK_ROLE = keccak256("RISK");
     uint256 internal constant BPS = 10_000;
     uint256 internal constant SIG_VALIDATION_FAILED = 1;
+    /// @dev StockTokenRegistry.MultiplierChangedSincePrice (audit M-2 split window): the RISK flatten defers on it.
+    bytes4 internal constant MULTIPLIER_CHANGED_SINCE_PRICE =
+        bytes4(keccak256("MultiplierChangedSincePrice(address,uint64,uint256)"));
     /// @dev Transient slot seed: signer of a validated userOp, keyed by keccak256(callData).
     bytes32 internal constant USEROP_SIGNER_SEED = keccak256("bookrunner.desk.userop.signer");
 
@@ -422,9 +425,18 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
         uint256 notional;
         if (viaRisk) {
             // Emergency path (trusted role): never blocked by a stale price, but bounded when it is fresh.
+            // Audit M-2 (review I-4): in a split window the price is in pre-change shares and a sale would be
+            // unbounded (notional 0) at a 10x-off reference: deferred until the oracle reprices (bubbles
+            // MultiplierChangedSincePrice; LP exits never depend on a flatten).
             try reg.valueUsd(o.token, spent) returns (uint256 v) {
                 notional = v;
-            } catch {}
+            } catch (bytes memory err) {
+                if (err.length >= 4 && bytes4(err) == MULTIPLIER_CHANGED_SINCE_PRICE) {
+                    assembly ("memory-safe") {
+                        revert(add(err, 32), mload(err))
+                    }
+                }
+            }
             _checkSlippageBps(notional, received, riskMaxSlippageBps);
         } else {
             notional = reg.valueUsd(o.token, spent);

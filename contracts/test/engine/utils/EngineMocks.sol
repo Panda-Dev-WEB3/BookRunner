@@ -110,8 +110,21 @@ contract EngineMockFactory {
 contract EngineMockRegistry {
     mapping(bytes32 => bytes32) public priceIdOf;
 
+    /// @dev Audit N-1 split gate (StockTokenRegistry.splitGate), scripted per price id.
+    mapping(bytes32 => bool) public splitPending;
+    mapping(bytes32 => uint64) public changedAt;
+
     function setPriceId(bytes32 underlying, bytes32 pid) external {
         priceIdOf[underlying] = pid;
+    }
+
+    function setSplit(bytes32 pid, bool pending, uint64 changedAt_) external {
+        splitPending[pid] = pending;
+        changedAt[pid] = changedAt_;
+    }
+
+    function splitGate(bytes32 pid, uint64 basisAt) external view returns (bool pending, bool window) {
+        return (splitPending[pid], changedAt[pid] > basisAt);
     }
 }
 

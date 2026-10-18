@@ -10,6 +10,7 @@ import {IPoolEngine} from "./interfaces/IPoolEngine.sol";
 import {IAttestedOracle} from "./interfaces/IAttestedOracle.sol";
 import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 import {IBookFactory} from "./interfaces/IBookFactory.sol";
+import {IStockTokenRegistry} from "./interfaces/IStockTokenRegistry.sol";
 
 /// @title IBookrunnerConfigTradeAge — LOW_GAS.md §1 parameter read by the engine.
 /// @dev Implemented by BookrunnerConfig; kept off IBookrunnerConfig so existing config stand-ins compile.
@@ -220,6 +221,10 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     error SizeTooLarge();
     error MarketReduceOnly(uint256 marketId);
     error OffHours(uint256 marketId);
+    /// @notice Audit N-1: an out-of-band multiplier change (split) of the market's token is pending: close-only.
+    error SplitPending(uint256 marketId);
+    /// @notice Audit N-1: the price is in pre-change shares (split window): no voluntary trade until repriced.
+    error SplitWindow(uint256 marketId);
     error StalePrice(bytes32 underlying, uint64 publishedAt);
     error PriceNotAcceptable(uint256 fillPriceWad, uint256 acceptablePriceWad);
     error ExposureCap(uint256 exposureUsd, uint256 maxNetExposureUsd);
@@ -470,6 +475,7 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
             (price, held, publishedAt) = _oracle(m);
             if (held) revert OffHours(marketId);
             if (_newRiskStale(publishedAt)) revert StalePrice(m.cfg.underlying, publishedAt);
+            _splitGate(marketId, m, publishedAt, true);
             _accrue(marketId, m, price);
             _settleFunding(marketId, m, p);
         }
@@ -551,6 +557,7 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
             // leg and the real one for another (audit A2-01 / A2-03).
             if (held) revert OffHours(marketId);
             if (_tradeStale(publishedAt)) revert StalePrice(m.cfg.underlying, publishedAt);
+            _splitGate(marketId, m, publishedAt, c.newRisk);
         }
         _accrue(marketId, m, c.price);
 
@@ -822,6 +829,20 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         if (price > MAX_PRICE_WAD) revert PriceOutOfRange(price);
         held = d.held;
         publishedAt = d.publishedAt;
+    }
+
+    /// @dev Audit N-1: positions are in units of the price id (shares) and are never rebased, so a split's
+    ///      per-share step at the reopen would be booked as trader P&L (a short opened before a 10:1 split takes
+    ///      ~90% of notional from the pool). While an out-of-band change of the market's token (any component,
+    ///      for an index) is pre-approved or staged, new risk reverts SplitPending (close-only); while the price
+    ///      (a live one here: `basisAt` = its publishedAt) predates the change, every voluntary trade reverts
+    ///      SplitWindow. Liquidations and the wind-down forceClose are not gated. No registry: no gate.
+    function _splitGate(uint256 marketId, Market storage m, uint64 basisAt, bool newRisk) internal view {
+        address reg = protocolConfig.stockRegistry();
+        if (reg == address(0)) return;
+        (bool pending, bool window) = IStockTokenRegistry(reg).splitGate(m.cfg.underlying, basisAt);
+        if (window) revert SplitWindow(marketId);
+        if (pending && newRisk) revert SplitPending(marketId);
     }
 
     function _stale(uint64 publishedAt, uint256 maxAge) internal view returns (bool) {
