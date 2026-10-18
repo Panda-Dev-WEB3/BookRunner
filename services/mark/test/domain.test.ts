@@ -20,6 +20,7 @@ import {
   signMark,
 } from "../src/index";
 import { markHeld, priceIsStale } from "../src/domain/held";
+import { multiplierBasisProblems, priceBasisAt } from "../src/domain/split";
 import { NVDA, P, TSLA, USDC, snapshot } from "./fixtures";
 
 describe("NAV composition", () => {
@@ -274,5 +275,31 @@ describe("held marks (audit M-1, fail closed)", () => {
     expect(build(false).held).toBe(false);
     expect(build(true).held).toBe(true);
     expect(pnlJsonHash(build(true))).not.toBe(pnlJsonHash(build(false)));
+  });
+});
+
+describe("split window (audit M-2): a price whose share basis predates the multiplier change is not valued", () => {
+  const pos = snapshot().desk.positions[0]!;
+  const fridayClose = 1_000n;
+  const saturday = 2_000n;
+
+  test("priceBasisAt: a live price's own publishedAt, a held price's last live print (re-stamps say nothing)", () => {
+    expect(priceBasisAt({ held: false, publishedAt: 5_000n, lastLiveAt: fridayClose })).toBe(5_000n);
+    expect(priceBasisAt({ held: true, publishedAt: 5_000n, lastLiveAt: fridayClose })).toBe(fridayClose);
+  });
+
+  test("Friday's held price after a weekend split: the position is refused; a post-split live print clears it", () => {
+    const held = { ...pos, priceHeld: true, priceBasisAt: fridayClose, multiplierChangedAt: saturday };
+    expect(multiplierBasisProblems([held])).toEqual([`NVDA: price basis ${fridayClose} predates the multiplier change at ${saturday}`]);
+    expect(multiplierBasisProblems([{ ...held, priceHeld: false, priceBasisAt: saturday + 1n }])).toEqual([]);
+    // same second: the oracle read the token at that block, the change was already active
+    expect(multiplierBasisProblems([{ ...held, priceBasisAt: saturday }])).toEqual([]);
+  });
+
+  test("no change recorded, empty or written-off positions, and fixtures without the fields do not count", () => {
+    expect(multiplierBasisProblems([{ ...pos, priceBasisAt: fridayClose, multiplierChangedAt: 0n }])).toEqual([]);
+    expect(multiplierBasisProblems([{ ...pos, qtyRaw: 0n, priceBasisAt: fridayClose, multiplierChangedAt: saturday }])).toEqual([]);
+    expect(multiplierBasisProblems([{ ...pos, valueUsd: 0n, priceBasisAt: fridayClose, multiplierChangedAt: saturday }])).toEqual([]);
+    expect(multiplierBasisProblems([pos])).toEqual([]);
   });
 });

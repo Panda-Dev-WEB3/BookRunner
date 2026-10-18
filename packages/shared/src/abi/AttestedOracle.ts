@@ -331,6 +331,25 @@ export const attestedOracleAbi = [
   },
   {
     "type": "function",
+    "name": "lastLiveAt",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "latest",
     "inputs": [
       {

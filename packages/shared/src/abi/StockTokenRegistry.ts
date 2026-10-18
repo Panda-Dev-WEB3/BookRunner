@@ -247,6 +247,25 @@ export const stockTokenRegistryAbi = [
   },
   {
     "type": "function",
+    "name": "multiplierChangedAt",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "multiplierFromToken",
     "inputs": [
       {
@@ -279,6 +298,25 @@ export const stockTokenRegistryAbi = [
         "name": "",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "multiplierSetAt",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ],
     "stateMutability": "view"
@@ -822,6 +860,27 @@ export const stockTokenRegistryAbi = [
         "name": "token",
         "type": "address",
         "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "MultiplierChangedSincePrice",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "priceBasisAt",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "multiplierChangedAt",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ]
   },

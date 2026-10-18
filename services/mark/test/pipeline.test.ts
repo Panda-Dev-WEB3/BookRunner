@@ -157,6 +157,25 @@ describe("MarkPipeline", () => {
     expect(chain.commitCalls).toBe(1);
   });
 
+  test("audit M-2: a desk position priced before its multiplier change (weekend split): retryable, nothing committed or settled; marks once the oracle reprices", async () => {
+    const { chain, pipeline } = setup();
+    const pos = chain.snap.desk.positions[0]!;
+    const fridayClose = BigInt(P - 86_400);
+    const saturday = BigInt(P - 3_600);
+    // Friday's per-share price re-stamped as held, the 10:1 split live on the token: valueUsdAt would say 10x
+    const split = { ...pos, priceHeld: true, valueUsd: pos.valueUsd * 10n, priceBasisAt: fridayClose, multiplierChangedAt: saturday };
+    chain.snap = { ...chain.snap, desk: { ...chain.snap.desk, positions: [split] } };
+    await expect(pipeline.run({ bookId: 1, periodEnd: P })).rejects.toBeInstanceOf(RetryableMarkError);
+    await expect(pipeline.run({ bookId: 1, periodEnd: P })).rejects.toThrow("predates the multiplier change");
+    expect(chain.commitCalls).toBe(0);
+    expect(chain.applyCalls).toBe(0);
+    // the reopen: a live post-split print (basis after the change) values the position again
+    chain.snap = { ...chain.snap, desk: { ...chain.snap.desk, positions: [{ ...pos, priceBasisAt: saturday + 1n, multiplierChangedAt: saturday }] } };
+    const out = await pipeline.run({ bookId: 1, periodEnd: P });
+    expect(out.status).toBe("applied");
+    expect(chain.commitCalls).toBe(1);
+  });
+
   test("Retiring wind-down: token dust below the flatten floor does not block deployedValueUsd == 0", async () => {
     const { chain, pipeline } = setup();
     const s = chain.snap;

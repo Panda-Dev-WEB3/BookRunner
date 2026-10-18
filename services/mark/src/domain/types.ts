@@ -17,6 +17,10 @@ export interface DeskPosition {
   signedPrice?: boolean;
   /** the oracle signed priceWad as held (session closed / feed held): the mark is then held (audit M-1). */
   priceHeld?: boolean;
+  /** share basis of priceWad: its publishedAt when live, AttestedOracle.lastLiveAt when held (audit M-2). */
+  priceBasisAt?: bigint;
+  /** StockTokenRegistry.multiplierChangedAt(token) at the snapshot block (0 = never). */
+  multiplierChangedAt?: bigint;
 }
 
 /** Everything a mark needs, read at ONE block. */

@@ -25,6 +25,7 @@ import { type BookRef, type TxSender, bookStateName, codeHasSelector, describeRe
 import { type Abi, type Address, type Hex, type PublicClient, encodeFunctionData, erc20Abi, isAddressEqual, parseEventLogs, zeroHash } from "viem";
 import type { AdapterReportState } from "../../../ops-venue/src/report712";
 import { priceIsStale } from "../domain/held";
+import { priceBasisAt } from "../domain/split";
 import { type SignedPrice, encodePriceData, pickSignedPrice, valuationRefTs } from "../domain/prices";
 import type { DeskPosition, MarkSnapshot } from "../domain/types";
 import type { AtomicMarkResult, CommittedMark, MarkAppliedEvent, MarkChain, SimulationResult } from "../ports";
@@ -463,10 +464,17 @@ export class MarkChainAdapter implements MarkChain {
       this.pc.readContract({ address: token, abi: erc20Abi, functionName: "balanceOf", args: [desk], ...b }),
       this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "getToken", args: [token], ...b }),
     ]);
-    const latest = await this.pc.readContract({ address: this.c.oracle, abi: attestedOracleAbi, functionName: "latest", args: [info.priceId], ...b });
+    // audit M-2: the price's share basis and the token's last multiplier change, at the same block (a revert,
+    // e.g. a live-mode token without effectiveAt(), fails the snapshot: never valued blind)
+    const [latest, lastLiveAt, multiplierChangedAt] = await Promise.all([
+      this.pc.readContract({ address: this.c.oracle, abi: attestedOracleAbi, functionName: "latest", args: [info.priceId], ...b }),
+      this.pc.readContract({ address: this.c.oracle, abi: attestedOracleAbi, functionName: "lastLiveAt", args: [info.priceId], ...b }),
+      this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "multiplierChangedAt", args: [token], ...b }),
+    ]);
     const signed = pickSignedPrice(prices, info.priceId, BigInt(latest.publishedAt), refTs);
     const priceWad = signed ? signed.priceWad : latest.priceWad;
     const publishedAt = signed ? signed.publishedAt : BigInt(latest.publishedAt);
+    const held = signed ? signed.held : latest.held;
     const valueUsd = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "valueUsdAt", args: [token, qtyRaw, priceWad], ...b });
     const priceStale = priceIsStale(publishedAt, refTs, maxPriceAge);
     return {
@@ -480,7 +488,9 @@ export class MarkChainAdapter implements MarkChain {
         valueUsd,
         priceStale,
         ...(signed ? { signedPrice: true } : {}),
-        ...((signed ? signed.held : latest.held) ? { priceHeld: true } : {}),
+        ...(held ? { priceHeld: true } : {}),
+        priceBasisAt: priceBasisAt({ held, publishedAt, lastLiveAt: BigInt(lastLiveAt) }),
+        multiplierChangedAt,
       },
       signed: signed && qtyRaw > 0n ? signed : null,
     };

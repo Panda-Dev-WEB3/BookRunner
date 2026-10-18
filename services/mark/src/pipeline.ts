@@ -22,6 +22,7 @@ import { buildMarkPnl, pnlJsonHash } from "./domain/pnl";
 import { previewTranches, type TranchePreview } from "./domain/preview";
 import { type SignedPrice, encodePriceData, newestByUnderlying } from "./domain/prices";
 import { venueReportAge } from "./domain/readiness";
+import { multiplierBasisProblems } from "./domain/split";
 import type { MarkSnapshot } from "./domain/types";
 import { applySignedVenueReport } from "./domain/venue";
 import type { MarkAppliedEvent, MarkChain, MarkFeeds, MarkRow, MarkSignerPort, MarkStore, ReceiptsRootPort } from "./ports";
@@ -156,6 +157,15 @@ export class MarkPipeline {
     for (let attempt = 1; attempt <= this.d.maxRetries; attempt++) {
       const c = await this.compute(ref, periodEnd, interval, opts);
       if (opts.dryRun) return { status: "dry_run", computed: c };
+
+      // audit M-2: never sign a NAV valuing a desk token at a price quoted before its multiplier changed (a
+      // weekend split: Friday's per-share price x the new multiplier = 10x). Not even as a held mark: it would
+      // still book the inflated P&L into the share prices. Retry until the oracle signs a post-change price.
+      const split = multiplierBasisProblems(c.snapshot.desk.positions);
+      if (split.length > 0) {
+        log.error({ positions: split }, "desk position priced before its multiplier change; refusing to commit the mark (retrying once the oracle reprices)");
+        throw new RetryableMarkError(`desk position priced before its multiplier change (audit M-2): ${split.join("; ")}`);
+      }
 
       // never sign a NAV built on a stale venue valuation: a stalled reporter would otherwise
       // keep committing pre-outage equity (redemptions at inflated prices, drawdown kill blind)
