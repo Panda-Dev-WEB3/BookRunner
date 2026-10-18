@@ -32,6 +32,7 @@ export class WithdrawProcessor {
   /** builder IF mode: per book, withdrawals no saga adopted; last scan time */
   private readonly unadopted = new Map<number, Array<{ id: string; amount: string; status: string; createdAt: number | null; receiver: string | null }>>();
   private readonly scannedAt = new Map<number, number>();
+  private readonly operatorErrLogged = new Map<string, string>();
 
   constructor(
     private readonly ctx: OpsContext,
@@ -83,13 +84,18 @@ export class WithdrawProcessor {
   }
 
   /** Builder IF mode: IF withdrawals waiting for the operator (withdraw on Orderly / return to the adapter), for alerts. */
-  ifOperatorWaits(): Array<{ bookId: number; nonce: string; step: "withdraw" | "return"; amount: string; owner: string; adapter: string; since: number; writtenOffAt?: number }> {
+  ifOperatorWaits(): Array<{ bookId: number; nonce: string; step: "withdraw" | "payout" | "return"; amount: string; owner: string; adapter: string; since: number; writtenOffAt?: number }> {
     const out: ReturnType<WithdrawProcessor["ifOperatorWaits"]> = [];
     for (const s of this.pending()) {
       if (!s.operatorIf) continue;
       const base = { bookId: s.bookId, nonce: s.nonce, amount: s.amount, owner: sagaReceiver(s), adapter: s.adapter };
       if (s.stage === "detected" && s.operatorWaitSince !== undefined) out.push({ ...base, step: "withdraw", since: s.operatorWaitSince });
-      else if (s.stage === "confirmed" && s.returnWaitSince !== undefined) out.push({ ...base, step: "return", since: s.returnWaitSince, ...(s.writtenOffAt !== undefined ? { writtenOffAt: s.writtenOffAt } : {}) });
+      else if (s.stage === "confirmed") {
+        // until the funds are back on the adapter or written off (and after a write-off, until they come back)
+        const wo = s.writtenOffAt !== undefined ? { writtenOffAt: s.writtenOffAt } : {};
+        if (s.returnWaitSince !== undefined) out.push({ ...base, step: "return", since: s.returnWaitSince, ...wo });
+        else out.push({ ...base, step: "payout", since: s.confirmedAtMs ?? s.updatedAt, ...wo });
+      }
     }
     return out;
   }
@@ -231,10 +237,10 @@ export class WithdrawProcessor {
         return { type: "confirmed", ...(r.hash ? { confirmTx: r.hash } : {}) };
       }
       case "pay": {
+        if (s.operatorIf) return this.operatorPay(key);
         const wid = s.withdrawId as string;
         const rec = await builder.withdrawal(s.accountId, wid);
         if (rec?.status === "COMPLETED") {
-          if (s.operatorIf && !(await this.operatorReturned(key))) return null;
           return { type: "venue_paid", ...(rec.txHash ? { payTx: rec.txHash as Hex } : s.payTx ? { payTx: s.payTx } : {}) };
         }
         if (rec?.status === "FAILED") {
@@ -244,7 +250,6 @@ export class WithdrawProcessor {
           if (!c) return null;
           return { type: "cancelled", reason: `venue withdrawal ${wid} FAILED after confirmation`, ...(c.hash ? { cancelTx: c.hash } : {}) };
         }
-        if (s.operatorIf) return null; // builder IF: Orderly pays the operator's EOA; poll until COMPLETED
         if (settings.mode === "live") return null; // VERIFY: Orderly pays out asynchronously; poll until COMPLETED
         return this.mockPay(key);
       }
@@ -339,70 +344,110 @@ export class WithdrawProcessor {
   }
 
   /**
-   * Builder IF mode, pay step after Orderly paid the operator's EOA: true once the operator has returned THIS payout, i.e.
-   * settlement-token Transfer(EOA -> adapter) logs after the on-chain request, claimed by no other saga, adding up to at
-   * least the requested amount (one transfer per withdrawal; the operator tops up Orderly's withdrawal fee). The
-   * adapter-wide balance never counts: it also holds fee earmarks, MM payouts and unattributed USDC. Waiting burns no
-   * attempt; past OPS_IF_RETURN_WRITE_OFF_MS the payout is written off from NAV on-chain (then still swept as a gain when
-   * it comes back).
+   * Builder IF mode, pay step (stage confirmed). The operator controls the Orderly account (and so whether ops-venue can
+   * read it), so nothing here depends on an Orderly read:
+   *   1. the write-off deadline runs from the ON-CHAIN confirmation (withdrawRequest.confirmedAt) + OPS_IF_RETURN_WRITE_OFF_MS;
+   *   2. the return is the operator's settlement-token Transfer(EOA -> adapter) logs (scanReturns), read from the chain;
+   *   3. only then Orderly's record: COMPLETED marks "paid to the EOA" (returnWaitSince: the alert's return step and the
+   *      point after which reports are no longer held), FAILED releases the request (failWithdraw, or nothing after a
+   *      write-off: the funds are venue-side again and the next report counts them).
+   * Any error in this stage (Orderly down, the operator removed ops-venue's read key, a missing row, an RPC blip, a
+   * reverting write-off) waits and retries: it never burns an attempt, so the saga never fails with funds in transit;
+   * it stays published (ifOperatorWaits) until the funds are back on the adapter or written off.
    */
-  private async operatorReturned(key: string): Promise<boolean> {
-    const { chain, log, settings } = this.ctx;
+  private async operatorPay(key: string): Promise<WithdrawEvent | null> {
+    const { chain, builder, log, settings } = this.ctx;
+    const recheck = settings.ifOperatorRecheckMs ?? DELIST_WAIT_MS;
     let s = this.get(key);
+    const nonce = BigInt(s.nonce);
     const now = this.ctx.now();
+    try {
+      const st = await chain.withdrawStatus(s.adapter, nonce);
+      const limit = settings.ifReturnWriteOffMs ?? DEFAULT_IF_RETURN_WRITE_OFF_MS;
+      const confirmedMs = st.confirmedAt !== undefined && st.confirmedAt > 0n ? Number(st.confirmedAt) * 1000 : (s.confirmedAtMs ?? now);
+      if (st.status === WITHDRAW_STATUS.WrittenOff && s.writtenOffAt === undefined) s = this.patch(key, { writtenOffAt: now });
+      if (st.status === WITHDRAW_STATUS.Confirmed && s.writtenOffAt === undefined && now - confirmedMs >= limit && !(await this.scanReturns(key))) {
+        // NAV must not keep counting money the operator holds: Confirmed -> WrittenOff on the adapter (in-transit cleared)
+        const w = await this.once(key, "writeoff", (o) => chain.writeOffOperatorPayout(s.adapter, nonce, o));
+        if (!w) {
+          this.nextAttemptAt.set(key, now + recheck);
+          return null;
+        }
+        s = this.patch(key, { writtenOffAt: now });
+        log.error({ bookId: s.bookId, nonce: s.nonce, amount: s.amount, owner: sagaReceiver(s), sinceConfirmationMs: now - confirmedMs }, "builder IF payout not back on the adapter in time: WRITTEN OFF from NAV (adapter.writeOffOperatorPayout); a later return is swept to the vault as a gain");
+      }
+      if (await this.scanReturns(key)) {
+        log.info({ bookId: s.bookId, nonce: s.nonce, transfers: this.get(key).returns?.map((r) => r.id), writtenOff: s.writtenOffAt !== undefined }, "builder IF account: the operator returned the payout to the adapter");
+        return { type: "venue_paid" };
+      }
+      const rec = await builder.withdrawal(s.accountId, s.withdrawId as string);
+      if (rec?.status === "FAILED") {
+        if (st.status === WITHDRAW_STATUS.WrittenOff) return { type: "cancelled", reason: `venue withdrawal ${s.withdrawId} FAILED after the write-off: the funds are venue-side again (counted by the next report)` };
+        const c = await this.once(key, "cancel", (o) => chain.failWithdraw(s.adapter, nonce, o));
+        if (!c) {
+          this.nextAttemptAt.set(key, now + recheck);
+          return null;
+        }
+        return { type: "cancelled", reason: `venue withdrawal ${s.withdrawId} FAILED after confirmation`, ...(c.hash ? { cancelTx: c.hash } : {}) };
+      }
+      if (rec?.status === "COMPLETED" && s.returnWaitSince === undefined) {
+        this.patch(key, { returnWaitSince: now });
+        log.warn({ bookId: s.bookId, nonce: s.nonce, amount: s.amount, owner: sagaReceiver(s), adapter: s.adapter }, "builder IF account: Orderly paid the IF withdrawal to the operator's wallet — the operator must transfer it (the full amount, one transfer) to the adapter; ops-venue re-checks every minute");
+      }
+    } catch (err) {
+      // waiting on the operator's account / the chain: never a failed attempt
+      const first = this.operatorErrLogged.get(key) !== errMsg(err);
+      this.operatorErrLogged.set(key, errMsg(err));
+      log[first ? "warn" : "debug"]({ bookId: s.bookId, nonce: s.nonce, err: errMsg(err) }, "builder IF payout check failed (no attempt burnt; the write-off deadline runs from the on-chain confirmation)");
+    }
+    this.nextAttemptAt.set(key, now + recheck);
+    return null;
+  }
+
+  /**
+   * Builder IF mode: has the operator returned THIS payout? Settlement-token Transfer(EOA -> adapter) logs after the
+   * on-chain request, claimed by no other saga, adding up to at least the requested amount (one transfer per withdrawal;
+   * the operator tops up Orderly's withdrawal fee). Never the adapter-wide balance (fee earmarks, MM payouts,
+   * unattributed USDC). Scans incrementally (returnScannedTo) and records the claimed transfers (returns).
+   */
+  private async scanReturns(key: string): Promise<boolean> {
+    const { chain, settings } = this.ctx;
+    let s = this.get(key);
     const amount = BigInt(s.amount);
     const owner = sagaReceiver(s);
+    const already = (s.returns ?? []).reduce((x, r) => x + BigInt(r.amount), 0n);
+    if (already >= amount) return true;
     const head = await chain.blockNumber();
     const from = s.returnScannedTo !== undefined ? BigInt(s.returnScannedTo) + 1n : BigInt(s.requestBlock ?? chain.startBlock.toString());
-    if (from <= head) {
-      const claimed = new Set(
-        Object.values(this.all())
-          .filter((x) => x.key !== s.key)
-          .flatMap((x) => (x.returns ?? []).map((r) => r.id)),
-      );
-      const step = settings.logMaxRange > 0n ? settings.logMaxRange : 2_000n;
-      const returns = [...(s.returns ?? [])];
-      let got = returns.reduce((x, r) => x + BigInt(r.amount), 0n);
-      let scanned = from - 1n;
-      for (let lo = from; lo <= head && got < amount; lo += step) {
-        const hi = lo + step - 1n < head ? lo + step - 1n : head;
-        for (const t of await chain.tokenTransfers(owner, s.adapter, lo, hi)) {
-          const id = `${t.txHash.toLowerCase()}:${t.logIndex}`;
-          if (got >= amount || claimed.has(id) || returns.some((r) => r.id === id)) continue;
-          returns.push({ id, amount: t.amount.toString() });
-          got += t.amount;
-        }
-        scanned = hi;
+    if (from > head) return false;
+    const claimed = new Set(
+      Object.values(this.all())
+        .filter((x) => x.key !== s.key)
+        .flatMap((x) => (x.returns ?? []).map((r) => r.id)),
+    );
+    const step = settings.logMaxRange > 0n ? settings.logMaxRange : 2_000n;
+    const returns = [...(s.returns ?? [])];
+    let got = already;
+    let scanned = from - 1n;
+    for (let lo = from; lo <= head && got < amount; lo += step) {
+      const hi = lo + step - 1n < head ? lo + step - 1n : head;
+      for (const t of await chain.tokenTransfers(owner, s.adapter, lo, hi)) {
+        const id = `${t.txHash.toLowerCase()}:${t.logIndex}`;
+        if (got >= amount || claimed.has(id) || returns.some((r) => r.id === id)) continue;
+        returns.push({ id, amount: t.amount.toString() });
+        got += t.amount;
       }
-      s = this.patch(key, { returns, returnScannedTo: scanned.toString() });
+      scanned = hi;
     }
-    const got = (s.returns ?? []).reduce((x, r) => x + BigInt(r.amount), 0n);
-    if (got >= amount) {
-      log.info({ bookId: s.bookId, nonce: s.nonce, returned: got.toString(), transfers: s.returns?.map((r) => r.id), waitedMs: s.returnWaitSince !== undefined ? now - s.returnWaitSince : 0, writtenOff: s.writtenOffAt !== undefined }, "builder IF account: the operator returned the payout to the adapter");
-      return true;
-    }
-    if (s.returnWaitSince === undefined) {
-      s = this.patch(key, { returnWaitSince: now });
-      log.warn(
-        { bookId: s.bookId, nonce: s.nonce, amount: s.amount, returned: got.toString(), owner, adapter: s.adapter },
-        "builder IF account: Orderly paid the IF withdrawal to the operator's wallet — the operator must transfer it (the full amount, one transfer) to the adapter; ops-venue re-checks every minute",
-      );
-    }
-    const limit = settings.ifReturnWriteOffMs ?? DEFAULT_IF_RETURN_WRITE_OFF_MS;
-    if (s.writtenOffAt === undefined && now - (s.returnWaitSince as number) >= limit) {
-      // NAV must not keep counting money in a private wallet: Confirmed -> WrittenOff on the adapter (in-transit cleared)
-      const st = await chain.withdrawStatus(s.adapter, BigInt(s.nonce));
-      if (st.status === WITHDRAW_STATUS.Confirmed) {
-        const w = await this.once(key, "writeoff", (o) => chain.writeOffOperatorPayout(s.adapter, BigInt(s.nonce), o));
-        if (!w) return false;
-      }
-      if (st.status === WITHDRAW_STATUS.Confirmed || st.status === WITHDRAW_STATUS.WrittenOff) {
-        s = this.patch(key, { writtenOffAt: now });
-        log.error({ bookId: s.bookId, nonce: s.nonce, amount: s.amount, owner, waitedMs: now - (s.returnWaitSince as number) }, "builder IF payout not returned in time: WRITTEN OFF from NAV (adapter.writeOffOperatorPayout); a later return is swept to the vault as a gain");
-      }
-    }
-    this.nextAttemptAt.set(key, now + (settings.ifOperatorRecheckMs ?? DELIST_WAIT_MS));
-    return false;
+    s = this.patch(key, { returns, returnScannedTo: scanned.toString() });
+    return got >= amount;
+  }
+
+  /** Withdraw sagas that FAILED (terminal; kept until pruned), for alerts: critical for IF (venue_withdraw_failed). */
+  failedSagas(): Array<{ bookId: number; nonce: string; account: number; amount: string; error: string; at: number; operatorIf: boolean }> {
+    return Object.values(this.all())
+      .filter((s) => s.stage === "failed")
+      .map((s) => ({ bookId: s.bookId, nonce: s.nonce, account: s.account, amount: s.amount, error: s.lastError ?? "", at: s.updatedAt, operatorIf: s.operatorIf === true }));
   }
 
   /**

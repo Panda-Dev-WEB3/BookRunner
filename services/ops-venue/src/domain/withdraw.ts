@@ -74,6 +74,8 @@ export interface WithdrawSaga {
   returns?: Array<{ id: string; amount: string }>;
   /** Builder IF mode: unix ms the unreturned payout was written off from NAV (adapter.writeOffOperatorPayout). */
   writtenOffAt?: number;
+  /** unix ms the saga reached `confirmed` (the on-chain confirmation; alerts' reference before Orderly pays) */
+  confirmedAtMs?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -157,6 +159,7 @@ export function transition(s: WithdrawSaga, ev: WithdrawEvent, now: number, maxA
   if (ev.type === "venue_requested") next.withdrawId = ev.withdrawId;
   if (ev.type === "venue_paid" && ev.payTx) next.payTx = ev.payTx;
   if (ev.type === "confirmed" && ev.confirmTx) next.confirmTx = ev.confirmTx;
+  if (ev.type === "confirmed") next.confirmedAtMs = now;
   if (ev.type === "swept") next.sweepTx = ev.sweepTx;
   if (ev.type === "skipped") next.reason = ev.reason;
   if (ev.type === "cancelled") {

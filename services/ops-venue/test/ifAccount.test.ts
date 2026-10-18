@@ -13,7 +13,10 @@ import type { TrackedBook } from "../src/worker/context";
 import { BookRegistry } from "../src/worker/books";
 import { OpsService } from "../src/worker/service";
 import { WithdrawProcessor } from "../src/worker/withdrawals";
-import { ADAPTER, IF_ID, IF_OWNER, makeCtx, MM_ID, provisioner, SYMBOL, trackedBook, VAULT } from "./helpers";
+import { OrderlyBuilderClient } from "../src/client";
+import { generateKey } from "../src/orderly/auth";
+import type { FetchLike } from "../src/orderly/http";
+import { ADAPTER, IF_ID, IF_OWNER, makeCtx, MM_ID, OPS, provisioner, SYMBOL, trackedBook, VAULT } from "./helpers";
 
 const EOA = "0x00000000000000000000000000000000000E0A01" as Address;
 const OTHER_ID = `0x${"e5".repeat(32)}` as Hex;
@@ -133,6 +136,7 @@ async function ifService(o: { mode: "contract" | "builder"; builderBound: boolea
     calls.requestWithdraw++;
     return reqW(p);
   };
+  t.chain.clockSec = () => BigInt(Math.floor(now / 1000));
   const svc = new OpsService(t.ctx, await provisioner(t));
   return { ...t, svc, calls, statuses, last: () => statuses.at(-1) as VenueSymbolIssuesMsg, registerKey: () => (keyRegistered = true), advance: (ms: number) => (now += ms) };
 }
@@ -472,5 +476,112 @@ describe("builder IF mode is a fallback: refused on mainnet without the owner's 
     expect(loadOpsEnv({ ...live, CHAIN_ID: "46630", ORDERLY_BASE_URL: "https://testnet-api.orderly.org" }).ORDERLY_IF_MODE).toBe("builder");
     expect(() => loadOpsEnv({ ORDERLY_MODE: "live", ORDERLY_BASE_URL: "https://orderly-proxy.internal" })).toThrow(/ORDERLY_IF_REQUIREMENT_USD/);
     expect(loadOpsEnv({ ORDERLY_MODE: "live", ORDERLY_BASE_URL: "https://orderly-proxy.internal", ORDERLY_IF_REQUIREMENT_USD: "100" }).ORDERLY_IF_REQUIREMENT_USD).toBe(100);
+  });
+});
+
+describe("fix round 2: the write-off never depends on reading the operator's Orderly account", () => {
+  async function confirmedSaga(o: { completed?: boolean } = {}) {
+    const t = await ifService({ mode: "builder", builderBound: true, expected: new Map([[1, IF_ID as string]]) });
+    t.ctx.settings.ifOperatorRecheckMs = 60_000;
+    t.ctx.settings.ifReturnWriteOffMs = 3_600_000;
+    await t.svc.syncBooks();
+    const rows: VenueWithdrawRow[] = [];
+    t.builder.withdrawals = async () => rows.map((r) => ({ ...r })) as Awaited<ReturnType<typeof t.builder.withdrawals>>;
+    const wp = t.svc.withdrawals as WithdrawProcessor;
+    const req = t.chain.requestWithdraw(ADAPTER, ACCOUNT.IF, 3_000_000_000n);
+    await wp.onRequested(req);
+    rows.push({ id: 75, status: o.completed ? "COMPLETED" : "PENDING", amountUsd: 3_000_000_000n, clientRef: null, receiver: EOA, createdAt: t.ctx.now() });
+    t.builder.withdrawal = async (_a, id) => (rows.find((r) => String(r.id) === id) ?? null) as Awaited<ReturnType<typeof t.builder.withdrawal>>;
+    await wp.processNonce(1, "1");
+    const saga = () => Object.values(t.sagas.get().withdrawals)[0] as WithdrawSaga;
+    expect(saga().stage).toBe("confirmed");
+    return { ...t, rows, wp, saga };
+  }
+
+  for (const [label, read] of [
+    ["the Orderly read throws (key removed / Orderly down)", "throw"],
+    ["the row is missing from the history", "missing"],
+  ] as const) {
+    test(`${label}: no attempt burnt, still published, written off at confirmation + limit`, async () => {
+      const t = await confirmedSaga();
+      t.builder.withdrawal = read === "throw" ? async () => Promise.reject(new Error("orderly auth: key removed")) : async () => null;
+      for (let i = 0; i < 70; i++) {
+        t.advance(50_000); // 58 min of retries (well past the old 40 attempts)
+        await t.wp.processNonce(1, "1");
+      }
+      expect([t.saga().stage, t.saga().attempts]).toEqual(["confirmed", 0]);
+      expect(t.wp.ifOperatorWaits()).toMatchObject([{ step: "payout", nonce: "1" }]);
+      expect(t.chain.count("writeOffOperatorPayout")).toBe(0);
+      t.advance(130_000); // past confirmation + 1 h
+      await t.wp.processNonce(1, "1");
+      expect(t.chain.count("writeOffOperatorPayout")).toBe(1);
+      expect(t.chain.adapter(ADAPTER).inTransit).toBe(0n);
+      expect(t.wp.ifOperatorWaits()[0]).toMatchObject({ step: "payout", writtenOffAt: t.saga().writtenOffAt });
+      // the return is seen on-chain even though Orderly still cannot be read
+      t.chain.balances.set(EOA.toLowerCase(), 3_000_000_000n);
+      t.chain.tokenTransfer(EOA, ADAPTER, 3_000_000_000n);
+      t.advance(61_000);
+      await t.wp.processNonce(1, "1");
+      expect(t.saga().stage).toBe("swept");
+    });
+  }
+
+  test("reports stay held before Orderly COMPLETED; a withdrawal FAILED there is released (failWithdraw), never double counted", async () => {
+    const t = await confirmedSaga();
+    const book = t.svc.registry.get(1) as TrackedBook;
+    t.chain.adapter(ADAPTER).lastFlowAt = 0n;
+    expect(await t.svc.reporter.holdReason(book, t.chain.headTs)).toContain("withdrawal in flight");
+    (t.rows[0] as VenueWithdrawRow).status = "FAILED"; // Orderly credits it back to the IF account
+    t.advance(61_000);
+    await t.wp.processNonce(1, "1");
+    expect(t.saga().stage).toBe("cancelled");
+    expect(t.chain.count("failWithdraw")).toBe(1);
+    expect(t.chain.adapter(ADAPTER).inTransit).toBe(0n);
+    t.chain.adapter(ADAPTER).lastFlowAt = 0n;
+    expect(await t.svc.reporter.holdReason(book, t.chain.headTs)).toBeNull();
+  });
+
+  test("once COMPLETED was seen, the return-wait no longer holds reports", async () => {
+    const t = await confirmedSaga({ completed: true });
+    expect(typeof t.saga().returnWaitSince).toBe("number");
+    t.chain.adapter(ADAPTER).lastFlowAt = 0n;
+    expect(await t.svc.reporter.holdReason(t.svc.registry.get(1) as TrackedBook, t.chain.headTs)).toBeNull();
+    expect(t.wp.ifOperatorWaits()[0]?.step).toBe("return");
+  });
+
+  test("a FAILED withdraw saga is published for alerts", async () => {
+    const t = await ifService({ mode: "contract", builderBound: false });
+    await t.svc.syncBooks();
+    t.builder.requestWithdraw = async () => {
+      throw new Error("venue down");
+    };
+    t.builder.withdrawals = async () => [];
+    const wp = t.svc.withdrawals as WithdrawProcessor;
+    await wp.onRequested(t.chain.requestWithdraw(ADAPTER, ACCOUNT.MM, 1_000_000n));
+    for (let i = 0; i < 6; i++) await wp.processNonce(1, "1");
+    expect(wp.failedSagas()).toMatchObject([{ bookId: 1, nonce: "1", account: ACCOUNT.MM, amount: "1000000", error: "venue down" }]);
+    await t.svc.syncBooks();
+    expect(t.last().failedWithdrawals?.[0]).toMatchObject({ bookId: 1, nonce: "1", account: ACCOUNT.MM });
+  });
+
+  test("client: a withdrawal beyond the first history page is found (paging stops on a short or repeated page)", async () => {
+    const pages: number[] = [];
+    const row = (id: number) => ({ id, trans_status: "COMPLETED", amount: 1, created_time: 1 });
+    const fetch = (async (input: string) => {
+      const page = Number(new URL(input).searchParams.get("page"));
+      pages.push(page);
+      const rows = page === 1 ? Array.from({ length: 100 }, (_, i) => row(1000 - i)) : page === 2 ? [row(7), row(6)] : [];
+      return new Response(JSON.stringify({ success: true, data: { rows } }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as unknown as FetchLike;
+    const c = new OrderlyBuilderClient({ baseUrl: "http://orderly.test", mode: "mock", brokerId: "bookrunner", chainId: 31337, builderAccountId: "0xb1", builderKey: await generateKey(), signer: OPS, fetch });
+    expect((await c.withdrawal("0xaa", "6"))?.id).toBe("6");
+    expect(pages).toEqual([1, 2]);
+    pages.length = 0;
+    expect(await c.withdrawal("0xaa", "5")).toBeNull();
+    expect(pages).toEqual([1, 2]); // page 2 is short: done
+    // a server ignoring `page` (same rows every time) ends after the second read
+    const same = (async () => new Response(JSON.stringify({ success: true, data: { rows: Array.from({ length: 100 }, (_, i) => row(i)) } }), { status: 200 })) as unknown as FetchLike;
+    const c2 = new OrderlyBuilderClient({ baseUrl: "http://orderly.test", mode: "mock", brokerId: "bookrunner", chainId: 31337, builderAccountId: "0xb1", builderKey: await generateKey(), signer: OPS, fetch: same });
+    expect(await c2.withdrawal("0xaa", "500")).toBeNull();
   });
 });

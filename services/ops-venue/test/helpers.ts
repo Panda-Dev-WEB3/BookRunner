@@ -77,7 +77,7 @@ export interface FakeAdapterState {
   vault: Address;
   router: Address;
   nonce: bigint;
-  requests: Map<string, { status: number; amount: bigint; account: number; requestedAt: bigint }>;
+  requests: Map<string, { status: number; amount: bigint; account: number; requestedAt: bigint; confirmedAt?: bigint }>;
   inTransit: bigint;
   pendingWithdraw: [bigint, bigint];
   pendingFees: bigint;
@@ -126,6 +126,8 @@ export class FakeChain implements ChainPort {
   delegateTxs = new Map<string, Hex>();
   /** far-future head so tests' injected clock wins the min(now, head) clamp */
   headTs = 1n << 40n;
+  /** block.timestamp the adapter records (confirmedAt); tests with a clock set it (default: the head) */
+  clockSec: () => bigint = () => this.headTs;
   private seq = 0;
 
   adapter(a: Address): FakeAdapterState {
@@ -295,7 +297,7 @@ export class FakeChain implements ChainPort {
   }
   async withdrawStatus(adapter: Address, nonce: bigint): Promise<WithdrawRequestView> {
     const r = this.adapter(adapter).requests.get(nonce.toString());
-    return r ? { status: r.status, amount: r.amount, account: r.account, requestedAt: r.requestedAt } : { status: WS.None, amount: 0n, account: 0, requestedAt: 0n };
+    return r ? { status: r.status, amount: r.amount, account: r.account, requestedAt: r.requestedAt, confirmedAt: r.confirmedAt ?? 0n } : { status: WS.None, amount: 0n, account: 0, requestedAt: 0n, confirmedAt: 0n };
   }
   async adapterFlowState(adapter: Address): Promise<AdapterFlowState> {
     const a = this.adapter(adapter);
@@ -318,6 +320,7 @@ export class FakeChain implements ChainPort {
     const r = a.requests.get(nonce.toString());
     if (!r || r.status !== WS.Confirmed) throw new Error(`RequestNotConfirmed(${nonce}, ${r?.status ?? 0})`);
     if (r.account !== 0 || !this.builderIfOwners.has(adapter.toLowerCase())) throw new Error(`NotBuilderIfPayout(${nonce})`);
+    if (this.clockSec() < (r.confirmedAt ?? 0n) + 3600n) throw new Error(`WriteOffTooEarly(${nonce})`);
     const h = this.begin("writeOffOperatorPayout", [adapter, nonce], opts);
     r.status = WS.WrittenOff;
     a.inTransit -= a.inTransit < r.amount ? a.inTransit : r.amount;
@@ -357,6 +360,7 @@ export class FakeChain implements ChainPort {
     if (!r || r.status !== WS.Requested) throw new Error(`RequestNotPending(${nonce}, ${r?.status ?? 0})`);
     const h = this.begin("confirmWithdraw", [adapter, nonce], opts);
     r.status = WS.Confirmed;
+    r.confirmedAt = this.clockSec();
     a.pendingWithdraw[r.account as 0 | 1] -= r.amount;
     a.inTransit += r.amount;
     a.lastFlowAt = this.headTs;

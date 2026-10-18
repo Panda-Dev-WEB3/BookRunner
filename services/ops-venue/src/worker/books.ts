@@ -134,6 +134,8 @@ export class BookRegistry {
   ifPriorEquity: () => Array<{ bookId: number; accountId: string; usd: string; since: number }> = () => [];
   /** Builder IF mode: IF withdrawals no saga adopted (set by OpsService from the withdrawals worker). */
   ifUnadopted: () => NonNullable<VenueSymbolIssuesMsg["ifUnadopted"]> = () => [];
+  /** Failed withdraw sagas (set by OpsService from the withdrawals worker). */
+  failedWithdrawals: () => NonNullable<VenueSymbolIssuesMsg["failedWithdrawals"]> = () => [];
   /** Builder IF mode: unexplained IF equity drops (set by OpsService from the reporter). */
   ifEquityDrops: () => NonNullable<VenueSymbolIssuesMsg["ifEquityDrops"]> = () => [];
   /** Builder IF mode: IF withdrawals waiting for the operator (set by OpsService from the withdrawals worker). */
@@ -192,6 +194,7 @@ export class BookRegistry {
       ifOperatorWaits: this.ifOperatorWaits(),
       ifUnadopted: this.ifUnadopted(),
       ifEquityDrops: this.ifEquityDrops(),
+      failedWithdrawals: this.failedWithdrawals(),
     };
     try {
       await this.ctx.status.venueSymbolIssues(msg);

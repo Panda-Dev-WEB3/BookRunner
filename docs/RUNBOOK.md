@@ -553,12 +553,17 @@ the Orderly testnet vault, NVDA and TSLA chartered again on it (new book ids, Or
      operator withdraws the requested amount on Orderly (paid to the EOA; delist first on a retiring book), then
      transfers it to the adapter: ONE plain USDG transfer of at least the requested amount (top up Orderly's withdrawal
      fee), from the EOA. ops-venue recognises the withdrawal, confirms it on-chain, tracks that Transfer log (never the
-     adapter's balance) and sweeps (alert `venue_if_operator_pending`, critical after 6 h). Withdraw promptly: while the
-     on-chain request is still Requested the book's venue reports are frozen (the adapter refuses them); the
-     return-wait afterwards does not freeze them. A payout not returned within `OPS_IF_RETURN_WRITE_OFF_MS` (24 h,
-     at least the adapter's 1 h floor) is written off from NAV on-chain (`adapter.writeOffOperatorPayout`, the vault's
+     adapter's balance) and sweeps (alert `venue_if_operator_pending`, critical after 6 h; published from the on-chain
+     confirmation until the funds are back or written off, whether or not ops-venue can read the account). Withdraw
+     promptly: while the on-chain request is still Requested, and until Orderly shows the withdrawal COMPLETED, the
+     book's venue reports are held (a withdrawal Orderly fails and credits back must not be counted twice); the
+     return-wait after COMPLETED does not hold them. A payout not back on the adapter within
+     `OPS_IF_RETURN_WRITE_OFF_MS` (24 h, at least the adapter's 1 h floor) of its ON-CHAIN confirmation is written off
+     from NAV on-chain, independent of any Orderly read (a removed key, Orderly down or a missing history row never
+     stops it; errors there burn no saga attempt) (`adapter.writeOffOperatorPayout`, the vault's
      flowNonce bumps; alert critical "WRITTEN OFF"); returned later it is swept to the vault as a gain. Misuse
-     detection: any withdrawal from the builder IF account that no on-chain request asked for pages critical
+     detection: any withdraw saga that FAILS pages (`venue_withdraw_failed`, critical for IF); any withdrawal from the
+     builder IF account that no on-chain request asked for pages critical
      (`venue_if_unadopted_withdrawal`; acknowledge reviewed ids with `OPS_IF_WITHDRAW_ACK`), and so does an IF equity
      below the adapter's insurance with no on-chain flow (`venue_if_equity_drop`). This moves IF custody off the
      adapter to that key: every deposit is still on-chain (`OrderlyDeposit`), every return a transfer to the adapter.

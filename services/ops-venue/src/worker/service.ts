@@ -44,6 +44,7 @@ export class OpsService {
     this.registry.ifReassign = () => this.provisioner.pendingReassign();
     this.registry.ifUnadopted = () => this.withdrawals.ifUnadopted();
     this.registry.ifEquityDrops = () => this.reporter.ifEquityDrops();
+    this.registry.failedWithdrawals = () => this.withdrawals.failedSagas().map(({ operatorIf: _o, ...f }) => f);
     this.registry.ifPriorEquity = () => Object.entries(this.ctx.sagas.get().ifPriorEquity ?? {}).flatMap(([a, p]) => {
       const b = this.registry.byAdapter(a);
       return b ? [{ bookId: b.bookId, accountId: b.accounts.if, usd: p.usd, since: p.at }] : [];

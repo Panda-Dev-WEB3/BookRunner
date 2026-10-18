@@ -174,14 +174,16 @@ export function parseIfAccounts(raw: string | null): {
   waits: Map<number, NonNullable<BookSnap["ifOperatorWaits"]>>;
   unadopted: Map<number, NonNullable<BookSnap["ifUnadopted"]>>;
   drops: Map<number, NonNullable<BookSnap["ifEquityDrop"]>>;
+  failed: Map<number, NonNullable<BookSnap["failedWithdrawals"]>>;
 } {
   const issues = new Map<number, NonNullable<BookSnap["ifAccountIssue"]>>();
   const waits = new Map<number, NonNullable<BookSnap["ifOperatorWaits"]>>();
   const unadopted = new Map<number, NonNullable<BookSnap["ifUnadopted"]>>();
   const drops = new Map<number, NonNullable<BookSnap["ifEquityDrop"]>>();
-  if (!raw) return { issues, waits, unadopted, drops };
+  const failed = new Map<number, NonNullable<BookSnap["failedWithdrawals"]>>();
+  if (!raw) return { issues, waits, unadopted, drops, failed };
   try {
-    const o = JSON.parse(raw) as { ifAccounts?: unknown; ifOperatorWaits?: unknown; ifUnadopted?: unknown; ifEquityDrops?: unknown };
+    const o = JSON.parse(raw) as { ifAccounts?: unknown; ifOperatorWaits?: unknown; ifUnadopted?: unknown; ifEquityDrops?: unknown; failedWithdrawals?: unknown };
     const s = (v: unknown) => (typeof v === "string" ? v : "");
     const ISSUES = new Set(["mismatch", "key_pending", "prior_equity", "reassign"]);
     for (const x of Array.isArray(o.ifAccounts) ? (o.ifAccounts as Array<Record<string, unknown> | null>) : []) {
@@ -196,13 +198,20 @@ export function parseIfAccounts(raw: string | null): {
     for (const x of Array.isArray(o.ifOperatorWaits) ? (o.ifOperatorWaits as Array<Record<string, unknown> | null>) : []) {
       const id = num(x?.bookId);
       const since = num(x?.since);
-      if (id === null || since === null || (x?.step !== "withdraw" && x?.step !== "return")) continue;
+      if (id === null || since === null || (x?.step !== "withdraw" && x?.step !== "payout" && x?.step !== "return")) continue;
       waits.set(id, [...(waits.get(id) ?? []), { nonce: s(x.nonce), step: x.step, amount: s(x.amount), owner: s(x.owner), adapter: s(x.adapter), since, writtenOffAt: num(x.writtenOffAt) }]);
     }
     for (const x of Array.isArray(o.ifUnadopted) ? (o.ifUnadopted as Array<Record<string, unknown> | null>) : []) {
       const id = num(x?.bookId);
       if (id === null || typeof x?.id !== "string") continue;
       unadopted.set(id, [...(unadopted.get(id) ?? []), { id: x.id, amount: s(x.amount), status: s(x.status), createdAt: num(x.createdAt) }]);
+    }
+    for (const x of Array.isArray(o.failedWithdrawals) ? (o.failedWithdrawals as Array<Record<string, unknown> | null>) : []) {
+      const id = num(x?.bookId);
+      const account = num(x?.account);
+      const at = num(x?.at);
+      if (id === null || account === null || at === null) continue;
+      failed.set(id, [...(failed.get(id) ?? []), { nonce: s(x?.nonce), account, amount: s(x?.amount), error: s(x?.error), at }]);
     }
     for (const x of Array.isArray(o.ifEquityDrops) ? (o.ifEquityDrops as Array<Record<string, unknown> | null>) : []) {
       const id = num(x?.bookId);
@@ -213,7 +222,7 @@ export function parseIfAccounts(raw: string | null): {
   } catch {
     // ignore: an unreadable status is not an alert of its own
   }
-  return { issues, waits, unadopted, drops };
+  return { issues, waits, unadopted, drops, failed };
 }
 
 /** KEYS.venueSymbolIssues JSON -> ops-venue mode + builder push flag + listing mode; malformed / absent -> null. */
@@ -423,7 +432,7 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
   let symbolIssues = new Map<number, string>();
   let markets = new Map<number, VenueMarketMsg>();
   let delistWaits = new Map<number, number>();
-  let ifAccounts: ReturnType<typeof parseIfAccounts> = { issues: new Map(), waits: new Map(), unadopted: new Map(), drops: new Map() };
+  let ifAccounts: ReturnType<typeof parseIfAccounts> = { issues: new Map(), waits: new Map(), unadopted: new Map(), drops: new Map(), failed: new Map() };
   let builderFeed: Snapshot["builderFeed"];
   let venueOps: Snapshot["venueOps"];
   try {
@@ -469,6 +478,7 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
       ifOperatorWaits: ifAccounts.waits.get(Number(b.id)) ?? [],
       ifUnadopted: ifAccounts.unadopted.get(Number(b.id)) ?? [],
       ifEquityDrop: ifAccounts.drops.get(Number(b.id)) ?? null,
+      failedWithdrawals: ifAccounts.failed.get(Number(b.id)) ?? [],
     }));
   }
 

@@ -144,7 +144,9 @@ export interface VenueSymbolIssuesMsg {
    * `amount` (USD 6dp) from the builder IF account on Orderly (paid to its EOA); return: transfer it from the EOA to the
    * book's adapter. `since` unix ms.
    */
-  ifOperatorWaits?: Array<{ bookId: number; nonce: string; step: "withdraw" | "return"; amount: string; owner: string; adapter: string; since: number; writtenOffAt?: number }>;
+  ifOperatorWaits?: Array<{ bookId: number; nonce: string; step: "withdraw" | "payout" | "return"; amount: string; owner: string; adapter: string; since: number; writtenOffAt?: number }>;
+  /** Withdraw sagas that FAILED (terminal: manual action; alerts venue_withdraw_failed, critical for IF) */
+  failedWithdrawals?: Array<{ bookId: number; nonce: string; account: number; amount: string; error: string; at: number }>;
   /** Builder IF mode: Orderly withdrawals from the builder IF account no on-chain request asked for (alerts venue_if_unadopted_withdrawal) */
   ifUnadopted?: Array<{ bookId: number; accountId: string; id: string; amount: string; status: string; createdAt: number | null }>;
   /** Builder IF mode: venue IF equity below the adapter's insurance with no on-chain flow (alerts venue_if_equity_drop) */

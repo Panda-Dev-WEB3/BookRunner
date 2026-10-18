@@ -107,6 +107,8 @@ export interface WithdrawRequestView {
   amount: bigint;
   account: number;
   requestedAt: bigint; // unix seconds
+  /** unix seconds of confirmWithdraw (0 = not confirmed); absent in older fakes */
+  confirmedAt?: bigint;
 }
 
 /** Adapter flow state read by the reporter and the sagas. */
@@ -420,7 +422,7 @@ export class ViemChain implements ChainPort {
 
   async withdrawStatus(adapter: Address, nonce: bigint): Promise<WithdrawRequestView> {
     const r = await this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "withdrawRequest", args: [nonce] });
-    return { status: Number(r.status), amount: r.amount, account: Number(r.account), requestedAt: BigInt(r.requestedAt) };
+    return { status: Number(r.status), amount: r.amount, account: Number(r.account), requestedAt: BigInt(r.requestedAt), confirmedAt: BigInt(r.confirmedAt) };
   }
 
   async adapterFlowState(adapter: Address): Promise<AdapterFlowState> {

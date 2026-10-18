@@ -149,6 +149,23 @@ describe("insurance-fund account (ops-venue ORDERLY_IF_MODE, VERIFY O10)", () =>
     expect(ks(venueIfAccount(snap({ books: [book({ ifAccountIssue: { issue: "reassign", detail: "re-assign", accountId: "0xaa", since: NOW } })] }), rules()))).toEqual([["venue_if_account:3", "warning"]]);
   });
 
+  test("payout step (confirmed on-chain, Orderly not visibly paid): published until back or written off; failed sagas alert (IF critical, any state)", () => {
+    const p = venueIfAccount(snap({ books: [book({ ifOperatorWaits: [{ nonce: "5", step: "payout", amount: "3000000000", owner: "0xE0A", adapter: "0xAD", since: NOW - 600_000 }] })] }), rules());
+    expect(ks(p)).toEqual([["venue_if_operator_pending:3:5", "warning"]]);
+    expect(p[0]?.summary).toContain("confirmed on-chain 10m ago and is not back on the adapter");
+    expect(p[0]?.summary).toContain("written off from NAV after");
+    const wo = venueIfAccount(snap({ books: [book({ ifOperatorWaits: [{ nonce: "5", step: "payout", amount: "1", owner: "0xE0A", adapter: "0xAD", since: NOW - 600_000, writtenOffAt: NOW }] })] }), rules());
+    expect(ks(wo)).toEqual([["venue_if_operator_pending:3:5", "critical"]]);
+    const f = (account: number, state = "Live") => venueIfAccount(snap({ books: [book({ state, failedWithdrawals: [{ nonce: "9", account, amount: "1000000", error: "venue down", at: NOW }] })] }), rules());
+    expect(ks(f(0))).toEqual([["venue_withdraw_failed:3:9", "critical"]]);
+    expect(ks(f(1))).toEqual([["venue_withdraw_failed:3:9", "warning"]]);
+    expect(ks(f(0, "Retired"))).toEqual([["venue_withdraw_failed:3:9", "critical"]]);
+    expect(f(0)[0]?.summary).toContain("insurance-fund withdrawal #9 (1 USD) FAILED in ops-venue (venue down)");
+    const parsed = parseIfAccounts(JSON.stringify({ failedWithdrawals: [{ bookId: 3, nonce: "9", account: 0, amount: "1", error: "x", at: 5 }, { bookId: 3 }], ifOperatorWaits: [{ bookId: 3, nonce: "5", step: "payout", amount: "1", owner: "o", adapter: "a", since: 1 }] }));
+    expect(parsed.failed.get(3)).toEqual([{ nonce: "9", account: 0, amount: "1", error: "x", at: 5 }]);
+    expect(parsed.waits.get(3)?.[0]?.step).toBe("payout");
+  });
+
   test("venue_market_restricted POST_ONLY text follows AGENT_VENUE_POST_ONLY_QUOTE when set", () => {
     const live = { ts: NOW, mode: "live" as const, builderPush: true, listingMode: "manual" as const };
     const m = { symbol: "PERP_NVDA_USDC_bookrunner", bookIds: [3], phase: "listed" as const, venueStatus: "POST_ONLY", openForRisk: false, everListed: true, since: NOW, checkedAt: NOW, failures: 0, error: null };

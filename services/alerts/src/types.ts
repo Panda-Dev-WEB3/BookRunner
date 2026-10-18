@@ -64,7 +64,9 @@ export interface BookSnap {
   /** ops-venue (KEYS.venueSymbolIssues ifAccounts): the book's IF account cannot be provisioned (ORDERLY_IF_MODE, VERIFY O10) */
   ifAccountIssue?: { issue: "mismatch" | "key_pending" | "prior_equity" | "reassign"; detail: string; accountId: string; since: number | null } | null;
   /** ops-venue (KEYS.venueSymbolIssues ifOperatorWaits): builder IF mode, IF withdrawals waiting for the operator */
-  ifOperatorWaits?: Array<{ nonce: string; step: "withdraw" | "return"; amount: string; owner: string; adapter: string; since: number; writtenOffAt?: number | null }>;
+  ifOperatorWaits?: Array<{ nonce: string; step: "withdraw" | "payout" | "return"; amount: string; owner: string; adapter: string; since: number; writtenOffAt?: number | null }>;
+  /** ops-venue (KEYS.venueSymbolIssues failedWithdrawals): withdraw sagas that FAILED (manual action) */
+  failedWithdrawals?: Array<{ nonce: string; account: number; amount: string; error: string; at: number }>;
   /** ops-venue (KEYS.venueSymbolIssues ifUnadopted): builder IF withdrawals no on-chain request asked for */
   ifUnadopted?: Array<{ id: string; amount: string; status: string; createdAt: number | null }>;
   /** ops-venue (KEYS.venueSymbolIssues ifEquityDrops): builder IF equity below the adapter's insurance */

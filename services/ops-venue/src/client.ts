@@ -231,6 +231,10 @@ export interface OrderlyBuilderClientOptions {
   now?: () => number;
 }
 
+/** GET /v1/asset/history page size (withdrawals) and how many pages a lookup by id reads at most. */
+export const WITHDRAW_PAGE_SIZE = 100;
+export const WITHDRAW_MAX_PAGES = 50;
+
 export class OrderlyBuilderClient implements OrderlyBuilderApi {
   private readonly http: OrderlyHttp;
   private readonly now: () => number;
@@ -490,13 +494,27 @@ export class OrderlyBuilderClient implements OrderlyBuilderApi {
   }
 
   /** Latest withdrawals of the account (GET /v1/asset/history?side=WITHDRAW, newest first; settlement token only). */
-  async withdrawals(accountId: string): Promise<WithdrawRecordView[]> {
-    const r = await this.asAccount<{ rows?: Array<Record<string, unknown>> }>(accountId, "GET", ORDERLY_PATHS.assetHistory, { query: { token: this.token, side: "WITHDRAW", page: 1, size: 100 } });
+  async withdrawals(accountId: string, page = 1): Promise<WithdrawRecordView[]> {
+    const r = await this.asAccount<{ rows?: Array<Record<string, unknown>> }>(accountId, "GET", ORDERLY_PATHS.assetHistory, { query: { token: this.token, side: "WITHDRAW", page, size: WITHDRAW_PAGE_SIZE } });
     return parseAssetHistory(r);
   }
 
+  /**
+   * One withdrawal by id, paging through the history (newest first) until it is found, a short page ends it, a page
+   * brings nothing new (a server ignoring `page`) or WITHDRAW_MAX_PAGES: an old withdrawal beyond the first page is
+   * still found instead of reading as "not there yet" forever.
+   */
   async withdrawal(accountId: string, withdrawId: string): Promise<WithdrawRecordView | null> {
-    return (await this.withdrawals(accountId)).find((w) => String(w.id) === withdrawId) ?? null;
+    const seen = new Set<string>();
+    for (let page = 1; page <= WITHDRAW_MAX_PAGES; page++) {
+      const rows = await this.withdrawals(accountId, page);
+      const hit = rows.find((w) => String(w.id) === withdrawId);
+      if (hit) return hit;
+      const fresh = rows.filter((w) => !seen.has(String(w.id)));
+      for (const w of rows) seen.add(String(w.id));
+      if (rows.length < WITHDRAW_PAGE_SIZE || fresh.length === 0) return null;
+    }
+    return null;
   }
 
   // ---------------------------------------------------------------- mock-only helpers

@@ -261,11 +261,23 @@ export function venueListing(s: Snapshot, c: RuleConfig): Condition[] {
  *   request asked for (the operator's key moved IF capital): CRITICAL.
  * - venue_if_equity_drop:<bookId> (builder mode): the venue's IF equity is below the adapter's insurance with no on-chain
  *   flow: CRITICAL.
+ * - venue_withdraw_failed:<bookId>:<nonce> (any mode): an ops-venue withdraw saga FAILED (terminal, manual action):
+ *   CRITICAL for the IF account, WARNING for MM. Not limited to listed states: a failed saga matters until pruned.
  */
 export function venueIfAccount(s: Snapshot, c: RuleConfig): Condition[] {
   const out: Condition[] = [];
   for (const b of s.books ?? []) {
-    if (b.venue !== "orderly" || !LISTED_STATES.has(b.state)) continue;
+    if (b.venue !== "orderly") continue;
+    for (const f of b.failedWithdrawals ?? []) {
+      const isIf = f.account === 0;
+      out.push({
+        key: `venue_withdraw_failed:${b.bookId}:${f.nonce}`,
+        rule: "venue_withdraw_failed",
+        severity: isIf ? "critical" : "warning",
+        summary: `${bookLabel(b)} (state ${b.state}): the ${isIf ? "insurance-fund" : "MM"} withdrawal #${f.nonce} (${(Number(f.amount) / 1e6).toLocaleString("en-US")} USD) FAILED in ops-venue (${f.error || "?"}): manual action — reconcile the venue and the adapter's request`,
+      });
+    }
+    if (!LISTED_STATES.has(b.state)) continue;
     const i = b.ifAccountIssue;
     if (i) {
       const live = b.state === "Live" || b.state === "Retiring";
@@ -291,7 +303,9 @@ export function venueIfAccount(s: Snapshot, c: RuleConfig): Condition[] {
         rule: "venue_if_operator_pending",
         severity: wait >= c.ifOperatorWaitCriticalSec || w.writtenOffAt != null ? "critical" : "warning",
         summary:
-          w.step === "withdraw"
+          w.step === "payout"
+            ? `${bookLabel(b)} (state ${b.state}): insurance-fund withdrawal #${w.nonce} (${usd.toLocaleString("en-US")} USD) was confirmed on-chain ${dur(wait)} ago and is not back on the adapter (Orderly has not visibly paid it to the operator's wallet ${w.owner}: check it on Orderly)${w.writtenOffAt != null ? `; WRITTEN OFF from NAV ${dur((s.now - w.writtenOffAt) / 1000)} ago (a late return is swept as a gain)` : "; it is written off from NAV after OPS_IF_RETURN_WRITE_OFF_MS"}`
+            : w.step === "withdraw"
             ? `${bookLabel(b)} (state ${b.state}): insurance-fund withdrawal #${w.nonce} (${usd.toLocaleString("en-US")} USD) has waited ${dur(wait)} for the operator: withdraw it promptly on Orderly from the builder IF account (wallet ${w.owner}; until then the book's venue reports are frozen), then transfer it to the adapter ${w.adapter}`
             : `${bookLabel(b)} (state ${b.state}): Orderly paid insurance-fund withdrawal #${w.nonce} (${usd.toLocaleString("en-US")} USD) to the operator's wallet ${w.owner} ${dur(wait)} ago: transfer it (one transfer, the full amount) to the adapter ${w.adapter}${w.writtenOffAt != null ? `; WRITTEN OFF from NAV ${dur((s.now - w.writtenOffAt) / 1000)} ago (a late return is swept as a gain)` : ""}`,
       });
