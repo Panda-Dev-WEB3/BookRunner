@@ -42,6 +42,10 @@ interface IAttestedOracle {
     /// @notice Reverts StalePrice if older than config.maxPriceAge().
     function priceOf(bytes32 underlying) external view returns (uint256 priceWad, bool held);
     function isStale(bytes32 underlying) external view returns (bool);
+    /// @notice publishedAt of the newest stored price signed NOT held (0 = none yet). A held price re-signs the
+    ///         last open-session observation under a fresh `publishedAt`, so the share basis it is quoted in
+    ///         (audit M-2: the multiplier it is valid against) is no newer than this.
+    function lastLiveAt(bytes32 underlying) external view returns (uint64);
     function isSigner(address signer) external view returns (bool);
     /// @notice Timelock: register / remove signer; `attestation` = recorded hash (TEE signers: AttestedOracle.setAttestedSigner).
     function setSigner(address signer, bool active, bytes32 attestation) external;

@@ -290,6 +290,41 @@ contract AttestedOracleTest is EngineBase {
         assertEq(oracle.latest(PID_B).priceWad, 7e18);
     }
 
+    /// @notice Audit M-2: `lastLiveAt` is the publishedAt of the newest stored NOT-held price, on every
+    ///         store path (push, pushMany, update); held re-stamps and skipped entries never move it.
+    function test_lastLiveAt_tracksNewestNonHeldPrice() public {
+        assertEq(oracle.lastLiveAt(PID_A), 0);
+        _push(PID_A, 1e18, true); // a hold seeded without history: no live basis
+        assertEq(oracle.lastLiveAt(PID_A), 0);
+        _push(PID_A, 1e18, false);
+        uint64 live = uint64(block.timestamp);
+        assertEq(oracle.lastLiveAt(PID_A), live);
+        vm.warp(block.timestamp + 60);
+        _push(PID_A, 1e18, true); // held re-stamp: fresh publishedAt, same basis
+        assertEq(oracle.latest(PID_A).publishedAt, block.timestamp);
+        assertEq(oracle.lastLiveAt(PID_A), live);
+        // pull path: a held re-stamp, then a live print
+        vm.warp(block.timestamp + 60);
+        oracle.update(_priceData(PID_A, 1e18, uint64(block.timestamp), true));
+        assertEq(oracle.lastLiveAt(PID_A), live);
+        vm.warp(block.timestamp + 60);
+        oracle.update(_priceData(PID_A, 2e18, uint64(block.timestamp), false));
+        assertEq(oracle.lastLiveAt(PID_A), block.timestamp);
+        // batch path: a not-newer live entry is skipped and does not move it; a newer one does
+        uint64 before = oracle.lastLiveAt(PID_A);
+        vm.warp(block.timestamp + 10);
+        IAttestedOracle.PriceUpdate[] memory us = new IAttestedOracle.PriceUpdate[](2);
+        bytes[] memory sigs = new bytes[](2);
+        us[0] = _update(PID_A, 3e18, before, false, 3); // not newer -> skipped
+        us[1] = _update(PID_B, 7e18, uint64(block.timestamp), false, 3);
+        for (uint256 i; i < 2; ++i) {
+            sigs[i] = _sign(SIGNER_PK, us[i]);
+        }
+        oracle.pushMany(us, sigs);
+        assertEq(oracle.lastLiveAt(PID_A), before);
+        assertEq(oracle.lastLiveAt(PID_B), block.timestamp);
+    }
+
     function test_pushMany_badSignatureRevertsWholeBatch() public {
         IAttestedOracle.PriceUpdate[] memory us = new IAttestedOracle.PriceUpdate[](2);
         bytes[] memory sigs = new bytes[](2);

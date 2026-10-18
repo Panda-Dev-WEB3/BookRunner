@@ -65,6 +65,8 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
     bool public attestationRequired;
 
     mapping(bytes32 underlying => PriceData) internal _prices;
+    /// @inheritdoc IAttestedOracle
+    mapping(bytes32 underlying => uint64) public override lastLiveAt;
 
     error NotTimelock(address caller);
     error ZeroAddress();
@@ -328,6 +330,8 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
         _prices[u.underlying] = PriceData({
             priceWad: u.priceWad, publishedAt: u.publishedAt, held: u.held, sourceCount: u.sourceCount
         });
+        // only newer prices are stored, so this is the newest live print (audit M-2: share basis of a hold)
+        if (!u.held) lastLiveAt[u.underlying] = u.publishedAt;
         emit PricePushed(u.underlying, u.priceWad, u.publishedAt, u.held, u.sourceCount, signer);
     }
 

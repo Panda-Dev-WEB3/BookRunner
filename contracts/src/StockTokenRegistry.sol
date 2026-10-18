@@ -7,7 +7,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IStockTokenRegistry} from "./interfaces/IStockTokenRegistry.sol";
 import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 import {IAttestedOracle} from "./interfaces/IAttestedOracle.sol";
-import {IScaledUIAmount} from "./interfaces/external/IScaledUIAmount.sol";
+import {IScaledUIAmount, IScaledUIAmountPending} from "./interfaces/external/IScaledUIAmount.sol";
 
 /// @title StockTokenRegistry — canonical Stock Token registry + multiplier-aware valuer.
 /// @notice Governance: `config.timelock()` or (devnet / launch) an `admin` set at construction, which
@@ -25,6 +25,9 @@ import {IScaledUIAmount} from "./interfaces/external/IScaledUIAmount.sol";
 ///         `multiplierBandBps` from it (and from the optional pre-approved `nextMultiplierAnchor`, for a
 ///         scheduled split) reverts MultiplierOutOfBand. The valuation then fails closed like a stale price
 ///         (the risk flatten path tolerates it) until governance re-anchors with {setMultiplier}.
+///         Split window (audit M-2): {valueUsd} also fails closed while the oracle price's share basis
+///         predates the last multiplier change ({multiplierChangedAt}), e.g. Friday's held price after a
+///         split took effect over the weekend, until the oracle signs a live price after the change.
 /// @dev Non-upgradeable. Tokens are never deleted: deactivating a token (`setActive(false)`) removes it
 ///      from the canonical set (no new hedges, charters) while existing inventory stays valuable.
 contract StockTokenRegistry is IStockTokenRegistry {
@@ -61,6 +64,9 @@ contract StockTokenRegistry is IStockTokenRegistry {
     mapping(address token => uint256) public nextMultiplierAnchor;
     /// @notice Max distance (bps) of a live multiplier from an anchor.
     uint16 public multiplierBandBps;
+    /// @notice Registry-side change of the effective multiplier (unix seconds, 0 = none): `setMultiplier` while
+    ///         the stored value is the effective one, and every `setMultiplierSource` (audit M-2).
+    mapping(address token => uint64) public multiplierSetAt;
 
     error Unauthorized(address caller);
     error ZeroAddress();
@@ -77,6 +83,7 @@ contract StockTokenRegistry is IStockTokenRegistry {
     error UnknownUnderlying(bytes32 underlying);
     error MultiplierOutOfBand(address token, uint256 live, uint256 anchor);
     error BadBand(uint16 bandBps);
+    error MultiplierChangedSincePrice(address token, uint64 priceBasisAt, uint256 multiplierChangedAt);
 
     event AdminSet(address indexed admin);
     event TokenActiveSet(address indexed token, bool active);
@@ -137,16 +144,23 @@ contract StockTokenRegistry is IStockTokenRegistry {
         StockToken storage t = _registered(token);
         if (multiplierWad == 0) revert BadMultiplier();
         t.multiplierWad = multiplierWad;
+        // stored mode: this IS the valuation multiplier; a price observed before it must not meet it (M-2)
+        if (!multiplierFromToken[token]) multiplierSetAt[token] = uint64(block.timestamp);
         emit MultiplierSet(token, multiplierWad);
     }
 
     /// @notice Multiplier source: true = the token's live ERC-8056 `uiMultiplier()` (mainnet Stock Tokens),
     ///         false = the stored value. Enabling reads the token once: it must implement `uiMultiplier()`
-    ///         and be within the band of the anchor (else MultiplierOutOfBand / a revert).
+    ///         and Robinhood's `effectiveAt()` (the change time the M-2 guard needs) and be within the band of
+    ///         the anchor (else MultiplierOutOfBand / a revert). The switch itself counts as a change.
     function setMultiplierSource(address token, bool fromToken) external onlyGov {
         StockToken storage t = _registered(token);
         multiplierFromToken[token] = fromToken;
-        if (fromToken) _multiplier(t);
+        multiplierSetAt[token] = uint64(block.timestamp);
+        if (fromToken) {
+            _multiplier(t);
+            _changedAt(t);
+        }
         emit MultiplierSourceSet(token, fromToken);
     }
 
@@ -253,6 +267,14 @@ contract StockTokenRegistry is IStockTokenRegistry {
     }
 
     /// @inheritdoc IStockTokenRegistry
+    /// @dev Live mode: the token's `effectiveAt()` once passed (a staged, not yet active change is ignored: the
+    ///      active multiplier is still the previous one), or the last source switch if later. Stored mode:
+    ///      {multiplierSetAt}.
+    function multiplierChangedAt(address token) external view override returns (uint256) {
+        return _changedAt(_registered(token));
+    }
+
+    /// @inheritdoc IStockTokenRegistry
     function getIndex(bytes32 indexId)
         external
         view
@@ -283,15 +305,31 @@ contract StockTokenRegistry is IStockTokenRegistry {
 
     /// @inheritdoc IStockTokenRegistry
     /// @dev Uses `AttestedOracle.priceOf` (reverts StalePrice beyond config.maxPriceAge()). A held
-    ///      (off-hours) price is still a valid valuation price.
+    ///      (off-hours) price is still a valid valuation price, unless the multiplier changed after its share
+    ///      basis (audit M-2): a per-share price is quoted in the share count of the moment it was observed,
+    ///      so after a split (or any multiplier change) it may only meet the multiplier of that moment. The
+    ///      basis is the price's `publishedAt`, or for a held price `AttestedOracle.lastLiveAt` (a held price
+    ///      re-signs the last open-session print under a fresh timestamp). A basis older than
+    ///      {multiplierChangedAt} reverts MultiplierChangedSincePrice: no valuation, so desk trades and
+    ///      desk-key flattens revert (the RISK flatten tolerates it) until the oracle signs a live price after
+    ///      the change (the reopen).
     function valueUsd(address token, uint256 qtyRaw) external view override returns (uint256) {
         StockToken storage t = _registered(token);
         if (qtyRaw == 0) return 0;
-        (uint256 priceWad,) = IAttestedOracle(config.oracle()).priceOf(t.priceId);
+        IAttestedOracle o = IAttestedOracle(config.oracle());
+        (uint256 priceWad, bool held) = o.priceOf(t.priceId);
+        uint256 changedAt = _changedAt(t);
+        if (changedAt != 0) {
+            uint64 basis = held ? o.lastLiveAt(t.priceId) : o.latest(t.priceId).publishedAt;
+            if (changedAt > basis) revert MultiplierChangedSincePrice(token, basis, changedAt);
+        }
         return _value(t, qtyRaw, priceWad);
     }
 
     /// @inheritdoc IStockTokenRegistry
+    /// @dev Pure valuation at a caller-supplied price: no staleness and no M-2 basis check (an off-chain
+    ///      caller applies them: the mark service refuses a position whose price basis predates
+    ///      {multiplierChangedAt}).
     function valueUsdAt(address token, uint256 qtyRaw, uint256 priceWad)
         external
         view
@@ -338,6 +376,17 @@ contract StockTokenRegistry is IStockTokenRegistry {
         uint256 next = nextMultiplierAnchor[token];
         if (next != 0 && _inBand(live, next)) return live;
         revert MultiplierOutOfBand(token, live, anchor);
+    }
+
+    /// @dev See {multiplierChangedAt}. Live mode reads Robinhood's `effectiveAt()` (reverts on a token
+    ///      without it: fail closed).
+    function _changedAt(StockToken storage t) internal view returns (uint256 at) {
+        address token = t.token;
+        at = multiplierSetAt[token];
+        if (multiplierFromToken[token]) {
+            uint256 eff = IScaledUIAmountPending(token).effectiveAt();
+            if (eff <= block.timestamp && eff > at) at = eff;
+        }
     }
 
     function _inBand(uint256 live, uint256 anchor) internal view returns (bool) {

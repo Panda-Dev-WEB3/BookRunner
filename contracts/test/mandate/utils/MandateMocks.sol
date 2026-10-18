@@ -115,6 +115,8 @@ contract MandateMockConfig {
 contract MandateMockOracle {
     MandateMockConfig public immutable config;
     mapping(bytes32 => IAttestedOracle.PriceData) internal _data;
+    /// @dev Mirrors AttestedOracle.lastLiveAt: publishedAt of the newest price set NOT held.
+    mapping(bytes32 => uint64) public lastLiveAt;
 
     constructor(MandateMockConfig c) {
         config = c;
@@ -124,10 +126,13 @@ contract MandateMockOracle {
         _data[id] = IAttestedOracle.PriceData({
             priceWad: priceWad, publishedAt: publishedAt, held: held, sourceCount: 3
         });
+        if (!held && publishedAt > lastLiveAt[id]) lastLiveAt[id] = publishedAt;
     }
 
     function setHeld(bytes32 id, bool held) external {
         _data[id].held = held;
+        uint64 at = _data[id].publishedAt;
+        if (!held && at > lastLiveAt[id]) lastLiveAt[id] = at;
     }
 
     function latest(bytes32 id) external view returns (IAttestedOracle.PriceData memory) {
