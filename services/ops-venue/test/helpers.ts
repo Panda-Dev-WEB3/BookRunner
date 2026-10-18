@@ -59,6 +59,7 @@ export function trackedBook(state: BookState = "Live"): TrackedBook {
     vault: VAULT,
     router: ROUTER,
     charterSymbol: SYMBOL,
+    venueSymbolError: null,
     symbol: SYMBOL,
     baseAsset: "NVDA",
     sessions: `0x${"00".repeat(32)}`,

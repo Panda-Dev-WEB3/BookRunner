@@ -18,6 +18,7 @@ import {
   riskState,
   rpc,
   venueReportAge,
+  venueSymbol,
 } from "../src/rules";
 import { oracleDown } from "../src/collect";
 import { loadConfig } from "../src/config";
@@ -108,6 +109,14 @@ describe("venue_report_stale", () => {
   });
   test("pool-engine books have no venue report", () => {
     expect(venueReportAge(snap({ books: [book({ venue: "pool_engine", venueReportAsOf: null })] }), rules())).toEqual([]);
+  });
+
+  test("venue_symbol_unmapped: an Orderly book ops-venue tracks without listing / trading (VERIFY O19)", () => {
+    const c = venueSymbol(snap({ books: [book({ venueSymbolError: 'charter symbol "NVDA-PERP" is not an Orderly perp symbol' })] }), rules());
+    expect(c.map((x) => [x.key, x.severity])).toEqual([["venue_symbol_unmapped:3", "critical"]]);
+    expect(c[0]?.summary).toMatch(/NVDA-PERP.*withdrawals still run/);
+    expect(venueSymbol(snap({ books: [book({ venueSymbolError: null })] }), rules())).toEqual([]);
+    expect(venueSymbol(snap({ books: [book()] }), rules())).toEqual([]);
   });
 });
 

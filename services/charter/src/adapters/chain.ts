@@ -52,7 +52,7 @@ export class CharterChain {
 
   constructor(
     readonly deployment: Deployment,
-    private readonly opts: { chainId: number; rpcUrl: string; env?: Record<string, string | undefined>; logger: Logger; liquidity?: LiquidityConfig },
+    private readonly opts: { chainId: number; rpcUrl: string; env?: Record<string, string | undefined>; logger: Logger; liquidity?: LiquidityConfig; orderlyBrokerId?: string },
   ) {
     this.pub = publicClientFor(opts.chainId, opts.rpcUrl);
     this.env = opts.env ?? process.env;
@@ -257,6 +257,7 @@ export class CharterChain {
       liquidity: this.liquidityFor(ch.underlying, underlying),
       newBooksPaused,
       nowSec,
+      orderlyBrokerId: this.opts.orderlyBrokerId ?? null,
     };
   }
 }

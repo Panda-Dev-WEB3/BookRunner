@@ -14,7 +14,7 @@ import { reportableState } from "../domain/report";
 import { matchPriorWithdrawal } from "../domain/withdraw";
 import { errMsg, nowSec } from "../util";
 import type { BookRegistry } from "./books";
-import type { OpsContext, TrackedBook } from "./context";
+import { type OpsContext, type TrackedBook, tradable } from "./context";
 import { type OnceResult, sendOnce } from "./txonce";
 
 interface SweptLedger {
@@ -85,7 +85,8 @@ export class FeeSweeper {
         this.ctx.log.warn({ bookId: s.bookId, period: s.period, stage: s.stage, err: errMsg(err) }, "fee saga step failed (will retry)");
       }
     }
-    const books = this.registry.list().filter((b) => reportableState(b.state));
+    // books without an Orderly market are never listed: no builder fees to sweep, and no share of broker-wide rows
+    const books = this.registry.list().filter((b) => reportableState(b.state) && tradable(b));
     if (books.length === 0) return;
     const interval = await this.ctx.chain.markInterval();
     const now = nowSec(this.ctx.now());
@@ -138,7 +139,7 @@ export class FeeSweeper {
     const raw = await this.ctx.builder.feeSettlements(0);
     const symbols = this.registry
       .list()
-      .filter((b) => reportableState(b.state))
+      .filter((b) => reportableState(b.state) && tradable(b))
       .map((b) => b.symbol);
     const { rows, dropped } = attributeBrokerWide(raw, symbols);
     if (dropped > 0 && !this.warnedBrokerWide) {

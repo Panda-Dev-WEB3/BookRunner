@@ -12,7 +12,7 @@ import { isTerminal, matchPriorWithdrawal, newWithdrawSaga, nextStep, retryDelay
 import { OrderlyHttpError } from "../orderly/http";
 import { errMsg } from "../util";
 import type { BookRegistry } from "./books";
-import type { OpsContext, TrackedBook } from "./context";
+import { type OpsContext, type TrackedBook, tradable } from "./context";
 import { sendOnce } from "./txonce";
 
 export class WithdrawProcessor {
@@ -146,7 +146,7 @@ export class WithdrawProcessor {
         try {
           return { type: "venue_requested", withdrawId: await this.venueRequest(s, st.requestedAt) };
         } catch (err) {
-          if (book && s.account === ACCOUNT.IF && isInsufficient(err) && book.state === "Retiring" && (await this.mmFlat(book))) {
+          if (book && tradable(book) && s.account === ACCOUNT.IF && isInsufficient(err) && book.state === "Retiring" && (await this.mmFlat(book))) {
             log.info({ bookId: s.bookId, symbol: book.symbol }, "retiring book: delisting symbol to release the insurance fund");
             await builder.setSymbolStatus(book.symbol, "DELISTED");
             return { type: "venue_requested", withdrawId: await this.venueRequest(s, st.requestedAt) };

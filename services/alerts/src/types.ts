@@ -54,6 +54,8 @@ export interface BookSnap {
   risk: RiskSnap | null;
   /** unix s: asOf of the latest signed venue report in Redis (Orderly books), null when absent */
   venueReportAsOf: number | null;
+  /** ops-venue (KEYS.venueSymbolIssues): why the book's charter symbol has no Orderly market (not listed / traded); null = fine or unknown */
+  venueSymbolError?: string | null;
 }
 
 export interface KillEventSnap {

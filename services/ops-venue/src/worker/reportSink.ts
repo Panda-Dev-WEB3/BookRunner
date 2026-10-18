@@ -1,8 +1,9 @@
 // Signed venue reports (OPS_REPORT_MODE=signed): the OPS_VENUE key signs, Redis carries them to the mark
 // keeper (MarkRegistry.commitAndApply), risk and the api. Formats: src/report712.ts.
+import { KEYS, VENUE_SYMBOL_ISSUES_TTL_SEC, type VenueSymbolIssuesMsg } from "@bookrunner/shared";
 import type { Address, Hex, LocalAccount } from "viem";
 import { type SignedVenueReportJson, VENUE_REPORT_RECENT_MAX, type VenueReportValues, signVenueReport, venueReportKey, venueReportRecentKey } from "../report712";
-import type { ReportPublisher, ReportSigner } from "./context";
+import type { ReportPublisher, ReportSigner, StatusPublisher } from "./context";
 
 /** ReportSigner over the ops-venue LocalAccount (roleAccount("opsVenue")). */
 export function accountReportSigner(account: LocalAccount, chainId: number): ReportSigner {
@@ -56,5 +57,19 @@ export class MemoryReportPublisher implements ReportPublisher {
     this.published.push(r);
     this.latest.set(r.bookId, r);
     this.recent.set(r.bookId, [r, ...(this.recent.get(r.bookId) ?? [])].slice(0, VENUE_REPORT_RECENT_MAX));
+  }
+}
+
+/** Structural subset of ioredis for the status key (SET with expiry). */
+export interface RedisSetExLike {
+  set(key: string, value: string, mode: "EX", seconds: number): Promise<unknown>;
+}
+
+/** KEYS.venueSymbolIssues (read by services/alerts), refreshed every book poll, expires when ops-venue stops. */
+export class RedisStatusPublisher implements StatusPublisher {
+  constructor(private readonly redis: RedisSetExLike) {}
+
+  async venueSymbolIssues(msg: VenueSymbolIssuesMsg): Promise<void> {
+    await this.redis.set(KEYS.venueSymbolIssues, JSON.stringify(msg), "EX", VENUE_SYMBOL_ISSUES_TTL_SEC);
   }
 }

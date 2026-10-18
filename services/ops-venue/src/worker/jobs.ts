@@ -1,7 +1,7 @@
 // QUEUES.venueOps job dispatch (BullMQ). Payload: VenueOpsJob (packages/shared/src/queues.ts).
 import type { VenueOpsJob } from "@bookrunner/shared";
 import type { BookRegistry } from "./books";
-import type { OpsContext } from "./context";
+import { type OpsContext, tradable } from "./context";
 import type { FeeSweeper } from "./fees";
 import type { Provisioner } from "./provision";
 import type { Reporter } from "./reporter";
@@ -32,8 +32,13 @@ export async function handleVenueOpsJob(job: VenueOpsJob, d: JobDeps): Promise<R
   switch (job.kind) {
     case "create_symbol":
       await d.provisioner.ensure(book, true);
-      return { bookId: book.bookId, symbol: book.symbol };
+      return { bookId: book.bookId, symbol: book.symbol, listed: tradable(book), ...(book.venueSymbolError ? { error: book.venueSymbolError } : {}) };
     case "fund_if": {
+      if (!tradable(book)) {
+        // no symbol, so no per-symbol IF row: report the IF account's own equity instead
+        const acct = await d.ctx.readAccount(book.accounts.if, book.symbol, await d.ctx.keys.opsKey(book.bookId, "if"));
+        return { balanceUsd: acct.equityUsd.toString(), targetUsd: book.ifTargetUsd.toString(), funded: acct.equityUsd >= book.ifTargetUsd, listed: false };
+      }
       // IF capital is deposited on-chain by the vault (closeWindow -> deployToVenue(IF)); verify it landed.
       const r = await d.ctx.builder.insuranceFund(book.symbol);
       const ok = r.balanceUsd >= book.ifTargetUsd;

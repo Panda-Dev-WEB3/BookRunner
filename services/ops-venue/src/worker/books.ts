@@ -1,7 +1,9 @@
 // Book discovery (poll): Orderly-venue books from deployment.books + BookFactory.bookIds(), their
 // adapter account ids and lifecycle state. Non-Orderly books are remembered and skipped. Each book's charter symbol is
-// mapped once here to its venue symbol (@bookrunner/shared venueSymbol: ORDERLY_MODE + ORDERLY_BROKER_ID).
-import { type BookState, venueSymbol } from "@bookrunner/shared";
+// mapped once here to its venue symbol (@bookrunner/shared resolveVenueSymbol: ORDERLY_MODE + ORDERLY_BROKER_ID). A
+// live book without an Orderly market stays tracked for its non-trading duties (TrackedBook.venueSymbolError); the
+// set of such books is published every pass (KEYS.venueSymbolIssues) for alerts.
+import { type BookState, resolveVenueSymbol, type VenueSymbolIssuesMsg } from "@bookrunner/shared";
 import { errMsg } from "../util";
 import { lc, type OpsContext, type TrackedBook } from "./context";
 
@@ -42,25 +44,44 @@ export class BookRegistry {
           this.skipped.add(id);
           continue;
         }
-        let symbol: string;
-        try {
-          symbol = venueSymbol({ charterSymbol: b.charterSymbol, mode: this.ctx.settings.mode, brokerId: this.ctx.settings.brokerId });
-        } catch (err) {
-          // the charter symbol is immutable: this book can never trade on this venue; other books are unaffected
-          this.skipped.add(id);
-          this.ctx.log.error({ bookId: id, charterSymbol: b.charterSymbol, err: errMsg(err) }, "Orderly book skipped: no venue symbol for its charter symbol");
-          continue;
-        }
+        const r = resolveVenueSymbol({ charterSymbol: b.charterSymbol, mode: this.ctx.settings.mode, brokerId: this.ctx.settings.brokerId });
         const [state, accounts, owners] = await Promise.all([this.ctx.chain.bookState(b.book), this.ctx.chain.accountIds(b.adapter), this.ctx.chain.accountOwners(b.adapter)]);
-        const tb: TrackedBook = { ...b, symbol, state, accounts, owners };
+        const tb: TrackedBook = { ...b, symbol: r.symbol ?? b.charterSymbol, venueSymbolError: r.error, state, accounts, owners };
         this.books.set(id, tb);
         delta.added.push(tb);
-        this.ctx.log.info({ bookId: id, symbol, charterSymbol: b.charterSymbol, state, adapter: b.adapter }, "tracking Orderly book");
+        if (r.error !== null) {
+          // the charter symbol is immutable: never listed / traded; its capital is still reported and withdrawable
+          this.ctx.log.error({ bookId: id, charterSymbol: b.charterSymbol, state, err: r.error }, "Orderly book tracked WITHOUT listing or trading: no venue symbol for its charter symbol");
+        } else {
+          if (r.warning) this.ctx.log.warn({ bookId: id, charterSymbol: b.charterSymbol, warning: r.warning }, "Orderly book charter symbol breaks the charter rule");
+          this.ctx.log.info({ bookId: id, symbol: r.symbol, charterSymbol: b.charterSymbol, state, adapter: b.adapter }, "tracking Orderly book");
+        }
       } catch (err) {
         this.ctx.log.warn({ bookId: id, err: errMsg(err) }, "book load failed (will retry)");
       }
     }
+    await this.publishStatus();
     return delta;
+  }
+
+  /** Books tracked without listing / trading (live mode, no Orderly market for the charter symbol). */
+  untradable(): TrackedBook[] {
+    return this.list().filter((b) => b.venueSymbolError !== null);
+  }
+
+  private async publishStatus(): Promise<void> {
+    if (!this.ctx.status) return;
+    const msg: VenueSymbolIssuesMsg = {
+      v: 1,
+      ts: this.ctx.now(),
+      mode: this.ctx.settings.mode,
+      books: this.untradable().map((b) => ({ bookId: b.bookId, charterSymbol: b.charterSymbol, error: b.venueSymbolError as string })),
+    };
+    try {
+      await this.ctx.status.venueSymbolIssues(msg);
+    } catch (err) {
+      this.ctx.log.debug({ err: errMsg(err) }, "venue symbol status publish failed");
+    }
   }
 
   get(bookId: number): TrackedBook | undefined {

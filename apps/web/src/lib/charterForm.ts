@@ -1,5 +1,6 @@
 // "File a charter" form model: human-unit form state -> charter.file draft input, with client-side
 // hints that mirror MarketCharter.validate (the API and the chain stay authoritative).
+import { parseVenueSymbol } from "@bookrunner/shared/venueSymbol";
 import type { CharterDraftInput } from "./api-types";
 import { getSettlementSymbol } from "./settlementToken";
 
@@ -170,6 +171,7 @@ export function formIssues(f: CharterForm): FieldIssue[] {
   const sym = f.symbol.trim();
   if (!sym) add("symbol", "Venue symbol is required");
   else if (new TextEncoder().encode(sym).length > 32) add("symbol", "Venue symbol must fit in 32 bytes");
+  else if (f.venue === "orderly" && parseVenueSymbol(sym) === null) add("symbol", "Orderly venue symbol must look like PERP_NVDA_USDC");
   if (f.venue === "pool_engine") {
     const t = int(f.takerFeeBps);
     if (!Number.isInteger(t) || t < 0) add("takerFeeBps", "Taker fee: whole bps");

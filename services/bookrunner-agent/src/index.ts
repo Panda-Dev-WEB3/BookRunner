@@ -14,6 +14,7 @@ import {
   type OraclePriceMsg,
   type QuotingVenue,
   VENUE,
+  assertVenueSymbolConfig,
   bytes32ToStr,
   createLogger,
   deploymentPath,
@@ -24,7 +25,6 @@ import {
   roleAccount,
   tryLoadDeployment,
   underlyingToToken,
-  venueSymbol,
   walletClientFor,
 } from "@bookrunner/shared";
 import type { Hex, LocalAccount, PublicClient } from "viem";
@@ -47,6 +47,7 @@ import { EwmaVolatility } from "./domain/volatility";
 import { SerialLock, errMsg, sleep } from "./util";
 import { EngineVenue } from "./venues/engine";
 import { createOrderlyVenue } from "./venues/orderly";
+import { VenueSymbolError, agentVenueSymbol, idleUntilAborted } from "./venues/symbol";
 
 const DESK_ROLES = ["deskKeyNvda", "deskKeyTsla", "deskKeyIndex"] as const;
 
@@ -218,7 +219,7 @@ async function runOnce(
     const accountId = env.ORDERLY_ACCOUNT_ID ?? (await ctx.chain.orderlyMmAccountId().catch(() => null)) ?? String(ctx.bookId);
     // the charter symbol stays the book's label (logs, marks, UI); Orderly is spoken to with the venue symbol
     // (PERP_<T>_USDC_<broker> with ORDERLY_MODE=live, VERIFY O19)
-    const symbol = venueSymbol({ charterSymbol: ctx.symbol, mode: env.ORDERLY_MODE, brokerId: env.ORDERLY_BROKER_ID });
+    const symbol = agentVenueSymbol(ctx.symbol, env, (warning) => log.warn({ warning }, "charter symbol breaks the Orderly charter rule"));
     log.info({ venueSymbol: symbol }, "venue: Orderly");
     venue = await createOrderlyVenue({ bookId: ctx.bookId, symbol, accountId, baseUrl: env.ORDERLY_BASE_URL, mode: env.ORDERLY_MODE, env: process.env }, log);
   }
@@ -363,6 +364,7 @@ async function waitForResume(ctx: BookContext, env: AgentEnv, log: Logger, bus: 
 async function main(): Promise<void> {
   const env = loadAgentEnv();
   const log = createLogger("bookrunner-agent", env.LOG_LEVEL);
+  assertVenueSymbolConfig({ mode: env.ORDERLY_MODE, brokerId: env.ORDERLY_BROKER_ID }); // live: books trade PERP_<T>_USDC_<broker>
   const ctl = new AbortController();
   const holder: Holder = { agent: null };
   let forceExit: ReturnType<typeof setTimeout> | null = null;
@@ -406,6 +408,13 @@ async function main(): Promise<void> {
       try {
         result = await runOnce(ctx, env, log, bus, store, holder, ctl.signal);
       } catch (err) {
+        if (err instanceof VenueSymbolError) {
+          // deterministic (immutable charter symbol): log once and idle this book until shutdown, no retry loop.
+          // ops-venue keeps its reports / withdrawals and alerts on it (venue_symbol_unmapped).
+          log.error({ bookId: ctx.bookId, charterSymbol: ctx.symbol, err: err.message }, "no Orderly market for the charter symbol: this book does not quote; idling until shutdown");
+          await idleUntilAborted(ctl.signal);
+          break;
+        }
         log.error({ bookId: ctx.bookId, err: errMsg(err) }, "agent setup failed; retrying");
         await sleep(env.DEPLOYMENT_RETRY_MS, ctl.signal);
         continue;

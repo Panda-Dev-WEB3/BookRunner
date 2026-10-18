@@ -64,6 +64,40 @@ export function venueSymbol(o: VenueSymbolConfig & { charterSymbol: string }): s
   return `PERP_${p.base}_${p.quote}_${broker}`;
 }
 
+/** Startup check (ops-venue, agents, risk): ORDERLY_MODE=live needs a valid ORDERLY_BROKER_ID. Throws otherwise. */
+export function assertVenueSymbolConfig(c: VenueSymbolConfig): void {
+  symbolBroker(c);
+}
+
+/**
+ * Charter-time rule for Orderly-venue books, independent of ORDERLY_MODE (the API's local validation, the jury's
+ * rule checks, the web form, and the services' mock-mode warning): the charter symbol must be PERP_<BASE>_USDC, or our
+ * own builder market PERP_<BASE>_USDC_<brokerId>. Null when fine, else why. `brokerId` unknown: any broker suffix passes.
+ */
+export function orderlyCharterSymbolIssue(charterSymbol: string, brokerId?: string | null): string | null {
+  const p = parseVenueSymbol(charterSymbol);
+  if (!p) return `charter symbol "${charterSymbol}" is not an Orderly perp symbol (PERP_<BASE>_USDC, BASE in uppercase letters and digits)`;
+  if (p.broker !== null && brokerId && p.broker !== brokerId) return `charter symbol "${charterSymbol}" names broker ${p.broker}'s market, not ${brokerId}'s`;
+  return null;
+}
+
+export type VenueSymbolResolution = { symbol: string; error: null; warning: string | null } | { symbol: null; error: string; warning: null };
+
+/**
+ * Per-book mapping as the services use it (never throws). Live: the venue symbol, or `error` when the charter symbol
+ * has no Orderly market (the book is then not listed / traded). Mock: the charter symbol verbatim; `warning` when it
+ * breaks the charter rule, so a bad charter surfaces before the switch to live.
+ */
+export function resolveVenueSymbol(o: VenueSymbolConfig & { charterSymbol: string }): VenueSymbolResolution {
+  const issue = orderlyCharterSymbolIssue(o.charterSymbol, o.brokerId);
+  if (o.mode !== "live") return { symbol: venueSymbol(o), error: null, warning: issue ? `${issue}: it would not trade with ORDERLY_MODE=live` : null };
+  try {
+    return { symbol: venueSymbol(o), error: null, warning: issue };
+  } catch (err) {
+    return { symbol: null, error: err instanceof Error ? err.message : String(err), warning: null };
+  }
+}
+
 /** Venue symbol -> charter form (broker suffix stripped); anything unparseable is returned unchanged. */
 export function charterSymbolOf(symbol: string): string {
   const p = parseVenueSymbol(symbol);

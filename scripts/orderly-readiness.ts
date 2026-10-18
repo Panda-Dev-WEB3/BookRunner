@@ -25,7 +25,7 @@ import { bookFactoryAbi, bookrunnerConfigAbi, orderlyAdapterAbi } from "../packa
 import { publicClientFor } from "../packages/shared/src/clients";
 import { deploymentPath, tryLoadDeployment } from "../packages/shared/src/deployments";
 import type { Deployment } from "../packages/shared/src/types";
-import { baseAssetOf, venueSymbol } from "../packages/shared/src/venueSymbol";
+import { baseAssetOf, parseVenueSymbol, venueSymbol } from "../packages/shared/src/venueSymbol";
 
 // ============================================================================================ model
 
@@ -96,11 +96,6 @@ export function builderSymbol(base: string, brokerId: string): string {
   }
 }
 
-/** PERP_<BASE>_<QUOTE>[_<broker>] -> parts; null when not a perp symbol. */
-export function parseSymbol(symbol: string): { base: string; quote: string; broker: string | null } | null {
-  const m = /^PERP_([^_]+)_([^_]+)(?:_(.+))?$/.exec(symbol);
-  return m ? { base: m[1]!, quote: m[2]!, broker: m[3] ?? null } : null;
-}
 
 /** Base asset of a charter symbol (PERP_NVDA_USDC or PERP_NVDA_USDC_<broker>). */
 export function charterBase(symbol: string): string | null {
@@ -270,7 +265,7 @@ export function symbolRows(brokerId: string, bases: string[], rows: SymbolInfoRo
   }
   const equities = rows
     .filter((x) => {
-      const s = parseSymbol(x.symbol);
+      const s = parseVenueSymbol(x.symbol);
       return s !== null && EQUITY_TICKERS.has(s.base);
     })
     .map((x) => `${x.symbol}${x.status && x.status !== "ACTIVE" ? `:${x.status}` : ""}`);

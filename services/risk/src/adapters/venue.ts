@@ -15,8 +15,8 @@ import {
   type VenueAccount,
   type VenueFill,
   type VenuePosition,
+  resolveVenueSymbol,
   usd,
-  venueSymbol,
 } from "@bookrunner/shared";
 import type { VenueProvider } from "../ports";
 import type { BookRef } from "../types";
@@ -175,7 +175,7 @@ export interface OrderlyVenueProviderOptions {
 
 export class OrderlyVenueProvider implements VenueProvider {
   private warnedNoKey = false;
-  private readonly badSymbol = new Set<number>();
+  private readonly symbolLogged = new Set<number>();
 
   constructor(private readonly o: OrderlyVenueProviderOptions) {}
 
@@ -194,15 +194,17 @@ export class OrderlyVenueProvider implements VenueProvider {
       throw err;
     }
     if (!accountId) return null;
-    let symbol: string;
-    try {
-      symbol = venueSymbol({ charterSymbol: ref.symbol, mode: this.o.mode, brokerId: this.o.brokerId });
-    } catch (err) {
-      // no Orderly market for this charter symbol: adapter reports only for this book
-      if (!this.badSymbol.has(ref.bookId)) this.o.log.error({ bookId: ref.bookId, symbol: ref.symbol, err: errMsg(err) }, "no Orderly venue symbol for the book's charter symbol");
-      this.badSymbol.add(ref.bookId);
+    const r = resolveVenueSymbol({ charterSymbol: ref.symbol, mode: this.o.mode, brokerId: this.o.brokerId });
+    const first = !this.symbolLogged.has(ref.bookId);
+    this.symbolLogged.add(ref.bookId);
+    if (r.symbol === null) {
+      // no Orderly market for this charter symbol (never listed / traded by ops-venue): the book is still monitored
+      // from the adapter / signed venue reports, there is just no venue client to cancel or read positions with
+      if (first) this.o.log.error({ bookId: ref.bookId, symbol: ref.symbol, err: r.error }, "no Orderly venue symbol for the book's charter symbol: monitoring from adapter reports only");
       return null;
     }
+    if (first && r.warning) this.o.log.warn({ bookId: ref.bookId, symbol: ref.symbol, warning: r.warning }, "book charter symbol breaks the Orderly charter rule");
+    const symbol = r.symbol;
     return new OrderlyRiskVenue({
       baseUrl: this.o.baseUrl,
       accountId,

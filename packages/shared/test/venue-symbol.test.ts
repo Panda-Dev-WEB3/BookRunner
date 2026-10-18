@@ -1,5 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { baseAssetOf, charterSymbolOf, isOrderlyBrokerId, parseVenueSymbol, symbolBroker, venueSymbol } from "../src";
+import {
+  assertVenueSymbolConfig,
+  baseAssetOf,
+  charterSymbolOf,
+  isOrderlyBrokerId,
+  orderlyCharterSymbolIssue,
+  parseVenueSymbol,
+  resolveVenueSymbol,
+  symbolBroker,
+  venueSymbol,
+} from "../src";
 
 describe("parseVenueSymbol", () => {
   test("Orderly-native and builder (broker-suffixed) perps", () => {
@@ -74,6 +84,51 @@ describe("venueSymbol (charter -> Orderly)", () => {
     expect(() => venueSymbol({ charterSymbol: "PERP_NVDA_USDT", mode: "live", brokerId: "bookrunner" })).toThrow(/not an Orderly perp symbol/);
     expect(() => venueSymbol({ charterSymbol: "PERP_AAPL_USDC_mythos", mode: "live", brokerId: "bookrunner" })).toThrow(/broker mythos/);
     expect(() => venueSymbol({ charterSymbol: "PERP_NVDA_USDC", mode: "live" })).toThrow(/ORDERLY_BROKER_ID/);
+  });
+});
+
+describe("charter-time check (orderlyCharterSymbolIssue), mode-independent", () => {
+  test("accepts PERP_<BASE>_USDC and our own builder market", () => {
+    expect(orderlyCharterSymbolIssue("PERP_NVDA_USDC")).toBeNull();
+    expect(orderlyCharterSymbolIssue("PERP_NVDA_USDC", "bookrunner")).toBeNull();
+    expect(orderlyCharterSymbolIssue("PERP_NVDA_USDC_bookrunner", "bookrunner")).toBeNull();
+    // broker unknown to the caller: the suffix form is still a valid Orderly symbol
+    expect(orderlyCharterSymbolIssue("PERP_NVDA_USDC_bookrunner")).toBeNull();
+  });
+
+  test("rejects what no book could trade", () => {
+    expect(orderlyCharterSymbolIssue("NVDA-PERP")).toMatch(/not an Orderly perp symbol/);
+    expect(orderlyCharterSymbolIssue("NVDA")).toMatch(/not an Orderly perp symbol/);
+    expect(orderlyCharterSymbolIssue("PERP_nvda_USDC")).toMatch(/not an Orderly perp symbol/);
+    expect(orderlyCharterSymbolIssue("")).toMatch(/not an Orderly perp symbol/);
+    expect(orderlyCharterSymbolIssue("PERP_AAPL_USDC_mythos", "bookrunner")).toMatch(/broker mythos/);
+  });
+});
+
+describe("resolveVenueSymbol (what the services call per book)", () => {
+  test("live: symbol or error, never a throw", () => {
+    expect(resolveVenueSymbol({ charterSymbol: "PERP_NVDA_USDC", mode: "live", brokerId: "bookrunner" })).toEqual({ symbol: "PERP_NVDA_USDC_bookrunner", error: null, warning: null });
+    const bad = resolveVenueSymbol({ charterSymbol: "NVDA-PERP", mode: "live", brokerId: "bookrunner" });
+    expect(bad.symbol).toBeNull();
+    expect(bad.error).toMatch(/not an Orderly perp symbol/);
+    // a plain ticker still maps (PERP_<T>_USDC_<broker>) but is flagged
+    const t = resolveVenueSymbol({ charterSymbol: "TSLA", mode: "live", brokerId: "bookrunner" });
+    expect(t.symbol).toBe("PERP_TSLA_USDC_bookrunner");
+    expect(t.warning).toMatch(/not an Orderly perp symbol/);
+  });
+
+  test("mock: charter symbol verbatim, a bad charter only warns", () => {
+    expect(resolveVenueSymbol({ charterSymbol: "PERP_NVDA_USDC", mode: "mock", brokerId: "bookrunner" })).toEqual({ symbol: "PERP_NVDA_USDC", error: null, warning: null });
+    const w = resolveVenueSymbol({ charterSymbol: "PERP_odd", mode: "mock", brokerId: "bookrunner" });
+    expect(w.symbol).toBe("PERP_odd");
+    expect(w.warning).toMatch(/would not trade with ORDERLY_MODE=live/);
+  });
+
+  test("startup check: live needs a valid ORDERLY_BROKER_ID, mock does not", () => {
+    expect(() => assertVenueSymbolConfig({ mode: "live", brokerId: "bookrunner" })).not.toThrow();
+    expect(() => assertVenueSymbolConfig({ mode: "mock", brokerId: "" })).not.toThrow();
+    expect(() => assertVenueSymbolConfig({ mode: "live", brokerId: "" })).toThrow(/ORDERLY_BROKER_ID/);
+    expect(() => assertVenueSymbolConfig({ mode: "live", brokerId: "Book Runner" })).toThrow(/broker id/);
   });
 });
 

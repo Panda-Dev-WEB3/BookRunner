@@ -124,6 +124,23 @@ export function parseRisk(raw: string | null): RiskSnap | null {
   };
 }
 
+/** KEYS.venueSymbolIssues JSON (VenueSymbolIssuesMsg, ops-venue) -> bookId -> error; malformed -> empty. */
+export function parseVenueSymbolIssues(raw: string | null): Map<number, string> {
+  const out = new Map<number, string>();
+  if (!raw) return out;
+  try {
+    const o = JSON.parse(raw) as { books?: unknown };
+    for (const b of Array.isArray(o.books) ? o.books : []) {
+      const id = num((b as { bookId?: unknown })?.bookId);
+      const err = (b as { error?: unknown })?.error;
+      if (id !== null && typeof err === "string") out.set(id, err);
+    }
+  } catch {
+    // ignore: an unreadable status is not an alert of its own
+  }
+  return out;
+}
+
 /** KEYS.venueReport JSON (VenueReportMsg): asOf in unix seconds. */
 export function parseVenueAsOf(raw: string | null): number | null {
   if (!raw) return null;
@@ -287,14 +304,17 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
   let backup: Snapshot["backup"];
   let riskRaw: Array<string | null> = [];
   let venueRaw: Array<string | null> = [];
+  let symbolIssues = new Map<number, string>();
   try {
     const ids = bookRows.map((b) => b.id);
-    const [sup, bk, risk, venue] = await Promise.all([
+    const [sup, bk, risk, venue, issues] = await Promise.all([
       d.kv.get(SUPERVISOR_STATUS_KEY),
       d.kv.get(BACKUP_STATUS_KEY),
       ids.length ? d.kv.mget(ids.map((id) => KEYS.riskState(id))) : Promise.resolve([]),
       ids.length ? d.kv.mget(ids.map((id) => KEYS.venueReport(id))) : Promise.resolve([]),
+      d.kv.get(KEYS.venueSymbolIssues),
     ]);
+    symbolIssues = parseVenueSymbolIssues(issues);
     supervisor = parseSupervisorStatus(sup);
     backup = parseBackup(bk);
     riskRaw = risk;
@@ -315,6 +335,7 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
       liveSince: b.subscriptionEnds ? Math.floor(new Date(b.subscriptionEnds).getTime() / 1000) : null,
       risk: parseRisk(riskRaw[i] ?? null),
       venueReportAsOf: parseVenueAsOf(venueRaw[i] ?? null),
+      venueSymbolError: symbolIssues.get(Number(b.id)) ?? null,
     }));
   }
 

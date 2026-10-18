@@ -1,4 +1,4 @@
-import type { BookState, Logger, VenueAccount } from "@bookrunner/shared";
+import type { BookState, Logger, VenueAccount, VenueSymbolIssuesMsg } from "@bookrunner/shared";
 import type { Address, Hex } from "viem";
 import type { ChainPort, OrderlyBook } from "../chain";
 import type { FeeSettlement, OrderlyBuilderClient } from "../client";
@@ -56,6 +56,11 @@ export interface ReportPublisher {
   publish(r: SignedVenueReportJson): Promise<void>;
 }
 
+/** Service status for alerts (Redis KEYS.venueSymbolIssues in production): books that are tracked but not tradable. */
+export interface StatusPublisher {
+  venueSymbolIssues(msg: VenueSymbolIssuesMsg): Promise<void>;
+}
+
 export interface OpsContext {
   settings: OpsSettings;
   chain: ChainPort;
@@ -70,14 +75,24 @@ export interface OpsContext {
   now: () => number;
   reportSigner: ReportSigner;
   reportPublisher: ReportPublisher;
+  /** optional (tests): where venue-symbol issues are published */
+  status?: StatusPublisher;
 }
 
 export interface TrackedBook extends OrderlyBook {
   /**
    * Venue symbol: what every Orderly call and match uses (orders, positions, trades, listing, IF, fee rows).
    * `venueSymbol` of the charter symbol: PERP_NVDA_USDC_<broker> with ORDERLY_MODE=live, the charter symbol in mock mode.
+   * When `venueSymbolError` is set it is the charter symbol, a label only: nothing is listed or traded under it.
    */
   symbol: string;
+  /**
+   * ORDERLY_MODE=live and the charter symbol has no Orderly market (shared resolveVenueSymbol). The book is NOT
+   * listed and NOT traded (no trade key registered, no listing / REDUCE_ONLY / DELISTED, no cancel-all, no fee
+   * sweeps); every non-trading duty still runs: reports, withdrawal and retirement sagas, key revocation, IF / MM
+   * account reads. Published to KEYS.venueSymbolIssues for alerts.
+   */
+  venueSymbolError: string | null;
   state: BookState;
   accounts: { if: Hex; mm: Hex };
   /** Owner (deposit receiver / delegateContract / payout address) of each Orderly account (chain.accountOwners). */
@@ -85,3 +100,6 @@ export interface TrackedBook extends OrderlyBook {
 }
 
 export const lc = (a: Address | string) => a.toLowerCase();
+
+/** Listed and traded on the venue (false: tracked for non-trading duties only, see TrackedBook.venueSymbolError). */
+export const tradable = (b: Pick<TrackedBook, "venueSymbolError">) => b.venueSymbolError === null;

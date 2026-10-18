@@ -7,7 +7,7 @@
 //   redis : CHANNELS.kill(*) -> revoke the book's venue trade key
 // Idles (log + retry) until contracts/deployments/<chainId>.json exists.
 import { createDb } from "@bookrunner/db";
-import { CHANNELS, createLogger, QUEUES, roleSigner, tryLoadDeployment, type VenueOpsJob } from "@bookrunner/shared";
+import { assertVenueSymbolConfig, CHANNELS, createLogger, QUEUES, roleSigner, tryLoadDeployment, type VenueOpsJob } from "@bookrunner/shared";
 import { Worker } from "bullmq";
 import { Redis } from "ioredis";
 import type { Address } from "viem";
@@ -21,7 +21,7 @@ import { FileSagaStore, PgOpsStore } from "./store";
 import { errMsg, KeyedMutex, sleep } from "./util";
 import type { OpsContext } from "./worker/context";
 import { loadOrCreateBuilderKey, Provisioner } from "./worker/provision";
-import { accountReportSigner, RedisReportPublisher } from "./worker/reportSink";
+import { accountReportSigner, RedisReportPublisher, RedisStatusPublisher } from "./worker/reportSink";
 import { OpsService } from "./worker/service";
 
 const env = loadOpsEnv();
@@ -32,7 +32,8 @@ const DAY = 86_400_000;
 const KILL_PATTERN = `${CHANNELS.kill(0).slice(0, -1)}*`;
 
 async function main() {
-  log.info({ mode: env.ORDERLY_MODE, baseUrl: env.ORDERLY_BASE_URL, chainId: env.CHAIN_ID }, "ops-venue starting");
+  log.info({ mode: env.ORDERLY_MODE, baseUrl: env.ORDERLY_BASE_URL, chainId: env.CHAIN_ID, brokerId: env.ORDERLY_BROKER_ID }, "ops-venue starting");
+  assertVenueSymbolConfig({ mode: env.ORDERLY_MODE, brokerId: env.ORDERLY_BROKER_ID }); // live: books trade PERP_<T>_USDC_<broker>
   const keys = new KeyStore(resolveKeysDir(env.OPS_KEYS_DIR));
   const sagas = new FileSagaStore(env.OPS_SAGA_FILE);
   const redis = new Redis(env.REDIS_URL, { maxRetriesPerRequest: null });
@@ -96,6 +97,7 @@ async function main() {
     now: Date.now,
     reportSigner: accountReportSigner(ops, env.CHAIN_ID),
     reportPublisher: new RedisReportPublisher(redis),
+    status: new RedisStatusPublisher(redis),
   };
   const service = new OpsService(ctx, new Provisioner(ctx, builderKey));
   log.info({ ops: ops.address, builderAccountId, books: dep.books.length, reportMode: env.OPS_REPORT_MODE }, "deployment loaded");

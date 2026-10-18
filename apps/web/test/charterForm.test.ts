@@ -29,6 +29,15 @@ describe("charter form", () => {
     expect(issuesFor(bad, "mandate").length).toBeGreaterThan(3);
   });
 
+  test("Orderly books need an Orderly perp symbol; in-house symbols are free-form", () => {
+    const symbolIssues = (symbol: string, venue: "orderly" | "pool_engine" = "orderly") =>
+      formIssues({ ...DEFAULT_FORM, sponsor: SPONSOR, symbol, venue, ifSizeUsd: "30000" }).filter((i) => i.field === "symbol");
+    expect(symbolIssues("PERP_NVDA_USDC")).toEqual([]);
+    expect(symbolIssues("PERP_NVDA_USDC_bookrunner")).toEqual([]);
+    expect(symbolIssues("NVDA-PERP")[0]?.message).toMatch(/PERP_NVDA_USDC/);
+    expect(symbolIssues("NVDA-PERP", "pool_engine")).toEqual([]);
+  });
+
   test("in-house engine fees are capped at 100 bps", () => {
     const issues = formIssues({ ...DEFAULT_FORM, sponsor: SPONSOR, venue: "pool_engine", ifSizeUsd: "10000", takerFeeBps: "150" });
     expect(issues.map((i) => i.field)).toEqual(["takerFeeBps"]);

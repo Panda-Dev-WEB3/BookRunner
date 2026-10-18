@@ -16,6 +16,8 @@ export interface CharterServiceClient {
 
 export interface ApiSettings {
   chainId: number;
+  /** ORDERLY_BROKER_ID (charter symbol rule for Orderly books); unset = any broker suffix passes the format check. */
+  orderlyBrokerId?: string;
   /** Fallback when the chain is unreachable (config.markInterval() is authoritative). */
   markIntervalSeconds: number;
   receiptsIntervalSeconds: number;

@@ -134,6 +134,24 @@ export function riskStale(s: Snapshot, c: RuleConfig): Condition[] {
   return out;
 }
 
+/**
+ * Orderly books ops-venue tracks WITHOUT listing or trading (live mode, the charter symbol names no Orderly market):
+ * capital can sit on the venue with no market-making; it needs an operator decision (retire / re-charter).
+ */
+export function venueSymbol(s: Snapshot, _c: RuleConfig): Condition[] {
+  const out: Condition[] = [];
+  for (const b of s.books ?? []) {
+    if (b.venue !== "orderly" || !b.venueSymbolError) continue;
+    out.push({
+      key: `venue_symbol_unmapped:${b.bookId}`,
+      rule: "venue_symbol_unmapped",
+      severity: "critical",
+      summary: `${bookLabel(b)} (state ${b.state}): not listed or traded on Orderly: ${b.venueSymbolError}. Reports and withdrawals still run; retire or re-charter the book`,
+    });
+  }
+  return out;
+}
+
 /** Orderly books: the signed venue report (ops-venue -> Redis, relayed in the mark tx) is too old or missing. */
 export function venueReportAge(s: Snapshot, c: RuleConfig): Condition[] {
   const out: Condition[] = [];
@@ -532,6 +550,7 @@ export const RULES = {
   kill_event: killEvents,
   risk_stale: riskStale,
   venue_report_stale: venueReportAge,
+  venue_symbol_unmapped: venueSymbol,
   processes,
   balances,
   rpc,

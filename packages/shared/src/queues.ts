@@ -27,7 +27,22 @@ export const KEYS = {
   agentHeartbeat: (bookId: number | bigint) => `bkrn:agent:hb:${bookId}`, // unix ms
   agentQuote: (bookId: number | bigint) => `bkrn:agent:quote:${bookId}`, // JSON QuoteMsg (latest)
   liveNav: (bookId: number | bigint) => `bkrn:nav:live:${bookId}`, // JSON LiveNav (risk/mark estimate)
+  venueSymbolIssues: "bkrn:ops-venue:symbol-issues", // JSON VenueSymbolIssuesMsg (ops-venue, every book poll, TTL)
 } as const;
+
+/** ops-venue refreshes KEYS.venueSymbolIssues every book poll; a stopped ops-venue lets it expire. */
+export const VENUE_SYMBOL_ISSUES_TTL_SEC = 600;
+
+/**
+ * Orderly books whose charter symbol has no Orderly market under the current config (ORDERLY_MODE=live: not listed,
+ * not traded; every non-trading duty still runs). services/alerts raises one alert per book.
+ */
+export interface VenueSymbolIssuesMsg {
+  v: 1;
+  ts: number; // unix ms
+  mode: "mock" | "live";
+  books: Array<{ bookId: number; charterSymbol: string; error: string }>;
+}
 
 export interface OraclePriceMsg {
   priceId: string; // e.g. "NVDA" or index name

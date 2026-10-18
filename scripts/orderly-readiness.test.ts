@@ -17,7 +17,6 @@ import {
   exitCode,
   orderlyHash,
   parseStages,
-  parseSymbol,
   symbolRows,
   tokenRows,
   vaultRows,
@@ -37,10 +36,10 @@ describe("hashes and symbols", () => {
 
   test("builder symbol naming PERP_<BASE>_USDC_<broker>", () => {
     expect(builderSymbol("nvda", "bookrunner")).toBe("PERP_NVDA_USDC_bookrunner");
-    expect(parseSymbol("PERP_AAPL_USDC_mythos")).toEqual({ base: "AAPL", quote: "USDC", broker: "mythos" });
-    expect(parseSymbol("PERP_TSLA_USDC")).toEqual({ base: "TSLA", quote: "USDC", broker: null });
-    expect(parseSymbol("PERP_ETH_USDC_woofi_pro")?.broker).toBe("woofi_pro");
-    expect(parseSymbol("SPOT_ETH_USDC")).toBeNull();
+    // invalid base / broker id: shown as is, so the row names what was asked for (and stays FAIL: not listed)
+    expect(builderSymbol("NV DA", "bookrunner")).toBe("PERP_NV DA_USDC_bookrunner");
+    expect(builderSymbol("NVDA", "Book Runner")).toBe("PERP_NVDA_USDC_Book Runner");
+    expect(symbolRows("Book Runner", ["NVDA"], [])[0]).toMatchObject({ check: "symbol PERP_NVDA_USDC_Book Runner", status: "FAIL" });
     expect(charterBase("PERP_NVDA_USDC")).toBe("NVDA");
     expect(charterBase("PERP_NVDA_USDC_bookrunner")).toBe("NVDA");
   });

@@ -4,12 +4,14 @@
 // only). Re-run on state changes; Retiring books go REDUCE_ONLY. Trade keys are re-issued only after
 // a re-mandate (rotateTradeKey). Keys and withdrawals of a contract account name its owner as
 // delegateContract (v3: the adapter for MM, the OrderlyIFAccount for IF; see chain.accountOwners).
+// A book without an Orderly market (TrackedBook.venueSymbolError) gets its accounts, delegates and ops keys (reports,
+// withdrawals) but no trade key registration and no listing.
 import type { Address } from "viem";
 import { OrderlyHttpError } from "../orderly/http";
 import { BUILDER_SCOPE, type KeyStore, newStoredKey, prefixOf, type StoredKey } from "../keys";
 import type { Ed25519Key } from "../orderly/auth";
 import { errMsg } from "../util";
-import type { OpsContext, TrackedBook } from "./context";
+import { type OpsContext, type TrackedBook, tradable } from "./context";
 
 export class Provisioner {
   private readonly done = new Map<number, string>();
@@ -45,8 +47,10 @@ export class Provisioner {
       const { settings, builder, keys, store, chain, log } = this.ctx;
       const f = await keys.ensureBook(book.bookId, book.accounts, { tradeMs: settings.tradeKeyTtlMs, opsMs: settings.opsKeyTtlMs });
       const tradeRevoked = !!f.trade?.revokedAt;
+      const trades = tradable(book);
+      const tradePrefix = f.trade && trades ? prefixOf(f.trade) : null;
       if (!this.done.has(book.bookId)) {
-        await store.upsertVenueAccount({ bookId: book.bookId, kind: "mm", accountId: book.accounts.mm, keyPrefix: f.trade ? prefixOf(f.trade) : null, status: tradeRevoked ? "revoked" : "pending" });
+        await store.upsertVenueAccount({ bookId: book.bookId, kind: "mm", accountId: book.accounts.mm, keyPrefix: tradePrefix, status: tradeRevoked ? "revoked" : "pending" });
       }
       if (settings.mode === "mock") {
         await builder.mockRegisterAccount({ accountId: book.accounts.if, owner: book.owners.if, kind: "if", delegateSigner: chain.opsAddress });
@@ -61,22 +65,24 @@ export class Provisioner {
           keys.markRegistered(book.bookId, which, this.ctx.now());
         }
       }
-      if (f.trade && !tradeRevoked && !f.trade.registeredAt) {
+      if (trades && f.trade && !tradeRevoked && !f.trade.registeredAt) {
         await builder.addKey({ accountId: f.trade.accountId, orderlyKey: f.trade.orderlyKey, scope: f.trade.scope, expirationMs: f.trade.expiration, delegateContract: book.owners.mm });
         keys.markRegistered(book.bookId, "trade", this.ctx.now());
       }
-      let sym: { symbol: string; status?: string };
-      try {
-        sym = await builder.createSymbol({ symbol: book.symbol, baseAsset: book.baseAsset, priceSource: settings.priceSource, sessions: book.sessions, ifAccountId: book.accounts.if });
-      } catch (err) {
-        // live listing APIs may reject a re-submission of an existing symbol (VERIFY wording)
-        if (!(err instanceof OrderlyHttpError && /exist|already|duplicate/i.test(err.message))) throw err;
-        sym = { symbol: book.symbol, status: "EXISTS" };
+      let sym: { symbol: string; status?: string } = { symbol: book.symbol, status: "NOT_LISTED" };
+      if (trades) {
+        try {
+          sym = await builder.createSymbol({ symbol: book.symbol, baseAsset: book.baseAsset, priceSource: settings.priceSource, sessions: book.sessions, ifAccountId: book.accounts.if });
+        } catch (err) {
+          // live listing APIs may reject a re-submission of an existing symbol (VERIFY wording)
+          if (!(err instanceof OrderlyHttpError && /exist|already|duplicate/i.test(err.message))) throw err;
+          sym = { symbol: book.symbol, status: "EXISTS" };
+        }
       }
       await store.upsertVenueAccount({ bookId: book.bookId, kind: "if", accountId: book.accounts.if, keyPrefix: null, status: "active" });
-      await store.upsertVenueAccount({ bookId: book.bookId, kind: "mm", accountId: book.accounts.mm, keyPrefix: f.trade ? prefixOf(f.trade) : null, status: tradeRevoked ? "revoked" : "active" });
+      await store.upsertVenueAccount({ bookId: book.bookId, kind: "mm", accountId: book.accounts.mm, keyPrefix: tradePrefix, status: tradeRevoked ? "revoked" : "active" });
       await store.upsertVenueAccount({ bookId: book.bookId, kind: "builder", accountId: settings.builderAccountId, keyPrefix: null, status: "active" });
-      if (book.state === "Retiring") {
+      if (trades && book.state === "Retiring") {
         try {
           await builder.setSymbolStatus(book.symbol, "REDUCE_ONLY");
         } catch (err) {
@@ -84,7 +90,8 @@ export class Provisioner {
         }
       }
       this.done.set(book.bookId, book.state);
-      log.info({ bookId: book.bookId, symbol: sym.symbol, symbolStatus: sym.status, state: book.state, tradeKey: f.trade ? prefixOf(f.trade) : null, tradeRevoked }, "book venue provisioned");
+      if (trades) log.info({ bookId: book.bookId, symbol: sym.symbol, symbolStatus: sym.status, state: book.state, tradeKey: tradePrefix, tradeRevoked }, "book venue provisioned");
+      else log.warn({ bookId: book.bookId, charterSymbol: book.charterSymbol, state: book.state, err: book.venueSymbolError }, "book venue accounts provisioned WITHOUT listing or trade key (no Orderly market for the charter symbol)");
     });
   }
 
@@ -113,6 +120,7 @@ export class Provisioner {
       const { keys, chain, builder, store, settings, log } = this.ctx;
       const f = keys.loadBook(book.bookId);
       if (!f?.trade?.revokedAt) return null;
+      if (!tradable(book)) return null; // no Orderly market: no trade key to restore
       if (await chain.mandateKilled(book.mandate)) return null;
       const next = await keys.rotateTrade(book.bookId, settings.tradeKeyTtlMs);
       const t = next.trade;
