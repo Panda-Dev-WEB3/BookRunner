@@ -7,6 +7,7 @@ import { SUPERVISOR_STATUS_KEY, parseSupervisorStatus } from "@bookrunner/shared
 import type {
   BackupSnap,
   BookSnap,
+  BuilderFeedSnap,
   IndexerCursorSnap,
   KillEventSnap,
   OracleConfirmSnap,
@@ -139,6 +140,33 @@ export function parseVenueSymbolIssues(raw: string | null): Map<number, string> 
     // ignore: an unreadable status is not an alert of its own
   }
   return out;
+}
+
+/** KEYS.builderFeedStatus JSON (BuilderFeedStatusMsg, ops-venue); malformed -> null. */
+export function parseBuilderFeed(raw: string | null): BuilderFeedSnap | null {
+  if (!raw) return null;
+  try {
+    const o = JSON.parse(raw) as Record<string, unknown>;
+    const ts = num(o.ts);
+    if (ts === null || !Array.isArray(o.symbols)) return null;
+    const sock = (o.socket ?? {}) as Record<string, unknown>;
+    return {
+      ts,
+      socket: { state: String(sock.state ?? "?"), lastError: typeof sock.lastError === "string" ? sock.lastError : null },
+      symbols: o.symbols
+        .filter((x): x is Record<string, unknown> => !!x && typeof (x as { symbol?: unknown }).symbol === "string")
+        .map((x) => ({
+          symbol: x.symbol as string,
+          bookIds: Array.isArray(x.bookIds) ? x.bookIds.map(Number).filter(Number.isFinite) : [],
+          state: String(x.state ?? "?"),
+          lastPushAt: num(x.lastPushAt),
+          failingSince: num(x.failingSince),
+          error: typeof x.error === "string" ? x.error : null,
+        })),
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** KEYS.venueReport JSON (VenueReportMsg): asOf in unix seconds. */
@@ -305,16 +333,19 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
   let riskRaw: Array<string | null> = [];
   let venueRaw: Array<string | null> = [];
   let symbolIssues = new Map<number, string>();
+  let builderFeed: Snapshot["builderFeed"];
   try {
     const ids = bookRows.map((b) => b.id);
-    const [sup, bk, risk, venue, issues] = await Promise.all([
+    const [sup, bk, risk, venue, issues, feed] = await Promise.all([
       d.kv.get(SUPERVISOR_STATUS_KEY),
       d.kv.get(BACKUP_STATUS_KEY),
       ids.length ? d.kv.mget(ids.map((id) => KEYS.riskState(id))) : Promise.resolve([]),
       ids.length ? d.kv.mget(ids.map((id) => KEYS.venueReport(id))) : Promise.resolve([]),
       d.kv.get(KEYS.venueSymbolIssues),
+      d.kv.get(KEYS.builderFeedStatus),
     ]);
     symbolIssues = parseVenueSymbolIssues(issues);
+    builderFeed = parseBuilderFeed(feed);
     supervisor = parseSupervisorStatus(sup);
     backup = parseBackup(bk);
     riskRaw = risk;
@@ -414,6 +445,7 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
     api,
     oracle,
     backup,
+    builderFeed,
     infraErrors,
   };
   return { snapshot, memory: { rpcSamples, buybackSamples, markIntervalSec } };

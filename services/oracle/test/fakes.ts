@@ -1,4 +1,4 @@
-import { type OraclePriceMsg, type PriceUpdate, createLogger, devAccount } from "@bookrunner/shared";
+import { type OraclePriceMsg, type OracleVenueFeedMsg, type PriceUpdate, createLogger, devAccount } from "@bookrunner/shared";
 import type { Address, Hex } from "viem";
 import type { OracleChain, PushResult } from "../src/adapters/chain";
 import type { PriceStore } from "../src/adapters/db";
@@ -92,6 +92,11 @@ export class FakePublisher implements PricePublisher {
   }
   async loadLast(priceId: string) {
     return this.last.get(priceId) ?? null;
+  }
+  venueFeeds: OracleVenueFeedMsg[] = [];
+  async publishVenueFeed(msg: OracleVenueFeedMsg) {
+    if (this.fail) throw new Error("redis down");
+    this.venueFeeds.push(msg);
   }
 }
 

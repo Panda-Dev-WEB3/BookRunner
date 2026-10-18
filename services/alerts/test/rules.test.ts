@@ -4,6 +4,7 @@ import {
   apiHealth,
   backup,
   balances,
+  builderPricePush,
   buyback,
   buybackStuck,
   evaluate,
@@ -117,6 +118,30 @@ describe("venue_report_stale", () => {
     expect(c[0]?.summary).toMatch(/NVDA-PERP.*withdrawals still run/);
     expect(venueSymbol(snap({ books: [book({ venueSymbolError: null })] }), rules())).toEqual([]);
     expect(venueSymbol(snap({ books: [book()] }), rules())).toEqual([]);
+  });
+});
+
+describe("builder_price_push (live Orderly builder prices, VERIFY O18)", () => {
+  const sym = (over: Record<string, unknown> = {}) => ({ symbol: "PERP_NVDA_USDC_bookrunner", bookIds: [3], state: "pushing", lastPushAt: NOW, failingSince: null, error: null, ...over });
+  const feed = (symbols: ReturnType<typeof sym>[], ts = NOW) => ({ ts, socket: { state: "ready", lastError: null }, symbols });
+  test("a symbol failing >= 30 s in session is critical; shorter, held or pushing is quiet", () => {
+    const c = builderPricePush(snap({ builderFeed: feed([sym({ state: "disconnected", failingSince: NOW - 31_000, error: "auth failed" })]) }), rules());
+    expect(c.map((x) => [x.key, x.severity])).toEqual([["builder_price_push:PERP_NVDA_USDC_bookrunner", "critical"]]);
+    expect(c[0]!.summary).toMatch(/book 3.*31s.*disconnected: auth failed.*reduce-only/);
+    expect(builderPricePush(snap({ builderFeed: feed([sym({ state: "stale", failingSince: NOW - 29_000 })]) }), rules())).toEqual([]);
+    expect(builderPricePush(snap({ builderFeed: feed([sym({ state: "held" }), sym()]) }), rules())).toEqual([]);
+    expect(builderPricePush(snap({ builderFeed: null }), rules())).toEqual([]);
+    expect(builderPricePush(snap(), rules())).toEqual([]);
+  });
+  test("the span stops at ops-venue's status time; a status that stopped updating alerts on its own", () => {
+    const old = feed([sym({ state: "stale", failingSince: NOW - 100_000 })], NOW - 90_000); // failing 10 s when last written
+    expect(builderPricePush(snap({ builderFeed: old }), rules()).map((x) => x.key)).toEqual(["builder_price_push_status"]);
+    expect(builderPricePush(snap({ builderFeed: feed([sym()], NOW - 59_000) }), rules())).toEqual([]);
+  });
+  test("ALERT_BUILDER_PUSH_FAIL_SECONDS", () => {
+    expect(loadConfig({}).rules.builderPushFailSec).toBe(30);
+    const c = builderPricePush(snap({ builderFeed: feed([sym({ state: "stale", failingSince: NOW - 31_000 })]) }), rules({ builderPushFailSec: 60 }));
+    expect(c).toEqual([]);
   });
 });
 

@@ -122,6 +122,8 @@ const shape = {
 
   ALERT_MARK_GRACE_SECONDS: z.coerce.number().int().min(0).optional(),
   ALERT_RISK_STALE_SECONDS: int(300),
+  /** a live Orderly builder market whose price ops-venue has not pushed this long in session (Orderly: >= 1/s) alerts (critical) */
+  ALERT_BUILDER_PUSH_FAIL_SECONDS: int(30),
   ALERT_RISK_WARN: bool(false),
   ALERT_VENUE_REPORT_MAX_AGE_SECONDS: z.coerce.number().int().min(1).optional(),
   ALERT_RESTART_WINDOW_SECONDS: int(900),
@@ -169,6 +171,8 @@ export interface RuleConfig {
   riskStaleSec: number;
   riskWarn: boolean;
   venueReportMaxAgeSec: number;
+  /** builder_price_push: failing span (s) of a live builder price push in session */
+  builderPushFailSec: number;
   restartWindowSec: number;
   restartMax: number;
   exitWindowSec: number;
@@ -279,6 +283,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       riskStaleSec: e.ALERT_RISK_STALE_SECONDS,
       riskWarn: e.ALERT_RISK_WARN,
       venueReportMaxAgeSec: e.ALERT_VENUE_REPORT_MAX_AGE_SECONDS ?? nd.venueReportMaxAgeSec,
+      builderPushFailSec: e.ALERT_BUILDER_PUSH_FAIL_SECONDS,
       restartWindowSec: e.ALERT_RESTART_WINDOW_SECONDS,
       restartMax: e.ALERT_RESTART_MAX,
       exitWindowSec: e.ALERT_EXIT_WINDOW_SECONDS,

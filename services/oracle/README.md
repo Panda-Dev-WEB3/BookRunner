@@ -167,5 +167,9 @@ Bound to `ORACLE_HOST` (default `127.0.0.1`, set `0.0.0.0` only behind a proxy /
 ## Venue builder prices
 
 `ORDERLY_MODE=mock`: `POST ORDERLY_BASE_URL/mock/price {symbol, price, held}` for Orderly books.
-`ORDERLY_MODE=live`: `LiveOrderlyPriceClient` throws `NotConfiguredError` (builder price-source
-endpoint is VERIFY); venue pushes are then disabled and reported in `/health`.
+Every tick (both modes, `ORACLE_VENUE_PRICES=1`): `OracleVenueFeedMsg` to Redis `bkrn:oracle:venue-feed` (key, TTL
+30 s, + PUBLISH): per Orderly venue symbol (shared `resolveVenueSymbol`: `PERP_<T>_USDC_<ORDERLY_BROKER_ID>` with
+`ORDERLY_MODE=live`) the latest signed price, `held`, `stale` (in session, nothing publishable this tick) and
+`signedAt`. `ORDERLY_MODE=live`: there is no oracle-side client; ops-venue (holder of the Orderly key) pushes the
+feed to Orderly's Builder Oracle WebSocket (`services/ops-venue/src/builderOracle`, docs/VERIFY.md O18).
+`/health` `venue`: `{mode, enabled, pushedBy: oracle | ops-venue, feed}`.

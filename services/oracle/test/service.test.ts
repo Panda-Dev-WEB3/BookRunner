@@ -1,6 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { SESSIONS_24X7, SESSIONS_NYSE_RTH, VENUE, encodeSessions, priceId } from "@bookrunner/shared";
-import { LiveOrderlyPriceClient } from "../src/adapters/venue";
 import { toPriceWad } from "../src/domain/price";
 import { sourcesHash } from "../src/domain/sources-hash";
 import { buildUniverse } from "../src/domain/universe";
@@ -14,7 +13,7 @@ const ALWAYS = encodeSessions(SESSIONS_24X7);
 // Thu 2026-10-01 15:00 UTC = 11:00 ET (in session)
 const T0 = Date.parse("2026-10-01T15:00:00Z");
 
-function universe(nvdaSessions = ALWAYS) {
+function universe(nvdaSessions = ALWAYS, venueSymbols?: { mode: "mock" | "live"; brokerId?: string }) {
   return buildUniverse({
     equities: [
       { priceId: "NVDA", underlying: priceId("NVDA") },
@@ -35,6 +34,7 @@ function universe(nvdaSessions = ALWAYS) {
       { bookId: 3, venue: VENUE.POOL_ENGINE, symbol: "RHX2-PERP", oracleKey: "RHX2", sessions: ALWAYS },
     ],
     defaultSessions: ALWAYS,
+    ...(venueSymbols ? { venueSymbols } : {}),
   }).entries;
 }
 
@@ -269,15 +269,64 @@ describe("OracleService tick", () => {
     expect(r.published).toEqual(["NVDA", "TSLA", "RHX2"]);
   });
 
-  test("live venue client (NotConfigured) disables builder prices without failing ticks", async () => {
-    const hh = new Harness({ venue: new LiveOrderlyPriceClient() });
-    await started(hh);
+  test("live (no oracle-side venue client): every tick publishes the venue feed by Orderly venue symbol", async () => {
+    const hh = new Harness({ venue: null });
+    await hh.svc.setDeployment({ chainId: 31337, oracle: ORACLE_ADDR, chain: hh.chain });
+    await hh.svc.setUniverse(universe(ALWAYS, { mode: "live", brokerId: "bookrunner" }));
+    hh.set("NVDA", 190);
+    hh.set("TSLA", 440);
     await hh.tick();
-    await Bun.sleep(0);
-    expect(hh.svc.health().venue.enabled).toBe(false);
-    expect(hh.svc.health().venue.disabledReason).toContain("VERIFY");
-    const r = await hh.tick(T0 + 1000);
-    expect(r.published).toHaveLength(3);
+    const feeds = hh.parts.publisher!.venueFeeds;
+    expect(feeds).toHaveLength(1);
+    // the signed per-share price of the book's oracle key, under the builder market symbol (Task 1 mapping)
+    expect(feeds[0]).toEqual({
+      v: 1,
+      ts: T0,
+      prices: [{ symbol: "PERP_NVDA_USDC_bookrunner", priceId: "NVDA", price: 190, held: false, stale: false, publishedAt: Math.floor(T0 / 1000), signedAt: T0 }],
+    });
+    expect(hh.svc.prices().find((m) => m.priceId === "NVDA")!.price).toBe(feeds[0]!.prices[0]!.price);
+    expect(hh.svc.health().venue).toMatchObject({ mode: null, enabled: true, pushedBy: "ops-venue", feed: { ts: T0, symbols: ["PERP_NVDA_USDC_bookrunner"], error: null } });
+  });
+
+  test("venue feed: in-session skip marks the last signed price stale (never a new price); recovery clears it at once", async () => {
+    const hh = new Harness({ venue: null });
+    await hh.svc.setDeployment({ chainId: 31337, oracle: ORACLE_ADDR, chain: hh.chain });
+    await hh.svc.setUniverse(universe(ALWAYS, { mode: "live", brokerId: "bookrunner" }));
+    hh.set("NVDA", 190);
+    hh.set("TSLA", 440);
+    await hh.tick();
+    hh.set("NVDA", 0, { a: null, b: null, c: null }); // every source silent
+    await hh.tick(T0 + 2000);
+    const stale = hh.parts.publisher!.venueFeeds.at(-1)!.prices[0]!;
+    expect(stale).toMatchObject({ price: 190, stale: true, signedAt: T0, publishedAt: Math.floor(T0 / 1000) });
+    hh.set("NVDA", 191);
+    await hh.tick(T0 + 4000);
+    // the oracle's unpublished run lingers for its hysteresis, the venue feed does not
+    expect(hh.parts.publisher!.venueFeeds.at(-1)!.prices[0]).toMatchObject({ price: 191, stale: false, signedAt: T0 + 4000 });
+  });
+
+  test("venue feed: off-hours the signed price is held (ops-venue stops pushing)", async () => {
+    const hh = new Harness({ venue: null, settings: { sessionsMode: "charter" } });
+    await hh.svc.setDeployment({ chainId: 31337, oracle: ORACLE_ADDR, chain: hh.chain });
+    await hh.svc.setUniverse(universe(RTH, { mode: "live", brokerId: "bookrunner" }));
+    hh.set("NVDA", 190);
+    hh.set("TSLA", 440);
+    await hh.tick(Date.parse("2026-10-02T19:00:00Z")); // Fri 15:00 ET
+    await hh.tick(Date.parse("2026-10-03T15:00:00Z")); // Saturday
+    expect(hh.parts.publisher!.venueFeeds.at(-1)!.prices[0]).toMatchObject({ symbol: "PERP_NVDA_USDC_bookrunner", price: 190, held: true, stale: false });
+  });
+
+  test("venue feed: nothing published without Orderly books or with ORACLE_VENUE_PRICES=0", async () => {
+    const off = new Harness({ venue: null, settings: { venuePrices: false } });
+    await started(off);
+    await off.tick();
+    expect(off.parts.publisher!.venueFeeds).toHaveLength(0);
+    await h.svc.setDeployment({ chainId: 31337, oracle: ORACLE_ADDR, chain: h.chain });
+    await h.svc.setUniverse(universe().map((e) => ({ ...e, venueSymbols: [] })));
+    h.set("NVDA", 190);
+    h.set("TSLA", 440);
+    await h.tick();
+    expect(h.parts.publisher!.venueFeeds).toHaveLength(0);
   });
 
   test("ORACLE_PUSH_ONCHAIN=0 (chain null): wall-clock timestamps, rows without tx", async () => {

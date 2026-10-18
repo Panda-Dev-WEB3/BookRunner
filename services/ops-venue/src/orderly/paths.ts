@@ -56,12 +56,8 @@ export const BUILDER_PATHS = {
   },
 } as const;
 
-/** Builder Oracle push (docs: user-flows/builder-oracle): WebSocket, not REST. VERIFY host per env. */
-export const ORDERLY_ORACLE_WS = {
-  mainnet: "wss://ws-oracle.orderly.org",
-  path: (accountId: string) => `/v1/ws/oracle/push/${accountId}`, // ?orderly_key&timestamp&sign (unpadded base64url of ed25519(timestamp))
-  topic: "indexpricefeed", // {id, event:"publish", topic, ts, data:{base_ccy, price}}; >= 1/s while the session is open
-} as const;
+// Builder Oracle push (docs: user-flows/builder-oracle): a WebSocket, not REST — src/builderOracle/socket.ts
+// (ORACLE_WS_DOMAINS, path, auth, message format; docs/VERIFY.md O18).
 
 /** Documented REST rate limits (requests per window) — enforced client-side as minimum spacing. */
 export const RATE_SPACING_MS: Record<string, number> = {

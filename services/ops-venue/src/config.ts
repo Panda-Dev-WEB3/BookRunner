@@ -38,7 +38,21 @@ export const opsEnvSchema = baseEnvSchema.extend({
   ORDERLY_BUILDER_KEY_SECRET: z.string().optional(), // base58 ed25519 seed (else generated into OPS_KEYS_DIR/builder.json)
   ORDERLY_EIP712_CHAIN_ID: z.coerce.number().optional(), // chainId in Orderly messages (default CHAIN_ID) — VERIFY for RHC
   ORDERLY_LEDGER_ADDRESS: z.string().optional(), // Withdraw domain verifyingContract (default mainnet Ledger)
+  // Live builder price push (Builder Oracle WebSocket, src/builderOracle, docs/VERIFY.md O18). Domain: this, else
+  // derived from ORDERLY_BASE_URL (api.orderly.org -> wss://ws-oracle.orderly.org [documented]; testnet-api.orderly.org
+  // -> wss://testnet-ws-oracle.orderly.org [VERIFY: undocumented]); anything else must set it.
   ORDERLY_ORACLE_WS_URL: z.string().optional(),
+  // The account that pushes ORACLE_<broker> and its Orderly key: default the builder account + builder key. VERIFY O18 /
+  // O21: whether Orderly accepts a non-admin account of the broker; else an Orderly key of the admin account (added by
+  // the admin wallet, never the wallet key itself) goes here.
+  ORDERLY_ORACLE_ACCOUNT_ID: z.string().optional(),
+  ORDERLY_ORACLE_KEY_SECRET: z.string().optional(),
+  OPS_BUILDER_PRICE_PUSH: bool(true), // ORDERLY_MODE=live + ORDERLY_SYMBOL_PRICE_SOURCE=builder only
+  OPS_BUILDER_PRICE_INTERVAL_MS: z.coerce.number().int().min(100).max(1_000).default(1_000), // Orderly: >= 1 publish/s in session
+  OPS_BUILDER_PRICE_MAX_AGE_MS: z.coerce.number().int().min(1_000).default(10_000), // older signed prices are not re-sent
+  OPS_BUILDER_ORACLE_RECONNECT_MS: z.coerce.number().int().min(100).default(5_000), // first retry (docs sample: 5 s), doubling
+  OPS_BUILDER_ORACLE_MAX_RECONNECT_MS: z.coerce.number().int().min(100).default(60_000),
+  OPS_BUILDER_ORACLE_IDLE_MS: z.coerce.number().int().min(0).default(60_000), // no server message (ping) this long: reconnect; 0 = off
   ORDERLY_SYMBOL_PRICE_SOURCE: z.enum(["builder", "chainlink"]).default("builder"),
   // Settlement token symbol on Orderly (holding rows, withdraw / transfer messages): USDC on devnet, USDG on
   // Robinhood Chain (VERIFY O3/O7). Must match the OrderlyAdapter tokenHash (keccak256 of this symbol).

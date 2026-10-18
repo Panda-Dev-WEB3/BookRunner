@@ -28,7 +28,67 @@ export const KEYS = {
   agentQuote: (bookId: number | bigint) => `bkrn:agent:quote:${bookId}`, // JSON QuoteMsg (latest)
   liveNav: (bookId: number | bigint) => `bkrn:nav:live:${bookId}`, // JSON LiveNav (risk/mark estimate)
   venueSymbolIssues: "bkrn:ops-venue:symbol-issues", // JSON VenueSymbolIssuesMsg (ops-venue, every book poll, TTL)
+  oracleVenueFeed: "bkrn:oracle:venue-feed", // JSON OracleVenueFeedMsg (oracle, every tick, TTL; also PUBLISHed on the same name)
+  builderFeedStatus: "bkrn:ops-venue:builder-feed", // JSON BuilderFeedStatusMsg (ops-venue live builder price push, TTL)
 } as const;
+
+/** The oracle refreshes KEYS.oracleVenueFeed every tick; a stopped oracle lets it expire (ops-venue then stops pushing). */
+export const ORACLE_VENUE_FEED_TTL_SEC = 30;
+/** ops-venue refreshes KEYS.builderFeedStatus every few seconds while it pushes live builder prices. */
+export const BUILDER_FEED_STATUS_TTL_SEC = 60;
+
+/**
+ * The oracle's signed prices keyed by Orderly venue symbol (the builder-price push targets of Orderly books), every
+ * tick to KEYS.oracleVenueFeed and the channel of the same name. With ORDERLY_MODE=live ops-venue (the holder of the
+ * Orderly key) pushes them to Orderly's Builder Oracle WebSocket; it never makes a price up, it only re-sends the
+ * latest one between ticks, and it stops when `held` (session closed) or `stale` (the oracle has no publishable price).
+ */
+export interface OracleVenueFeedMsg {
+  v: 1;
+  ts: number; // unix ms (oracle tick)
+  prices: OracleVenuePrice[];
+}
+
+export interface OracleVenuePrice {
+  /** venue symbol (shared venueSymbol: PERP_<T>_USDC_<broker> with ORDERLY_MODE=live) */
+  symbol: string;
+  priceId: string;
+  /** the per-share price of the latest signed OraclePriceMsg for priceId */
+  price: number;
+  /** session closed: the oracle holds the last open price (Orderly freezes the index OFF_MARKET; nothing is pushed) */
+  held: boolean;
+  /** in session but the oracle has no publishable price this tick (sources failing): nothing is pushed */
+  stale: boolean;
+  /** OraclePriceMsg.publishedAt (unix s, chain head time) */
+  publishedAt: number;
+  /** unix ms (oracle wall clock) when that price was signed: the age ops-venue checks */
+  signedAt: number;
+}
+
+/** Per-symbol state of the live builder price push (ops-venue). Every state but pushing / held is a failure. */
+export type BuilderPushState = "pushing" | "held" | "stale" | "no-price" | "invalid" | "disconnected" | "rejected" | "not-configured";
+
+/** ops-venue's live builder price push, for services/alerts (builder_price_push). */
+export interface BuilderFeedStatusMsg {
+  v: 1;
+  ts: number; // unix ms
+  intervalMs: number;
+  maxAgeMs: number;
+  socket: { state: string; lastError: string | null; host: string | null };
+  symbols: Array<{
+    symbol: string;
+    base: string;
+    bookIds: number[];
+    state: BuilderPushState;
+    /** unix ms of the last publish sent */
+    lastPushAt: number | null;
+    /** last price sent */
+    price: number | null;
+    /** unix ms: start of the current failing run (null = pushing or held) */
+    failingSince: number | null;
+    error: string | null;
+  }>;
+}
 
 /** ops-venue refreshes KEYS.venueSymbolIssues every book poll; a stopped ops-venue lets it expire. */
 export const VENUE_SYMBOL_ISSUES_TTL_SEC = 600;

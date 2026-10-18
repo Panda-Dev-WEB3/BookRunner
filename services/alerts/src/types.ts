@@ -185,6 +185,26 @@ export interface BackupSnap {
   dir: string;
 }
 
+/**
+ * ops-venue's live builder price push (Redis bkrn:ops-venue:builder-feed, BuilderFeedStatusMsg): the oracle's signed
+ * price per Orderly builder market, pushed >= 1/s to Orderly's Builder Oracle in session (docs/VERIFY.md O18).
+ */
+export interface BuilderFeedSnap {
+  /** unix ms of ops-venue's status write */
+  ts: number;
+  socket: { state: string; lastError: string | null };
+  symbols: Array<{
+    symbol: string;
+    bookIds: number[];
+    /** pushing | held | stale | no-price | invalid | disconnected | rejected | not-configured */
+    state: string;
+    lastPushAt: number | null;
+    /** unix ms: start of the failing run (null = pushing or held) */
+    failingSince: number | null;
+    error: string | null;
+  }>;
+}
+
 export interface Snapshot {
   now: number; // unix ms
   network: string;
@@ -208,6 +228,8 @@ export interface Snapshot {
   oracle: OracleProbe | null;
   /** null: no backup recorded, undefined: Redis read failed */
   backup: BackupSnap | null | undefined;
+  /** null/absent: no live builder price push status (mock mode, or ops-venue not pushing); undefined: Redis read failed */
+  builderFeed?: BuilderFeedSnap | null;
   /** collection failures that are themselves worth an alert (db / redis unreachable) */
   infraErrors: Array<{ source: "db" | "redis"; error: string }>;
 }

@@ -1,6 +1,6 @@
 // Signed venue reports (OPS_REPORT_MODE=signed): the OPS_VENUE key signs, Redis carries them to the mark
 // keeper (MarkRegistry.commitAndApply), risk and the api. Formats: src/report712.ts.
-import { KEYS, VENUE_SYMBOL_ISSUES_TTL_SEC, type VenueSymbolIssuesMsg } from "@bookrunner/shared";
+import { BUILDER_FEED_STATUS_TTL_SEC, type BuilderFeedStatusMsg, KEYS, VENUE_SYMBOL_ISSUES_TTL_SEC, type VenueSymbolIssuesMsg } from "@bookrunner/shared";
 import type { Address, Hex, LocalAccount } from "viem";
 import { type SignedVenueReportJson, VENUE_REPORT_RECENT_MAX, type VenueReportValues, signVenueReport, venueReportKey, venueReportRecentKey } from "../report712";
 import type { ReportPublisher, ReportSigner, StatusPublisher } from "./context";
@@ -71,5 +71,10 @@ export class RedisStatusPublisher implements StatusPublisher {
 
   async venueSymbolIssues(msg: VenueSymbolIssuesMsg): Promise<void> {
     await this.redis.set(KEYS.venueSymbolIssues, JSON.stringify(msg), "EX", VENUE_SYMBOL_ISSUES_TTL_SEC);
+  }
+
+  /** Live builder price push state (builderOracle/feed.ts) for services/alerts builder_price_push. */
+  async builderFeed(msg: BuilderFeedStatusMsg): Promise<void> {
+    await this.redis.set(KEYS.builderFeedStatus, JSON.stringify(msg), "EX", BUILDER_FEED_STATUS_TTL_SEC);
   }
 }

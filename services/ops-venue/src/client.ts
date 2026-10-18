@@ -2,16 +2,17 @@
 // only the base URL, auth strictness and the builder (Perp Anything) endpoints differ.
 //   OrderlyVenue          implements QuotingVenue for ONE book account (the MM account + trade key).
 //                         Used by bookrunner-agent and risk.
-//   OrderlyBuilderClient  implements OrderlyBuilderApi (ops-venue): symbols, builder price, IF, fee
+//   OrderlyBuilderClient  implements OrderlyBuilderApi (ops-venue): symbols, mock builder price, IF, fee
 //                         settlements, withdrawals (EIP-712 via the delegate signer), key revocation.
-import { baseAssetOf, type OrderlyBuilderApi, type QuotingVenue, type TwoSidedQuote, type VenueAccount, type VenueFill } from "@bookrunner/shared";
+//                         Live builder prices: Builder Oracle WebSocket, src/builderOracle (not this client).
+import { type OrderlyBuilderApi, type QuotingVenue, type TwoSidedQuote, type VenueAccount, type VenueFill } from "@bookrunner/shared";
 import type { Address, LocalAccount } from "viem";
 import { KeyStore, resolveKeysDir } from "./keys";
-import { type Ed25519Key, keyFromSecret, keyPrefix, signMessage } from "./orderly/auth";
+import { type Ed25519Key, keyFromSecret, keyPrefix } from "./orderly/auth";
 import { type DailyFeeRevenueData, dateWindows, FEE_REVENUE_MAX_DAYS, type HoldingData, type PositionsData, parseAssetHistory, parseDailyFeeRevenue, quoteOrders, toVenueAccount, toVenueFill, usdRaw } from "./orderly/convert";
 import { type AddKeyParams, ORDERLY_LEDGER_MAINNET, signAddKey, signDelegateSigner, signWithdraw } from "./orderly/eip712";
 import { type FetchLike, OrderlyHttp, OrderlyHttpError } from "./orderly/http";
-import { BUILDER_PATHS, ORDERLY_ORACLE_WS, ORDERLY_PATHS } from "./orderly/paths";
+import { BUILDER_PATHS, ORDERLY_PATHS } from "./orderly/paths";
 
 export type OrderlyMode = "mock" | "live";
 
@@ -220,7 +221,6 @@ export interface OrderlyBuilderClientOptions {
   /** EIP-712 signer: delegate signer of the adapters' accounts and owner of the builder account. */
   signer: LocalAccount;
   ledgerAddress?: Address;
-  oracleWsUrl?: string;
   /** Live: earliest day queried for builder fee revenue (cumulative sweep accounting starts here). */
   feeHistoryStartMs?: number;
   /** Settlement token symbol on Orderly (withdrawals, transfers): "USDC" (default); "USDG" on Robinhood Chain. */
@@ -233,7 +233,6 @@ export interface OrderlyBuilderClientOptions {
 export class OrderlyBuilderClient implements OrderlyBuilderApi {
   private readonly http: OrderlyHttp;
   private readonly now: () => number;
-  private ws: WebSocket | null = null;
 
   constructor(readonly o: OrderlyBuilderClientOptions) {
     this.http = new OrderlyHttp({ baseUrl: o.baseUrl, accountId: o.builderAccountId, key: o.builderKey, ...(o.fetch ? { fetch: o.fetch } : {}), ...(o.now ? { now: o.now } : {}), ...(o.sleep ? { sleep: o.sleep } : {}) });
@@ -329,35 +328,8 @@ export class OrderlyBuilderClient implements OrderlyBuilderApi {
       await this.http.request("POST", "/mock/price", { body: { symbol: p.symbol, price: p.price, held: p.held, ts: p.ts }, key: null });
       return;
     }
-    // live: Builder Oracle WebSocket push (docs: user-flows/builder-oracle). Held sessions: Orderly
-    // freezes the index while OFF_MARKET, so we simply stop publishing while held.
-    if (p.held) return;
-    const ws = await this.oracleSocket();
-    const base = baseAssetOf(p.symbol) ?? p.symbol; // PERP_NVDA_USDC[_<broker>] -> NVDA (base_ccy)
-    ws.send(JSON.stringify({ id: `px_${base}_${p.ts}`, event: "publish", topic: ORDERLY_ORACLE_WS.topic, ts: p.ts, data: { base_ccy: base, price: p.price } }));
-  }
-
-  private async oracleSocket(): Promise<WebSocket> {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) return this.ws;
-    if (!this.o.builderKey) throw new Error("builder key required for the builder oracle feed");
-    const ts = this.now();
-    const sign = (await signMessage(this.o.builderKey, String(ts))).replace(/=+$/, ""); // unpadded base64url (VERIFY)
-    const url = `${this.o.oracleWsUrl ?? ORDERLY_ORACLE_WS.mainnet}${ORDERLY_ORACLE_WS.path(this.o.builderAccountId)}?orderly_key=${encodeURIComponent(this.o.builderKey.orderlyKey)}&timestamp=${ts}&sign=${sign}`;
-    const ws = new WebSocket(url);
-    await new Promise<void>((resolve, reject) => {
-      ws.addEventListener("open", () => resolve(), { once: true });
-      ws.addEventListener("error", () => reject(new Error("builder oracle websocket error")), { once: true });
-    });
-    ws.addEventListener("close", () => {
-      if (this.ws === ws) this.ws = null;
-    });
-    this.ws = ws;
-    return ws;
-  }
-
-  close() {
-    this.ws?.close();
-    this.ws = null;
+    // live: a persistent, authenticated stream at >= 1 publish/s, owned by builderOracle/feed.ts (BuilderPriceFeed)
+    throw new Error("live builder prices go through the Builder Oracle WebSocket (ops-venue BuilderPriceFeed), not setBuilderPrice");
   }
 
   // ---------------------------------------------------------------- insurance fund

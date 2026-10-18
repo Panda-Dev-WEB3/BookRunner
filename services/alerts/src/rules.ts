@@ -152,6 +152,42 @@ export function venueSymbol(s: Snapshot, _c: RuleConfig): Condition[] {
   return out;
 }
 
+/**
+ * Live builder price push (ops-venue -> Orderly Builder Oracle, docs/VERIFY.md O18). Orderly needs >= 1 price/s per
+ * builder market while the session is open, else it can restrict the market (reduce-only). held (session closed) is
+ * not a failure. The span is measured up to ops-venue's own status time (never grows on a stale status); a status
+ * that stopped updating is its own alert.
+ * - builder_price_push:<symbol> CRITICAL: failing (stale / no-price / disconnected / rejected / ...) >= builderPushFailSec
+ * - builder_price_push_status CRITICAL: the status is older than builderPushFailSec + 30 s (ops-venue stuck)
+ */
+export function builderPricePush(s: Snapshot, c: RuleConfig): Condition[] {
+  const f = s.builderFeed;
+  if (!f) return [];
+  const out: Condition[] = [];
+  const statusAge = (s.now - f.ts) / 1000;
+  if (statusAge > c.builderPushFailSec + 30) {
+    out.push({
+      key: "builder_price_push_status",
+      rule: "builder_price_push",
+      severity: "critical",
+      summary: `ops-venue's live builder price push status is ${dur(statusAge)} old: Orderly builder markets may not be receiving prices`,
+    });
+  }
+  for (const x of f.symbols) {
+    if (x.failingSince == null) continue;
+    const span = (f.ts - x.failingSince) / 1000;
+    if (span < c.builderPushFailSec) continue;
+    const books = x.bookIds.length ? ` (book${x.bookIds.length > 1 ? "s" : ""} ${x.bookIds.join(", ")})` : "";
+    out.push({
+      key: `builder_price_push:${x.symbol}`,
+      rule: "builder_price_push",
+      severity: "critical",
+      summary: `Orderly builder price for ${x.symbol}${books} not pushed for ${dur(span)} in session (${x.state}${x.error ? `: ${x.error}` : ""}): Orderly may restrict the market to reduce-only`,
+    });
+  }
+  return out;
+}
+
 /** Orderly books: the signed venue report (ops-venue -> Redis, relayed in the mark tx) is too old or missing. */
 export function venueReportAge(s: Snapshot, c: RuleConfig): Condition[] {
   const out: Condition[] = [];
@@ -551,6 +587,7 @@ export const RULES = {
   risk_stale: riskStale,
   venue_report_stale: venueReportAge,
   venue_symbol_unmapped: venueSymbol,
+  builder_price_push: builderPricePush,
   processes,
   balances,
   rpc,

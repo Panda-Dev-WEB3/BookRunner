@@ -514,7 +514,7 @@ the Orderly testnet vault, NVDA and TSLA chartered again on it (new book ids, Or
    never registers it itself (`loadOrCreateBuilderKey`). Check it with `--builder-key`.
 3. **List the markets** (Perp Anything): `PERP_NVDA_USDC_bookrunner` and `PERP_TSLA_USDC_bookrunner` (Orderly appends
    the broker id to builder symbols, VERIFY O14), market session 24/5 (RWA). Index price source: our
-   builder-pushed oracle feed (`base_ccy` NVDA / TSLA; the push is not implemented, G2). Testnet prices are
+   builder-pushed oracle feed `ORACLE_bookrunner` (`base_ccy` NVDA / TSLA; pushed by ops-venue, G2 / O18). Testnet prices are
    synthetic (no testnet Chainlink feeds, VERIFY C4): do not mix our feed with real-market sources on testnet, or the
    index and our marks diverge.
 4. **IF accounts**: each symbol is assigned to one IF account, funded strictly above 100 USDG per effective symbol on
@@ -569,11 +569,12 @@ the Orderly testnet vault, NVDA and TSLA chartered again on it (new book ids, Or
    ORDERLY_BUILDER_ACCOUNT_ID=0xaa04410b18eb0856e02832221f24b2cd37fde7c6f6f8eec83fe95a2f62702e5c
    ORDERLY_BUILDER_KEY_SECRET=<base58 seed of the admin account's Orderly key, step 2.2>
    OPS_FEE_SWEEP_AUTO=false   # G6: the admin account is not the ops-venue key's
-   # ORDERLY_ORACLE_WS_URL=<testnet builder-oracle WebSocket>   # G2: host unknown; default = mainnet's
+   # ORDERLY_ORACLE_WS_URL=wss://testnet-ws-oracle.orderly.org   # default for testnet-api.orderly.org; undocumented (VERIFY O18)
+   # ORDERLY_ORACLE_ACCOUNT_ID / ORDERLY_ORACLE_KEY_SECRET: the account that pushes ORACLE_bookrunner (default: the builder account + key above)
    # ORDERLY_EIP712_CHAIN_ID defaults to CHAIN_ID (46630)
    ```
    dev.ts keeps starting mock-orderly (and trader-sim, unless `--no-sim`) on testnet whatever `ORDERLY_MODE` is (G7); they no longer
-   serve the Orderly books. In live mode the oracle's venue push refuses (`venue builder prices disabled`, G2).
+   serve the Orderly books. In live mode the oracle publishes its signed prices per venue symbol (`bkrn:oracle:venue-feed`) and ops-venue pushes them to the Builder Oracle WebSocket at >= 1/s in session (log `live builder price push started`, state in `bkrn:ops-venue:builder-feed`, alert `builder_price_push`).
 
 ### 4. Verification
 
@@ -601,7 +602,7 @@ the Orderly testnet vault, NVDA and TSLA chartered again on it (new book ids, Or
 | # | Gap | VERIFY |
 |---|---|---|
 | G1 | No deployment path for "real Orderly, mocks elsewhere" on testnet: `Deploy.s.sol` always deploys MockERC20 USDC + MockOrderlyVault; `DeployMainnet` `REHEARSAL=1` takes real externals but needs Stock Tokens, Chainlink feeds and Uniswap v3 on testnet, which are not published there (VERIFY T3, C4). Adapters cannot be rebound to another vault / token. Source of testnet USDG unknown. | O17 |
-| G2 | Builder-pushed index price: the oracle's live client (`services/oracle/src/adapters/venue.ts`) throws `NotConfiguredError`. ops-venue's `OrderlyBuilderClient.setBuilderPrice` has a WebSocket push (ed25519 builder key, topic `indexpricefeed`) that nothing calls; it defaults to the mainnet host, derives `base_ccy` with the shared symbol parser (accepts `_bookrunner` symbols since G3), and its sign format is VERIFY. Orderly wants at least 1 update/s while the session is open (the testnet oracle ticks every 2 s). | O18 |
+| G2 | **Closed in code (2026-10-18).** Builder-pushed index price: the oracle publishes its signed price per venue symbol every tick (`bkrn:oracle:venue-feed`); ops-venue pushes it to the Builder Oracle WebSocket (`src/builderOracle`, documented auth / message / ping) every second in session, re-sending the latest signed price between oracle ticks (testnet: every 2 s) and stopping when the oracle holds (session closed) or has no fresh price; alert `builder_price_push` after 30 s. Still to confirm with Orderly: the testnet host (default `wss://testnet-ws-oracle.orderly.org`, undocumented), the auth / reject message shapes, and whether the builder account (vs the admin account, G6) may push `ORACLE_bookrunner`. | O18 |
 | G3 | **Closed (2026-10-18).** Symbol naming: one mapping (`packages/shared/src/venueSymbol.ts`) used by ops-venue, the agent and risk: `ORDERLY_MODE=live` -> `PERP_<T>_USDC_<ORDERLY_BROKER_ID>` (`PERP_NVDA_USDC_bookrunner`), mock -> the charter symbol verbatim. Charters, marks and the UI keep `PERP_NVDA_USDC`. Charters with a symbol no Orderly market can carry are rejected at filing (API) and blocked by the jury; a live book without a market is tracked for reports / withdrawals only (alert `venue_symbol_unmapped`). | O19 |
 | G4 | Listing: live `createSymbol` posts to `/v1/broker/listing/*` (bodies VERIFY) on every provisioning and aborts the book's provisioning on any error other than "exists"; the listing is done in Orderly One. There is no "listed in Orderly One" mode (skip, check `/v1/public/info`). Live `setSymbolStatus` (REDUCE_ONLY at retirement) has no confirmed endpoint: do it in Orderly One. | O20 |
 | G5 | IF account: whether an OrderlyIFAccount (contract / delegate account) can be a symbol's IF account is not confirmed; no builder-held IF fallback. | O10 |
