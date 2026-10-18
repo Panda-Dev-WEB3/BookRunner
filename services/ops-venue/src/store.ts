@@ -3,7 +3,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { chainCursor, type Db, events, receipts, settlements, venueAccounts } from "@bookrunner/db";
-import { CHANNELS, type DomainEventPayloads, type DomainEventType, dbUsd, payloadHash, REPO_ROOT, type ReceiptKind } from "@bookrunner/shared";
+import { CHANNELS, busJson, type DomainEventPayloads, type DomainEventType, dbUsd, payloadHash, REPO_ROOT, type ReceiptKind } from "@bookrunner/shared";
 import { and, eq, sql } from "drizzle-orm";
 import type { FeeSaga } from "./domain/fees";
 import type { WithdrawSaga } from "./domain/withdraw";
@@ -96,7 +96,7 @@ export class PgOpsStore implements OpsStore {
       .returning({ id: events.id, createdAt: events.createdAt });
     const row = rows[0];
     if (!row) return false;
-    await this.pub.publish(CHANNELS.domainEvents, JSON.stringify({ id: row.id, type, createdAt: row.createdAt.toISOString(), data }));
+    await this.pub.publish(CHANNELS.domainEvents, busJson({ id: row.id, type, createdAt: row.createdAt.toISOString(), data }));
     return true;
   }
 

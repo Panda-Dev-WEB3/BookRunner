@@ -1,5 +1,5 @@
 // ioredis adapter: keys and channels from packages/shared/src/queues.ts.
-import { CHANNELS, type DomainEvent, KEYS, type KillMsg, type OraclePriceMsg, type QuoteMsg } from "@bookrunner/shared";
+import { CHANNELS, type DomainEvent, KEYS, type KillMsg, type OraclePriceMsg, type QuoteMsg, busJson } from "@bookrunner/shared";
 import type { Redis } from "ioredis";
 import type { BusPort } from "../ports";
 import type { LiveNav, QuoteObservation, RiskStatePayload } from "../types";
@@ -40,7 +40,7 @@ export class RedisBus implements BusPort {
   }
 
   async saveRiskState(bookId: number, payload: RiskStatePayload): Promise<void> {
-    const s = JSON.stringify(payload);
+    const s = busJson(payload); // stamped with the stack's bus namespace (subscribers drop another stack's)
     await this.t(this.redis.multi().set(KEYS.riskState(bookId), s).publish(CHANNELS.riskState(bookId), s).exec(), "SET+PUBLISH riskState");
   }
 
@@ -49,12 +49,12 @@ export class RedisBus implements BusPort {
   }
 
   async publishKill(bookId: number, msg: KillMsg): Promise<void> {
-    await this.t(this.redis.publish(CHANNELS.kill(bookId), JSON.stringify(msg)), "PUBLISH kill");
+    await this.t(this.redis.publish(CHANNELS.kill(bookId), busJson(msg)), "PUBLISH kill");
   }
 
   async publishDomainEvent(evt: DomainEvent): Promise<void> {
     const body = { id: evt.id, type: evt.type, createdAt: evt.createdAt, data: evt.data };
-    await this.t(this.redis.publish(CHANNELS.domainEvents, JSON.stringify(body)), "PUBLISH domainEvents");
+    await this.t(this.redis.publish(CHANNELS.domainEvents, busJson(body)), "PUBLISH domainEvents");
   }
 }
 

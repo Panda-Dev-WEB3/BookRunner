@@ -3,7 +3,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { ACCOUNT, devAccount } from "@bookrunner/shared";
+import { ACCOUNT, BUS_NS, devAccount } from "@bookrunner/shared";
 import { type Address, encodeAbiParameters, getAddress, type Hex, keccak256, parseAbiParameters, stringToHex, toFunctionSelector, zeroAddress } from "viem";
 import { codeHasSelector, REPORT_SIGNED_SELECTOR, selectorPush } from "../src/chain";
 import { loadOpsEnv } from "../src/config";
@@ -73,8 +73,8 @@ describe("VenueReport typed data", () => {
   });
 
   test("Redis keys", () => {
-    expect(venueReportKey(3)).toBe("bkrn:venue:report:3");
-    expect(venueReportRecentKey(3)).toBe("bkrn:venue:report:3:recent");
+    expect(venueReportKey(3)).toBe(`bkrn:${BUS_NS}:venue:report:3`);
+    expect(venueReportRecentKey(3)).toBe(`bkrn:${BUS_NS}:venue:report:3:recent`);
   });
 });
 
@@ -297,10 +297,10 @@ describe("RedisReportPublisher", () => {
     const json = toSignedVenueReportJson(await signed());
     await new RedisReportPublisher(redis, 4).publish(json);
     expect(ops.map((o) => [o[0], o[1]])).toEqual([
-      ["set", "bkrn:venue:report:1"],
-      ["lpush", "bkrn:venue:report:1:recent"],
-      ["ltrim", "bkrn:venue:report:1:recent"],
-      ["publish", "bkrn:venue:report:1"],
+      ["set", `bkrn:${BUS_NS}:venue:report:1`],
+      ["lpush", `bkrn:${BUS_NS}:venue:report:1:recent`],
+      ["ltrim", `bkrn:${BUS_NS}:venue:report:1:recent`],
+      ["publish", `bkrn:${BUS_NS}:venue:report:1`],
     ]);
     expect(ops[2]!.slice(2)).toEqual([0, 3]);
     expect(JSON.parse(String(ops[0]![2]))).toEqual(json);

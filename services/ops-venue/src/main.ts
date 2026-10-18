@@ -35,8 +35,8 @@ const env = loadOpsEnv();
 const log = createLogger("ops-venue");
 const abort = new AbortController();
 const DAY = 86_400_000;
-/** CHANNELS.kill(bookId) = "bkrn:risk:kill:<id>" -> pattern over all books. */
-const KILL_PATTERN = `${CHANNELS.kill(0).slice(0, -1)}*`;
+/** CHANNELS.kill(bookId) = "bkrn:<ns>:risk:kill:<id>" -> pattern over all books of THIS stack (bus namespace). */
+const KILL_PATTERN = CHANNELS.killPattern;
 
 async function main() {
   log.info({ mode: env.ORDERLY_MODE, baseUrl: env.ORDERLY_BASE_URL, chainId: env.CHAIN_ID, brokerId: env.ORDERLY_BROKER_ID }, "ops-venue starting");

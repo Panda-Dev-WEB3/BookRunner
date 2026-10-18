@@ -6,11 +6,43 @@
 //   bun scripts/rehearsal-guard.ts --record contracts/deployments/46630.live.json [--rpc <url>]
 // Exit 0 = safe to replace (the caller still archives the old record), 1 = NOT safe (funds or live books), 2 = error
 // (an unreadable record or chain counts as not safe).
+//   bun scripts/rehearsal-guard.ts --supervisor
+// Is the testnet-live stack running? Reads its supervisor status key (bus namespace testnet-live) on its own Redis
+// (REDIS_LIVE_URL, else 127.0.0.1:63791 db 0 with REDIS_LIVE_PASSWORD from the environment; never on a command line).
+// Exit 0 = not running (no fresh status; an unreachable Redis counts as not running: the systemd check runs too),
+// 1 = running.
+import { RedisClient } from "bun";
 import { type Address, getAddress } from "viem";
 import { bookAbi, orderlyAdapterAbi } from "../packages/shared/src/abi";
 import { publicClientFor } from "../packages/shared/src/clients";
 import { tryLoadDeployment } from "../packages/shared/src/deployments";
 import type { Deployment } from "../packages/shared/src/types";
+import { busNames } from "../packages/shared/src/queues";
+import { SUPERVISOR_TTL_MS, parseSupervisorStatus } from "../packages/shared/src/supervisor";
+import { variantRedisUrl } from "./network-profile";
+
+/** Pure: is a supervisor status (raw Redis value) fresh, i.e. its stack running? */
+export function supervisorRunning(raw: string | null, now: number, ttlMs = SUPERVISOR_TTL_MS): boolean {
+  const s = parseSupervisorStatus(raw);
+  return !!s && now - s.ts <= ttlMs;
+}
+
+async function supervisorCheck(): Promise<never> {
+  const url = process.env.REDIS_LIVE_URL?.trim() || variantRedisUrl(process.env, "testnet-live");
+  const key = busNames("testnet-live").KEYS.supervisorStatus;
+  let raw: string | null = null;
+  try {
+    const c = new RedisClient(url, { connectionTimeout: 5_000, enableOfflineQueue: false, autoReconnect: false });
+    await c.connect();
+    raw = (await c.send("GET", [key])) as string | null;
+    c.close();
+  } catch (err) {
+    console.log(`[rehearsal-guard] the live Redis is unreachable (${(err as Error).message}): treated as not running`);
+  }
+  const running = supervisorRunning(raw, Date.now());
+  console.log(`[rehearsal-guard] testnet-live supervisor: ${running ? "RUNNING (fresh status)" : "not running"}`);
+  process.exit(running ? 1 : 0);
+}
 
 export const SAFE_STATES = new Set([1, 4]); // Cancelled, Retired
 const STATE_NAMES = ["Subscription", "Cancelled", "Live", "Retiring", "Retired"];
@@ -52,8 +84,9 @@ async function main() {
     const i = argv.indexOf(`--${n}`);
     return i >= 0 ? argv[i + 1] : undefined;
   };
+  if (argv.includes("--supervisor")) await supervisorCheck();
   const file = opt("record");
-  if (!file) throw new Error("--record <file> is required");
+  if (!file) throw new Error("--record <file> (or --supervisor) is required");
   const dep = tryLoadDeployment(file);
   if (!dep) throw new Error(`${file}: not readable`);
   const pc = publicClientFor(dep.chainId, opt("rpc") ?? process.env.RHC_TESTNET_RPC_URL ?? "https://rpc.testnet.chain.robinhood.com");

@@ -1,7 +1,7 @@
 // Redis publication: latest message under KEYS.oracleLast(priceId), fan-out on CHANNELS.oraclePrice,
 // the pull-oracle bundle under KEYS.oracleBundle (expires with the oracle: no stale bundle survives it), and the
 // builder-price venue feed under KEYS.oracleVenueFeed (+ PUBLISH on the same name; ops-venue pushes it to Orderly live).
-import { CHANNELS, KEYS, type Logger, ORACLE_VENUE_FEED_TTL_SEC, type OracleBundleMsg, type OraclePriceMsg, type OracleVenueFeedMsg } from "@bookrunner/shared";
+import { CHANNELS, KEYS, type Logger, ORACLE_VENUE_FEED_TTL_SEC, type OracleBundleMsg, type OraclePriceMsg, type OracleVenueFeedMsg, busJson } from "@bookrunner/shared";
 import { Redis } from "ioredis";
 
 export interface BundlePublication {
@@ -43,7 +43,7 @@ export class RedisPricePublisher implements PricePublisher {
     if (msgs.length === 0 && !bundle) return;
     const p = this.redis.pipeline();
     for (const m of msgs) {
-      const json = JSON.stringify(m);
+      const json = busJson(m); // stamped with the stack's bus namespace
       p.set(KEYS.oracleLast(m.priceId), json);
       p.publish(CHANNELS.oraclePrice(m.priceId), json);
     }
@@ -54,7 +54,7 @@ export class RedisPricePublisher implements PricePublisher {
   }
 
   async publishVenueFeed(msg: OracleVenueFeedMsg): Promise<void> {
-    const json = JSON.stringify(msg);
+    const json = busJson(msg);
     const res = await this.redis.pipeline().set(KEYS.oracleVenueFeed, json, "EX", ORACLE_VENUE_FEED_TTL_SEC).publish(KEYS.oracleVenueFeed, json).exec();
     const failed = res?.find(([err]) => err);
     if (failed?.[0]) throw failed[0];

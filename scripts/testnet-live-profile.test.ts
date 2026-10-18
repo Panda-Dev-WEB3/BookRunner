@@ -9,7 +9,8 @@ import {
   TESTNET_LIVE_EXCLUDED,
   TESTNET_LIVE_PINNED,
   TESTNET_ORDERLY,
-  otherVariantRedisUrl,
+  otherVariant,
+  redisHostPort,
   supervisorConflict,
   testnetLiveProfile,
   testnetOrderlyLive,
@@ -40,7 +41,7 @@ function root(dep: object | null): string {
 
 const LIVE_M = generateMnemonic(english);
 const PUBLIC_M = generateMnemonic(english);
-const env = { BKRN_TESTNET_LIVE_MNEMONIC: LIVE_M, ORDERLY_BUILDER_KEY_SECRET: "seed", ORACLE_SEED: "s", POSTGRES_PASSWORD: "pw", REDIS_PASSWORD: "rp" };
+const env = { BKRN_TESTNET_LIVE_MNEMONIC: LIVE_M, ORDERLY_BUILDER_KEY_SECRET: "seed", ORACLE_SEED: "s", POSTGRES_PASSWORD: "pw", REDIS_PASSWORD: "rp", REDIS_LIVE_PASSWORD: "lp" };
 const PUBLIC = { BKRN_TESTNET_MNEMONIC: PUBLIC_M, ORACLE_SEED: "p", OPS_VENUE_PRIVATE_KEY: `0x${"11".repeat(32)}` };
 const KEYS = new Set(["BKRN_TESTNET_LIVE_MNEMONIC", "ORDERLY_BUILDER_KEY_SECRET", "ORACLE_SEED"]);
 
@@ -67,7 +68,8 @@ describe("testnet-live profile (separate stack next to the public testnet)", () 
       OPS_KEYS_DIR: ".data/testnet-live/keys",
       OPS_SAGA_FILE: ".data/testnet-live/ops-venue/sagas.json",
       DATABASE_URL: "postgres://bookrunner:pw@127.0.0.1:54400/bookrunner_testnet_live",
-      REDIS_URL: "redis://:rp@127.0.0.1:63790/2",
+      REDIS_URL: "redis://:lp@127.0.0.1:63791/0", // its OWN Redis instance (redis-live)
+      BKRN_BUS_NS: "testnet-live", // its own bus namespace (channels, keys, queues)
       API_PORT: "4500",
       ORACLE_PORT: "4510",
       CHARTER_PORT: "4530",
@@ -141,7 +143,18 @@ describe("testnet-live profile (separate stack next to the public testnet)", () 
     expect(supervisorConflict({ ts: now - 100_000, network: "testnet", deployer: me }, me, now, 90_000)).toBeNull();
     expect(supervisorConflict({ ts: now, network: "testnet" }, me, now, 90_000)).toBeNull(); // an older supervisor without the field
     expect(supervisorConflict(null, me, now, 90_000)).toBeNull();
-    expect(otherVariantRedisUrl("redis://:p@127.0.0.1:63790/2", "testnet-live")).toBe("redis://:p@127.0.0.1:63790/1");
-    expect(otherVariantRedisUrl("redis://127.0.0.1:63790/1", "testnet")).toBe("redis://127.0.0.1:63790/2");
+    expect(otherVariant({ REDIS_PASSWORD: "p", REDIS_LIVE_PASSWORD: "l" }, "testnet-live")).toEqual({ variant: "testnet", redisUrl: "redis://:p@127.0.0.1:63790/1", statusKey: "bkrn:testnet:supervisor:status" });
+    expect(otherVariant({}, "testnet")).toEqual({ variant: "testnet-live", redisUrl: "redis://127.0.0.1:63791/0", statusKey: "bkrn:testnet-live:supervisor:status" });
+  });
+
+  test("Redis: refuses the public stack's Redis (an override pointing at 63790) and a passwordless live Redis next to a protected infra Redis", () => {
+    const r0 = root(LIVE_DEP);
+    expect(testnetLiveProfile({ ...env, REDIS_LIVE_URL: "redis://:rp@127.0.0.1:63790/5" }, KEYS, r0).errors).toEqual([expect.stringMatching(/is the public testnet stack's Redis: it needs its own instance/)]);
+    expect(testnetLiveProfile({ ...env, REDIS_LIVE_URL: "redis://localhost:63790" }, KEYS, r0).errors).toEqual([expect.stringMatching(/public testnet stack's Redis/)]);
+    expect(testnetLiveProfile({ ...env, REDIS_LIVE_URL: "redis://127.0.0.1:6400/0" }, KEYS, r0).errors).toEqual([]);
+    const { REDIS_LIVE_PASSWORD: _, ...noLive } = env;
+    expect(testnetLiveProfile(noLive, KEYS, r0).errors).toEqual([expect.stringMatching(/REDIS_LIVE_PASSWORD is not set/)]);
+    expect(redisHostPort("redis://:x@localhost/1")).toBe("127.0.0.1:6379");
+    expect(redisHostPort("nope")).toBeNull();
   });
 });

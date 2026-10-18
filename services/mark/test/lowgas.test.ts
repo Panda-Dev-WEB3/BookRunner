@@ -2,7 +2,7 @@
 // in ONE MarkRegistry.commitAndApply tx; fallback to commit + applyMark; the waterfall's "no fee flow"
 // signal; Redis feeds with signature + role checks.
 import { describe, expect, test } from "bun:test";
-import { type PriceUpdate, VENUE, WAD, createLogger, devAccount, priceTypedData, strToBytes32, usd } from "@bookrunner/shared";
+import { KEYS, type PriceUpdate, VENUE, WAD, createLogger, devAccount, priceTypedData, strToBytes32, usd } from "@bookrunner/shared";
 import { MemoryEventSink, MemorySettlementSignals } from "@bookrunner/waterfall";
 import type { Address, Hex } from "viem";
 import {
@@ -404,9 +404,9 @@ describe("RedisMarkFeeds", () => {
     const forged = await signedPrice({ underlying: TSLA_ID, priceWad: 1n, priceId: "TSLA" }, devAccount("trader0"));
     const tampered = { ...(await signedPrice({ priceWad: 300n * WAD })), priceWad: 301n * WAD };
     r.kv.set(ORACLE_BUNDLE_KEY, JSON.stringify({ priceData: encodePriceData([a]), publishedAt: P + 20, chainId: CHAIN, oracle: ORACLE, priceIds: ["NVDA"] }));
-    r.kv.set("bkrn:oracle:last:TSLA", JSON.stringify(priceMsg(b)));
-    r.kv.set("bkrn:oracle:last:FAKE", JSON.stringify(priceMsg(forged)));
-    r.kv.set("bkrn:oracle:last:BAD", JSON.stringify(priceMsg(tampered)));
+    r.kv.set(KEYS.oracleLast("TSLA"), JSON.stringify(priceMsg(b)));
+    r.kv.set(KEYS.oracleLast("FAKE"), JSON.stringify(priceMsg(forged)));
+    r.kv.set(KEYS.oracleLast("BAD"), JSON.stringify(priceMsg(tampered)));
     const feeds = new RedisMarkFeeds(r, verifier(), log);
     const got = await feeds.signedPrices();
     expect(got.map((p) => p.priceId).sort()).toEqual(["NVDA", "TSLA"]);

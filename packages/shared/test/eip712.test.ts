@@ -17,7 +17,7 @@ import {
   venueReportTypedData,
   venueReportTypes,
 } from "../src/eip712";
-import { KEYS, type OraclePriceMsg } from "../src/queues";
+import { BUS_NS, KEYS, type OraclePriceMsg } from "../src/queues";
 
 const ORACLE = "0x00000000000000000000000000000000000000aa" as const;
 const ADAPTER = "0x00000000000000000000000000000000000000bb" as const;
@@ -125,7 +125,7 @@ describe("signed venue reports", () => {
   });
 
   test("redis keys", () => {
-    expect(KEYS.oracleBundle).toBe("bkrn:oracle:bundle");
-    expect(KEYS.venueReport(3)).toBe("bkrn:venue:report:3");
+    expect(KEYS.oracleBundle).toBe(`bkrn:${BUS_NS}:oracle:bundle`);
+    expect(KEYS.venueReport(3)).toBe(`bkrn:${BUS_NS}:venue:report:3`);
   });
 });

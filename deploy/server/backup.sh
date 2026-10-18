@@ -3,7 +3,8 @@
 # .data/<network> (mock venue snapshot, ops keys, sagas; logs excluded) and contracts/deployments/*.json.
 # Testnet host: the live-Orderly rehearsal stack next to it (bookrunner@testnet-live) goes into the same set when its
 # database exists: postgres-live.dump (bookrunner_testnet_live) and .data/testnet-live (incl. the Orderly keys of accounts
-# holding REAL testnet USDG); its record 46630.live.json is one of the deployments/*.json; Redis db 2 is in redis.rdb.
+# holding REAL testnet USDG); its record 46630.live.json is one of the deployments/*.json; its own Redis (redis-live) goes to
+# redis-live.rdb; archived rehearsal state (.data/testnet-live.<stamp>, with a dump of the renamed DB) is carried too.
 # Keeps 14 daily + 8 weekly sets; optional off-site copy (rsync over ssh and/or rclone). Records the outcome
 # in Redis (bkrn:backup:last) so services/alerts reports a missing, stale or failed backup.
 #
@@ -35,6 +36,7 @@ KEEP_DAILY="${BACKUP_KEEP_DAILY:-14}"
 KEEP_WEEKLY="${BACKUP_KEEP_WEEKLY:-8}"
 PG_CONTAINER="${BACKUP_PG_CONTAINER:-bookrunner-postgres-1}"
 REDIS_CONTAINER="${BACKUP_REDIS_CONTAINER:-bookrunner-redis-1}"
+REDIS_LIVE_CONTAINER="${BACKUP_REDIS_LIVE_CONTAINER:-bookrunner-redis-live-1}"
 REDIS_IMAGE="${BACKUP_REDIS_IMAGE:-redis:7-alpine}"
 COMPOSE_NETWORK="${BACKUP_COMPOSE_NETWORK:-bookrunner_default}"
 DB="bookrunner_${NETWORK}"
@@ -59,12 +61,17 @@ fi
 if [ -z "${REDIS_PASSWORD:-}" ] && [ -f "$DEPLOY/.env.infra" ]; then
   REDIS_PASSWORD="$(sed -n 's/^REDIS_PASSWORD=//p' "$DEPLOY/.env.infra" | head -1)"
 fi
+if [ -z "${REDIS_LIVE_PASSWORD:-}" ] && [ -f "$DEPLOY/.env.infra" ]; then
+  REDIS_LIVE_PASSWORD="$(sed -n 's/^REDIS_LIVE_PASSWORD=//p' "$DEPLOY/.env.infra" | head -1)"
+fi
 # only when set: an empty REDISCLI_AUTH would make redis-cli send AUTH "" to a password-less Redis
 if [ -n "${REDIS_PASSWORD:-}" ]; then export REDISCLI_AUTH="$REDIS_PASSWORD"; fi
 
 log() { echo "$(date -u +%FT%TZ) $*"; }
 # redis-cli inside the redis container; the password travels as an env var, never on a command line
 rcli() { docker exec -e REDISCLI_AUTH "$REDIS_CONTAINER" redis-cli --no-auth-warning "$@"; }
+# the rehearsal stack's own Redis (redis-live) with its own password (REDIS_LIVE_PASSWORD, .env.infra)
+rcli_live() { ( if [ -n "${REDIS_LIVE_PASSWORD:-}" ]; then export REDISCLI_AUTH="$REDIS_LIVE_PASSWORD"; else unset REDISCLI_AUTH; fi; docker exec -e REDISCLI_AUTH "$REDIS_LIVE_CONTAINER" redis-cli --no-auth-warning "$@" ); }
 psql_live() { docker exec -i "$PG_CONTAINER" psql -v ON_ERROR_STOP=1 -qAt -U bookrunner "$@"; }
 
 record_status() { # ok(true|false) error dir bytes offsite
@@ -158,6 +165,21 @@ verify_set() {
   docker rm -f "$name" >/dev/null
   [ -n "$keys" ] || { echo "!! the Redis snapshot did not load" >&2; exit 1; }
   log "    redis: snapshot loads, db $BACKUP_REDIS_DB has $keys keys (live now: $(rcli -n "$BACKUP_REDIS_DB" DBSIZE))"
+  if [ -f "$set/redis-live.rdb" ]; then
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    docker create --name "$name" --network none "$REDIS_IMAGE" redis-server --appendonly no --dir /data --dbfilename dump.rdb >/dev/null
+    docker cp "$set/redis-live.rdb" "$name:/data/dump.rdb"
+    docker start "$name" >/dev/null
+    keys=""
+    for i in $(seq 1 30); do
+      keys="$(docker exec "$name" redis-cli -n 0 DBSIZE 2>/dev/null || true)"
+      [ -n "$keys" ] && [ "$(docker exec "$name" redis-cli INFO persistence 2>/dev/null | sed -n 's/^loading:\([0-9]\).*/\1/p')" = 0 ] && break
+      sleep 1
+    done
+    docker rm -f "$name" >/dev/null
+    [ -n "$keys" ] || { echo "!! the redis-live snapshot did not load" >&2; exit 1; }
+    log "    redis-live: snapshot loads, db 0 has $keys keys"
+  fi
   log "==> restore drill OK"
 }
 
@@ -215,6 +237,11 @@ if [ "$NETWORK" = testnet ] && [ "${BACKUP_LIVE_REHEARSAL:-auto}" != off ] \
   SUMS+=(postgres-live.dump)
   if [ -d "$APP/$LIVE_STATE" ]; then STATE_PATHS+=("./$LIVE_STATE"); fi
 fi
+# archived rehearsal state (deploy-testnet.sh REDEPLOY: .data/testnet-live.<stamp>, with the old Orderly keys and a
+# postgres.dump of the renamed database): kept in every set until removed by hand (RESTORE.md retention)
+if [ "$NETWORK" = testnet ] && [ "${BACKUP_LIVE_REHEARSAL:-auto}" != off ]; then
+  while IFS= read -r d; do STATE_PATHS+=("$d"); done < <(cd "$APP" && find ./.data -maxdepth 1 -mindepth 1 -type d -name 'testnet-live.*' 2>/dev/null | sort)
+fi
 
 log "==> redis: BGSAVE"
 before="$(rcli LASTSAVE)"
@@ -226,6 +253,20 @@ done
 [ "$(rcli LASTSAVE)" != "$before" ] || { log "!! BGSAVE did not complete in 300 s"; false; }
 [ "$(rcli INFO persistence | sed -n 's/^rdb_last_bgsave_status:\([a-z]*\).*/\1/p')" = ok ] || { log "!! BGSAVE failed"; false; }
 docker cp "$REDIS_CONTAINER:/data/dump.rdb" "$WORK/redis.rdb"
+
+# the rehearsal stack's own Redis (redis-live), when its container runs: its own password, its own snapshot
+if [ "$LIVE" = 1 ] && docker inspect "$REDIS_LIVE_CONTAINER" >/dev/null 2>&1; then
+  log "==> redis-live: BGSAVE"
+  before="$(rcli_live LASTSAVE)"
+  for _ in $(seq 1 60); do rcli_live BGSAVE >/dev/null 2>&1 && break; sleep 2; done
+  for _ in $(seq 1 300); do
+    [ "$(rcli_live LASTSAVE)" != "$before" ] && break
+    sleep 1
+  done
+  [ "$(rcli_live LASTSAVE)" != "$before" ] || { log "!! redis-live BGSAVE did not complete in 300 s"; false; }
+  docker cp "$REDIS_LIVE_CONTAINER:/data/dump.rdb" "$WORK/redis-live.rdb"
+  SUMS+=(redis-live.rdb)
+fi
 
 log "==> state: $APP ${STATE_PATHS[*]} (logs excluded) + contracts/deployments/*.json"
 # tar never follows symlinks: a link planted in the app tree cannot pull a root-only file into the set

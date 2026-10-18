@@ -1,5 +1,5 @@
 // Wires the ops-venue workers together and runs the periodic loops.
-import { bytes32ToStr, type KillMsg, type VenueOpsJob } from "@bookrunner/shared";
+import { busDropper, bytes32ToStr, CHANNELS, type KillMsg, type VenueOpsJob } from "@bookrunner/shared";
 import type { AdapterLog, MandateLog } from "../chain";
 import { pruneSagas } from "../store";
 import { errMsg, runLoop } from "../util";
@@ -30,6 +30,8 @@ export class OpsService {
   readonly revoker: Revoker;
   readonly logs: LogWatcher;
   readonly native: NativeFeeKeeper;
+  /** kill channels are namespaced per stack; a kill stamped with another stack's namespace is dropped (logged once) */
+  private readonly foreignKill = busDropper((msg, meta) => this.ctx.log.warn(meta, msg));
 
   constructor(
     readonly ctx: OpsContext,
@@ -150,6 +152,7 @@ export class OpsService {
       this.ctx.log.warn({ raw: raw.slice(0, 200) }, "unparseable kill message");
       return;
     }
+    if (this.foreignKill(CHANNELS.killPattern, msg)) return; // another stack's kill: never revoke our keys for it
     if (!this.registry.get(msg.bookId) && !this.ctx.keys.loadBook(msg.bookId)) return; // not an Orderly book
     await this.revoker.revoke(msg.bookId, msg.reason || "RISK_KILL", "kill_channel");
   }

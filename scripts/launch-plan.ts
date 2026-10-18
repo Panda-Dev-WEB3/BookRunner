@@ -87,9 +87,23 @@ export function launchSizes(live: boolean, books: LaunchBookName[], minIfUsd: (v
 export type Participant = "sponsor" | "a0" | "a1" | "a2";
 
 /** Settlement token (whole USD, rounded per commit as launchBook rounds) each participant spends: commits + charter fees. */
-export function settlementNeeds(sizes: BookSize[], charterFeeUsd: number): Record<Participant, number> {
-  const out: Record<Participant, number> = { sponsor: charterFeeUsd * sizes.length, a0: 0, a1: 0, a2: 0 };
-  for (const s of sizes) for (const c of commitPlan(s.ifUsd + s.mmUsd)) out[c.who] += c.usd;
+/** A book a previous launch already started (resume): its charter fee paid, these commits made. */
+export interface BookProgress {
+  feePaid: boolean;
+  done: ReadonlySet<Commit["who"]>;
+}
+
+/**
+ * Settlement token each participant still spends: commits + charter fees, minus what a resumed book already paid
+ * (`progress` by book name; launchBook skips those steps), so a resumed launch never funds a book twice.
+ */
+export function settlementNeeds(sizes: BookSize[], charterFeeUsd: number, progress: Readonly<Record<string, BookProgress>> = {}): Record<Participant, number> {
+  const out: Record<Participant, number> = { sponsor: 0, a0: 0, a1: 0, a2: 0 };
+  for (const s of sizes) {
+    const pr = progress[s.name];
+    if (!pr?.feePaid) out.sponsor += charterFeeUsd;
+    for (const c of commitPlan(s.ifUsd + s.mmUsd)) if (!pr?.done.has(c.who)) out[c.who] += c.usd;
+  }
   return out;
 }
 

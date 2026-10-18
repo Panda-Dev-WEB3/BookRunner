@@ -49,7 +49,7 @@ import { hedgeAllowTree } from "../packages/shared/src/merkle";
 import { SESSIONS_24X5, encodeSessions } from "../packages/shared/src/sessions";
 import { type BookComponents, type Deployment, liveVenueDeployment } from "../packages/shared/src/types";
 import { usd } from "../packages/shared/src/units";
-import { type BookSize, type Commit, type Participant, commitPlan, launchBooks, launchSizes, settlementNeeds, transferPlan } from "./launch-plan";
+import { type BookProgress, type BookSize, type Commit, type Participant, commitPlan, launchBooks, launchSizes, settlementNeeds, transferPlan } from "./launch-plan";
 
 const RPC = process.env.RPC_URL ?? "http://127.0.0.1:8547";
 const WINDOW = Number(process.env.LAUNCH_WINDOW_SECONDS ?? 120);
@@ -197,11 +197,34 @@ const configUint = (c: Deployment["contracts"], name: string, args: readonly unk
   read<bigint>(c.config, [{ type: "function", name, inputs, outputs: [{ name: "", type: "uint256" }], stateMutability: "view" }], name, args);
 
 /** Live venue: the settlement token is real (no mint): the deployer transfers each participant's need, all or nothing. */
-async function fundSettlementLive(d: Deployment, sizes: BookSize[]) {
+/** Resume: what a previous run already did for each book still to launch (charter filed = fee paid; commits made). */
+async function launchProgress(d: Deployment, specs: LaunchSpec[]): Promise<Record<string, BookProgress>> {
+  const c = d.contracts;
+  const out: Record<string, BookProgress> = {};
+  const who: Record<Commit["who"], LocalAccount> = { sponsor: acct.sponsor, a0: acct.a0, a1: acct.a1, a2: acct.a2 };
+  for (const s of specs) {
+    const prior = await existingCharter(c, s);
+    if (!prior) continue;
+    const done = new Set<Commit["who"]>();
+    const comps = await read<BookComponents>(c.factory, bookFactoryAbi as Abi, "componentsOf", [prior.id]);
+    if (comps.book && !BYTES32_ZERO.test(comps.book)) {
+      const open = (await read<number>(comps.book, bookAbi as Abi, "state")) === 0;
+      for (const k of commitPlan(Number((s.ifUsd + s.mmUsd) / 1_000_000n))) {
+        const tranche = k.tranche === "junior" ? comps.junior : comps.senior;
+        // a closed window takes no commitment any more; an open one skips the commits already made (launchBook)
+        if (!open || (await read<bigint>(tranche, trancheAbi as Abi, "balanceOf", [who[k.who].address])) > 0n) done.add(k.who);
+      }
+    }
+    out[s.name] = { feePaid: true, done };
+  }
+  return out;
+}
+
+async function fundSettlementLive(d: Deployment, sizes: BookSize[], progress: Record<string, BookProgress>) {
   const c = d.contracts;
   const balOf = (who: Address) => read<bigint>(c.usdc, mockERC20Abi as Abi, "balanceOf", [who]);
   const fee = Number(await configUint(c, "charterFeeUsd")) / 1e6;
-  const needs = settlementNeeds(sizes, fee);
+  const needs = settlementNeeds(sizes, fee, progress);
   const who: Record<Participant, LocalAccount> = { sponsor: acct.sponsor, a0: acct.a0, a1: acct.a1, a2: acct.a2 };
   const parts = Object.keys(who) as Participant[];
   const balances = Object.fromEntries(await Promise.all(parts.map(async (p) => [p, await balOf(who[p].address)] as const))) as Record<Participant, bigint>;
@@ -216,12 +239,12 @@ async function fundSettlementLive(d: Deployment, sizes: BookSize[]) {
   for (const [p, amount] of transfers) await send(acct.deployer, c.usdc, mockERC20Abi as Abi, "transfer", [who[p].address, amount]);
 }
 
-async function fundParticipants(d: Deployment, sizes: BookSize[]) {
+async function fundParticipants(d: Deployment, sizes: BookSize[], progress: Record<string, BookProgress> = {}) {
   const c = d.contracts;
   // Idempotent: a partially completed launch can be re-run (only missing balances/stakes/bonds are added).
   const balOf = (token: Address, who: Address) => read<bigint>(token, mockERC20Abi as Abi, "balanceOf", [who]);
   if (liveVenueDeployment(d)) {
-    await fundSettlementLive(d, sizes);
+    await fundSettlementLive(d, sizes, progress);
   } else {
     // USDC (devnet mock: open mint)
     const mints: Array<[LocalAccount, number]> = [
@@ -416,7 +439,8 @@ async function main() {
   const todo = specs.filter((s) => !launched.some((b) => b.name === s.name));
   if (launched.length) log(`resuming: already chartered ${launched.map((b) => b.name).join(", ")}; to do ${todo.map((s) => s.name).join(", ") || "none"}`);
   await fundGas();
-  await fundParticipants(d, sizes.filter((z) => todo.some((s) => s.name === z.name)));
+  // a book a previous run left half done is funded only for what is still missing (never twice)
+  await fundParticipants(d, sizes.filter((z) => todo.some((s) => s.name === z.name)), await launchProgress(d, todo));
   const path = deploymentPath();
   const saveProgress = (complete: boolean) => {
     const fresh = JSON.parse(readFileSync(path, "utf8")) as Deployment;

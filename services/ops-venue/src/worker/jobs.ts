@@ -50,7 +50,13 @@ export async function handleVenueOpsJob(job: VenueOpsJob, d: JobDeps): Promise<R
       }
       // IF capital is deposited on-chain by the vault (closeWindow -> deployToVenue(IF)); verify it landed, at or above the
       // charter target and strictly above Orderly's per-market requirement (one market per book IF account, VERIFY O10)
-      const r = await d.ctx.builder.insuranceFund(book.symbol);
+      // live: the book's IF ACCOUNT equity (its ops key; one market per IF account). Orderly's public
+      // /v1/public/insurancefund is Orderly's own insurance fund, not a builder market's (VERIFY O17). mock: the
+      // mock venue's per-symbol IF row.
+      const r =
+        d.ctx.settings.mode === "live"
+          ? { balanceUsd: (await d.ctx.readAccount(book.accounts.if, book.symbol, await d.ctx.keys.opsKey(book.bookId, "if"))).equityUsd }
+          : await d.ctx.builder.insuranceFund(book.symbol);
       const req = d.ctx.settings.ifRequirementUsd ?? null;
       const above = req === null ? null : ifAboveRequirement(r.balanceUsd, req);
       const ok = r.balanceUsd >= book.ifTargetUsd && above !== false && !book.ifAccountError;

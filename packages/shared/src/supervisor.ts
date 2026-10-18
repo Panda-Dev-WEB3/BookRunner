@@ -2,8 +2,10 @@
 // every child it runs to Redis (SUPERVISOR_STATUS_KEY, short TTL, refreshed every few seconds and on every
 // exit / restart). services/alerts reads it to detect exited and crash-looping services, so alerting never
 // needs the log file. Pure helpers here; the Redis write itself lives in dev.ts.
+import { KEYS } from "./queues";
 
-export const SUPERVISOR_STATUS_KEY = "bkrn:supervisor:status";
+/** This stack's status key (bus namespace, packages/shared queues.ts): bkrn:<ns>:supervisor:status */
+export const SUPERVISOR_STATUS_KEY = KEYS.supervisorStatus;
 /** dev.ts refreshes the key this often ... */
 export const SUPERVISOR_PUBLISH_MS = 15_000;
 /** ... and it expires after this long (a dead supervisor = a missing key). */

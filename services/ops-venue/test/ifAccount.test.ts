@@ -101,6 +101,21 @@ describe("min-IF: Orderly's requirement is strictly greater (VERIFY O10)", () =>
     expect(r.funded).toBe(true);
     expect(r.requirementUsd).toBeUndefined();
   });
+
+  test("fund_if in live mode reads the IF ACCOUNT's equity (never the public insurancefund endpoint)", async () => {
+    const t = await makeCtx();
+    t.chain.books = [trackedBook()];
+    const svc = new OpsService(t.ctx, await provisioner(t));
+    await svc.syncBooks();
+    t.ctx.settings.mode = "live";
+    t.ctx.settings.ifRequirementUsd = 100_000_000n;
+    (svc.registry.get(1) as TrackedBook).ifTargetUsd = 101_000_000n;
+    t.builder.insuranceFund = async () => {
+      throw new Error("must not be called in live mode");
+    };
+    t.mock.venue.credit(IF_ID, 150_000_000);
+    expect(await svc.handleJob({ kind: "fund_if", bookId: 1 })).toMatchObject({ balanceUsd: "150000000", funded: true, aboveRequirement: true, ifAccountId: IF_ID });
+  });
 });
 
 /** OpsService over the in-process mock venue, with the adapter optionally bound to a builder EOA. */

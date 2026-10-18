@@ -3,6 +3,8 @@ name: bookrunner
 # Server infra for the testnet stack (a shared host: small, capped, loopback-only).
 #   Postgres + Timescale  127.0.0.1:54400   (image pinned to the digest the testnet DB was created with)
 #   Redis                 127.0.0.1:63790   (AOF on: risk journals, signed venue reports, job queues survive restarts)
+#   Redis (live)          127.0.0.1:63791   the live-Orderly rehearsal stack's OWN Redis (bookrunner@testnet-live): pub/sub
+#                                           channels are global to a Redis server, so the two stacks never share one
 # Started by bookrunner-infra.service (root) from the root-owned copy /usr/local/lib/bookrunner-deploy:
 #   docker compose --env-file /usr/local/lib/bookrunner-deploy/.env.infra -f .../docker-compose.yml up -d --wait
 # No anvil: the stack runs against Robinhood Chain testnet.
@@ -11,6 +13,7 @@ name: bookrunner
 #   POSTGRES_PASSWORD  only initialises a NEW data directory: on an existing volume the password is whatever
 #                      `ALTER USER bookrunner PASSWORD ...` last set (HARDENING.md has the migration steps)
 #   REDIS_PASSWORD     requirepass (written to a config file inside the container, never on a command line)
+#   REDIS_LIVE_PASSWORD requirepass of redis-live (its own password; install.sh adds it to an existing .env.infra)
 # Unset (no .env.infra): the historical defaults, Postgres "bookrunner" and Redis without auth.
 services:
   postgres:
@@ -75,6 +78,32 @@ services:
       timeout: 3s
       retries: 20
 
+  redis-live:
+    image: redis:7-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_LIVE_PASSWORD:-}
+    command:
+      - sh
+      - -c
+      - |
+        umask 077
+        if [ -n "$$REDIS_PASSWORD" ]; then printf 'requirepass %s\n' "$$REDIS_PASSWORD" > /tmp/bookrunner-auth.conf; else : > /tmp/bookrunner-auth.conf; fi
+        chown redis:redis /tmp/bookrunner-auth.conf
+        exec docker-entrypoint.sh redis-server /tmp/bookrunner-auth.conf --appendonly yes --maxmemory 48mb --maxmemory-policy noeviction
+    ports:
+      - "127.0.0.1:63791:6379"
+    volumes:
+      - redislivedata:/data
+    mem_limit: 64m
+    oom_score_adj: 500
+    healthcheck:
+      test: ["CMD-SHELL", "if [ -n \"$$REDIS_PASSWORD\" ]; then export REDISCLI_AUTH=\"$$REDIS_PASSWORD\"; fi; redis-cli ping | grep -q PONG"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
 volumes:
   pgdata:
   redisdata:
+  redislivedata:

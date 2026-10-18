@@ -5,7 +5,7 @@
 //   bun scripts/dev.ts --no-sim        # without trader-sim
 //   bun scripts/dev.ts --network testnet   # Robinhood Chain testnet profile (.env.testnet)
 //   bun scripts/dev.ts --network testnet-live   # live-Orderly rehearsal stack NEXT TO the public testnet: real Orderly
-//                                          # testnet, own mnemonic (BKRN_TESTNET_LIVE_MNEMONIC), 46630.live.json, DB, Redis db 2,
+//                                          # testnet, own mnemonic (BKRN_TESTNET_LIVE_MNEMONIC), 46630.live.json, DB, own Redis (63791) + bus ns,
 //                                          # .data/testnet-live, ports 4500/4510/4530; no mock-orderly / trader-sim / web
 //                                          # (.env.testnet-live; scripts/network-profile.ts testnetLiveProfile; bookrunner@testnet-live)
 //   bun scripts/dev.ts --network mainnet   # Robinhood Chain MAINNET (4663): scripts/network-profile.ts
@@ -31,7 +31,6 @@ import { ADMIN_KEY_OPT_IN, type DevRole, hasDerivedKeys, roleAccount } from "../
 import { redactUrl } from "../packages/shared/src/redact";
 import {
   SUPERVISOR_PUBLISH_MS,
-  SUPERVISOR_STATUS_KEY,
   SUPERVISOR_TTL_MS,
   type SupervisedProc,
   newProc,
@@ -41,6 +40,7 @@ import {
   supervisorStatus,
 } from "../packages/shared/src/supervisor";
 import { roleSigner } from "../packages/shared/src/signer";
+import { busNames, busNamespace } from "../packages/shared/src/queues";
 import {
   LIVE_MNEMONIC_ENV,
   MAINNET_EXCLUDED,
@@ -48,7 +48,7 @@ import {
   type TestnetVariant,
   deskKeyEnvFor,
   mainnetProfile,
-  otherVariantRedisUrl,
+  otherVariant,
   supervisorConflict,
   testnetLiveProfile,
   testnetOrderlyLive,
@@ -123,6 +123,7 @@ if (testnetLike) {
   const redisAuth = env.REDIS_PASSWORD ? `:${encodeURIComponent(env.REDIS_PASSWORD)}@` : "";
   const t: Record<string, string> = {
     NETWORK: "testnet",
+    BKRN_BUS_NS: "testnet", // bus namespace of the public testnet stack (the live variant pins testnet-live)
     CHAIN_ID: "46630",
     RPC_URL: env.RHC_TESTNET_RPC_URL || "https://rpc.testnet.chain.robinhood.com",
     DEPLOYMENT_FILE: "contracts/deployments/46630.json",
@@ -168,7 +169,7 @@ if (testnetLike) {
     process.exit(1);
   }
   if (liveVenue) {
-    // live-Orderly rehearsal: real Orderly testnet venue, own mnemonic / record / DB / Redis db / state / ports
+    // live-Orderly rehearsal: real Orderly testnet venue, own mnemonic / record / DB / Redis instance + bus namespace / state / ports
     const live = testnetLiveProfile(env, testnetKeys, ROOT, only, publicTestnetEnv());
     if (live.errors.length > 0) {
       console.error(`[dev] refusing to start the testnet-live stack (${live.errors.length} problem(s)):`);
@@ -177,6 +178,7 @@ if (testnetLike) {
     }
     Object.assign(env, live.env);
     delete env[LIVE_MNEMONIC_ENV]; // mapped to BKRN_TESTNET_MNEMONIC (the role mnemonic) above; never passed on twice
+    delete env.REDIS_LIVE_URL; // folded into REDIS_URL (may carry the password: children get REDIS_URL only)
     env.MOCK_ORDERLY_SNAPSHOT_FILE = ".data/testnet-live/mock-orderly.json"; // unused (no mock venue), never the public file
     console.log(`[dev] venue: LIVE Orderly testnet (${env.ORDERLY_BASE_URL}, broker ${env.ORDERLY_BROKER_ID}, ${env.DEPLOYMENT_FILE}); API :${env.API_PORT}; no mock-orderly / trader-sim / web`);
   }
@@ -288,15 +290,18 @@ if (procs.length === 0) {
 }
 
 // Supervisor guard (testnet variants, belt and braces next to the separate mnemonics): refuse to start while the OTHER
-// variant's supervisor (same Redis, its own db) reports the same deployer address: the same keys never sign twice.
+// variant's supervisor (its own Redis instance and bus namespace) reports the same deployer address: the same keys
+// never sign twice.
 const myDeployer = testnetLike ? variantDeployer(env) : null;
+/** this stack's supervisor status key: its bus namespace (env as resolved by the profile, not dev.ts's own process env) */
+const supervisorKey = busNames(busNamespace(env)).KEYS.supervisorStatus;
 if (testnetLike && myDeployer) {
-  const otherUrl = otherVariantRedisUrl(env.REDIS_URL || "redis://127.0.0.1:63790/1", network as TestnetVariant);
+  const other = otherVariant(env, network as TestnetVariant);
   let raw: string | null = null;
   try {
-    const c = new RedisClient(otherUrl, { connectionTimeout: 5_000, enableOfflineQueue: false, autoReconnect: false });
+    const c = new RedisClient(other.redisUrl, { connectionTimeout: 5_000, enableOfflineQueue: false, autoReconnect: false });
     await c.connect();
-    raw = (await c.send("GET", [SUPERVISOR_STATUS_KEY])) as string | null;
+    raw = (await c.send("GET", [other.statusKey])) as string | null;
     c.close();
   } catch (err) {
     console.warn(`[dev] supervisor guard: the other testnet variant's status is unreadable (${(err as Error).message}); continuing`);
@@ -327,7 +332,7 @@ async function publishSupervisor(): Promise<void> {
     }
     if (!supRedis.connected) await supRedis.connect();
     const status = supervisorStatus(network, supervisorStarted, supervised.values(), Date.now(), myDeployer);
-    await supRedis.send("SET", [SUPERVISOR_STATUS_KEY, JSON.stringify(status), "PX", String(SUPERVISOR_TTL_MS)]);
+    await supRedis.send("SET", [supervisorKey, JSON.stringify(status), "PX", String(SUPERVISOR_TTL_MS)]);
   } catch {
     // Redis down or restarting: the next publish retries; alerts reports the heartbeat missing if it lasts
     try {

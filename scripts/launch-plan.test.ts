@@ -43,6 +43,15 @@ describe("launch plan (mock venue vs live Orderly rehearsal, VERIFY O17)", () =>
     for (const c of commitPlan(650)) expect(needs[c.who]).toBe(c.usd);
   });
 
+  test("a resumed book is never funded twice: its fee and the commits already made are left out", () => {
+    const sizes = launchSizes(true, ["NVDA", "TSLA"], testnetMin, {});
+    // NVDA: charter filed (fee paid), sponsor + a2 committed; TSLA untouched
+    const needs = settlementNeeds(sizes, 10, { NVDA: { feePaid: true, done: new Set(["sponsor", "a2"] as const) } });
+    expect(needs).toEqual({ sponsor: 10 + 78, a0: 2 * 325, a1: 2 * 260, a2: 195 });
+    // window already closed: nothing more for that book
+    expect(settlementNeeds(sizes.slice(0, 1), 10, { NVDA: { feePaid: true, done: new Set(["sponsor", "a0", "a1", "a2"] as const) } })).toEqual({ sponsor: 0, a0: 0, a1: 0, a2: 0 });
+  });
+
   test("settlement needs and the deployer's transfers (only the gaps)", () => {
     const sizes = launchSizes(true, ["NVDA", "TSLA"], testnetMin, {});
     const needs = settlementNeeds(sizes, 10);

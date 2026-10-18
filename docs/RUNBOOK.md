@@ -456,14 +456,18 @@ feeds or Uniswap on Robinhood testnet, VERIFY T3 / C4).
 template `deploy/server/bookrunner@.service` + the drop-in `bookrunner@testnet-live.service.d/override.conf`: cap 1.5 /
 2 GB, `ReadWritePaths` .data + contracts/deployments) running `scripts/dev.ts --network testnet-live --no-web`.
 **`bookrunner.service` (the public testnet, bookrunner.tech, books 1 and 2 on the mock venue) keeps running, untouched.**
-Nothing is shared but the host, Postgres / Redis (other database / db index) and the chain:
+What the two stacks share, exactly: the host (CPU / RAM / disk), the Postgres server (each stack has its own database
+and nothing reads the other's), the Docker daemon / `bookrunner-infra.service` that runs both Redis instances, the
+chain (each stack has its own contracts) and Orderly (only the rehearsal talks to it). Everything else is separate:
 
 | | public testnet stack | rehearsal stack |
 |---|---|---|
 | unit | `bookrunner.service` | `bookrunner@testnet-live` (installed by install.sh / update.sh, never enabled by them) |
 | role keys | `BKRN_TESTNET_MNEMONIC` (`.env.testnet`) | `BKRN_TESTNET_LIVE_MNEMONIC` (`.env.testnet-live` or `/etc/bookrunner/testnet-live.env`): every role, the deployer, the desk keys and the gas funder differ |
 | record | `contracts/deployments/46630.json` | `contracts/deployments/46630.live.json` |
-| database / Redis db | `bookrunner_testnet` / 1 | `bookrunner_testnet_live` / 2 |
+| database | `bookrunner_testnet` | `bookrunner_testnet_live` |
+| Redis | the infra Redis `127.0.0.1:63790`, db 1, `REDIS_PASSWORD` | its OWN Redis instance `redis-live` `127.0.0.1:63791`, db 0, `REDIS_LIVE_PASSWORD` (docker-compose, started by `bookrunner-infra`); the profile refuses the public Redis |
+| bus namespace (every pub/sub channel, Redis key and BullMQ queue; messages stamped with it) | `testnet`: `bkrn:testnet:…`, queues `bkrn-testnet-…` | `testnet-live`: `bkrn:testnet-live:…`, queues `bkrn-testnet-live-…` |
 | state | `.data/testnet/` | `.data/testnet-live/` (keys, sagas, `dev.log`) |
 | loopback ports (API / oracle / charter) | 4400 / 4410 / 4430 (+ mock-orderly 4420) | 4500 / 4510 / 4530 (no mock-orderly, trader-sim or web) |
 | public traffic | nginx -> 127.0.0.1:4400 (bookrunner.tech) | none unless configured (optional subdomain, step 3.6) |
@@ -473,12 +477,32 @@ testnet-live` refuse a missing `BKRN_TESTNET_LIVE_MNEMONIC`, one deriving the sa
 `BKRN_TESTNET_MNEMONIC` (read from `.env.testnet`, never applied; mnemonics are never printed) and any explicit
 `*_PRIVATE_KEY` / `DESK_KEY_PRIVATE_KEY_*` / `BKRN_TESTNET_FUNDER_PK` also present in `.env.testnet`. Belt and braces:
 each variant's supervisor publishes its deployer address in its status key, and `dev.ts` refuses to start while the
-other variant's status (the other Redis db) is fresh with the same deployer. `dev.ts --network testnet` refuses
+other variant's status (on the other Redis instance, under the other namespace) is fresh with the same deployer.
+
+**Bus isolation (two layers).** Redis pub/sub channels are global to a Redis server whatever the db index, so a db index
+alone would let one stack's risk kill revoke the other's Orderly trade key, its limit state drive the other's agent,
+its oracle prices feed the other's quotes and its domain events reach the other's webhooks and jury. (1) Every channel,
+key and queue carries the stack's bus namespace (`packages/shared/src/queues.ts` `busNamespace`: `BKRN_BUS_NS`, else
+`NETWORK`, else the chain id; the live profile pins `testnet-live`), and published messages carry `ns`: a subscriber
+drops (and logs once) a message stamped with another namespace (kill handling in ops-venue, the agent's bus, the API
+webhook dispatcher, the charter jury, the builder price feed). (2) The rehearsal runs on its own Redis instance. This
+also closes the audit lead "Redis is a shared trust domain" ACROSS stacks: one stack's processes can no longer
+publish into, or read, the other's bus. Within a stack Redis stays one trust domain (any process with the stack's
+`REDIS_URL` can publish a kill), as before. `dev.ts --network testnet` refuses
 `ORDERLY_MODE=live` in `.env.testnet` (the public stack never flips to live Orderly).
 
 **Status 2026-10-18: blocked on Orderly** (venue stage of the readiness check: no token and no broker allowed on the
 testnet vault, chain 46630 not listed). The code path is complete (G1-G7 below). Nothing in this section sends a
 transaction before step R4.
+
+### Bus namespace: first deploy on a running stack
+
+The bus namespace renames the shared Redis keys (`bkrn:<x>` -> `bkrn:<ns>:<x>`) and BullMQ queues (`bkrn-<x>` ->
+`bkrn-<ns>-<x>`). On the public testnet host, once, with the new code in place and `bookrunner.service` stopped:
+`REDIS_URL=redis://:<REDIS_PASSWORD>@127.0.0.1:63790/1 bun scripts/bus-migrate.ts --ns testnet` (dry run: prints the
+plan), then the same with `--apply` (RENAMENX: risk state + journal meta, signed venue reports, oracle last / bundle,
+agent quote, ops-venue status keys), then start the unit. Old queue jobs are not moved: mark / settlement schedulers
+re-enqueue from chain state. Mainnet: the same with `--ns mainnet` before its first start on this code.
 
 ### Rehearsal procedure (end to end)
 
@@ -690,9 +714,12 @@ and 2 stay on the mock stack; retire them there (Operations "Wind-down") only wh
    **Redeploying** (`REDEPLOY=1`) is refused unless every book of the existing `46630.live.json` (including an unfinished
    launch's) is Retired or Cancelled with an empty adapter (`scripts/rehearsal-guard.ts`, read-only; exit 6 otherwise):
    those books' Orderly accounts may hold real USDG, and the record plus `.data/testnet-live/keys` are the way back to
-   them. `FORCE_ARCHIVE=1` overrides with a loud warning. Either way the old record is archived as
-   `46630.live.<UTC stamp>.json`, the state as `.data/testnet-live.<stamp>` (keys kept) and the database renamed to
-   `bookrunner_testnet_live_<stamp>`; nothing is deleted.
+   them. `FORCE_ARCHIVE=1` overrides with a loud warning. It is also refused while `bookrunner@testnet-live` runs
+   (systemd, and a fresh testnet-live supervisor status: `rehearsal-guard.ts --supervisor`), and nothing is archived
+   before the readiness gate passes. Then the old record is archived as `46630.live.<UTC stamp>.json`, the state as
+   `.data/testnet-live.<stamp>` (keys kept) with `postgres.dump` (the old database) and `redis-live.rdb` (the old live
+   Redis) inside it, the database renamed to `bookrunner_testnet_live_<stamp>` and the live Redis db 0 emptied; nothing
+   is deleted. The archived directory is in every daily backup until removed by hand (RESTORE.md retention).
 2. **`UpgradeOrderlyAdapters.s.sol`** is not part of the rehearsal (the live deployment already has the current
    implementation). **Never run it on the mock stack with `DEPLOY_ORDERLY_TOKEN=USDG`**: the mock vault only allows
    `keccak256("USDC")`, so every new Orderly book would revert `TokenNotAllowedByVenue` at `initialize`, and books 1 and 2
@@ -727,7 +754,13 @@ and 2 stay on the mock stack; retire them there (Operations "Wind-down") only wh
    sudo tail -f /opt/bookrunner/app/.data/testnet-live/dev.log
    curl -s http://127.0.0.1:4500/health; echo            # its API (loopback only)
    ```
-   Locally the same is `bun scripts/dev.ts --network testnet-live` (with `.env.testnet-live`). The profile
+   **Host memory check before the first start** (the caps add up; read the host's figure, do not guess):
+   `grep MemTotal /proc/meminfo; free -h` on the host. Budget at the caps: public stack 2 G (high) / 2.5 G (max) + 2 G
+   swap, rehearsal 1.5 G / 2 G + 1 G swap, Postgres 512 MB, Redis 128 MB + redis-live 64 MB, plus the mail services
+   already on that VPS. Start the rehearsal only when `MemAvailable` (with the public stack running) is above ~2.5 G;
+   otherwise lower `MemoryHigh` / `MemoryMax` in the drop-in (`systemctl edit bookrunner@testnet-live`) or wait.
+   Locally the same is `bun scripts/dev.ts --network testnet-live` (with `.env.testnet-live`; `docker compose up -d`
+   starts `redis-live` on 63791 too). The profile
    (`scripts/network-profile.ts` `testnetLiveProfile`) sets `ORDERLY_BASE_URL=https://testnet-api.orderly.org`,
    `ORDERLY_BROKER_ID=bookrunner` (venue symbols `PERP_<T>_USDC_bookrunner`), `ORDERLY_TOKEN=USDG`,
    `ORDERLY_LEDGER_ADDRESS=0x1826B75e2ef249173FC735149AE4B8e9ea10abff` (testnet Ledger, withdraw EIP-712 domain),
@@ -735,7 +768,9 @@ and 2 stay on the mock stack; retire them there (Operations "Wind-down") only wh
    (each overridable from `.env.testnet-live`: e.g. `ORDERLY_IF_MODE=builder` + `ORDERLY_IF_BUILDER_ACCOUNTS`, step 2.4;
    `ORDERLY_ORACLE_WS_URL` defaults to `wss://testnet-ws-oracle.orderly.org`, undocumented, VERIFY O18) and pins
    `ORDERLY_MODE=live`, `OPS_FEE_SWEEP_AUTO=false`, the live mnemonic as the role mnemonic of its signing children,
-   `DEPLOYMENT_FILE=contracts/deployments/46630.live.json`, the database `bookrunner_testnet_live`, Redis db 2,
+   `DEPLOYMENT_FILE=contracts/deployments/46630.live.json`, the database `bookrunner_testnet_live`, its own Redis
+   (`redis://:<REDIS_LIVE_PASSWORD>@127.0.0.1:63791/0`; `REDIS_LIVE_URL` overrides; refused when it is the public Redis
+   or when the infra Redis has a password and `REDIS_LIVE_PASSWORD` is missing), the bus namespace `BKRN_BUS_NS=testnet-live`,
    `.data/testnet-live/{keys,ops-venue/sagas.json}`, ports `API_PORT=4500` / `ORACLE_PORT=4510` / `CHARTER_PORT=4530` (and
    the alerts probes on them), `ALERT_LABEL=BookRunner testnet-live (Orderly rehearsal)` and `ALERT_BACKUP_EXPECTED=0`
    (the daily backup covers both stacks and is recorded in the public stack's Redis db). It starts neither mock-orderly,
@@ -743,7 +778,7 @@ and 2 stay on the mock stack; retire them there (Operations "Wind-down") only wh
    `ORDERLY_BUILDER_KEY_SECRET` or `ORACLE_SEED`, a missing record or one that is not a live-venue record on this vault /
    USDG / broker, a non-https `ORDERLY_BASE_URL`, or `OPS_FEE_SWEEP_AUTO` set to anything but false. ops-venue itself
    refuses an admin-owned builder account without the key secret. In live mode the oracle publishes its signed prices
-   per venue symbol (`bkrn:oracle:venue-feed`) and ops-venue pushes them to the Builder Oracle WebSocket at >= 1/s in
+   per venue symbol (`bkrn:testnet-live:oracle:venue-feed`) and ops-venue pushes them to the Builder Oracle WebSocket at >= 1/s in
    session (log `live builder price push started`, alert `builder_price_push`); the agent quotes maker-only (POST_ONLY)
    while the market is in its POST_ONLY launch phase.
    **Public access (optional, off by default).** nginx routes nothing to the rehearsal stack. To expose its API read-only,
@@ -768,7 +803,7 @@ and 2 stay on the mock stack; retire them there (Operations "Wind-down") only wh
   `ORDERLY_IF_MODE=builder`, where the delegate is confirmed once per book: the adapter only) it returns
   `adapter.accountId(0)`.
 - After the window closes: `OrderlyDeposit` events for IF and MM on each adapter, the vault's USDG balance up by the
-  deposits, the signed venue reports (Redis `bkrn:venue:report:<bookId>`, db 2; `GET 127.0.0.1:4500/v1/books/<id>/venue-report`) show IF and MM equal to the deposits,
+  deposits, the signed venue reports (Redis `bkrn:testnet-live:venue:report:<bookId>` on the live Redis; `GET 127.0.0.1:4500/v1/books/<id>/venue-report`) show IF and MM equal to the deposits,
   readiness `IF funded` PASS (> 100 USDG), the symbols turn `ACTIVE` (readiness `symbol` rows PASS), the agent quotes,
   and the first mark reconciles against Orderly's statement (Operations "Mark reconciliation break").
 
@@ -777,7 +812,7 @@ and 2 stay on the mock stack; retire them there (Operations "Wind-down") only wh
 The public testnet stack is never involved: it keeps running throughout, so there is nothing to switch back.
 
 1. Stop the rehearsal: `sudo systemctl stop bookrunner@testnet-live` (and `disable` if it was enabled). Its record,
-   database, Redis db 2 and `.data/testnet-live/` stay; a restart resumes where it stopped.
+   database, its Redis instance and `.data/testnet-live/` stay; a restart resumes where it stopped.
 2. The live books keep their funds on Orderly's testnet while stopped (marks and reports pause). To recover the USDG,
    run the stack and retire them first (GUARDIAN `setNewBooksPaused(true)`, `MarketCharter.retire`; ops-venue recalls IF
    and MM, final mark, holders redeem; in Orderly One set the markets REDUCE_ONLY / delist as the IF withdrawal requires,
@@ -798,5 +833,5 @@ The public testnet stack is never involved: it keeps running throughout, so ther
 | G4 | **Closed in code (2026-10-18).** `ORDERLY_LISTING_MODE=manual` (default with `ORDERLY_MODE=live`; `api` stays the default in mock mode): the admin lists each market in Orderly One (step 2.3); ops-venue never calls a listing or symbol-status endpoint, provisions the book's accounts and keys and follows `GET /v1/public/info/{symbol}` per symbol (15 s doubling to 5 min, 5 s timeout, 4 at once: a book waiting for its listing never holds up another). State per symbol (awaiting / listed / missing, open for new risk or restricted) in `bkrn:ops-venue:symbol-issues` and the API's `/health` `orderlyListing`. Alerts: `venue_listing_pending` (warning; critical after a Live book has had no market for 30 min), `venue_market_restricted` (REDUCE_ONLY / POST_ONLY warning, DELISTING / DELISTED on a Live book critical), `venue_market_missing` (a listed market gone: Live critical), `venue_listing_check` (5 failed checks), `venue_delist_pending`. The agent quotes and hedges reduce-only while its market is not open (`AGENT_VENUE_MARKET_GATE`); in Orderly's POST_ONLY launch phase it quotes both sides maker-only (POST_ONLY orders within the mandate) to provide the launch depth (`AGENT_VENUE_POST_ONLY_QUOTE`, default true with `ORDERLY_MODE=live`; false = reduce-only); the builder price push pages for a listed market that went missing or restricted. Retirement: set the market REDUCE_ONLY in Orderly One if needed and delist it there when the IF withdrawal of a retiring book waits on it (alert `venue_delist_pending`; ops-venue retries every minute, 24 h ceiling). | O20 |
 | G5 | **Closed in code (2026-10-18)**; Orderly's answer still open. IF account mode: `ORDERLY_IF_MODE=contract` (default, the per-book OrderlyIFAccount delegate account) or `builder` (FALLBACK, not for mainnet without the owner's sign-off, `ORDERLY_IF_MODE_BUILDER_ACK=1`; return tracking per Transfer log, write-off from NAV after 24 h, unadopted-withdrawal and IF-drop alerts: step 2.4; an operator EOA's Orderly account bound by the timelock's `adapter.setIfAccountOwner(eoa)` (OrderlyAdapter v4), listed per book in `ORDERLY_IF_BUILDER_ACCOUNTS`; deposits unchanged on-chain via `Vault.depositTo(eoa, …)`; the operator registers ops-venue's IF key and performs IF withdrawals, returning the USDG to the adapter, ops-venue confirms and sweeps). Mode / binding mismatch: alert `venue_if_account`, no IF provisioning for that book only. Admin clicks per mode: step 2.4. `venueMinIf[Orderly]` per network in `Deploy.s.sol` (testnet 101 USDG). Still to ask Orderly: may a contract (delegate) account be a market's IF account? | O10 |
 | G6 | **Closed in code (2026-10-18).** Builder admin key: the admin wallet registers an Orderly key for its account once (step 2.2) and the operator sets `ORDERLY_BUILDER_KEY_SECRET`; ops-venue refuses an admin-owned `ORDERLY_BUILDER_ACCOUNT_ID` in live mode without it, turns its automated fee sweep off and refuses the `sweep_fees` job (the fee withdrawal needs the admin wallet's signature). Builder fee settlement into the books stays manual (not scripted). | O21 |
-| G7 | **Closed in code (2026-10-18).** dev.ts `--network testnet-live` / unit `bookrunner@testnet-live` (step 3.6): a separate stack next to the public testnet one (own mnemonic, record, DB, Redis db, state, ports; key-separation preflight and supervisor guard), live Orderly testnet values, no mock-orderly / trader-sim / web. The public stack stays on the mock venue. | O22 |
+| G7 | **Closed in code (2026-10-18).** dev.ts `--network testnet-live` / unit `bookrunner@testnet-live` (step 3.6): a separate stack next to the public testnet one (own mnemonic, record, DB, Redis instance, bus namespace, state, ports; key-separation preflight, cross-namespace message drop and supervisor guard), live Orderly testnet values, no mock-orderly / trader-sim / web. The public stack stays on the mock venue. | O22 |
 | G8 | Orderly's testnet itself: chain 46630 in `chain_info`, USDG and the broker allowed on the vault (Orderly action). | O1-O3, O7 |

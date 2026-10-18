@@ -37,6 +37,11 @@ if [ ! -f "$INFRA_ENV" ]; then
   docker volume inspect bookrunner_pgdata >/dev/null 2>&1 \
     && echo "!! the Postgres volume already exists: set the new password in the DB BEFORE restarting anything (HARDENING.md step 4)"
 fi
+# the live-Orderly rehearsal stack's own Redis (redis-live) has its own password: added once to an existing file
+if ! grep -q '^REDIS_LIVE_PASSWORD=' "$INFRA_ENV"; then
+  ( umask 077; printf 'REDIS_LIVE_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> "$INFRA_ENV" )
+  echo "==> added REDIS_LIVE_PASSWORD to $INFRA_ENV (redis-live, 127.0.0.1:63791; applied at the next bookrunner-infra start / reload)"
+fi
 chown root:root "$INFRA_ENV"
 chmod 0600 "$INFRA_ENV"
 

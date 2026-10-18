@@ -18,7 +18,8 @@
 # swap router and prices stay mock / synthetic (no Stock Tokens / Chainlink / Uniswap on RH testnet, VERIFY T3 / C4).
 # REDEPLOY=1 in live mode: refused unless every book of the existing live record is Retired / Cancelled with empty
 # adapters (scripts/rehearsal-guard.ts), FORCE_ARCHIVE=1 overrides; either way the old record, database and state
-# (.data/testnet-live, incl. the Orderly keys of its accounts) are ARCHIVED, never deleted.
+# (.data/testnet-live, incl. the Orderly keys of its accounts, plus a dump of the old DB and the old live Redis snapshot)
+# are ARCHIVED, never deleted; refused while bookrunner@testnet-live runs; the readiness gate runs before any archiving.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -86,9 +87,17 @@ if ! awk -v b="$BAL" -v m="$MIN_ETH" 'BEGIN { exit !(b + 0 >= m + 0) }'; then
 fi
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+ARCHIVE=0
 if [ -f "$REC" ]; then
   [ "${REDEPLOY:-0}" = "1" ] || { echo "$REC exists — set REDEPLOY=1 to deploy a fresh stack"; exit 3; }
   if [ "$VENUE" = live ]; then
+    # never under a running rehearsal stack: its services hold the DB, the state and the Redis being archived
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet bookrunner@testnet-live 2>/dev/null; then
+      echo "!! bookrunner@testnet-live is running: stop it first (sudo systemctl stop bookrunner@testnet-live)"; exit 7
+    fi
+    if ! "$BUN" scripts/rehearsal-guard.ts --supervisor; then
+      echo "!! the testnet-live supervisor is alive (its status key is fresh): stop that stack first"; exit 7
+    fi
     echo "==> REDEPLOY of the live rehearsal: are its books retired and empty? (read-only)"
     if ! "$BUN" scripts/rehearsal-guard.ts --record "$REC" --rpc "$RPC"; then
       if [ "${FORCE_ARCHIVE:-0}" != "1" ]; then
@@ -100,20 +109,41 @@ if [ -f "$REC" ]; then
       echo "!! The archived record and .data/testnet-live keys below are the ONLY way back to those accounts: back them up."
       echo "!! ===================================================================================================="
     fi
-    cp -p "$REC" "${REC%.json}.$STAMP.json"
-    echo "    archived $REC -> ${REC%.json}.$STAMP.json"
-    if [ -d "$STATE" ]; then mv "$STATE" "$STATE.$STAMP"; echo "    archived $STATE -> $STATE.$STAMP (Orderly keys of the old accounts)"; fi
-    if docker exec bookrunner-postgres-1 psql -U bookrunner -d bookrunner -tc "SELECT 1 FROM pg_database WHERE datname='$DB'" | grep -q 1; then
-      docker exec bookrunner-postgres-1 psql -U bookrunner -d bookrunner -c "ALTER DATABASE $DB RENAME TO ${DB}_$(echo "$STAMP" | tr 'A-Z' 'a-z')" >/dev/null
-      echo "    archived database $DB -> ${DB}_$(echo "$STAMP" | tr 'A-Z' 'a-z')"
-    fi
+    ARCHIVE=1
   fi
 fi
 
 if [ "$VENUE" = live ]; then
+  # the gate runs BEFORE anything is archived: a venue that is not ready leaves the old record, DB and state in place
   echo "==> Orderly readiness, venue stage (read-only: the vault must allow USDG and broker $DEPLOY_ORDERLY_BROKER_ID)"
   RHC_TESTNET_RPC_URL="$RPC" "$BUN" scripts/orderly-readiness.ts --stage venue --broker "$DEPLOY_ORDERLY_BROKER_ID" \
-    || { echo "    Orderly has not enabled the testnet venue for us yet (RUNBOOK rehearsal step R1): nothing deployed"; exit 5; }
+    || { echo "    Orderly has not enabled the testnet venue for us yet (RUNBOOK rehearsal step R1): nothing deployed or archived"; exit 5; }
+fi
+
+if [ "$ARCHIVE" = 1 ]; then
+  # archive, never delete: record, state (Orderly keys of the old accounts) with a dump of the old database and a
+  # snapshot of the old live Redis inside it (so the daily backup carries them), then the database renamed and the
+  # live Redis emptied (the new deployment's books 1, 2 must not read the old books' risk state / reports)
+  AR="$STATE.$STAMP"
+  cp -p "$REC" "${REC%.json}.$STAMP.json"
+  echo "    archived $REC -> ${REC%.json}.$STAMP.json"
+  if [ -d "$STATE" ]; then mv "$STATE" "$AR"; else mkdir -p "$AR"; fi
+  chmod 0750 "$AR"
+  echo "    archived $STATE -> $AR (Orderly keys of the old accounts)"
+  if docker exec bookrunner-postgres-1 psql -U bookrunner -d bookrunner -tc "SELECT 1 FROM pg_database WHERE datname='$DB'" | grep -q 1; then
+    ( umask 077; docker exec bookrunner-postgres-1 pg_dump -U bookrunner -Fc -d "$DB" > "$AR/postgres.dump" )
+    DB_AR="${DB}_$(echo "$STAMP" | tr 'A-Z' 'a-z')"
+    docker exec bookrunner-postgres-1 psql -U bookrunner -d bookrunner -c "ALTER DATABASE $DB RENAME TO $DB_AR" >/dev/null
+    echo "    archived database $DB -> $DB_AR (dump in $AR/postgres.dump; drop the renamed DB by hand once no longer needed)"
+  fi
+  if docker inspect bookrunner-redis-live-1 >/dev/null 2>&1; then
+    (
+      if [ -n "${REDIS_LIVE_PASSWORD:-}" ]; then export REDISCLI_AUTH="$REDIS_LIVE_PASSWORD"; else unset REDISCLI_AUTH; fi
+      docker exec -e REDISCLI_AUTH bookrunner-redis-live-1 redis-cli --no-auth-warning SAVE >/dev/null
+      docker cp bookrunner-redis-live-1:/data/dump.rdb "$AR/redis-live.rdb"
+      docker exec -e REDISCLI_AUTH bookrunner-redis-live-1 redis-cli --no-auth-warning FLUSHDB >/dev/null
+    ) && echo "    archived the live Redis snapshot -> $AR/redis-live.rdb, live Redis db 0 emptied"
+  fi
 fi
 
 echo "==> testnet database $DB"

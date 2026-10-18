@@ -7,11 +7,11 @@
 // Sources (tolerant parsing, the oracle service owns the formats): Redis `bkrn:oracle:bundle` (an object
 // with `priceData` hex and/or an array of signed price messages, or a bare array) and the per-key signed
 // messages `KEYS.oracleLast(priceId)` (OraclePriceMsg incl. `signature`).
-import type { PriceUpdate } from "@bookrunner/shared";
+import { KEYS, type PriceUpdate } from "@bookrunner/shared";
 import { type Hex, decodeAbiParameters, encodeAbiParameters, isHex } from "viem";
 
 /** Redis key of the oracle service's latest signed bundle (services-pull). */
-export const ORACLE_BUNDLE_KEY = "bkrn:oracle:bundle";
+export const ORACLE_BUNDLE_KEY = KEYS.oracleBundle;
 
 export interface SignedPrice extends PriceUpdate {
   /** human key (e.g. "NVDA") when the source carried one */

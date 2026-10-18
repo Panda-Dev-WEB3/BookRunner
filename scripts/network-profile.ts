@@ -8,6 +8,7 @@ import type { Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { ADMIN_KEY_OPT_IN, DEV_MNEMONIC, type DevRole, MAINNET_CHAIN_ID, assertDistinctRoleKeys, assertNoMnemonicOnMainnet, devAccount, roleAccount } from "../packages/shared/src/devkeys";
 import { KMS_ENV_FOR_ROLE, SERVICE_ROLES, roleSignerSource } from "../packages/shared/src/signer";
+import { busNames } from "../packages/shared/src/queues";
 
 export type Env = Record<string, string | undefined>;
 
@@ -359,7 +360,8 @@ export function watchedRoleAddresses(env: Env, roles: readonly DevRole[]): { pai
 // A truly SEPARATE stack that runs ALONGSIDE the public testnet stack on the same host (systemd bookrunner@testnet-live
 // next to bookrunner.service): its own role mnemonic (BKRN_TESTNET_LIVE_MNEMONIC: every role key, the deployer and the
 // gas funder differ from the public stack's, so no key ever signs in two places), its own deployment record, database,
-// Redis db, state directory and loopback ports. Env: .env.testnet-live (mode 600, optional) over the process env (the
+// Redis INSTANCE (redis-live, 127.0.0.1:63791) and bus namespace (testnet-live: channels, keys, queues), state directory
+// and loopback ports. Env: .env.testnet-live (mode 600, optional) over the process env (the
 // unit's /etc/bookrunner/testnet-live.env); the public stack's .env.testnet is only READ, to refuse a shared key. No
 // mock-orderly (nothing to serve), no trader-sim (it mints mock USDC), no web dev server. Builder admin key (G6):
 // ops-venue uses ORDERLY_BUILDER_KEY_SECRET, the key the admin wallet registered; its automated fee sweep is off.
@@ -414,8 +416,36 @@ export const TESTNET_LIVE_PINNED: Readonly<Record<string, string>> = {
 /** Processes the live variant never starts. */
 export const TESTNET_LIVE_EXCLUDED = new Set(["mock-orderly", "trader-sim", "web"]);
 
-/** Redis db of each testnet variant (the supervisor guard reads the other one's status key). */
-export const TESTNET_REDIS_DB: Record<TestnetVariant, number> = { testnet: 1, "testnet-live": 2 };
+/**
+ * Redis of each testnet variant: the public stack on the infra Redis (127.0.0.1:63790, db 1, REDIS_PASSWORD), the live
+ * stack on its OWN Redis instance (deploy/server/docker-compose.yml redis-live, 127.0.0.1:63791, db 0,
+ * REDIS_LIVE_PASSWORD). Pub/sub channels are global to a Redis server, so a db index alone would not isolate them.
+ */
+export const TESTNET_REDIS: Record<TestnetVariant, { port: number; db: number; passwordEnv: string }> = {
+  testnet: { port: 63790, db: 1, passwordEnv: "REDIS_PASSWORD" },
+  "testnet-live": { port: 63791, db: 0, passwordEnv: "REDIS_LIVE_PASSWORD" },
+};
+
+/** Bus namespace of each testnet variant (packages/shared queues.ts busNamespace: channels, keys, queues). */
+export const TESTNET_BUS_NS: Record<TestnetVariant, string> = { testnet: "testnet", "testnet-live": "testnet-live" };
+
+/** The REDIS_URL a testnet variant uses (from its password env; none = no auth, the local default). */
+export function variantRedisUrl(env: Env, v: TestnetVariant): string {
+  const r = TESTNET_REDIS[v];
+  const pw = env[r.passwordEnv];
+  return `redis://${pw ? `:${encodeURIComponent(pw)}@` : ""}127.0.0.1:${r.port}/${r.db}`;
+}
+
+/** host:port of a redis URL (for the "same Redis" refusal); null when unparseable. */
+export function redisHostPort(url: string | undefined): string | null {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    return `${u.hostname === "localhost" ? "127.0.0.1" : u.hostname}:${u.port || "6379"}`;
+  } catch {
+    return null;
+  }
+}
 
 /** True when an env (the public testnet profile's) asks for live Orderly: refused there, use --network testnet-live. */
 export function testnetOrderlyLive(env: Env): boolean {
@@ -438,9 +468,17 @@ export function testnetLiveProfile(inherited: Env, explicit: ReadonlySet<string>
   for (const [k, v] of Object.entries(TESTNET_LIVE_DEFAULTS)) env[k] = explicit.has(k) && inherited[k] ? (inherited[k] as string) : v;
   Object.assign(env, TESTNET_LIVE_PINNED);
   const pg = encodeURIComponent(inherited.POSTGRES_PASSWORD || "bookrunner");
-  const redisAuth = inherited.REDIS_PASSWORD ? `:${encodeURIComponent(inherited.REDIS_PASSWORD)}@` : "";
   env.DATABASE_URL = `postgres://bookrunner:${pg}@127.0.0.1:54400/bookrunner_testnet_live`;
-  env.REDIS_URL = `redis://${redisAuth}127.0.0.1:63790/${TESTNET_REDIS_DB["testnet-live"]}`;
+  // its own Redis instance (REDIS_LIVE_URL overrides, e.g. a local test Redis) and its own bus namespace
+  env.REDIS_URL = inherited.REDIS_LIVE_URL?.trim() || variantRedisUrl(inherited, "testnet-live");
+  env.BKRN_BUS_NS = TESTNET_BUS_NS["testnet-live"];
+  const publicRedis = [redisHostPort(variantRedisUrl(inherited, "testnet")), redisHostPort(publicEnv?.REDIS_URL)].filter((x): x is string => !!x);
+  const mineRedis = redisHostPort(env.REDIS_URL);
+  if (!mineRedis) errors.push("the live stack's REDIS_URL is not a redis:// URL");
+  else if (publicRedis.includes(mineRedis)) errors.push(`the live stack's Redis (${mineRedis}) is the public testnet stack's Redis: it needs its own instance (redis-live, 127.0.0.1:63791)`);
+  if (inherited.REDIS_PASSWORD && !inherited.REDIS_LIVE_PASSWORD && !inherited.REDIS_LIVE_URL) {
+    errors.push("REDIS_LIVE_PASSWORD is not set (the infra Redis has a password, the live Redis instance must have its own: .env.infra, install.sh)");
+  }
   // services that call each other over HTTP follow the live ports (only when configured at all)
   if (inherited.CHARTER_URL) env.CHARTER_URL = `http://127.0.0.1:${TESTNET_LIVE_PORTS.charter}`;
   if (inherited.ORACLE_URL) env.ORACLE_URL = `http://127.0.0.1:${TESTNET_LIVE_PORTS.oracle}`;
@@ -510,10 +548,10 @@ export function variantDeployer(env: Env): string | null {
   }
 }
 
-/** REDIS_URL of the OTHER testnet variant (same server, the other variant's db index). */
-export function otherVariantRedisUrl(redisUrl: string, mine: TestnetVariant): string {
+/** The OTHER testnet variant's Redis URL and supervisor status key (its own instance and bus namespace). */
+export function otherVariant(env: Env, mine: TestnetVariant): { variant: TestnetVariant; redisUrl: string; statusKey: string } {
   const other: TestnetVariant = mine === "testnet" ? "testnet-live" : "testnet";
-  return redisUrl.replace(/\/\d+$/, "") + `/${TESTNET_REDIS_DB[other]}`;
+  return { variant: other, redisUrl: variantRedisUrl(env, other), statusKey: busNames(TESTNET_BUS_NS[other]).KEYS.supervisorStatus };
 }
 
 /**

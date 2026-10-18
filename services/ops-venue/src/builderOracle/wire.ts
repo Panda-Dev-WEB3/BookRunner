@@ -1,6 +1,6 @@
 // Wiring of the live builder price push (main.ts): gating, the pushing account / key, the WebSocket client, and the
 // two inputs of the oracle venue feed (channel + periodic key re-read). Redis is injected so tests drive it with fakes.
-import { type BuilderFeedStatusMsg, KEYS, type Logger } from "@bookrunner/shared";
+import { type BuilderFeedStatusMsg, KEYS, type Logger, busDropper } from "@bookrunner/shared";
 import type { Ed25519Key } from "../orderly/auth";
 import type { TrackedBook } from "../worker/context";
 import { BuilderPriceFeed, builderFeedTargets } from "./feed";
@@ -92,8 +92,9 @@ export async function startBuilderPriceFeed(d: BuilderFeedDeps): Promise<Builder
     maxAgeMs: env.OPS_BUILDER_PRICE_MAX_AGE_MS,
   });
   feed = f;
+  const foreign = busDropper((msg, meta) => log.warn(meta, msg)); // another stack's feed (bus namespace)
   d.sub.on("message", (channel, message) => {
-    if (channel === KEYS.oracleVenueFeed) f.onFeedJson(message);
+    if (channel === KEYS.oracleVenueFeed && !foreign(channel, message)) f.onFeedJson(message);
   });
   await d.sub.subscribe(KEYS.oracleVenueFeed).catch((err: unknown) => log.warn({ err: String(err) }, "oracle venue feed subscribe failed (redis down?): the key is re-read every few seconds"));
   socket?.start();

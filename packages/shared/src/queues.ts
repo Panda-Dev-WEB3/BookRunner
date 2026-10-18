@@ -1,38 +1,113 @@
 // BullMQ queue names, Redis pub/sub channels and keys, and job payloads shared across services.
+//
+// Bus namespace (one per STACK, mandatory): every channel, key and BullMQ queue name below carries the namespace of the
+// stack the process belongs to, `bkrn:<ns>:…` (queues `bkrn-<ns>-…`). Redis pub/sub channels are global to a Redis
+// server, whatever the db index, so two stacks on one Redis (or a mis-pointed REDIS_URL) would otherwise receive each
+// other's kills, risk states, oracle prices and domain events. ns = BKRN_BUS_NS, else the network: NETWORK (devnet |
+// testnet | testnet-live | mainnet), else from CHAIN_ID (31337 devnet, 46630 testnet, 4663 mainnet). The live-Orderly
+// rehearsal stack pins BKRN_BUS_NS=testnet-live (scripts/network-profile.ts). Published messages also carry `ns`
+// (busJson); subscribers drop a message whose `ns` differs from theirs (busForeign, logged once per channel and ns).
 import type { VenueMarketMsg } from "./venueMarket";
 
-export const QUEUES = {
-  jury: "bkrn-jury", // charter -> model jury
-  venueOps: "bkrn-venue-ops", // symbol creation, IF funding, withdrawals, reports (ops-venue)
-  marks: "bkrn-marks", // mark per book per period (mark)
-  receipts: "bkrn-receipts", // hourly receipts root per book (receipts)
-  settlements: "bkrn-settlements", // settlement sweep + distribute per book per period (waterfall)
-  webhooks: "bkrn-webhooks", // webhook deliveries (api)
-  events: "bkrn-events", // domain events fan-out (indexer/api)
-} as const;
+const NS_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
-export const CHANNELS = {
-  oraclePrice: (priceId: string) => `bkrn:oracle:price:${priceId}`,
-  quotes: (bookId: number | bigint) => `bkrn:agent:quotes:${bookId}`,
-  fills: (bookId: number | bigint) => `bkrn:agent:fills:${bookId}`,
-  riskState: (bookId: number | bigint) => `bkrn:risk:state:${bookId}`,
-  kill: (bookId: number | bigint) => `bkrn:risk:kill:${bookId}`,
-  domainEvents: "bkrn:events",
-} as const;
+/** The stack's bus namespace from an environment (pure). */
+export function busNamespace(env: Record<string, string | undefined> = process.env): string {
+  const explicit = env.BKRN_BUS_NS?.trim();
+  if (explicit) {
+    if (!NS_RE.test(explicit)) throw new Error(`BKRN_BUS_NS must be lowercase letters, digits and '-' (got "${explicit}")`);
+    return explicit;
+  }
+  const net = env.NETWORK?.trim().toLowerCase();
+  if (net && NS_RE.test(net)) return net;
+  const chainId = Number(env.CHAIN_ID ?? 31337);
+  return chainId === 31337 ? "devnet" : chainId === 46630 ? "testnet" : chainId === 4663 ? "mainnet" : `chain${chainId}`;
+}
 
-export const KEYS = {
-  oracleLast: (priceId: string) => `bkrn:oracle:last:${priceId}`, // JSON OraclePriceMsg
-  oracleBundle: "bkrn:oracle:bundle", // JSON OracleBundleMsg (pull oracle: latest signed priceData, every tick)
-  venueReport: (bookId: number | bigint) => `bkrn:venue:report:${bookId}`, // JSON VenueReportMsg (ops-venue, signed)
-  riskState: (bookId: number | bigint) => `bkrn:risk:state:${bookId}`, // JSON LimitsSnapshot + meta
-  agentHeartbeat: (bookId: number | bigint) => `bkrn:agent:hb:${bookId}`, // unix ms
-  agentQuote: (bookId: number | bigint) => `bkrn:agent:quote:${bookId}`, // JSON QuoteMsg (latest)
-  liveNav: (bookId: number | bigint) => `bkrn:nav:live:${bookId}`, // JSON LiveNav (risk/mark estimate)
-  venueSymbolIssues: "bkrn:ops-venue:symbol-issues", // JSON VenueSymbolIssuesMsg (ops-venue, every book poll, TTL)
-  oracleVenueFeed: "bkrn:oracle:venue-feed", // JSON OracleVenueFeedMsg (oracle, every tick, TTL; also PUBLISHed on the same name)
-  builderFeedStatus: "bkrn:ops-venue:builder-feed", // JSON BuilderFeedStatusMsg (ops-venue live builder price push, TTL)
-} as const;
+/** This process's bus namespace (fixed at start: dev.ts / systemd set the env before a service starts). */
+export const BUS_NS = busNamespace();
 
+/** JSON of a bus message stamped with this stack's namespace (`ns`). */
+export function busJson(msg: object, ns: string = BUS_NS): string {
+  return JSON.stringify({ ...msg, ns });
+}
+
+/**
+ * The foreign namespace of a received bus message, or null when it is this stack's (or carries none: only this
+ * stack's publishers write its namespaced channels). A foreign message must be dropped.
+ */
+export function busForeign(raw: string | object | null | undefined, ns: string = BUS_NS): string | null {
+  let o: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      o = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  const got = o && typeof o === "object" ? (o as { ns?: unknown }).ns : undefined;
+  return typeof got === "string" && got !== ns ? got : null;
+}
+
+/** Drops foreign messages, logging once per (channel, foreign ns). Returns true when the message must be ignored. */
+export function busDropper(warn: (msg: string, meta: Record<string, unknown>) => void, ns: string = BUS_NS): (channel: string, raw: string | object) => boolean {
+  const seen = new Set<string>();
+  return (channel, raw) => {
+    const foreign = busForeign(raw, ns);
+    if (foreign === null) return false;
+    const k = `${channel}|${foreign}`;
+    if (!seen.has(k)) {
+      seen.add(k);
+      warn("bus message from another stack dropped (namespace mismatch)", { channel, ns: foreign, mine: ns });
+    }
+    return true;
+  };
+}
+
+/** Channel / key / queue names of a namespace (BUS_NS for this process; another stack's for tests and guards). */
+export function busNames(ns: string = BUS_NS) {
+  const p = `bkrn:${ns}`;
+  return {
+    QUEUES: {
+      jury: `bkrn-${ns}-jury`, // charter -> model jury
+      venueOps: `bkrn-${ns}-venue-ops`, // symbol creation, IF funding, withdrawals, reports (ops-venue)
+      marks: `bkrn-${ns}-marks`, // mark per book per period (mark)
+      receipts: `bkrn-${ns}-receipts`, // hourly receipts root per book (receipts)
+      settlements: `bkrn-${ns}-settlements`, // settlement sweep + distribute per book per period (waterfall)
+      webhooks: `bkrn-${ns}-webhooks`, // webhook deliveries (api)
+      events: `bkrn-${ns}-events`, // domain events fan-out (indexer/api)
+    },
+    CHANNELS: {
+      oraclePrice: (priceId: string) => `${p}:oracle:price:${priceId}`,
+      quotes: (bookId: number | bigint) => `${p}:agent:quotes:${bookId}`,
+      fills: (bookId: number | bigint) => `${p}:agent:fills:${bookId}`,
+      riskState: (bookId: number | bigint) => `${p}:risk:state:${bookId}`,
+      kill: (bookId: number | bigint) => `${p}:risk:kill:${bookId}`,
+      /** psubscribe pattern over every book's kill channel */
+      killPattern: `${p}:risk:kill:*`,
+      domainEvents: `${p}:events`,
+    },
+    KEYS: {
+      oracleLast: (priceId: string) => `${p}:oracle:last:${priceId}`, // JSON OraclePriceMsg
+      oracleBundle: `${p}:oracle:bundle`, // JSON OracleBundleMsg (pull oracle: latest signed priceData, every tick)
+      venueReport: (bookId: number | bigint) => `${p}:venue:report:${bookId}`, // JSON VenueReportMsg (ops-venue, signed; also PUBLISHed on the same name)
+      venueReportRecent: (bookId: number | bigint) => `${p}:venue:report:${bookId}:recent`, // list, newest first
+      riskState: (bookId: number | bigint) => `${p}:risk:state:${bookId}`, // JSON LimitsSnapshot + meta
+      agentHeartbeat: (bookId: number | bigint) => `${p}:agent:hb:${bookId}`, // unix ms
+      agentQuote: (bookId: number | bigint) => `${p}:agent:quote:${bookId}`, // JSON QuoteMsg (latest)
+      liveNav: (bookId: number | bigint) => `${p}:nav:live:${bookId}`, // JSON LiveNav (risk/mark estimate)
+      venueSymbolIssues: `${p}:ops-venue:symbol-issues`, // JSON VenueSymbolIssuesMsg (ops-venue, every book poll, TTL)
+      oracleVenueFeed: `${p}:oracle:venue-feed`, // JSON OracleVenueFeedMsg (oracle, every tick, TTL; also PUBLISHed on the same name)
+      builderFeedStatus: `${p}:ops-venue:builder-feed`, // JSON BuilderFeedStatusMsg (ops-venue live builder price push, TTL)
+      supervisorStatus: `${p}:supervisor:status`, // JSON SupervisorStatus (scripts/dev.ts)
+    },
+  };
+}
+
+const NAMES = busNames();
+export const QUEUES = NAMES.QUEUES;
+export const CHANNELS = NAMES.CHANNELS;
+export const KEYS = NAMES.KEYS;
 /** The oracle refreshes KEYS.oracleVenueFeed every tick; a stopped oracle lets it expire (ops-venue then stops pushing). */
 export const ORACLE_VENUE_FEED_TTL_SEC = 30;
 /**

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Deployment } from "../packages/shared/src/types";
-import { recordBooks, redeployVerdict } from "./rehearsal-guard";
+import { recordBooks, redeployVerdict, supervisorRunning } from "./rehearsal-guard";
 
 const empty = [0n, 0n, 0n, 0n, 0n];
 
@@ -23,5 +23,13 @@ describe("rehearsal REDEPLOY guard (VERIFY O17)", () => {
     expect(recordBooks({ books: [], launch: { complete: false, launched: [b(1)] } } as Pick<Deployment, "books" | "launch">).map((x) => x.bookId)).toEqual([1]);
     expect(recordBooks({ books: [b(1), b(2)], launch: { complete: true } }).map((x) => x.bookId)).toEqual([1, 2]);
     expect(recordBooks({ books: [b(1)], launch: { complete: false, launched: [b(1), b(2)] } }).map((x) => x.bookId)).toEqual([1, 2]);
+  });
+
+  test("--supervisor: a fresh testnet-live supervisor status means the stack runs (deploy-testnet.sh refuses to archive)", () => {
+    const st = (ts: number) => JSON.stringify({ v: 1, ts, network: "testnet-live", startedAt: 0, procs: [] });
+    expect(supervisorRunning(st(1_000_000), 1_010_000)).toBe(true);
+    expect(supervisorRunning(st(1_000_000), 1_000_000 + 91_000)).toBe(false);
+    expect(supervisorRunning(null, 1)).toBe(false);
+    expect(supervisorRunning("garbage", 1)).toBe(false);
   });
 });

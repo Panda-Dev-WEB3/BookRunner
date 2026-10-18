@@ -8,6 +8,7 @@ writes one **set** per run to `/var/backups/bookrunner/daily/<UTC stamp>/` and h
 |---|---|---|
 | `postgres.dump` | `bookrunner_<network>` (Timescale hypertables and compressed chunks included) | `pg_dump -Fc`, checked with `pg_restore -l` |
 | `postgres-live.dump` | testnet host with the live-Orderly rehearsal stack (`bookrunner@testnet-live`): `bookrunner_testnet_live` | as above; only when that database exists (`BACKUP_LIVE_REHEARSAL=off` skips it) |
+| `redis-live.rdb` | the rehearsal stack's own Redis (`redis-live`) | `BGSAVE` with `REDIS_LIVE_PASSWORD`; only with `postgres-live.dump` and a running container |
 | `redis.rdb` | every Redis db (risk journals, signed venue reports, oracle bundle, queues, alert state) | `BGSAVE` then `docker cp` of `dump.rdb` |
 | `state.tar.gz` | `.data/<network>/` (mock venue snapshot, **ops keys**, sagas; logs left out), with the rehearsal stack also `.data/testnet-live/` (its **Orderly keys**: they control accounts holding real testnet USDG), and `contracts/deployments/*.json` (incl. `46630.live.json` and archived `46630.live.<stamp>.json`) | `tar` (symlinks are stored as links, never followed) |
 | `MANIFEST`, `SHA256SUMS` | app commit, image references, checksums | |
@@ -182,8 +183,8 @@ before step 4, restorable with step 4.
 The rehearsal stack runs next to the public testnet stack (docs/RUNBOOK.md "Testnet rehearsal on real Orderly"). The
 daily set covers it automatically once `bookrunner_testnet_live` exists: `postgres-live.dump`, `.data/testnet-live/`
 (ops / trade keys of the Orderly accounts that hold **real testnet USDG**: without them and the record, those funds can
-only be recovered through Orderly) and `contracts/deployments/46630.live.json` in `state.tar.gz`, Redis db 2 in
-`redis.rdb`. Keep `.env.testnet-live` offline as well. `backup.sh --verify` restores `postgres-live.dump` into a
+only be recovered through Orderly) and `contracts/deployments/46630.live.json` in `state.tar.gz`, its own Redis
+(`redis-live`, 127.0.0.1:63791) in `redis-live.rdb`. Keep `.env.testnet-live` offline as well. `backup.sh --verify` restores `postgres-live.dump` into a
 scratch database and counts the keys in the tar (the monthly drill covers it). Restore only the rehearsal stack:
 
 ```bash
@@ -205,5 +206,13 @@ ls -la "$APP/.data/$NET/keys"
 systemctl start bookrunner@testnet-live; sleep 60; curl -s http://127.0.0.1:4500/health; echo
 ```
 
-Redis: restoring `redis.rdb` (step 4) replaces every db, the public stack's included. For the rehearsal alone skip it:
+Redis: the rehearsal has its own instance, so step 4 with `RD=bookrunner-redis-live-1` and `redis-live.rdb` restores it
+without touching the public stack's Redis (`REDISCLI_AUTH` = `REDIS_LIVE_PASSWORD` from `.env.infra`); or skip it:
 ops-venue re-signs its venue reports within a minute and the risk service rebuilds its state from the chain.
+
+**Archived rehearsal state (retention).** A rehearsal `REDEPLOY` (scripts/deploy-testnet.sh) archives the old state as
+`.data/testnet-live.<stamp>/` with the old Orderly keys, `postgres.dump` (the old database) and `redis-live.rdb` (the
+old live Redis) inside it; every daily set carries these directories (`state.tar.gz`) for as long as they exist, and
+the renamed database `bookrunner_testnet_live_<stamp>` stays on the host. Remove both by hand only once the old books'
+Orderly accounts are empty (retired and recalled): `rm -rf .data/testnet-live.<stamp>` and `DROP DATABASE
+bookrunner_testnet_live_<stamp>`; the sets of the last 14 days / 8 weeks still hold them.

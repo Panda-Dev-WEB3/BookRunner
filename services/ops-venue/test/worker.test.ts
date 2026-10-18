@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ACCOUNT, RECEIPT_KIND, strToBytes32, type VenueAccount } from "@bookrunner/shared";
+import { ACCOUNT, BUS_NS, RECEIPT_KIND, busJson, strToBytes32, type VenueAccount } from "@bookrunner/shared";
 import { computeReport, dropSuspicious } from "../src/domain/report";
 import { keyFromSecret } from "../src/orderly/auth";
 import { OrderlyVenue } from "../src/client";
@@ -94,6 +94,23 @@ describe("provisioning", () => {
 });
 
 describe("kill -> venue key revocation", () => {
+  test("a kill stamped with ANOTHER stack's bus namespace never revokes this stack's key (cross-stack isolation)", async () => {
+    const t = await service();
+    t.mock.venue.credit(MM_ID, 75_000_000_000);
+    t.mock.venue.setPrice("NVDA", 190, false);
+    t.mock.venue.credit(IF_ID, 25_000_000_000);
+    const agent = new OrderlyVenue({ baseUrl: BASE, accountId: MM_ID, symbol: SYMBOL, mode: "mock", bookId: 1, keysDir: t.keys.dir, fetch: t.mock.fetch });
+    await agent.replaceQuote({ bid: { px: 189, qty: 1 }, ask: { px: 191, qty: 1 } });
+    const kill = { bookId: 1, ts: Date.now(), reason: "DRAWDOWN", breaches: [] };
+    await t.svc.onKillMessage(busJson(kill, BUS_NS === "testnet-live" ? "testnet" : "testnet-live"));
+    expect(t.mock.venue.openOrders(MM_ID)).toHaveLength(2);
+    expect(t.store.events.filter((e) => e.type === "agent.revoked")).toHaveLength(0);
+    // the same kill on this stack's namespace revokes
+    await t.svc.onKillMessage(busJson(kill));
+    expect(t.mock.venue.openOrders(MM_ID)).toHaveLength(0);
+    expect(t.store.events.filter((e) => e.type === "agent.revoked")).toHaveLength(1);
+  });
+
   test("revoke_key job: cancel-all, key removed (401 after), DB revoked, DECISION receipt, one agent.revoked event", async () => {
     const t = await service();
     t.mock.venue.credit(MM_ID, 75_000_000_000);
