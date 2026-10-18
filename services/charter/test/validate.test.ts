@@ -55,6 +55,17 @@ describe("validateCharter (MarketCharter.validate mirror)", () => {
     });
   }
 
+  test("audit M-1: Junior notice of at least one mark interval (when the interval is known)", () => {
+    const ctx = { ...devValidationContext, markInterval: 3600 };
+    expect(validateCharter(nvdaCharter({ juniorNoticeSeconds: 3600n }), ctx).ok).toBe(true);
+    const r = validateCharter(nvdaCharter({ juniorNoticeSeconds: 3599n }), ctx);
+    expect(r.reason).toBe("BAD_NOTICE");
+    expect(r.reasons).toEqual(["BAD_NOTICE"]);
+    expect(validateCharter(nvdaCharter({ juniorNoticeSeconds: 0n }), ctx).reason).toBe("BAD_NOTICE");
+    // interval unknown (chain unreachable): not checked locally, the on-chain validate() still is
+    expect(validateCharter(nvdaCharter({ juniorNoticeSeconds: 0n }), devValidationContext).ok).toBe(true);
+  });
+
   test("boundaries accepted exactly at the limits", () => {
     expect(v(nvdaCharter({ ifTargetUsd: usd("25000") })).ok).toBe(true);
     expect(v(nvdaCharter({ subscriptionWindow: 60 })).ok).toBe(true);

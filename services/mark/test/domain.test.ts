@@ -19,6 +19,7 @@ import {
   recoverMarkSigner,
   signMark,
 } from "../src/index";
+import { markHeld } from "../src/domain/held";
 import { NVDA, P, TSLA, USDC, snapshot } from "./fixtures";
 
 describe("NAV composition", () => {
@@ -138,7 +139,7 @@ describe("MarkPnl JSON", () => {
     expect(canonicalJson(pnl).startsWith('{"bookId":"1","deployedValueUsd":"108600.000000","desk":{"hedgeValueUsd":"7600.000000"')).toBe(true);
     expect(pnlJsonHash(build())).toBe(pnlJsonHash(pnl)); // deterministic rebuild
     // pinned: any change to formats / field set / canonicalisation must be deliberate
-    expect(pnlJsonHash(pnl)).toBe("0xec3f522b80265a9e3fa879c5bc4a8f0b0c5daaf917a155a389a7d0e29ee87093");
+    expect(pnlJsonHash(pnl)).toBe("0x9d77b843d377467d3dea1082000fdfa962dd2d20da3bb1a49b6e9a40d92dfba3");
     expect(pnlJsonHash(build({ vaultIdle: usd("2001") }))).not.toBe(pnlJsonHash(pnl));
   });
 
@@ -170,7 +171,7 @@ describe("EIP-712 mark signature", () => {
   test("signature recovers to the mark signer; digest matches shared typed data", async () => {
     const signer = devAccount("markSigner");
     const registry = "0x5FbDB2315678afecb367f032d93F642f64180aa3" as const;
-    const input = { bookId: 1n, periodEnd: BigInt(P), navUsd: usd("110600"), deployedValueUsd: usd("108600"), flowNonce: 7n, inventoryRoot: `0x${"11".repeat(32)}`, pnlJsonHash: `0x${"22".repeat(32)}`, receiptsRoot: `0x${"33".repeat(32)}` } as const;
+    const input = { bookId: 1n, periodEnd: BigInt(P), navUsd: usd("110600"), deployedValueUsd: usd("108600"), flowNonce: 7n, inventoryRoot: `0x${"11".repeat(32)}`, pnlJsonHash: `0x${"22".repeat(32)}`, receiptsRoot: `0x${"33".repeat(32)}`, held: false } as const;
     const sig = await signMark(signer, 31337, registry, input);
     expect((await recoverMarkSigner(31337, registry, input, sig)).toLowerCase()).toBe(signer.address.toLowerCase());
     expect(markDigest(31337, registry, input)).toBe(hashTypedData(markTypedData(31337, registry, input)));
@@ -217,5 +218,40 @@ describe("venue report freshness (Orderly)", () => {
     expect(venueReportAge(0, P + 40, P + 30, 1200)).toEqual({ stale: false, ageSec: 0 }); // reported after the block
     expect(venueReportAge(1, 0, P + 30, 1200).stale).toBe(false); // engine: valued live on-chain
     expect(venueReportAge(0, 0, P + 30, 0).stale).toBe(false); // 0 disables
+  });
+});
+
+describe("held marks (audit M-1)", () => {
+  const s = snapshot();
+  const pos = s.desk.positions[0]!;
+
+  test("not held when every price the valuation used is live", () => {
+    expect(markHeld(s)).toEqual({ held: false, reasons: [], underlyingUnknown: false });
+  });
+
+  test("held when the oracle signed the underlying's price as held", () => {
+    const h = markHeld({ ...s, underlyingPrice: { ...s.underlyingPrice!, held: true } });
+    expect(h).toEqual({ held: true, reasons: ["underlying"], underlyingUnknown: false });
+  });
+
+  test("held when a desk position is valued at a held price; empty positions do not count", () => {
+    expect(markHeld({ ...s, desk: { ...s.desk, positions: [{ ...pos, priceHeld: true }] } }).reasons).toEqual(["NVDA"]);
+    expect(markHeld({ ...s, desk: { ...s.desk, positions: [{ ...pos, qtyRaw: 0n, priceHeld: true }] } }).held).toBe(false);
+  });
+
+  test("unknown underlying price state is reported, not treated as held", () => {
+    expect(markHeld({ ...s, underlyingPrice: null })).toEqual({ held: false, reasons: [], underlyingUnknown: true });
+  });
+
+  test("the MarkPnl statement records the flag (hashed into pnlJsonHash)", () => {
+    const build = (snap: typeof s) => {
+      const nav = composeNav(snap);
+      return buildMarkPnl({ snapshot: snap, periodEnd: P, nav, preview: previewTranches(snap, nav.navUsd), extras: { feeFlowUsd: 0n, fundingUsd: 0n, prevUnrealizedUsd: 0n, lastQuoteSkewBps: null } });
+    };
+    const live = build(s);
+    const held = build({ ...s, underlyingPrice: { ...s.underlyingPrice!, held: true } });
+    expect(live.held).toBe(false);
+    expect(held.held).toBe(true);
+    expect(pnlJsonHash(held)).not.toBe(pnlJsonHash(live));
   });
 });

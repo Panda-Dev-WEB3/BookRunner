@@ -80,6 +80,12 @@ export interface MarkInput {
   inventoryRoot: Hex;
   pnlJsonHash: Hex;
   receiptsRoot: Hex;
+  /**
+   * The valuation used a held oracle price (the oracle's signed price state for the book's underlying:
+   * session closed / feed held). Book.applyMark then books the P&L but defers redemption and top-up
+   * settlement to the first non-held mark (audit M-1). Signed: part of the EIP-712 Mark.
+   */
+  held: boolean;
 }
 
 /** Off-chain mark statement; keccak256(canonicalJson(pnl)) == MarkInput.pnlJsonHash. */
@@ -94,6 +100,8 @@ export interface MarkPnl {
   pnl: { realizedUsd: string; unrealizedUsd: string; feeFlowUsd: string; fundingUsd: string; markPnlUsd: string };
   tranches: { seniorNav: string; juniorNav: string; seniorPrice: string; juniorPrice: string };
   limits: { inventoryUtil: number; skewUtil: number; hedgeRatioBps: number; drawdownBps: number };
+  /** == MarkInput.held: valued at a held oracle price, so the mark settles no redemption / top-up (audit M-1). */
+  held: boolean;
 }
 
 /** Deployment file written by contracts/script/Deploy.s.sol + LaunchBooks.s.sol. */

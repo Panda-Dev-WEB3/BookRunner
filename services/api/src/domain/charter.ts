@@ -226,6 +226,8 @@ export function draftToCharter(d: CharterDraft, ctx: DraftContext = {}): DraftCo
 // ------------------------------------------------------------------ local validation
 export interface ValidationContext {
   venueMinIfUsd?: [bigint, bigint];
+  /** config.markInterval(): the minimum Junior notice (audit M-1); undefined when unknown (not checked). */
+  markInterval?: number;
   /** true/false when checked against the registry; null/undefined when unknown. */
   underlyingKnown?: boolean | null;
   newBooksPaused?: boolean;
@@ -254,6 +256,9 @@ export function validateCharterLocal(c: Charter, ctx: ValidationContext = {}): C
     add("BAD_WINDOW", "subscriptionWindowSeconds", "Subscription window must be between 60 seconds and 30 days");
   }
   if (c.juniorNoticeSeconds > BigInt(THIRTY_DAYS)) add("BAD_NOTICE", "juniorNoticeSeconds", "Junior notice must be at most 30 days");
+  if (ctx.markInterval !== undefined && c.juniorNoticeSeconds < BigInt(ctx.markInterval)) {
+    add("BAD_NOTICE", "juniorNoticeSeconds", `Junior notice must be at least one mark interval (${ctx.markInterval} seconds)`);
+  }
 
   const m = c.mandate;
   if (m.maxInventoryUsd === 0n) add("BAD_MANDATE", "mandate.maxInventoryUsd", "Mandate max inventory must be above 0");

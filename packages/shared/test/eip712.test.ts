@@ -12,12 +12,15 @@ import {
   decodeVenueReport,
   encodePriceData,
   encodeVenueReport,
+  markTypedData,
+  markTypes,
   priceTypedData,
   priceUpdateFromMsg,
   venueReportTypedData,
   venueReportTypes,
 } from "../src/eip712";
 import { KEYS, type OraclePriceMsg } from "../src/queues";
+import type { MarkInput } from "../src/types";
 
 const ORACLE = "0x00000000000000000000000000000000000000aa" as const;
 const ADAPTER = "0x00000000000000000000000000000000000000bb" as const;
@@ -127,5 +130,55 @@ describe("signed venue reports", () => {
   test("redis keys", () => {
     expect(KEYS.oracleBundle).toBe("bkrn:oracle:bundle");
     expect(KEYS.venueReport(3)).toBe("bkrn:venue:report:3");
+  });
+});
+
+// ---- signed marks (MarkRegistry.sol MARK_TYPEHASH; audit M-1 added the signed `held` flag) ----
+
+/** == MARK_STRUCT_HASH_VECTOR in contracts/test/core/MarkRegistry.t.sol (test_markStructHash_parityVector). */
+const MARK_STRUCT_HASH_VECTOR = "0x5ed67b6c5b3d7f71865d814669c6d89b6876b79c379bbad9b3a70759f4cc6de3";
+
+describe("mark struct hash parity", () => {
+  const word = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as Hex;
+  const mark: MarkInput = {
+    bookId: 7n,
+    periodEnd: 1_700_006_400n,
+    navUsd: 110_600_000_000n,
+    deployedValueUsd: 108_600_000_000n,
+    flowNonce: 3n,
+    inventoryRoot: word(0x11),
+    pnlJsonHash: word(0x22),
+    receiptsRoot: word(0x33),
+    held: true,
+  };
+
+  test("type string matches MarkRegistry.MARK_TYPEHASH", () => {
+    const expected = keccak256(
+      toHex("Mark(uint256 bookId,uint64 periodEnd,uint256 navUsd,uint256 deployedValueUsd,uint64 flowNonce,bytes32 inventoryRoot,bytes32 pnlJsonHash,bytes32 receiptsRoot,bool held)"),
+    );
+    const encoded = encodeAbiParameters([{ type: "bytes32" }, ...markTypes.Mark.map((f) => ({ type: f.type }))], [
+      expected,
+      mark.bookId,
+      mark.periodEnd,
+      mark.navUsd,
+      mark.deployedValueUsd,
+      mark.flowNonce,
+      mark.inventoryRoot,
+      mark.pnlJsonHash,
+      mark.receiptsRoot,
+      mark.held,
+    ]);
+    expect(hashStruct({ data: mark, primaryType: "Mark", types: markTypes })).toBe(keccak256(encoded));
+  });
+
+  test("struct hash equals the Solidity vector; `held` is signed", async () => {
+    expect(hashStruct({ data: mark, primaryType: "Mark", types: markTypes })).toBe(MARK_STRUCT_HASH_VECTOR);
+    expect(hashStruct({ data: { ...mark, held: false }, primaryType: "Mark", types: markTypes })).not.toBe(MARK_STRUCT_HASH_VECTOR);
+    const signer = devAccount("markSigner");
+    const registry = "0x00000000000000000000000000000000000000cc" as const;
+    const sig = await signer.signTypedData(markTypedData(31337, registry, mark));
+    expect(await recoverTypedDataAddress({ ...markTypedData(31337, registry, mark), signature: sig })).toBe(signer.address);
+    // flipping `held` (a relayer turning a held mark into a settling one) breaks the signature
+    expect(await recoverTypedDataAddress({ ...markTypedData(31337, registry, { ...mark, held: false }), signature: sig })).not.toBe(signer.address);
   });
 });

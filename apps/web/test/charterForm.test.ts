@@ -45,7 +45,7 @@ describe("charter form", () => {
       seniorHurdleBps: 6000,
       seniorCapBps: 7000,
       subscriptionWindowSeconds: 600,
-      juniorNoticeSeconds: 900,
+      juniorNoticeSeconds: 86_400,
       takerFeeBps: 0,
       meta: { name: "NVDA book" },
     });

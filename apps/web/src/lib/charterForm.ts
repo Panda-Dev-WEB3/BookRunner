@@ -78,7 +78,7 @@ export const DEFAULT_FORM: CharterForm = {
   seniorCapBps: "7000",
   seniorShareBps: "6000",
   windowSeconds: "600",
-  juniorNoticeSeconds: "900",
+  juniorNoticeSeconds: "86400",
   perWalletCapUsd: "250000",
 };
 
@@ -109,7 +109,7 @@ export const FIELD_HELP: Record<string, string> = {
   seniorCapBps: "Senior's maximum share of book capital at window close",
   seniorShareBps: "Senior share of net fee flow after expenses and protocol carry; Junior takes the residual",
   windowSeconds: "Subscription window length (60 seconds to 30 days)",
-  juniorNoticeSeconds: "Junior redemption notice. Notice is not a gate: requests are always accepted",
+  juniorNoticeSeconds: "Junior redemption notice, at least one mark interval. Notice is not a gate: requests are always accepted",
   perWalletCapUsd: "Per-wallet commitment cap per window (0 = none; the sponsor is exempt)",
 };
 
@@ -211,7 +211,7 @@ export function formIssues(f: CharterForm): FieldIssue[] {
   const win = int(f.windowSeconds);
   if (!Number.isInteger(win) || win < 60 || win > THIRTY_DAYS) add("windowSeconds", "Subscription window must be between 60 seconds and 30 days");
   const notice = int(f.juniorNoticeSeconds);
-  if (!Number.isInteger(notice) || notice < 0 || notice > THIRTY_DAYS) add("juniorNoticeSeconds", "Junior notice must be between 0 and 30 days");
+  if (!Number.isInteger(notice) || notice < 0 || notice > THIRTY_DAYS) add("juniorNoticeSeconds", "Junior notice must be between one mark interval and 30 days");
   if (!USD_RE.test(f.perWalletCapUsd.trim())) add("perWalletCapUsd", "Per-wallet cap: a USD amount (0 = none)");
   return out;
 }

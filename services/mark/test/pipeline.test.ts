@@ -93,6 +93,27 @@ describe("MarkPipeline", () => {
     expect(store.rows.get(1)?.appliedTx).toBeDefined();
   });
 
+  test("audit M-1: a valuation at a price the oracle signed as held commits a signed held mark", async () => {
+    const { chain, store, pipeline, signer } = setup();
+    chain.snap = { ...chain.snap, underlyingPrice: { ...chain.snap.underlyingPrice!, held: true } };
+    const out = await pipeline.run({ bookId: 1, periodEnd: P });
+    expect(out.status).toBe("applied");
+    if (out.status !== "applied") return;
+    expect(out.input.held).toBe(true);
+    const row = store.rows.get(1)!;
+    expect(row.input.held).toBe(true);
+    expect(row.pnl.held).toBe(true);
+    expect(await signer.recover(row.input, row.signature)).toBe(signer.address);
+    // the flag is signed: the same signature does not verify a non-held copy
+    expect(await signer.recover({ ...row.input, held: false }, row.signature)).not.toBe(signer.address);
+  });
+
+  test("live prices: the mark is not held", async () => {
+    const { pipeline } = setup();
+    const out = await pipeline.run({ bookId: 1, periodEnd: P });
+    expect(out.status === "applied" && out.input.held).toBe(false);
+  });
+
   test("dry run sends nothing", async () => {
     const { chain, pipeline } = setup();
     const out = await pipeline.run({ bookId: 1, periodEnd: P }, { dryRun: true });
@@ -172,7 +193,7 @@ describe("spool serialisation", () => {
       markId: 3,
       bookId: 1,
       periodEnd: P,
-      input: { bookId: 1n, periodEnd: BigInt(P), navUsd: 5n, deployedValueUsd: 4n, flowNonce: 2n, inventoryRoot: "0x01", pnlJsonHash: "0x02", receiptsRoot: "0x03" },
+      input: { bookId: 1n, periodEnd: BigInt(P), navUsd: 5n, deployedValueUsd: 4n, flowNonce: 2n, inventoryRoot: "0x01", pnlJsonHash: "0x02", receiptsRoot: "0x03", held: false },
       pnl: { bookId: "1" } as MarkRow["pnl"],
       signer: "0x0000000000000000000000000000000000000001",
       signature: "0x04",

@@ -47,6 +47,7 @@ import { usd } from "../packages/shared/src/units";
 
 const RPC = process.env.RPC_URL ?? "http://127.0.0.1:8547";
 const WINDOW = Number(process.env.LAUNCH_WINDOW_SECONDS ?? 120);
+// at least one on-chain mark interval: MarketCharter.validate rejects a shorter notice (audit M-1)
 const JUNIOR_NOTICE = BigInt(process.env.LAUNCH_JUNIOR_NOTICE_SECONDS ?? 900);
 const JURY_WAIT_MS = Number(process.env.LAUNCH_JURY_WAIT_SECONDS ?? 90) * 1000;
 const CLOSE_GRACE_MS = Number(process.env.LAUNCH_CLOSE_GRACE_SECONDS ?? 30) * 1000;
@@ -107,7 +108,7 @@ interface LaunchSpec {
   takerFeeBps: number;
 }
 
-function buildCharter(s: LaunchSpec) {
+function buildCharter(s: LaunchSpec, markInterval: bigint) {
   const allow = hedgeAllowTree(s.hedgeTokens.map((t) => ({ asset: tokenUnderlying(t), venue: HEDGE_VENUES.UNIV3 })));
   return {
     underlying: s.underlying,
@@ -130,7 +131,7 @@ function buildCharter(s: LaunchSpec) {
     seniorHurdleBps: 6000,
     seniorCapBps: 7000,
     subscriptionWindow: WINDOW,
-    juniorNoticeSeconds: JUNIOR_NOTICE,
+    juniorNoticeSeconds: JUNIOR_NOTICE > markInterval ? JUNIOR_NOTICE : markInterval,
     sponsor: acct.sponsor.address,
     perWalletCapUsd: usd(250_000),
     symbol: strToBytes32(s.symbol),
@@ -250,7 +251,8 @@ async function waitJury(committee: Address, id: bigint): Promise<void> {
 
 async function launchBook(d: Deployment, s: LaunchSpec) {
   const c = d.contracts;
-  const charter = buildCharter(s);
+  const markInterval = await read<number>(c.config, [{ type: "function", name: "markInterval", inputs: [], outputs: [{ type: "uint32" }], stateMutability: "view" }], "markInterval");
+  const charter = buildCharter(s, BigInt(markInterval));
   const fee = await read<bigint>(c.config, [{ type: "function", name: "charterFeeUsd", inputs: [], outputs: [{ type: "uint256" }], stateMutability: "view" }], "charterFeeUsd");
   await send(acct.sponsor, c.usdc, mockERC20Abi as Abi, "approve", [c.charter, fee]);
   const filed = await send(acct.sponsor, c.charter, marketCharterAbi as Abi, "file", [charter]);

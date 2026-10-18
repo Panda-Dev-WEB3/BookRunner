@@ -15,6 +15,8 @@ export interface DeskPosition {
   priceStale: boolean;
   /** priceWad comes from the oracle's signed bundle (newer than the stored on-chain price; rides in the mark tx). */
   signedPrice?: boolean;
+  /** the oracle signed priceWad as held (session closed / feed held): the mark is then held (audit M-1). */
+  priceHeld?: boolean;
 }
 
 /** Everything a mark needs, read at ONE block. */

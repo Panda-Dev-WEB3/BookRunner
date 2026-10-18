@@ -111,7 +111,7 @@ describe.skipIf(!ENABLED)("on-chain: MarkRegistry.commitAndApply + pull-oracle r
     const chain = markChain();
     const head = await pc.getBlock();
     const periodEnd = (head.timestamp / 300n) * 300n;
-    const input = { bookId: 1n, periodEnd, navUsd: usd("101000"), deployedValueUsd: usd("100000"), flowNonce: 0n, inventoryRoot: `0x${"11".repeat(32)}` as Hex, pnlJsonHash: `0x${"22".repeat(32)}` as Hex, receiptsRoot: `0x${"33".repeat(32)}` as Hex };
+    const input = { bookId: 1n, periodEnd, navUsd: usd("101000"), deployedValueUsd: usd("100000"), flowNonce: 0n, inventoryRoot: `0x${"11".repeat(32)}` as Hex, pnlJsonHash: `0x${"22".repeat(32)}` as Hex, receiptsRoot: `0x${"33".repeat(32)}` as Hex, held: false };
     const sig = await new LocalMarkSigner(markSigner, 31337, c.markRegistry).sign(input);
     const p = await price(head.timestamp);
     const priceData = encodePriceData([p]);

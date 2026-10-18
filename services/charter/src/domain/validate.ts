@@ -26,9 +26,11 @@ export const MAX_NOTICE_SECONDS = 30n * 86_400n;
 export const MIN_KILL_DRAWDOWN_BPS = -5000;
 export const MAX_INHOUSE_TAKER_FEE_BPS = 100;
 
-/** Chain facts validate() reads (config.venueMinIfUsd, registry.isCanonical / isIndex). */
+/** Chain facts validate() reads (config.venueMinIfUsd / markInterval, registry.isCanonical / isIndex). */
 export interface ValidationContext {
   venueMinIfUsd(venue: number): bigint;
+  /** config.markInterval(): minimum Junior notice (audit M-1). Absent = not checked (chain unknown). */
+  markInterval?: number;
   isCanonicalToken(token: Address): boolean;
   isIndex(underlying: Hex): boolean;
 }
@@ -74,6 +76,10 @@ export function validateCharter(c: Charter, ctx: ValidationContext): ValidationR
   if (c.subscriptionWindow > MAX_WINDOW_SECONDS) fail("BAD_WINDOW", `subscription window ${c.subscriptionWindow}s > 30d`);
 
   if (c.juniorNoticeSeconds > MAX_NOTICE_SECONDS) fail("BAD_NOTICE", `junior notice ${c.juniorNoticeSeconds}s > 30d`);
+  // audit M-1: at least one mark interval of notice (MarketCharter.validate reads config.markInterval())
+  if (ctx.markInterval !== undefined && c.juniorNoticeSeconds < BigInt(ctx.markInterval)) {
+    fail("BAD_NOTICE", `junior notice ${c.juniorNoticeSeconds}s < mark interval ${ctx.markInterval}s`);
+  }
 
   const m = c.mandate;
   if (m.maxInventoryUsd === 0n) fail("BAD_MANDATE", "maxInventoryUsd is 0");
@@ -110,6 +116,7 @@ export function staticValidationContext(p: {
   venueMinIfUsd: Partial<Record<number, bigint>>;
   canonicalTokens: Iterable<string>;
   indexIds: Iterable<string>;
+  markInterval?: number;
 }): ValidationContext {
   const tokens = new Set([...p.canonicalTokens].map((t) => t.toLowerCase()));
   const indexes = new Set([...p.indexIds].map((t) => t.toLowerCase()));
@@ -117,6 +124,7 @@ export function staticValidationContext(p: {
     venueMinIfUsd: (v) => p.venueMinIfUsd[v] ?? 0n,
     isCanonicalToken: (t) => tokens.has(t.toLowerCase()),
     isIndex: (u) => indexes.has(u.toLowerCase()),
+    ...(p.markInterval !== undefined ? { markInterval: p.markInterval } : {}),
   };
 }
 

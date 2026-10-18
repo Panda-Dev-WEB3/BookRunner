@@ -109,6 +109,14 @@ describe("validateCharterLocal mirrors MarketCharter.validate", () => {
     }
   });
 
+  test("audit M-1: Junior notice below one mark interval is BAD_NOTICE once the interval is known", () => {
+    const c = structuredClone(sampleCharter());
+    c.juniorNoticeSeconds = 3599n;
+    expect(codes(validateCharterLocal(c, { markInterval: 3600 }))).toEqual(["BAD_NOTICE"]);
+    c.juniorNoticeSeconds = 3600n;
+    expect(validateCharterLocal(c, { markInterval: 3600 })).toEqual([]);
+  });
+
   test("boundaries are accepted", () => {
     const c = structuredClone(sampleCharter());
     c.subscriptionWindow = 60;

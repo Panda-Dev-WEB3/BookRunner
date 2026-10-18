@@ -40,6 +40,7 @@ const EMPTY_MARK: MarkInput = {
   inventoryRoot: zeroHash,
   pnlJsonHash: zeroHash,
   receiptsRoot: zeroHash,
+  held: false,
 };
 const ERRORS_ABI = [...markRegistryAbi, ...bookAbi, ...attestedOracleAbi, ...orderlyAdapterAbi] as Abi;
 
@@ -478,6 +479,7 @@ export class MarkChainAdapter implements MarkChain {
         valueUsd,
         priceStale,
         ...(signed ? { signedPrice: true } : {}),
+        ...((signed ? signed.held : latest.held) ? { priceHeld: true } : {}),
       },
       signed: signed && qtyRaw > 0n ? signed : null,
     };

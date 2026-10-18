@@ -27,7 +27,7 @@ export const REASON_TEXT: Record<string, string> = {
   BAD_ORACLE: "Unknown oracle kind",
   BAD_BPS: "Senior share of fee flow or Senior cap is out of range",
   BAD_WINDOW: "Subscription window must be between 60 seconds and 30 days",
-  BAD_NOTICE: "Junior notice must be at most 30 days",
+  BAD_NOTICE: "Junior notice must be between one mark interval and 30 days",
   BAD_MANDATE: "Mandate terms are out of range",
   BAD_UNDERLYING: "Underlying is neither a canonical Stock Token nor a registered index",
   BAD_SYMBOL: "Venue symbol is required",
@@ -93,6 +93,7 @@ export const charterRouter = router({
       c.underlying === zeroHash ? null : await softChain(deps, "registry.underlying", (g) => g.underlyingKnown(c.underlying), null);
     const local = validateCharterLocal(c, {
       venueMinIfUsd: params?.venueMinIfUsd,
+      markInterval: params?.markInterval,
       underlyingKnown,
       newBooksPaused: params?.newBooksPaused,
     });

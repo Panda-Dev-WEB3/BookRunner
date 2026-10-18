@@ -175,7 +175,7 @@ describe.skipIf(!ENABLED)("on-chain: RevenueRouter distribution + MarkRegistry c
     const signer = new LocalMarkSigner(markSigner, 31337, c.markRegistry as Address);
     const head = await pc.getBlock();
     const periodEnd = BigInt(Math.floor(Number(head.timestamp) / 300) * 300);
-    const input = { bookId: 1n, periodEnd, navUsd: usd("101000"), deployedValueUsd: usd("100000"), flowNonce: 3n, inventoryRoot: `0x${"11".repeat(32)}` as Hex, pnlJsonHash: `0x${"22".repeat(32)}` as Hex, receiptsRoot: `0x${"33".repeat(32)}` as Hex };
+    const input = { bookId: 1n, periodEnd, navUsd: usd("101000"), deployedValueUsd: usd("100000"), flowNonce: 3n, inventoryRoot: `0x${"11".repeat(32)}` as Hex, pnlJsonHash: `0x${"22".repeat(32)}` as Hex, receiptsRoot: `0x${"33".repeat(32)}` as Hex, held: false };
     expect(await chain.hashMark(input)).toBe(signer.digest(input));
     const sig = await signer.sign(input);
     const committed = await chain.commit(input, sig);

@@ -15,6 +15,7 @@ import { type DomainEventPayloads, type Logger, type MarkInput, type MarkPnl, VE
 import { type BookLookup, type BookRef, type DomainEventSink, describeRevert, sleep, usd6 } from "@bookrunner/waterfall";
 import type { Hex } from "viem";
 import { type SignedVenueReport, encodeVenueReport, reportIncludable } from "../../ops-venue/src/report712";
+import { markHeld } from "./domain/held";
 import { buildInventory } from "./domain/inventory";
 import { RETIRE_TOKEN_DUST_USD, composeNav, navCrossChecks, type NavComposition, writeOffRetiringDust } from "./domain/nav";
 import { buildMarkPnl, pnlJsonHash } from "./domain/pnl";
@@ -263,6 +264,9 @@ export class MarkPipeline {
         lastQuoteSkewBps: await this.d.store.lastQuoteSkewBps(ref.bookId, periodEnd),
       },
     });
+    // audit M-1: a valuation at a held price settles nothing on-chain (signed into the mark; == pnl.held)
+    const hold = markHeld(snapshot);
+    if (hold.underlyingUnknown) log.warn("underlying price state unreadable at the snapshot block; mark not flagged held for it");
     const input: MarkInput = {
       bookId: BigInt(ref.bookId),
       periodEnd: BigInt(periodEnd),
@@ -272,6 +276,7 @@ export class MarkPipeline {
       inventoryRoot: inventory.root,
       pnlJsonHash: pnlJsonHash(pnl),
       receiptsRoot: receipts.root,
+      held: hold.held,
     };
     const prices = snapshot.signedPrices ?? [];
     const tx: MarkTxPlan = {
@@ -293,6 +298,7 @@ export class MarkPipeline {
         juniorNav: usd6(preview.result.juniorNav),
         receipts: receipts.receipts,
         killAtMark: preview.killAtMark,
+        held: hold.held ? hold.reasons : false,
         venueSource: snapshot.venue.source ?? "adapter",
         valuationAt: snapshot.venue.valuationAt,
         signedPrices: prices.map((p) => p.priceId ?? p.underlying),

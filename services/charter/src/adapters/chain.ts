@@ -65,7 +65,10 @@ export class CharterChain {
   // ------------------------------------------------------------ validation inputs
 
   async validationContextFor(ch: Charter): Promise<ValidationContext> {
-    const venueMin = await this.pub.readContract({ address: this.c.config, abi: bookrunnerConfigAbi, functionName: "venueMinIfUsd", args: [ch.venue] });
+    const [venueMin, markInterval] = await Promise.all([
+      this.pub.readContract({ address: this.c.config, abi: bookrunnerConfigAbi, functionName: "venueMinIfUsd", args: [ch.venue] }),
+      this.pub.readContract({ address: this.c.config, abi: bookrunnerConfigAbi, functionName: "markInterval" }),
+    ]);
     let canonical: string[] = [];
     let indexes: string[] = [];
     if (isTokenUnderlying(ch.underlying)) {
@@ -78,7 +81,7 @@ export class CharterChain {
       const ok = await this.pub.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "isIndex", args: [ch.underlying] });
       if (ok) indexes = [ch.underlying];
     }
-    return staticValidationContext({ venueMinIfUsd: { [ch.venue]: venueMin }, canonicalTokens: canonical, indexIds: indexes });
+    return staticValidationContext({ venueMinIfUsd: { [ch.venue]: venueMin }, canonicalTokens: canonical, indexIds: indexes, markInterval: Number(markInterval) });
   }
 
   /** eth_call MarketCharter.validate(c) — parity cross-check with the TS mirror. */

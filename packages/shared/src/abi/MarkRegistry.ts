@@ -85,6 +85,11 @@ export const markRegistryAbi = [
             "name": "receiptsRoot",
             "type": "bytes32",
             "internalType": "bytes32"
+          },
+          {
+            "name": "held",
+            "type": "bool",
+            "internalType": "bool"
           }
         ]
       },
@@ -151,6 +156,11 @@ export const markRegistryAbi = [
             "name": "receiptsRoot",
             "type": "bytes32",
             "internalType": "bytes32"
+          },
+          {
+            "name": "held",
+            "type": "bool",
+            "internalType": "bool"
           }
         ]
       },
@@ -295,6 +305,11 @@ export const markRegistryAbi = [
                 "name": "receiptsRoot",
                 "type": "bytes32",
                 "internalType": "bytes32"
+              },
+              {
+                "name": "held",
+                "type": "bool",
+                "internalType": "bool"
               }
             ]
           },
@@ -366,6 +381,11 @@ export const markRegistryAbi = [
             "name": "receiptsRoot",
             "type": "bytes32",
             "internalType": "bytes32"
+          },
+          {
+            "name": "held",
+            "type": "bool",
+            "internalType": "bool"
           }
         ]
       }
