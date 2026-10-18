@@ -10,7 +10,7 @@ import { type Env, MAINNET_EXCLUDED, MAINNET_FIXED, MAINNET_REQUIRED_ENV, deskKe
 const GOOD_CFG = JSON.parse(readFileSync(join(import.meta.dir, "../config/chains/4663.json"), "utf8")) as {
   chainId: number;
   chainlink: { feeds: Record<string, unknown> };
-  dexConfirm: { pools: Record<string, { pool: string; minQuoteLiquidityUsd: number }> };
+  dexConfirm: { pools: Record<string, { pool: string; minDepthUsd: number; twapSec: number }> };
 };
 
 const keys = Array.from({ length: 6 }, (_, i) => `0x${(i + 1).toString(16).padStart(64, "0")}`);
@@ -160,8 +160,8 @@ describe("mainnet profile (scripts/dev.ts --network mainnet)", () => {
     const { TSLA: _p, ...fourPools } = GOOD_CFG.dexConfirm.pools;
     const noTslaPool = { ...GOOD_CFG, dexConfirm: { ...GOOD_CFG.dexConfirm, pools: fourPools } };
     expect(mainnetProfile(goodEnv(), hostRoot(GOOD_DEP, noTslaPool)).errors).toEqual(["no DEX confirm pool for TSLA (config/chains/4663.json dexConfirm.pools)"]);
-    const shallow = { ...GOOD_CFG, dexConfirm: { ...GOOD_CFG.dexConfirm, pools: { ...GOOD_CFG.dexConfirm.pools, AAPL: { ...GOOD_CFG.dexConfirm.pools.AAPL!, minQuoteLiquidityUsd: 500 } } } };
-    expect(mainnetProfile(goodEnv(), hostRoot(GOOD_DEP, shallow)).errors).toEqual(["dexConfirm.pools.AAPL.minQuoteLiquidityUsd must be >= 10000 (got 500)"]);
+    const shallow = { ...GOOD_CFG, dexConfirm: { ...GOOD_CFG.dexConfirm, pools: { ...GOOD_CFG.dexConfirm.pools, AAPL: { ...GOOD_CFG.dexConfirm.pools.AAPL!, minDepthUsd: 500 } } } };
+    expect(mainnetProfile(goodEnv(), hostRoot(GOOD_DEP, shallow)).errors).toEqual(["dexConfirm.pools.AAPL.minDepthUsd must be >= 10000 (got 500)"]);
     // a narrower ticker list only needs its own feeds / pools
     expect(mainnetProfile({ ...goodEnv(), ORACLE_TICKERS: "NVDA,TSLA" }, hostRoot(GOOD_DEP, noAmznFeed)).errors).toEqual([]);
     expect(mainnetProfile({ ...goodEnv(), ORACLE_TICKERS: "NVDA,GME" }, hostRoot(GOOD_DEP)).errors).toEqual([
@@ -174,6 +174,27 @@ describe("mainnet profile (scripts/dev.ts --network mainnet)", () => {
     // feeds state their basis
     const plain = { ...goodEnv(), ORACLE_CHAINLINK_FEEDS: JSON.stringify({ NVDA: "0x0000000000000000000000000000000000000f01" }) };
     expect(mainnetProfile(plain, hostRoot(GOOD_DEP)).errors).toEqual([expect.stringMatching(/plain addresses for NVDA/)]);
+  });
+
+  test("freshness and DEX bounds: Chainlink max age <= heartbeat + 1 h, DEX TWAP 300-3600 s, DEX max age <= 120 s, lag < confirm", () => {
+    const ok = (e: Env) => expect(mainnetProfile({ ...goodEnv(), ...e }, hostRoot(GOOD_DEP)).errors).toEqual([]);
+    const bad = (e: Env, re: RegExp) => expect(mainnetProfile({ ...goodEnv(), ...e }, hostRoot(GOOD_DEP)).errors).toEqual([expect.stringMatching(re)]);
+    ok({ ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS: "3600000", ORACLE_CHAINLINK_MAX_AGE_MS: "90000000" });
+    bad({ ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS: "172800000" }, /ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS=172800000 must be <= 3600000/);
+    bad({ ORACLE_CHAINLINK_MAX_AGE_MS: "90000001" }, /ORACLE_CHAINLINK_MAX_AGE_MS=90000001 must be <= 90000000/);
+    const feeds = (over: Record<string, unknown>) =>
+      JSON.stringify({ NVDA: { proxy: "0x0000000000000000000000000000000000000f01", basis: "per-token", heartbeatSec: 86_400, ...over } });
+    ok({ ORACLE_CHAINLINK_FEEDS: feeds({ maxAgeSec: 90_000 }) });
+    bad({ ORACLE_CHAINLINK_FEEDS: feeds({ maxAgeSec: 172_800 }) }, /chainlink feed NVDA: maxAgeSec=172800 > heartbeat 86400 s \+ 1 h/);
+    // the chain config's own feeds are bounded too
+    const cfgWide = { ...GOOD_CFG, chainlink: { ...GOOD_CFG.chainlink, feeds: { ...GOOD_CFG.chainlink.feeds, TSLA: { ...(GOOD_CFG.chainlink.feeds.TSLA as object), maxAgeSec: 200_000 } } } };
+    expect(mainnetProfile(goodEnv(), hostRoot(GOOD_DEP, cfgWide)).errors).toEqual([expect.stringMatching(/chainlink feed TSLA: maxAgeSec=200000/)]);
+    ok({ ORACLE_DEX_TWAP_SEC: "300", ORACLE_DEX_MAX_AGE_MS: "120000", ORACLE_PRIMARY_LAG_BPS: "150" });
+    bad({ ORACLE_DEX_TWAP_SEC: "60" }, /ORACLE_DEX_TWAP_SEC=60 outside 300-3600 s/);
+    bad({ ORACLE_DEX_MAX_AGE_MS: "600000" }, /ORACLE_DEX_MAX_AGE_MS=600000 must be in \(0, 120000\]/);
+    bad({ ORACLE_PRIMARY_LAG_BPS: "250" }, /ORACLE_PRIMARY_LAG_BPS=250 must be positive and below ORACLE_CONFIRM_BPS \(200\)/);
+    const shortTwap = { ...GOOD_CFG, dexConfirm: { ...GOOD_CFG.dexConfirm, pools: { ...GOOD_CFG.dexConfirm.pools, MSFT: { ...GOOD_CFG.dexConfirm.pools.MSFT!, twapSec: 120 } } } };
+    expect(mainnetProfile(goodEnv(), hostRoot(GOOD_DEP, shortTwap)).errors).toEqual(["dexConfirm.pools.MSFT.twapSec=120 outside 300-3600 s on mainnet"]);
   });
 
   test("ORACLE_POLICY / ORACLE_MIN_SOURCES are pinned; a contradicting value is refused, not silently overridden", () => {

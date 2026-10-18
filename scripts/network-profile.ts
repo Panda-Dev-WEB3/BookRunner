@@ -79,8 +79,12 @@ const isLocal = (url: string) => /(^|\/\/|@)(127\.0\.0\.1|localhost|0\.0\.0\.0|\
  */
 export const MAINNET_ORACLE_MIN_SOURCES = 1;
 export const MAINNET_ORACLE_POLICY = "primary-confirm";
-/** services/oracle production.ts MAINNET_DEX_MIN_FLOOR_USD */
+/** services/oracle production.ts MAINNET_DEX_MIN_FLOOR_USD (the configured 2% depth floor, minDepthUsd) */
 export const MAINNET_DEX_MIN_FLOOR_USD = 10_000;
+/** services/oracle production.ts MAINNET_DEX_TWAP_SEC / MAINNET_DEX_MAX_AGE_MS / MAINNET_CHAINLINK_MAX_GRACE_MS */
+export const MAINNET_DEX_TWAP_SEC = { min: 300, max: 3_600 } as const;
+export const MAINNET_DEX_MAX_AGE_MS = 120_000;
+export const MAINNET_CHAINLINK_MAX_GRACE_MS = 3_600_000;
 /** services/oracle config.ts ORACLE_TICKERS default */
 const DEFAULT_ORACLE_TICKERS = "NVDA,TSLA,AAPL,MSFT,AMZN";
 /** services/oracle production.ts MAINNET_HTTP_MAX_AGE_MS */
@@ -111,14 +115,14 @@ function oracleSourcesProblems(env: Env, root: string): string[] {
 
   const cfgName = env.ORACLE_CHAIN_CONFIG?.trim() || "config/chains/4663.json";
   const cfgPath = isAbsolute(cfgName) ? cfgName : resolve(root, cfgName);
-  let cfgFeeds: Record<string, unknown> = {};
-  let cfgPools: Record<string, { pool?: unknown; minQuoteLiquidityUsd?: unknown }> = {};
+  let cfgFeeds: Record<string, { heartbeatSec?: unknown; maxAgeSec?: unknown } | undefined> = {};
+  let cfgPools: Record<string, { pool?: unknown; minDepthUsd?: unknown; twapSec?: unknown }> = {};
   if (existsSync(cfgPath)) {
     try {
       const c = JSON.parse(readFileSync(cfgPath, "utf8")) as {
         chainId?: number;
-        chainlink?: { feeds?: Record<string, unknown> };
-        dexConfirm?: { pools?: Record<string, { pool?: unknown; minQuoteLiquidityUsd?: unknown }> };
+        chainlink?: { feeds?: Record<string, { heartbeatSec?: unknown; maxAgeSec?: unknown } | undefined> };
+        dexConfirm?: { pools?: Record<string, { pool?: unknown; minDepthUsd?: unknown; twapSec?: unknown }> };
       };
       if (c.chainId !== MAINNET_CHAIN_ID) problems.push(`${cfgName} is for chain ${c.chainId}, not 4663`);
       else {
@@ -146,10 +150,45 @@ function oracleSourcesProblems(env: Env, root: string): string[] {
   }
   const noPool = tickers.filter((t) => typeof cfgPools[t]?.pool !== "string");
   if (noPool.length > 0) problems.push(`no DEX confirm pool for ${noPool.join(", ")} (${cfgName} dexConfirm.pools)`);
+  const twapOverride = env.ORACLE_DEX_TWAP_SEC?.trim() ? Number(env.ORACLE_DEX_TWAP_SEC) : undefined;
+  if (twapOverride !== undefined && !(twapOverride >= MAINNET_DEX_TWAP_SEC.min && twapOverride <= MAINNET_DEX_TWAP_SEC.max)) {
+    problems.push(`ORACLE_DEX_TWAP_SEC=${env.ORACLE_DEX_TWAP_SEC} outside ${MAINNET_DEX_TWAP_SEC.min}-${MAINNET_DEX_TWAP_SEC.max} s on mainnet (a short window is cheap to push)`);
+  }
   for (const t of tickers) {
-    const floor = cfgPools[t]?.minQuoteLiquidityUsd;
-    if (typeof cfgPools[t]?.pool === "string" && (typeof floor !== "number" || floor < MAINNET_DEX_MIN_FLOOR_USD)) {
-      problems.push(`dexConfirm.pools.${t}.minQuoteLiquidityUsd must be >= ${MAINNET_DEX_MIN_FLOOR_USD} (got ${String(floor)})`);
+    const pool = cfgPools[t];
+    if (typeof pool?.pool !== "string") continue;
+    const floor = pool.minDepthUsd;
+    if (typeof floor !== "number" || floor < MAINNET_DEX_MIN_FLOOR_USD) {
+      problems.push(`dexConfirm.pools.${t}.minDepthUsd must be >= ${MAINNET_DEX_MIN_FLOOR_USD} (got ${String(floor)})`);
+    }
+    const twap = twapOverride ?? (typeof pool.twapSec === "number" ? pool.twapSec : 600);
+    if (twapOverride === undefined && !(twap >= MAINNET_DEX_TWAP_SEC.min && twap <= MAINNET_DEX_TWAP_SEC.max)) {
+      problems.push(`dexConfirm.pools.${t}.twapSec=${twap} outside ${MAINNET_DEX_TWAP_SEC.min}-${MAINNET_DEX_TWAP_SEC.max} s on mainnet`);
+    }
+  }
+  const dexAge = env.ORACLE_DEX_MAX_AGE_MS?.trim();
+  if (dexAge && !(Number(dexAge) > 0 && Number(dexAge) <= MAINNET_DEX_MAX_AGE_MS)) {
+    problems.push(`ORACLE_DEX_MAX_AGE_MS=${dexAge} must be in (0, ${MAINNET_DEX_MAX_AGE_MS}] on mainnet (an RPC stall must not confirm with an old block)`);
+  }
+  // Chainlink alone signs: its in-session max age stays within heartbeat + 1 h (a widened bound would sign an old
+  // round as a fresh price; services/oracle production.ts chainlinkAgeProblems)
+  const grace = env.ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS?.trim();
+  const graceMs = grace ? Number(grace) : 600_000;
+  if (grace && !(graceMs >= 0 && graceMs <= MAINNET_CHAINLINK_MAX_GRACE_MS)) {
+    problems.push(`ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS=${grace} must be <= ${MAINNET_CHAINLINK_MAX_GRACE_MS} on mainnet (a wider grace signs an old Chainlink round as fresh)`);
+  }
+  const defaultBound = 86_400_000 + MAINNET_CHAINLINK_MAX_GRACE_MS;
+  const defaultAge = env.ORACLE_CHAINLINK_MAX_AGE_MS?.trim();
+  if (defaultAge && !(Number(defaultAge) > 0 && Number(defaultAge) <= defaultBound)) {
+    problems.push(`ORACLE_CHAINLINK_MAX_AGE_MS=${defaultAge} must be <= ${defaultBound} on mainnet (24 h heartbeat + 1 h)`);
+  }
+  const mergedFeeds: Record<string, unknown> = { ...cfgFeeds, ...envFeeds };
+  for (const [id, f] of Object.entries(mergedFeeds)) {
+    if (!f || typeof f !== "object") continue;
+    const { heartbeatSec, maxAgeSec } = f as { heartbeatSec?: unknown; maxAgeSec?: unknown };
+    const hb = typeof heartbeatSec === "number" ? heartbeatSec : 86_400;
+    if (typeof maxAgeSec === "number" && maxAgeSec * 1000 > hb * 1000 + MAINNET_CHAINLINK_MAX_GRACE_MS) {
+      problems.push(`chainlink feed ${id}: maxAgeSec=${maxAgeSec} > heartbeat ${hb} s + 1 h on mainnet (an old round would be signed as fresh)`);
     }
   }
   const policy = env.ORACLE_POLICY?.trim();
@@ -159,6 +198,10 @@ function oracleSourcesProblems(env: Env, root: string): string[] {
   const confirmBps = env.ORACLE_CONFIRM_BPS?.trim();
   if (confirmBps && !(Number(confirmBps) > 0 && Number(confirmBps) <= 500)) {
     problems.push(`ORACLE_CONFIRM_BPS=${confirmBps} must be in (0, 500] on mainnet (default 200)`);
+  }
+  const lagBps = env.ORACLE_PRIMARY_LAG_BPS?.trim();
+  if (lagBps && !(Number(lagBps) > 0 && Number(lagBps) < (confirmBps ? Number(confirmBps) : 200))) {
+    problems.push(`ORACLE_PRIMARY_LAG_BPS=${lagBps} must be positive and below ORACLE_CONFIRM_BPS (${confirmBps || 200}) on mainnet`);
   }
   const finnhub = isOn(env.ORACLE_HTTP_FINNHUB);
   const pythOn = isOn(env.ORACLE_PYTH);
