@@ -480,6 +480,21 @@ can redo it during the timelock delay from the published quote.
 - **Route review**: `bun scripts/check-pools.ts` (read-only) before every `setRoute` proposal and
   periodically; a failing token (no pool, no liquidity, round trip beyond the bound) should be
   re-routed or removed from mandates' `hedgeAllowRoot` before agents hedge it.
+- **Stale charters** (audit review M-7): `bun scripts/sweep-charters.ts` lists the charters still Filed after their
+  decision deadline (dry run); `--send` expires them from the KEEPER key (fee refunded, bond released; anyone may
+  call `expire`). After a MarketCharter / committee repoint, run it with `--charter <old address>`: charters still
+  Filed there can no longer be decided.
+- **Unconfirmed kill** (Redis is not trusted, SECURITY.md "Off-chain trust boundaries"): a kill message halts the
+  agent and cancels the book's Orderly orders, but ops-venue revokes the venue trade key only once the mandate is
+  killed on-chain (log `venue key revocation deferred`). An agent halted with `killConfirmedOnChain: false` that
+  risk did not kill (no `kill.executed`, mandate not killed) received a forged or alert-mode message: check Redis
+  access, then restart the agent.
+- **Hold alerts** (services/alerts): `held_marks_in_session` (a mark held while the session was open: a price the
+  NAV uses is held or stale, e.g. a desk token whose feed stopped; settlement is deferred up to 30 days; see the
+  mark log "held" reasons), `risk_quote_unverified` (risk holds a book reduce-only for over
+  `ALERT_QUOTE_UNVERIFIED_SECONDS` in session: no fresh attested price; restore the oracle feed / signed prints),
+  `desk_stale_trade_price` (the desk refused `ALERT_STALE_TRADE_PRICE_MAX` key swaps with StaleTradePrice within
+  `ALERT_STALE_TRADE_PRICE_WINDOW_SECONDS`: the agent's signed prices are not reaching the desk; hedging is stuck).
 
 ## Rollback and incidents (mainnet)
 

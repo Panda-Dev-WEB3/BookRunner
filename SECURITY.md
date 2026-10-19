@@ -4,8 +4,9 @@
 
 Bookrunner runs on **Robinhood Chain testnet only** (chain id 46630), with test tokens and no real funds. The
 contracts have had an internal security review (31 findings, 4 High, all fixed with regression tests in
-[`contracts/test/audit/`](contracts/test/audit)). They have **not yet been independently audited**; an external
-audit and a bug bounty are planned before mainnet.
+[`contracts/test/audit/`](contracts/test/audit)). An external audit (October 2026) reported 4 Medium and 3 Low
+findings and a set of leads; each one's fix, regression test or accepted rationale is tracked in
+[docs/AUDIT-2026-10.md](docs/AUDIT-2026-10.md). A bug bounty is planned before mainnet.
 
 ## Reporting a vulnerability
 
@@ -22,8 +23,9 @@ https://bookrunner.tech/.well-known/security.txt (source: `apps/site/public/.wel
 
 ## Scope
 
-The in-scope contracts, the out-of-scope items, the severity guide and the invariants the test suite asserts
-are listed in [docs/BOUNTY_SCOPE.md](docs/BOUNTY_SCOPE.md). In short:
+The in-scope contracts, the out-of-scope items and the severity guide are listed in
+[docs/BOUNTY_SCOPE.md](docs/BOUNTY_SCOPE.md). Every protocol invariant, with the Foundry invariant suite and the
+unit tests that check it, is listed in [docs/INVARIANTS.md](docs/INVARIANTS.md). In short:
 
 - **In scope:** mandate bypass (`MMMandate`, `BookrunnerDesk`, `HedgeExecutor`, `StockTokenRegistry`), waterfall
   and redemption flaws (`Book`, `Tranche`, `UnderwritingVault`, `RevenueRouter`, `Backstop`, `BkrnFeeRouter`,
@@ -36,6 +38,23 @@ are listed in [docs/BOUNTY_SCOPE.md](docs/BOUNTY_SCOPE.md). In short:
 
 Reports about the off-chain services (`services/`), the web apps (`apps/`) or the testnet host are welcome too
 and are handled the same way.
+
+## Off-chain trust boundaries
+
+Redis (the bus between the services, namespaced `bkrn:<ns>:…`) is a shared trust domain: anyone who can write to
+it is assumed hostile (audit 2026-10 lead). What such a writer can and cannot do:
+
+- **Prices.** No service acts on an unsigned price from Redis. The agent quotes, and plans hedges, only on the
+  oracle's EIP-712 signed `PriceUpdate` for its own price id, recovered to an `AttestedOracle` signer under this
+  chain and oracle (`packages/shared/src/oracleVerify.ts`), taking price, age and `held` from the signed fields.
+  ops-venue's builder price push and the mark and risk signed feeds apply the same check. A forged, tampered,
+  relabelled or replayed print is dropped; withholding prices only stops quoting (stale price).
+- **Kill channel.** A kill message makes the agent cancel its orders and halt: a forged one is a stop, never
+  anything else. ops-venue cancels the book's Orderly orders on a kill message or a `revoke_key` job, but revokes
+  the venue trade key only once the mandate is killed on-chain (`MMMandate.killed()`; the risk kill sequence's
+  `mandate_kill` step, whose `Kill` log ops-venue also watches). The on-chain kill is the authoritative one; a
+  halted agent whose kill the chain never confirmed logs `killConfirmedOnChain: false` and resumes on a restart.
+- **Signed reports and marks.** Venue reports and marks are EIP-712 signed by role keys and verified on-chain.
 
 ## Accepted risks
 
@@ -66,6 +85,13 @@ a way to exceed the stated bound is in scope.
   orders) while the engine starts with small caps or off (owner decision); the bound above is the accepted residual.
   Desk keys are held to the same freshness rule for their own swaps (audit lead "old prints"): a key's Hedge or
   Flatten needs the token's price within `min(maxPriceAge, maxTradePriceAge)`.
+- **Redis write access** (audit 2026-10 lead, see "Off-chain trust boundaries"). A Redis writer can deny service:
+  stop quoting (withhold prices, send kills), drop jobs, blank the status keys the alerts read. It can also lift a
+  restriction the risk service publishes through Redis (its risk state, e.g. a `reduce_only` hold): the agent then
+  quotes both sides again, still at the verified oracle price, within the mandate (checked on-chain for engine
+  books) and subject to the on-chain kill, which no Redis message can undo. Not in Redis: keys, prices the agent
+  trusts, kills that revoke keys. The server's Redis has a password (`requirepass`) and listens on 127.0.0.1 only
+  ([deploy/server/HARDENING.md](deploy/server/HARDENING.md)).
 
 ## What to include
 
