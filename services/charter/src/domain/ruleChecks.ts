@@ -151,8 +151,13 @@ export function runRuleChecks(c: Charter, ctx: RuleContext): RuleCheck[] {
   } else {
     add("mandate_margin", "pass", "MM capital supports max inventory at 10% initial margin");
   }
-  if (m.minQuoteWidthBps > 0 && m.maxSkewBps > m.minQuoteWidthBps * 10) {
-    add("mandate_quote", "warn", "allowed quote skew is more than 10x the minimum width", { maxSkewBps: String(m.maxSkewBps), minQuoteWidthBps: String(m.minQuoteWidthBps) });
+  const quoteMetrics = { maxSkewBps: String(m.maxSkewBps), minQuoteWidthBps: String(m.minQuoteWidthBps), takerFeeBps: String(c.takerFeeBps) };
+  if (m.maxSkewBps * 2 > m.minQuoteWidthBps) {
+    // audit M-3: BAD_MANDATE on-chain; kept so the jury report names the reason
+    add("mandate_quote", "block", "max skew above half the min width: a quote could sit entirely on one side of the oracle", quoteMetrics);
+  } else if (m.maxSkewBps * 2 === m.minQuoteWidthBps) {
+    // audit M-3 residual: at the max skew and the min width one side fills exactly at the oracle (no edge)
+    add("mandate_quote", "info", `at the max skew and min width one side quotes at the oracle with no edge${c.takerFeeBps === 0 ? " and no taker fee" : ""}`, quoteMetrics);
   } else if (m.minQuoteWidthBps > 500) {
     add("mandate_quote", "info", "minimum quote width above 500 bps limits taker flow", { minQuoteWidthBps: String(m.minQuoteWidthBps) });
   } else {

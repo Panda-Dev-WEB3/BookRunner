@@ -9,6 +9,8 @@ import { type QuoteSelection, selectLiveQuote } from "./quote";
 
 export interface EvaluateOptions {
   quoteMaxAgeMs: number;
+  /** Max deviation (bps) of the agent's quote reference from the attested price (default 25; audit M-3). */
+  quoteRefToleranceBps?: number;
   /** Max gap between observations for the out-of-band clock to keep running. */
   bandMaxGapSec: number;
   /** An offsetting perp hedge venue is enabled (spot-only books: false — long exposure is unhedgeable). */
@@ -30,7 +32,7 @@ export function evaluate(obs: BookObservation, prevBand: HedgeBandState, o: Eval
   const m = obs.mandate;
   const nav = computeLiveNav(obs.nav);
   const offHours = isOffHours(obs.oracle);
-  const quote = selectLiveQuote(obs.quote, oraclePrice(obs.oracle), obs.nowMs, o.quoteMaxAgeMs, m.maxSkewBps);
+  const quote = selectLiveQuote(obs.quote, oraclePrice(obs.oracle), obs.nowMs, o.quoteMaxAgeMs, o.quoteRefToleranceBps);
   const canHedgeLong = o.canHedgeLong ?? false;
   // audit M-2 split window: a held token in it is valued at the multiplier of its price's basis (on-chain
   // basisMultiplier) and never flattened. Only when that multiplier is unknown (valued at 0) is the desk valuation

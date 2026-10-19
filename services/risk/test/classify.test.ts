@@ -119,6 +119,33 @@ describe("quote skew / width on a live quote", () => {
     expect(ev.quote?.reference).toBe("agent");
     expect(ev.snapshot.breaches).toEqual([]);
   });
+
+  test("audit M-3: at the 8 / 4 terms, 4-5 bps of agent / risk price drift does not breach a straddling quote", () => {
+    const m84 = { ...MANDATE, maxSkewBps: 4, minQuoteWidthBps: 8 };
+    // agent quoted 8.5 bps wide with +3.5 bps skew around its own print; the attested price is 4.5 bps lower or higher
+    for (const agentPx of [190 * (1 + 4.5 / 1e4), 190 * (1 - 4.5 / 1e4), 190 * (1 + 4 / 1e4)]) {
+      const mid = agentPx * (1 + 3.5 / 1e4);
+      const half = (mid * 8.5) / 20_000;
+      const ev = run({ mandate: m84, quote: quoteAt(now - 1000, mid - half, mid + half, agentPx) });
+      expect(ev.quote?.reference).toBe("agent");
+      expect(ev.snapshot.breaches).toEqual([]);
+    }
+    // with the tolerance at the old coupling (maxSkewBps = 4), the same 4.5 bps drift would be judged against the
+    // attested price and flagged
+    const agentPx = 190 * (1 + 4.5 / 1e4);
+    const mid = agentPx * (1 + 3.5 / 1e4);
+    const half = (mid * 8.5) / 20_000;
+    const coupled = evaluate(observation({ mandate: m84, quote: quoteAt(now - 1000, mid - half, mid + half, agentPx) }), IN_BAND, {
+      ...OPTS,
+      quoteRefToleranceBps: 4,
+    });
+    expect(coupled.quote?.reference).toBe("oracle");
+    expect(coupled.snapshot.breaches).toEqual(["SKEW"]);
+    // beyond the tolerance the attested price is the reference again
+    const far = run({ mandate: m84, quote: quoteAt(now - 1000, 190.5, 190.7, 190.6) });
+    expect(far.quote?.reference).toBe("oracle");
+    expect(far.snapshot.breaches).toEqual(["SKEW"]);
+  });
 });
 
 describe("drawdown (live NAV vs perf index high-water)", () => {

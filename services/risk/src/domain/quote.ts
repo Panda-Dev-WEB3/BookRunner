@@ -5,12 +5,17 @@
 //  - a quote older than maxAgeMs (or implausibly far in the future) is not live → no quote check;
 //  - only two-sided quotes have a mid; a one-sided (reduce-only) or empty quote is not checked;
 //  - reference = the oracle the agent quoted against (QuoteMsg.oracle), UNLESS that reference itself
-//    deviates from the attested oracle by more than maxSkewBps (or is missing) — then the attested
-//    price is used, so a bad agent reference cannot hide a skewed quote.
+//    deviates from the attested oracle by more than refToleranceBps (or is missing) — then the attested
+//    price is used, so a bad agent reference cannot hide a skewed quote. The tolerance is its own setting
+//    (RISK_QUOTE_REF_TOLERANCE_BPS), not maxSkewBps: since audit M-3 max skew is at most half the min width
+//    (4 bps on the devnet NVDA terms), and a few bps of ordinary drift between the agent's print and the risk
+//    service's must not turn a straddling quote into a SKEW / ONE_SIDED breach (and a kill).
 import { type QuoteProposal, quoteSkewBps, quoteWidthBps } from "@bookrunner/shared";
 import type { QuoteObservation } from "../types";
 
 const FUTURE_TOLERANCE_MS = 5_000;
+/** Default max deviation of the agent's reference from the attested price before the attested one is used. */
+export const DEFAULT_QUOTE_REF_TOLERANCE_BPS = 25;
 
 export interface QuoteSelection {
   proposal: QuoteProposal | undefined;
@@ -22,7 +27,7 @@ export function selectLiveQuote(
   attestedPx: number | null,
   nowMs: number,
   maxAgeMs: number,
-  maxSkewBps: number,
+  refToleranceBps: number = DEFAULT_QUOTE_REF_TOLERANCE_BPS,
 ): QuoteSelection {
   if (!q) return { proposal: undefined, info: null };
   const ageMs = nowMs - q.ts;
@@ -33,7 +38,7 @@ export function selectLiveQuote(
   let px = q.oracle;
   if (attestedPx !== null && attestedPx > 0) {
     const refDevBps = q.oracle > 0 ? (Math.abs(q.oracle - attestedPx) / attestedPx) * 10_000 : Number.POSITIVE_INFINITY;
-    if (refDevBps > maxSkewBps) {
+    if (refDevBps > refToleranceBps) {
       reference = "oracle";
       px = attestedPx;
     }

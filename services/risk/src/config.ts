@@ -20,6 +20,11 @@ export const riskEnvShape = {
   RISK_BREACH_CONFIRM_TICKS: z.coerce.number().int().positive().default(2),
   /** A quote older than this is not "live" and is not checked for skew/width. */
   RISK_QUOTE_MAX_AGE_MS: z.coerce.number().int().positive().default(15_000),
+  /**
+   * Max deviation (bps) of the price the agent quoted against from the attested price before the quote is
+   * checked against the attested price instead (audit M-3: decoupled from maxSkewBps, now a few bps).
+   */
+  RISK_QUOTE_REF_TOLERANCE_BPS: z.coerce.number().min(0).max(10_000).default(25),
   /** enforce = run the kill sequence on breach; alert = classify + emit limit.breached only. */
   RISK_KILL_MODE: z.enum(["enforce", "alert"]).default("enforce"),
   /**
@@ -71,6 +76,7 @@ export interface RiskSettings {
   limitsEveryTicks: number;
   breachConfirmTicks: number;
   quoteMaxAgeMs: number;
+  quoteRefToleranceBps: number;
   killMode: "enforce" | "alert";
   flattenMode: "net" | "all";
   flattenSlippageBps: number;
@@ -88,6 +94,7 @@ export function settingsFromEnv(env: RiskEnv): RiskSettings {
     limitsEveryTicks: env.RISK_LIMITS_EVERY_TICKS,
     breachConfirmTicks: env.RISK_BREACH_CONFIRM_TICKS,
     quoteMaxAgeMs: env.RISK_QUOTE_MAX_AGE_MS,
+    quoteRefToleranceBps: env.RISK_QUOTE_REF_TOLERANCE_BPS,
     killMode: env.RISK_KILL_MODE,
     flattenMode: env.RISK_FLATTEN_MODE,
     flattenSlippageBps: env.RISK_FLATTEN_SLIPPAGE_BPS,

@@ -104,6 +104,7 @@ export class BookMonitor {
     const obs = await this.assemble(chainObs, nowMs);
     const ev = evaluate(obs, this.state.band, {
       quoteMaxAgeMs: s.quoteMaxAgeMs,
+      quoteRefToleranceBps: s.quoteRefToleranceBps,
       bandMaxGapSec: Math.max(60, Math.ceil((10 * s.intervalMs) / 1000)),
     });
     const { next, effects } = decide({

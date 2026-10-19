@@ -21,6 +21,19 @@ describe("rule checks", () => {
     expect(statusOf(checks, "venue_min_if")).toEqual(["info"]); // exactly at the minimum
   });
 
+  test("audit M-3: quote check blocks skew above half the width, notes the zero-edge boundary", () => {
+    const at = (maxSkewBps: number, minQuoteWidthBps: number) => {
+      const c = nvdaCharter();
+      c.mandate = { ...c.mandate, maxSkewBps, minQuoteWidthBps };
+      return runRuleChecks(c, ruleContextFor(c)).filter((x) => x.id === "mandate_quote");
+    };
+    expect(at(25, 8).map((x) => x.status)).toEqual(["block"]);
+    const edge = at(4, 8);
+    expect(edge.map((x) => x.status)).toEqual(["info"]);
+    expect(edge[0]?.detail).toContain("no edge");
+    expect(at(3, 8).map((x) => x.status)).toEqual(["pass"]);
+  });
+
   test("float caps: capacity valued with the multiplier exactly once", () => {
     const t = nvdaToken({ multiplierWad: 2n * 10n ** 18n, floatCapRaw: 10n ** 18n, priceWad: 100n * 10n ** 18n });
     expect(tokenValueUsd(10n ** 18n, t, 100n * 10n ** 18n)).toBe(usd("200"));
