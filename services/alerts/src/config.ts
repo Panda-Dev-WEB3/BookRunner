@@ -138,6 +138,17 @@ const shape = {
    */
   AGENT_VENUE_POST_ONLY_QUOTE: z.stringbool().optional(),
   ALERT_RISK_WARN: bool(false),
+  /** held_marks_in_session: this many marks of the current held run valued while the book's session was open alert (warning) */
+  ALERT_HELD_MARKS_IN_SESSION: z.coerce.number().int().min(1).default(1),
+  /** held_marks_in_session: a held run (since the last non-held mark) this long pages critical */
+  ALERT_HELD_MARK_CRITICAL_SECONDS: int(86_400),
+  /** risk_quote_unverified: a book held reduce-only for quoteUnverified this long in session alerts */
+  ALERT_QUOTE_UNVERIFIED_SECONDS: int(300),
+  /** desk_stale_trade_price: this many StaleTradePrice refusals of a book's desk swaps within the window alert (3x: critical) */
+  ALERT_STALE_TRADE_PRICE_MAX: z.coerce.number().int().min(1).default(3),
+  ALERT_STALE_TRADE_PRICE_WINDOW_SECONDS: z.coerce.number().int().min(60).max(3_600).default(900),
+  /** the stack's SESSIONS_MODE (24x7 overrides the charter sessions, as for the agents and risk) */
+  SESSIONS_MODE: z.string().optional(),
   ALERT_VENUE_REPORT_MAX_AGE_SECONDS: z.coerce.number().int().min(1).optional(),
   ALERT_RESTART_WINDOW_SECONDS: int(900),
   ALERT_RESTART_MAX: int(3),
@@ -183,6 +194,15 @@ export interface RuleConfig {
   markGraceSec: number;
   riskStaleSec: number;
   riskWarn: boolean;
+  /** held_marks_in_session: marks of the held run valued in session before a warning */
+  heldMarksInSession: number;
+  /** held_marks_in_session: held run length (s) before critical */
+  heldMarkCriticalSec: number;
+  /** risk_quote_unverified: hold (s) in session before the alert */
+  quoteUnverifiedSec: number;
+  /** desk_stale_trade_price: refusals within the window before a warning */
+  staleTradePriceMax: number;
+  staleTradePriceWindowSec: number;
   venueReportMaxAgeSec: number;
   /** builder_price_push: failing span (s) of a live builder price push in session */
   builderPushFailSec: number;
@@ -248,6 +268,8 @@ export interface AlertsConfig {
   rpcUrl: string;
   deploymentFile: string;
   markIntervalSec: number;
+  /** SESSIONS_MODE (24x7: charter sessions ignored) */
+  sessionsMode: string | undefined;
   intervalSec: number;
   apiUrl: string;
   oracleUrl: string;
@@ -296,6 +318,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     rpcUrl: e.RPC_URL,
     deploymentFile: e.DEPLOYMENT_FILE,
     markIntervalSec: e.MARK_INTERVAL_SECONDS,
+    sessionsMode: e.SESSIONS_MODE,
     intervalSec: Math.max(10, e.ALERT_INTERVAL_SECONDS),
     apiUrl: (e.ALERT_API_URL || `http://127.0.0.1:${e.API_PORT}`).replace(/\/+$/, ""),
     oracleUrl: (e.ALERT_ORACLE_URL || `http://127.0.0.1:${e.ORACLE_PORT}`).replace(/\/+$/, ""),
@@ -305,6 +328,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       markGraceSec: e.ALERT_MARK_GRACE_SECONDS ?? nd.markGraceSec,
       riskStaleSec: e.ALERT_RISK_STALE_SECONDS,
       riskWarn: e.ALERT_RISK_WARN,
+      heldMarksInSession: e.ALERT_HELD_MARKS_IN_SESSION,
+      heldMarkCriticalSec: e.ALERT_HELD_MARK_CRITICAL_SECONDS,
+      quoteUnverifiedSec: e.ALERT_QUOTE_UNVERIFIED_SECONDS,
+      staleTradePriceMax: e.ALERT_STALE_TRADE_PRICE_MAX,
+      staleTradePriceWindowSec: e.ALERT_STALE_TRADE_PRICE_WINDOW_SECONDS,
       venueReportMaxAgeSec: e.ALERT_VENUE_REPORT_MAX_AGE_SECONDS ?? nd.venueReportMaxAgeSec,
       builderPushFailSec: e.ALERT_BUILDER_PUSH_FAIL_SECONDS,
       listingLiveGraceSec: e.ALERT_LISTING_LIVE_GRACE_SECONDS,

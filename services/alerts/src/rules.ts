@@ -3,6 +3,7 @@
 // "resolved" when it stops. Keys are stable per (rule, subject) so the same problem never alerts twice.
 import { formatEther } from "viem";
 import type { RuleConfig } from "./config";
+import { HOLD_RULES } from "./rules-holds";
 import type { BookSnap, Condition, OracleConfirmSnap, OracleProbe, OracleSourceSnap, Sample, Snapshot } from "./types";
 
 /** States in which a book is marked every period (Book.sol: Live and Retiring). */
@@ -787,6 +788,7 @@ export const RULES = {
   venue_listing: venueListing,
   venue_if_account: venueIfAccount,
   builder_price_push: builderPricePush,
+  ...HOLD_RULES,
   processes,
   balances,
   rpc,

@@ -3,6 +3,7 @@
 // markInterval) and the API's /health. Each source fails independently: a failed source becomes an
 // infra / rpc / api condition instead of blinding the other rules.
 import { KEYS } from "@bookrunner/shared/queues";
+import { SESSIONS_24X7, type Sessions, effectiveSessions } from "@bookrunner/shared/sessions";
 import { parseVenueMarkets, type VenueMarketMsg } from "@bookrunner/shared/venueMarket";
 import { SUPERVISOR_STATUS_KEY, parseSupervisorStatus } from "@bookrunner/shared/supervisor";
 import type {
@@ -33,7 +34,12 @@ export interface BookRow {
   state: string;
   venue: number;
   subscriptionEnds: Date | null;
+  /** the charter's sessions (bytes32 hex, charters.struct_json); absent / null = unknown */
+  sessions?: string | null;
 }
+
+/** How many of each book's newest marks the held-mark rule looks at. */
+export const RECENT_MARKS = 48;
 
 export interface DbPort {
   books(): Promise<BookRow[]>;
@@ -41,6 +47,8 @@ export interface DbPort {
   latestMarkPeriodEnds(): Promise<Array<{ bookId: number; periodEnd: Date }>>;
   killsSince(since: Date): Promise<Array<{ id: number; bookId: number; ts: Date; reason: string; breaches: unknown }>>;
   cursors(): Promise<Array<{ name: string; block: number; updatedAt: Date }>>;
+  /** the newest `perBook` marks of every book with their pnl_json.held (null on marks older than audit M-1) */
+  recentMarks?(perBook: number): Promise<Array<{ bookId: number; periodEnd: Date; held: boolean | null }>>;
 }
 
 export interface KvPort {
@@ -77,6 +85,8 @@ export interface CollectSettings {
   rpcWindowSec: number;
   /** kill_events lookback (one notification per kill) */
   killLookbackSec?: number;
+  /** SESSIONS_MODE (24x7 overrides every charter's sessions) */
+  sessionsMode?: string | undefined;
 }
 
 /** State carried between passes (rolling samples), persisted next to the dedupe state. */
@@ -114,6 +124,7 @@ export function parseRisk(raw: string | null): RiskSnap | null {
     ts: ts === null ? null : ts > 1e12 ? ts : ts * 1000,
     killed: meta.killed === true,
     killReason: typeof meta.killReason === "string" ? meta.killReason : null,
+    ...(meta.quoteUnverified === true ? { quoteUnverified: true } : {}),
     journal: k
       ? {
           episodeId: String(k.episodeId ?? "?"),
@@ -125,6 +136,28 @@ export function parseRisk(raw: string | null): RiskSnap | null {
         }
       : null,
   };
+}
+
+/** KEYS.agentDeskRejects JSON (DeskRejectsMsg, the book's agent) -> StaleTradePrice refusal times (unix ms); malformed -> []. */
+export function parseDeskRejects(raw: string | null): number[] {
+  if (!raw) return [];
+  try {
+    const o = JSON.parse(raw) as { staleTradePrice?: unknown };
+    return Array.isArray(o.staleTradePrice) ? o.staleTradePrice.map(num).filter((t): t is number => t !== null).slice(-1_000) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** The charter's sessions (bytes32 hex), SESSIONS_MODE applied; null when absent or undecodable. */
+export function sessionsOf(hex: string | null | undefined, mode: string | undefined): Sessions | null {
+  if (mode === "24x7") return SESSIONS_24X7;
+  if (typeof hex !== "string" || !/^0x[0-9a-fA-F]{1,64}$/.test(hex)) return null;
+  try {
+    return effectiveSessions(hex as `0x${string}`, mode);
+  } catch {
+    return null;
+  }
 }
 
 /** KEYS.venueSymbolIssues JSON (VenueSymbolIssuesMsg, ops-venue) -> bookId -> error; malformed -> empty. */
@@ -403,14 +436,20 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
   let indexer: IndexerCursorSnap[] | null = null;
   let bookRows: BookRow[] = [];
   let markBy = new Map<number, number>();
+  const recentBy = new Map<number, Array<{ periodEnd: number; held: boolean }>>();
   try {
-    const [rows, marks, k, cur] = await Promise.all([
+    const [rows, marks, k, cur, recent] = await Promise.all([
       d.db.books(),
       d.db.latestMarkPeriodEnds(),
       d.db.killsSince(new Date(now - (st.killLookbackSec ?? 86_400) * 1000)),
       d.db.cursors(),
+      d.db.recentMarks ? d.db.recentMarks(RECENT_MARKS) : Promise.resolve([]),
     ]);
     bookRows = rows;
+    for (const m of [...recent].sort((a, b) => new Date(b.periodEnd).getTime() - new Date(a.periodEnd).getTime())) {
+      const id = Number(m.bookId);
+      recentBy.set(id, [...(recentBy.get(id) ?? []), { periodEnd: Math.floor(new Date(m.periodEnd).getTime() / 1000), held: m.held === true }]);
+    }
     markBy = new Map(marks.map((m) => [Number(m.bookId), Math.floor(new Date(m.periodEnd).getTime() / 1000)]));
     kills = k.map((r) => ({
       id: Number(r.id),
@@ -429,6 +468,7 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
   let backup: Snapshot["backup"];
   let riskRaw: Array<string | null> = [];
   let venueRaw: Array<string | null> = [];
+  let rejectsRaw: Array<string | null> = [];
   let symbolIssues = new Map<number, string>();
   let markets = new Map<number, VenueMarketMsg>();
   let delistWaits = new Map<number, number>();
@@ -437,14 +477,16 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
   let venueOps: Snapshot["venueOps"];
   try {
     const ids = bookRows.map((b) => b.id);
-    const [sup, bk, risk, venue, issues, feed] = await Promise.all([
+    const [sup, bk, risk, venue, issues, feed, rejects] = await Promise.all([
       d.kv.get(SUPERVISOR_STATUS_KEY),
       d.kv.get(BACKUP_STATUS_KEY),
       ids.length ? d.kv.mget(ids.map((id) => KEYS.riskState(id))) : Promise.resolve([]),
       ids.length ? d.kv.mget(ids.map((id) => KEYS.venueReport(id))) : Promise.resolve([]),
       d.kv.get(KEYS.venueSymbolIssues),
       d.kv.get(KEYS.builderFeedStatus),
+      ids.length ? d.kv.mget(ids.map((id) => KEYS.agentDeskRejects(id))) : Promise.resolve([]),
     ]);
+    rejectsRaw = rejects;
     symbolIssues = parseVenueSymbolIssues(issues);
     markets = parseMarketsByBook(issues);
     delistWaits = parseDelistWaits(issues);
@@ -479,6 +521,9 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
       ifUnadopted: ifAccounts.unadopted.get(Number(b.id)) ?? [],
       ifEquityDrop: ifAccounts.drops.get(Number(b.id)) ?? null,
       failedWithdrawals: ifAccounts.failed.get(Number(b.id)) ?? [],
+      sessions: sessionsOf(b.sessions, st.sessionsMode),
+      recentMarks: recentBy.get(Number(b.id)) ?? [],
+      deskStaleTradePrice: parseDeskRejects(rejectsRaw[i] ?? null),
     }));
   }
 

@@ -1,6 +1,7 @@
 // What the alert rules see: one Snapshot per pass (collected from Postgres, Redis, the chain and the API by
 // collect.ts), plus the rolling samples the runner keeps between passes. Rules are pure functions of these.
 import type { VenueMarketMsg } from "@bookrunner/shared/venueMarket";
+import type { Sessions } from "@bookrunner/shared/sessions";
 import type { SupervisorStatus } from "@bookrunner/shared/supervisor";
 
 export type Severity = "warning" | "critical";
@@ -39,6 +40,8 @@ export interface RiskSnap {
   killReason: string | null;
   /** open kill journal (meta.monitor.kill): a kill sequence in progress or stuck */
   journal: RiskJournalSnap | null;
+  /** meta.quoteUnverified (audit M-3): the book is held reduce-only, its live quote has no fresh attested price to check against */
+  quoteUnverified?: boolean;
 }
 
 export interface BookSnap {
@@ -71,6 +74,12 @@ export interface BookSnap {
   ifUnadopted?: Array<{ id: string; amount: string; status: string; createdAt: number | null }>;
   /** ops-venue (KEYS.venueSymbolIssues ifEquityDrops): builder IF equity below the adapter's insurance */
   ifEquityDrop?: { expectedUsd: string; venueUsd: string; at: number } | null;
+  /** the charter's trading sessions (charters.struct_json, SESSIONS_MODE=24x7 applied); null = unknown */
+  sessions?: Sessions | null;
+  /** the newest marks (Postgres marks, pnl_json.held), newest first; periodEnd unix s */
+  recentMarks?: Array<{ periodEnd: number; held: boolean }>;
+  /** agent (KEYS.agentDeskRejects): unix ms of the desk's StaleTradePrice refusals of the last hour */
+  deskStaleTradePrice?: number[];
 }
 
 export interface KillEventSnap {

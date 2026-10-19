@@ -38,14 +38,19 @@ if (args.includes("--test")) {
 
 const sql = postgres(cfg.databaseUrl, { max: 2, idle_timeout: 60, connect_timeout: 10, onnotice: () => {} });
 const db: DbPort = {
-  books: () => sql<Array<{ id: number; name: string | null; symbol: string; state: string; venue: number; subscriptionEnds: Date | null }>>`
-    select id::int8 as id, name, symbol, state, venue, subscription_ends as "subscriptionEnds" from books order by id`.then((r) => r.map((x) => ({ ...x, id: Number(x.id) }))),
+  books: () => sql<Array<{ id: number; name: string | null; symbol: string; state: string; venue: number; subscriptionEnds: Date | null; sessions: string | null }>>`
+    select b.id::int8 as id, b.name, b.symbol, b.state, b.venue, b.subscription_ends as "subscriptionEnds", c.struct_json->>'sessions' as sessions
+    from books b left join charters c on c.id = b.charter_id order by b.id`.then((r) => r.map((x) => ({ ...x, id: Number(x.id) }))),
   latestMarkPeriodEnds: () => sql<Array<{ bookId: number; periodEnd: Date }>>`
     select distinct on (book_id) book_id as "bookId", period_end as "periodEnd" from marks order by book_id, period_end desc`.then((r) => [...r]),
   killsSince: (since) => sql<Array<{ id: number; bookId: number; ts: Date; reason: string; breaches: unknown }>>`
     select id, book_id as "bookId", ts, reason, breaches from kill_events where ts > ${since} order by id`.then((r) => [...r]),
   cursors: () => sql<Array<{ name: string; block: number; updatedAt: Date }>>`
     select name, block_number as block, updated_at as "updatedAt" from chain_cursor`.then((r) => [...r]),
+  recentMarks: (perBook) => sql<Array<{ bookId: number; periodEnd: Date; held: boolean | null }>>`
+    select book_id::int8 as "bookId", period_end as "periodEnd", (pnl_json->>'held')::boolean as held
+    from (select book_id, period_end, pnl_json, row_number() over (partition by book_id order by period_end desc) as rn from marks) m
+    where rn <= ${perBook}`.then((r) => r.map((x) => ({ ...x, bookId: Number(x.bookId) }))),
 };
 
 // fast-failing Redis: a read error is an infra condition, never a hang
@@ -78,7 +83,7 @@ const chain: ChainPort = {
 const collectFn = (mem: Parameters<typeof collect>[2]) =>
   collect(
     { db, kv: { get: (k) => redis.get(k), mget: (ks) => redis.mget(...ks) }, chain, fetch, now: Date.now },
-    { network: cfg.network, chainId: cfg.chainId, apiUrl: cfg.apiUrl, oracleUrl: cfg.oracleUrl, markIntervalSec: cfg.markIntervalSec, roles: cfg.roles, rpcWindowSec: cfg.rpcWindowSec },
+    { network: cfg.network, chainId: cfg.chainId, apiUrl: cfg.apiUrl, oracleUrl: cfg.oracleUrl, markIntervalSec: cfg.markIntervalSec, roles: cfg.roles, rpcWindowSec: cfg.rpcWindowSec, sessionsMode: cfg.sessionsMode },
     mem,
     cfg.rules.buybackGrowSec * 2 + 86_400,
   );
