@@ -14,6 +14,7 @@ The underwriting syndicate for on-chain perp markets.
 [![TypeScript](https://img.shields.io/badge/TypeScript-6.0-3178C6?logo=typescript&logoColor=white)](tsconfig.base.json)
 [![Network](https://img.shields.io/badge/network-Robinhood%20Chain%20testnet-2f5bea)](https://bookrunner.tech/status/)
 [![Status](https://img.shields.io/badge/status-testnet-orange)](#disclaimer)
+[![License](https://img.shields.io/badge/license-BUSL--1.1-blue)](LICENSE)
 [![Follow on X](https://img.shields.io/badge/follow-%40TryBookRunner-000000?logo=x&logoColor=white)](https://x.com/TryBookRunner)
 
 [Website](https://bookrunner.tech) · [App](https://bookrunner.tech/app/) · [Live desk](https://bookrunner.tech/dashboard/) · [Status](https://bookrunner.tech/status/) · [Docs](#documentation) · [X](https://x.com/TryBookRunner)
@@ -260,10 +261,16 @@ bash scripts/forge.sh test -vvv --match-contract WaterfallParityTest
 ./node_modules/.bin/bun run lint:copy
 ```
 
-The Foundry suite has 1,188 passing tests: unit, fuzz and invariant tests (waterfall conservation, redemptions
+The Foundry suite has 1,240 passing tests: unit, fuzz and invariant tests (waterfall conservation, redemptions
 never blocked by permission, engine exposure caps, adapter fund routing), Solidity / TypeScript waterfall parity
 vectors, and the security-review regressions in [`contracts/test/audit/`](contracts/test/audit). Service unit
-tests run with `bun test` and need no running infrastructure.
+tests run with `bun test` and need no running infrastructure; the integration tests (`BKRN_IT=1`) run with
+`bash scripts/ci-integration.sh` against Postgres/Timescale, Redis and anvil.
+
+CI (GitHub Actions, [`.github/workflows`](.github/workflows)) runs all of it on every pull request: the Foundry
+suite at the `ci` profile (every invariant suite at 102,400 calls or more), the TypeScript unit tests, type checks
+and copy linter, the integration suite, and the scanners (gitleaks, Slither with a reviewed allowlist, Semgrep).
+Actions are pinned by commit SHA and images by digest; no secrets are needed.
 
 ## Security
 
@@ -321,6 +328,12 @@ tests run with `bun test` and need no running infrastructure.
 | [apps/web/README.md](apps/web/README.md) | Web app: commands, configuration, wallets, design system |
 | [SECURITY.md](SECURITY.md) | How to report a vulnerability |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup, conventions, pull request checklist |
+
+## License
+
+Business Source License 1.1 ([LICENSE](LICENSE)). Licensor: Panda-Dev-WEB3 (BookRunner). Non-production use is
+free; there is no Additional Use Grant. Each version becomes available under the MIT License on its Change Date,
+2030-10-18 at the latest.
 
 ## Contact
 
