@@ -45,6 +45,11 @@ PHASE=all
 if [ "${1:-}" = "--phase" ]; then PHASE="${2:-}"; fi
 case "$PHASE" in all|check|archive-files|migrate|finish) ;; *) echo "unknown --phase $PHASE"; exit 1 ;; esac
 PLAN="${DEPLOY_PLAN_FILE:-$ROOT/.data/rehearsal-deploy.plan}"
+# THE env-file rule (scripts/env-file.ts): a key defined twice refuses the file before it is ever sourced
+envcheck() { "$BUN" scripts/env-file.ts check "$1" || { echo "!! fix $1 first (one line per key)"; exit 1; }; }
+# the server wrapper (deploy/server/rehearsal-deploy.sh) hands the live secrets over in the environment, parsed from the
+# root-owned /etc/bookrunner/testnet-live.env: then no app-tree env file is read for them (one source)
+FROM_WRAPPER="${DEPLOY_ENV_FROM_WRAPPER:-0}"
 # address of mnemonic index 0, read from the env var named $1 (never on a command line)
 addr_of() { M_VAR="$1" "$BUN" -e 'const {mnemonicToAccount}=require("viem/accounts");const m=(process.env[process.env.M_VAR]||"").trim();if(!m)process.exit(3);console.log(mnemonicToAccount(m,{addressIndex:0}).address)'; }
 
@@ -52,6 +57,7 @@ VENUE="${ORDERLY_VENUE:-mock}"
 case "$VENUE" in
   mock)
     [ -f .env.testnet ] || { echo ".env.testnet missing (needs BKRN_TESTNET_MNEMONIC)"; exit 1; }
+    envcheck .env.testnet
     set -a; . ./.env.testnet; set +a
     : "${BKRN_TESTNET_MNEMONIC:?BKRN_TESTNET_MNEMONIC not set in .env.testnet}"
     MNEMONIC_VAR=BKRN_TESTNET_MNEMONIC
@@ -64,10 +70,16 @@ case "$VENUE" in
     # the public stack's deployer, for the distinctness check only: its mnemonic is read in a subshell, never exported
     PUBLIC_DEPLOYER=""
     if [ -f .env.testnet ]; then
+      envcheck .env.testnet
       PUBLIC_DEPLOYER="$( set -a; . ./.env.testnet >/dev/null 2>&1; set +a; addr_of BKRN_TESTNET_MNEMONIC 2>/dev/null || true )"
     fi
-    if [ -f .env.testnet-live ]; then set -a; . ./.env.testnet-live; set +a; fi
-    : "${BKRN_TESTNET_LIVE_MNEMONIC:?BKRN_TESTNET_LIVE_MNEMONIC not set (.env.testnet-live): the rehearsal stack needs its own role mnemonic}"
+    if [ "$FROM_WRAPPER" = 1 ]; then
+      [ ! -e .env.testnet-live ] || { echo "!! .env.testnet-live exists in the app tree: on the server the live secrets live ONLY in /etc/bookrunner/testnet-live.env (one source)"; exit 1; }
+    elif [ -f .env.testnet-live ]; then
+      envcheck .env.testnet-live
+      set -a; . ./.env.testnet-live; set +a
+    fi
+    : "${BKRN_TESTNET_LIVE_MNEMONIC:?BKRN_TESTNET_LIVE_MNEMONIC not set (server: /etc/bookrunner/testnet-live.env; locally: .env.testnet-live): the rehearsal stack needs its own role mnemonic}"
     MNEMONIC_VAR=BKRN_TESTNET_LIVE_MNEMONIC
     REC=contracts/deployments/46630.live.json; DB=bookrunner_testnet_live; STATE=.data/testnet-live
     # Orderly RH testnet externals (VERIFY O2 / O3); the readiness check re-reads them on-chain
@@ -154,7 +166,8 @@ if [ "$PHASE" = all ] || [ "$PHASE" = check ]; then
   if [ "$PHASE" = check ]; then
     # the plan the root wrapper acts on (it parses these exact keys, never evaluates the file)
     mkdir -p "$(dirname "$PLAN")"
-    printf 'VENUE=%s\nARCHIVE=%s\nSTAMP=%s\nDEPLOYER=%s\nDB=%s\n' "$VENUE" "$ARCHIVE" "$STAMP" "$DEPLOYER" "$DB" > "$PLAN"
+    printf 'VENUE=%s\nARCHIVE=%s\nSTAMP=%s\nDEPLOYER=%s\nDB=%s\nDEPLOY_ORDERLY_VAULT=%s\nDEPLOY_SETTLEMENT_TOKEN=%s\nDEPLOY_ORDERLY_TOKEN=%s\nDEPLOY_ORDERLY_BROKER_ID=%s\nDEPLOY_CHARTER_FEE_USD=%s\n' \
+      "$VENUE" "$ARCHIVE" "$STAMP" "$DEPLOYER" "$DB" "${DEPLOY_ORDERLY_VAULT:-}" "${DEPLOY_SETTLEMENT_TOKEN:-}" "${DEPLOY_ORDERLY_TOKEN:-}" "${DEPLOY_ORDERLY_BROKER_ID:-}" "${DEPLOY_CHARTER_FEE_USD:-}" > "$PLAN"
     echo "==> plan written to $PLAN (archive: $ARCHIVE)"
     exit 0
   fi
@@ -216,6 +229,17 @@ if [ "$PHASE" = all ]; then
 fi
 
 # ============================================================== finish
+# the deployment must have been signed by the deployer the checks ran on (never another mnemonic, e.g. the public one)
+if [ "$PHASE" = finish ]; then
+  EXPECT="${EXPECT_DEPLOYER:?EXPECT_DEPLOYER (the deployer of the plan) is required}"
+  MINE="$(addr_of "$MNEMONIC_VAR")"
+  [ "$(echo "$MINE" | tr '[:upper:]' '[:lower:]')" = "$(echo "$EXPECT" | tr '[:upper:]' '[:lower:]')" ] \
+    || { echo "!! the mnemonic handed to this phase derives $MINE, the checked deployer is $EXPECT: refusing"; exit 4; }
+else
+  EXPECT="$DEPLOYER"
+fi
+echo "==> broadcast sender (every deploy transaction from the checked deployer $EXPECT)"
+check senders --expect "$EXPECT" || { echo "!! the deployment was NOT signed by the checked deployer: do not start the stack on it (docs/RUNBOOK.md step 3.1)"; exit 4; }
 echo "==> startBlock from deploy receipts (on Arbitrum Orbit chains block.number is the PARENT chain's block)"
 check start-block --record "$REC"
 echo "==> verify on-chain (a partial broadcast must never pass silently)"

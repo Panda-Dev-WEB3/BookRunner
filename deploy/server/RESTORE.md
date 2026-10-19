@@ -13,7 +13,7 @@ writes one **set** per run to `/var/backups/bookrunner/daily/<UTC stamp>/` and h
 | `state.tar.gz` | `.data/<network>/` (mock venue snapshot, **ops keys**, sagas; logs left out), with the rehearsal stack also `.data/testnet-live/` (its **Orderly keys**: they control accounts holding real testnet USDG), and `contracts/deployments/*.json` (incl. `46630.live.json` and archived `46630.live.<stamp>.json`) | `tar` (symlinks are stored as links, never followed) |
 | `MANIFEST`, `SHA256SUMS` | app commit, image references, checksums | |
 
-**Not in the sets:** `.env.<network>` (mnemonic, `ORACLE_SEED`, API keys), the rehearsal stack's `.env.testnet-live` /
+**Not in the sets:** `.env.<network>` (mnemonic, `ORACLE_SEED`, API keys), the rehearsal stack's
 `/etc/bookrunner/testnet-live.env` (`BKRN_TESTNET_LIVE_MNEMONIC`, its `ORACLE_SEED`, `ORDERLY_BUILDER_KEY_SECRET`) and `.env.infra`. Keep a copy of
 `.env.<network>` offline (password manager / sealed storage): without it a restored stack cannot sign. A new
 host generates a new `.env.infra`.
@@ -184,7 +184,7 @@ The rehearsal stack runs next to the public testnet stack (docs/RUNBOOK.md "Test
 daily set covers it automatically once `bookrunner_testnet_live` exists: `postgres-live.dump`, `.data/testnet-live/`
 (ops / trade keys of the Orderly accounts that hold **real testnet USDG**: without them and the record, those funds can
 only be recovered through Orderly) and `contracts/deployments/46630.live.json` in `state.tar.gz`, its own Redis
-(`redis-live`, 127.0.0.1:63791) in `redis-live.rdb`. Keep `.env.testnet-live` offline as well. `backup.sh --verify` restores `postgres-live.dump` into a
+(`redis-live`, 127.0.0.1:63791) in `redis-live.rdb`. Keep `/etc/bookrunner/testnet-live.env` offline as well. `backup.sh --verify` restores `postgres-live.dump` into a
 scratch database and counts the keys in the tar (the monthly drill covers it). Restore only the rehearsal stack:
 
 ```bash

@@ -4,6 +4,7 @@
 //   bun scripts/deploy-check.ts balance     --rpc <url> --address <0x…>          # ETH, decimal
 //   bun scripts/deploy-check.ts start-block --record <file> [--broadcast <run-latest.json>]
 //   bun scripts/deploy-check.ts verify      --rpc <url> --record <file> [--live-token <0x…> --live-vault <0x…>]
+//   bun scripts/deploy-check.ts senders     --expect <0x…> [--broadcast <run-latest.json>]   # every broadcast tx from it
 // Exit 0 ok, 4 = a verification failed, 2 = usage / RPC error.
 import { readFileSync, writeFileSync } from "node:fs";
 import { type Address, createPublicClient, formatEther, getAddress, http, parseAbi, stringToHex } from "viem";
@@ -25,6 +26,17 @@ export function startBlockOf(broadcast: { receipts?: Array<{ blockNumber?: strin
   return Math.min(...b) - 1;
 }
 
+/**
+ * Pure: the senders of a forge broadcast file. The deployment must have been signed by the deployer the checks ran on
+ * (a mnemonic other than the checked one, e.g. the public stack's, must never deploy unnoticed).
+ */
+export function broadcastSendersProblem(broadcast: { transactions?: Array<{ transaction?: { from?: string } }> }, expect: string): string | null {
+  const txs = broadcast.transactions ?? [];
+  if (txs.length === 0) return "the broadcast file lists no transaction";
+  const others = [...new Set(txs.map((t) => (t.transaction?.from ?? "?").toLowerCase()).filter((f) => f !== expect.toLowerCase()))];
+  return others.length ? `broadcast signed by ${others.join(", ")}, not by the checked deployer ${expect}` : null;
+}
+
 const abi = parseAbi([
   "function tokens() view returns (address[])",
   "function implementation(bytes32) view returns (address)",
@@ -41,6 +53,17 @@ async function main() {
     d.startBlock = startBlockOf(JSON.parse(readFileSync(bc, "utf8")));
     writeFileSync(rec, `${JSON.stringify(d, null, 2)}\n`);
     console.log(`    startBlock ${d.startBlock}`);
+    return;
+  }
+  if (cmd === "senders") {
+    const expect = getAddress(need(argv, "expect"));
+    const bc = opt(argv, "broadcast") ?? "contracts/broadcast/Deploy.s.sol/46630/run-latest.json";
+    const problem = broadcastSendersProblem(JSON.parse(readFileSync(bc, "utf8")), expect);
+    if (problem) {
+      console.log(`!! ${problem}`);
+      process.exit(4);
+    }
+    console.log(`    ok: every broadcast transaction was sent by ${expect}`);
     return;
   }
   const pc = createPublicClient({ transport: http(need(argv, "rpc"), { timeout: 20_000 }) });
@@ -82,7 +105,7 @@ async function main() {
     console.log(`    ok: config, ${tokens.length} stock tokens, factory implementations (config ${c.config})`);
     return;
   }
-  throw new Error(`unknown command ${cmd ?? ""} (chain-id | balance | start-block | verify)`);
+  throw new Error(`unknown command ${cmd ?? ""} (chain-id | balance | start-block | verify | senders)`);
 }
 
 if (import.meta.main) {

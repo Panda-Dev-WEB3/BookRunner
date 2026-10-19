@@ -42,6 +42,7 @@ import {
 import { roleSigner } from "../packages/shared/src/signer";
 import { busNames, busNamespace } from "../packages/shared/src/queues";
 import { describeMigration, migrateBus } from "./bus-migrate";
+import { parseEnvText } from "./env-file";
 import {
   LIVE_MNEMONIC_ENV,
   MAINNET_EXCLUDED,
@@ -80,12 +81,13 @@ const testnetLike = network === "testnet" || liveVenue;
 function readEnvFile(file: string): Array<[string, string]> | null {
   const path = resolve(ROOT, file);
   if (!existsSync(path)) return null;
-  const out: Array<[string, string]> = [];
-  for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
-    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
-    if (m && !line.trim().startsWith("#")) out.push([m[1]!, m[2]!.replace(/^["']|["']$/g, "")]);
+  // THE env-file rule (scripts/env-file.ts): a key defined twice refuses the file (no first-vs-last ambiguity)
+  const f = parseEnvText(readFileSync(path, "utf8"));
+  if (f.duplicates.length) {
+    console.error(`[dev] refusing: ${file} defines ${f.duplicates.join(", ")} more than once (keep exactly one line per key)`);
+    process.exit(1);
   }
-  return out;
+  return Object.entries(f.values);
 }
 /** Loads KEY=VALUE lines; returns the keys it defined (null when the file is missing). */
 function loadEnvFile(file: string, override: boolean): Set<string> | null {
@@ -113,7 +115,9 @@ if (testnetLike) {
   // NB: bun auto-loads the repo .env (devnet values) into process.env — this profile must OVERRIDE them.
   // testnet-live: its own env (.env.testnet-live over the process env, e.g. the unit's /etc/bookrunner/testnet-live.env);
   // the public stack's .env.testnet is only read, to refuse a shared key, never applied
-  const testnetKeys = liveVenue ? (loadEnvFile(".env.testnet-live", true) ?? new Set<string>()) : loadEnvFile(".env.testnet", true);
+  // live without .env.testnet-live (the server: the unit's root-owned /etc/bookrunner/testnet-live.env, parsed by systemd):
+  // the keys the unit set count as explicit (they override the profile defaults)
+  const testnetKeys = liveVenue ? (loadEnvFile(".env.testnet-live", true) ?? new Set(Object.keys(process.env))) : loadEnvFile(".env.testnet", true);
   if (!testnetKeys) {
     console.error("[dev] .env.testnet missing — run `bash scripts/deploy-testnet.sh` first");
     process.exit(1);
@@ -323,8 +327,9 @@ if (testnetLike && myDeployer) {
   const url = env.REDIS_URL || "redis://127.0.0.1:63790";
   let done = false;
   for (let attempt = 1; attempt <= 12 && !done; attempt++) {
-    const c = new RedisClient(url, { connectionTimeout: 5_000, enableOfflineQueue: false, autoReconnect: false });
+    let c: RedisClient | null = null;
     try {
+      c = new RedisClient(url, { connectionTimeout: 5_000, enableOfflineQueue: false, autoReconnect: false });
       await c.connect();
       const m = await migrateBus(c, ns);
       for (const line of describeMigration(ns, m)) console.log(`[dev] ${line}`);
@@ -334,7 +339,7 @@ if (testnetLike && myDeployer) {
       await new Promise((r) => setTimeout(r, 5_000));
     } finally {
       try {
-        c.close();
+        c?.close();
       } catch {
         // already closed
       }

@@ -463,7 +463,7 @@ chain (each stack has its own contracts) and Orderly (only the rehearsal talks t
 | | public testnet stack | rehearsal stack |
 |---|---|---|
 | unit | `bookrunner.service` | `bookrunner@testnet-live` (installed by install.sh / update.sh, never enabled by them) |
-| role keys | `BKRN_TESTNET_MNEMONIC` (`.env.testnet`) | `BKRN_TESTNET_LIVE_MNEMONIC` (`.env.testnet-live` or `/etc/bookrunner/testnet-live.env`): every role, the deployer, the desk keys and the gas funder differ |
+| role keys | `BKRN_TESTNET_MNEMONIC` (`.env.testnet`) | `BKRN_TESTNET_LIVE_MNEMONIC` (server: `/etc/bookrunner/testnet-live.env`, root 0600; developer machine: `.env.testnet-live`): every role, the deployer, the desk keys and the gas funder differ |
 | record | `contracts/deployments/46630.json` | `contracts/deployments/46630.live.json` |
 | database | `bookrunner_testnet` | `bookrunner_testnet_live` |
 | Redis | the infra Redis `127.0.0.1:63790`, db 1, `REDIS_PASSWORD` | its OWN Redis instance `redis-live` `127.0.0.1:63791`, db 0, `REDIS_LIVE_PASSWORD` (docker-compose, started by `bookrunner-infra`); the profile refuses the public Redis |
@@ -519,7 +519,7 @@ expanded inside `sh -c`, never typed):
 |---|---|---|---|
 | R1 | operator | Readiness, read-only (step 0): `bun scripts/orderly-readiness.ts --stage venue` | exit 0 (Orderly enabled USDG + broker `bookrunner` on the testnet vault, chain 46630 listed) |
 | R2 | Orderly / admin wallet | Orderly side (step 2.1); builder admin key registered by the admin wallet (step 2.2) | readiness `--stage venue` 0; `--builder-key ed25519:<pub>` row `builder key` PASS |
-| R3 | operator | Rehearsal env + funds (step 3.0): `.env.testnet-live` with a NEW mnemonic; the live deployer gets ETH (faucet) + the USDG budget (open question, VERIFY O17), the live gas funder ETH | the live deployer holds the launch budget |
+| R3 | operator | Rehearsal env + funds (step 3.0): `/etc/bookrunner/testnet-live.env` (root 0600, one line per key) with a NEW mnemonic; the live deployer gets ETH (faucet) + the USDG budget (open question, VERIFY O17), the live gas funder ETH | the live deployer holds the launch budget |
 | R4 | operator | Deploy: `sudo /usr/local/lib/bookrunner-deploy/rehearsal-deploy.sh` (step 3.1; root-owned wrapper, bun / scripts as bookrunner) | `46630.live.json` written, `orderly.venue = "live"`; readiness `record orderly` PASS |
 | R5 | operator (root) | `systemctl start bookrunner@testnet-live` (step 3.6); the public stack keeps running | `[dev] venue: LIVE Orderly testnet` in `.data/testnet-live/dev.log`; the launch charters NVDA / TSLA (rehearsal sizes, step 3.3) |
 | R6 | operator | Per book: delegate signer (step 3.4), native deposit fee if any (step 3.5) | ops-venue `Orderly delegate signer confirmed` x2 per book, `book venue provisioned` |
@@ -603,7 +603,7 @@ and 2 stay on the mock stack; retire them there (Operations "Wind-down") only wh
       network testnet) "API keys" -> add, or `POST https://testnet-api.orderly.org/v1/orderly_key` with the EIP-712
       `AddOrderlyKey` message signed by the admin wallet (`brokerId bookrunner`, `chainId 46630`, `orderlyKey`, `scope
       read,trading,asset`, `timestamp`, `expiration` <= 365 days). Note its expiry: re-register before it lapses.
-   3. Hand the base58 secret to the operator out of band; it goes into `.env.testnet-live` as `ORDERLY_BUILDER_KEY_SECRET`
+   3. Hand the base58 secret to the operator out of band; it goes into `/etc/bookrunner/testnet-live.env` (server) as `ORDERLY_BUILDER_KEY_SECRET`
       (mode 600, never in git or logs). With the secret set ops-venue treats the key as registered and never generates
       or registers one (`loadOrCreateBuilderKey`); with an admin-owned `ORDERLY_BUILDER_ACCOUNT_ID` and no secret
       ops-venue refuses to start (`resolveBuilderAccount`), and so does dev.ts's live profile.
@@ -646,7 +646,7 @@ and 2 stay on the mock stack; retire them there (Operations "Wind-down") only wh
      /v1/register_account` signed by the EOA); its account id is `keccak256(abi.encode(eoa, keccak256("bookrunner")))`;
      (b) the timelock calls `adapter.setIfAccountOwner(eoa)` while the book's IF is empty (before the window
      closes; refused once IF capital or an IF withdrawal is on the adapter); (c) add `<bookId>=<accountId>` to
-     `ORDERLY_IF_BUILDER_ACCOUNTS` and set `ORDERLY_IF_MODE=builder` in `.env.testnet-live` (step 3.6), restart the stack; (d) register the
+     `ORDERLY_IF_BUILDER_ACCOUNTS` and set `ORDERLY_IF_MODE=builder` in `/etc/bookrunner/testnet-live.env` (step 3.6), restart the stack; (d) register the
      Orderly key ops-venue logs (`builder IF account: the operator must register this Orderly key`, scope `read`)
      for that account from the EOA (Orderly One or `POST /v1/orderly_key` signed by the EOA): until then the book's
      venue reports fail (alert `venue_if_account` key_pending). Admin in Orderly One: assign that account as the
@@ -681,15 +681,20 @@ and 2 stay on the mock stack; retire them there (Operations "Wind-down") only wh
 
 ### 3. Operator side (testnet: the deployer is `config.timelock()`)
 
-0. **Rehearsal env, budget and testnet USDG.** On the host, as the `bookrunner` user, create
-   `/opt/bookrunner/app/.env.testnet-live` (mode 600; or the same keys in `/etc/bookrunner/testnet-live.env`, root 0600,
-   which the unit also reads):
+0. **Rehearsal env, budget and testnet USDG.** On the server the live secrets live in ONE root-owned file,
+   `/etc/bookrunner/testnet-live.env` (root:root 0600): the unit reads it (EnvironmentFile) and `rehearsal-deploy.sh`
+   parses it (step 3.1); an `.env.testnet-live` in the app tree is refused there (it is for a developer machine only).
+   Exactly ONE line per key: every reader (systemd, `dev.ts`, `deploy-testnet.sh`, the wrapper) refuses a file defining a
+   key twice (`scripts/env-file.ts`; append-with-`>>` mistakes would otherwise make readers disagree). As root:
    ```bash
    BKRN_TESTNET_LIVE_MNEMONIC=<a NEW 12/24-word mnemonic, generated offline; never the public stack's>
    ORACLE_SEED=<openssl rand -hex 32>
    ORDERLY_BUILDER_KEY_SECRET=<base58 secret of the builder admin key, step 2.2>
-   # optional: RHC_TESTNET_RPC_URL, ANTHROPIC_API_KEY (charter jury), ALERT_* delivery (its mails say "BookRunner testnet-live")
+   # optional: RHC_TESTNET_RPC_URL (and FORGE_RPC_URL for forge only), MARK_INTERVAL_SECONDS, ANTHROPIC_API_KEY (charter jury),
+   # ALERT_* delivery (its mails say "BookRunner testnet-live"), the DEPLOY_ORDERLY_VAULT / DEPLOY_SETTLEMENT_TOKEN /
+   # DEPLOY_ORDERLY_TOKEN / DEPLOY_ORDERLY_BROKER_ID / DEPLOY_CHARTER_FEE_USD overrides of step 3.1
    ```
+   (`sudo install -m 0600 -o root -g root /dev/null /etc/bookrunner/testnet-live.env`, then edit it as root.)
    Keep an offline copy (it is not in the backups, RESTORE.md). Funds (VERIFY O17: the source of testnet USDG is an open
    question to Orderly / Paxos; there is no faucet we know of): the live deployer (index 0 of the NEW mnemonic; its address
    is printed by `deploy-testnet.sh`) needs ETH (faucet) for the deployment and the launch's gas distribution, and, before
@@ -709,22 +714,26 @@ and 2 stay on the mock stack; retire them there (Operations "Wind-down") only wh
    sudo /usr/local/lib/bookrunner-deploy/rehearsal-deploy.sh --redeploy [--force-archive]
    ```
    (on a developer machine with Docker: `ORDERLY_VENUE=live bash scripts/deploy-testnet.sh`, every step in-process).
-   **Who runs what** (HARDENING.md: root runs only root-owned code): the wrapper runs every bun / script step AS the
-   `bookrunner` user (`scripts/deploy-testnet.sh --phase check | archive-files | migrate | finish`, which reads its own
-   `.env.testnet` / `.env.testnet-live`), with `POSTGRES_PASSWORD` / `REDIS_LIVE_PASSWORD` from the root-only `.env.infra`
-   handed over in the environment (`sudo --preserve-env`, never on a command line). Root itself only drives Docker: the
-   database (create, `pg_dump` of an archived one, rename) and the live Redis (PING, SAVE, FLUSHDB) through `docker exec`
-   on the infra containers, and forge in the pinned Foundry image (by digest, `FOUNDRY_IMAGE`) run as the bookrunner
-   uid (`--cap-drop ALL`, no-new-privileges, only the app tree and `/opt/bookrunner/.foundry-docker` mounted, no Docker
-   socket). Residual: forge compiles and runs the Solidity deploy script from the app tree inside that unprivileged
-   container, where it can write only what the bookrunner user can write anyway. Root never sources a file from the app
-   tree: it parses the check phase's plan (fixed keys, validated) and, for the forge container, `BKRN_TESTNET_LIVE_MNEMONIC`
-   / `RHC_TESTNET_RPC_URL` / `FORGE_RPC_URL` / `MARK_INTERVAL_SECONDS` from `.env.testnet-live` (KEY=VALUE lines,
-   validated, symlinks refused). Every file it creates in the app tree is created by the bookrunner user (dumps through
-   `sudo -u bookrunner dd`, forge output as its uid), so nothing root-owned is left behind; the wrapper refuses to run
-   while `contracts/{out,cache,broadcast,deployments}` hold files from an earlier root run (it prints the one-off
-   `chown -R --no-dereference`). `scripts/deploy-testnet.sh` itself refuses to run as root from the app tree.
-   It reads `.env.testnet-live` (and `.env.testnet` only to compare the deployer addresses: refused when they match),
+   **Who runs what** (HARDENING.md: root runs only root-owned code): the wrapper parses the root-owned
+   `/etc/bookrunner/testnet-live.env` (duplicates refused, every value validated, mode 0600 required) and the root-only
+   `.env.infra`, and runs every bun / script step AS the `bookrunner` user (`scripts/deploy-testnet.sh --phase check |
+   archive-files | migrate | finish`) with THOSE values in its environment (`sudo --preserve-env`, never on a command
+   line): the check phase, forge and the finish phase therefore use the same mnemonic and the same `DEPLOY_*` settings
+   (read once by the wrapper; the plan records them and the wrapper refuses a plan that differs). Root itself only
+   drives Docker: the database (create, `pg_dump` of an archived one, rename) and the live Redis (PING, SAVE, FLUSHDB)
+   through `docker exec` on the infra containers, and forge in the pinned Foundry image (by digest, `FOUNDRY_IMAGE`)
+   run as the bookrunner uid (`--cap-drop ALL`, no-new-privileges, no Docker socket; `--mount type=bind`: the app tree
+   READ-ONLY, only `contracts/{out,cache,broadcast,deployments}` and `/opt/bookrunner/.foundry-docker` writable, each
+   source re-checked as a real bookrunner-owned directory right before the run; the RPC URL as `ETH_RPC_URL`, not argv).
+   Residual: forge compiles and runs the Solidity deploy script from the app tree inside that unprivileged container,
+   which can write only those bookrunner-owned paths. The only app-tree file root reads is the check phase's plan (fixed
+   keys, validated, symlink refused). Every file created in the app tree is the bookrunner user's (dumps through
+   `sudo -u bookrunner dd`, forge output as its uid); the wrapper refuses while `contracts/{out,cache,broadcast,
+   deployments}` hold files from an earlier root run (it prints the one-off `chown -R --no-dereference`).
+   `scripts/deploy-testnet.sh` itself refuses to run as root from the app tree. **Broadcast check:** the finish phase
+   refuses (exit 4) a deployment whose broadcast transactions were not ALL sent by the plan's deployer (and a mnemonic
+   that does not derive it): never start the stack on such a record.
+   It uses the live mnemonic (and `.env.testnet` only to compare the deployer addresses: refused when they match),
    runs `orderly-readiness.ts --stage venue` (exit 5 = Orderly not ready: nothing deployed), creates and migrates the
    `bookrunner_testnet_live` database, and runs `Deploy.s.sol` with the live mnemonic and `DEPLOY_ORDERLY_VAULT=0x2A5b…E24d`,
    `DEPLOY_SETTLEMENT_TOKEN=0x7E95…802F` (USDG), `DEPLOY_ORDERLY_TOKEN=USDG`, `DEPLOY_ORDERLY_BROKER_ID=bookrunner`,
@@ -800,7 +809,7 @@ and 2 stay on the mock stack; retire them there (Operations "Wind-down") only wh
    `ORDERLY_BROKER_ID=bookrunner` (venue symbols `PERP_<T>_USDC_bookrunner`), `ORDERLY_TOKEN=USDG`,
    `ORDERLY_LEDGER_ADDRESS=0x1826B75e2ef249173FC735149AE4B8e9ea10abff` (testnet Ledger, withdraw EIP-712 domain),
    `ORDERLY_BUILDER_ACCOUNT_ID=0xaa04…2e5c` (the admin account), `ORDERLY_LISTING_MODE=manual`, `ORDERLY_IF_MODE=contract`
-   (each overridable from `.env.testnet-live`: e.g. `ORDERLY_IF_MODE=builder` + `ORDERLY_IF_BUILDER_ACCOUNTS`, step 2.4;
+   (each overridable from `/etc/bookrunner/testnet-live.env` / a local `.env.testnet-live`: e.g. `ORDERLY_IF_MODE=builder` + `ORDERLY_IF_BUILDER_ACCOUNTS`, step 2.4;
    `ORDERLY_ORACLE_WS_URL` defaults to `wss://testnet-ws-oracle.orderly.org`, undocumented, VERIFY O18) and pins
    `ORDERLY_MODE=live`, `OPS_FEE_SWEEP_AUTO=false`, the live mnemonic as the role mnemonic of its signing children,
    `DEPLOYMENT_FILE=contracts/deployments/46630.live.json`, the database `bookrunner_testnet_live`, its own Redis
