@@ -43,9 +43,13 @@ contract Backstop is IBackstop, ReentrancyGuardTransient {
     error NotConfigured(bytes32 what);
     error DepositNotReceived(uint256 amount, uint256 unaccounted);
     error InvalidBps(uint256 bps);
+    /// @notice migrate() while this contract is still config.backstop().
+    error StillCurrent();
 
     /// @notice Per-cover cap changed.
     event MaxCoverBpsSet(uint16 bps);
+    /// @notice The whole balance moved to the backstop config now points at (audit 2026-10 D).
+    event Migrated(address indexed to, uint256 amount);
 
     /// @param config_ BookrunnerConfig; `usdc()` must already be set.
     constructor(address config_) {
@@ -102,6 +106,24 @@ contract Backstop is IBackstop, ReentrancyGuardTransient {
             usdc.safeTransfer(vault, covered);
         } else {
             emit Covered(bookId, shortfall, 0);
+        }
+    }
+
+    /// @notice Migration (audit 2026-10 D): once the timelock has repointed `config.backstop()` to a new Backstop,
+    ///         anyone may move this contract's whole USDC balance (acknowledged deposits and donations) there; the
+    ///         new backstop acknowledges it (`notifyDeposit`). Books only ever call `config.backstop()`, so this
+    ///         contract is no longer used for cover once repointed. No new trust: the destination is the timelock's
+    ///         choice, as is every other protocol address.
+    function migrate() external nonReentrant returns (uint256 moved) {
+        address next = config.backstop();
+        if (next == address(this)) revert StillCurrent();
+        if (next == address(0)) revert NotConfigured("backstop");
+        moved = balance();
+        accountedBalance = 0;
+        emit Migrated(next, moved);
+        if (moved > 0) {
+            usdc.safeTransfer(next, moved);
+            IBackstop(next).notifyDeposit(moved);
         }
     }
 

@@ -117,6 +117,8 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
     error BadTwapParams();
     error BadReferenceSource(uint8 source);
     error TwapDeviation(int24 spotTick, int24 meanTick);
+    /// @notice migrate() while this contract is still config.feeRouter().
+    error StillCurrent();
 
     /// @notice Buyback router changed.
     event BuybackRouterSet(address router);
@@ -128,6 +130,10 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
     event ReferenceSourceSet(uint8 source);
     /// @notice TWAP source parameters changed.
     event TwapParamsSet(address pool, uint32 window, uint24 maxTickDeviation);
+    /// @notice The whole USDC balance moved to the fee router config now points at (audit 2026-10 D).
+    event Migrated(address indexed to, uint256 amount);
+    /// @notice USDC acknowledged as pending buyback by notifyMigration.
+    event MigrationReceived(address indexed from, uint256 amount);
 
     /// @param config_ BookrunnerConfig; `usdc()` and `bkrn()` must already be set.
     constructor(address config_) {
@@ -165,6 +171,34 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
 
         usdc.safeTransfer(backstop, toBackstop);
         IBackstop(backstop).notifyDeposit(toBackstop);
+    }
+
+    /// @notice Migration (audit 2026-10 D): once the timelock has repointed `config.feeRouter()` to a new
+    ///         BkrnFeeRouter, anyone may move this contract's whole USDC balance (the pending buyback plus any
+    ///         donation) there; the new router adds it to its `buybackPending` (`notifyMigration`). RevenueRouters
+    ///         read `config.feeRouter()` at every distribution, so no new carry arrives here once repointed.
+    function migrate() external nonReentrant returns (uint256 moved) {
+        address next = config.feeRouter();
+        if (next == address(this)) revert StillCurrent();
+        if (next == address(0)) revert NotConfigured("feeRouter");
+        moved = usdc.balanceOf(address(this));
+        buybackPending = 0;
+        emit Migrated(next, moved);
+        if (moved > 0) {
+            usdc.safeTransfer(next, moved);
+            BkrnFeeRouter(next).notifyMigration(moved);
+        }
+    }
+
+    /// @notice Anyone: acknowledges `amount` USDC that has arrived here and is not pending yet (a predecessor's
+    ///         `migrate`, or a donation) as pending buyback. Push-then-notify, like notifyCarry.
+    function notifyMigration(uint256 amount) external nonReentrant {
+        if (amount == 0) revert ZeroAmount();
+        uint256 required = buybackPending + amount;
+        uint256 bal = usdc.balanceOf(address(this));
+        if (bal < required) revert CarryNotReceived(required, bal);
+        buybackPending = required;
+        emit MigrationReceived(msg.sender, amount);
     }
 
     /// @inheritdoc IBkrnFeeRouter
