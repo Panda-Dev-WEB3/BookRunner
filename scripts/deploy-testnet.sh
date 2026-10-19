@@ -25,7 +25,10 @@ MIN_ETH="${DEPLOY_MIN_ETH:-0.03}"
 
 CHAIN=$(cast chain-id --rpc-url "$RPC")
 [ "$CHAIN" = "46630" ] || { echo "RPC $RPC is chain $CHAIN, expected 46630"; exit 1; }
-DEPLOYER=$(cast wallet address --mnemonic "$BKRN_TESTNET_MNEMONIC" --mnemonic-index 0)
+# The mnemonic never goes on a command line (visible to every local user in ps / /proc/<pid>/cmdline): the
+# address is derived from the exported environment, and forge gets it as DEV_MNEMONIC through docker -e NAME
+# (the name only; the value travels in the environment, scripts/forge.sh).
+DEPLOYER=$("$BUN" -e 'import { mnemonicToAccount } from "viem/accounts"; console.log(mnemonicToAccount(process.env.BKRN_TESTNET_MNEMONIC!.trim(), { addressIndex: 0 }).address)')
 BAL=$(cast balance "$DEPLOYER" --rpc-url "$RPC" --ether)
 echo "==> Robinhood Chain testnet via $RPC"
 echo "    deployer $DEPLOYER balance $BAL ETH (need >= $MIN_ETH incl. gas for service keys)"

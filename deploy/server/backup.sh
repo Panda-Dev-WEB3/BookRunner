@@ -31,7 +31,7 @@ KEEP_DAILY="${BACKUP_KEEP_DAILY:-14}"
 KEEP_WEEKLY="${BACKUP_KEEP_WEEKLY:-8}"
 PG_CONTAINER="${BACKUP_PG_CONTAINER:-bookrunner-postgres-1}"
 REDIS_CONTAINER="${BACKUP_REDIS_CONTAINER:-bookrunner-redis-1}"
-REDIS_IMAGE="${BACKUP_REDIS_IMAGE:-redis:7-alpine}"
+REDIS_IMAGE="${BACKUP_REDIS_IMAGE:-redis@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499}" # 7-alpine, the digest docker-compose.yml pins
 COMPOSE_NETWORK="${BACKUP_COMPOSE_NETWORK:-bookrunner_default}"
 DB="bookrunner_${NETWORK}"
 if [ -z "${BACKUP_REDIS_DB:-}" ]; then

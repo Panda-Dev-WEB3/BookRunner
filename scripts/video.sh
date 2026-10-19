@@ -16,7 +16,7 @@ if [ "${1:-}" = footage ]; then
     -v "$HOSTDIR:/work" \
     -v bookrunner-video-footage-node-modules:/pw/node_modules \
     -w /pw \
-    mcr.microsoft.com/playwright:v1.64.1-noble \
+    mcr.microsoft.com/playwright:v1.64.1-noble@sha256:7852dc5a7d72f5fe458a597d690f6c42fbc8e9e26ddfa95f8e6ef552558d9bbf \
     sh -c "npm i --no-save --no-package-lock --no-audit --no-fund playwright@1.64.1 && cp /work/scripts/record-footage.mjs /pw/ && node /pw/record-footage.mjs"
 fi
 if [ "${1:-}" = app-build ]; then
@@ -48,7 +48,7 @@ if [ "${1:-}" = demo ]; then
     -v bookrunner-video-demo-node-modules:/pw/node_modules \
     -e DEMO_VIDEO_DIR=/work -e APP_DIST=/app-dist \
     -w /pw \
-    mcr.microsoft.com/playwright:v1.64.1-noble \
+    mcr.microsoft.com/playwright:v1.64.1-noble@sha256:7852dc5a7d72f5fe458a597d690f6c42fbc8e9e26ddfa95f8e6ef552558d9bbf \
     sh -c 'set -e
       grep -qs "\"version\": \"1.64.1\"" node_modules/playwright/package.json && grep -qs "\"version\": \"2.57.2\"" node_modules/viem/package.json \
         || npm i --no-save --no-package-lock --no-audit --no-fund playwright@1.64.1 viem@2.57.2 >/dev/null
