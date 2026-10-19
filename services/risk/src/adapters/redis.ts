@@ -78,5 +78,6 @@ export function parseQuote(v: unknown): QuoteObservation | null {
     ...(bookId !== null ? { bookId } : {}),
     ...(size !== null ? { size } : {}),
     ...(typeof q.signature === "string" ? { signature: q.signature } : {}),
+    ...(q.ref && typeof q.ref === "object" ? { ref: q.ref } : {}),
   };
 }

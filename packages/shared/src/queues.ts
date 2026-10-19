@@ -96,6 +96,7 @@ export function busNames(ns: string = BUS_NS) {
       agentHeartbeat: (bookId: number | bigint) => `${p}:agent:hb:${bookId}`, // unix ms
       agentQuote: (bookId: number | bigint) => `${p}:agent:quote:${bookId}`, // JSON QuoteMsg (latest)
       agentDeskRejects: (bookId: number | bigint) => `${p}:agent:desk-rejects:${bookId}`, // JSON DeskRejectsMsg (agent, TTL; alerts desk_stale_trade_price)
+      agentStatus: (bookId: number | bigint) => `${p}:agent:status:${bookId}`, // JSON AgentStatusMsg (agent, TTL; alerts agent_no_desk_key / risk_state_unverified)
       busForged: (source: string) => `${p}:bus:forged:${source}`, // JSON BusForgedMsg (agent-<id> / ops-venue / risk, TTL; alerts bus_forged_message)
       liveNav: (bookId: number | bigint) => `${p}:nav:live:${bookId}`, // JSON LiveNav (risk/mark estimate)
       venueSymbolIssues: `${p}:ops-venue:symbol-issues`, // JSON VenueSymbolIssuesMsg (ops-venue, every book poll, TTL)
@@ -317,7 +318,37 @@ export interface QuoteMsg {
   sides: { bid: boolean; ask: boolean };
   /** EIP-712 AgentQuote signed by the book's desk session key (busAuth.ts); risk ignores an unsigned quote */
   signature?: `0x${string}`;
+  /**
+   * The oracle print the quote was priced on: its signed PriceUpdate fields and the oracle's signature ("0x" for the
+   * AttestedOracle fallback read from the chain). priceWad / publishedAt are covered by the agent's signature; risk
+   * verifies the print and judges the quote against it.
+   */
+  ref?: {
+    underlying: `0x${string}`;
+    priceWad: string;
+    publishedAt: number;
+    held: boolean;
+    sourceCount: number;
+    sourcesHash: `0x${string}`;
+    signature: `0x${string}`;
+  };
 }
+
+/** The agent's own status (KEYS.agentStatus, refreshed every state refresh, TTL): alerts agent_no_desk_key / risk_state_unverified. */
+export interface AgentStatusMsg {
+  v: 1;
+  bookId: number;
+  ts: number; // unix ms
+  /** the desk session key: active on the mandate, registered but expired / revoked / mandate killed (inactive), none */
+  deskKey: "active" | "inactive" | "missing";
+  /** unix ms since the desk key is not active (null: active) */
+  deskKeySince: number | null;
+  /** unix ms since no verified risk state arrived (null: verified within the agent's timeout) */
+  riskStateUnverifiedSince: number | null;
+}
+
+/** KEYS.agentStatus TTL (s): far above the refresh period, so a stopped agent's status expires. */
+export const AGENT_STATUS_TTL_SEC = 300;
 
 export interface FillMsg {
   bookId: number;

@@ -61,7 +61,9 @@ export function evaluate(
   const driftBps = effectiveDriftBps(o.quoteDriftBps ?? DEFAULT_QUOTE_DRIFT_BPS, m.minQuoteWidthBps);
   const quotePx = attestedPrice(obs.oracle, obs.nowMs, o.quotePriceMaxAgeMs ?? DEFAULT_QUOTE_PRICE_MAX_AGE_MS);
   const hold = stepQuoteHold(prevHold, quotePx !== null, o.quoteHoldReleaseTicks ?? DEFAULT_QUOTE_HOLD_RELEASE_TICKS);
-  const quote = selectLiveQuote(obs.quote, quotePx, obs.nowMs, o.quoteMaxAgeMs, driftBps);
+  // an authenticated quote carries the verified print it was priced on (refPx): it is judged against that print, so a
+  // replayed genuine quote cannot fake a breach after a price move (audit 2026-10 lead "Redis trust")
+  const quote = selectLiveQuote(obs.quote, obs.quote?.refPx ?? quotePx, obs.nowMs, o.quoteMaxAgeMs, driftBps);
   const canHedgeLong = o.canHedgeLong ?? false;
   // audit M-2 split window: a held token in it is valued at the multiplier of its price's basis (on-chain
   // basisMultiplier) and never flattened. Only when that multiplier is unknown (valued at 0) is the desk valuation

@@ -1,7 +1,7 @@
 // risk service entry: wiring + graceful shutdown. See ARCHITECTURE.md §3 flow 4 and §4 (risk row).
 import { createDb } from "@bookrunner/db";
-import { FORGED_WINDOW_SEC, ForgedLog, KEYS, assertVenueSymbolConfig, busJson, createLogger, publicClientFor, roleSigner, tryLoadDeployment, walletClientFor } from "@bookrunner/shared";
-import { mMMandateAbi } from "@bookrunner/shared/abi";
+import { FORGED_WINDOW_SEC, ForgedLog, KEYS, assertVenueSymbolConfig, busJson, createLogger, oracleSignerCheck, publicClientFor, roleSigner, tryLoadDeployment, walletClientFor } from "@bookrunner/shared";
+import { attestedOracleAbi, mMMandateAbi } from "@bookrunner/shared/abi";
 import { Redis } from "ioredis";
 import { type Hex, zeroHash } from "viem";
 import { riskBusAuth } from "./adapters/busAuth";
@@ -92,7 +92,12 @@ async function main(): Promise<void> {
         chainId: env.CHAIN_ID,
         config: dep.contracts.config,
         account,
-        isActiveKey: (mandate, key) => pub.readContract({ address: mandate, abi: mMMandateAbi, functionName: "isActiveKey", args: [key] }),
+        deskKeyStatus: async (mandate, key) => {
+          if (await pub.readContract({ address: mandate, abi: mMMandateAbi, functionName: "isActiveKey", args: [key] })) return "active";
+          const k = await pub.readContract({ address: mandate, abi: mMMandateAbi, functionName: "getKey", args: [key] });
+          return k.validUntil > 0n ? "inactive" : "unknown";
+        },
+        oracle: oracleSignerCheck({ chainId: env.CHAIN_ID, oracle: dep.contracts.oracle, isSignerOnChain: (a) => pub.readContract({ address: dep.contracts.oracle, abi: attestedOracleAbi, functionName: "isSigner", args: [a] }) }),
         forged: new ForgedLog("risk", async (m) => void (await redis.set(KEYS.busForged("risk"), busJson(m), "PX", FORGED_WINDOW_SEC * 1000))),
       }),
     makeVenues: (chain: ChainGateway) =>

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { type Address, keccak256, toHex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { FORGED_WINDOW_SEC, ForgedLog, KILL_MAX_AGE_SEC, KillVerifier, cachedAddressCheck, killNonce, recoverQuoteSigner, signKill, signQuote } from "../src/busAuth";
+import { FORGED_WINDOW_SEC, ForgedLog, KILL_MAX_AGE_SEC, KillVerifier, RiskStateVerifier, cachedAddressCheck, killNonce, recoverQuoteSigner, signKill, signQuote, signRiskState } from "../src/busAuth";
 import type { QuoteMsg } from "../src/queues";
 
 const CHAIN = 31337;
@@ -108,5 +108,22 @@ describe("cachedAddressCheck and ForgedLog", () => {
     expect(f.recent().map((e) => e.reason)).toEqual(["b"]);
     expect(writes).toHaveLength(2);
     expect(writes[1]).toMatchObject({ v: 1, source: "agent-3", events: [{ reason: "b", kind: "kill" }] });
+  });
+});
+
+describe("RiskStateVerifier (RISK-signed risk state)", () => {
+  const state = async (s: "ok" | "killed", tsMs: number, who = RISK, bookId = 3) => ({ state: s, stateSig: { tsMs, signature: await signRiskState(who, CHAIN, CONFIG, { bookId, state: s, tsMs }) } });
+  test("valid once per tsMs (monotonic); unsigned, non-RISK, other-book and changed-state ones are forged; old ones stale", async () => {
+    let now = T * 1000;
+    const v = new RiskStateVerifier({ chainId: CHAIN, config: CONFIG, bookId: 3, isRiskSigner: async (a) => a.toLowerCase() === RISK.address.toLowerCase(), now: () => now });
+    const ok = await state("ok", now);
+    expect(await v.verify(JSON.stringify(ok))).toEqual({ ok: true, state: "ok", tsMs: now });
+    expect(await v.verify(ok)).toMatchObject({ ok: false, replay: true, forged: false });
+    now += 2_000;
+    for (const bad of [{ state: "killed" }, await state("killed", now, OTHER), await state("killed", now, RISK, 4), { ...(await state("ok", now)), state: "killed" }]) {
+      expect(await v.verify(bad)).toMatchObject({ ok: false, forged: true });
+    }
+    expect(await v.verify(await state("killed", now - 61_000))).toMatchObject({ ok: false, forged: false, replay: true });
+    expect(await v.verify(await state("killed", now))).toMatchObject({ ok: true, state: "killed" });
   });
 });

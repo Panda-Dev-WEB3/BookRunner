@@ -1,5 +1,6 @@
 import type { QuoteHoldState } from "./domain/quote";
-import type { BookComponents, BookState, LimitState, LimitsSnapshot, Mandate, VenueId } from "@bookrunner/shared";
+import type { BookComponents, BookState, LimitState, LimitsSnapshot, Mandate, QuoteMsg, RiskStateSig, VenueId } from "@bookrunner/shared";
+import type { QuoteAuth } from "./ports";
 import type { Hex } from "viem";
 
 /** Static facts about a book, resolved once at discovery. */
@@ -112,6 +113,10 @@ export interface QuoteObservation {
   size?: number;
   /** EIP-712 AgentQuote signature by the book's desk session key (absent: unsigned) */
   signature?: string;
+  /** the oracle print the quote was priced on (QuoteMsg.ref) */
+  ref?: QuoteMsg["ref"];
+  /** set by risk once the quote is authenticated: the verified reference price the quote is judged against */
+  refPx?: number;
 }
 
 export interface LiveNavResult {
@@ -250,7 +255,7 @@ export interface RiskMeta {
    * Who signed the agent's quote read from Redis (audit 2026-10 lead "Redis trust"): ok = an active desk key of the
    * mandate; anything else = the quote is ignored (no quote check, never a breach). null = no quote / no check.
    */
-  quoteAuth?: "ok" | "unsigned" | "forged" | "unavailable" | null;
+  quoteAuth?: QuoteAuth | null;
   hedgeBand: { inBand: boolean; outOfBandSince: number | null; outOfBandSec: number; graceSec: number };
   killed: boolean;
   killReason: string | null;
@@ -261,4 +266,6 @@ export interface RiskMeta {
 /** JSON at KEYS.riskState(bookId) and on CHANNELS.riskState(bookId): LimitsSnapshot + meta. */
 export interface RiskStatePayload extends LimitsSnapshot {
   meta: RiskMeta;
+  /** RISK-key signature over (book, state, tsMs) (shared busAuth.ts RiskState): the agent acts only on signed states */
+  stateSig?: RiskStateSig;
 }

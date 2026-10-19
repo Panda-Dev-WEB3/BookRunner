@@ -5,9 +5,17 @@
 //     domain (chainId, BookrunnerConfig). Verifiers check config.hasRole(RISK_ROLE, signer) (cached, RPC errors never
 //     cached), the age (issuedAt within KILL_MAX_AGE_SEC, not in the future) and replays (nonce seen).
 //   - Agent quotes (KEYS.agentQuote): EIP-712 `AgentQuote` signed by the book's desk session key, domain (chainId,
-//     the book's MMMandate). Risk checks MMMandate.isActiveKey(signer); an unsigned or forged quote is no quote.
+//     the book's MMMandate), including the oracle print the quote was priced on (refPriceWad, refPublishedAt; the
+//     message carries that print's own oracle signature). Risk checks MMMandate.isActiveKey(signer), verifies the print
+//     and judges the quote against THAT price, accepts a quote at most QUOTE_SIGNED_MAX_AGE_MS old and strictly newer
+//     than the last one it accepted: a replayed genuine quote is judged against its own price, so it cannot fake a
+//     breach. An unsigned or forged quote is no quote.
+//   - Risk state (KEYS.riskState / CHANNELS.riskState): EIP-712 `RiskState` signed by the RISK key, domain as the
+//     kill order. The agent acts only on a verified, fresh, strictly newer state; it goes reduce-only when none arrives
+//     for its timeout (never halts on that).
 import { type Address, type Hex, type LocalAccount, getAddress, isAddress, keccak256, recoverTypedDataAddress, toHex } from "viem";
-import type { KillMsg, QuoteMsg } from "./queues";
+import type { KillMsg, OraclePriceMsg, QuoteMsg } from "./queues";
+import type { LimitState } from "./mandate";
 
 // ------------------------------------------------------------------ cached on-chain address checks
 
@@ -92,7 +100,18 @@ export class KillVerifier {
   private readonly now: () => number;
 
   constructor(
-    private readonly o: { chainId: number; config: Address; isRiskSigner: (a: Address) => Promise<boolean>; now?: () => number; maxAgeSec?: number },
+    private readonly o: {
+      chainId: number;
+      config: Address;
+      isRiskSigner: (a: Address) => Promise<boolean>;
+      now?: () => number;
+      maxAgeSec?: number;
+      /**
+       * false: nonces are not consumed (the revoke_key job: a BullMQ retry re-verifies the same signed order; the
+       * revocation is idempotent and refuses a key created after the order, so a replay revokes nothing new)
+       */
+      consumeNonces?: boolean;
+    },
   ) {
     this.now = o.now ?? Date.now;
   }
@@ -136,7 +155,7 @@ export class KillVerifier {
       return { ok: false, reason: `RISK role check unavailable for ${signer}: ${err instanceof Error ? err.message : String(err)}`, forged: false, unavailable: true };
     }
     if (!isRisk) return { ok: false, reason: `kill signed by ${signer}, which does not hold RISK_ROLE`, forged: true };
-    this.seen.set(k.nonce.toLowerCase(), k.issuedAt);
+    if (this.o.consumeNonces !== false) this.seen.set(k.nonce.toLowerCase(), k.issuedAt);
     if (this.seen.size > 1_024) {
       for (const [n, at] of this.seen) if (nowSec - at > (this.o.maxAgeSec ?? KILL_MAX_AGE_SEC)) this.seen.delete(n);
     }
@@ -156,13 +175,26 @@ export const quoteTypes = {
     { name: "askE8", type: "uint256" },
     { name: "sizeE8", type: "uint256" },
     { name: "sides", type: "uint8" },
+    { name: "refPriceWad", type: "uint256" },
+    { name: "refPublishedAt", type: "uint64" },
   ],
 } as const;
 
+/** Risk accepts a signed agent quote at most this old (ms; the agent republishes every quote tick). */
+export const QUOTE_SIGNED_MAX_AGE_MS = 5_000;
+
 const e8 = (x: number): bigint => (Number.isFinite(x) && x > 0 ? BigInt(Math.round(x * 1e8)) : 0n);
 
-/** The signed fields of a QuoteMsg (prices and size at 1e-8, sides bit 0 = bid, bit 1 = ask). */
-export function quoteFields(q: Pick<QuoteMsg, "bookId" | "ts" | "bid" | "ask" | "size" | "sides">) {
+type QuoteSigned = Pick<QuoteMsg, "bookId" | "ts" | "bid" | "ask" | "size" | "sides"> & { ref?: Pick<NonNullable<QuoteMsg["ref"]>, "priceWad" | "publishedAt"> | undefined };
+
+/** The signed fields of a QuoteMsg (prices and size at 1e-8, sides bit 0 = bid, bit 1 = ask, the reference print). */
+export function quoteFields(q: QuoteSigned) {
+  let refPriceWad = 0n;
+  try {
+    refPriceWad = q.ref ? BigInt(q.ref.priceWad) : 0n;
+  } catch {
+    refPriceWad = 0n;
+  }
   return {
     bookId: BigInt(q.bookId),
     ts: BigInt(Math.trunc(q.ts)),
@@ -170,21 +202,113 @@ export function quoteFields(q: Pick<QuoteMsg, "bookId" | "ts" | "bid" | "ask" | 
     askE8: e8(q.ask),
     sizeE8: e8(q.size),
     sides: (q.sides?.bid ? 1 : 0) | (q.sides?.ask ? 2 : 0),
+    refPriceWad,
+    refPublishedAt: BigInt(Math.max(0, Math.trunc(q.ref?.publishedAt ?? 0))),
   };
 }
 
+/** The quote reference of an oracle print the agent priced on (its signed PriceUpdate fields + oracle signature). */
+export function quoteRefOf(m: OraclePriceMsg): NonNullable<QuoteMsg["ref"]> {
+  return { underlying: m.underlying, priceWad: m.priceWad, publishedAt: m.publishedAt, held: m.held, sourceCount: m.sourceCount, sourcesHash: m.sourcesHash, signature: m.signature };
+}
+
 /** The agent's signature over its published quote (desk session key). */
-export function signQuote(account: Pick<LocalAccount, "signTypedData">, chainId: number, mandate: Address, q: QuoteMsg): Promise<Hex> {
+export function signQuote(account: Pick<LocalAccount, "signTypedData">, chainId: number, mandate: Address, q: QuoteSigned): Promise<Hex> {
   return account.signTypedData({ domain: quoteDomain(chainId, mandate), types: quoteTypes, primaryType: "AgentQuote", message: quoteFields(q) });
 }
 
 /** The signer of a published quote; null when unsigned or malformed. */
-export async function recoverQuoteSigner(chainId: number, mandate: Address, q: Pick<QuoteMsg, "bookId" | "ts" | "bid" | "ask" | "size" | "sides"> & { signature?: unknown }): Promise<Address | null> {
+export async function recoverQuoteSigner(chainId: number, mandate: Address, q: QuoteSigned & { signature?: unknown }): Promise<Address | null> {
   if (typeof q.signature !== "string" || !SIG_RE.test(q.signature)) return null;
   try {
     return await recoverTypedDataAddress({ domain: quoteDomain(chainId, mandate), types: quoteTypes, primaryType: "AgentQuote", message: quoteFields(q), signature: q.signature as Hex });
   } catch {
     return null;
+  }
+}
+
+// ------------------------------------------------------------------ risk state
+
+export const RISK_STATES: readonly LimitState[] = ["ok", "warn", "reduce_only", "breach", "killed"];
+/** A signed risk state older than this (ms) is refused; risk re-signs an unchanged state at least every RISK_STATE_RESIGN_MS. */
+export const RISK_STATE_MAX_AGE_MS = 60_000;
+export const RISK_STATE_RESIGN_MS = 10_000;
+
+export const riskStateTypes = {
+  RiskState: [
+    { name: "bookId", type: "uint256" },
+    { name: "state", type: "uint8" },
+    { name: "tsMs", type: "uint64" },
+  ],
+} as const;
+
+/** The RISK key's signature over (book, state, tsMs); domain = the kill order's (chainId, BookrunnerConfig). */
+export function signRiskState(account: Pick<LocalAccount, "signTypedData">, chainId: number, config: Address, k: { bookId: number; state: LimitState; tsMs: number }): Promise<Hex> {
+  return account.signTypedData({ domain: killDomain(chainId, config), types: riskStateTypes, primaryType: "RiskState", message: { bookId: BigInt(k.bookId), state: RISK_STATES.indexOf(k.state), tsMs: BigInt(k.tsMs) } });
+}
+
+/** Signature block risk adds to its published state (RiskStatePayload.stateSig). */
+export interface RiskStateSig {
+  tsMs: number;
+  signature: Hex;
+}
+
+export type RiskStateVerdict =
+  | { ok: true; state: LimitState; tsMs: number }
+  | { ok: false; reason: string; forged: boolean; unavailable?: boolean; replay?: boolean };
+
+/** Verifies risk states for ONE book: RISK-signed, at most RISK_STATE_MAX_AGE_MS old, strictly newer than the last accepted. */
+export class RiskStateVerifier {
+  private lastTsMs = 0;
+  private readonly now: () => number;
+
+  constructor(
+    private readonly o: { chainId: number; config: Address; bookId: number; isRiskSigner: (a: Address) => Promise<boolean>; now?: () => number },
+  ) {
+    this.now = o.now ?? Date.now;
+  }
+
+  async verify(raw: unknown): Promise<RiskStateVerdict> {
+    let m: unknown = raw;
+    if (typeof raw === "string") {
+      try {
+        m = JSON.parse(raw);
+      } catch {
+        return { ok: false, reason: "unreadable risk state", forged: true };
+      }
+    }
+    const p = (m && typeof m === "object" ? m : {}) as { state?: unknown; stateSig?: Partial<RiskStateSig> };
+    const state = p.state as LimitState;
+    if (typeof p.state !== "string" || !RISK_STATES.includes(state)) return { ok: false, reason: "malformed risk state", forged: true };
+    const sig = p.stateSig;
+    if (!sig || typeof sig.signature !== "string" || !SIG_RE.test(sig.signature) || typeof sig.tsMs !== "number" || !Number.isSafeInteger(sig.tsMs)) {
+      return { ok: false, reason: "unsigned risk state (no RISK signature)", forged: true };
+    }
+    const now = this.now();
+    if (sig.tsMs > now + KILL_FUTURE_SEC * 1000) return { ok: false, reason: "risk state from the future", forged: true };
+    if (now - sig.tsMs > RISK_STATE_MAX_AGE_MS) return { ok: false, reason: `stale risk state (${Math.round((now - sig.tsMs) / 1000)} s)`, forged: false, replay: true };
+    if (sig.tsMs <= this.lastTsMs) return { ok: false, reason: "risk state not newer than the last accepted", forged: false, replay: true };
+    let signer: Address;
+    try {
+      signer = await recoverTypedDataAddress({
+        domain: killDomain(this.o.chainId, this.o.config),
+        types: riskStateTypes,
+        primaryType: "RiskState",
+        message: { bookId: BigInt(this.o.bookId), state: RISK_STATES.indexOf(state), tsMs: BigInt(sig.tsMs) },
+        signature: sig.signature as Hex,
+      });
+    } catch {
+      return { ok: false, reason: "malformed risk state signature", forged: true };
+    }
+    let isRisk: boolean;
+    try {
+      isRisk = await this.o.isRiskSigner(signer);
+    } catch (err) {
+      return { ok: false, reason: `RISK role check unavailable for ${signer}: ${err instanceof Error ? err.message : String(err)}`, forged: false, unavailable: true };
+    }
+    if (!isRisk) return { ok: false, reason: `risk state signed by ${signer}, which does not hold RISK_ROLE (or for another book)`, forged: true };
+    this.lastTsMs = sig.tsMs;
+    return { ok: true, state, tsMs: sig.tsMs };
   }
 }
 
@@ -199,7 +323,7 @@ export interface BusForgedMsg {
   source: string;
   ts: number; // unix ms of the write
   /** oldest first, within FORGED_WINDOW_SEC */
-  events: Array<{ at: number; kind: "kill" | "quote"; reason: string }>;
+  events: Array<{ at: number; kind: "kill" | "quote" | "state"; reason: string }>;
 }
 
 /** Records forged messages a service refused and publishes the last hour of them (best effort). */
@@ -212,7 +336,7 @@ export class ForgedLog {
     private readonly now: () => number = Date.now,
   ) {}
 
-  note(kind: "kill" | "quote", reason: string): void {
+  note(kind: "kill" | "quote" | "state", reason: string): void {
     const now = this.now();
     this.events = [...this.events.filter((e) => now - e.at < FORGED_WINDOW_SEC * 1000), { at: now, kind, reason: reason.slice(0, 160) }].slice(-200);
     void this.write({ v: 1, source: this.source, ts: now, events: this.events }).catch(() => undefined);

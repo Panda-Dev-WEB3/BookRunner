@@ -3,12 +3,14 @@
 import {
   HEDGE_BAND_GRACE_SECONDS,
   type LimitsSnapshot,
+  RISK_STATE_RESIGN_MS,
   type Logger,
   type QuotingVenue,
   RECEIPT_KIND,
   VENUE,
   bytes32ToStr,
 } from "@bookrunner/shared";
+import type { Hex } from "viem";
 import type { RiskSettings } from "./config";
 import { type Evaluation, evaluate } from "./domain/evaluate";
 import { trustLiveVenueEquity, venueDeployedValue } from "./domain/nav";
@@ -28,6 +30,7 @@ import {
   type ExposureSource,
   type LiveNav,
   type MonitorState,
+  type QuoteObservation,
   type RiskMeta,
   type RiskStatePayload,
   initialMonitorState,
@@ -83,6 +86,10 @@ export class BookMonitor {
   private venueReportAsOf: number | null = null;
   /** authentication of the quote read this tick (null: none read / no auth) */
   private quoteAuth: RiskMeta["quoteAuth"] = null;
+  /** the last quote accepted (signed, fresh, newer, verified print); kept until a newer one, aged out by the evaluation */
+  private acceptedQuote: QuoteObservation | null = null;
+  /** the last signed state (re-signed on change or after RISK_STATE_RESIGN_MS) */
+  private stateSig: { state: string; tsMs: number; signature: Hex } | null = null;
   private lastForgedQuoteLog = Number.NEGATIVE_INFINITY;
   readonly log: Logger;
 
@@ -91,6 +98,26 @@ export class BookMonitor {
     private readonly d: MonitorDeps,
   ) {
     this.log = d.log.child({ bookId: ref.bookId });
+  }
+
+  /**
+   * The RISK-key signature of the state published this tick (the agent acts only on signed states, audit 2026-10 lead
+   * "Redis trust"): re-signed when the state changes or the last signature is RISK_STATE_RESIGN_MS old. A signing
+   * failure publishes unsigned (agents then go reduce-only after their timeout, never further).
+   */
+  private async signState(state: LimitsSnapshot["state"], nowMs: number): Promise<{ tsMs: number; signature: Hex } | undefined> {
+    const sign = this.d.auth?.signState;
+    if (!sign) return undefined;
+    const prev = this.stateSig;
+    if (prev && prev.state === state && nowMs - prev.tsMs < RISK_STATE_RESIGN_MS && nowMs >= prev.tsMs) return { tsMs: prev.tsMs, signature: prev.signature };
+    try {
+      const signature = await sign.call(this.d.auth, { bookId: this.ref.bookId, state, tsMs: nowMs });
+      this.stateSig = { state, tsMs: nowMs, signature };
+      return { tsMs: nowMs, signature };
+    } catch (err) {
+      this.log.warn({ err: errMsg(err) }, "risk state signing failed (published unsigned)");
+      return undefined;
+    }
   }
 
   /** Current in-memory state machine (exposed for diagnostics/tests). */
@@ -215,20 +242,25 @@ export class BookMonitor {
     let quote = await this.soft("latestQuote", () => this.d.bus.latestQuote(ref.bookId), null);
     this.quoteAuth = null;
     const auth = this.d.auth;
-    if (quote && auth) {
-      // Redis is not trusted: an unsigned / forged quote is no quote (never a breach, never a kill)
-      const st = await auth.quote(ref, quote).catch(() => "unavailable" as const);
-      this.quoteAuth = st;
-      if (st !== "ok") {
-        if (st === "forged") {
-          auth.forged?.("quote", `book ${ref.bookId}: quote not signed by an active desk key`);
+    if (auth) {
+      // Redis is not trusted: only a new, desk-key-signed quote priced on a verified print is accepted; anything else
+      // is no new quote (the last accepted one stays until it ages out). The quote is judged against its own print.
+      if (quote) {
+        const attested = oracle && (oracle.source === "chain" || oracle.source === "signed") ? { priceWad: oracle.priceWad, publishedAt: oracle.publishedAt } : null;
+        const res = await auth
+          .quote(ref, quote, { nowMs, lastAcceptedTs: this.acceptedQuote?.ts ?? 0, priceMaxAgeMs: this.d.settings.quotePriceMaxAgeMs, attested })
+          .catch(() => ({ status: "unavailable" as const }));
+        this.quoteAuth = res.status;
+        if (res.status === "ok" && res.refPx !== undefined) this.acceptedQuote = { ...quote, refPx: res.refPx };
+        else if (res.status === "forged") {
+          auth.forged?.("quote", `book ${ref.bookId}: quote signature invalid or not from a desk key of the mandate`);
           if (nowMs - this.lastForgedQuoteLog > 60_000) {
             this.lastForgedQuoteLog = nowMs;
-            this.log.warn({ bookId: ref.bookId }, "FORGED agent quote in Redis ignored (not signed by an active desk key of the mandate)");
+            this.log.warn({ bookId: ref.bookId }, "FORGED agent quote in Redis ignored (signature invalid or not from a desk key of the mandate)");
           }
         }
-        quote = null;
       }
+      quote = this.acceptedQuote;
     }
 
     return {
@@ -278,7 +310,8 @@ export class BookMonitor {
   private async publish(obs: BookObservation, ev: Evaluation): Promise<void> {
     const snap = ev.snapshot;
     const meta = this.meta(obs, ev);
-    const payload = jsonSafe<RiskStatePayload>({ ...snap, meta });
+    const stateSig = await this.signState(snap.state, obs.nowMs);
+    const payload = jsonSafe<RiskStatePayload>({ ...snap, meta, ...(stateSig ? { stateSig } : {}) });
     this.lastPayload = payload;
     await this.soft("saveRiskState", () => this.d.bus.saveRiskState(this.ref.bookId, payload), undefined);
     await this.soft("saveLiveNav", () => this.d.bus.saveLiveNav(this.ref.bookId, this.liveNav(obs, ev)), undefined);
