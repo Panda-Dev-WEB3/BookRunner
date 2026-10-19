@@ -335,7 +335,8 @@ contract MarketCharter is IMarketCharter, ReentrancyGuardTransient {
 
     /// @inheritdoc IMarketCharter
     function isOpen(uint256 id) external view returns (bool) {
-        return _records[id].status == BRTypes.CharterStatus.Filed && block.timestamp < _deadline[id];
+        if (_records[id].status != BRTypes.CharterStatus.Filed) return false;
+        return block.timestamp < _deadline[id];
     }
 
     // ------------------------------------------------------------------------------------------
