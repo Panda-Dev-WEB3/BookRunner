@@ -227,7 +227,17 @@ export interface RiskMeta {
   liveNavUsd: string;
   drawdownBps: number;
   oracle: { priceId: string; price: number | null; publishedAt: number; held: boolean; stale: boolean; source: OracleReading["source"] };
-  quote: { ts: number; ageMs: number; used: boolean; reference: "agent" | "oracle"; widthBps: number; skewBps: number } | null;
+  quote: {
+    ts: number;
+    ageMs: number;
+    used: boolean;
+    reference: "attested" | "none";
+    agentRefDevBps: number | null;
+    widthBps: number;
+    skewBps: number;
+  } | null;
+  /** Audit M-3: a live quote could not be checked against a fresh attested price (book held reduce-only). */
+  quoteUnverified?: boolean;
   hedgeBand: { inBand: boolean; outOfBandSince: number | null; outOfBandSec: number; graceSec: number };
   killed: boolean;
   killReason: string | null;

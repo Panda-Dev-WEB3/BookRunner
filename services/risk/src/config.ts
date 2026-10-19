@@ -1,5 +1,6 @@
 import { baseEnvSchema } from "@bookrunner/shared";
 import { z } from "zod";
+import { DEFAULT_QUOTE_DRIFT_BPS, MAX_QUOTE_DRIFT_BPS } from "./domain/quote";
 
 /** Risk-service environment on top of the shared base env (packages/shared/src/env.ts). */
 export const riskEnvShape = {
@@ -21,10 +22,11 @@ export const riskEnvShape = {
   /** A quote older than this is not "live" and is not checked for skew/width. */
   RISK_QUOTE_MAX_AGE_MS: z.coerce.number().int().positive().default(15_000),
   /**
-   * Max deviation (bps) of the price the agent quoted against from the attested price before the quote is
-   * checked against the attested price instead (audit M-3: decoupled from maxSkewBps, now a few bps).
+   * Audit M-3: agent quotes are checked against the attested oracle price (never the agent's reported reference);
+   * this is the print drift allowed on top of maxSkewBps and past the oracle on each side (bps, 0..10), further
+   * capped at half the mandate's min quote width.
    */
-  RISK_QUOTE_REF_TOLERANCE_BPS: z.coerce.number().min(0).max(10_000).default(25),
+  RISK_QUOTE_DRIFT_BPS: z.coerce.number().min(0).max(MAX_QUOTE_DRIFT_BPS).default(DEFAULT_QUOTE_DRIFT_BPS),
   /** enforce = run the kill sequence on breach; alert = classify + emit limit.breached only. */
   RISK_KILL_MODE: z.enum(["enforce", "alert"]).default("enforce"),
   /**
@@ -76,7 +78,7 @@ export interface RiskSettings {
   limitsEveryTicks: number;
   breachConfirmTicks: number;
   quoteMaxAgeMs: number;
-  quoteRefToleranceBps: number;
+  quoteDriftBps: number;
   killMode: "enforce" | "alert";
   flattenMode: "net" | "all";
   flattenSlippageBps: number;
@@ -94,7 +96,7 @@ export function settingsFromEnv(env: RiskEnv): RiskSettings {
     limitsEveryTicks: env.RISK_LIMITS_EVERY_TICKS,
     breachConfirmTicks: env.RISK_BREACH_CONFIRM_TICKS,
     quoteMaxAgeMs: env.RISK_QUOTE_MAX_AGE_MS,
-    quoteRefToleranceBps: env.RISK_QUOTE_REF_TOLERANCE_BPS,
+    quoteDriftBps: env.RISK_QUOTE_DRIFT_BPS,
     killMode: env.RISK_KILL_MODE,
     flattenMode: env.RISK_FLATTEN_MODE,
     flattenSlippageBps: env.RISK_FLATTEN_SLIPPAGE_BPS,

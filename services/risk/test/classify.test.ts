@@ -2,6 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import { HEDGE_BAND_GRACE_SECONDS, usd, wad } from "@bookrunner/shared";
 import { evaluate } from "../src/domain/evaluate";
+import { effectiveDriftBps } from "../src/domain/quote";
 import type { BookObservation, HedgeBandState } from "../src/types";
 import { MANDATE, T0, chainObs, observation, quoteAt } from "./fakes";
 
@@ -75,8 +76,9 @@ describe("quote skew / width on a live quote", () => {
   });
 
   test("audit M-3: a quote entirely on one side of the oracle is a skew breach, even within maxSkewBps", () => {
-    // MANDATE is the pre-fix 25 / 8 (a cached mandate): mid 190.15 (+7.9 bps), width 10.5 bps, bid ABOVE 190
-    const ev = run({ quote: quoteAt(now - 1000, 190.05, 190.25) });
+    // MANDATE is the pre-fix 25 / 8 (a cached mandate): mid 190.2 (+10.5 bps), width 10.5 bps, bid 5.3 bps ABOVE 190
+    // (past the 4 bps drift allowance = min(5, 8 / 2))
+    const ev = run({ quote: quoteAt(now - 1000, 190.1, 190.3) });
     expect(ev.snapshot.skewUtil).toBeLessThan(1);
     expect(ev.snapshot.breaches).toEqual(["SKEW"]);
     expect(ev.snapshot.state).toBe("breach");
@@ -106,45 +108,77 @@ describe("quote skew / width on a live quote", () => {
     expect(ev.snapshot.breaches).toEqual([]);
   });
 
-  test("an agent reference far from the attested oracle cannot hide a skewed quote", () => {
-    // agent claims oracle 190.6 (its quote looks centred), attested oracle is 190 -> +31.6 bps skew
-    const ev = run({ quote: quoteAt(now - 1000, 190.5, 190.7, 190.6) });
-    expect(ev.quote?.reference).toBe("oracle");
+  const m84 = { ...MANDATE, maxSkewBps: 4, minQuoteWidthBps: 8 };
+  /** A quote `widthBps` wide, `skewBps` off `refPx`, as the agent builds it around its own print. */
+  const quoteAround = (refPx: number, skewBps: number, widthBps: number, reportedRef = refPx) => {
+    const mid = refPx * (1 + skewBps / 1e4);
+    const half = (mid * widthBps) / 20_000;
+    return quoteAt(now - 1000, mid - half, mid + half, reportedRef);
+  };
+
+  test("audit M-3: the quote is checked against the attested price, never the agent's reported reference", () => {
+    // the agent reports a reference 20 bps above the attested 190 and centres its quote on it: against its own
+    // reference the quote straddles, against the attested price it sits entirely above the oracle
+    for (const shiftBps of [20, 15, -15, -24]) {
+      const fake = 190 * (1 + shiftBps / 1e4);
+      for (const mandate of [m84, MANDATE]) {
+        const ev = run({ mandate, quote: quoteAround(fake, 0, 8.5) });
+        expect(ev.quote?.reference).toBe("attested");
+        expect(ev.quote?.agentRefDevBps).toBeCloseTo(Math.abs(shiftBps), 6);
+        expect(ev.snapshot.breaches).toEqual(["SKEW"]);
+        expect(ev.snapshot.state).toBe("breach");
+      }
+    }
+  });
+
+  test("audit M-3: at the 8 / 4 terms, 4-5 bps of agent / attested print drift does not flag a straddling quote", () => {
+    for (const driftBps of [4, 5, -4, -5]) {
+      for (const skewBps of [0, 2, -2]) {
+        const agentPx = 190 * (1 + driftBps / 1e4);
+        const ev = run({ mandate: m84, quote: quoteAround(agentPx, skewBps, 8.5) });
+        expect(ev.quote?.used).toBe(true);
+        expect(ev.quote?.reference).toBe("attested");
+        expect(ev.snapshot.breaches).toEqual([]);
+        expect(ev.snapshot.state).toBe("ok");
+      }
+    }
+  });
+
+  test("audit M-3: the drift allowance is capped at 10 bps and at half the min quote width", () => {
+    expect(effectiveDriftBps(5, 8)).toBe(4);
+    expect(effectiveDriftBps(10, 8)).toBe(4);
+    expect(effectiveDriftBps(25, 100)).toBe(10);
+    expect(effectiveDriftBps(5, 30)).toBe(5);
+    expect(effectiveDriftBps(-1, 30)).toBe(0);
+    // configured 10 at 8 / 4: a bid 4.5 bps above the attested price is still one-sided
+    const q = quoteAround(190 * (1 + 8.75 / 1e4), 0, 8.5); // bid +4.5 bps, mid +8.75 bps
+    const ev = evaluate(observation({ mandate: m84, quote: q }), IN_BAND, { ...OPTS, quoteDriftBps: 10 });
     expect(ev.snapshot.breaches).toEqual(["SKEW"]);
   });
 
-  test("an agent reference within tolerance is used as the quote's reference", () => {
-    // attested 190 vs agent 190.1 (5.3 bps apart); quote centred on 190.1
-    const ev = run({ quote: quoteAt(now - 1000, 190.0, 190.2, 190.1) });
-    expect(ev.quote?.reference).toBe("agent");
-    expect(ev.snapshot.breaches).toEqual([]);
-  });
-
-  test("audit M-3: at the 8 / 4 terms, 4-5 bps of agent / risk price drift does not breach a straddling quote", () => {
-    const m84 = { ...MANDATE, maxSkewBps: 4, minQuoteWidthBps: 8 };
-    // agent quoted 8.5 bps wide with +3.5 bps skew around its own print; the attested price is 4.5 bps lower or higher
-    for (const agentPx of [190 * (1 + 4.5 / 1e4), 190 * (1 - 4.5 / 1e4), 190 * (1 + 4 / 1e4)]) {
-      const mid = agentPx * (1 + 3.5 / 1e4);
-      const half = (mid * 8.5) / 20_000;
-      const ev = run({ mandate: m84, quote: quoteAt(now - 1000, mid - half, mid + half, agentPx) });
-      expect(ev.quote?.reference).toBe("agent");
+  test("audit M-3: no fresh attested price -> the live quote is unverified and the book is held reduce-only", () => {
+    const relaxed = { ...MANDATE, noNewRiskOffHours: false }; // isolate the hold from the off-hours rule
+    const centred = quoteAround(190, 0, 10);
+    const stale = { priceWad: wad(190), publishedAt: T0 - 3600, held: false, stale: true, source: "chain" as const };
+    const redis = { priceWad: wad(190), publishedAt: T0, held: false, stale: false, source: "redis" as const };
+    for (const oracle of [stale, redis, { ...stale, priceWad: 0n, source: "none" as const }]) {
+      const ev = run({ mandate: relaxed, oracle, quote: centred });
+      expect(ev.quote?.used).toBe(false);
+      expect(ev.quote?.reference).toBe("none");
+      expect(ev.quoteUnverified).toBe(true);
       expect(ev.snapshot.breaches).toEqual([]);
+      expect(ev.snapshot.state).toBe("reduce_only");
+      // without a live quote there is nothing to verify: no hold from this rule
+      const idle = run({ mandate: relaxed, oracle });
+      expect(idle.quoteUnverified).toBe(false);
+      expect(idle.snapshot.state).toBe("ok");
     }
-    // with the tolerance at the old coupling (maxSkewBps = 4), the same 4.5 bps drift would be judged against the
-    // attested price and flagged
-    const agentPx = 190 * (1 + 4.5 / 1e4);
-    const mid = agentPx * (1 + 3.5 / 1e4);
-    const half = (mid * 8.5) / 20_000;
-    const coupled = evaluate(observation({ mandate: m84, quote: quoteAt(now - 1000, mid - half, mid + half, agentPx) }), IN_BAND, {
-      ...OPTS,
-      quoteRefToleranceBps: 4,
-    });
-    expect(coupled.quote?.reference).toBe("oracle");
-    expect(coupled.snapshot.breaches).toEqual(["SKEW"]);
-    // beyond the tolerance the attested price is the reference again
-    const far = run({ mandate: m84, quote: quoteAt(now - 1000, 190.5, 190.7, 190.6) });
-    expect(far.quote?.reference).toBe("oracle");
-    expect(far.snapshot.breaches).toEqual(["SKEW"]);
+    // a fresh verified signed print checks the quote
+    const signed = { priceWad: wad(190), publishedAt: T0, held: false, stale: false, source: "signed" as const };
+    const ok = run({ mandate: relaxed, oracle: signed, quote: centred });
+    expect(ok.quote?.used).toBe(true);
+    expect(ok.quoteUnverified).toBe(false);
+    expect(ok.snapshot.state).toBe("ok");
   });
 });
 

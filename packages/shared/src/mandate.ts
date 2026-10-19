@@ -43,21 +43,28 @@ export interface QuoteCheck {
  * sell drains the pool at a constant price. On-chain: MMMandate.checkQuote / PoolEngine.setQuote require
  * 2 x |skewBps| <= spreadBps (both relative to the oracle); validateMandate requires maxSkew <= minWidth / 2.
  */
-export function quoteStraddlesOracle(q: QuoteProposal): boolean {
+export function quoteStraddlesOracle(q: QuoteProposal, driftBps = 0): boolean {
   if (!(q.oraclePx > 0)) return false;
   // 1e-9 bps tolerance for float rounding at the boundary
-  return ((q.bidPx - q.oraclePx) / q.oraclePx) * 10_000 <= 1e-9 && ((q.oraclePx - q.askPx) / q.oraclePx) * 10_000 <= 1e-9;
+  const tol = Math.max(0, driftBps) + 1e-9;
+  return ((q.bidPx - q.oraclePx) / q.oraclePx) * 10_000 <= tol && ((q.oraclePx - q.askPx) / q.oraclePx) * 10_000 <= tol;
 }
 
-export function checkQuote(m: Mandate, q: QuoteProposal): QuoteCheck {
+/**
+ * `driftBps` (risk monitoring only, default 0): the quote is judged against a price other than the one it was
+ * built on (the risk service checks it against the attested oracle, audit M-3), so the skew may exceed maxSkewBps
+ * and a side may sit past the oracle by at most that much ordinary print drift. The agent and the chain use 0.
+ */
+export function checkQuote(m: Mandate, q: QuoteProposal, driftBps = 0): QuoteCheck {
+  const d = Math.max(0, driftBps);
   const widthBps = quoteWidthBps(q);
   const skewBps = quoteSkewBps(q);
   const violations: QuoteCheck["violations"] = [];
   if (q.askPx <= q.bidPx) violations.push("CROSSED");
   // 1e-9 tolerance for float rounding at the boundary
   if (widthBps + 1e-9 < m.minQuoteWidthBps) violations.push("WIDTH");
-  if (Math.abs(skewBps) > m.maxSkewBps + 1e-9) violations.push("SKEW");
-  if (!quoteStraddlesOracle(q)) violations.push("ONE_SIDED");
+  if (Math.abs(skewBps) > m.maxSkewBps + d + 1e-9) violations.push("SKEW");
+  if (!quoteStraddlesOracle(q, d)) violations.push("ONE_SIDED");
   return { ok: violations.length === 0, violations, widthBps, skewBps };
 }
 
@@ -175,10 +182,11 @@ export function classifyLimits(args: {
   outOfBandSinceSec?: number | null; // seconds the ratio has been out of band
   killed: boolean;
   canHedgeLong?: boolean; // offsetting perp hedge venue enabled (spot-only books: false)
+  quoteDriftBps?: number; // lastQuote is judged against the attested oracle: allowed print drift (checkQuote)
 }): LimitsSnapshot {
   const m = args.mandate;
   const util = inventoryUtil(m, args.netExposureUsd);
-  const q = args.lastQuote ? checkQuote(m, args.lastQuote) : undefined;
+  const q = args.lastQuote ? checkQuote(m, args.lastQuote, args.quoteDriftBps ?? 0) : undefined;
   const skewUtil = q && m.maxSkewBps > 0 ? Math.abs(q.skewBps) / m.maxSkewBps : 0;
   const ratio = hedgeRatioBps(m, args.netExposureUsd, args.deskHedgeUsd);
   const breaches: string[] = [];
