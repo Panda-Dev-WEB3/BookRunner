@@ -55,6 +55,11 @@ export const opsEnvSchema = baseEnvSchema.extend({
   // older signed prices (held or not) are not re-sent; never below 3 x the oracle's ORACLE_TICK_MS (carried in its feed;
   // testnet ticks every 2 s, mainnet / devnet 1 s), so a slow oracle tick cannot make every price stale between ticks
   OPS_BUILDER_PRICE_MAX_AGE_MS: z.coerce.number().int().min(1_000).default(10_000),
+  // a signed price more than this far from the last pushed one is held back (alert) until it persists ..._ACCEPT_MS
+  OPS_BUILDER_PRICE_MAX_DEVIATION_BPS: z.coerce.number().int().min(1).max(10_000).default(1_000),
+  OPS_BUILDER_PRICE_DEVIATION_ACCEPT_MS: z.coerce.number().int().min(0).default(120_000),
+  // pinned oracle signer set for the push (comma-separated addresses); unset = AttestedOracle.isSigner on-chain
+  OPS_BUILDER_ORACLE_SIGNERS: z.string().optional(),
   OPS_BUILDER_ORACLE_RECONNECT_MS: z.coerce.number().int().min(100).default(5_000), // first retry (docs sample: 5 s), doubling
   OPS_BUILDER_ORACLE_MAX_RECONNECT_MS: z.coerce.number().int().min(100).default(60_000),
   OPS_BUILDER_ORACLE_IDLE_MS: z.coerce.number().int().min(0).default(60_000), // no server message (ping) this long: reconnect; 0 = off

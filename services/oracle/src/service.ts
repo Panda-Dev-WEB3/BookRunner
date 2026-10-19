@@ -609,11 +609,26 @@ export class OracleService {
       const u = this.unpublished.get(e.priceId);
       const stale = u !== undefined && u.publishedAt === null;
       for (const symbol of e.venueSymbols) {
-        prices.push({ symbol, priceId: e.priceId, price: m.price, held: m.held, stale, publishedAt: m.publishedAt, signedAt: this.latestAt.get(e.priceId) ?? m.publishedAt * 1000 });
+        prices.push({
+          symbol,
+          priceId: e.priceId,
+          price: m.price,
+          held: m.held,
+          stale,
+          publishedAt: m.publishedAt,
+          signedAt: this.latestAt.get(e.priceId) ?? m.publishedAt * 1000,
+          // the signed PriceUpdate + signature: ops-venue verifies it before pushing (never trusts the unsigned fields)
+          underlying: m.underlying,
+          priceWad: m.priceWad,
+          sourceCount: m.sourceCount,
+          sourcesHash: m.sourcesHash,
+          signature: m.signature,
+        });
       }
     }
     const tickMs = this.deps.settings.tickMs;
-    return { v: 1, ts: nowMs, ...(tickMs ? { tickMs } : {}), prices };
+    const ctx = this.ctx;
+    return { v: 1, ts: nowMs, ...(tickMs ? { tickMs } : {}), ...(ctx ? { chainId: ctx.chainId, oracle: ctx.oracle } : {}), prices };
   }
 
   /** Live only (no mock venue client): mock mode keeps its POST to mock-orderly and writes no feed. */

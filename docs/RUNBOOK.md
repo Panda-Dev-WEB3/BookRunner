@@ -497,6 +497,13 @@ transaction before step R4.
 
 ### Bus namespace: first deploy on a running stack
 
+Before the FIRST `update.sh` with this code on the public testnet host (final review I2 / I3): (1) as the bookrunner
+user, `grep -oE '^[[:space:]]*[A-Z0-9_]+[[:space:]]*=' /opt/bookrunner/app/.env.testnet | tr -d ' \t=' | sort | uniq -d`
+must print nothing (dev.ts now refuses a key defined twice; fix the file first); (2) `sudo systemctl stop bookrunner`
+before `update.sh` (no child of the old dev.ts can restart on the new code with the new namespace during the build;
+update.sh starts the stack again and the migration runs with nothing attached); (3) `free -m`: ~100 MB headroom for
+`redis-live`.
+
 The bus namespace renames the shared Redis keys (`bkrn:<x>` -> `bkrn:<ns>:<x>`) and the BullMQ queues (`bkrn-<x>` ->
 `bkrn-<ns>-<x>`). **Nothing to do by hand:** `scripts/dev.ts` migrates at every start, BEFORE it starts any service
 (`scripts/bus-migrate.ts` `migrateBus`), so `update.sh` (`systemctl restart bookrunner`), a manual restart, the

@@ -49,6 +49,7 @@ import {
   TESTNET_LIVE_EXCLUDED,
   type TestnetVariant,
   deskKeyEnvFor,
+  liveUnitExplicitKeys,
   mainnetProfile,
   otherVariant,
   supervisorConflict,
@@ -116,8 +117,8 @@ if (testnetLike) {
   // testnet-live: its own env (.env.testnet-live over the process env, e.g. the unit's /etc/bookrunner/testnet-live.env);
   // the public stack's .env.testnet is only read, to refuse a shared key, never applied
   // live without .env.testnet-live (the server: the unit's root-owned /etc/bookrunner/testnet-live.env, parsed by systemd):
-  // the keys the unit set count as explicit (they override the profile defaults)
-  const testnetKeys = liveVenue ? (loadEnvFile(".env.testnet-live", true) ?? new Set(Object.keys(process.env))) : loadEnvFile(".env.testnet", true);
+  // only the DOCUMENTED override names the unit set count as explicit (TESTNET_LIVE_UNIT_OVERRIDES), never every key
+  const testnetKeys = liveVenue ? (loadEnvFile(".env.testnet-live", true) ?? liveUnitExplicitKeys(process.env)) : loadEnvFile(".env.testnet", true);
   if (!testnetKeys) {
     console.error("[dev] .env.testnet missing — run `bash scripts/deploy-testnet.sh` first");
     process.exit(1);

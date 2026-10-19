@@ -5,7 +5,14 @@
 // holds (session closed: Orderly freezes the index OFF_MARKET and applies its own off-market handling), marks stale (no
 // publishable price this tick) or whose price is older than maxAgeMs (held or not; never below 3 oracle ticks). Per-symbol state goes to Redis
 // KEYS.builderFeedStatus; services/alerts raises builder_price_push when a symbol fails for > 30 s in session.
-import { baseAssetOf, type BuilderFeedStatusMsg, type BuilderPushState, type Logger, type OracleVenueFeedMsg, type OracleVenuePrice } from "@bookrunner/shared";
+// Trust: Redis is NOT trusted for the price. Every entry must carry the oracle's EIP-712 signed PriceUpdate; it is pushed
+// only when the signature recovers, under the configured domain (CHAIN_ID + the deployment's AttestedOracle), to an
+// oracle signer (AttestedOracle.isSigner on-chain, or the pinned OPS_BUILDER_ORACLE_SIGNERS). The pushed price, its age
+// (publishedAt) and held come from the SIGNED fields only. An unsigned / wrongly signed entry is never pushed (state
+// invalid -> alert), and a signed price more than maxDeviationBps away from the last pushed one is held back (invalid ->
+// alert) unless it persists for deviationAcceptMs (a real gap open, re-signed every tick), then accepted with a warning.
+import { baseAssetOf, type BuilderFeedStatusMsg, type BuilderPushState, type Logger, type OracleVenueFeedMsg, type OracleVenuePrice, type PriceUpdate, recoverPriceSigner } from "@bookrunner/shared";
+import type { Address, Hex } from "viem";
 import { type TrackedBook, tradable } from "../worker/context";
 import type { PublishReject } from "./socket";
 
@@ -29,9 +36,23 @@ export interface PushTarget {
   preListing?: boolean;
 }
 
+/** Who may sign a pushed price: the oracle's EIP-712 domain and its signer set. */
+export interface PriceSignerCheck {
+  chainId: number;
+  /** the deployment's AttestedOracle (EIP-712 verifying contract) */
+  oracle: Address;
+  isOracleSigner(addr: Address): Promise<boolean>;
+}
+
 export interface BuilderPriceFeedOptions {
   /** null = the push cannot run (no WebSocket domain / key): every target reports not-configured */
   socket: FeedSocket | null;
+  /** signature check of every price (required: an unsigned Redis value is never pushed) */
+  verifier: PriceSignerCheck;
+  /** max move vs the last pushed price per push (bps, default 1000 = 10 %): beyond it the price is held back (alert) */
+  maxDeviationBps?: number;
+  /** a capped price that persists this long (signed every tick) is accepted (default 120 s) */
+  deviationAcceptMs?: number;
   /** why socket is null */
   notConfigured?: string;
   targets: () => PushTarget[];
@@ -61,6 +82,19 @@ interface SymbolState {
   failingSince: number | null;
   error: string | null;
   logged?: boolean;
+  /** since when the signed price has been beyond the deviation cap (null = within) */
+  capSince?: number | null;
+}
+
+/** A verified entry: price, age and held from the SIGNED PriceUpdate; stale (can only stop a push) from the feed. */
+interface VerifiedPrice {
+  symbol: string;
+  price: number;
+  held: boolean;
+  stale: boolean;
+  publishedAtMs: number;
+  feedTs: number;
+  tickMs: number | null;
 }
 
 /** Book states whose builder market is (or is about to be) listed: provisioning lists every non-cancelled book. */
@@ -100,7 +134,12 @@ function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
 }
 
 export class BuilderPriceFeed {
-  private readonly prices = new Map<string, OracleVenuePrice & { feedTs: number; tickMs: number | null }>();
+  private readonly prices = new Map<string, VerifiedPrice>();
+  /** the newest entry per symbol that FAILED verification (newer than the verified one: nothing is pushed) */
+  private readonly invalid = new Map<string, { feedTs: number; error: string }>();
+  private readonly invalidWarned = new Map<string, string>();
+  /** signature verdicts (signer or the reason), keyed by the signed fields + signature */
+  private readonly verdicts = new Map<string, Address | string>();
   private readonly states = new Map<string, SymbolState>();
   /** latest reject per base_ccy ("*" = not attributable) */
   private readonly rejects = new Map<string, PublishReject>();
@@ -110,9 +149,13 @@ export class BuilderPriceFeed {
   readonly maxAgeMs: number;
   readonly rejectHoldMs: number;
   readonly ioTimeoutMs: number;
+  readonly maxDeviationBps: number;
+  readonly deviationAcceptMs: number;
 
   constructor(private readonly o: BuilderPriceFeedOptions) {
     this.now = o.now ?? Date.now;
+    this.maxDeviationBps = o.maxDeviationBps ?? 1_000;
+    this.deviationAcceptMs = o.deviationAcceptMs ?? 120_000;
     this.intervalMs = o.intervalMs ?? 1_000;
     this.maxAgeMs = o.maxAgeMs ?? 10_000;
     this.rejectHoldMs = o.rejectHoldMs ?? 5_000;
@@ -123,28 +166,72 @@ export class BuilderPriceFeed {
    * An oracle venue-feed message (Redis key or channel): per symbol, the entry of the newest oracle tick wins (the key
    * re-read can return a message already seen on the channel; an older one never overrides a newer one).
    */
-  onFeed(msg: OracleVenueFeedMsg): void {
+  async onFeed(msg: OracleVenueFeedMsg): Promise<void> {
     if (!msg || msg.v !== 1 || !Array.isArray(msg.prices) || typeof msg.ts !== "number") return;
     const tickMs = typeof msg.tickMs === "number" && msg.tickMs > 0 ? msg.tickMs : null;
     if (tickMs !== null && 3 * tickMs > this.maxAgeMs && !this.tickWarned) {
       this.tickWarned = true;
       this.o.log.warn({ oracleTickMs: tickMs, maxAgeMs: this.maxAgeMs, effectiveMaxAgeMs: 3 * tickMs }, "OPS_BUILDER_PRICE_MAX_AGE_MS is below 3 oracle ticks: using 3 x ORACLE_TICK_MS");
     }
+    const v = this.o.verifier;
+    const domainOk = msg.chainId === v.chainId && typeof msg.oracle === "string" && msg.oracle.toLowerCase() === v.oracle.toLowerCase();
     for (const p of msg.prices) {
-      if (!p || typeof p.symbol !== "string" || typeof p.signedAt !== "number" || typeof p.price !== "number") continue;
-      const cur = this.prices.get(p.symbol);
-      if (!cur || msg.ts >= cur.feedTs) this.prices.set(p.symbol, { ...p, feedTs: msg.ts, tickMs });
+      if (!p || typeof p.symbol !== "string") continue;
+      if (msg.ts < Math.max(this.prices.get(p.symbol)?.feedTs ?? -Infinity, this.invalid.get(p.symbol)?.feedTs ?? -Infinity)) continue;
+      const verdict = domainOk ? await this.verify(p) : `signature domain ${msg.chainId ?? "?"} / ${msg.oracle ?? "?"} is not this deployment's (${v.chainId} / ${v.oracle})`;
+      // re-check after the await: a newer message may have landed meanwhile (never let an older one win)
+      if (msg.ts < Math.max(this.prices.get(p.symbol)?.feedTs ?? -Infinity, this.invalid.get(p.symbol)?.feedTs ?? -Infinity)) continue;
+      if (typeof verdict === "string") {
+        this.invalid.set(p.symbol, { feedTs: msg.ts, error: verdict });
+        if (this.invalidWarned.get(p.symbol) !== verdict) {
+          this.invalidWarned.set(p.symbol, verdict);
+          this.o.log.warn({ symbol: p.symbol, err: verdict }, "builder feed: oracle price REJECTED (not pushed)");
+        }
+        continue;
+      }
+      this.invalid.delete(p.symbol);
+      this.invalidWarned.delete(p.symbol);
+      this.prices.set(p.symbol, { ...verdict, feedTs: msg.ts, tickMs });
     }
   }
 
-  /** Raw JSON from Redis; malformed input is ignored. */
-  onFeedJson(raw: string | null): void {
-    if (!raw) return;
+  /** The signed fields of an entry, verified; a string = why it is refused. */
+  private async verify(p: OracleVenuePrice): Promise<Omit<VerifiedPrice, "feedTs" | "tickMs"> | string> {
+    if (typeof p.signature !== "string" || typeof p.underlying !== "string" || typeof p.priceWad !== "string" || typeof p.sourcesHash !== "string" || typeof p.sourceCount !== "number" || typeof p.publishedAt !== "number" || typeof p.held !== "boolean") {
+      return "unsigned oracle price (no EIP-712 signature / signed fields)";
+    }
+    let wad: bigint;
     try {
-      this.onFeed(JSON.parse(raw) as OracleVenueFeedMsg);
+      wad = BigInt(p.priceWad);
+    } catch {
+      return "malformed priceWad";
+    }
+    const u: PriceUpdate = { underlying: p.underlying as Hex, priceWad: wad, publishedAt: BigInt(Math.trunc(p.publishedAt)), held: p.held, sourceCount: p.sourceCount, sourcesHash: p.sourcesHash as Hex };
+    const key = `${p.underlying}|${p.priceWad}|${p.publishedAt}|${p.held}|${p.sourceCount}|${p.sourcesHash}|${p.signature}`;
+    let verdict = this.verdicts.get(key);
+    if (verdict === undefined) {
+      const signer = await recoverPriceSigner(this.o.verifier.chainId, this.o.verifier.oracle, u, p.signature as Hex);
+      verdict = !signer ? "malformed signature" : (await this.o.verifier.isOracleSigner(signer)) ? signer : `signed by ${signer}, which is not an oracle signer`;
+      if (this.verdicts.size >= 1_024) this.verdicts.clear();
+      this.verdicts.set(key, verdict);
+    }
+    if (verdict.startsWith("0x") && !verdict.includes(" ")) {
+      return { symbol: p.symbol, price: Number(wad) / 1e18, held: p.held, stale: p.stale === true, publishedAtMs: Number(u.publishedAt) * 1_000 };
+    }
+    return verdict;
+  }
+
+  /** Raw JSON from Redis; malformed input is ignored. */
+  async onFeedJson(raw: string | null): Promise<void> {
+    if (!raw) return;
+    let msg: OracleVenueFeedMsg;
+    try {
+      msg = JSON.parse(raw) as OracleVenueFeedMsg;
     } catch {
       this.o.log.debug("builder feed: unreadable oracle venue feed ignored");
+      return;
     }
+    await this.onFeed(msg);
   }
 
   onReject(r: PublishReject): void {
@@ -186,18 +273,23 @@ export class BuilderPriceFeed {
       st.preListing = !!t.preListing;
       this.states.set(t.symbol, st);
       const p = this.prices.get(t.symbol);
+      const bad = this.invalid.get(t.symbol);
       let next: BuilderPushState;
       let error: string | null = null;
       if (!this.o.socket) {
         next = "not-configured";
         error = this.o.notConfigured ?? "builder oracle push not configured";
+      } else if (bad && bad.feedTs >= (p?.feedTs ?? -Infinity)) {
+        // the newest entry failed verification: nothing is pushed (not even the older verified price)
+        next = "invalid";
+        error = bad.error;
       } else if (!p) {
         next = "no-price";
         error = "no oracle price for this symbol";
-      } else if (now - p.signedAt > this.maxAgeOf(p)) {
+      } else if (now - p.publishedAtMs > this.maxAgeOf(p)) {
         // before `held`: the oracle re-signs held prices every tick, so an old one (held or not) means it stopped
         next = "stale";
-        error = `oracle price is ${Math.round((now - p.signedAt) / 1000)} s old (max ${Math.round(this.maxAgeOf(p) / 1000)} s)${p.held ? ", last seen held" : ""}`;
+        error = `oracle price is ${Math.round((now - p.publishedAtMs) / 1000)} s old (max ${Math.round(this.maxAgeOf(p) / 1000)} s)${p.held ? ", last seen held" : ""}`;
       } else if (p.held) {
         next = "held";
       } else if (p.stale) {
@@ -206,6 +298,9 @@ export class BuilderPriceFeed {
       } else if (!Number.isFinite(p.price) || p.price <= 0) {
         next = "invalid";
         error = `invalid oracle price ${p.price}`;
+      } else if (this.capped(st, p.price, now)) {
+        next = "invalid";
+        error = `signed price ${p.price} is ${Math.round((Math.abs(p.price - (st.price as number)) / (st.price as number)) * 10_000)} bps from the last pushed ${st.price} (cap ${this.maxDeviationBps} bps): held back, accepted if it persists ${Math.round(this.deviationAcceptMs / 1000)} s`;
       } else if (sentBase.has(base)) {
         next = "pushing"; // another symbol with the same base_ccy was just sent
         st.lastPushAt = now;
@@ -223,6 +318,20 @@ export class BuilderPriceFeed {
       }
       this.transition(st, next, error, now);
     }
+  }
+
+  /** Deviation cap vs the last pushed price; a jump that persists deviationAcceptMs is accepted (warned once). */
+  private capped(st: SymbolState, price: number, now: number): boolean {
+    const last = st.price;
+    if (last === null || !(last > 0) || (Math.abs(price - last) / last) * 10_000 <= this.maxDeviationBps) {
+      st.capSince = null;
+      return false;
+    }
+    st.capSince ??= now;
+    if (now - st.capSince < this.deviationAcceptMs) return true;
+    this.o.log.warn({ symbol: st.symbol, last, price, sinceMs: now - st.capSince }, "builder feed: a capped price persisted, accepted as the new level");
+    st.capSince = null;
+    return false;
   }
 
   private transition(st: SymbolState, next: BuilderPushState, error: string | null, now: number): void {

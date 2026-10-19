@@ -9,6 +9,8 @@ import {
   TESTNET_LIVE_EXCLUDED,
   TESTNET_LIVE_PINNED,
   TESTNET_ORDERLY,
+  TESTNET_LIVE_UNIT_OVERRIDES,
+  liveUnitExplicitKeys,
   otherVariant,
   redisHostPort,
   supervisorConflict,
@@ -157,4 +159,13 @@ describe("testnet-live profile (separate stack next to the public testnet)", () 
     expect(redisHostPort("redis://:x@localhost/1")).toBe("127.0.0.1:6379");
     expect(redisHostPort("nope")).toBeNull();
   });
+
+  test("server unit env (no .env.testnet-live): only the documented override names count as explicit", () => {
+    const keys = liveUnitExplicitKeys({ ORDERLY_IF_MODE: "builder", MARK_INTERVAL_SECONDS: "3600", RPC_URL: "http://127.0.0.1:8547", DATABASE_URL: "postgres://x/bookrunner", NETWORK: "devnet", ORDERLY_TOKEN: "" });
+    expect([...keys].sort()).toEqual(["MARK_INTERVAL_SECONDS", "ORDERLY_IF_MODE"]);
+    expect(TESTNET_LIVE_UNIT_OVERRIDES.has("DATABASE_URL")).toBe(false);
+    const r = testnetLiveProfile({ ...env, ORDERLY_IF_MODE: "builder", ORDERLY_LISTING_MODE: "api" }, liveUnitExplicitKeys({ ORDERLY_IF_MODE: "builder" }), root(LIVE_DEP));
+    expect(r.env).toMatchObject({ ORDERLY_IF_MODE: "builder", ORDERLY_LISTING_MODE: "manual" });
+  });
 });
+

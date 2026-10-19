@@ -392,6 +392,18 @@ export const TESTNET_LIVE_DEFAULTS: Readonly<Record<string, string>> = {
   ORDERLY_IF_MODE: "contract", // per-book OrderlyIFAccount (G5); builder = fallback with ORDERLY_IF_BUILDER_ACCOUNTS
 };
 
+/**
+ * The documented overrides of the live profile when it runs from the unit's env (no .env.testnet-live: the server's
+ * root-owned /etc/bookrunner/testnet-live.env): only these keys of the process env count as explicit, never every key
+ * (a stray app-tree .env auto-loaded by bun must not override the profile).
+ */
+export const TESTNET_LIVE_UNIT_OVERRIDES: ReadonlySet<string> = new Set([...Object.keys(TESTNET_LIVE_DEFAULTS), "OPS_FEE_SWEEP_AUTO", "MARK_INTERVAL_SECONDS"]);
+
+/** Explicit keys of the live profile from a process env (the unit's env file): the documented overrides present. */
+export function liveUnitExplicitKeys(processEnv: Env): Set<string> {
+  return new Set([...TESTNET_LIVE_UNIT_OVERRIDES].filter((k) => processEnv[k] !== undefined && processEnv[k] !== ""));
+}
+
 /** Loopback ports of the live stack (the public testnet stack keeps 4400 / 4410 / 4420 / 4430). */
 export const TESTNET_LIVE_PORTS = { api: 4500, oracle: 4510, charter: 4530 } as const;
 

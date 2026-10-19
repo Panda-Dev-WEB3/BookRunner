@@ -99,6 +99,7 @@ export function busNames(ns: string = BUS_NS) {
       venueSymbolIssues: `${p}:ops-venue:symbol-issues`, // JSON VenueSymbolIssuesMsg (ops-venue, every book poll, TTL)
       oracleVenueFeed: `${p}:oracle:venue-feed`, // JSON OracleVenueFeedMsg (oracle, every tick, TTL; also PUBLISHed on the same name)
       builderFeedStatus: `${p}:ops-venue:builder-feed`, // JSON BuilderFeedStatusMsg (ops-venue live builder price push, TTL)
+      venueEverListed: `${p}:ops-venue:ever-listed`, // SET of venue symbols ever seen listed (survives restarts: listed -> missing, never awaiting)
       supervisorStatus: `${p}:supervisor:status`, // JSON SupervisorStatus (scripts/dev.ts)
     },
   };
@@ -122,12 +123,19 @@ export const BUILDER_FEED_STATUS_TTL_SEC = 600;
  * tick to KEYS.oracleVenueFeed and the channel of the same name. With ORDERLY_MODE=live ops-venue (the holder of the
  * Orderly key) pushes them to Orderly's Builder Oracle WebSocket; it never makes a price up, it only re-sends the
  * latest one between ticks, and it stops when `held` (session closed) or `stale` (the oracle has no publishable price).
+ * Every entry carries the oracle's EIP-712 SIGNED PriceUpdate (underlying, priceWad, publishedAt, held, sourceCount,
+ * sourcesHash + signature, the same message AttestedOracle verifies): ops-venue pushes only a price whose signature
+ * recovers to an oracle signer under this feed's domain (chainId + AttestedOracle), takes the price, the age and `held`
+ * from the SIGNED fields, and caps the per-push deviation. The unsigned fields (price, stale, signedAt) are informative.
  */
 export interface OracleVenueFeedMsg {
   v: 1;
   ts: number; // unix ms (oracle tick)
   /** ORACLE_TICK_MS: ops-venue never treats a price as stale before 3 ticks, whatever its own max age */
   tickMs?: number;
+  /** EIP-712 domain of the signatures (AttestedOracle on this chain); absent = an older oracle: nothing is pushed */
+  chainId?: number;
+  oracle?: `0x${string}`;
   prices: OracleVenuePrice[];
 }
 
@@ -143,8 +151,15 @@ export interface OracleVenuePrice {
   stale: boolean;
   /** OraclePriceMsg.publishedAt (unix s, chain head time) */
   publishedAt: number;
-  /** unix ms (oracle wall clock) when that price was signed: the age ops-venue checks */
+  /** unix ms (oracle wall clock) when that price was signed (informative; ops-venue ages the SIGNED publishedAt) */
   signedAt: number;
+  // ---- the signed PriceUpdate (IAttestedOracle.PriceUpdate) and its signature; required for a push
+  underlying?: `0x${string}`;
+  /** decimal string (WAD): the pushed price is priceWad / 1e18 */
+  priceWad?: string;
+  sourceCount?: number;
+  sourcesHash?: `0x${string}`;
+  signature?: `0x${string}`;
 }
 
 /** Per-symbol state of the live builder price push (ops-venue). Every state but pushing / held is a failure. */

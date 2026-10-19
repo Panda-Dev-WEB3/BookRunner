@@ -279,11 +279,17 @@ describe("OracleService tick", () => {
     const feeds = hh.parts.publisher!.venueFeeds;
     expect(feeds).toHaveLength(1);
     // the signed per-share price of the book's oracle key, under the builder market symbol (Task 1 mapping)
-    expect(feeds[0]).toEqual({
+    expect(feeds[0]).toMatchObject({
       v: 1,
       ts: T0,
-      prices: [{ symbol: "PERP_NVDA_USDC_bookrunner", priceId: "NVDA", price: 190, held: false, stale: false, publishedAt: Math.floor(T0 / 1000), signedAt: T0 }],
+      chainId: 31337,
+      oracle: ORACLE_ADDR,
+      prices: [{ symbol: "PERP_NVDA_USDC_bookrunner", priceId: "NVDA", price: 190, held: false, stale: false, publishedAt: Math.floor(T0 / 1000), signedAt: T0, priceWad: "190000000000000000000", sourceCount: 3 }],
     });
+    // every entry carries the EIP-712 signed PriceUpdate: it recovers to the oracle signer under the feed's domain
+    const e = feeds[0]!.prices[0]!;
+    const u = { underlying: e.underlying!, priceWad: BigInt(e.priceWad!), publishedAt: BigInt(e.publishedAt), held: e.held, sourceCount: e.sourceCount!, sourcesHash: e.sourcesHash! };
+    expect(await recoverPriceSigner(31337, ORACLE_ADDR, u, e.signature!)).toBe(hh.svc.signerInfo().address);
     expect(hh.svc.prices().find((m) => m.priceId === "NVDA")!.price).toBe(feeds[0]!.prices[0]!.price);
     expect(hh.svc.health().venue).toMatchObject({ mode: null, enabled: true, pushedBy: "ops-venue", feed: { ts: T0, symbols: ["PERP_NVDA_USDC_bookrunner"], error: null } });
   });

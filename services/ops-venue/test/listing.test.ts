@@ -75,7 +75,7 @@ async function twoBooks(listingMode: "api" | "manual", o: { createFails?: string
 }
 
 /** Bare tracker over a scripted listingStatus (manual clock): the schedule without the books loop. */
-function bareTracker(answer: (symbol: string) => Promise<{ listed: boolean; status: string | null }>, schedule: Partial<ConstructorParameters<typeof ListingTracker>[1]> = {}) {
+function bareTracker(answer: (symbol: string) => Promise<{ listed: boolean; status: string | null }>, schedule: Partial<ConstructorParameters<typeof ListingTracker>[1]> = {}, everListed?: OpsContext["everListed"]) {
   let now = 0;
   const calls: Array<{ symbol: string; at: number }> = [];
   const cap = captureLog();
@@ -89,6 +89,7 @@ function bareTracker(answer: (symbol: string) => Promise<{ listed: boolean; stat
     },
     log: cap.log,
     now: () => now,
+    ...(everListed ? { everListed } : {}),
   } as unknown as OpsContext;
   const tr = new ListingTracker(ctx, schedule);
   const book = (bookId: number, symbol: string, state: TrackedBook["state"] = "Live") => ({ ...trackedBook(state), bookId, symbol });
@@ -140,6 +141,40 @@ describe("ListingTracker schedule (manual clock, no books loop)", () => {
     }
     // due at 1065 (765 + 300): listed -> every 300 s
     expect(h.calls.map((c) => c.at / 1000)).toEqual([1065, 1365, 1665]);
+  });
+
+  test("everListed survives a restart (persisted): a delisted market stays missing, never awaiting again", async () => {
+    const saved = new Set<string>();
+    const store = { load: async () => [...saved], add: async (s: string) => void saved.add(s) };
+    let listed = true;
+    const sym = "PERP_A_USDC_bookrunner";
+    const a = bareTracker(async () => ({ listed, status: listed ? "ACTIVE" : null }), {}, store);
+    const booksA = [a.book(1, sym)];
+    await a.tr.check(booksA);
+    expect(booksA[0]?.listing).toMatchObject({ phase: "listed", everListed: true });
+    expect([...saved]).toEqual([sym]);
+    // ops-venue restarts (a fresh tracker, empty memory) while Orderly no longer lists the market
+    listed = false;
+    const b = bareTracker(async () => ({ listed, status: null }), {}, store);
+    const booksB = [b.book(1, sym)];
+    await b.tr.check(booksB);
+    expect(booksB[0]?.listing).toMatchObject({ phase: "missing", everListed: true });
+    // without the persisted set it would read "awaiting" (the bug)
+    const c = bareTracker(async () => ({ listed: false, status: null }));
+    const booksC = [c.book(1, sym)];
+    await c.tr.check(booksC);
+    expect(booksC[0]?.listing?.phase).toBe("awaiting");
+    // an unreadable store: memory only, retried at the next check
+    let fail = true;
+    const flaky = { load: async () => (fail ? Promise.reject(new Error("redis down")) : [sym]), add: async () => {} };
+    const d = bareTracker(async () => ({ listed: false, status: null }), { recheckMs: 1 }, flaky);
+    const booksD = [d.book(1, sym)];
+    await d.tr.check(booksD);
+    expect(booksD[0]?.listing?.phase).toBe("awaiting");
+    fail = false;
+    d.set(10_000);
+    await d.tr.check(booksD);
+    expect(booksD[0]?.listing?.phase).toBe("missing");
   });
 
   test("forced checks (provisioning, create_symbol) do not inflate the backoff", async () => {

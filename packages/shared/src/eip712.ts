@@ -1,4 +1,4 @@
-import { type Address, type Hex, decodeAbiParameters, encodeAbiParameters } from "viem";
+import { type Address, type Hex, decodeAbiParameters, encodeAbiParameters, recoverTypedDataAddress } from "viem";
 import type { OraclePriceMsg } from "./queues";
 import type { MarkInput } from "./types";
 
@@ -48,6 +48,15 @@ export interface PriceUpdate {
 
 export const priceTypedData = (chainId: number, oracle: Address, p: PriceUpdate) =>
   ({ domain: oracleDomain(chainId, oracle), types: priceTypes, primaryType: "Price", message: p }) as const;
+
+/** The signer of an oracle PriceUpdate under the AttestedOracle domain (chainId + oracle); null when the signature is malformed. */
+export async function recoverPriceSigner(chainId: number, oracle: Address, u: PriceUpdate, signature: Hex): Promise<Address | null> {
+  try {
+    return await recoverTypedDataAddress({ ...priceTypedData(chainId, oracle, u), signature });
+  } catch {
+    return null;
+  }
+}
 
 /** The EIP-712 PriceUpdate an OraclePriceMsg was signed over (the oracle service signs exactly this). */
 export function priceUpdateFromMsg(m: OraclePriceMsg): PriceUpdate {

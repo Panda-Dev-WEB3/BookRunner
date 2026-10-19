@@ -16,7 +16,7 @@ import { assertVenueSymbolConfig, CHANNELS, createLogger, QUEUES, roleSigner, tr
 import { Worker } from "bullmq";
 import { Redis } from "ioredis";
 import type { Address } from "viem";
-import { builderPushEnabled, startBuilderPriceFeed } from "./builderOracle/wire";
+import { builderPushEnabled, oracleSignerCheck, startBuilderPriceFeed } from "./builderOracle/wire";
 import { ViemChain } from "./chain";
 import { OrderlyBuilderClient, OrderlyVenue } from "./client";
 import { loadOpsEnv, resolveBuilderAccount, resolveListingMode } from "./config";
@@ -28,7 +28,7 @@ import { FileSagaStore, PgOpsStore } from "./store";
 import { errMsg, KeyedMutex, sleep } from "./util";
 import type { OpsContext } from "./worker/context";
 import { loadOrCreateBuilderKey, Provisioner } from "./worker/provision";
-import { accountReportSigner, RedisReportPublisher, RedisStatusPublisher } from "./worker/reportSink";
+import { accountReportSigner, RedisEverListedStore, RedisReportPublisher, RedisStatusPublisher } from "./worker/reportSink";
 import { OpsService } from "./worker/service";
 
 const env = loadOpsEnv();
@@ -127,6 +127,7 @@ async function main() {
     reportSigner: accountReportSigner(ops, env.CHAIN_ID),
     reportPublisher: new RedisReportPublisher(redis),
     status: statusPublisher,
+    everListed: new RedisEverListedStore(redis),
   };
   if (env.ORDERLY_IF_MODE === "builder") log.warn({ books: [...parseIfBuilderAccounts(env.ORDERLY_IF_BUILDER_ACCOUNTS).keys()] }, "ORDERLY_IF_MODE=builder (FALLBACK): IF accounts are operator-EOA accounts (adapter.setIfAccountOwner), i.e. IF custody with one operator key; the operator registers ops-venue's IF keys and performs IF withdrawals (VERIFY O10)");
   const service = new OpsService(ctx, new Provisioner(ctx, builderKey));
@@ -161,6 +162,8 @@ async function main() {
     redis,
     sub,
     publishStatus: (s) => statusPublisher.builderFeed(s),
+    // every pushed price must be the oracle's EIP-712 signed PriceUpdate under this deployment's AttestedOracle
+    verifier: oracleSignerCheck({ chainId: env.CHAIN_ID, oracle: dep.contracts.oracle, pinned: env.OPS_BUILDER_ORACLE_SIGNERS, isSignerOnChain: (a) => chain.isOracleSigner(a) }),
     signal: abort.signal,
   });
 

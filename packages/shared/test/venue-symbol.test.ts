@@ -122,6 +122,11 @@ describe("resolveVenueSymbol (what the services call per book)", () => {
     const w = resolveVenueSymbol({ charterSymbol: "PERP_odd", mode: "mock", brokerId: "bookrunner" });
     expect(w.symbol).toBe("PERP_odd");
     expect(w.warning).toMatch(/would not trade with ORDERLY_MODE=live/);
+    // a plain ticker DOES trade in live mode (normalised): the warning says so instead of "would not trade"
+    const plain = resolveVenueSymbol({ charterSymbol: "NVDA", mode: "mock", brokerId: "bookrunner" });
+    expect(plain.symbol).toBe("PERP_NVDA_USDC");
+    expect(plain.warning).toMatch(/ORDERLY_MODE=live would trade it as PERP_NVDA_USDC_bookrunner/);
+    expect(plain.warning).not.toMatch(/would not trade/);
   });
 
   test("startup check: live needs a valid ORDERLY_BROKER_ID, mock does not", () => {

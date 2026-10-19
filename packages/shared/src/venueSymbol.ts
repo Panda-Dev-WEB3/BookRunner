@@ -81,6 +81,17 @@ export function orderlyCharterSymbolIssue(charterSymbol: string, brokerId?: stri
   return null;
 }
 
+/** Mock-mode warning for a charter symbol breaking the charter rule: what live mode would actually do with it. */
+function mockWarning(o: VenueSymbolConfig & { charterSymbol: string }, issue: string): string {
+  try {
+    // a plain ticker (NVDA) still maps in live mode (PERP_NVDA_USDC_<broker>): it would trade, but the charter rule refuses it
+    const live = venueSymbol({ charterSymbol: o.charterSymbol, mode: "live", brokerId: o.brokerId || "bookrunner" });
+    return `${issue}: new charters must name PERP_<BASE>_USDC (ORDERLY_MODE=live would trade it as ${live})`;
+  } catch {
+    return `${issue}: it would not trade with ORDERLY_MODE=live`;
+  }
+}
+
 export type VenueSymbolResolution = { symbol: string; error: null; warning: string | null } | { symbol: null; error: string; warning: null };
 
 /**
@@ -90,7 +101,7 @@ export type VenueSymbolResolution = { symbol: string; error: null; warning: stri
  */
 export function resolveVenueSymbol(o: VenueSymbolConfig & { charterSymbol: string }): VenueSymbolResolution {
   const issue = orderlyCharterSymbolIssue(o.charterSymbol, o.brokerId);
-  if (o.mode !== "live") return { symbol: venueSymbol(o), error: null, warning: issue ? `${issue}: it would not trade with ORDERLY_MODE=live` : null };
+  if (o.mode !== "live") return { symbol: venueSymbol(o), error: null, warning: issue ? mockWarning(o, issue) : null };
   try {
     return { symbol: venueSymbol(o), error: null, warning: issue };
   } catch (err) {

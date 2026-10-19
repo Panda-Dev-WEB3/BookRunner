@@ -7,7 +7,7 @@
 // saga inspects that tx (`txState`) instead of re-sending; a dropped tx is replaced with its own nonce
 // (`opts.nonce`), so at most one of the two can ever be mined.
 import { BOOK_STATE, type BookState, baseAssetOf, bytes32ToStr, type Deployment, type Logger, publicClientFor, VENUE, walletClientFor } from "@bookrunner/shared";
-import { bookAbi, bookFactoryAbi, bookrunnerConfigAbi, mMMandateAbi, mockERC20Abi, orderlyAdapterAbi } from "@bookrunner/shared/abi";
+import { attestedOracleAbi, bookAbi, bookFactoryAbi, bookrunnerConfigAbi, mMMandateAbi, mockERC20Abi, orderlyAdapterAbi } from "@bookrunner/shared/abi";
 import {
   type Abi,
   type Address,
@@ -309,6 +309,11 @@ export class ViemChain implements ChainPort {
       this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "accountId", args: [1] }),
     ]);
     return { if: ifId.toLowerCase() as Hex, mm: mmId.toLowerCase() as Hex };
+  }
+
+  /** AttestedOracle.isSigner(addr) of this deployment (builder price push: who may sign a pushed price). */
+  async isOracleSigner(addr: Address): Promise<boolean> {
+    return (await this.pc.readContract({ address: this.dep.contracts.oracle, abi: attestedOracleAbi, functionName: "isSigner", args: [addr] })) as boolean;
   }
 
   async ifAccountOwner(adapter: Address): Promise<Address | null> {

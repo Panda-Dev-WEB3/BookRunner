@@ -68,6 +68,8 @@ export const CHECKED_STATES: ReadonlySet<string> = new Set(["Subscription", "Liv
 
 export class ListingTracker {
   private readonly by = new Map<string, SymbolEntry>();
+  /** persisted everListed symbols (ctx.everListed), loaded once; null until loaded (a failed load retries next check) */
+  private persisted: Set<string> | null = null;
   readonly schedule: ListingSchedule;
 
   constructor(
@@ -90,6 +92,13 @@ export class ListingTracker {
    * backoff (provisioning a book, the create_symbol job). Never throws; bounded by the per-check timeout.
    */
   async check(books: TrackedBook[], force = false): Promise<void> {
+    if (this.persisted === null && this.ctx.everListed) {
+      try {
+        this.persisted = new Set(await this.ctx.everListed.load());
+      } catch (err) {
+        this.ctx.log.warn({ err: errMsg(err) }, "listing: persisted everListed set unreadable (retried next check; memory only meanwhile)");
+      }
+    }
     const groups = new Map<string, TrackedBook[]>();
     for (const b of books) {
       if (!tradable(b) || !CHECKED_STATES.has(b.state)) continue;
@@ -153,7 +162,7 @@ export class ListingTracker {
     const prev = e.info;
     try {
       const r = await this.status(symbol);
-      const everListed = prev?.everListed ?? false;
+      const everListed = (prev?.everListed ?? false) || (this.persisted?.has(symbol) ?? false);
       const phase = listingPhase(r, everListed);
       if (r.status !== null && !isKnownMarketStatus(r.status) && !e.warnedUnknown) {
         e.warnedUnknown = true;
@@ -171,6 +180,12 @@ export class ListingTracker {
         failures: 0,
         error: null,
       };
+      if (phase === "listed" && this.ctx.everListed && !(this.persisted?.has(symbol) ?? false)) {
+        await this.ctx.everListed.add(symbol).then(
+          () => void (this.persisted ??= new Set()).add(symbol),
+          (err) => log.warn({ symbol, err: errMsg(err) }, "listing: could not persist everListed (memory only; retried next check)"),
+        );
+      }
       // listed and open: slow re-check; anything else (awaiting, missing, restricted) re-checks with backoff
       this.reschedule(e, now, e.info.openForRisk, force);
       if (!same) this.logChange(symbol, prev, e.info, group);

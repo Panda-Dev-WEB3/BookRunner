@@ -116,6 +116,16 @@ export interface OpsContext {
   reportPublisher: ReportPublisher;
   /** optional (tests): where venue-symbol issues are published */
   status?: StatusPublisher;
+  /**
+   * optional (memory only without it): the venue symbols ever seen listed, persisted (Redis KEYS.venueEverListed), so a
+   * restart keeps a listed market that disappeared "missing" instead of flipping it back to "awaiting"
+   */
+  everListed?: EverListedStore;
+}
+
+export interface EverListedStore {
+  load(): Promise<string[]>;
+  add(symbol: string): Promise<void>;
 }
 
 export interface TrackedBook extends OrderlyBook {
