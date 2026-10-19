@@ -166,6 +166,9 @@ if (testnetLike) {
     MOCK_ORDERLY_SNAPSHOT_FILE: ".data/testnet/mock-orderly.json",
     OPS_KEYS_DIR: ".data/testnet/keys",
     OPS_SAGA_FILE: ".data/testnet/ops-venue/sagas.json",
+    // committed-mark rows waiting for Postgres: under .data (the unit's writable state), not the default tmpdir,
+    // which is the unit's PrivateTmp and is emptied on every restart (HARDENING.md, audit 2026-10)
+    MARK_SPOOL_DIR: ".data/testnet/mark-spool",
   };
   // testnet defaults win over anything inherited; only keys set explicitly in .env.testnet override them
   for (const [k, v] of Object.entries(t)) if (!testnetKeys.has(k) || k === "CHAIN_ID" || k === "DEPLOYMENT_FILE") env[k] = v;

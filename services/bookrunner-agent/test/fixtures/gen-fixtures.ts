@@ -1,6 +1,6 @@
 // Regenerates test/fixtures/agent-fixtures.ts from the Foundry build of test/fixtures/sol:
 //   docker run --rm -v "<abs>/services/bookrunner-agent/test/fixtures/sol:/work" -w /work \
-//     -v bookrunner-svm:/root/.svm --entrypoint forge ghcr.io/foundry-rs/foundry:latest build
+//     -v bookrunner-svm:/root/.svm --entrypoint forge ghcr.io/foundry-rs/foundry@sha256:0c00cb0bda1ab1b91c9a6bf60f4c76c09c1a8870824b6d4718afbabacf6f9a17 build
 //   bun test/fixtures/gen-fixtures.ts
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";

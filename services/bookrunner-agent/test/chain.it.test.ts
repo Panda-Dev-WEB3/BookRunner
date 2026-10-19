@@ -77,7 +77,8 @@ describe.skipIf(!IT)("agent chain adapters on a private anvil", () => {
     expect(sent.length).toBe(1);
     now += 6_000;
     await venue.replaceQuote({ ...q, theoretical: { bidPx: 100.025, askPx: 100.145 } }); // skew +8.5 bps
-    expect((await chain.readQuote())?.skewBps).toBe(8);
+    // audit M-3: |skew| <= spread / 2, so the engine params carry floor(12 / 2) = 6, not the mandate maxSkew 8
+    expect((await chain.readQuote())?.skewBps).toBe(6);
     expect(sent.length).toBe(2);
   }, 30_000);
 
@@ -103,8 +104,8 @@ describe.skipIf(!IT)("agent chain adapters on a private anvil", () => {
     const fill = tradeToFill(trades[0]!, "RHX5-PERP");
     expect(fill.side).toBe("sell"); // trader bought from the pool
     expect(fill.qty).toBe(10);
-    expect(fill.px).toBeCloseTo(Number(quote) / 1e18, 9); // oracle 100 * (1e4 + 12/2 + 8) / 1e4 after the SetQuote above
-    expect(fill.px).toBeCloseTo(100.14, 9);
+    expect(fill.px).toBeCloseTo(Number(quote) / 1e18, 9); // oracle 100 * (1e4 + 12/2 + 6) / 1e4 after the SetQuote above
+    expect(fill.px).toBeCloseTo(100.12, 9);
     expect(fill.trader).toBe(devAccount("trader0").address.toLowerCase());
     expect(fill.ts).toBeGreaterThan(0);
     expect(await chain.tradesSince(0)).toEqual([]); // cursor advanced

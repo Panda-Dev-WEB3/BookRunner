@@ -52,7 +52,7 @@ describe.skipIf(!IT)("mark store (postgres)", () => {
     markId,
     bookId: BOOK,
     periodEnd,
-    input: { bookId: BigInt(BOOK), periodEnd: BigInt(periodEnd), navUsd: usd("100"), deployedValueUsd: usd("90"), flowNonce: 3n, inventoryRoot: `0x${"01".repeat(32)}`, pnlJsonHash: `0x${"02".repeat(32)}`, receiptsRoot: `0x${"03".repeat(32)}` },
+    input: { bookId: BigInt(BOOK), periodEnd: BigInt(periodEnd), navUsd: usd("100"), deployedValueUsd: usd("90"), flowNonce: 3n, inventoryRoot: `0x${"01".repeat(32)}`, pnlJsonHash: `0x${"02".repeat(32)}`, receiptsRoot: `0x${"03".repeat(32)}`, held: false },
     pnl: { bookId: String(BOOK), periodEnd, pnl: { unrealizedUsd: unrealized } } as unknown as MarkRow["pnl"],
     signer: "0x00000000000000000000000000000000000000AA",
     signature: "0x1234",

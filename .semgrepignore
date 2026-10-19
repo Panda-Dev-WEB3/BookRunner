@@ -1,0 +1,15 @@
+# Semgrep (CI: .github/workflows/security.yml). Replaces Semgrep's default ignore list, so it repeats it.
+:include .gitignore
+.git/
+node_modules/
+build/
+dist/
+vendor/
+*.min.js
+# vendored libraries (OpenZeppelin, forge-std) and the exported marketing-site bundle
+contracts/lib/
+apps/site/public/
+# devnet / test mocks (open mint and burn by design; never deployed on mainnet, MainnetInput refuses them)
+contracts/src/mocks/
+# Solidity tests and their mocks (deliberately permissive helpers; Slither filters them too)
+contracts/test/

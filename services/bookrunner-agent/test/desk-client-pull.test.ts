@@ -79,7 +79,8 @@ function fakeProvider(opts: { rejectWithPrices?: Hex; rejectAll?: Hex } = {}) {
 }
 
 function client(provider: ReturnType<typeof fakeProvider>, prices: DeskPriceData | null) {
-  const transport = custom({ request: provider.request });
+  // retryCount 0: viem retries a thrown fake-RPC error 3x with backoff (~1 s each), which pushed tests to the 5 s timeout
+  const transport = custom({ request: provider.request }, { retryCount: 0 });
   const pub = createPublicClient({ chain: localChain, transport, pollingInterval: 5 });
   const wallet = createWalletClient({ chain: localChain, transport, account: devAccount("deskKeyIndex") });
   return new DeskClient(pub as never, wallet, DESK, createLogger("desk-test", "silent"), 5_000, undefined, prices);
@@ -137,6 +138,22 @@ describe("DeskClient pull oracle", () => {
     expect(String((err as Error).message)).toContain("StalePrice");
     expect(provider.sent).toHaveLength(0);
     expect(provider.calls).toHaveLength(1);
+  });
+
+  test("a desk refusal is reported to onRejected by its error name (StaleTradePrice counted for alerts)", async () => {
+    const stale = encodeErrorResult({ abi: DESK_PULL_ABI, errorName: "StaleTradePrice", args: [TOKEN, 1n] });
+    const desk = client(fakeProvider({ rejectAll: stale }), null);
+    const seen: Array<[string, string]> = [];
+    desk.onRejected = (revert, action) => seen.push([revert, action]);
+    const err = await desk.run(encodeHedge({ token: TOKEN, buy: true, amountIn: 1_000n, minAmountOut: 1n, poolFee: 3000, proof: [] }), "h").catch((e: unknown) => e);
+    expect(String((err as Error).message)).toContain("StaleTradePrice");
+    expect(seen).toEqual([["StaleTradePrice", "Hedge"]]);
+    // a throwing counter never changes the outcome
+    desk.onRejected = () => {
+      throw new Error("counter broke");
+    };
+    const err2 = await desk.run(encodeFlatten({ token: TOKEN, amountIn: 5n, minAmountOut: 1n, poolFee: 3000 }), "f").catch((e: unknown) => e);
+    expect(String((err2 as Error).message)).toContain("StaleTradePrice");
   });
 
   test("EngineVenue SetQuote goes through executeWithPrices", async () => {

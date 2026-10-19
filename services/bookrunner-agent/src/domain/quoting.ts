@@ -79,7 +79,7 @@ export interface ClampedQuote {
 /**
  * Clamp a reservation/spread proposal to the mandate:
  *   width in [minQuoteWidthBps + safety, max(maxWidthBps, min + safety)]
- *   |skew| <= maxSkewBps - safety (skew = (mid - oracle) / oracle)
+ *   |skew| <= min(maxSkewBps, half the width) - safety (skew = (mid - oracle) / oracle; audit M-3)
  * The result is rebuilt around the clamped mid so width and skew are exact (before tick rounding).
  */
 export function clampToMandate(
@@ -99,7 +99,13 @@ export function clampToMandate(
   const maxW = Math.max(minW, cfg.maxWidthBps);
   const widthBps = Math.min(maxW, Math.max(minW, rawWidthBps));
 
-  const maxSkew = Math.max(0, m.maxSkewBps - Math.max(0, cfg.skewSafetyBps));
+  // audit M-3: the quote must straddle the oracle (bid <= oracle <= ask). With mid = oracle x (1 + s) and
+  // half-width h (relative to mid), that holds for |s| <= h / (1 + h); a cached mandate whose maxSkew exceeds
+  // half its min width must not let a quote sit entirely on one side of the oracle.
+  const halfW = widthBps / 20_000;
+  const straddle = (halfW / (1 + halfW)) * 10_000;
+  const safety = Math.max(0, cfg.skewSafetyBps);
+  const maxSkew = Math.max(0, Math.min(m.maxSkewBps, straddle) - safety);
   const skewBps = Math.min(maxSkew, Math.max(-maxSkew, rawSkewBps));
 
   const mid = oraclePx * (1 + skewBps / 10_000);

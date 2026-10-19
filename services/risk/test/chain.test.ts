@@ -10,6 +10,7 @@ import {
   bookrunnerDeskAbi,
   mMMandateAbi,
   orderlyAdapterAbi,
+  poolEngineAbi,
   poolEngineAdapterAbi,
   stockTokenRegistryAbi,
   underwritingVaultAbi,
@@ -52,6 +53,7 @@ const C = {
   desk: A(0x701),
   adapter: A(0x801),
   usdc: A(0x900),
+  poolEngine: A(0xe9),
 };
 
 const ABIS: Record<string, Abi> = {
@@ -66,6 +68,7 @@ const ABIS: Record<string, Abi> = {
   [C.adapter]: [...poolEngineAdapterAbi, ...orderlyAdapterAbi] as Abi,
   [NVDA_TOKEN]: erc20Abi,
   [C.usdc]: erc20Abi,
+  [C.poolEngine]: poolEngineAbi,
 };
 
 const components = { book: C.book, senior: C.senior, junior: C.junior, vault: C.vault, mandate: C.mandate, router: C.router, desk: C.desk, adapter: C.adapter };
@@ -117,8 +120,16 @@ const RESULTS: Record<string, unknown> = {
   [`${NVDA_TOKEN}:balanceOf`]: 10n * 10n ** 18n,
   [`${C.stockRegistry}:getToken`]: { token: NVDA_TOKEN, priceId: priceId("NVDA"), multiplierWad: wad(1), decimals: 18, active: true, floatCapRaw: 0n },
   [`${C.stockRegistry}:valueUsdAt`]: usd(1_900),
+  // audit M-2 split window reads (no change recorded: outside the window)
+  [`${C.stockRegistry}:multiplierChangedAt`]: 0n,
+  [`${C.oracle}:lastLiveAt`]: BigInt(T0),
+  [`${C.stockRegistry}:basisMultiplier`]: 0n,
   [`${C.mandate}:kill`]: undefined,
   [`${C.adapter}:setReduceOnly`]: undefined,
+  // Task 7: the engine's per-period loss budget (audit M-3) read every tick for an engine book
+  [`${C.adapter}:marketId`]: 3n,
+  [`${C.adapter}:engine`]: C.poolEngine,
+  [`${C.poolEngine}:lossBudget`]: [800, 5_966_667n, usd(100_000), usd(9_000), usd(8_000), true],
 };
 
 function fakeProvider(reverts: ReadonlySet<string> = new Set()) {
@@ -206,7 +217,8 @@ function fakeProvider(reverts: ReadonlySet<string> = new Set()) {
 
 function makeChain(reverts?: ReadonlySet<string>, nowMs?: number) {
   const provider = fakeProvider(reverts);
-  const transport = custom({ request: provider.request });
+  // retryCount 0: viem retries a thrown fake-RPC error 3x with backoff (~1 s each), which pushed tests to the 5 s timeout
+  const transport = custom({ request: provider.request }, { retryCount: 0 });
   const pub = createPublicClient({ chain: localChain, transport, pollingInterval: 5 });
   const wallet = createWalletClient({ chain: localChain, transport, account: devAccount("risk") });
   const dep = { chainId: 31337, startBlock: 0, contracts: C, stockTokens: {}, books: [] } as unknown as Deployment;
@@ -273,6 +285,23 @@ describe("ViemChain reads with the oracle's signed prints (pull oracle, LOW_GAS 
   });
 });
 
+describe("ViemChain: engine loss budget (Task 7, audit M-3 budget breach)", () => {
+  test("an engine book reads PoolEngine.lossBudget(marketId) every tick", async () => {
+    const { chain } = makeChain();
+    const ref = { ...(await chain.loadRef(1)), venue: VENUE.POOL_ENGINE };
+    const o = await chain.observe(ref);
+    expect(o.lossBudget).toEqual({ budgetBps: 800, period: 5_966_667, anchorEquityUsd: usd(100_000), lossUsd: usd(9_000), budgetUsd: usd(8_000), blocked: true });
+  });
+
+  test("an Orderly book has none; an engine without the view (pre-M-3) reads null, never fails the tick", async () => {
+    const { chain } = makeChain();
+    expect((await chain.observe(await chain.loadRef(1))).lossBudget).toBeUndefined();
+    const old = makeChain(new Set([`${C.poolEngine}:lossBudget`]));
+    const ref = { ...(await old.chain.loadRef(1)), venue: VENUE.POOL_ENGINE };
+    expect((await old.chain.observe(ref)).lossBudget).toBeNull();
+  });
+});
+
 describe("ViemChain reads", () => {
   test("discovery: book ids, components, charter, oracle key", async () => {
     const { chain } = makeChain();
@@ -312,6 +341,36 @@ describe("ViemChain reads", () => {
     // every other limit input is still observed, so venue-exposure limits and kills keep running
     expect(o.adapter.netExposureUsd).toBe(usd(-20_000));
     expect(o.mandate).toEqual(MANDATE);
+  });
+
+  test("audit M-2: a held token priced before its multiplier change is flagged and valued at the basis multiplier (unknown in stored mode: 0), never at the new one", async () => {
+    const extra = {
+      [`${C.stockRegistry}:multiplierChangedAt`]: BigInt(T0 + 10),
+      [`${C.oracle}:lastLiveAt`]: BigInt(T0),
+      [`${C.stockRegistry}:multiplierFromToken`]: false,
+    };
+    const saved = Object.fromEntries(Object.keys(extra).map((k) => [k, RESULTS[k]]));
+    Object.assign(RESULTS, extra);
+    try {
+      const { chain } = makeChain(new Set([`${C.desk}:hedgeNotionalUsd`, `${C.desk}:valueUsd`]));
+      const ref = await chain.loadRef(1);
+      const h = await chain.deskHoldings(ref);
+      expect(h[0]).toMatchObject({ valueUsd: 0n, splitWindow: true, splitValuationUnknown: true });
+      const o = await chain.observe(ref);
+      expect(o.desk).toMatchObject({ splitWindow: true, splitUntrusted: true });
+      // fix round 2: the on-chain basis multiplier values it (trusted), never at the new multiplier
+      RESULTS[`${C.stockRegistry}:basisMultiplier`] = wad(1);
+      const h2 = await chain.deskHoldings(ref);
+      expect(h2[0]).toMatchObject({ valueUsd: usd(1_900), splitWindow: true });
+      expect(h2[0]?.splitValuationUnknown).toBeUndefined();
+      expect((await chain.observe(ref)).desk.splitUntrusted).toBeUndefined();
+      RESULTS[`${C.stockRegistry}:basisMultiplier`] = 0n;
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete RESULTS[k];
+        else RESULTS[k] = v;
+      }
+    }
   });
 
   test("latest Kill log and desk holdings (registry valuation)", async () => {

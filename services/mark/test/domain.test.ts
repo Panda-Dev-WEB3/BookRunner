@@ -19,6 +19,10 @@ import {
   recoverMarkSigner,
   signMark,
 } from "../src/index";
+import { isDustPosition, markHeld, priceIsStale } from "../src/domain/held";
+import { RETIRE_TOKEN_DUST_USD, writeOffRetiringDust } from "../src/domain/nav";
+import { settlePriceInForce } from "../src/domain/settle";
+import { priceBasisAt, resolveSplitWindow } from "../src/domain/split";
 import { NVDA, P, TSLA, USDC, snapshot } from "./fixtures";
 
 describe("NAV composition", () => {
@@ -115,7 +119,7 @@ describe("MarkPnl JSON", () => {
   const build = (over = {}) => {
     const s = snapshot(over);
     const nav = composeNav(s);
-    return buildMarkPnl({ snapshot: s, periodEnd: P, nav, preview: previewTranches(s, nav.navUsd), extras: { feeFlowUsd: usd("10"), fundingUsd: 0n, prevUnrealizedUsd: 0n, lastQuoteSkewBps: -5 } });
+    return buildMarkPnl({ snapshot: s, periodEnd: P, nav, preview: previewTranches(s, nav.navUsd), held: false, extras: { feeFlowUsd: usd("10"), fundingUsd: 0n, prevUnrealizedUsd: 0n, lastQuoteSkewBps: -5 } });
   };
 
   test("shape and formats", () => {
@@ -138,7 +142,7 @@ describe("MarkPnl JSON", () => {
     expect(canonicalJson(pnl).startsWith('{"bookId":"1","deployedValueUsd":"108600.000000","desk":{"hedgeValueUsd":"7600.000000"')).toBe(true);
     expect(pnlJsonHash(build())).toBe(pnlJsonHash(pnl)); // deterministic rebuild
     // pinned: any change to formats / field set / canonicalisation must be deliberate
-    expect(pnlJsonHash(pnl)).toBe("0xec3f522b80265a9e3fa879c5bc4a8f0b0c5daaf917a155a389a7d0e29ee87093");
+    expect(pnlJsonHash(pnl)).toBe("0x9d77b843d377467d3dea1082000fdfa962dd2d20da3bb1a49b6e9a40d92dfba3");
     expect(pnlJsonHash(build({ vaultIdle: usd("2001") }))).not.toBe(pnlJsonHash(pnl));
   });
 
@@ -149,6 +153,7 @@ describe("MarkPnl JSON", () => {
       periodEnd: P,
       nav: composeNav(s),
       preview: previewTranches(s, composeNav(s).navUsd),
+      held: false,
       extras: { feeFlowUsd: 0n, fundingUsd: usd("100"), prevUnrealizedUsd: usd("200"), lastQuoteSkewBps: null },
     });
     expect(pnl.pnl.unrealizedUsd).toBe("500.000000");
@@ -170,7 +175,7 @@ describe("EIP-712 mark signature", () => {
   test("signature recovers to the mark signer; digest matches shared typed data", async () => {
     const signer = devAccount("markSigner");
     const registry = "0x5FbDB2315678afecb367f032d93F642f64180aa3" as const;
-    const input = { bookId: 1n, periodEnd: BigInt(P), navUsd: usd("110600"), deployedValueUsd: usd("108600"), flowNonce: 7n, inventoryRoot: `0x${"11".repeat(32)}`, pnlJsonHash: `0x${"22".repeat(32)}`, receiptsRoot: `0x${"33".repeat(32)}` } as const;
+    const input = { bookId: 1n, periodEnd: BigInt(P), navUsd: usd("110600"), deployedValueUsd: usd("108600"), flowNonce: 7n, inventoryRoot: `0x${"11".repeat(32)}`, pnlJsonHash: `0x${"22".repeat(32)}`, receiptsRoot: `0x${"33".repeat(32)}`, held: false } as const;
     const sig = await signMark(signer, 31337, registry, input);
     expect((await recoverMarkSigner(31337, registry, input, sig)).toLowerCase()).toBe(signer.address.toLowerCase());
     expect(markDigest(31337, registry, input)).toBe(hashTypedData(markTypedData(31337, registry, input)));
@@ -217,5 +222,153 @@ describe("venue report freshness (Orderly)", () => {
     expect(venueReportAge(0, P + 40, P + 30, 1200)).toEqual({ stale: false, ageSec: 0 }); // reported after the block
     expect(venueReportAge(1, 0, P + 30, 1200).stale).toBe(false); // engine: valued live on-chain
     expect(venueReportAge(0, 0, P + 30, 0).stale).toBe(false); // 0 disables
+  });
+});
+
+describe("held marks (audit M-1, fail closed)", () => {
+  const s = snapshot();
+  const pos = s.desk.positions[0]!;
+  const u = s.underlyingPrice!;
+
+  test("not held when every price the valuation used is known, live and fresh", () => {
+    expect(markHeld(s)).toEqual({ held: false, reasons: [] });
+  });
+
+  test("held: the oracle signed the underlying's price as held (closed session)", () => {
+    expect(markHeld({ ...s, underlyingPrice: { ...u, held: true } })).toEqual({ held: true, reasons: ["underlying_held"] });
+  });
+
+  test("held: the underlying's price state is unreadable", () => {
+    expect(markHeld({ ...s, underlyingPrice: null })).toEqual({ held: true, reasons: ["underlying_unknown"] });
+  });
+
+  test("held: the underlying's price is older than maxPriceAge", () => {
+    expect(markHeld({ ...s, underlyingPrice: { ...u, stale: true } })).toEqual({ held: true, reasons: ["underlying_stale"] });
+  });
+
+  test("held: oracle down over the weekend (last print Friday 20:00 UTC, held transition never signed)", () => {
+    const fridayClose = 1_760_731_200; // Fri 2025-10-17 20:00 UTC
+    const saturdayMark = fridayClose + 4 * 3600; // Sat 00:00 UTC
+    const maxPriceAge = 300;
+    const stale = priceIsStale(fridayClose, saturdayMark, maxPriceAge);
+    expect(stale).toBe(true);
+    // the stored price still says held=false (the oracle never signed the held transition)
+    const h = markHeld({ ...s, underlyingPrice: { ...u, publishedAt: fridayClose, held: false, stale } });
+    expect(h).toEqual({ held: true, reasons: ["underlying_stale"] });
+  });
+
+  test("priceIsStale: never published, at the bound, past the bound", () => {
+    expect(priceIsStale(0, 1_000, 300)).toBe(true);
+    expect(priceIsStale(700, 1_000, 300)).toBe(false);
+    expect(priceIsStale(699n, 1_000n, 300n)).toBe(true);
+  });
+
+  test("held: a desk position the NAV values is priced held or stale; empty positions do not count", () => {
+    expect(markHeld({ ...s, desk: { ...s.desk, positions: [{ ...pos, priceHeld: true }] } }).reasons).toEqual(["desk_held:NVDA"]);
+    expect(markHeld({ ...s, desk: { ...s.desk, positions: [{ ...pos, priceStale: true }] } }).reasons).toEqual(["desk_stale:NVDA"]);
+    expect(markHeld({ ...s, desk: { ...s.desk, positions: [{ ...pos, qtyRaw: 0n, priceHeld: true, priceStale: true }] } }).held).toBe(false);
+  });
+
+  test("the MarkPnl statement records the flag the caller computed (hashed into pnlJsonHash)", () => {
+    const build = (held: boolean) => {
+      const nav = composeNav(s);
+      return buildMarkPnl({ snapshot: s, periodEnd: P, nav, preview: previewTranches(s, nav.navUsd), held, extras: { feeFlowUsd: 0n, fundingUsd: 0n, prevUnrealizedUsd: 0n, lastQuoteSkewBps: null } });
+    };
+    expect(build(false).held).toBe(false);
+    expect(build(true).held).toBe(true);
+    expect(pnlJsonHash(build(true))).not.toBe(pnlJsonHash(build(false)));
+  });
+});
+
+describe("split window (audit M-2, review I-1): revalue at the basis multiplier, refuse only while young", () => {
+  const pos = snapshot().desk.positions[0]!; // 40 NVDA at $190, multiplier 1: $7,600
+  const fri = 1_000n;
+  const sat = 2_000n;
+  const day = 86_400n;
+  // Friday's held per-share price after a 10:1 split: valueUsdAt (new multiplier) says $76,000
+  const split = { ...pos, multiplierWad: 10n * WAD, valueUsd: usd("76000"), priceHeld: true, priceBasisAt: fri, multiplierChangedAt: sat, basisMultiplierWad: WAD, splitWindowSince: sat };
+
+  test("priceBasisAt: a live price's own publishedAt, a held price's last live print", () => {
+    expect(priceBasisAt({ held: false, publishedAt: 5_000n, lastLiveAt: fri })).toBe(5_000n);
+    expect(priceBasisAt({ held: true, publishedAt: 5_000n, lastLiveAt: fri })).toBe(fri);
+  });
+
+  test("young window: valued at the basis multiplier (continuous $7,600, never 10x), refused", () => {
+    const r = resolveSplitWindow([split], { nowSec: sat + 3_600n, maxRefuseSec: day });
+    expect(r.positions[0]).toMatchObject({ valueUsd: usd("7600"), multiplierWad: WAD, splitWindow: true });
+    expect(r.window).toHaveLength(1);
+    expect(r.refuse).toEqual(r.window);
+    expect(r.window[0]).toContain("predates the multiplier change");
+    // and the mark is held
+    expect(markHeld({ ...snapshot(), desk: { ...snapshot().desk, positions: r.positions } }).reasons).toContain("desk_split:NVDA");
+  });
+
+  test("past the refusal bound, or at a stale price: not refused (committed held); unknown multiplier: 0", () => {
+    expect(resolveSplitWindow([split], { nowSec: sat + day, maxRefuseSec: day }).refuse).toEqual([]);
+    expect(resolveSplitWindow([{ ...split, priceStale: true }], { nowSec: sat + 60n, maxRefuseSec: day }).refuse).toEqual([]);
+    const unknown = resolveSplitWindow([{ ...split, basisMultiplierWad: null }], { nowSec: sat + day, maxRefuseSec: day });
+    expect(unknown.positions[0]).toMatchObject({ valueUsd: 0n, splitWindow: true });
+    expect(unknown.window[0]).toContain("unknown");
+  });
+
+  test("outside the window: untouched (same-second change, no change, empty position, fixtures without the fields)", () => {
+    const keep = [{ ...split, priceBasisAt: sat }, { ...split, multiplierChangedAt: 0n }, { ...split, qtyRaw: 0n }, pos];
+    const r = resolveSplitWindow(keep, { nowSec: sat + 60n, maxRefuseSec: day });
+    expect(r.window).toEqual([]);
+    expect(r.positions).toEqual(keep);
+  });
+});
+
+describe("dust desk positions (Task 7: a position valued 0 never holds the mark)", () => {
+  const s = snapshot();
+  const pos = s.desk.positions[0]!;
+
+  test("a position worth 0 at a known price does not hold the mark, held or stale", () => {
+    const dust = { ...pos, qtyRaw: 1n, valueUsd: 0n, priceHeld: true, priceStale: true };
+    expect(markHeld({ ...s, desk: { ...s.desk, positions: [dust] } })).toEqual({ held: false, reasons: [] });
+    expect(isDustPosition(dust)).toBe(true);
+  });
+
+  test("a Retiring book's position written off below MARK_RETIRE_TOKEN_DUST_USD does not hold the mark", () => {
+    const retiring = snapshot({ book: { ...s.book, state: "Retiring" } });
+    const tiny = { ...pos, qtyRaw: 3n * 10n ** 12n, valueUsd: 570n, priceHeld: true }; // $0.00057 at a held price
+    const { snapshot: written } = writeOffRetiringDust({ ...retiring, desk: { ...retiring.desk, positions: [tiny] } }, RETIRE_TOKEN_DUST_USD);
+    expect(written.desk.positions[0]!.valueUsd).toBe(0n);
+    expect(markHeld(written).held).toBe(false);
+    // a Live book keeps it (no write-off): $0.00057 at a held price still holds
+    expect(markHeld({ ...s, desk: { ...s.desk, positions: [tiny] } }).reasons).toEqual(["desk_held:NVDA"]);
+  });
+
+  test("not dust: an unknown price (0) or a split-window position valued 0 because its multiplier is unknown", () => {
+    const noPrice = { ...pos, priceWad: 0n, valueUsd: 0n, priceStale: true };
+    expect(markHeld({ ...s, desk: { ...s.desk, positions: [noPrice] } }).reasons).toEqual(["desk_stale:NVDA"]);
+    const zeroed = { ...pos, valueUsd: 0n, multiplierWad: 0n, splitWindow: true, basisMultiplierWad: null, priceHeld: true };
+    expect(markHeld({ ...s, desk: { ...s.desk, positions: [zeroed] } }).reasons).toEqual(["desk_held:NVDA", "desk_split:NVDA"]);
+    expect(isDustPosition(zeroed)).toBe(false);
+    // a split-window position at a KNOWN basis multiplier that is worth 0 is dust
+    expect(isDustPosition({ ...zeroed, basisMultiplierWad: WAD })).toBe(true);
+  });
+});
+
+describe("governance settle price (Task 7 lead: delisted / permanently held market)", () => {
+  const inForce = { priceWad: 80n * WAD, proposedAt: 1_000n, effectiveAt: 1_000n + 3n * 86_400n, pending: false, effective: true };
+
+  test("in force on-chain: the valuation uses it", () => {
+    expect(settlePriceInForce(inForce, null)).toBe(80n * WAD);
+    expect(settlePriceInForce(inForce, { held: true, publishedAt: 9_000n })).toBe(80n * WAD); // a newer held print
+    expect(settlePriceInForce(inForce, { held: false, publishedAt: 999n })).toBe(80n * WAD); // live, before the proposal
+  });
+
+  test("not used: none, pending, an old oracle (null) or voided by a newer live print", () => {
+    expect(settlePriceInForce(null, null)).toBeNull();
+    expect(settlePriceInForce({ ...inForce, pending: true, effective: false }, null)).toBeNull();
+    expect(settlePriceInForce({ ...inForce, effective: false }, null)).toBeNull();
+    expect(settlePriceInForce(inForce, { held: false, publishedAt: 1_000n })).toBeNull();
+  });
+
+  test("a mark valued at it is not held: the governance price is final, the book settles at it", () => {
+    const s = snapshot({ underlyingPrice: { ...snapshot().underlyingPrice!, priceWad: 80n * WAD, held: false, stale: false, settled: true } });
+    const pos = { ...s.desk.positions[0]!, priceWad: 80n * WAD, settlePrice: true };
+    expect(markHeld({ ...s, desk: { ...s.desk, positions: [pos] } })).toEqual({ held: false, reasons: [] });
   });
 });

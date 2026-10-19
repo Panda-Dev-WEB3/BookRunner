@@ -40,17 +40,32 @@ describe("clampToMandate", () => {
     const c = clampToMandate({ reservation: 190 * 0.99, spread: 0.0001 }, 190, m, DEFAULT_QUOTING_CONFIG);
     expect(c).not.toBeNull();
     expect(c!.widthBps).toBeCloseTo(8.5, 9);
-    expect(c!.skewBps).toBeCloseTo(-24.5, 9);
+    expect(c!.skewBps).toBeCloseTo(-3.5, 9);
     expect(checkQuote(m, { bidPx: c!.bidPx, askPx: c!.askPx, oraclePx: 190 }).ok).toBe(true);
+  });
+
+  test("audit M-3: a cached pre-fix mandate (max skew 25 > half the min width 8) still straddles the oracle", () => {
+    const m = nvdaMandate({ maxSkewBps: 25 });
+    for (const dir of [-1, 1]) {
+      const c = clampToMandate({ reservation: 190 * (1 + dir * 0.01), spread: 0.0001 }, 190, m, DEFAULT_QUOTING_CONFIG)!;
+      expect(c.widthBps).toBeCloseTo(8.5, 9);
+      // half of the 8.5 bps width (relative to the oracle: 4.25 / 1.000425) minus the 0.5 bps safety
+      expect(Math.abs(c.skewBps)).toBeCloseTo(4.25 / (1 + 4.25 / 1e4) - 0.5, 6);
+      expect(c.bidPx).toBeLessThanOrEqual(190);
+      expect(c.askPx).toBeGreaterThanOrEqual(190);
+      expect(checkQuote(m, { bidPx: c.bidPx, askPx: c.askPx, oraclePx: 190 }).ok).toBe(true);
+    }
+    // the unclamped one-sided quote is flagged
+    expect(checkQuote(m, { bidPx: 190 * 1.002, askPx: 190 * 1.0028, oraclePx: 190 }).violations).toContain("ONE_SIDED");
   });
 
   test("passes through an in-mandate proposal unchanged", () => {
     const m = nvdaMandate();
-    const r = 190 * (1 + 10 / 1e4);
+    const r = 190 * (1 + 3 / 1e4);
     const spread = r * (20 / 1e4);
     const c = clampToMandate({ reservation: r, spread }, 190, m, DEFAULT_QUOTING_CONFIG)!;
     expect(c.widthBps).toBeCloseTo(20, 9);
-    expect(c.skewBps).toBeCloseTo(10, 9);
+    expect(c.skewBps).toBeCloseTo(3, 9);
   });
 
   test("rejects non-finite and non-positive inputs", () => {

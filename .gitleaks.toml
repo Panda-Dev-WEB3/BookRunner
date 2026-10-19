@@ -1,0 +1,21 @@
+# gitleaks configuration (CI: .github/workflows/security.yml). The default rule set plus a reviewed allowlist:
+# only public values that the generic-api-key rule mistakes for secrets. Single findings in test fixtures are
+# listed by fingerprint in .gitleaksignore instead, so the rest of those files is still scanned.
+title = "bookrunner"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "vendored code: OpenZeppelin / forge-std (ERC-7201 storage-slot constants), the exported marketing-site bundle"
+paths = [
+  '''^contracts/lib/''',
+  '''^apps/site/public/assets/framer/''',
+]
+
+[[allowlists]]
+description = "EVM addresses (token, pool and quote-token addresses in chain configs and deploy inputs) are public"
+regexTarget = "secret"
+regexes = [
+  '''^0x[0-9a-fA-F]{40}$''',
+]

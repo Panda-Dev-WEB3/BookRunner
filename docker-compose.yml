@@ -1,13 +1,14 @@
 name: bookrunner
 
 # Local infra. Ports are non-default to avoid clashing with other stacks on the host.
+# Images are pinned by digest (tag in the comment); bump one by `docker buildx imagetools inspect <image>:<tag>`.
 #   Postgres + Timescale  127.0.0.1:54400
 #   Redis                 127.0.0.1:63790
 #   Redis (live)          127.0.0.1:63791   (dev.ts --network testnet-live: the rehearsal stack's own Redis)
 #   Anvil (chain 31337)   127.0.0.1:8547   (devnet stand-in for Robinhood Chain 4663)
 services:
   postgres:
-    image: timescale/timescaledb:latest-pg17
+    image: timescale/timescaledb@sha256:b346edcdb51a1fd6020e3965e0bd1c9f3406fa6d5fbce1e28f4852587ef934e2 # latest-pg17 (PG 17.11, Timescale 2.30.2), as deploy/server
     environment:
       POSTGRES_USER: bookrunner
       POSTGRES_PASSWORD: bookrunner
@@ -23,7 +24,7 @@ services:
       retries: 20
 
   redis:
-    image: redis:7-alpine
+    image: redis@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499 # 7-alpine (Redis 7.4.11)
     ports:
       - "127.0.0.1:63790:6379"
     healthcheck:
@@ -33,7 +34,7 @@ services:
       retries: 20
 
   redis-live:
-    image: redis:7-alpine
+    image: redis@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499 # 7-alpine (Redis 7.4.11)
     ports:
       - "127.0.0.1:63791:6379"
     healthcheck:
@@ -43,7 +44,7 @@ services:
       retries: 20
 
   anvil:
-    image: ghcr.io/foundry-rs/foundry:latest
+    image: ghcr.io/foundry-rs/foundry@sha256:0c00cb0bda1ab1b91c9a6bf60f4c76c09c1a8870824b6d4718afbabacf6f9a17 # v1.8.1, as scripts/forge.sh
     entrypoint: ["anvil"]
     command:
       - --host=0.0.0.0

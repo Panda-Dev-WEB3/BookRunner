@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+pragma solidity ^0.8.24;
 
 /// @title IBookrunnerConfig — protocol registry of addresses, parameters and roles.
 /// @notice Admin is the 48h TimelockController. Every component reads siblings from here.

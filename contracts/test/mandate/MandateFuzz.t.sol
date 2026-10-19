@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {BRTypes} from "../../src/interfaces/BRTypes.sol";
 import {IBookrunnerDesk} from "../../src/interfaces/IBookrunnerDesk.sol";
@@ -242,7 +242,9 @@ contract MandateFuzzTest is MandateBase {
 
     function testFuzz_checkQuote_rule(uint16 spread, int16 skew, uint128 maxNet) public view {
         int256 s = int256(skew);
-        bool shouldPass = spread >= 8 && (s < 0 ? -s : s) <= 25 && maxNet <= MAX_INV;
+        int256 a = s < 0 ? -s : s;
+        // width, skew, audit M-3 (2 x |skew| <= spread: the quote straddles the oracle), inventory
+        bool shouldPass = spread >= 8 && a <= 4 && a * 2 <= int256(uint256(spread)) && maxNet <= MAX_INV;
         try mandate.checkQuote(key, spread, skew, maxNet) {
             assertTrue(shouldPass);
         } catch {

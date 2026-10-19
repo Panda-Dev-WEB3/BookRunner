@@ -316,6 +316,13 @@ export class ViemChain implements ChainPort {
     return (await this.pc.readContract({ address: this.dep.contracts.oracle, abi: attestedOracleAbi, functionName: "isSigner", args: [addr] })) as boolean;
   }
 
+  /** config.hasRole(RISK_ROLE, addr): who may sign a kill order (busAuth.ts). */
+  async isRiskSigner(addr: Address): Promise<boolean> {
+    this.riskRole ??= (await this.pc.readContract({ address: this.dep.contracts.config, abi: bookrunnerConfigAbi, functionName: "RISK_ROLE" })) as Hex;
+    return (await this.pc.readContract({ address: this.dep.contracts.config, abi: bookrunnerConfigAbi, functionName: "hasRole", args: [this.riskRole, addr] })) as boolean;
+  }
+  private riskRole: Hex | null = null;
+
   async ifAccountOwner(adapter: Address): Promise<Address | null> {
     try {
       return eoaOrNull(await this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "ifAccountOwner" }));

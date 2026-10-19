@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {EngineBase} from "./utils/EngineBase.sol";
 import {EngineMockConfig, EngineMockFactory} from "./utils/EngineMocks.sol";
@@ -391,9 +391,16 @@ contract PoolEngineTest is EngineBase {
         _setQuote(adA, mA, 25, 7, MAX_NET); // odd spread: half-bps precision kept
         assertEq(engine.quotePrice(mA, 1), 100e18 * (20_000 + 25 + 14) / 20_000);
         assertEq(engine.quotePrice(mA, -1), 100e18 * (20_000 - 25 + 14) / 20_000);
-        _setQuote(adA, mA, 20, -15, MAX_NET);
-        assertEq(engine.quotePrice(mA, 1), 99.95e18);
-        assertEq(engine.quotePrice(mA, -1), 99.75e18);
+        _setQuote(adA, mA, 30, -15, MAX_NET); // |skew| == spread / 2: the buy fills at the oracle
+        assertEq(engine.quotePrice(mA, 1), 100e18);
+        assertEq(engine.quotePrice(mA, -1), 99.7e18);
+        // audit M-3: a quote entirely on one side of the oracle (2 x |skew| > spread) is refused
+        vm.prank(adA);
+        vm.expectRevert(abi.encodeWithSelector(PoolEngine.InvalidQuote.selector, uint16(20), int16(-15)));
+        engine.setQuote(mA, 20, -15, MAX_NET);
+        vm.prank(adA);
+        vm.expectRevert(abi.encodeWithSelector(PoolEngine.InvalidQuote.selector, uint16(25), int16(13)));
+        engine.setQuote(mA, 25, 13, MAX_NET);
         vm.expectRevert(PoolEngine.ZeroSize.selector);
         engine.quotePrice(mA, 0);
     }
@@ -822,9 +829,11 @@ contract PoolEngineTest is EngineBase {
         vm.expectEmit(true, true, true, true, address(engine));
         emit Liquidation(mA, alice, keeper, 10e18, 80e18, 0, 91_500_500);
         vm.prank(keeper);
-        assertEq(engine.liquidate(mA, alice), 0);
+        // Task 7 lead "liquidation reward": margin gone, the keeper's half of the nominal fee ($800 x 50 bps / 2)
+        // comes from the IF after the bad debt
+        assertEq(engine.liquidate(mA, alice), 2e6);
         IPoolEngine.MarketState memory s = engine.state(mA);
-        assertEq(s.insuranceUsd, IF - 91_500_500);
+        assertEq(s.insuranceUsd, IF - 91_500_500 - 2e6);
         assertEq(s.poolCashUsd, POOL + 200_500_000); // pool made whole
         assertEq(engine.positionOf(mA, alice).marginUsd, 0);
         assertEq(engine.totalMarginUsd(mA), 0);

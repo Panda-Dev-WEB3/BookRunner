@@ -1,6 +1,6 @@
 // Ports between the risk logic and infrastructure. Real adapters live in src/adapters/*; tests
 // inject fakes that record calls.
-import type { BookState, DomainEvent, KillMsg, OraclePriceMsg, QuotingVenue, VenueOpsJob } from "@bookrunner/shared";
+import type { BookState, DomainEvent, KillMsg, LimitState, OraclePriceMsg, QuotingVenue, VenueOpsJob } from "@bookrunner/shared";
 import type { Address, Hex } from "viem";
 import type { FlattenOrder, Holding } from "./domain/flatten";
 import type { SignedVenueReport } from "../../ops-venue/src/report712";
@@ -146,6 +146,51 @@ export interface BusPort {
 
 export interface QueuePort {
   enqueueVenueOp(job: VenueOpsJob, jobId: string): Promise<void>;
+}
+
+/**
+ * Result of the agent-quote authentication (audit 2026-10 lead "Redis trust"): only "ok" quotes are accepted.
+ * forged = invalid signature, or a signer that was never a desk key; no_key = a registered desk key that is no longer
+ * active (expired / revoked); stale = older than QUOTE_SIGNED_MAX_AGE_MS or not newer than the last accepted quote;
+ * bad_ref = the oracle print it was priced on is missing, too old or not verifiable; unavailable = an RPC check failed.
+ */
+export type QuoteAuth = "ok" | "unsigned" | "forged" | "unavailable" | "no_key" | "stale" | "bad_ref";
+
+export interface QuoteAuthResult {
+  status: QuoteAuth;
+  /** "ok": the verified oracle print the quote was priced on (USD per share); the quote is judged against it */
+  refPx?: number;
+}
+
+export interface QuoteCheckContext {
+  nowMs: number;
+  /** ts of the last quote accepted for the book (0: none): a quote must be strictly newer */
+  lastAcceptedTs: number;
+  /** RISK_QUOTE_PRICE_MAX_AGE_MS: the print must be at most this much older than the quote */
+  priceMaxAgeMs: number;
+  /** the attested price risk read this tick (chain or verified signed print), for an unsigned AttestedOracle reference */
+  attested: { priceWad: bigint; publishedAt: number } | null;
+}
+
+/**
+ * Authenticated bus messages (packages/shared/src/busAuth.ts). Redis is not trusted: risk acts only on an agent quote
+ * signed by an active desk key of the book's mandate, and signs its kill orders with the RISK key.
+ */
+export interface RiskBusAuth {
+  /** Is the quote read from Redis a new, signed quote of an active desk key, priced on a verified print? */
+  quote(ref: BookRef, q: QuoteObservation, ctx: QuoteCheckContext): Promise<QuoteAuthResult>;
+  /** The RISK key's signature over the published state (busAuth.ts RiskState); the agent acts only on signed states. */
+  signState?(k: { bookId: number; state: LimitState; tsMs: number }): Promise<Hex>;
+  /** The KillMsg signed with the RISK key (EIP-712 KillOrder, nonce per book and episode). */
+  signKill(k: { bookId: number; reason: string; breaches: string[]; episodeId: string; issuedAt: number }): Promise<KillMsg>;
+  /** A forged message was refused (published for alerts bus_forged_message). */
+  forged?(kind: "quote" | "state", reason: string): void;
+  /** The RISK key's signature over the persisted state machine (busAuth.ts RiskMonitorState). */
+  signMonitor?(k: { bookId: number; monitor: unknown; tsMs: number }): Promise<Hex>;
+  /** Was this persisted state machine signed by THIS risk service's key (no RPC)? */
+  isOwnMonitor?(k: { bookId: number; monitor: unknown; tsMs: unknown; signature: unknown }): Promise<boolean>;
+  /** Is `msg` a KillOrder this risk key signed for (bookId, episodeId) (no RPC)? */
+  isOwnKillOrder?(bookId: number, episodeId: string, msg: unknown): Promise<boolean>;
 }
 
 /** Live venue clients (QuotingVenue) per book; null when none is available (engine books, no keys). */

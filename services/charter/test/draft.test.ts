@@ -18,7 +18,7 @@ const draft = (over: Record<string, unknown> = {}) => ({
   mmInventoryUsd: "75,000",
   mandate: {
     maxInventoryUsd: "50000",
-    maxSkewBps: 25,
+    maxSkewBps: 4,
     minQuoteWidthBps: 8,
     hedgeRatioMinBps: 5000,
     hedgeRatioMaxBps: 12000,

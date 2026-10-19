@@ -69,3 +69,13 @@ describe("stockValueUsd (registry fallback)", () => {
     expect(stockValueUsd(V.qtyRaw, V.uiMultiplierWad, perTokenWad, V.decimals)).toBe(V.doubleAppliedUsd6);
   });
 });
+
+describe("planFlatten: audit M-2 split window", () => {
+  test("a token in the split window is never sold (the on-chain RISK flatten defers until repriced)", () => {
+    const nvda = { ...holding(NVDA_TOKEN, 100, 190), splitWindow: true };
+    const tsla = holding(TSLA_TOKEN, 10, 400);
+    const p = planFlatten({ holdings: [nvda, tsla], netBookExposureUsd: usd(-50_000), mode: "all", slippageBps: 100 });
+    expect(p.orders.map((o) => o.token)).toEqual([TSLA_TOKEN]);
+    expect(p.skipped).toEqual([{ token: NVDA_TOKEN, reason: "split_window" }]);
+  });
+});

@@ -38,7 +38,7 @@ export async function wireMark(cfg: MarkConfig, log: Logger, deployment: Deploym
     log.warn({ err: err instanceof Error ? err.message.split("\n")[0] : String(err) }, "could not verify MARK_SIGNER role");
   }
 
-  const markChain = new MarkChainAdapter(pc, sender, deployment);
+  const markChain = new MarkChainAdapter(pc, sender, deployment, Date.now, cfg.MARK_SPLIT_LOG_LOOKBACK_BLOCKS);
   const feeds = feedRedis
     ? new RedisMarkFeeds(feedRedis, chainVerifier(pc, { config: deployment.contracts.config, oracle: deployment.contracts.oracle }, cfg.CHAIN_ID), log)
     : null;
@@ -72,6 +72,7 @@ export async function wireMark(cfg: MarkConfig, log: Logger, deployment: Deploym
     confirmations: cfg.MARK_CONFIRMATIONS,
     receiptsWaitMs: cfg.MARK_RECEIPTS_WAIT_SECONDS * 1000,
     maxVenueReportAgeSec: cfg.MARK_MAX_VENUE_REPORT_AGE_SECONDS,
+    ...(cfg.MARK_SPLIT_REFUSE_MAX_SECONDS > 0 ? { splitRefuseMaxSec: cfg.MARK_SPLIT_REFUSE_MAX_SECONDS } : {}),
     retireTokenDustUsd: cfg.MARK_RETIRE_TOKEN_DUST_USD,
     spool,
     chainId: cfg.CHAIN_ID,

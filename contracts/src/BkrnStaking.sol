@@ -1,9 +1,10 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
+import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 import {IBkrnStaking} from "./interfaces/IBkrnStaking.sol";
 import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 
@@ -29,6 +30,7 @@ import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 ///      the sum of all `earned` is `<= rewardReserve - queuedReward - unstreamedReward`.
 contract BkrnStaking is IBkrnStaking, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
+    using EnumerableSet for EnumerableSet.AddressSet;
 
     bytes32 private constant DEFAULT_ADMIN_ROLE = 0x00;
     uint256 private constant PRECISION = 1e18;
@@ -79,6 +81,8 @@ contract BkrnStaking is IBkrnStaking, ReentrancyGuardTransient {
 
     /// @inheritdoc IBkrnStaking
     mapping(address locker => bool) public isLocker;
+    /// @dev Current lockers, enumerable for the handover check (audit 2026-10 D; isLocker stays the hot-path read).
+    EnumerableSet.AddressSet internal _lockers;
 
     mapping(address account => Account) private _accounts;
     mapping(address account => mapping(bytes32 lockId => LockData)) private _locks;
@@ -214,7 +218,15 @@ contract BkrnStaking is IBkrnStaking, ReentrancyGuardTransient {
         }
         if (locker == address(0)) revert ZeroAddress();
         isLocker[locker] = allowed;
+        if (allowed) _lockers.add(locker);
+        else _lockers.remove(locker);
         emit LockerSet(locker, allowed, msg.sender);
+    }
+
+    /// @notice Every current locker (charter, committee, each book's MMMandate): script/VerifyHandover.s.sol requires
+    ///         exactly the expected set (audit 2026-10 D).
+    function lockers() external view returns (address[] memory) {
+        return _lockers.values();
     }
 
     /// @inheritdoc IBkrnStaking

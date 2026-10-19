@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
 
@@ -165,7 +165,7 @@ abstract contract GovBase is Test {
     function _mandate() internal pure returns (BRTypes.Mandate memory m) {
         m = BRTypes.Mandate({
             maxInventoryUsd: 50_000e6,
-            maxSkewBps: 25,
+            maxSkewBps: 4,
             minQuoteWidthBps: 8,
             maxHedgeLeverage: 100,
             hedgeRatioMinBps: 5000,

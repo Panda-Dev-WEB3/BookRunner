@@ -98,6 +98,7 @@ describe("validateCharterLocal mirrors MarketCharter.validate", () => {
       ["BAD_MANDATE", (c) => (c.mandate.killAtDrawdownBps = 0)],
       ["BAD_MANDATE", (c) => (c.mandate.killAtDrawdownBps = -5001)],
       ["BAD_MANDATE", (c) => (c.mandate.maxSkewBps = 0)],
+      ["BAD_MANDATE", (c) => (c.mandate.maxSkewBps = 5)], // audit M-3: above half the min width 8
       ["BAD_UNDERLYING", (c) => (c.underlying = zeroHash)],
       ["BAD_SYMBOL", (c) => (c.symbol = zeroHash)],
       ["BAD_FEES", (c) => ((c.venue = 1), (c.takerFeeBps = 101))],
@@ -109,6 +110,14 @@ describe("validateCharterLocal mirrors MarketCharter.validate", () => {
     }
   });
 
+  test("audit M-1: Junior notice below one mark interval is BAD_NOTICE once the interval is known", () => {
+    const c = structuredClone(sampleCharter());
+    c.juniorNoticeSeconds = 3599n;
+    expect(codes(validateCharterLocal(c, { markInterval: 3600 }))).toEqual(["BAD_NOTICE"]);
+    c.juniorNoticeSeconds = 3600n;
+    expect(validateCharterLocal(c, { markInterval: 3600 })).toEqual([]);
+  });
+
   test("boundaries are accepted", () => {
     const c = structuredClone(sampleCharter());
     c.subscriptionWindow = 60;
@@ -116,6 +125,7 @@ describe("validateCharterLocal mirrors MarketCharter.validate", () => {
     c.mandate.killAtDrawdownBps = -5000;
     c.seniorCapBps = 10_000;
     c.ifTargetUsd = 25_001_000_000n; // smallest Orderly IF strictly above the venue's 25,000
+    c.mandate.maxSkewBps = 4; // audit M-3: exactly half the min width 8
     expect(validateCharterLocal(c)).toEqual([]);
     const e = structuredClone(sampleCharter());
     e.venue = 1;

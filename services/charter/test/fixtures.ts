@@ -29,7 +29,7 @@ export function nvdaCharter(overrides: Partial<Charter> = {}): Charter {
     mmInventoryUsd: usd("75000"),
     mandate: {
       maxInventoryUsd: usd("50000"),
-      maxSkewBps: 25,
+      maxSkewBps: 4,
       minQuoteWidthBps: 8,
       maxHedgeLeverage: 100,
       hedgeRatioMinBps: 5000,

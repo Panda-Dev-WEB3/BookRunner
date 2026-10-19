@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+pragma solidity ^0.8.24;
 
 /// @title IUniswapV3PoolView — the read-only Uniswap v3 pool surface the protocol uses (TWAP + checks).
 /// @notice Signatures match `IUniswapV3PoolImmutables` / `IUniswapV3PoolState` / `IUniswapV3PoolDerivedState`.

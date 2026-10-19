@@ -34,6 +34,9 @@ describe("validateCharter (MarketCharter.validate mirror)", () => {
     ["kill drawdown < -5000", withMandate({ killAtDrawdownBps: -5001 }), "BAD_MANDATE"],
     ["skew zero", withMandate({ maxSkewBps: 0 }), "BAD_MANDATE"],
     ["skew negative", withMandate({ maxSkewBps: -5 }), "BAD_MANDATE"],
+    // audit M-3: max skew above half the min width (a quote could sit entirely on one side of the oracle)
+    ["skew > half the min width", withMandate({ maxSkewBps: 5, minQuoteWidthBps: 8 }), "BAD_MANDATE"],
+    ["pre-fix devnet terms 25 / 8", withMandate({ maxSkewBps: 25, minQuoteWidthBps: 8 }), "BAD_MANDATE"],
     ["token not canonical", nvdaCharter({ underlying: `0x${"0".repeat(24)}${"b".repeat(40)}` }), "BAD_UNDERLYING"],
     ["zero underlying", nvdaCharter({ underlying: zeroHash }), "BAD_UNDERLYING"],
     ["index not registered", nvdaCharter({ underlying: indexUnderlying("RHX9") }), "BAD_UNDERLYING"],
@@ -55,6 +58,17 @@ describe("validateCharter (MarketCharter.validate mirror)", () => {
     });
   }
 
+  test("audit M-1: Junior notice of at least one mark interval (when the interval is known)", () => {
+    const ctx = { ...devValidationContext, markInterval: 3600 };
+    expect(validateCharter(nvdaCharter({ juniorNoticeSeconds: 3600n }), ctx).ok).toBe(true);
+    const r = validateCharter(nvdaCharter({ juniorNoticeSeconds: 3599n }), ctx);
+    expect(r.reason).toBe("BAD_NOTICE");
+    expect(r.reasons).toEqual(["BAD_NOTICE"]);
+    expect(validateCharter(nvdaCharter({ juniorNoticeSeconds: 0n }), ctx).reason).toBe("BAD_NOTICE");
+    // interval unknown (chain unreachable): not checked locally, the on-chain validate() still is
+    expect(validateCharter(nvdaCharter({ juniorNoticeSeconds: 0n }), devValidationContext).ok).toBe(true);
+  });
+
   test("boundaries accepted exactly at the limits", () => {
     expect(v(nvdaCharter({ ifTargetUsd: usd("25000") })).ok).toBe(true);
     expect(v(nvdaCharter({ subscriptionWindow: 60 })).ok).toBe(true);
@@ -66,7 +80,8 @@ describe("validateCharter (MarketCharter.validate mirror)", () => {
     expect(v(withMandate({ killAtDrawdownBps: -5000 })).ok).toBe(true);
     expect(v(withMandate({ killAtDrawdownBps: -1 })).ok).toBe(true);
     expect(v(withMandate({ hedgeRatioMinBps: 12_000 })).ok).toBe(true); // min == max
-    expect(v(withMandate({ maxSkewBps: 1, minQuoteWidthBps: 1 })).ok).toBe(true);
+    expect(v(withMandate({ maxSkewBps: 1, minQuoteWidthBps: 2 })).ok).toBe(true);
+    expect(v(withMandate({ maxSkewBps: 4, minQuoteWidthBps: 9 })).ok).toBe(true); // audit M-3: floor(9 / 2)
     expect(v(nvdaCharter({ venue: VENUE.POOL_ENGINE, takerFeeBps: 100 })).ok).toBe(true);
     // the taker-fee cap applies to the in-house venue only
     expect(v(nvdaCharter({ venue: VENUE.ORDERLY, takerFeeBps: 500 })).ok).toBe(true);

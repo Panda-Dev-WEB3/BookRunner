@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
@@ -50,6 +50,11 @@ contract GovMockConfig is IBookrunnerConfig {
     uint256 public committeeBondBkrn;
     uint32 public markInterval = 300;
     uint32 public maxMarkAge = 3600;
+
+    function setMarkInterval(uint32 v) external {
+        markInterval = v;
+    }
+
     uint32 public maxPriceAge = 300;
     uint32 public committeeWindow;
     mapping(uint8 => uint256) public venueMinIfUsd;

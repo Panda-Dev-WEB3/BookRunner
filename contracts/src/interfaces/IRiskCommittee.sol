@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+pragma solidity ^0.8.24;
 
 /// @title IRiskCommittee — model-jury verdict + three bonded human members.
 /// @notice Approve: jury verdict posted AND 2-of-3 approve votes (3-of-3 if the jury recommended reject).

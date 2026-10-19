@@ -13,10 +13,13 @@
 //            so the earlier columns keep their RNG stream)
 //   wallet: [commit, isSponsor(0|1), totalCommitted, sponsorCommitted, totalAllocated, shares, refund]
 //            (juniorWindowAllocation: Junior window settlement with sponsor priority)
+//   credit: [senior, junior, juniorSupply, seniorImpairment, backstopDebt, seniorCredit, juniorCredit,
+//            seniorRestored, backstopRepaid, seniorImpairment', backstopDebt'] (applyDistribution, audit L-1;
+//            generated last so the sections above keep their RNG stream)
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { WAD, minBig } from "../packages/shared/src/units";
-import { allocateWindow, applyMarkPnl, juniorWindowAllocation, splitDistribution } from "../packages/shared/src/waterfall";
+import { allocateWindow, applyDistribution, applyMarkPnl, juniorWindowAllocation, splitDistribution } from "../packages/shared/src/waterfall";
 
 let seed = 0x5eed_b00cn;
 function rnd(max: bigint): bigint {
@@ -38,6 +41,7 @@ const window: string[][] = [];
 const split: string[][] = [];
 const mark: string[][] = [];
 const wallet: string[][] = [];
+const credit: string[][] = [];
 
 for (let i = 0; i < N; i++) {
   const ifTargetUsd = amt();
@@ -91,7 +95,19 @@ for (let i = 0; i < N; i++) {
   wallet.push([commit, isSponsor ? 1n : 0n, totalCommitted, sponsorCommitted, totalAllocated, w.shares, w.refund].map(String));
 }
 
+// Fee-flow credit (Book.creditDistribution, audit L-1): residual order Senior impairment -> backstop debt ->
+// Junior. Covers no impairment / no debt, residual below / between / above both, and no Junior supply.
+for (let i = 0; i < N; i++) {
+  const senior = amt();
+  const junior = rnd(4n) === 0n ? 0n : amt();
+  const juniorSupply = pick([0n, 1n, 10n ** 9n, 10n ** 9n]);
+  const seniorImpairment = rnd(2n) === 0n ? 0n : pick([amt(), junior / 2n, junior, junior + 1n]);
+  const backstopDebt = rnd(2n) === 0n ? 0n : pick([amt(), junior, 1n]);
+  const c = applyDistribution({ senior, junior, juniorSupply, seniorImpairment, backstopDebt });
+  credit.push([senior, junior, juniorSupply, seniorImpairment, backstopDebt, c.seniorCredit, c.juniorCredit, c.seniorRestored, c.backstopRepaid, c.seniorImpairment, c.backstopDebt].map(String));
+}
+
 const out = resolve(import.meta.dir, "../contracts/test/vectors");
 mkdirSync(out, { recursive: true });
-writeFileSync(resolve(out, "waterfall.json"), `${JSON.stringify({ count: N, window, split, mark, wallet }, null, 1)}\n`);
-console.log(`wrote ${N} window / split / mark / wallet vectors to contracts/test/vectors/waterfall.json`);
+writeFileSync(resolve(out, "waterfall.json"), `${JSON.stringify({ count: N, window, split, mark, wallet, credit }, null, 1)}\n`);
+console.log(`wrote ${N} window / split / mark / wallet / credit vectors to contracts/test/vectors/waterfall.json`);

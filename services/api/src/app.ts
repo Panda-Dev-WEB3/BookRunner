@@ -24,6 +24,36 @@ export interface AppOptions {
 export const MAX_TRPC_BATCH = 10;
 
 /**
+ * Batch weight (audit M-4): receipts.* calls (Merkle proofs / roots over an hour of leaves) are heavy, so one
+ * counts as a full batch: a request may carry a single receipts.* call and nothing else. The web client
+ * sends them unbatched (apps/web httpLink split), and nginx rate-limits them per IP in their own zone.
+ * Every other procedure weighs 1 (the batch cap above).
+ */
+export const TRPC_HEAVY_PREFIXES = ["receipts."] as const;
+export const TRPC_HEAVY_WEIGHT = MAX_TRPC_BATCH;
+
+export function trpcBatchWeight(paths: string[]): number {
+  return paths.reduce((w, p) => w + (TRPC_HEAVY_PREFIXES.some((h) => p.startsWith(h)) ? TRPC_HEAVY_WEIGHT : 1), 0);
+}
+
+/**
+ * Path confusion (audit L-3). nginx exposes only /health, /status.json and /trpc/ of this API; a request
+ * like `/trpc/..\v1\books` used to reach the REST mirror, /v1/webhooks and /mcp because Bun resolves
+ * backslashes and dot-segments before the app sees the URL. nginx now forwards a normalized path and
+ * stamps each proxied location in ROUTE_HEADER; the API refuses a request whose path is outside the
+ * stamped location (prefix when it ends with "/", else exact), and any path with encoded slashes,
+ * backslashes or dots or a dot-segment, whoever sends it.
+ */
+export const ROUTE_HEADER = "x-bookrunner-route";
+const SUSPECT_PATH = /\\|%(?:2f|5c|2e)|(?:^|\/)\.\.?(?:\/|$)/i;
+
+export function pathAllowed(pathname: string, route: string | undefined): boolean {
+  if (SUSPECT_PATH.test(pathname)) return false;
+  if (route === undefined) return true;
+  return route.endsWith("/") ? pathname.startsWith(route) && pathname.length > route.length : pathname === route;
+}
+
+/**
  * Procedures a client may find missing on an older API (apps/web useOptional): /health lists which of
  * them this build serves as `capabilities`, so the web never probes one that is absent. The full
  * procedure list (and uptime) is only in `/health?verbose` with the admin bearer token.
@@ -75,6 +105,13 @@ export function createApp(deps: ApiDeps, opts: AppOptions) {
   const started = deps.now();
   const procedures = Object.keys((appRouter as unknown as { _def: { procedures: Record<string, unknown> } })._def.procedures).sort();
   const capabilities = OPTIONAL_PROCEDURES.filter((p) => procedures.includes(p));
+
+  app.use("*", async (c, next) => {
+    // the raw path as Bun parsed it (c.req.path is the routing path)
+    const pathname = new URL(c.req.url).pathname;
+    if (!pathAllowed(pathname, c.req.header(ROUTE_HEADER))) return c.json({ error: { code: "BAD_REQUEST", message: "invalid request path" } }, 400);
+    await next();
+  });
 
   app.use(
     "*",
@@ -129,6 +166,24 @@ export function createApp(deps: ApiDeps, opts: AppOptions) {
     }
     c.header("Cache-Control", STATUS_CACHE_CONTROL);
     return c.json(statusCache.body);
+  });
+
+  // weighted batch cap (receipts.* fill a batch): checked before tRPC parses inputs or runs anything
+  app.use("/trpc/*", async (c, next) => {
+    const raw = new URL(c.req.url).pathname.slice("/trpc/".length);
+    let paths: string[];
+    try {
+      paths = decodeURIComponent(raw).split(",");
+    } catch {
+      return c.json({ error: { code: "BAD_REQUEST", message: "invalid procedure path" } }, 400);
+    }
+    if (paths.length > 1 && trpcBatchWeight(paths) > MAX_TRPC_BATCH) {
+      return c.json(
+        { error: { json: { message: `Batch too heavy: receipts.* calls must be sent alone, others at most ${MAX_TRPC_BATCH} per batch`, code: -32600, data: { code: "BAD_REQUEST", httpStatus: 400 } } } },
+        400,
+      );
+    }
+    await next();
   });
 
   app.use(

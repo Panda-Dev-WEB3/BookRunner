@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
@@ -361,7 +361,8 @@ contract BookTest is BookFixture {
             flowNonce: 2,
             inventoryRoot: 0,
             pnlJsonHash: 0,
-            receiptsRoot: 0
+            receiptsRoot: 0,
+            held: false
         });
         uint256 otherId = registry.commit(other, "");
         vm.expectRevert(abi.encodeWithSelector(Book.MarkForOtherBook.selector, otherId, BOOK_ID + 1));

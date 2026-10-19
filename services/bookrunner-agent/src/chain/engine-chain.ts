@@ -69,7 +69,7 @@ export class ViemEngineChain implements EngineChain {
   }
 
   async tradesSince(sinceMs: number): Promise<EngineTrade[]> {
-    const latest = await this.pub.getBlockNumber();
+    const latest = await this.pub.getBlockNumber({ cacheTime: 0 }); // a cached head can trail a just-mined trade
     if (this.cursor === null) {
       const lb = latest - BigInt(Math.max(0, this.cfg.lookbackBlocks));
       const start = BigInt(this.cfg.startBlock);

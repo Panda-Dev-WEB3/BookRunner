@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
@@ -45,6 +45,10 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
     uint8 internal constant J = BRTypes.JUNIOR;
     /// @notice Longest top-up round the sponsor may open.
     uint256 public constant MAX_TOPUP_WINDOW = 30 days;
+    /// @notice Audit 2026-10 lead "unconfirmed deposits": once the subscription window has been over this long
+    ///         and the book is still in Subscription (closeWindow keeps reverting, e.g. the venue deposit), anyone
+    ///         may cancel it ({cancelStuckWindow}); every commitment is then refundable 1:1.
+    uint256 public constant CLOSE_WINDOW_TIMEOUT = BookLogic.CLOSE_WINDOW_TIMEOUT;
 
     bytes32 public constant KILL_DRAWDOWN = "DRAWDOWN"; // == BookLogic.KILL_DRAWDOWN
     bytes32 public constant KILL_RETIRE = "RETIRE";
@@ -90,6 +94,9 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
         uint256 backstopDebt;
         /// @dev repayment owed to the backstop, netted from NAV, paid from vault idle once claims are funded
         uint256 backstopPayable;
+        /// @dev periodEnd of the first held mark of the current run of held marks (0 = last mark not held).
+        ///      Held marks defer settlement until periodEnd >= heldSince + BookLogic.MAX_HELD_DEFERRAL (M-1).
+        uint64 heldSince;
     }
 
     // keccak256(abi.encode(uint256(keccak256("bookrunner.storage.Book")) - 1)) & ~bytes32(uint256(0xff))
@@ -119,6 +126,7 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
     error TopUpActive();
     error BadTopUp();
     error NewBooksPaused();
+    error WindowNotStuck(uint64 cancellableAt);
     /// @dev OZ SafeCast's error (same signature/selector), raised by Waterfall.applyMarkPnl inside the
     ///      linked BookLogic library and bubbled through Book. Declared here so Book's ABI still lists it
     ///      (an external library's errors are not part of the linking contract's ABI).
@@ -138,6 +146,17 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
         uint256[2] owed,
         uint256[2] topUp
     );
+    /// @notice A mark valued at a held oracle price was applied (audit M-1): its P&L is booked; `settled`
+    ///         false = redemption buckets and a due top-up round were left for the first non-held mark;
+    ///         true = the hold run (since `heldSince`) reached BookLogic.MAX_HELD_DEFERRAL (30 days) and no
+    ///         governance settle price is pending or in force for the book's underlying (AttestedOracle.settlePrice;
+    ///         ignored past BookLogic.MAX_SETTLE_PRICE_DEFERRAL, 60 days of hold), so they settled at the held
+    ///         valuation.
+    event MarkHeld(uint256 indexed bookId, uint256 indexed markId, uint64 heldSince, bool settled);
+    /// @notice Audit 2026-10 L-1: part of a fee distribution's residual restored Senior impairment
+    ///         (`seniorRestored`, credited to Senior) and repaid backstop debt (`backstopRepaid`, owed to the
+    ///         backstop and paid from vault idle by fundClaims) before anything reached Junior.
+    event DistributionRepaid(uint256 indexed bookId, uint256 seniorRestored, uint256 backstopRepaid);
     event TopUpSettled(uint256 indexed bookId, uint256 seniorAccepted, uint256 juniorAccepted);
     event TopUpCancelled(uint256 indexed bookId);
     event BackstopCoverFailed(uint256 indexed bookId, uint256 shortfall);
@@ -277,6 +296,13 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
         return _s().lastMark;
     }
 
+    /// @notice periodEnd of the first mark of the current run of held marks (0 = the last applied mark
+    ///         was not held). While it is set and younger than BookLogic.MAX_HELD_DEFERRAL, held marks
+    ///         settle no redemption bucket and no top-up round (audit M-1).
+    function heldSince() external view returns (uint64) {
+        return _s().heldSince;
+    }
+
     /// @notice Vault cash owed out of the book and netted from its NAV: settled redemption assets owed to
     ///         tranche escrows but not yet funded, plus the backstop repayment not yet paid (the vault
     ///         reserves all of it from deployment).
@@ -340,30 +366,33 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
         BookLogic.closeWindow(_s());
     }
 
+    /// @notice Anyone, once the book has stayed in Subscription for CLOSE_WINDOW_TIMEOUT past `subscriptionEnds`
+    ///         (closeWindow kept reverting, e.g. its venue deposit): Subscription -> Cancelled, so every
+    ///         commitment is refundable 1:1 (Tranche.claimCancelledRefund). Emits BookCancelled("CLOSE_TIMEOUT").
+    function cancelStuckWindow() external nonReentrant {
+        BookLogic.cancelStuckWindow(_s());
+    }
+
     /// @notice Anyone. Applies a committed mark: must be for this book, not applied, the book's latest
     ///         committed mark in the registry (a superseded older one reverts MarkOutOfOrder), newer than
     ///         the last applied mark and computed against the current flowNonce. Runs P&L through the
     ///         waterfall (Junior -> Senior -> backstop, backstop debt repaid from gains), the drawdown kill
     ///         check, settles due redemption buckets and an ended top-up round at the post-P&L share prices
-    ///         and funds claims (then a backstop repayment owed) from vault idle.
+    ///         and funds claims (then a backstop repayment owed) from vault idle. A `held` mark (valued at a
+    ///         held oracle price) applies the P&L only: buckets and the round settle at the first non-held
+    ///         mark, or once the hold run is BookLogic.MAX_HELD_DEFERRAL old (audit M-1; emits MarkHeld).
     function applyMark(uint256 markId) external nonReentrant {
         BookLogic.applyMark(_s(), markId);
     }
 
-    /// @notice Only the book's RevenueRouter, after transferring senior + junior USDC to the vault.
+    /// @notice Only the book's RevenueRouter, after transferring senior + junior USDC to the vault. Senior's
+    ///         hurdle share is credited to Senior; the residual (the Junior amount, or everything when Junior
+    ///         has no supply) first restores Senior impairment, then repays backstop debt (owed to the backstop,
+    ///         netted from NAV and paid by fundClaims), and only the rest reaches Junior (audit 2026-10 L-1,
+    ///         `Waterfall.applyDistribution`). Emits DistributionCredited with the amounts credited to each
+    ///         tranche, and DistributionRepaid when part of the residual restored Senior or repaid the backstop.
     function creditDistribution(uint256 seniorAmount, uint256 juniorAmount) external {
-        BookStorage storage $ = _s();
-        if (msg.sender != $.components.router) revert NotRouter();
-        BRTypes.BookState st = $.state;
-        if (st == BRTypes.BookState.Subscription || st == BRTypes.BookState.Cancelled) revert BadState(st);
-        $.nav[S] += seniorAmount;
-        $.nav[J] += juniorAmount;
-        emit DistributionCredited($.bookId, seniorAmount, juniorAmount);
-        if (st == BRTypes.BookState.Retired) {
-            // late fee flow raises the immediate-settlement price for the remaining holders
-            if (seniorAmount > 0) BookLogic.setRetiredPrice($, S, true);
-            if (juniorAmount > 0) BookLogic.setRetiredPrice($, J, true);
-        }
+        BookLogic.creditDistribution(_s(), seniorAmount, juniorAmount);
     }
 
     /// @notice Only the book's vault: every vault <-> venue / desk capital movement bumps the nonce, so a

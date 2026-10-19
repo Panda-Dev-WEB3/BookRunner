@@ -49,3 +49,31 @@ describe("syncCommittee", () => {
     expect(again.finalized).toEqual([]);
   });
 });
+
+describe("deadline notices follow the on-chain decision deadline (audit 2026-10 D)", () => {
+  test("a window changed after filing does not move a charter's deadline", async () => {
+    const w = world(new Set());
+    // the config window was shortened to 24h after charters 5 / 6 were filed with 48h: on-chain they still
+    // close at filedAt + 48h (MarketCharter.decisionDeadline), so no window_elapsed notice at +30h
+    w.chain.committee = async () => ({ members: [M(0xa8), M(0xa9), M(0xaa)], bonded: [true, true, true], committeeBondBkrn: 250_000n, committeeWindowSec: 86_400 });
+    w.chain.decisionDeadline = async (id) => {
+      const filed = id === 4 ? "2026-10-01T00:00:00Z" : "2026-10-02T00:00:00Z";
+      return Math.floor(new Date(filed).getTime() / 1000) + 172_800;
+    };
+    const now = new Date("2026-10-03T06:00:00Z");
+    await syncCommittee({ chain: w.chain, store: w.store, bus: w.bus, warnSec: 6 * 3600, now, logger });
+    expect(w.emitted).toContain("committee.window_elapsed:4"); // 4 closed at 10-03 00:00
+    expect(w.emitted.filter((k) => k.endsWith(":5") || k.endsWith(":6"))).toEqual([]); // 5/6 close at 10-04 00:00
+  });
+
+  test("falls back to filedAt + the current window when the deadline cannot be read", async () => {
+    const w = world(new Set());
+    w.chain.decisionDeadline = async () => {
+      throw new Error("old MarketCharter without decisionDeadline");
+    };
+    const now = new Date("2026-10-03T23:00:00Z");
+    await syncCommittee({ chain: w.chain, store: w.store, bus: w.bus, warnSec: 6 * 3600, now, logger });
+    expect(w.emitted).toContain("committee.window_elapsed:4");
+    expect(w.emitted).toContain("committee.deadline_approaching:5");
+  });
+});

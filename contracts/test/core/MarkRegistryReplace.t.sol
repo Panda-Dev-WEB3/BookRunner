@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {CoreFixture} from "./utils/CoreFixture.sol";
 import {MarkRegistry} from "../../src/MarkRegistry.sol";
@@ -50,7 +50,8 @@ contract MarkRegistryReplaceTest is CoreFixture {
             flowNonce: nonce,
             inventoryRoot: keccak256("inv"),
             pnlJsonHash: keccak256("pnl"),
-            receiptsRoot: keccak256("receipts")
+            receiptsRoot: keccak256("receipts"),
+            held: false
         });
     }
 

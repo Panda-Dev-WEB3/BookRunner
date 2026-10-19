@@ -49,10 +49,12 @@ import { hedgeAllowTree } from "../packages/shared/src/merkle";
 import { SESSIONS_24X5, encodeSessions } from "../packages/shared/src/sessions";
 import { type BookComponents, type Deployment, liveVenueDeployment } from "../packages/shared/src/types";
 import { usd } from "../packages/shared/src/units";
+import { ensureDeskKeys } from "./desk-keys";
 import { type BookProgress, type BookSize, type Commit, type Participant, commitPlan, launchBooks, launchSizes, settlementNeeds, transferPlan } from "./launch-plan";
 
 const RPC = process.env.RPC_URL ?? "http://127.0.0.1:8547";
 const WINDOW = Number(process.env.LAUNCH_WINDOW_SECONDS ?? 120);
+// at least one on-chain mark interval: MarketCharter.validate rejects a shorter notice (audit M-1)
 const JUNIOR_NOTICE = BigInt(process.env.LAUNCH_JUNIOR_NOTICE_SECONDS ?? 900);
 const JURY_WAIT_MS = Number(process.env.LAUNCH_JURY_WAIT_SECONDS ?? 90) * 1000;
 const CLOSE_GRACE_MS = Number(process.env.LAUNCH_CLOSE_GRACE_SECONDS ?? 30) * 1000;
@@ -113,7 +115,7 @@ interface LaunchSpec {
   takerFeeBps: number;
 }
 
-function buildCharter(s: LaunchSpec) {
+function buildCharter(s: LaunchSpec, markInterval: bigint) {
   const allow = hedgeAllowTree(s.hedgeTokens.map((t) => ({ asset: tokenUnderlying(t), venue: HEDGE_VENUES.UNIV3 })));
   return {
     underlying: s.underlying,
@@ -136,7 +138,7 @@ function buildCharter(s: LaunchSpec) {
     seniorHurdleBps: 6000,
     seniorCapBps: 7000,
     subscriptionWindow: WINDOW,
-    juniorNoticeSeconds: JUNIOR_NOTICE,
+    juniorNoticeSeconds: JUNIOR_NOTICE > markInterval ? JUNIOR_NOTICE : markInterval,
     sponsor: acct.sponsor.address,
     perWalletCapUsd: usd(250_000),
     symbol: strToBytes32(s.symbol),
@@ -333,7 +335,9 @@ async function launchBook(d: Deployment, s: LaunchSpec) {
     id = prior.id;
     log(`${s.name}: resuming charter ${id} (${prior.status === 2 ? "approved" : "filed"})`);
   } else {
-    const charter = buildCharter(s);
+    // audit M-1: the Junior notice is at least one on-chain mark interval
+    const markInterval = await read<number>(c.config, [{ type: "function", name: "markInterval", inputs: [], outputs: [{ type: "uint32" }], stateMutability: "view" }], "markInterval");
+    const charter = buildCharter(s, BigInt(markInterval));
     const fee = await configUint(c, "charterFeeUsd");
     await send(acct.sponsor, c.usdc, mockERC20Abi as Abi, "approve", [c.charter, fee]);
     const filed = await send(acct.sponsor, c.charter, marketCharterAbi as Abi, "file", [charter]);
@@ -398,7 +402,8 @@ async function closeWindows(books: Array<{ name: string; components: BookCompone
 async function main() {
   const d = loadDeployment();
   if (d.books.length > 0 && d.launch?.complete !== false) {
-    log(`already launched (${d.books.map((b) => b.name).join(", ")}) — nothing to do`);
+    log(`already launched (${d.books.map((b) => b.name).join(", ")}) — registering missing desk keys only`);
+    await ensureDeskKeys({ send: true, log: (m) => log(`desk keys: ${m}`) }).catch((err) => log(`desk keys: FAILED (${err instanceof Error ? err.message : String(err)}); run bun scripts/desk-keys.ts --send`));
     return;
   }
   // resume: books a previous run already chartered (launch.launched) are kept; a book it stopped in the middle of is
@@ -419,19 +424,20 @@ async function main() {
     const z = sizes.find((x) => x.name === s.name);
     return z ? { ...s, ifUsd: usd(z.ifUsd), mmUsd: usd(z.mmUsd), maxInventoryUsd: usd(z.maxInventoryUsd) } : null;
   };
+  // audit M-3: maxSkewBps <= minQuoteWidthBps / 2 (MarketCharter.validate)
   const specs: LaunchSpec[] = [
     sized({
       name: "NVDA", symbol: "PERP_NVDA_USDC", venue: 0, underlying: tokenUnderlying(t("NVDA")), hedgeTokens: [t("NVDA")],
-      maxSkewBps: 25, minQuoteWidthBps: 8, hedgeRatioMinBps: 5000, hedgeRatioMaxBps: 12000, deskKey: devAccount("deskKeyNvda"), takerFeeBps: 0,
+      maxSkewBps: 4, minQuoteWidthBps: 8, hedgeRatioMinBps: 5000, hedgeRatioMaxBps: 12000, deskKey: devAccount("deskKeyNvda"), takerFeeBps: 0,
     }),
     sized({
       name: "TSLA", symbol: "PERP_TSLA_USDC", venue: 0, underlying: tokenUnderlying(t("TSLA")), hedgeTokens: [t("TSLA")],
-      maxSkewBps: 30, minQuoteWidthBps: 12, hedgeRatioMinBps: 5000, hedgeRatioMaxBps: 12000, deskKey: devAccount("deskKeyTsla"), takerFeeBps: 0,
+      maxSkewBps: 6, minQuoteWidthBps: 12, hedgeRatioMinBps: 5000, hedgeRatioMaxBps: 12000, deskKey: devAccount("deskKeyTsla"), takerFeeBps: 0,
     }),
     sized({
       name: "RHX5", symbol: "RHX5-PERP", venue: 1, underlying: indexUnderlying("RHX5"),
       hedgeTokens: ["NVDA", "TSLA", "AAPL", "MSFT", "AMZN"].map(t),
-      maxSkewBps: 25, minQuoteWidthBps: 10, hedgeRatioMinBps: 4000, hedgeRatioMaxBps: 12000, deskKey: devAccount("deskKeyIndex"), takerFeeBps: 6,
+      maxSkewBps: 5, minQuoteWidthBps: 10, hedgeRatioMinBps: 4000, hedgeRatioMaxBps: 12000, deskKey: devAccount("deskKeyIndex"), takerFeeBps: 6,
     }),
   ].filter((s): s is LaunchSpec => s !== null);
 
@@ -460,6 +466,8 @@ async function main() {
   await closeWindows(launched);
   saveProgress(true);
   log(`launched ${launched.length} books -> ${path}`);
+  // every book needs an active desk key to quote new risk (Task 7b): books chartered outside this launch included
+  await ensureDeskKeys({ send: true, log: (m) => log(`desk keys: ${m}`) }).catch((err) => log(`desk keys: FAILED (${err instanceof Error ? err.message : String(err)}); run bun scripts/desk-keys.ts --send`));
 }
 
 main().catch((err) => {

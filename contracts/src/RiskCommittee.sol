@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 
@@ -21,6 +21,8 @@ import {CharterRules} from "./MarketCharter.sol";
 ///         member slashed below (or not re-bonded after a raise of) `committeeBondBkrn`, stop counting
 ///         immediately and count again only once that seated member re-bonds.
 ///         Action deadlines are fixed at proposal (`expiresAt`), independent of later window changes.
+///         Charter state (verdict, ballots, finalized) is keyed by the MarketCharter address and its id, and the
+///         decision deadline is the one MarketCharter fixed at filing (audit 2026-10 D).
 ///         Live-book actions (2-of-3): REMANDATE, RETIRE, SLASH_SPONSOR, REVOKE_KEY.
 ///         Seat changes and slashing only via `config.timelock()`. Non-upgradeable.
 contract RiskCommittee is IRiskCommittee, ReentrancyGuardTransient {
@@ -64,6 +66,9 @@ contract RiskCommittee is IRiskCommittee, ReentrancyGuardTransient {
         bool executed;
         /// @dev proposedAt + committeeWindow at proposal time; later window changes do not move it.
         uint64 expiresAt;
+        /// @dev config.charter() at proposal (appended, audit 2026-10 D): approval reverts CharterChanged once the
+        ///      timelock repoints it, so a pending action never executes against another charter's book id.
+        address charter;
     }
 
     /// @notice Protocol registry (addresses, params, roles).
@@ -77,9 +82,12 @@ contract RiskCommittee is IRiskCommittee, ReentrancyGuardTransient {
     /// @dev Staking contract holding the address's bond lock (pinned at bond time, see bondStakingOf).
     mapping(address member => address) private _bondStaking;
 
-    mapping(uint256 charterId => Verdict) private _verdicts;
-    mapping(uint256 charterId => mapping(address member => Ballot)) private _ballots;
-    mapping(uint256 charterId => bool) private _finalized;
+    /// @dev Charter decisions are keyed by the MarketCharter contract (config.charter() at the call) and its id
+    ///      (audit 2026-10 D): after the timelock repoints config.charter(), the new contract's ids start with no
+    ///      verdict, no ballot and not finalized.
+    mapping(address charter => mapping(uint256 charterId => Verdict)) private _verdicts;
+    mapping(address charter => mapping(uint256 charterId => mapping(address member => Ballot))) private _ballots;
+    mapping(address charter => mapping(uint256 charterId => bool)) private _finalized;
 
     uint256 private _actionCount;
     mapping(uint256 actionId => Action) private _actions;
@@ -106,6 +114,9 @@ contract RiskCommittee is IRiskCommittee, ReentrancyGuardTransient {
     error UnknownAction(uint256 actionId);
     error ActionAlreadyExecuted(uint256 actionId);
     error ActionExpired(uint256 actionId);
+    /// @notice config.charter() was repointed since the action was proposed: its book id refers to the previous
+    ///         MarketCharter (audit 2026-10 D); propose it again against the current one.
+    error CharterChanged(uint256 actionId);
     error AlreadyApproved(uint256 actionId, address member);
     error BadSlashAmount(uint256 amount, uint256 bonded);
 
@@ -208,9 +219,9 @@ contract RiskCommittee is IRiskCommittee, ReentrancyGuardTransient {
         IBookrunnerConfig cfg = config;
         if (!cfg.hasRole(cfg.JURY_ROLE(), msg.sender)) revert NotJury();
         if (cid == bytes32(0)) revert BadCid();
-        Verdict storage v = _verdicts[charterId];
+        Verdict storage v = _verdicts[_charter()][charterId];
         if (v.posted) revert JuryAlreadyPosted(charterId);
-        if (_finalized[charterId] || !_isOpen(charterId)) revert CharterNotOpen(charterId);
+        if (_finalized[_charter()][charterId] || !_isOpen(charterId)) revert CharterNotOpen(charterId);
 
         v.cid = cid;
         v.recommendApprove = recommendApprove;
@@ -225,10 +236,10 @@ contract RiskCommittee is IRiskCommittee, ReentrancyGuardTransient {
     function vote(uint256 charterId, bool approve) external nonReentrant {
         address m = msg.sender;
         if (!isBonded(m)) revert NotBondedMember();
-        if (_ballots[charterId][m] != Ballot.None) revert AlreadyVoted(charterId, m);
-        if (_finalized[charterId] || !_isOpen(charterId)) revert CharterNotOpen(charterId);
+        if (_ballots[_charter()][charterId][m] != Ballot.None) revert AlreadyVoted(charterId, m);
+        if (_finalized[_charter()][charterId] || !_isOpen(charterId)) revert CharterNotOpen(charterId);
 
-        _ballots[charterId][m] = approve ? Ballot.Approve : Ballot.Reject;
+        _ballots[_charter()][charterId][m] = approve ? Ballot.Approve : Ballot.Reject;
         emit Voted(charterId, m, approve);
         _finalizeIfReady(charterId);
     }
@@ -237,7 +248,7 @@ contract RiskCommittee is IRiskCommittee, ReentrancyGuardTransient {
     /// @dev Anyone. Returns false (no revert) when the charter is not open, already finalized, below
     ///      threshold, or the approval threshold is met while newBooksPaused.
     function tryFinalize(uint256 charterId) external nonReentrant returns (bool decided) {
-        if (_finalized[charterId] || !_isOpen(charterId)) return false;
+        if (_finalized[_charter()][charterId] || !_isOpen(charterId)) return false;
         return _finalizeIfReady(charterId);
     }
 
@@ -247,7 +258,7 @@ contract RiskCommittee is IRiskCommittee, ReentrancyGuardTransient {
         view
         returns (bytes32 cid, bool recommendApprove, bool posted)
     {
-        Verdict storage v = _verdicts[charterId];
+        Verdict storage v = _verdicts[_charter()][charterId];
         return (v.cid, v.recommendApprove, v.posted);
     }
 
@@ -255,9 +266,10 @@ contract RiskCommittee is IRiskCommittee, ReentrancyGuardTransient {
     /// @dev Counts only ballots of currently seated AND bonded members (see isBonded).
     function votesOf(uint256 charterId) public view returns (uint8 approvals, uint8 rejections) {
         address[3] memory voters = _bondedSeats();
+        mapping(address member => Ballot) storage ballots = _ballots[_charter()][charterId];
         for (uint256 i; i < SEATS; ++i) {
             if (voters[i] == address(0)) continue;
-            Ballot b = _ballots[charterId][voters[i]];
+            Ballot b = ballots[voters[i]];
             if (b == Ballot.Approve) ++approvals;
             else if (b == Ballot.Reject) ++rejections;
         }
@@ -266,12 +278,12 @@ contract RiskCommittee is IRiskCommittee, ReentrancyGuardTransient {
     /// @inheritdoc IRiskCommittee
     /// @dev Per address: true if `member` cast a ballot, even if it no longer counts.
     function hasVoted(uint256 charterId, address member) external view returns (bool) {
-        return _ballots[charterId][member] != Ballot.None;
+        return _ballots[_charter()][charterId][member] != Ballot.None;
     }
 
     /// @notice True once this committee called MarketCharter.decide for `charterId`.
     function isFinalized(uint256 charterId) external view returns (bool) {
-        return _finalized[charterId];
+        return _finalized[_charter()][charterId];
     }
 
     // ------------------------------------------------------------------------------------------
@@ -301,6 +313,7 @@ contract RiskCommittee is IRiskCommittee, ReentrancyGuardTransient {
         a.proposer = msg.sender;
         a.proposedAt = uint64(block.timestamp);
         a.expiresAt = uint64(block.timestamp + config.committeeWindow());
+        a.charter = _charter();
         _actionApproved[actionId][msg.sender] = true;
 
         emit ActionProposed(actionId, bookId, actionKind, msg.sender);
@@ -318,6 +331,7 @@ contract RiskCommittee is IRiskCommittee, ReentrancyGuardTransient {
         if (a.proposer == address(0)) revert UnknownAction(actionId);
         if (a.executed) revert ActionAlreadyExecuted(actionId);
         if (block.timestamp >= a.expiresAt) revert ActionExpired(actionId);
+        if (_charter() != a.charter) revert CharterChanged(actionId);
         if (_actionApproved[actionId][m]) revert AlreadyApproved(actionId, m);
 
         _actionApproved[actionId][m] = true;
@@ -401,17 +415,21 @@ contract RiskCommittee is IRiskCommittee, ReentrancyGuardTransient {
         }
     }
 
-    /// @dev Filed in MarketCharter and inside the committee window.
+    /// @dev Filed in MarketCharter and before its decision deadline, which MarketCharter fixes at filing (audit
+    ///      2026-10 D: a later committeeWindow change neither expires nor revives a charter).
     function _isOpen(uint256 charterId) private view returns (bool) {
-        IMarketCharter.CharterRecord memory r = IMarketCharter(config.charter()).get(charterId);
-        return r.status == BRTypes.CharterStatus.Filed
-            && block.timestamp < uint256(r.filedAt) + config.committeeWindow();
+        return IMarketCharter(_charter()).isOpen(charterId);
+    }
+
+    /// @dev The MarketCharter whose ids charter decisions refer to (the key of the per-charter state).
+    function _charter() private view returns (address) {
+        return config.charter();
     }
 
     /// @dev Caller guarantees the charter is open and not finalized.
     function _finalizeIfReady(uint256 charterId) private returns (bool) {
         (uint8 approvals, uint8 rejections) = votesOf(charterId);
-        Verdict memory v = _verdicts[charterId];
+        Verdict memory v = _verdicts[_charter()][charterId];
         bool approved;
         if (rejections >= REJECT_THRESHOLD) {
             approved = false;
@@ -425,7 +443,7 @@ contract RiskCommittee is IRiskCommittee, ReentrancyGuardTransient {
             return false;
         }
 
-        _finalized[charterId] = true;
+        _finalized[_charter()][charterId] = true;
         emit Decided(charterId, approved);
         IMarketCharter(config.charter()).decide(charterId, approved, v.cid);
         return true;

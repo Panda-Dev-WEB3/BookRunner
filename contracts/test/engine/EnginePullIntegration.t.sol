@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 
@@ -80,7 +80,7 @@ contract EnginePullIntegrationTest is EngineBase {
         c.mmInventoryUsd = 100_000e6;
         c.mandate = BRTypes.Mandate({
             maxInventoryUsd: MAX_INV,
-            maxSkewBps: 25,
+            maxSkewBps: 5,
             minQuoteWidthBps: 10,
             maxHedgeLeverage: 100,
             hedgeRatioMinBps: 4000,

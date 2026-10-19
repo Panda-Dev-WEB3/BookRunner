@@ -67,7 +67,7 @@ export const DEFAULT_FORM: CharterForm = {
   mmInventoryUsd: "75000",
   mandate: {
     maxInventoryUsd: "50000",
-    maxSkewBps: "25",
+    maxSkewBps: "4",
     minQuoteWidthBps: "8",
     maxHedgeLeverage: "1",
     hedgeRatioMinBps: "5000",
@@ -79,7 +79,7 @@ export const DEFAULT_FORM: CharterForm = {
   seniorCapBps: "7000",
   seniorShareBps: "6000",
   windowSeconds: "600",
-  juniorNoticeSeconds: "900",
+  juniorNoticeSeconds: "86400",
   perWalletCapUsd: "250000",
 };
 
@@ -100,7 +100,7 @@ export const FIELD_HELP: Record<string, string> = {
   ifSizeUsd: "Insurance fund size deployed first at window close; must meet the venue minimum",
   mmInventoryUsd: "Market-making inventory deployed after the insurance fund",
   "mandate.maxInventoryUsd": "Max |net venue position| notional. Desk key tiers must cover it",
-  "mandate.maxSkewBps": "Max distance of the quote mid from the oracle, in bps of the oracle price",
+  "mandate.maxSkewBps": "Max distance of the quote mid from the oracle, in bps of the oracle price; at most half the min quote width, so a quote always straddles the oracle",
   "mandate.minQuoteWidthBps": "Narrowest allowed quote: (ask - bid) / mid, in bps",
   "mandate.maxHedgeLeverage": "Leverage cap for perp hedge legs (spot hedges are 1.00x)",
   "mandate.hedgeRatio": "Share of venue exposure offset by desk hedges; enforced once exposure exceeds 5% of max inventory",
@@ -110,7 +110,7 @@ export const FIELD_HELP: Record<string, string> = {
   seniorCapBps: "Senior's maximum share of book capital at window close",
   seniorShareBps: "Senior share of net fee flow after expenses and protocol carry; Junior takes the residual",
   windowSeconds: "Subscription window length (60 seconds to 30 days)",
-  juniorNoticeSeconds: "Junior redemption notice. Notice is not a gate: requests are always accepted",
+  juniorNoticeSeconds: "Junior redemption notice, at least one mark interval. Notice is not a gate: requests are always accepted",
   perWalletCapUsd: "Per-wallet commitment cap per window (0 = none; the sponsor is exempt)",
 };
 
@@ -162,8 +162,13 @@ export function suggestSymbol(ticker: string, venue: CharterForm["venue"]): stri
   return venue === "orderly" ? `PERP_${t}_USDC` : `${t}-PERP`;
 }
 
-/** Client-side hints for every field (errors block "Review"; warnings do not). */
-export function formIssues(f: CharterForm, opts: { chainId?: number } = {}): FieldIssue[] {
+/**
+ * Client-side hints for every field (errors block "Review"; warnings do not). `markIntervalSeconds`: the
+ * network's mark interval (the books' markSchedule) — MarketCharter.validate rejects a Junior notice below it
+ * (audit M-1); unknown: at least 1 second (the interval is never 0). `chainId`: picks the network's Orderly IF
+ * minimum (VERIFY O10).
+ */
+export function formIssues(f: CharterForm, ctx: { markIntervalSeconds?: number | null; chainId?: number } = {}): FieldIssue[] {
   const out: FieldIssue[] = [];
   const add = (field: string, message: string, severity: FieldIssue["severity"] = "error") => out.push({ field, step: stepOf(field), message, severity });
   const usdField = (field: string, v: string, label: string, positive = false) => {
@@ -188,7 +193,7 @@ export function formIssues(f: CharterForm, opts: { chainId?: number } = {}): Fie
 
   usdField("ifSizeUsd", f.ifSizeUsd, "Insurance fund size", true);
   usdField("mmInventoryUsd", f.mmInventoryUsd, "MM inventory");
-  const minIf = venueMinIfUsd(f.venue, opts.chainId);
+  const minIf = venueMinIfUsd(f.venue, ctx.chainId);
   if (USD_RE.test(f.ifSizeUsd.trim()) && Number(f.ifSizeUsd) < minIf) {
     add("ifSizeUsd", `Below the venue minimum of ${minIf.toLocaleString("en-US")} ${getSettlementSymbol()} (network default; the chain value applies)`);
   }
@@ -199,6 +204,10 @@ export function formIssues(f: CharterForm, opts: { chainId?: number } = {}): Fie
   if (!Number.isInteger(skew) || skew <= 0 || skew > 32_767) add("mandate.maxSkewBps", "Max skew must be a whole number of bps above 0");
   const width = int(m.minQuoteWidthBps);
   if (!Number.isInteger(width) || width <= 0 || width > 65_535) add("mandate.minQuoteWidthBps", "Min quote width must be a whole number of bps above 0");
+  // audit M-3: a quote at the min width and the max skew must still straddle the oracle
+  if (Number.isInteger(skew) && Number.isInteger(width) && skew > 0 && width > 0 && skew * 2 > width) {
+    add("mandate.maxSkewBps", `Max skew must be at most half the min quote width (${Math.floor(width / 2)} bps)`);
+  }
   const lev = Number(m.maxHedgeLeverage);
   if (!Number.isFinite(lev) || lev < 0 || lev > 655.35) add("mandate.maxHedgeLeverage", "Hedge leverage: a multiple between 0 and 655.35");
   const lo = int(m.hedgeRatioMinBps);
@@ -220,7 +229,10 @@ export function formIssues(f: CharterForm, opts: { chainId?: number } = {}): Fie
   const win = int(f.windowSeconds);
   if (!Number.isInteger(win) || win < 60 || win > THIRTY_DAYS) add("windowSeconds", "Subscription window must be between 60 seconds and 30 days");
   const notice = int(f.juniorNoticeSeconds);
-  if (!Number.isInteger(notice) || notice < 0 || notice > THIRTY_DAYS) add("juniorNoticeSeconds", "Junior notice must be between 0 and 30 days");
+  const minNotice = ctx.markIntervalSeconds && ctx.markIntervalSeconds > 0 ? ctx.markIntervalSeconds : 1;
+  if (!Number.isInteger(notice) || notice < minNotice || notice > THIRTY_DAYS) {
+    add("juniorNoticeSeconds", `Junior notice must be between one mark interval (${fmtNoticeMin(minNotice)}) and 30 days`);
+  }
   if (!USD_RE.test(f.perWalletCapUsd.trim())) add("perWalletCapUsd", "Per-wallet cap: a USD amount (0 = none)");
   return out;
 }
@@ -278,4 +290,10 @@ export function splitDuration(seconds: number): { value: number; unit: "s" | "mi
     if (seconds >= u.seconds && seconds % u.seconds === 0) return { value: seconds / u.seconds, unit: u.id };
   }
   return { value: seconds, unit: "s" };
+}
+
+/** "1 h", "15 min", "1 d", "45 s": the minimum notice in the form's own units. */
+function fmtNoticeMin(seconds: number): string {
+  const d = splitDuration(seconds);
+  return `${d.value} ${d.unit}`;
 }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+pragma solidity ^0.8.24;
 
 /// @title IBkrnFeeRouter — splits protocol carry: 50% buyback-to-stakers, 50% syndicate backstop.
 interface IBkrnFeeRouter {

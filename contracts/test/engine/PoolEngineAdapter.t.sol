@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
@@ -83,7 +83,7 @@ contract PoolEngineAdapterTest is EngineBase {
     function _mandate(uint128 maxInv, uint16 minWidth) internal pure returns (BRTypes.Mandate memory) {
         return BRTypes.Mandate({
             maxInventoryUsd: maxInv,
-            maxSkewBps: 25,
+            maxSkewBps: 5,
             minQuoteWidthBps: minWidth,
             maxHedgeLeverage: 100,
             hedgeRatioMinBps: 4000,

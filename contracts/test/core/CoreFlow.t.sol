@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {CoreFixture} from "./utils/CoreFixture.sol";
 import {BRTypes} from "../../src/interfaces/BRTypes.sol";
@@ -59,7 +59,8 @@ contract CoreFlowTest is CoreFixture {
             flowNonce: 1,
             inventoryRoot: bytes32(uint256(1)),
             pnlJsonHash: bytes32(uint256(2)),
-            receiptsRoot: bytes32(uint256(3))
+            receiptsRoot: bytes32(uint256(3)),
+            held: false
         });
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(markSignerPk, registry.hashMark(m));
         uint256 id = registry.commit(m, abi.encodePacked(r, s, v));

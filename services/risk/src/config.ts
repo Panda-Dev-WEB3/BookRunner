@@ -1,5 +1,13 @@
 import { baseEnvSchema } from "@bookrunner/shared";
 import { z } from "zod";
+import {
+  DEFAULT_QUOTE_DRIFT_BPS,
+  DEFAULT_QUOTE_HOLD_RELEASE_TICKS,
+  DEFAULT_QUOTE_PRICE_MAX_AGE_MS,
+  MAX_QUOTE_DRIFT_BPS,
+  MAX_QUOTE_PRICE_MAX_AGE_MS,
+  MIN_QUOTE_PRICE_MAX_AGE_MS,
+} from "./domain/quote";
 
 /** Risk-service environment on top of the shared base env (packages/shared/src/env.ts). */
 export const riskEnvShape = {
@@ -20,6 +28,25 @@ export const riskEnvShape = {
   RISK_BREACH_CONFIRM_TICKS: z.coerce.number().int().positive().default(2),
   /** A quote older than this is not "live" and is not checked for skew/width. */
   RISK_QUOTE_MAX_AGE_MS: z.coerce.number().int().positive().default(15_000),
+  /**
+   * Audit M-3: agent quotes are checked against the attested oracle price (never the agent's reported reference);
+   * this is the print drift allowed on top of maxSkewBps and past the oracle on each side (bps, 0..10), further
+   * capped at half the mandate's min quote width.
+   */
+  RISK_QUOTE_DRIFT_BPS: z.coerce.number().min(0).max(MAX_QUOTE_DRIFT_BPS).default(DEFAULT_QUOTE_DRIFT_BPS),
+  /**
+   * Audit M-3: max age of the attested price a quote is checked against (ms, 2 000..60 000; a few oracle push
+   * intervals). Older (e.g. a minutes-old stored price in pull mode during a signed-feed outage): no quote check,
+   * the book is held reduce-only, never killed on SKEW. Valuation keeps config.maxPriceAge.
+   */
+  RISK_QUOTE_PRICE_MAX_AGE_MS: z.coerce
+    .number()
+    .int()
+    .min(MIN_QUOTE_PRICE_MAX_AGE_MS)
+    .max(MAX_QUOTE_PRICE_MAX_AGE_MS)
+    .default(DEFAULT_QUOTE_PRICE_MAX_AGE_MS),
+  /** Consecutive ticks with a fresh attested price before the fail-safe reduce-only hold lifts (1..10). */
+  RISK_QUOTE_HOLD_RELEASE_TICKS: z.coerce.number().int().min(1).max(10).default(DEFAULT_QUOTE_HOLD_RELEASE_TICKS),
   /** enforce = run the kill sequence on breach; alert = classify + emit limit.breached only. */
   RISK_KILL_MODE: z.enum(["enforce", "alert"]).default("enforce"),
   /**
@@ -71,6 +98,9 @@ export interface RiskSettings {
   limitsEveryTicks: number;
   breachConfirmTicks: number;
   quoteMaxAgeMs: number;
+  quoteDriftBps: number;
+  quotePriceMaxAgeMs: number;
+  quoteHoldReleaseTicks: number;
   killMode: "enforce" | "alert";
   flattenMode: "net" | "all";
   flattenSlippageBps: number;
@@ -88,6 +118,9 @@ export function settingsFromEnv(env: RiskEnv): RiskSettings {
     limitsEveryTicks: env.RISK_LIMITS_EVERY_TICKS,
     breachConfirmTicks: env.RISK_BREACH_CONFIRM_TICKS,
     quoteMaxAgeMs: env.RISK_QUOTE_MAX_AGE_MS,
+    quoteDriftBps: env.RISK_QUOTE_DRIFT_BPS,
+    quotePriceMaxAgeMs: env.RISK_QUOTE_PRICE_MAX_AGE_MS,
+    quoteHoldReleaseTicks: env.RISK_QUOTE_HOLD_RELEASE_TICKS,
     killMode: env.RISK_KILL_MODE,
     flattenMode: env.RISK_FLATTEN_MODE,
     flattenSlippageBps: env.RISK_FLATTEN_SLIPPAGE_BPS,

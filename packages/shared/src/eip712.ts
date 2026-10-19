@@ -17,6 +17,7 @@ export const markTypes = {
     { name: "inventoryRoot", type: "bytes32" },
     { name: "pnlJsonHash", type: "bytes32" },
     { name: "receiptsRoot", type: "bytes32" },
+    { name: "held", type: "bool" }, // audit M-1: MARK_TYPEHASH "...,bytes32 receiptsRoot,bool held)"
   ],
 } as const;
 

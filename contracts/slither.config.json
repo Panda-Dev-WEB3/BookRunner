@@ -1,0 +1,9 @@
+{
+  "filter_paths": "lib/|test/|script/|src/mocks/",
+  "exclude_dependencies": true,
+  "exclude_informational": true,
+  "exclude_low": true,
+  "detectors_to_exclude": "timestamp,weak-prng",
+  "foundry_ignore_compile": true,
+  "foundry_out_directory": "out-slither"
+}

@@ -187,7 +187,7 @@ service). A distribution with `gross == 0` is a no-op but still marks the period
 ### 2.5 Book, Tranche, UnderwritingVault, Waterfall [A-book]
 
 **Waterfall.sol** — pure library mirroring `packages/shared/src/waterfall.ts` exactly:
-`allocateWindow`, `walletAllocation`, `initialDeployment`, `splitDistribution`, `applyMarkPnl`,
+`allocateWindow`, `walletAllocation`, `initialDeployment`, `splitDistribution`, `applyDistribution`, `applyMarkPnl`,
 `sharePriceWad`, `bucketIndex`. `test/WaterfallParity.t.sol` must pass all rows of
 `test/vectors/waterfall.json` (format documented in `scripts/gen-vectors.ts`). Reason codes:
 1 NO_JUNIOR, 2 SPONSOR_SKIN, 3 IF_UNFUNDED.
@@ -197,7 +197,13 @@ service). A distribution with `gross == 0` is a no-op but still marks the period
 ```
 Subscription --closeWindow ok--> Live --retire--> Retiring --finalizeRetirement--> Retired
      \--closeWindow fail--> Cancelled (all commitments refundable 1:1 via claimCancelledRefund)
+     \--cancelStuckWindow (anyone, 7 days after subscriptionEnds, still Subscription)--> Cancelled
 ```
+
+- `cancelStuckWindow()` (Task 7, audit lead "unconfirmed deposits"): `closeWindow` deploys the IF and MM
+  inventory to the venue in the same transaction, so a venue deposit that keeps reverting would keep the book in
+  Subscription for good. `CLOSE_WINDOW_TIMEOUT` (7 days) after `subscriptionEnds`, anyone may cancel it instead:
+  every commitment is refundable 1:1. `closeWindow` itself is not gated by the timeout.
 
 - `closeWindow()` (anyone, `now >= subscriptionEnds`): reads both tranches' committed totals and the
   sponsor's Junior commitment `P` → `Waterfall.allocateWindow`. **Sponsor priority [ext]** (closes
@@ -224,13 +230,40 @@ Subscription --closeWindow ok--> Live --retire--> Retiring --finalizeRetirement-
   `assetsOwed`, fund owed assets from vault idle to the tranche escrow (remainder → `unfundedClaims`);
   increase S/J by top-up accepted (cash moved escrow → vault). `registry.markApplied(markId)`.
   In **Retired** state redemption requests settle immediately at the final price.
+- **Held marks [ext, audit M-1]**: `MarkInput.held` (signed, part of the EIP-712 `Mark`) is set by the
+  mark service, failing closed, when the valuation used a price that is not known, live and fresh: the
+  oracle signed the underlying's price as `held` (session closed / feed held), the underlying's price is
+  unreadable or older than `maxPriceAge`, or a desk Stock Token position is priced held or stale
+  (`services/mark/src/domain/held.ts`). A held mark applies the P&L (waterfall,
+  backstop, drawdown kill, share prices) but settles **no redemption bucket and no top-up round**; they
+  wait for the first non-held mark, which settles every bucket due by then at its post-P&L prices (so
+  a reopen gap is shared by everyone who was in the book when the session closed). `heldSince` = the
+  first held mark's periodEnd of the current run (0 after a non-held mark); once
+  `periodEnd − heldSince ≥ MAX_HELD_DEFERRAL` (30 days, docs/AUDIT-2026-10.md D-M1-1) held marks settle
+  again at the held valuation, unless a governance settle price for the book's underlying (or an index component)
+  is pending or in force (`AttestedOracle.settlePrice`, Task 7: in force within 3 days, the mark service then values
+  the book at it and signs non-held marks, which settle); that deferral ends at `MAX_SETTLE_PRICE_DEFERRAL` (60 days
+  of hold) whatever governance or the mark service does. So a long hold (a suspended or delisted underlying) defers exits but never blocks them. The first settling mark
+  settles at most `MAX_SETTLE_BUCKETS` (256) due buckets per tranche; the rest settle at the next mark (also
+  post-hold). Each held mark emits `MarkHeld(bookId, markId, heldSince, settled)`. `requestRedeem` and
+  claims are unaffected. `MarketCharter.decide` re-checks the minimum notice against the interval the book
+  caches at creation.
 - **Senior impairment follows the outstanding shares [ext]**: whenever Senior shares are burned at a
   settlement (redemption buckets at a mark, the Retired backlog, Retired immediate redemptions) the
   impairment is scaled pro-rata, `imp' = floor(imp · (supply − burned) / supply)` (0 once no Senior
   share is left). Holders who redeemed at the impaired price took their loss with them, so gain
   restoration and backstop cover (shared across books) only ever restore the remaining shares.
   Book-side only: `applyMarkPnl` and its TS mirror are unchanged.
-- `creditDistribution` (only router): `S += senior; J += junior`.
+- `creditDistribution` (only router) **[audit L-1]**: Senior's hurdle share is credited to Senior; the
+  residual (the Junior amount, or everything when Junior has no supply) follows the mark gain order:
+  Senior impairment first, then backstop debt (owed to the backstop: `backstopPayable`, netted from NAV,
+  paid from vault idle by the next `fundClaims`), then Junior (`Waterfall.applyDistribution`, mirrored by
+  `applyDistribution` in `packages/shared/src/waterfall.ts`, parity vectors `credit`). Emits
+  `DistributionCredited` with the amounts credited to each tranche and `DistributionRepaid(seniorRestored,
+  backstopRepaid)`. Design note: fee flow is book income like a mark gain, so it must not reach the
+  first-loss tranche while Senior, or the backstop that covered Senior, is still owed. The hurdle share is
+  what Senior is paid for its capital, so it is credited to Senior as before and is not used to restore
+  Senior's own principal.
 - `onCapitalFlow()` (only vault): `flowNonce++`.
 - `retire()` (only MarketCharter): Live → Retiring; cancels an open top-up round and calls
   `mandate.setRetiring()` **[ext]** — reduce-only wind-down, NOT a kill: desk keys stay active so the
@@ -286,8 +319,10 @@ Every deploy/recall/fundDesk and desk `ReturnToVault` calls `book.onCapitalFlow(
   `charterFeeUsd` USDC into escrow; `staking.lock(sponsor, bondLockId(id), sponsorBondBkrn)`;
   status Filed. `validate` reasons (bytes32 short strings): `IF_BELOW_VENUE_MIN`, `BAD_VENUE`,
   `BAD_ORACLE`, `BAD_BPS` (hurdle/cap > 1e4 or cap == 0), `BAD_WINDOW` (window < 60s or > 30d),
-  `BAD_NOTICE` (> 30d), `BAD_MANDATE` (maxInventory == 0, minQuoteWidth == 0, band min > max,
-  killAtDrawdownBps >= 0 or < -5000, maxSkewBps <= 0), `BAD_UNDERLYING` (not canonical token, not
+  `BAD_NOTICE` (< `config.markInterval()` or > 30d; the minimum is defence in depth beside held marks,
+  audit M-1: a Junior request always bears at least one full mark period of P&L), `BAD_MANDATE` (maxInventory == 0, minQuoteWidth == 0, band min > max,
+  killAtDrawdownBps >= 0 or < -5000, maxSkewBps <= 0, maxSkewBps > minQuoteWidthBps / 2: audit M-3, a quote at the
+  minimum width and the maximum skew must still straddle the oracle), `BAD_UNDERLYING` (not canonical token, not
   registered index), `BAD_SYMBOL` (zero), `BAD_FEES` (in-house taker fee > 100 bps).
 - `decide(id, ok, juryCid)` only committee. Approve → fee forwarded to `expenseRecipient`
   (committee review + oracle setup), `factory.create(id, charter)`, record book, status Approved.
@@ -312,12 +347,12 @@ Every deploy/recall/fundDesk and desk `ReturnToVault` calls `book.onCapitalFlow(
 | Field | Meaning | Enforced |
 |---|---|---|
 | `maxInventoryUsd` | max \|net venue position notional\| | engine: hard cap (`maxNetExposureUsd`); Orderly: risk monitor + venue position caps; key tier must be ≥ it |
-| `maxSkewBps` | max \|quote mid − oracle\| / oracle | engine `checkQuote`; agent pre-trade; risk monitor |
+| `maxSkewBps` | max \|quote mid − oracle\| / oracle; ≤ minQuoteWidthBps / 2 (audit M-3) | engine `checkQuote` (also 2 × \|skew\| ≤ spread); agent pre-trade; risk monitor (a quote not straddling the oracle is a SKEW breach) |
 | `minQuoteWidthBps` | min (ask − bid)/mid | engine `checkQuote` (spreadBps); agent; risk |
 | `maxHedgeLeverage` | perp hedge legs, 0.01x units; spot = 100 | `checkHedge` |
 | `hedgeRatioMin/MaxBps` | \|offsetting hedge\| / \|exposure\|; enforced when \|exposure\| ≥ 5% of maxInventory | `checkHedge`: post-trade in band OR strictly closer to band |
 | `noNewRiskOffHours` | oracle `held` or stale ⇒ reduce-only | engine, `checkHedge` (must reduce \|exposure+hedge\|), `checkInventoryMove` (toVenue blocked), agent |
-| `killAtDrawdownBps` | drawdown of perf index from high-water ≤ this ⇒ kill | book at mark (on-chain), risk intra-mark |
+| `killAtDrawdownBps` | drawdown of perf index from high-water ≤ this ⇒ kill | book at mark (on-chain), risk intra-mark; engine books: also the per-period pool loss budget (\|kill\| bps of the pool equity, audit M-3) |
 | `hedgeAllowRoot` | StandardMerkleTree over `(bytes32 asset, bytes32 venue)` | `checkHedge` with proof |
 
 Spot Stock Tokens are long-only (not borrowable): a spot hedge can only offset a **short** venue
@@ -331,7 +366,9 @@ IF: `insuranceEquity + amount <= charter.ifTargetUsd`; MM: `max(marginEquity,0) 
 charter.mmInventoryUsd`; off-hours + noNewRiskOffHours blocks toVenue. Recalls (toVenue=false) are
 always allowed to an active key, the RISK role, KEEPER and the book.
 `FundDesk`: desk value after ≤ `maxInventoryUsd * hedgeRatioMaxBps / 1e4`.
-`checkQuote`: spread ≥ minQuoteWidthBps, |skew| ≤ maxSkewBps, maxNetExposure ≤ maxInventoryUsd.
+`checkQuote`: spread ≥ minQuoteWidthBps, |skew| ≤ maxSkewBps, 2 × |skew| ≤ spread (`QuoteOneSided`, audit M-3:
+the quote straddles the oracle, so buy fill ≥ oracle ≥ sell fill; holds for a mandate cached before the charter
+rule too), maxNetExposure ≤ maxInventoryUsd. PoolEngine.setQuote enforces 2 × |skew| ≤ spread itself.
 
 Keys: `registerKey` (sponsor) requires `inventoryTierUsd >= mandate.maxInventoryUsd` and locks
 `config.agentTierBond(inventoryTierUsd)` from `operator` (lockId = keccak(bookId, key)) on
@@ -387,18 +424,41 @@ are oracle keys published by the oracle service as the weighted index level. Mul
 token: stored, or (mainnet) the token's ERC-8056 `uiMultiplier()` read live within `multiplierBandBps`
 of the stored anchor (`setMultiplierSource`, `setNextMultiplierAnchor`); Robinhood's per-token Chainlink
 prices are divided by that same value in the oracle service (VERIFY C2/T2, `packages/shared/src/stockTokens.ts`).
+Split window (audit M-2, docs/AUDIT-2026-10.md): `valueUsd` reverts `MultiplierChangedSincePrice` while the
+price's share basis (its `publishedAt`, or `AttestedOracle.lastLiveAt` for a held price) predates
+`multiplierChangedAt(token)` (live mode: the token's passed `effectiveAt()`; stored mode: the last
+`setMultiplier` / source switch), until the oracle signs a live price after the change; the mark service
+values such a position at the multiplier of the price's basis (or 0): it refuses the mark for at most one interval,
+then commits it held. `valueUsdAt` is the pure valuation at a given price. `splitGate(priceId, basisAt)` gates the
+engine (audit N-1, below).
 
 ### 2.8 AttestedOracle, PoolEngine, PoolEngineAdapter [A-engine]
 
 - `AttestedOracle` per `IAttestedOracle` (EIP-712 typed price). `push` requires an active signer,
   `publishedAt > stored.publishedAt`, `publishedAt <= block.timestamp + 5`, and
   `sourceCount >= minSources` unless `held`. `priceOf` reverts `StalePrice` beyond `maxPriceAge`.
+  `lastLiveAt(id)` = publishedAt of the newest stored price signed not held (the share basis of a held
+  price, which re-stamps the last open-session print; StockTokenRegistry split guard, audit M-2).
   Signer registry: timelock `setSigner(signer, active, attestation)`; the attestation hash is the
   TEE quote digest (verification flow VERIFY; devnet uses a plain key).
 - `PoolEngine` per `IPoolEngine` (pool-vs-trader, isolated margin, aggregate accounting O(1)):
   - fill price: buy (trader long) at `oracle * (1e4 + spread/2 + skew) / 1e4`, sell at
     `oracle * (1e4 - spread/2 + skew) / 1e4` — skew (signed bps) shifts both sides; reverts if worse
-    than `acceptablePriceWad`.
+    than `acceptablePriceWad`. `setQuote` requires 2 × |skew| ≤ spread (audit M-3): buy fill ≥ oracle ≥
+    sell fill, so at a constant oracle price no fill can cost the pool (invariant
+    `test/audit/ext2026/M3PoolEquityInvariant.t.sol`).
+  - per-period loss budget (audit M-3): the first trade of each `config.markInterval()`-long period (Unix-time
+    buckets) anchors the pool equity at the oracle; liquidity the adapter moves shifts the anchor. New risk reverts
+    `LossBudgetExceeded` while `anchor - poolEquity > lossBudgetBps × anchor` (reductions, closes, liquidations
+    and `forceClose` stay open); the next period re-anchors. `lossBudgetBps` = |mandate.killAtDrawdownBps| (set
+    by the adapter at `initialize` and on every re-mandate; 800 until then, 1..5000). Cost: one SLOAD and a
+    config read per trade, one SSTORE per period. View `lossBudget(marketId)`; `LossBudgetBreached` once per
+    period from the first successful reduction / close / liquidation / close-out that sees the budget spent, or
+    the permissionless `pokeLossBudget(marketId)` (Task 7).
+  - split gate (audit N-1): positions are per share and never rebased, so while an out-of-band multiplier
+    change of the market's token (any component, for an index) is pre-approved or staged, new risk (and margin
+    withdrawal with a position) reverts `SplitPending` (close-only); while the price predates the change every
+    voluntary trade reverts `SplitWindow` (`StockTokenRegistry.splitGate`). Liquidations / `forceClose` stay open.
   - taker fee `takerFeeBps` of notional → `feesAccruedUsd` (claimed by the adapter → RevenueRouter).
   - every voluntary trade (open, increase, reduce, close, flip) needs a live price: none fills while
     the oracle is `held` (off-hours) or older than `min(maxPriceAge, 60 s, maxTradePriceAge)` (audit
@@ -415,9 +475,14 @@ prices are divided by that same value in the oracle service (VERIFY C2/T2, `pack
     reopen gap of that size, else it is liquidated at the held close rather than leaving the gap as IF
     bad debt; traders top up or deleverage before the close, top-ups work off-hours). Liquidations
     use the latest (held) price with no `maxTradePriceAge` bound (involuntary, fee-bearing); position
-    closed at oracle, `liquidationFeeBps` split 50% liquidator / 50% IF; wind-down `forceClose`
+    closed at oracle, `liquidationFeeBps` of notional taken from the remaining margin; the liquidator always
+    earns half the nominal fee, from that margin first and from the IF (after the bad debt it covers, capped by
+    its balance) when the margin is gone, the rest of the fee goes to the IF (Task 7); wind-down `forceClose`
     (anyone, once the close-out is open) instead needs a live, fresh price like a trade (optionally
-    carried as `priceData`), so it never fills at a held price;
+    carried as `priceData`), so it never fills at a held price, except at a governance settle price in force
+    for the underlying (`AttestedOracle.settlePrice`: a delisted / permanently held market), where anyone closes
+    any position at it, fee-free, with no close-out schedule, the market is priced at it as held and liquidation uses
+    the maintenance requirement (a final price has no reopen gap) (Task 7);
     bad debt paid by IF, then **ADL within that market only** (pool cash reduced by shortfall,
     `ADL` event) — never touches other markets.
   - `withdrawLiquidity` keeps `poolEquity - amount >= requiredPoolMargin` (pool must cover current

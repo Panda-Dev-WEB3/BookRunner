@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {BRTypes} from "../../../src/interfaces/BRTypes.sol";
@@ -78,6 +78,14 @@ contract MockBookConfig is IBookrunnerConfig {
         charter = a;
     }
 
+    function setOracle(address a) external {
+        oracle = a;
+    }
+
+    function setStockRegistry(address a) external {
+        stockRegistry = a;
+    }
+
     function setFactory(address a) external {
         factory = a;
     }
@@ -117,7 +125,7 @@ contract MockMarkRegistry is IMarkRegistry {
 
     function MARK_TYPEHASH() external pure returns (bytes32) {
         return keccak256(
-            "Mark(uint256 bookId,uint64 periodEnd,uint256 navUsd,uint256 deployedValueUsd,uint64 flowNonce,bytes32 inventoryRoot,bytes32 pnlJsonHash,bytes32 receiptsRoot)"
+            "Mark(uint256 bookId,uint64 periodEnd,uint256 navUsd,uint256 deployedValueUsd,uint64 flowNonce,bytes32 inventoryRoot,bytes32 pnlJsonHash,bytes32 receiptsRoot,bool held)"
         );
     }
 
@@ -165,6 +173,7 @@ contract MockVenueAdapter is IVenueAdapter {
     uint256 public value;
     uint256 public ifEquity;
     bool public revertWithdraw;
+    bool public revertDeposit;
 
     constructor(MockERC20 usdc_) {
         usdcToken = usdc_;
@@ -182,12 +191,17 @@ contract MockVenueAdapter is IVenueAdapter {
         revertWithdraw = r;
     }
 
+    function setRevertDeposit(bool r) external {
+        revertDeposit = r;
+    }
+
     function venueKind() external pure returns (uint8) {
         return BRTypes.VENUE_POOL_ENGINE;
     }
 
     function depositToVenue(uint8 account, uint256 amount) external {
         require(msg.sender == vault, "MockVenueAdapter: not vault");
+        require(!revertDeposit, "MockVenueAdapter: deposit disabled");
         IERC20(address(usdcToken)).transferFrom(vault, address(this), amount);
         value += amount;
         if (account == BRTypes.ACCOUNT_IF) ifEquity += amount;
@@ -277,7 +291,7 @@ contract MockMandate {
     function getMandate() external view returns (BRTypes.Mandate memory m) {
         require(!revertGetMandate, "MockMandate: getMandate");
         m.maxInventoryUsd = 50_000e6;
-        m.maxSkewBps = 25;
+        m.maxSkewBps = 4;
         m.minQuoteWidthBps = 8;
         m.maxHedgeLeverage = 100;
         m.hedgeRatioMinBps = 5000;

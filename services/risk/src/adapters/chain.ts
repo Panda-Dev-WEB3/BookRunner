@@ -12,7 +12,10 @@ import {
   VENUE,
   type VenueId,
   bytes32ToStr,
+  inSplitWindow,
+  priceBasisAt,
   strToBytes32,
+  valueAtMultiplier,
 } from "@bookrunner/shared";
 import {
   attestedOracleAbi,
@@ -22,6 +25,7 @@ import {
   bookrunnerDeskAbi,
   mMMandateAbi,
   orderlyAdapterAbi,
+  poolEngineAbi,
   poolEngineAdapterAbi,
   stockTokenRegistryAbi,
   underwritingVaultAbi,
@@ -45,7 +49,7 @@ import type { FlattenOrder, Holding } from "../domain/flatten";
 import { stockValueUsd } from "../domain/flatten";
 import { oracleFromChain, oracleFromSigned } from "../domain/oracle";
 import type { ChainPort, DiscoveryPort, KillLog, SignedPriceMap } from "../ports";
-import type { BookRef, ChainObservation, OracleReading } from "../types";
+import type { BookRef, ChainObservation, EngineLossBudget, OracleReading } from "../types";
 import { Mutex, errMsg } from "../util/async";
 
 /** BookrunnerDesk.ActionKind.Flatten */
@@ -185,6 +189,7 @@ export class ViemChain implements ChainPort, DiscoveryPort {
         hedgeNotionalUsd !== null && deskValueUsd !== null
           ? { hedgeNotionalUsd, valueUsd: deskValueUsd, priceStale: false }
           : await this.deskAtLastPrice(ref);
+    const lossBudget = ref.venue === VENUE.POOL_ENGINE ? await this.engineLossBudget(ref) : undefined;
     let adapter = { netExposureUsd, deployedValueUsd, insuranceEquityUsd };
     let adapterSource: NonNullable<ChainObservation["adapter"]["source"]> = "onchain";
     if (ref.venue === VENUE.POOL_ENGINE && signedUnderlying) {
@@ -215,7 +220,23 @@ export class ViemChain implements ChainPort, DiscoveryPort {
       highWaterWad: perf[1],
       oracle,
       maxPriceAgeSec,
+      ...(lossBudget !== undefined ? { lossBudget } : {}),
     };
+  }
+
+  /** PoolEngine.lossBudget for the book's market (Task 7); null when unreadable (never fails the tick). */
+  private async engineLossBudget(ref: BookRef): Promise<EngineLossBudget | null> {
+    const a = ref.components.adapter;
+    try {
+      const [marketId, engine] = await Promise.all([
+        this.pub.readContract({ address: a, abi: poolEngineAdapterAbi, functionName: "marketId" }),
+        this.pub.readContract({ address: a, abi: poolEngineAdapterAbi, functionName: "engine" }).catch(() => this.c.poolEngine),
+      ]);
+      const [budgetBps, period, anchorEquityUsd, lossUsd, budgetUsd, blocked] = await this.pub.readContract({ address: engine, abi: poolEngineAbi, functionName: "lossBudget", args: [marketId] });
+      return { budgetBps: Number(budgetBps), period: Number(period), anchorEquityUsd, lossUsd, budgetUsd, blocked };
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -231,7 +252,7 @@ export class ViemChain implements ChainPort, DiscoveryPort {
     const held = holdings.filter((h) => h.qtyRaw > 0n);
     const hedge = held.reduce((sum, h) => sum + h.valueUsd, 0n);
     const priceStale = held.some((h) => !h.publishedAt || nowSec - h.publishedAt > maxPriceAgeSec);
-    return { hedgeNotionalUsd: hedge, valueUsd: usdc + hedge, priceStale, signedPrices: held.some((h) => h.signed === true) };
+    return { hedgeNotionalUsd: hedge, valueUsd: usdc + hedge, priceStale, signedPrices: held.some((h) => h.signed === true), ...splitFlags(held) };
   }
 
   /**
@@ -276,7 +297,7 @@ export class ViemChain implements ChainPort, DiscoveryPort {
       { bookId: ref.bookId, hedgeUsd: hedge.toString(), tokens: holdings.length },
       "desk valuation reverted (stale oracle price); using the last attested prices",
     );
-    return { hedgeNotionalUsd: hedge, valueUsd: usdc + hedge, priceStale: true };
+    return { hedgeNotionalUsd: hedge, valueUsd: usdc + hedge, priceStale: true, ...splitFlags(holdings.filter((h) => h.qtyRaw > 0n)) };
   }
 
   private async readOracle(priceId: Hex): Promise<OracleReading | null> {
@@ -342,10 +363,12 @@ export class ViemChain implements ChainPort, DiscoveryPort {
         ]);
         let priceWad = 0n;
         let publishedAt = 0;
+        let held = false;
         try {
           const l = await this.pub.readContract({ address: this.c.oracle, abi: attestedOracleAbi, functionName: "latest", args: [info.priceId] });
           priceWad = l.priceWad;
           publishedAt = Number(l.publishedAt);
+          held = l.held;
         } catch (err) {
           this.o.log.warn({ token, err: errMsg(err) }, "no oracle price for desk token");
         }
@@ -354,6 +377,14 @@ export class ViemChain implements ChainPort, DiscoveryPort {
         if (signed) {
           priceWad = signed.priceWad;
           publishedAt = Number(signed.publishedAt);
+          held = signed.held;
+        }
+        const split = priceWad > 0n && qtyRaw > 0n ? await this.splitWindowOf(token, info.priceId, { held, publishedAt: BigInt(publishedAt) }) : null;
+        if (split) {
+          // audit M-2: the price predates the multiplier change; valued at the multiplier of its basis (or 0),
+          // never at the new one, and flagged so no kill / flatten acts on it
+          const valueUsd = split.multiplierWad === null ? 0n : valueAtMultiplier(qtyRaw, split.multiplierWad, priceWad, info.decimals);
+          return { token, qtyRaw, valueUsd, priceWad, multiplierWad: split.multiplierWad ?? 0n, decimals: info.decimals, publishedAt, splitWindow: true, ...(split.multiplierWad === null ? { splitValuationUnknown: true } : {}), ...(signed ? { signed: true } : {}) };
         }
         let valueUsd = 0n;
         if (priceWad > 0n && qtyRaw > 0n) {
@@ -372,6 +403,29 @@ export class ViemChain implements ChainPort, DiscoveryPort {
         return { token, qtyRaw, valueUsd, priceWad, multiplierWad: info.multiplierWad, decimals: info.decimals, publishedAt, ...(signed ? { signed: true } : {}) };
       }),
     );
+  }
+
+  /**
+   * Audit M-2 split window of a held token (the shared rule, packages/shared/src/splitWindow.ts): null when
+   * outside it, else the multiplier in force at the price's basis from the registry's on-chain
+   * basisMultiplier (null = unknown: the valuation is then untrusted). A failed read fails closed for this tick
+   * (in the window, untrusted: no flatten of the token, desk-dependent breaches wait for the next tick).
+   */
+  private async splitWindowOf(token: Address, priceId: Hex, p: { held: boolean; publishedAt: bigint }): Promise<{ multiplierWad: bigint | null } | null> {
+    try {
+      const [changedAt, lastLiveAt] = await Promise.all([
+        this.pub.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "multiplierChangedAt", args: [token] }),
+        this.pub.readContract({ address: this.c.oracle, abi: attestedOracleAbi, functionName: "lastLiveAt", args: [priceId] }),
+      ]);
+      const basis = priceBasisAt({ held: p.held, publishedAt: p.publishedAt, lastLiveAt: BigInt(lastLiveAt) });
+      if (!inSplitWindow({ multiplierChangedAt: changedAt, priceBasisAt: basis })) return null;
+      const m = await this.pub.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "basisMultiplier", args: [token, basis] });
+      this.o.log.warn({ token, basis: basis.toString(), multiplierChangedAt: changedAt.toString(), basisMultiplier: m.toString() }, "desk token in the split window (audit M-2): valued at the basis multiplier, never flattened");
+      return { multiplierWad: m > 0n ? m : null };
+    } catch (err) {
+      this.o.log.warn({ token, err: errMsg(err) }, "split-window reads failed; the token is treated as in the window with an untrusted valuation this tick");
+      return { multiplierWad: null };
+    }
   }
 
   // ------------------------------------------------------------------ writes (RISK role)
@@ -446,4 +500,12 @@ function safeStr(b: Hex): string {
   } catch {
     return b;
   }
+}
+
+/** Desk split-window flags (audit M-2): any held token in the window; any valued without a basis multiplier. */
+function splitFlags(held: readonly Holding[]): { splitWindow?: true; splitUntrusted?: true } {
+  return {
+    ...(held.some((h) => h.splitWindow === true) ? { splitWindow: true as const } : {}),
+    ...(held.some((h) => h.splitValuationUnknown === true) ? { splitUntrusted: true as const } : {}),
+  };
 }

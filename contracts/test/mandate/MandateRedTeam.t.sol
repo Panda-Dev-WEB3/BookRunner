@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {PackedUserOperation} from "@openzeppelin/contracts/interfaces/IERC4337.sol";
@@ -126,7 +126,7 @@ contract MandateRedTeamTest is MandateBase {
         );
         vm.expectRevert(abi.encodeWithSelector(IMMMandate.QuoteWidthTooNarrow.selector, uint16(0), uint16(8)));
         desk.execute(_act(IBookrunnerDesk.ActionKind.SetQuote, abi.encode(uint16(0), int16(0), uint128(1))));
-        vm.expectRevert(abi.encodeWithSelector(IMMMandate.SkewTooWide.selector, type(int16).min, int16(25)));
+        vm.expectRevert(abi.encodeWithSelector(IMMMandate.SkewTooWide.selector, type(int16).min, int16(4)));
         desk.execute(
             _act(IBookrunnerDesk.ActionKind.SetQuote, abi.encode(uint16(10), type(int16).min, uint128(1)))
         );
@@ -311,7 +311,7 @@ contract MandateRedTeamTest is MandateBase {
         );
         // valuation needs a fresh price: risk-adding hedges cannot be priced, so they revert
         vm.prank(key);
-        vm.expectRevert(abi.encodeWithSelector(IAttestedOracle.StalePrice.selector, NVDA_ID, uint64(T0)));
+        vm.expectRevert(abi.encodeWithSelector(BookrunnerDesk.StaleTradePrice.selector, address(nvda), uint64(T0)));
         desk.execute(_hedgeAction(address(nvda), true, 1000e6, 0));
         // RISK can always flatten
         _exec(risk, _flattenAction(address(nvda), tokens, 0));

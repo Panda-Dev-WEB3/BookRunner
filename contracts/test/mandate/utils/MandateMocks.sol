@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
@@ -33,6 +33,7 @@ contract MandateMockConfig {
     address public entryPoint;
     address public timelock;
     uint32 public maxPriceAge = 300;
+    uint32 public maxTradePriceAge = 15;
     uint32 public markInterval = 86_400;
 
     uint256[] internal _tierThresholds;
@@ -98,6 +99,10 @@ contract MandateMockConfig {
         maxPriceAge = v;
     }
 
+    function setMaxTradePriceAge(uint32 v) external {
+        maxTradePriceAge = v;
+    }
+
     /// @dev Sorted step tiers [(threshold, bond)].
     function setTiers(uint256[] calldata thresholds, uint256[] calldata bonds) external {
         _tierThresholds = thresholds;
@@ -115,6 +120,8 @@ contract MandateMockConfig {
 contract MandateMockOracle {
     MandateMockConfig public immutable config;
     mapping(bytes32 => IAttestedOracle.PriceData) internal _data;
+    /// @dev Mirrors AttestedOracle.lastLiveAt: publishedAt of the newest price set NOT held.
+    mapping(bytes32 => uint64) public lastLiveAt;
 
     constructor(MandateMockConfig c) {
         config = c;
@@ -124,10 +131,13 @@ contract MandateMockOracle {
         _data[id] = IAttestedOracle.PriceData({
             priceWad: priceWad, publishedAt: publishedAt, held: held, sourceCount: 3
         });
+        if (!held && publishedAt > lastLiveAt[id]) lastLiveAt[id] = publishedAt;
     }
 
     function setHeld(bytes32 id, bool held) external {
         _data[id].held = held;
+        uint64 at = _data[id].publishedAt;
+        if (!held && at > lastLiveAt[id]) lastLiveAt[id] = at;
     }
 
     function latest(bytes32 id) external view returns (IAttestedOracle.PriceData memory) {
@@ -320,14 +330,17 @@ contract MandateMockPoolEngine {
         broken = v;
     }
 
-    function state(uint256) external view returns (IPoolEngine.MarketState memory s) {
+    /// @dev The engine answers for the adapter mock's market id (1) only, so a wrong market id read fails.
+    function state(uint256 marketId) external view returns (IPoolEngine.MarketState memory s) {
         require(!broken, "engine broken");
+        require(marketId == 1, "unknown market");
         s.spreadBps = spreadBps;
         s.skewBps = skewBps;
     }
 
-    function config(uint256) external view returns (IPoolEngine.MarketConfig memory c) {
+    function config(uint256 marketId) external view returns (IPoolEngine.MarketConfig memory c) {
         require(!broken, "engine broken");
+        require(marketId == 1, "unknown market");
         c.maxNetExposureUsd = maxNetExposureUsd;
     }
 }

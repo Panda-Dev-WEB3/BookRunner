@@ -69,6 +69,7 @@ describe("testnet-live profile (separate stack next to the public testnet)", () 
       DEPLOYMENT_FILE: "contracts/deployments/46630.live.json",
       OPS_KEYS_DIR: ".data/testnet-live/keys",
       OPS_SAGA_FILE: ".data/testnet-live/ops-venue/sagas.json",
+      MARK_SPOOL_DIR: ".data/testnet-live/mark-spool", // never the public stack's spool (audit 2026-10 + rehearsal stack)
       DATABASE_URL: "postgres://bookrunner:pw@127.0.0.1:54400/bookrunner_testnet_live",
       REDIS_URL: "redis://:lp@127.0.0.1:63791/0", // its OWN Redis instance (redis-live)
       BKRN_BUS_NS: "testnet-live", // its own bus namespace (channels, keys, queues)

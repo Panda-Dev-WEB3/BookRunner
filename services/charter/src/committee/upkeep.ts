@@ -11,6 +11,8 @@ export interface CommitteeChain {
   committee(): Promise<{ members: Address[]; bonded: boolean[]; committeeBondBkrn: bigint; committeeWindowSec: number }>;
   /** Simulates tryFinalize and sends it only when it would decide the charter. */
   tryFinalize?(charterId: number): Promise<{ finalized: boolean; tx: string | null }>;
+  /** MarketCharter.decisionDeadline (unix s): fixed at filing, so a later committeeWindow change does not move it. */
+  decisionDeadline?(charterId: number): Promise<number>;
 }
 
 export interface CommitteeStore {
@@ -26,12 +28,15 @@ export interface DeadlineNotice {
   remainingSec: number;
 }
 
-/** Pure: which filed charters need a deadline notification now. */
-export function deadlineNotices(filed: Array<{ id: number; filedAt: Date }>, windowSec: number, warnSec: number, now: Date): DeadlineNotice[] {
-  if (windowSec <= 0) return [];
+/**
+ * Pure: which filed charters need a deadline notification now. A charter's own `deadline` (on-chain
+ * decisionDeadline, fixed at filing: audit 2026-10 D) wins; filedAt + the current window is the fallback.
+ */
+export function deadlineNotices(filed: Array<{ id: number; filedAt: Date; deadline?: Date }>, windowSec: number, warnSec: number, now: Date): DeadlineNotice[] {
   const out: DeadlineNotice[] = [];
   for (const f of filed) {
-    const deadline = new Date(f.filedAt.getTime() + windowSec * 1000);
+    if (!f.deadline && windowSec <= 0) continue;
+    const deadline = f.deadline ?? new Date(f.filedAt.getTime() + windowSec * 1000);
     const remainingSec = Math.floor((deadline.getTime() - now.getTime()) / 1000);
     if (remainingSec <= 0) out.push({ charterId: f.id, kind: "window_elapsed", deadline, remainingSec });
     else if (remainingSec <= warnSec) out.push({ charterId: f.id, kind: "deadline_approaching", deadline, remainingSec });
@@ -72,7 +77,20 @@ export async function syncCommittee(p: {
     }
   }
 
-  const notices = deadlineNotices(filed.filter((f) => !finalized.includes(f.id)), c.committeeWindowSec, p.warnSec, p.now);
+  const open = await Promise.all(
+    filed
+      .filter((f) => !finalized.includes(f.id))
+      .map(async (f) => {
+        if (!p.chain.decisionDeadline) return f;
+        try {
+          const at = await p.chain.decisionDeadline(f.id);
+          return at > 0 ? { ...f, deadline: new Date(at * 1000) } : f;
+        } catch {
+          return f; // older MarketCharter: filedAt + the current window
+        }
+      }),
+  );
+  const notices = deadlineNotices(open, c.committeeWindowSec, p.warnSec, p.now);
   let sent = 0;
   for (const n of notices) {
     const fresh = await p.bus.emit({

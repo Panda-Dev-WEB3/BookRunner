@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -32,6 +32,11 @@ interface IDeskReturnVault {
     function notifyDeskReturn(uint256 amount) external;
 }
 
+/// @dev BookrunnerConfig's trade-price bound (LOW_GAS.md §1), not part of the frozen IBookrunnerConfig.
+interface IDeskConfigTradeAge {
+    function maxTradePriceAge() external view returns (uint32);
+}
+
 /// @title BookrunnerDesk — per-book ERC-4337 v0.7 account operated by mandate session keys.
 /// @notice There is NO generic call: `execute` only runs the typed actions of IBookrunnerDesk.ActionKind,
 ///         each validated by the book's MMMandate. Holds the book's long-spot hedge inventory (canonical
@@ -58,7 +63,8 @@ interface IDeskReturnVault {
 ///         attested oracle value (no self-sandwiching the book), and their cumulative loss vs the oracle
 ///         per mark period is capped at `periodSlippageBudgetBps` of maxInventoryUsd (no bleeding the book
 ///         by churning in-band). RISK Flatten is bounded by `riskMaxSlippageBps` whenever the price is
-///         fresh, and is never blocked by a stale price.
+///         fresh, and is never blocked by a stale price. A key's Hedge / Flatten also needs the traded token's
+///         price within the engine's trade bound, min(maxPriceAge, maxTradePriceAge) (audit 2026-10 "old prints").
 ///
 ///         Mark window (A3-02 / A7-01): key-initiated capital flows (InventoryToVenue, InventoryToVault,
 ///         FundDesk, ReturnToVault) bump the book's flowNonce, which voids a mark signed against the
@@ -80,6 +86,9 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
     bytes32 internal constant RISK_ROLE = keccak256("RISK");
     uint256 internal constant BPS = 10_000;
     uint256 internal constant SIG_VALIDATION_FAILED = 1;
+    /// @dev StockTokenRegistry.MultiplierChangedSincePrice (audit M-2 split window): the RISK flatten defers on it.
+    bytes4 internal constant MULTIPLIER_CHANGED_SINCE_PRICE =
+        bytes4(keccak256("MultiplierChangedSincePrice(address,uint64,uint256)"));
     /// @dev Transient slot seed: signer of a validated userOp, keyed by keccak256(callData).
     bytes32 internal constant USEROP_SIGNER_SEED = keccak256("bookrunner.desk.userop.signer");
 
@@ -163,6 +172,9 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
     error ReturnBelowMin(uint256 amount, uint256 minAmount);
     error OpCostTooHigh(uint256 maxCostWei, uint256 capWei);
     error PrefundBudgetExceeded(uint256 missingWei, uint256 budgetWei);
+    /// @notice A key-initiated swap's token price is older than min(maxPriceAge, maxTradePriceAge) (audit 2026-10
+    ///         lead "old prints"): bring a fresh signed price (executeWithPrices).
+    error StaleTradePrice(address token, uint64 publishedAt);
 
     event SessionKeySynced(address indexed key, uint64 validUntil);
     event EntryPointSynced(address indexed entryPoint);
@@ -366,6 +378,7 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
         if (!o.buy && o.amountIn > IERC20(o.token).balanceOf(address(this))) {
             revert IMMMandate.SpotShortNotAllowed();
         }
+        _requireTradePrice(reg, o.token);
 
         int256 before = SafeCast.toInt256(_hedgeValue(reg));
         (uint256 spent, uint256 received) = o.buy
@@ -415,6 +428,11 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
         if (o.amountIn > IERC20(o.token).balanceOf(address(this))) revert IMMMandate.SpotShortNotAllowed();
 
         IStockTokenRegistry reg = _registry();
+        // audit M-2 (fix round 2, N-I2): the split window defers the RISK flatten whatever the price's age (at
+        // the reopen the price is often stale too: the oracle drops pre-split rounds), so a stale price can
+        // never turn it into an unbounded sale at a pre-change reference
+        if (viaRisk) reg.checkPriceBasis(o.token);
+        else _requireTradePrice(reg, o.token);
         int256 before = viaRisk ? int256(0) : SafeCast.toInt256(_hedgeValue(reg));
         (uint256 spent, uint256 received) = _swap(o.venue, o.token, usdc, o.poolFee, o.amountIn, o.minAmountOut);
         _syncHeld(o.token);
@@ -422,9 +440,18 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
         uint256 notional;
         if (viaRisk) {
             // Emergency path (trusted role): never blocked by a stale price, but bounded when it is fresh.
+            // Audit M-2 (review I-4): in a split window the price is in pre-change shares and a sale would be
+            // unbounded (notional 0) at a 10x-off reference: deferred until the oracle reprices (bubbles
+            // MultiplierChangedSincePrice; LP exits never depend on a flatten).
             try reg.valueUsd(o.token, spent) returns (uint256 v) {
                 notional = v;
-            } catch {}
+            } catch (bytes memory err) {
+                if (err.length >= 4 && bytes4(err) == MULTIPLIER_CHANGED_SINCE_PRICE) {
+                    assembly ("memory-safe") {
+                        revert(add(err, 32), mload(err))
+                    }
+                }
+            }
             _checkSlippageBps(notional, received, riskMaxSlippageBps);
         } else {
             notional = reg.valueUsd(o.token, spent);
@@ -612,6 +639,19 @@ contract BookrunnerDesk is IBookrunnerDesk, IDeskKeySync, Initializable, Reentra
             uint256(IMMMandate(mandate).getMandate().maxInventoryUsd) * periodSlippageBudgetBps / BPS;
         if (used > budget) revert SlippageBudgetExceeded(used, budget);
         slippageUsedUsd[period] = used;
+    }
+
+    /// @dev Key-initiated swaps (Hedge, key Flatten) are valued at the token's oracle price, so that price must be as
+    ///      fresh as an engine trade's: publishedAt >= block.timestamp - min(maxPriceAge, maxTradePriceAge) (15 s by
+    ///      default). Without it a key could time its swap against a stored print up to maxPriceAge (300 s) old and
+    ///      still pass the slippage check (audit 2026-10 lead "old prints"). A held price is re-stamped by the oracle
+    ///      while the session is closed (the mandate's off-hours rules apply to it). The RISK flatten is exempt.
+    function _requireTradePrice(IStockTokenRegistry reg, address token) internal view {
+        uint256 maxAge = config.maxPriceAge();
+        uint256 tradeAge = IDeskConfigTradeAge(address(config)).maxTradePriceAge();
+        if (tradeAge < maxAge) maxAge = tradeAge;
+        uint64 at = IAttestedOracle(config.oracle()).latest(reg.getToken(token).priceId).publishedAt;
+        if (uint256(at) + maxAge < block.timestamp) revert StaleTradePrice(token, at);
     }
 
     function _requireSpotVenue(bytes32 v) internal pure {

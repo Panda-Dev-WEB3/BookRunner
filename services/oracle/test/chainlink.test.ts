@@ -111,6 +111,36 @@ describe("ChainlinkSource: refusals", () => {
     const next = await seen.src.observe("NVDA");
     if (!next.ok) throw new Error(next.reason);
     expect(next.uiMultiplier).toBe(1_05n * 10n ** 16n);
+    // audit M-2: a split (a step beyond the band) changes the share unit itself, so the round's per-share
+    // price is in OLD shares: dropped even though the round was seen before the change (the registry would
+    // value it at the new multiplier, 10x)
+    const split = setup();
+    const pre = await split.src.observe("NVDA");
+    if (!pre.ok) throw new Error(pre.reason);
+    split.reader.token = { uiMultiplier: 10n * V.uiMultiplierWad, newUIMultiplier: 10n * V.uiMultiplierWad, effectiveAt: T0S - 30n, oraclePaused: false };
+    const post = await split.src.observe("NVDA");
+    expect(post.ok).toBe(false);
+    if (!post.ok) expect(post.reason).toContain("share unit");
+    // reverse split too
+    split.reader.token = { uiMultiplier: V.uiMultiplierWad / 10n, newUIMultiplier: V.uiMultiplierWad / 10n, effectiveAt: T0S - 30n, oraclePaused: false };
+    expect((await split.src.observe("NVDA")).ok).toBe(false);
+    // the feed's first round after the split is usable again (divided by the new multiplier)
+    split.reader.token = { uiMultiplier: 10n * V.uiMultiplierWad, newUIMultiplier: 10n * V.uiMultiplierWad, effectiveAt: T0S - 30n, oraclePaused: false };
+    split.reader.rounds.set(FEED, { answer: V.feedAnswer, startedAt: T0S - 10n, updatedAt: T0S - 10n });
+    const fresh = await split.src.observe("NVDA");
+    if (!fresh.ok) throw new Error(fresh.reason);
+    expect(fresh.uiMultiplier).toBe(10n * V.uiMultiplierWad);
+    expect(fresh.price).toBeCloseTo(pre.price / 10, 6);
+    // review M-3: the split band follows the registry's governance band (setSplitBandBps), not a constant
+    const banded = setup();
+    expect(banded.src.splitBand).toBe(500);
+    expect((await banded.src.observe("NVDA")).ok).toBe(true);
+    banded.reader.token = { uiMultiplier: (V.uiMultiplierWad * 103n) / 100n, newUIMultiplier: (V.uiMultiplierWad * 103n) / 100n, effectiveAt: T0S - 30n, oraclePaused: false };
+    expect((await banded.src.observe("NVDA")).ok).toBe(true); // a 3% step: in the default 5% band
+    banded.src.setSplitBandBps(200); // governance narrowed the band to 2%
+    expect((await banded.src.observe("NVDA")).ok).toBe(false);
+    banded.src.setSplitBandBps(0); // invalid values are ignored
+    expect(banded.src.splitBand).toBe(200);
     // never seen (e.g. restart after the change): dropped
     const { reader, src } = setup();
     reader.token = { uiMultiplier: 10n * WAD, newUIMultiplier: 10n * WAD, effectiveAt: T0S - 30n, oraclePaused: false };

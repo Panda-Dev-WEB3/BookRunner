@@ -52,7 +52,7 @@ services:
       retries: 20
 
   redis:
-    image: redis:7-alpine
+    image: redis@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499 # 7-alpine (Redis 7.4.11)
     restart: unless-stopped
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
@@ -79,7 +79,7 @@ services:
       retries: 20
 
   redis-live:
-    image: redis:7-alpine
+    image: redis@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499 # 7-alpine (Redis 7.4.11)
     restart: unless-stopped
     environment:
       REDIS_PASSWORD: ${REDIS_LIVE_PASSWORD:-}

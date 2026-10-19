@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+pragma solidity ^0.8.24;
 
 /// @title IBkrnStaking — staking, bonds (locks) and slashing for $BKRN. Access and bonding only.
 interface IBkrnStaking {

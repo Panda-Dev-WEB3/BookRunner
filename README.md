@@ -14,6 +14,7 @@ The underwriting syndicate for on-chain perp markets.
 [![TypeScript](https://img.shields.io/badge/TypeScript-6.0-3178C6?logo=typescript&logoColor=white)](tsconfig.base.json)
 [![Network](https://img.shields.io/badge/network-Robinhood%20Chain%20testnet-2f5bea)](https://bookrunner.tech/status/)
 [![Status](https://img.shields.io/badge/status-testnet-orange)](#disclaimer)
+[![License](https://img.shields.io/badge/license-BUSL--1.1-blue)](LICENSE)
 [![Follow on X](https://img.shields.io/badge/follow-%40TryBookRunner-000000?logo=x&logoColor=white)](https://x.com/TryBookRunner)
 
 [Website](https://bookrunner.tech) · [App](https://bookrunner.tech/app/) · [Live desk](https://bookrunner.tech/dashboard/) · [Status](https://bookrunner.tech/status/) · [Docs](#documentation) · [X](https://x.com/TryBookRunner)
@@ -26,7 +27,8 @@ The underwriting syndicate for on-chain perp markets.
 
 > [!IMPORTANT]
 > **Testnet only.** Bookrunner runs on Robinhood Chain testnet with test tokens and no real funds. The
-> contracts have had an internal security review; an independent external audit is planned before mainnet.
+> contracts have had an internal security review and an external AI audit grade (October 2026, every finding fixed or
+> accepted: [docs/AUDIT-2026-10.md](docs/AUDIT-2026-10.md)); an independent human audit is planned before mainnet.
 
 ## What is Bookrunner
 
@@ -260,17 +262,27 @@ bash scripts/forge.sh test -vvv --match-contract WaterfallParityTest
 ./node_modules/.bin/bun run lint:copy
 ```
 
-The Foundry suite has 1,188 passing tests: unit, fuzz and invariant tests (waterfall conservation, redemptions
+The Foundry suite has 1,240 passing tests: unit, fuzz and invariant tests (waterfall conservation, redemptions
 never blocked by permission, engine exposure caps, adapter fund routing), Solidity / TypeScript waterfall parity
 vectors, and the security-review regressions in [`contracts/test/audit/`](contracts/test/audit). Service unit
-tests run with `bun test` and need no running infrastructure.
+tests run with `bun test` and need no running infrastructure; the integration tests (`BKRN_IT=1`) run with
+`bash scripts/ci-integration.sh` against Postgres/Timescale, Redis and anvil.
+
+CI (GitHub Actions, [`.github/workflows`](.github/workflows)) runs all of it on every pull request: the Foundry
+suite at the `ci` profile (every invariant suite at 102,400 calls or more), the TypeScript unit tests, type checks
+and copy linter, the integration suite, and the scanners (gitleaks, Slither with a reviewed allowlist, Semgrep).
+Actions are pinned by commit SHA and images by digest; no secrets are needed.
 
 ## Security
 
 - **Internal review.** A seven-area internal security review of the contracts found 31 issues, 4 of them High.
   All are fixed, each with a regression test in [`contracts/test/audit/`](contracts/test/audit).
-- **Not yet independently audited.** An independent external audit is planned before mainnet, followed by a bug
-  bounty. Scope and severity guide: [docs/BOUNTY_SCOPE.md](docs/BOUNTY_SCOPE.md).
+- **External AI audit grade (October 2026).** 4 Medium, 3 Low, privileged-operation items and leads, each fixed with a
+  regression test or accepted with its rationale: [docs/AUDIT-2026-10.md](docs/AUDIT-2026-10.md). Every protocol
+  invariant is linked to the tests that check it ([docs/INVARIANTS.md](docs/INVARIANTS.md)); mutation testing of the
+  core contracts: [docs/MUTATION-2026-10.md](docs/MUTATION-2026-10.md).
+- **Not yet independently audited by humans.** An independent human audit is planned before mainnet, followed by a
+  bug bounty. Scope and severity guide: [docs/BOUNTY_SCOPE.md](docs/BOUNTY_SCOPE.md).
 - **Redemptions are never blocked by permission.** The pause switch (`setNewBooksPaused`) stops new charters,
   books and deposits only; only lack of liquidity may delay a claim.
 - **Reporting.** Please report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
@@ -322,6 +334,15 @@ tests run with `bun test` and need no running infrastructure.
 | [SECURITY.md](SECURITY.md) | How to report a vulnerability |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup, conventions, pull request checklist |
 
+## License
+
+Business Source License 1.1 ([LICENSE](LICENSE)). Licensor: Panda-Dev-WEB3 (BookRunner). Non-production use is
+free; there is no Additional Use Grant. Each version becomes available under the MIT License on its Change Date,
+2030-10-18 at the latest.
+
+The contract interfaces (`contracts/src/interfaces/`) and `contracts/src/libraries/UniswapV3Twap.sol` are not part of
+the licensed work: they are MIT ([LICENSE-MIT](LICENSE-MIT)), so integrators can import them freely.
+
 ## Contact
 
 - Website: https://bookrunner.tech
@@ -334,5 +355,5 @@ tests run with `bun test` and need no running infrastructure.
 Bookrunner is software; it is not a fund, adviser, broker or venue operator of record. Stock-perp books are not
 offered to US persons. The deployment at bookrunner.tech runs on Robinhood Chain testnet with test tokens only:
 nothing on it has monetary value, and no real funds should be sent to any address shown there. The contracts
-have had an internal security review but have not yet been independently audited. Nothing in this repository is
-an offer, a solicitation or investment advice.
+have had an internal security review and an AI audit grade but have not yet been audited by humans. Nothing in
+this repository is an offer, a solicitation or investment advice.

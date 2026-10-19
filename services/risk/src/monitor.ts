@@ -3,23 +3,26 @@
 import {
   HEDGE_BAND_GRACE_SECONDS,
   type LimitsSnapshot,
+  type MonitorStateSig,
+  RISK_STATE_RESIGN_MS,
   type Logger,
   type QuotingVenue,
   RECEIPT_KIND,
   VENUE,
   bytes32ToStr,
 } from "@bookrunner/shared";
+import type { Hex } from "viem";
 import type { RiskSettings } from "./config";
 import { type Evaluation, evaluate } from "./domain/evaluate";
 import { trustLiveVenueEquity, venueDeployedValue } from "./domain/nav";
 import { oracleFromRedis, oraclePrice } from "./domain/oracle";
 import { finite, jsonSafe, receiptRow, usdNum, usdStr } from "./domain/records";
-import { type Effect, decide, newKillJournal } from "./domain/transitions";
+import { type Effect, decide, isJournalComplete, newKillJournal } from "./domain/transitions";
 import { dedupe, emitDomainEvent } from "./events";
 import { runKillSequence } from "./kill/sequence";
 import { reportDeployedValueUsd } from "../../ops-venue/src/report712";
 import { pickVenueReport } from "./domain/venueReport";
-import type { BusPort, ChainPort, Clock, QueuePort, SignedFeedsPort, SignedPriceMap, StorePort, VenueProvider } from "./ports";
+import type { BusPort, ChainPort, Clock, QueuePort, RiskBusAuth, SignedFeedsPort, SignedPriceMap, StorePort, VenueProvider } from "./ports";
 import {
   type BookObservation,
   type BookRef,
@@ -28,6 +31,7 @@ import {
   type ExposureSource,
   type LiveNav,
   type MonitorState,
+  type QuoteObservation,
   type RiskMeta,
   type RiskStatePayload,
   initialMonitorState,
@@ -48,6 +52,11 @@ export interface MonitorDeps {
   feeds?: SignedFeedsPort;
   /** Chain the signed venue reports must be signed for. */
   chainId?: number;
+  /**
+   * Authenticated bus messages (audit 2026-10 lead "Redis trust"): agent quotes are checked only when signed by an
+   * active desk key, kill orders are RISK-signed. Absent (tests of other behaviour): quotes trusted, kills unsigned.
+   */
+  auth?: RiskBusAuth;
 }
 
 const NO_PRICES: SignedPriceMap = new Map();
@@ -57,6 +66,9 @@ export interface TickResult {
   effects: Array<Effect["kind"]>;
   killComplete: boolean | null;
 }
+
+/** A restored kill journal corroborated only by its own signed KillOrder resumes when the copy is at most this old. */
+const RESTORE_KILL_MAX_AGE_MS = 10 * 60_000;
 
 /** Persisted state is read at most this many times before the monitor proceeds without it. */
 const RESTORE_ATTEMPTS = 5;
@@ -76,6 +88,15 @@ export class BookMonitor {
   private prices: SignedPriceMap = NO_PRICES;
   /** asOf of the signed venue report the current tick valued the venue with (null: none used) */
   private venueReportAsOf: number | null = null;
+  /** authentication of the quote read this tick (null: none read / no auth) */
+  private quoteAuth: RiskMeta["quoteAuth"] = null;
+  /** the last quote accepted (signed, fresh, newer, verified print); kept until a newer one, aged out by the evaluation */
+  private acceptedQuote: QuoteObservation | null = null;
+  /** the last signed copy of the state machine (re-signed when it changes materially or after RISK_STATE_RESIGN_MS) */
+  private monitorSig: { key: string; sig: MonitorStateSig<MonitorState> } | null = null;
+  /** the last signed state (re-signed on change or after RISK_STATE_RESIGN_MS) */
+  private stateSig: { state: string; tsMs: number; signature: Hex } | null = null;
+  private lastForgedQuoteLog = Number.NEGATIVE_INFINITY;
   readonly log: Logger;
 
   constructor(
@@ -83,6 +104,26 @@ export class BookMonitor {
     private readonly d: MonitorDeps,
   ) {
     this.log = d.log.child({ bookId: ref.bookId });
+  }
+
+  /**
+   * The RISK-key signature of the state published this tick (the agent acts only on signed states, audit 2026-10 lead
+   * "Redis trust"): re-signed when the state changes or the last signature is RISK_STATE_RESIGN_MS old. A signing
+   * failure publishes unsigned (agents then go reduce-only after their timeout, never further).
+   */
+  private async signState(state: LimitsSnapshot["state"], nowMs: number): Promise<{ tsMs: number; signature: Hex } | undefined> {
+    const sign = this.d.auth?.signState;
+    if (!sign) return undefined;
+    const prev = this.stateSig;
+    if (prev && prev.state === state && nowMs - prev.tsMs < RISK_STATE_RESIGN_MS && nowMs >= prev.tsMs) return { tsMs: prev.tsMs, signature: prev.signature };
+    try {
+      const signature = await sign.call(this.d.auth, { bookId: this.ref.bookId, state, tsMs: nowMs });
+      this.stateSig = { state, tsMs: nowMs, signature };
+      return { tsMs: nowMs, signature };
+    } catch (err) {
+      this.log.warn({ err: errMsg(err) }, "risk state signing failed (published unsigned)");
+      return undefined;
+    }
   }
 
   /** Current in-memory state machine (exposed for diagnostics/tests). */
@@ -102,13 +143,21 @@ export class BookMonitor {
     this.prices = feeds ? await this.soft("signedPrices", () => feeds.prices(), NO_PRICES) : NO_PRICES;
     const chainObs = await this.d.chain.observe(this.ref, this.prices.size ? this.prices : undefined); // RPC failure -> tick fails -> loop backs off
     const obs = await this.assemble(chainObs, nowMs);
-    const ev = evaluate(obs, this.state.band, {
-      quoteMaxAgeMs: s.quoteMaxAgeMs,
-      bandMaxGapSec: Math.max(60, Math.ceil((10 * s.intervalMs) / 1000)),
-    });
+    const ev = evaluate(
+      obs,
+      this.state.band,
+      {
+        quoteMaxAgeMs: s.quoteMaxAgeMs,
+        quoteDriftBps: s.quoteDriftBps,
+        quotePriceMaxAgeMs: s.quotePriceMaxAgeMs,
+        quoteHoldReleaseTicks: s.quoteHoldReleaseTicks,
+        bandMaxGapSec: Math.max(60, Math.ceil((10 * s.intervalMs) / 1000)),
+      },
+      this.state.quoteHold,
+    );
     const { next, effects } = decide({
       bookId: this.ref.bookId,
-      state: { ...this.state, band: ev.band },
+      state: { ...this.state, band: ev.band, quoteHold: ev.quoteHold },
       snapshot: ev.snapshot,
       killedOnChain: obs.killed,
       nowSec,
@@ -196,7 +245,29 @@ export class BookMonitor {
       const fromRedis = oracleFromRedis(msg, nowSec, c.maxPriceAgeSec);
       if (!oracle || fromRedis.publishedAt > oracle.publishedAt) oracle = fromRedis;
     }
-    const quote = await this.soft("latestQuote", () => this.d.bus.latestQuote(ref.bookId), null);
+    let quote = await this.soft("latestQuote", () => this.d.bus.latestQuote(ref.bookId), null);
+    this.quoteAuth = null;
+    const auth = this.d.auth;
+    if (auth) {
+      // Redis is not trusted: only a new, desk-key-signed quote priced on a verified print is accepted; anything else
+      // is no new quote (the last accepted one stays until it ages out). The quote is judged against its own print.
+      if (quote) {
+        const attested = oracle && (oracle.source === "chain" || oracle.source === "signed") ? { priceWad: oracle.priceWad, publishedAt: oracle.publishedAt } : null;
+        const res = await auth
+          .quote(ref, quote, { nowMs, lastAcceptedTs: this.acceptedQuote?.ts ?? 0, priceMaxAgeMs: this.d.settings.quotePriceMaxAgeMs, attested })
+          .catch(() => ({ status: "unavailable" as const }));
+        this.quoteAuth = res.status;
+        if (res.status === "ok" && res.refPx !== undefined) this.acceptedQuote = { ...quote, refPx: res.refPx };
+        else if (res.status === "forged") {
+          auth.forged?.("quote", `book ${ref.bookId}: quote signature invalid or not from a desk key of the mandate`);
+          if (nowMs - this.lastForgedQuoteLog > 60_000) {
+            this.lastForgedQuoteLog = nowMs;
+            this.log.warn({ bookId: ref.bookId }, "FORGED agent quote in Redis ignored (signature invalid or not from a desk key of the mandate)");
+          }
+        }
+      }
+      quote = this.acceptedQuote;
+    }
 
     return {
       bookId: ref.bookId,
@@ -210,6 +281,8 @@ export class BookMonitor {
       exposureSource,
       deskHedgeUsd: c.desk.hedgeNotionalUsd,
       deskPriceStale: c.desk.priceStale === true,
+      ...(c.desk.splitWindow ? { deskSplitWindow: true } : {}),
+      ...(c.desk.splitUntrusted ? { deskSplitUntrusted: true } : {}),
       nav: {
         vaultIdleUsd: c.vaultIdleUsd,
         unfundedClaimsUsd: c.unfundedClaimsUsd,
@@ -222,6 +295,7 @@ export class BookMonitor {
       },
       oracle,
       quote,
+      ...(c.lossBudget !== undefined ? { lossBudget: c.lossBudget } : {}),
     };
   }
 
@@ -243,7 +317,9 @@ export class BookMonitor {
   private async publish(obs: BookObservation, ev: Evaluation): Promise<void> {
     const snap = ev.snapshot;
     const meta = this.meta(obs, ev);
-    const payload = jsonSafe<RiskStatePayload>({ ...snap, meta });
+    const stateSig = await this.signState(snap.state, obs.nowMs);
+    const monitorSig = await this.signMonitor(obs.nowMs);
+    const payload = jsonSafe<RiskStatePayload>({ ...snap, meta, ...(stateSig ? { stateSig } : {}), ...(monitorSig ? { monitorSig } : {}) });
     this.lastPayload = payload;
     await this.soft("saveRiskState", () => this.d.bus.saveRiskState(this.ref.bookId, payload), undefined);
     await this.soft("saveLiveNav", () => this.d.bus.saveLiveNav(this.ref.bookId, this.liveNav(obs, ev)), undefined);
@@ -298,6 +374,18 @@ export class BookMonitor {
         source: obs.oracle.source,
       },
       quote: ev.quote,
+      quoteUnverified: ev.quoteUnverified,
+      lossBudget: obs.lossBudget
+        ? {
+            budgetBps: obs.lossBudget.budgetBps,
+            period: obs.lossBudget.period,
+            anchorEquityUsd: usdStr(obs.lossBudget.anchorEquityUsd),
+            lossUsd: usdStr(obs.lossBudget.lossUsd),
+            budgetUsd: usdStr(obs.lossBudget.budgetUsd),
+            blocked: obs.lossBudget.blocked,
+          }
+        : null,
+      quoteAuth: this.quoteAuth,
       hedgeBand: {
         inBand: ev.inBand,
         outOfBandSince: ev.band.outOfBandSince,
@@ -336,9 +424,69 @@ export class BookMonitor {
   /** Re-saves the last published risk state with the current state machine (journal included). */
   private async persist(): Promise<void> {
     if (!this.lastPayload) return;
-    const payload = jsonSafe<RiskStatePayload>({ ...this.lastPayload, meta: { ...this.lastPayload.meta, monitor: this.state } });
+    const monitorSig = await this.signMonitor(this.d.clock.nowMs());
+    const payload = jsonSafe<RiskStatePayload>({ ...this.lastPayload, meta: { ...this.lastPayload.meta, monitor: this.state }, ...(monitorSig ? { monitorSig } : {}) });
     this.lastPayload = payload;
     await this.soft("persistRiskState", () => this.d.bus.saveRiskState(this.ref.bookId, payload), undefined);
+  }
+
+  /**
+   * The RISK-signed copy of the state machine to persist (N-3): re-signed when its material part (breach episode, kill
+   * journal, handled kill, streak, last state) changes, or after RISK_STATE_RESIGN_MS; otherwise the last signed copy
+   * is re-used (risk restores that copy, never the unsigned meta.monitor). A signing failure persists none.
+   */
+  private async signMonitor(nowMs: number): Promise<MonitorStateSig<MonitorState> | undefined> {
+    const sign = this.d.auth?.signMonitor;
+    if (!sign) return undefined;
+    const s = this.state;
+    const key = JSON.stringify({ kill: s.kill, episode: s.episode, handledKill: s.handledKill, breachStreak: s.breachStreak, lastState: s.lastState, quoteHold: s.quoteHold });
+    const prev = this.monitorSig;
+    if (prev && prev.key === key && nowMs - prev.sig.tsMs < RISK_STATE_RESIGN_MS && nowMs >= prev.sig.tsMs) return prev.sig;
+    try {
+      const monitor = jsonSafe(s);
+      const signature = await sign.call(this.d.auth, { bookId: this.ref.bookId, monitor, tsMs: nowMs });
+      this.monitorSig = { key, sig: { tsMs: nowMs, monitor, signature } };
+      return this.monitorSig.sig;
+    } catch (err) {
+      this.log.warn({ err: errMsg(err) }, "risk monitor state signing failed (not persisted signed)");
+      return undefined;
+    }
+  }
+
+  /**
+   * The state machine to restore (N-3: Redis is not trusted). With authentication: only the copy THIS risk key signed
+   * (monitorSig) is restored; a missing one starts fresh, an unsigned / invalid / foreign one starts fresh and is
+   * counted as forged. A restored, unfinished kill journal resumes only when corroborated: the mandate is already
+   * killed on-chain, or the journal carries the episode's KillOrder signed by this risk key and the copy is at most
+   * RESTORE_KILL_MAX_AGE_MS old. Otherwise the journal is dropped and the book is re-evaluated from its limits.
+   */
+  private async restoredMonitor(p: RiskStatePayload | null): Promise<MonitorState | null> {
+    const auth = this.d.auth;
+    if (!auth?.isOwnMonitor) return p?.meta?.monitor ?? null;
+    const ms = p?.monitorSig;
+    if (!ms || typeof ms.signature !== "string") {
+      // a legacy (pre-signing) record, or none: start fresh, not a forgery (only a failing signature is counted)
+      if (p?.meta?.monitor) this.log.warn("persisted risk state carries no signature (legacy record): starting from a fresh state");
+      return null;
+    }
+    if (!(await auth.isOwnMonitor({ bookId: this.ref.bookId, monitor: ms.monitor, tsMs: ms.tsMs, signature: ms.signature }))) {
+      this.log.warn("persisted risk state signature invalid or from another signer: starting from a fresh state");
+      auth.forged?.("state", `book ${this.ref.bookId}: persisted risk state with an invalid signature`);
+      return null;
+    }
+    const m: MonitorState = { ...initialMonitorState(), ...ms.monitor };
+    if (m.kill && !isJournalComplete(m.kill)) {
+      const killedOnChain = await this.d.chain.isKilled(this.ref); // an RPC error retries the restore
+      const fresh = this.d.clock.nowMs() - ms.tsMs <= RESTORE_KILL_MAX_AGE_MS;
+      const ownOrder = fresh && auth.isOwnKillOrder ? await auth.isOwnKillOrder(this.ref.bookId, m.kill.episodeId, m.kill.killOrder) : false;
+      if (!killedOnChain && !ownOrder) {
+        this.log.warn({ episodeId: m.kill.episodeId, done: m.kill.done, ageMs: this.d.clock.nowMs() - ms.tsMs }, "restored kill journal not corroborated (mandate not killed on-chain, no signed KillOrder of this episode): dropped; limits re-evaluated");
+        m.kill = null;
+        m.episode = null;
+        m.breachStreak = 0;
+      }
+    }
+    return m;
   }
 
   private async restore(): Promise<void> {
@@ -349,7 +497,8 @@ export class BookMonitor {
       if (p?.meta?.monitor && !sameDeployment) {
         this.log.warn({ storedMandate: p.meta.mandate ?? null }, "persisted risk state belongs to another deployment; ignoring it");
       } else if (p?.meta?.monitor) {
-        this.state = { ...initialMonitorState(), ...p.meta.monitor };
+        const restored = await this.restoredMonitor(p);
+        if (restored) this.state = { ...initialMonitorState(), ...restored };
         this.log.info(
           { lastState: this.state.lastState, killJournal: this.state.kill?.episodeId ?? null, handledKill: this.state.handledKill },
           "restored risk state",
@@ -462,6 +611,7 @@ export class BookMonitor {
         venue,
         clock: this.d.clock,
         sleep: this.d.sleep,
+        ...(this.d.auth ? { signKill: this.d.auth.signKill.bind(this.d.auth) } : {}),
       },
     );
     if (res.complete) {

@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 
@@ -100,7 +100,7 @@ contract EngineMandateIntegrationTest is EngineBase {
         c.oracle = BRTypes.ORACLE_ATTESTED;
         c.ifTargetUsd = 25_000e6;
         c.mmInventoryUsd = 100_000e6;
-        c.mandate = _terms(MAX_INV, 10, 25);
+        c.mandate = _terms(MAX_INV, 10, 5);
         c.sponsor = sponsor;
         c.symbol = bytes32("RHX5-PERP");
         c.takerFeeBps = 6;
@@ -171,7 +171,7 @@ contract EngineMandateIntegrationTest is EngineBase {
         engine.trade(mid, 1e18, type(uint256).max);
 
         vm.prank(committee);
-        mandate.remandate(_terms(MAX_INV, 10, 25));
+        mandate.remandate(_terms(MAX_INV, 10, 5));
         assertFalse(mandate.killed());
         // still no new risk until a freshly registered key quotes under the new terms
         assertTrue(engine.state(mid).reduceOnly);
@@ -186,7 +186,7 @@ contract EngineMandateIntegrationTest is EngineBase {
     ///      a quote landing in between never re-opens the market, and the kill then revokes the key.
     function test_killNotWeakened_riskReduceOnlyNeverLiftedByQuote() public {
         vm.prank(committee);
-        mandate.remandate(_terms(MAX_INV, 10, 25));
+        mandate.remandate(_terms(MAX_INV, 10, 5));
         _register(key2, MAX_INV);
         vm.prank(risk);
         adapter.setReduceOnly(true);
@@ -206,15 +206,15 @@ contract EngineMandateIntegrationTest is EngineBase {
     // ------------------------------------------------------------------ remandate-stale-engine-quote
 
     function test_regression_remandateClampsLiveEngineQuote() public {
-        _quote(key, 12, 20, MAX_INV);
-        // tightening re-mandate without a kill: maxInventory 30k, width >= 15, |skew| <= 10
+        _quote(key, 12, 5, MAX_INV);
+        // tightening re-mandate without a kill: maxInventory 30k, width >= 15, |skew| <= 3
         vm.prank(committee);
-        mandate.remandate(_terms(30_000e6, 15, 10));
+        mandate.remandate(_terms(30_000e6, 15, 3));
         IPoolEngine.MarketState memory s = engine.state(mid);
         assertLe(engine.config(mid).maxNetExposureUsd, 30_000e6, "cap within the new maxInventoryUsd");
         assertGe(s.spreadBps, 15, "spread within the new min width");
-        assertLe(s.skewBps, 10, "skew within the new max skew");
-        assertGe(s.skewBps, -10, "skew within the new max skew");
+        assertLe(s.skewBps, 3, "skew within the new max skew");
+        assertGe(s.skewBps, -3, "skew within the new max skew");
         // until a fresh key quotes, no trader can add risk at the old terms (keys were revoked)
         vm.prank(alice);
         vm.expectPartialRevert(PoolEngine.MarketReduceOnly.selector);
@@ -245,7 +245,7 @@ contract EngineMandateIntegrationTest is EngineBase {
         assertEq(adapter.deployedValueUsd(), 0);
         // a re-mandate during the wind-down never re-opens the market
         vm.prank(committee);
-        mandate.remandate(_terms(MAX_INV, 10, 25));
+        mandate.remandate(_terms(MAX_INV, 10, 5));
         _register(key2, MAX_INV);
         _quote(key2, 10, 0, MAX_INV);
         assertTrue(engine.state(mid).reduceOnly);

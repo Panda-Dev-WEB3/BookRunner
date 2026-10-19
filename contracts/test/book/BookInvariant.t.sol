@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {StdInvariant} from "forge-std/StdInvariant.sol";
 import {console2} from "forge-std/console2.sol";
@@ -61,7 +61,7 @@ contract BookInvariantTest is StdInvariant, BookFixture {
             actors
         );
         targetContract(address(handler));
-        bytes4[] memory selectors = new bytes4[](32);
+        bytes4[] memory selectors = new bytes4[](34);
         uint256 k;
         // weights: redemption requests x4, claims x4, marks x5, warps x2
         for (uint256 w = 0; w < 4; w++) {
@@ -71,6 +71,9 @@ contract BookInvariantTest is StdInvariant, BookFixture {
         for (uint256 w = 0; w < 5; w++) {
             selectors[k++] = BookHandler.mark.selector;
         }
+        // audit M-1: held marks (P&L only, settlement deferred) x2
+        selectors[k++] = BookHandler.heldMark.selector;
+        selectors[k++] = BookHandler.heldMark.selector;
         selectors[k++] = BookHandler.warp.selector;
         selectors[k++] = BookHandler.warp.selector;
         selectors[k++] = BookHandler.requestRedeemViaOperator.selector;
@@ -96,25 +99,38 @@ contract BookInvariantTest is StdInvariant, BookFixture {
 
     /// @dev (a) RED-TEAM: redemption never permission-gated.
     /// forge-config: default.invariant.fail-on-revert = true
+    /// forge-config: ci.invariant.fail-on-revert = true
     function invariant_redemptionNeverPermissionGated() public view {
         assertFalse(handler.permissionViolation(), handler.lastViolationTag());
     }
 
     /// @dev (b) waterfall conservation after each applyMark.
     /// forge-config: default.invariant.fail-on-revert = true
+    /// forge-config: ci.invariant.fail-on-revert = true
     function invariant_waterfallConservation() public view {
         assertFalse(handler.conservationViolation(), "S + J != marked NAV + backstop cover - repayment");
     }
 
     /// @dev marks and retirement are never blocked.
     /// forge-config: default.invariant.fail-on-revert = true
+    /// forge-config: ci.invariant.fail-on-revert = true
     function invariant_marksNeverBlocked() public view {
         assertFalse(handler.markViolation(), handler.lastViolationTag());
         assertFalse(handler.finalizeViolation(), handler.lastViolationTag());
     }
 
+    /// @dev audit M-1: held marks inside the deferral bound settle nothing (lastSettledIndex and the top-up round
+    ///      untouched); the first settling mark clears every due bucket (within MAX_SETTLE_BUCKETS per tranche).
+    /// forge-config: default.invariant.fail-on-revert = true
+    /// forge-config: ci.invariant.fail-on-revert = true
+    function invariant_heldMarksDeferSettlement() public view {
+        assertFalse(handler.heldSettlementViolation(), "a held mark inside the bound settled something");
+        assertFalse(handler.dueBucketViolation(), "a settling mark left a due bucket pending");
+    }
+
     /// @dev book accounting identity (venue value is always marked immediately by the handler).
     /// forge-config: default.invariant.fail-on-revert = true
+    /// forge-config: ci.invariant.fail-on-revert = true
     function invariant_accountingIdentity() public view {
         (uint256 lhs, uint256 rhs) = _accountingIdentity();
         assertEq(lhs, rhs, "S + J + unfunded != idle + deployed");
@@ -122,6 +138,7 @@ contract BookInvariantTest is StdInvariant, BookFixture {
 
     /// @dev (c) claimable <= escrow + unfunded, per tranche.
     /// forge-config: default.invariant.fail-on-revert = true
+    /// forge-config: ci.invariant.fail-on-revert = true
     function invariant_claimableCovered() public view {
         _checkClaimable(senior, BRTypes.SENIOR);
         _checkClaimable(junior, BRTypes.JUNIOR);
@@ -139,6 +156,7 @@ contract BookInvariantTest is StdInvariant, BookFixture {
 
     /// @dev tranche shares are only ever held by known parties or in escrow.
     /// forge-config: default.invariant.fail-on-revert = true
+    /// forge-config: ci.invariant.fail-on-revert = true
     function invariant_supplyAccounted() public view {
         _checkSupply(senior);
         _checkSupply(junior);
@@ -188,13 +206,37 @@ contract BookInvariantTest is StdInvariant, BookFixture {
         handler.mark(0, 0);
         handler.claim(1, 0, 1, 0);
 
+        // audit M-1: a request during a held session defers to the first non-held mark
+        handler.requestRedeem(1, 0, 1000e6, 1); // bob senior
+        handler.heldMark(-100, 0);
+        handler.heldMark(0, 0);
+        assertGt(handler.heldDeferred(), 1, "held marks deferred");
+        handler.mark(0, 0);
+        assertGt(handler.settlingMarksWithDue(), 0, "a settling mark cleared due buckets");
+        assertFalse(handler.heldSettlementViolation());
+        assertFalse(handler.dueBucketViolation());
+
         // losses through Junior into Senior with a backstop
         handler.fundBackstop(20_000e6);
         handler.mark(-5000, 0);
         handler.mark(-5000, 0);
         assertGt(handler.backstopCovers(), 0, "backstop covers");
 
-        // fee flow + top-up round
+        // fee flow + top-up round. Audit L-1: a fee residual restores Senior and repays the backstop before Junior,
+        // so fee flow first clears what the losses left owed; only then does Junior get a non-zero price again.
+        (uint256 debt,) = book.backstopDebt();
+        assertGt(debt + book.seniorImpairment(), 0, "the losses left Senior / the backstop owed");
+        for (uint256 i = 0; i < 40 && debt + book.seniorImpairment() > 0; i++) {
+            (, uint256 j0) = book.trancheNav();
+            handler.credit(0, 5000e6);
+            (, uint256 j1) = book.trancheNav();
+            (debt,) = book.backstopDebt();
+            if (debt + book.seniorImpairment() > 0) {
+                assertEq(j1, j0, "Junior gets nothing while Senior or the backstop is owed");
+            }
+        }
+        assertEq(debt, 0, "backstop repaid from fee flow");
+        assertEq(book.seniorImpairment(), 0, "Senior restored from fee flow");
         handler.credit(3000e6, 3000e6);
         handler.openTopUp(300, 50_000e6, 50_000e6);
         handler.depositTopUp(3, 1, 10_000e6); // dave junior

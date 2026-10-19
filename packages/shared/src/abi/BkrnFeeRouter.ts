@@ -251,6 +251,19 @@ export const bkrnFeeRouterAbi = [
   },
   {
     "type": "function",
+    "name": "migrate",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "moved",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "notifyCarry",
     "inputs": [
       {
@@ -258,6 +271,19 @@ export const bkrnFeeRouterAbi = [
         "type": "uint256",
         "internalType": "uint256"
       },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "notifyMigration",
+    "inputs": [
       {
         "name": "amount",
         "type": "uint256",
@@ -622,6 +648,44 @@ export const bkrnFeeRouterAbi = [
   },
   {
     "type": "event",
+    "name": "Migrated",
+    "inputs": [
+      {
+        "name": "to",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "MigrationReceived",
+    "inputs": [
+      {
+        "name": "from",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "ReferenceSourceSet",
     "inputs": [
       {
@@ -802,6 +866,11 @@ export const bkrnFeeRouterAbi = [
         "internalType": "address"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "StillCurrent",
+    "inputs": []
   },
   {
     "type": "error",

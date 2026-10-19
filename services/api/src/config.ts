@@ -32,6 +32,11 @@ export const apiEnvShape = {
     .transform((v) => v !== "false" && v !== "0"),
   /** TTL (seconds) of cached chain reads (wallet positions, protocol params). */
   CHAIN_CACHE_TTL_SECONDS: z.coerce.number().int().min(0).default(5),
+  /**
+   * Memory bound of the receipts tree cache (audit M-4), in leaves (~700 bytes each): closed hours' Merkle
+   * trees are kept for receipts.proof / receipts.root. 100,000 leaves ~ 70 MB.
+   */
+  API_RECEIPT_CACHE_LEAVES: z.coerce.number().int().min(1).default(100_000),
   /** Oracle staleness bound used for display when the chain is not reachable. */
   MAX_PRICE_AGE_SECONDS: z.coerce.number().int().min(1).default(300),
 };

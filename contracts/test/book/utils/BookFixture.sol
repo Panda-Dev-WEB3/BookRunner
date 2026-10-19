@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
@@ -67,7 +67,7 @@ abstract contract BookFixture is Test {
         c.mmInventoryUsd = 75_000e6;
         c.mandate = BRTypes.Mandate({
             maxInventoryUsd: 50_000e6,
-            maxSkewBps: 25,
+            maxSkewBps: 4,
             minQuoteWidthBps: 8,
             maxHedgeLeverage: 100,
             hedgeRatioMinBps: 5000,
@@ -185,6 +185,14 @@ abstract contract BookFixture is Test {
     }
 
     function _commitMark(uint64 periodEnd, uint256 deployed, uint64 nonce) internal returns (uint256 id) {
+        id = _commitMark(periodEnd, deployed, nonce, false);
+    }
+
+    /// @dev `held`: the valuation used a held oracle price (audit M-1: P&L only, settlement deferred).
+    function _commitMark(uint64 periodEnd, uint256 deployed, uint64 nonce, bool held)
+        internal
+        returns (uint256 id)
+    {
         BRTypes.MarkInput memory m = BRTypes.MarkInput({
             bookId: BOOK_ID,
             periodEnd: periodEnd,
@@ -193,7 +201,8 @@ abstract contract BookFixture is Test {
             flowNonce: nonce,
             inventoryRoot: bytes32(0),
             pnlJsonHash: bytes32(0),
-            receiptsRoot: bytes32(0)
+            receiptsRoot: bytes32(0),
+            held: held
         });
         id = registry.commit(m, "");
     }
@@ -206,11 +215,21 @@ abstract contract BookFixture is Test {
 
     /// @dev Everything _markWithPnl does except applying the mark.
     function _prepareMark(int256 pnl) internal returns (uint256 id) {
+        id = _prepareMark(pnl, false);
+    }
+
+    function _prepareMark(int256 pnl, bool held) internal returns (uint256 id) {
         vm.warp(((block.timestamp / INTERVAL) + 1) * INTERVAL);
         uint256 v = adapter.value();
         uint256 nv = pnl >= 0 ? v + uint256(pnl) : (uint256(-pnl) > v ? 0 : v - uint256(-pnl));
         adapter.setValue(nv);
-        id = _commitMark(_nextPeriodEnd(), nv, book.flowNonce());
+        id = _commitMark(_nextPeriodEnd(), nv, book.flowNonce(), held);
+    }
+
+    /// @dev _markWithPnl for a mark valued at a held price.
+    function _heldMarkWithPnl(int256 pnl) internal returns (uint256 id) {
+        id = _prepareMark(pnl, true);
+        book.applyMark(id);
     }
 
     /// @dev Recall `amount` from the MM account as KEEPER (sync on the mock venue).

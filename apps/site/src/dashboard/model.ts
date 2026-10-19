@@ -493,3 +493,11 @@ export function termsView(d: BookDetail): TermsView {
 /** The connected wallet is this book's sponsor (it may open top-up rounds and register keys). */
 export const isSponsor = (d: BookDetail | null | undefined, wallet: string | null): boolean =>
   !!wallet && !!d?.charter && d.charter.sponsor.toLowerCase() === wallet.toLowerCase();
+
+/**
+ * MarketCharter.validate rejects a Junior notice below config.markInterval() (audit M-1). The interval is the
+ * one the books report (all books share the network's); unknown: at least 1 second (the interval is never 0).
+ */
+export function juniorNoticeMinSeconds(markIntervalSeconds: number | null | undefined): number {
+  return markIntervalSeconds && markIntervalSeconds > 0 ? markIntervalSeconds : 1;
+}

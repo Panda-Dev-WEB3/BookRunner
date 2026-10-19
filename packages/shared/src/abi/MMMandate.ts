@@ -1457,6 +1457,22 @@ export const mMMandateAbi = [
   },
   {
     "type": "error",
+    "name": "QuoteOneSided",
+    "inputs": [
+      {
+        "name": "spreadBps",
+        "type": "uint16",
+        "internalType": "uint16"
+      },
+      {
+        "name": "skewBps",
+        "type": "int16",
+        "internalType": "int16"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "QuoteWidthTooNarrow",
     "inputs": [
       {

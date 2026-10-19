@@ -1,8 +1,10 @@
 // risk service entry: wiring + graceful shutdown. See ARCHITECTURE.md §3 flow 4 and §4 (risk row).
 import { createDb } from "@bookrunner/db";
-import { assertVenueSymbolConfig, createLogger, publicClientFor, roleSigner, tryLoadDeployment, walletClientFor } from "@bookrunner/shared";
+import { FORGED_WINDOW_SEC, ForgedLog, KEYS, assertVenueSymbolConfig, busJson, createLogger, oracleSignerCheck, publicClientFor, roleSigner, tryLoadDeployment, walletClientFor } from "@bookrunner/shared";
+import { attestedOracleAbi, mMMandateAbi } from "@bookrunner/shared/abi";
 import { Redis } from "ioredis";
 import { type Hex, zeroHash } from "viem";
+import { riskBusAuth } from "./adapters/busAuth";
 import { ViemChain } from "./adapters/chain";
 import { RedisMarkFeeds, chainVerifier } from "../../mark/src/adapters/feeds";
 import { DrizzleStore } from "./adapters/db";
@@ -82,6 +84,21 @@ async function main(): Promise<void> {
       new CachedSignedFeeds(new RedisMarkFeeds(redis, chainVerifier(pub, { config: dep.contracts.config, oracle: dep.contracts.oracle }, env.CHAIN_ID), log), {
         ttlMs: Math.max(250, Math.floor(settings.intervalMs / 2)),
         timeoutMs: env.RISK_REDIS_TIMEOUT_MS,
+      }),
+    // Redis is not trusted (audit 2026-10 lead): only agent quotes signed by an active desk key of the book's mandate
+    // are checked (a forged quote can never cause a breach), and kill orders are signed with the RISK key
+    makeAuth: (dep) =>
+      riskBusAuth({
+        chainId: env.CHAIN_ID,
+        config: dep.contracts.config,
+        account,
+        deskKeyStatus: async (mandate, key) => {
+          if (await pub.readContract({ address: mandate, abi: mMMandateAbi, functionName: "isActiveKey", args: [key] })) return "active";
+          const k = await pub.readContract({ address: mandate, abi: mMMandateAbi, functionName: "getKey", args: [key] });
+          return k.validUntil > 0n ? "inactive" : "unknown";
+        },
+        oracle: oracleSignerCheck({ chainId: env.CHAIN_ID, oracle: dep.contracts.oracle, isSignerOnChain: (a) => pub.readContract({ address: dep.contracts.oracle, abi: attestedOracleAbi, functionName: "isSigner", args: [a] }) }),
+        forged: new ForgedLog("risk", async (m) => void (await redis.set(KEYS.busForged("risk"), busJson(m), "PX", FORGED_WINDOW_SEC * 1000))),
       }),
     makeVenues: (chain: ChainGateway) =>
       new OrderlyVenueProvider({

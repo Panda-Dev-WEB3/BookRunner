@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+pragma solidity ^0.8.24;
 
 /// @title IStockTokenRegistry — canonical Stock Token registry + multiplier-aware valuer.
 /// @notice A Stock Token's `multiplier` (WAD) = shares of the underlying equity represented by 1 whole
@@ -45,6 +45,18 @@ interface IStockTokenRegistry {
     /// @notice Effective multiplier (WAD) used by the valuation: stored, or the token's live `uiMultiplier()`
     ///         when `multiplierFromToken(token)` (reverts outside the band around the anchor).
     function multiplierOf(address token) external view returns (uint256);
+    /// @notice When the effective multiplier last changed (unix seconds; 0 = never or unknown). Audit M-2:
+    ///         `valueUsd` refuses a price whose share basis predates it.
+    function multiplierChangedAt(address token) external view returns (uint256);
+    /// @notice Engine split gate for a market's price id (audit N-1): `pending` = close-only (an out-of-band
+    ///         change is pre-approved or staged), `window` = the price's share basis `basisAt` predates a change
+    ///         (no voluntary trade).
+    function splitGate(bytes32 priceId, uint64 basisAt) external view returns (bool pending, bool window);
+    /// @notice Multiplier in force at a price basis `basisAt` (0 = unknown): the on-chain source off-chain
+    ///         valuations use in the split window.
+    function basisMultiplier(address token, uint64 basisAt) external view returns (uint256);
+    /// @notice Reverts while the stored price's share basis predates the multiplier change (any price age).
+    function checkPriceBasis(address token) external view;
 
     event TokenRegistered(address indexed token, bytes32 indexed priceId, uint256 multiplierWad);
     event MultiplierSet(address indexed token, uint256 multiplierWad);

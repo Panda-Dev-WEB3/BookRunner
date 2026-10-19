@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 /// @notice Test/devnet Chainlink AggregatorV3 (proxy-shaped reads only). Open setter — never deploy to mainnet.
 contract MockAggregatorV3 {

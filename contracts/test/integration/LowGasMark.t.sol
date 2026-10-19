@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
@@ -310,7 +310,7 @@ abstract contract LowGasMarkBase is Test {
         c.mmInventoryUsd = MM_INVENTORY;
         c.mandate = BRTypes.Mandate({
             maxInventoryUsd: 50_000e6,
-            maxSkewBps: 25,
+            maxSkewBps: 4,
             minQuoteWidthBps: 8,
             maxHedgeLeverage: 100,
             hedgeRatioMinBps: 5000,
@@ -349,7 +349,8 @@ abstract contract LowGasMarkBase is Test {
             flowNonce: nonce,
             inventoryRoot: keccak256("inventory"),
             pnlJsonHash: keccak256("pnl.json"),
-            receiptsRoot: keccak256("receipts")
+            receiptsRoot: keccak256("receipts"),
+            held: false
         });
     }
 
@@ -495,6 +496,49 @@ contract LowGasMarkTest is LowGasMarkBase {
         assertEq(id2, 2);
         assertEq(book.lastMarkPeriodEnd(), p2);
         assertEq(adapter.deployedValueUsd(), 100_700e6);
+    }
+
+    /// @notice Audit M-1 end to end on the real stack: a signed held mark relayed through the real
+    ///         MarkRegistry.commitAndApply books its P&L but settles nothing; flipping `held` breaks the signature;
+    ///         the next (non-held) mark settles the queued redemption at its own price.
+    function test_atomicMark_heldMark_defersSettlement_endToEnd() public {
+        vm.prank(alice);
+        senior.requestRedeem(10_000e6, alice, alice);
+        _toMarkTime();
+        (BRTypes.MarkInput memory m,, bytes memory priceData, bytes memory venueReport) = _keeperInputs();
+        m.held = true;
+        bytes memory sig = _signMark(m);
+
+        // a relayer cannot turn the signed held mark into a settling one
+        BRTypes.MarkInput memory flipped = _mark(m.periodEnd, m.deployedValueUsd, m.flowNonce); // held: false
+        vm.prank(relayer);
+        vm.expectPartialRevert(MarkRegistry.NotMarkSigner.selector);
+        registry.commitAndApply(flipped, sig, priceData, venueReport);
+
+        vm.expectEmit(true, true, false, true, address(book));
+        emit Book.MarkHeld(BOOK_ID, 1, p1, false);
+        vm.prank(relayer);
+        uint256 id = registry.commitAndApply(m, sig, priceData, venueReport);
+        assertTrue(registry.getMark(id).input.held, "held stored with the mark");
+        assertTrue(registry.getMark(id).applied);
+        // P&L booked (+1,200), nothing settled
+        (uint256 s, uint256 j) = book.trancheNav();
+        assertEq(s + j, 101_200e6);
+        assertEq(senior.totalSupply(), 70_000e6, "alice's bucket not settled at the held mark");
+        assertEq(book.unfundedClaims(), 0);
+        assertEq(book.heldSince(), p1);
+
+        // next day, live price: settles at this mark's price
+        vm.warp(uint256(p1) + INTERVAL + 300);
+        uint64 p2 = p1 + INTERVAL;
+        BRTypes.MarkInput memory m2 = _mark(p2, 100_700e6, book.flowNonce());
+        vm.prank(keeper);
+        registry.commitAndApply(
+            m2, _signMark(m2), "", _venueReport(OPS_PK, 25_000e6, 75_700e6, -2000e6, p2 + 30)
+        );
+        assertEq(book.heldSince(), 0);
+        assertEq(senior.totalSupply(), 60_000e6, "settled at the first non-held mark");
+        assertEq(book.unfundedClaims(), 10_000e6 * book.sharePrice(BRTypes.SENIOR) / WAD);
     }
 
     function test_atomicMark_matchesLegacyThreeTransactions() public {

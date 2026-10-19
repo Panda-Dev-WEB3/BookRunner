@@ -227,6 +227,8 @@ export function draftToCharter(d: CharterDraft, ctx: DraftContext = {}): DraftCo
 // ------------------------------------------------------------------ local validation
 export interface ValidationContext {
   venueMinIfUsd?: [bigint, bigint];
+  /** config.markInterval(): the minimum Junior notice (audit M-1); undefined when unknown (not checked). */
+  markInterval?: number;
   /** true/false when checked against the registry; null/undefined when unknown. */
   underlyingKnown?: boolean | null;
   newBooksPaused?: boolean;
@@ -257,6 +259,9 @@ export function validateCharterLocal(c: Charter, ctx: ValidationContext = {}): C
     add("BAD_WINDOW", "subscriptionWindowSeconds", "Subscription window must be between 60 seconds and 30 days");
   }
   if (c.juniorNoticeSeconds > BigInt(THIRTY_DAYS)) add("BAD_NOTICE", "juniorNoticeSeconds", "Junior notice must be at most 30 days");
+  if (ctx.markInterval !== undefined && c.juniorNoticeSeconds < BigInt(ctx.markInterval)) {
+    add("BAD_NOTICE", "juniorNoticeSeconds", `Junior notice must be at least one mark interval (${ctx.markInterval} seconds)`);
+  }
 
   const m = c.mandate;
   if (m.maxInventoryUsd === 0n) add("BAD_MANDATE", "mandate.maxInventoryUsd", "Mandate max inventory must be above 0");
@@ -266,6 +271,10 @@ export function validateCharterLocal(c: Charter, ctx: ValidationContext = {}): C
     add("BAD_MANDATE", "mandate.killAtDrawdownBps", "Kill drawdown must be negative and no lower than -5000 bps");
   }
   if (m.maxSkewBps <= 0) add("BAD_MANDATE", "mandate.maxSkewBps", "Mandate max skew must be above 0 bps");
+  // audit M-3 (MarketCharter.validate): a quote at the min width and the max skew must still straddle the oracle
+  if (m.maxSkewBps > 0 && m.minQuoteWidthBps > 0 && m.maxSkewBps * 2 > m.minQuoteWidthBps) {
+    add("BAD_MANDATE", "mandate.maxSkewBps", "Mandate max skew must be at most half the min quote width");
+  }
 
   if (c.underlying === zeroHash || ctx.underlyingKnown === false) {
     add("BAD_UNDERLYING", "underlying", "Underlying is neither a canonical Stock Token nor a registered index");

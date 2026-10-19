@@ -15,6 +15,20 @@ export interface DeskPosition {
   priceStale: boolean;
   /** priceWad comes from the oracle's signed bundle (newer than the stored on-chain price; rides in the mark tx). */
   signedPrice?: boolean;
+  /** the oracle signed priceWad as held (session closed / feed held): the mark is then held (audit M-1). */
+  priceHeld?: boolean;
+  /** share basis of priceWad: its publishedAt when live, AttestedOracle.lastLiveAt when held (audit M-2). */
+  priceBasisAt?: bigint;
+  /** StockTokenRegistry.multiplierChangedAt(token) at the snapshot block (0 = never). */
+  multiplierChangedAt?: bigint;
+  /** in the split window: the multiplier in force at priceBasisAt (token events), null = unknown */
+  basisMultiplierWad?: bigint | null;
+  /** in the split window: when the first change after the basis took effect (the window's start) */
+  splitWindowSince?: bigint;
+  /** set by resolveSplitWindow: valued at the basis multiplier (or 0), the mark is held */
+  splitWindow?: boolean;
+  /** priceWad is the governance settle price in force for the token's price id (domain/settle.ts): live, final */
+  settlePrice?: boolean;
 }
 
 /** Everything a mark needs, read at ONE block. */
@@ -71,7 +85,12 @@ export interface MarkSnapshot {
   backstopBalance: bigint;
   mandate: Mandate;
   killed: boolean;
-  underlyingPrice: { priceId: Hex; priceWad: bigint; publishedAt: number; held: boolean } | null;
+  /**
+   * The underlying's price the valuation used (the signed bundle print when newer than the stored one), null
+   * when unreadable. `stale`: older than config.maxPriceAge at the valuation time (domain/held.ts: held). `settled`:
+   * the governance settle price in force (domain/settle.ts), valued as a live price (never held / stale).
+   */
+  underlyingPrice: { priceId: Hex; priceWad: bigint; publishedAt: number; held: boolean; stale: boolean; settled?: boolean } | null;
   /**
    * Signed oracle prices this valuation used that are newer than the chain's stored ones (desk tokens,
    * engine underlying). They form the mark tx's priceData so the chain ends up on the prices the NAV used.

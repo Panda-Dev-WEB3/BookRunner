@@ -39,3 +39,5 @@ Low — event/accounting inconsistencies with no fund impact.
    credited in the same transaction).
 3. Engine: pool |net exposure| ≤ `maxNetExposureUsd` after any new-risk trade; USDC conservation.
 4. Orderly adapter: USDC only ever moves to the book's vault or router.
+
+The full list, each invariant linked to the invariant suite and unit tests that check it: [INVARIANTS.md](INVARIANTS.md).

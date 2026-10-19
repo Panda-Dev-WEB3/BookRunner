@@ -22,6 +22,11 @@ export interface Holding {
   publishedAt?: number;
   /** the price is the oracle's signed print (newer than the stored on-chain one) */
   signed?: boolean;
+  /** audit M-2 split window: the price predates the token's multiplier change (valueUsd is at the basis
+   *  multiplier, or 0); never flattened (the on-chain RISK flatten defers until the oracle reprices) */
+  splitWindow?: boolean;
+  /** in the split window with no on-chain basis multiplier: valued at 0, the desk valuation is untrusted */
+  splitValuationUnknown?: boolean;
 }
 
 export interface FlattenOrder {
@@ -36,7 +41,7 @@ export interface FlattenOrder {
 export interface FlattenPlan {
   sellUsd: bigint;
   orders: FlattenOrder[];
-  skipped: Array<{ token: Address; reason: "no_price" }>;
+  skipped: Array<{ token: Address; reason: "no_price" | "split_window" }>;
 }
 
 /**
@@ -56,8 +61,10 @@ export function planFlatten(args: {
   slippageBps: number;
 }): FlattenPlan {
   const held = args.holdings.filter((h) => h.qtyRaw > 0n);
-  const skipped = held.filter((h) => h.valueUsd <= 0n).map((h) => ({ token: h.token, reason: "no_price" as const }));
-  const priced = held.filter((h) => h.valueUsd > 0n);
+  const skipped: FlattenPlan["skipped"] = held
+    .filter((h) => h.splitWindow === true || h.valueUsd <= 0n)
+    .map((h) => ({ token: h.token, reason: h.splitWindow === true ? ("split_window" as const) : ("no_price" as const) }));
+  const priced = held.filter((h) => h.splitWindow !== true && h.valueUsd > 0n);
   const spotUsd = priced.reduce((s, h) => s + h.valueUsd, 0n);
   if (spotUsd === 0n) return { sellUsd: 0n, orders: [], skipped };
 

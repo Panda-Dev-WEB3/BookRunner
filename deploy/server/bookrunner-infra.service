@@ -20,5 +20,24 @@ ExecStop=/bin/sh -c 'exec /usr/bin/docker compose $( [ -f .env.infra ] && echo -
 TimeoutStartSec=300
 TimeoutStopSec=60
 
+# ---- sandbox of the docker CLI only (dockerd and the containers run under docker.service; audit 2026-10, HARDENING.md).
+# The CLI reads the compose file and .env.infra and talks to /run/docker.sock; it writes nothing on the host, so
+# /usr, /boot, /etc are read-only and it gets no privilege gain, kernel / clock / cgroup access or realtime.
+# Not set on purpose: ProtectHome (the CLI may create /root/.docker), RestrictNamespaces / SystemCallFilter (the
+# CLI only, but kept loose so a docker upgrade never breaks the infra start).
+NoNewPrivileges=true
+UMask=0077
+ProtectSystem=full
+PrivateTmp=true
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
 [Install]
 WantedBy=multi-user.target

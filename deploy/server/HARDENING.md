@@ -12,7 +12,7 @@ its secrets to processes that do not need them, and must not sign predictable pr
 | Secrets per process | every child got the whole env (mnemonic, `ANTHROPIC_API_KEY`, ...) | allow-list per child (`packages/shared/src/childenv.ts`) |
 | Protocol admin (deployer) key | derived from the shared mnemonic by any process | only with `BKRN_ALLOW_ADMIN_KEY=1` (launch / deploy scripts) or `DEPLOYER_PRIVATE_KEY`; the gas keeper uses a dedicated **funder** key |
 | Oracle on testnet | synthetic prices from the public seed `bookrunner-devnet` | refuses to start without a secret `ORACLE_SEED`; per-step CSPRNG entropy |
-| nginx | no HSTS / CSP / Permissions-Policy, version in `Server:`, source maps public, no rate limit | all headers (HSTS `max-age=31536000; includeSubDomains`, no `preload`), `server_tokens off`, `*.map` → 404 (and builds emit none), `/trpc/` + `/health` rate-limited per IP (the API caps tRPC batches at 10); www → apex 301; unknown `*.bookrunner.tech` (port 80) → apex; `/app/` `X-Robots-Tag: noindex`; the CSP allows no third-party host beyond Framer CDN, Google Fonts, the testnet RPC and WalletConnect / Reown |
+| nginx | no HSTS / CSP / Permissions-Policy, version in `Server:`, source maps public, no rate limit | all headers (HSTS `max-age=31536000; includeSubDomains`, no `preload`), `server_tokens off`, `*.map` → 404 (and builds emit none), `/trpc/` + `/health` rate-limited per IP (the API caps tRPC batches at 10), `receipts.*` in a stricter zone (2 r/s, audit M-4; one fills a batch); `/trpc/` forwarded normalized with backslashes / encoded separators / dot-segments refused (audit L-3), so `/v1` and `/mcp` stay loopback-only; www → apex 301; unknown `*.bookrunner.tech` (port 80) → apex; `/app/` `X-Robots-Tag: noindex`; the CSP allows no third-party host beyond Framer CDN, Google Fonts, the testnet RPC and WalletConnect / Reown |
 
 Values never appear in these commands' output: every secret is generated into a file and read from it.
 
@@ -120,3 +120,146 @@ Values never appear in these commands' output: every secret is generated into a 
 - Security contact: `/.well-known/security.txt` (RFC 9116, source `apps/site/public/.well-known/security.txt`,
   policy `SECURITY.md`). Its `Expires` is 2027-10-14; `apps/site/test/audit-nginx-headers.test.ts` fails once it
   has passed, as a reminder to renew it.
+
+## One Unix user for every service (audit 2026-10, privileged operations)
+
+**Finding.** Every service runs as the one `bookrunner` user: a compromise of any process (the internet-facing API
+included) reads the files and memory-adjacent state of the processes that sign. The testnet stack is one process
+tree (`scripts/dev.ts` under `bookrunner.service`), so splitting it per user is a host redesign, not a unit edit.
+**Status: partially fixed (testnet sandbox tightened) / mainnet plan below.**
+
+### What the testnet units do now
+
+`update.sh` installs exactly these from the root-owned copy `/usr/local/lib/bookrunner-deploy` (only when the file
+differs, then `systemctl daemon-reload`):
+
+| Installed | Where | Then |
+|---|---|---|
+| `bookrunner.service`, `bookrunner-infra.service`, `bookrunner-backup.service`, `bookrunner-backup.timer` | `/etc/systemd/system/` (0644) | daemon-reload; unless `--web-only`: `systemctl enable --now bookrunner-infra`, `systemctl reload bookrunner-infra`, `systemctl restart bookrunner` |
+| `bookrunner@.service` and the drop-in `bookrunner@testnet-live.service.d/override.conf` (the live-Orderly rehearsal stack) | `/etc/systemd/system/` (0644; the drop-in dir 0755) | daemon-reload; never enabled or started by `update.sh` / `install.sh`; unless `--web-only`, `systemctl restart bookrunner@testnet-live` only if it is already running |
+| `logrotate-bookrunner` | `/etc/logrotate.d/bookrunner` | — |
+| nginx http conf, locations snippet, site HSTS line, wildcard site (`nginx-lib.sh`) | `/etc/nginx/...` | `nginx -t`, rollback on failure, reload |
+| `/var/backups/bookrunner` | root 0700 | enables `bookrunner-backup.timer` once |
+| the web app and the site | `/var/www/bookrunner` (+ `/app`), owner `bookrunner` | — |
+
+It also refreshes `/usr/local/lib/bookrunner-deploy` itself (rsync from the root clone, `.env.infra` kept),
+fast-forwards `/opt/bookrunner/app` and runs `bun install --frozen-lockfile` and the two builds **as `bookrunner`**
+(outside any unit: they write `node_modules/`, `apps/*/dist` and bun's cache under `HOME=/opt/bookrunner`).
+`install.sh` installs the same unit set (the drop-in included) once; `update.sh` re-installs whichever differs.
+`bookrunner@.service` carries the same sandbox as `bookrunner.service` (every directive of the table at the top and of
+"Added in this change" below), except `/etc/bookrunner` stays visible: the template's `EnvironmentFile` is
+`/etc/bookrunner/%i.env` (root 0600, unreadable to the user anyway). The testnet-live drop-in inherits that sandbox
+unchanged and only lowers the memory budget and adds `ReadWritePaths=-/opt/bookrunner/app/contracts/deployments`
+(the launch appends the chartered books to `46630.live.json`); `scripts/systemd-units.test.ts` fails if the drop-in
+sets any other key. On the mainnet host `bookrunner@mainnet` runs alone (MAINNET.md).
+
+What the running stack (`bookrunner.service`) writes, checked against the code:
+
+| Path | Writer | Covered by |
+|---|---|---|
+| `/opt/bookrunner/app/.data/testnet/dev.log` | systemd (`StandardOutput=append:`), rotated by logrotate (`copytruncate`, root) | `ReadWritePaths=/opt/bookrunner/app/.data` |
+| `.data/testnet/mock-orderly.json` (+ `.tmp`) | mock-orderly snapshot | same |
+| `.data/testnet/keys/` (0600) | ops-venue Orderly keys | same |
+| `.data/testnet/ops-venue/sagas.json` (+ `.tmp`) | ops-venue sagas | same |
+| `.data/testnet/mark-spool/` | mark: committed-mark rows waiting for Postgres | same (**new**: was the default `tmpdir()`, i.e. the unit's `PrivateTmp`, emptied on every restart; `MARK_SPOOL_DIR` now set by the testnet and mainnet profiles, resolved against the repo root) |
+| `contracts/deployments/46630.json` | `scripts/launch-devnet.ts` / `record-books.ts`, first start only | `ReadWritePaths=-/opt/bookrunner/app/contracts/deployments` |
+| `/tmp` | anything transient | `PrivateTmp=true` (private, emptied on stop) |
+
+What `bookrunner@testnet-live` writes (the template + drop-in; every state path is pinned by
+`scripts/network-profile.ts` `TESTNET_LIVE_PINNED`, so it never shares a file with the public stack):
+
+| Path | Writer | Covered by |
+|---|---|---|
+| `.data/testnet-live/dev.log` | systemd (`StandardOutput=append:`; `ExecStartPre` creates the directory) | `ReadWritePaths=/opt/bookrunner/app/.data` (template) |
+| `.data/testnet-live/keys/`, `.data/testnet-live/ops-venue/sagas.json` | ops-venue (Orderly keys of the live accounts, sagas) | same |
+| `.data/testnet-live/mark-spool/` | mark: committed-mark rows waiting for Postgres | same (pinned at the merge of the rehearsal stack: before, the live stack inherited the public `.data/testnet/mark-spool`, whose rows belong to the other database) |
+| `contracts/deployments/46630.live.json` | `scripts/launch-devnet.ts` (first start / a resumed launch) | drop-in `ReadWritePaths=-/opt/bookrunner/app/contracts/deployments` |
+
+`systemd-analyze verify` (systemd 255, ubuntu:24.04) reports no error on `bookrunner@testnet-live` (template + drop-in)
+or `bookrunner@mainnet`; `systemd-analyze security --offline` exposure 1.5 for both, as `bookrunner.service`.
+
+Not written at run time: the code tree and `node_modules` (read-only), `HOME` (`BUN_RUNTIME_TRANSPILER_CACHE_PATH=0`,
+no install at run time). Not used: the Docker socket (Postgres and Redis are reached over TCP on localhost;
+`bookrunner-infra.service` is the only Docker client).
+
+Added in this change (on top of the sandbox in the table at the top):
+
+- `bookrunner.service` / `bookrunner@.service`: `InaccessiblePaths` for the Docker and containerd sockets (and
+  `/etc/bookrunner` on the testnet unit, which reads nothing there), so even a later `docker` group membership gives
+  the stack no Docker access; `SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @raw-io
+  @reboot @swap` with `SystemCallErrorNumber=EPERM` (a deny-list, so an unexpected call fails with EPERM instead of
+  killing the process; every group in it is also denied by Docker's default seccomp profile, under which bun runs
+  unchanged, except `ptrace`, which bun does not use); `RemoveIPC=yes`.
+- `bookrunner-infra.service` (root, Docker CLI only): `NoNewPrivileges`, `ProtectSystem=full`, `PrivateTmp`,
+  kernel / clock / cgroup protection, `RestrictSUIDSGID`, `RestrictRealtime`, `LockPersonality`, address families
+  unix / inet / netlink, `UMask=0077`. `dockerd` and the containers are untouched (they run under `docker.service`).
+- `bookrunner-backup.service`: `ProtectKernelLogs`, `ProtectClock`, `RestrictSUIDSGID`, `RestrictRealtime`,
+  `LockPersonality`.
+
+`systemd-analyze verify` (systemd 255) reports no error on any of the four units; `systemd-analyze security
+--offline` exposure: `bookrunner.service` 2.9 → 1.5, `bookrunner-infra.service` 9.4 → 6.9, `bookrunner-backup.service`
+8.1 → 7.1. Not set, on purpose: `MemoryDenyWriteExecute` (bun's JIT), `ProcSubset=pid` (bun / libuv may read
+`/proc/meminfo`, `/proc/stat`), `ProtectHome` on the infra unit (the Docker CLI may create `/root/.docker`).
+
+**Operator steps.** The usual `sudo /usr/local/lib/bookrunner-deploy/update.sh` installs the changed units,
+reloads systemd, reloads the infra unit and restarts the stack. Before it, two checks:
+
+1. **App tree owner.** `update.sh` pulls, installs and builds as `bookrunner`; on a host where `/opt/bookrunner/app`
+   is owned by root those steps fail. Check, and fix only if needed:
+   ```bash
+   stat -c '%U %n' /opt/bookrunner/app /opt/bookrunner/app/.git /opt/bookrunner/app/node_modules   # expect: bookrunner
+   sudo chown -R bookrunner:bookrunner /opt/bookrunner/app   # only if the line above shows root
+   ```
+2. **Spooled mark rows.** Until this update the mark spool sat in the unit's `PrivateTmp`, which the restart empties.
+   Rows only exist there after a Postgres write failure (`dev.log`: "marks row spooled to disk", cleared by "spooled
+   marks rows written to Postgres"). Move any into the new spool directory first; the new mark service flushes them
+   at its next successful tick:
+   ```bash
+   sudo sh -c 'ls -1 /tmp/systemd-private-*-bookrunner.service-*/tmp/bookrunner-mark-spool/ 2>/dev/null'   # empty = nothing to do
+   sudo install -d -o bookrunner -g bookrunner -m 0750 /opt/bookrunner/app/.data/testnet/mark-spool
+   sudo sh -c 'cp -p /tmp/systemd-private-*-bookrunner.service-*/tmp/bookrunner-mark-spool/mark-*.json /opt/bookrunner/app/.data/testnet/mark-spool/ 2>/dev/null; chown bookrunner:bookrunner /opt/bookrunner/app/.data/testnet/mark-spool/*.json 2>/dev/null; true'
+   ```
+
+Check after the update:
+
+```bash
+systemctl is-active bookrunner bookrunner-infra            # active / active
+sudo tail -n 50 /opt/bookrunner/app/.data/testnet/dev.log  # every service started, no EPERM / EROFS
+sudo journalctl -u bookrunner-infra -n 20 --no-pager       # compose "up -d --wait" succeeded
+systemd-analyze security bookrunner | tail -1              # ~1.5
+```
+
+**Rollback of the new sandbox directives only** (everything else stays). A drop-in overrides the installed unit;
+`update.sh` never removes drop-ins, so the rollback stays until the file is deleted:
+
+```bash
+sudo install -d /etc/systemd/system/bookrunner.service.d
+printf '[Service]\nSystemCallFilter=\nInaccessiblePaths=\nRemoveIPC=no\n' | sudo tee /etc/systemd/system/bookrunner.service.d/rollback.conf
+sudo systemctl daemon-reload && sudo systemctl restart bookrunner
+# infra unit (Docker CLI sandbox):
+sudo install -d /etc/systemd/system/bookrunner-infra.service.d
+printf '[Service]\nProtectSystem=no\nPrivateTmp=no\nRestrictAddressFamilies=\n' | sudo tee /etc/systemd/system/bookrunner-infra.service.d/rollback.conf
+sudo systemctl daemon-reload && sudo systemctl reload bookrunner-infra
+# once fixed: sudo rm /etc/systemd/system/bookrunner*.service.d/rollback.conf && sudo systemctl daemon-reload
+```
+
+An empty `SystemCallFilter=` / `InaccessiblePaths=` / `RestrictAddressFamilies=` resets the list (systemd semantics).
+
+### Mainnet target (plan, not built)
+
+The signing services run as separate Unix users, on separate hosts where the budget allows, with no key on disk:
+
+| Process group | User / host | Secrets it can use |
+|---|---|---|
+| `oracle` (price signer) | `bkrn-oracle`, ideally its own host / TEE (the attested signer, VERIFY E1) | `ORACLE_SIGNER_KMS_KEY_ID` (KMS `Sign` only), source API keys |
+| `mark` (MARK_SIGNER) | `bkrn-mark` | `MARK_SIGNER_KMS_KEY_ID` |
+| `ops-venue` (OPS_VENUE, Orderly keys) | `bkrn-ops`, own host | `OPS_VENUE_KMS_KEY_ID`, its `.data/mainnet/keys` (0600, its own directory) |
+| `risk`, `charter` (jury), keeper, agents | one user per role | their own `<ROLE>_KMS_KEY_ID` |
+| `api`, `indexer`, `receipts`, `alerts` | `bkrn-api` (internet-facing; no signing material at all) | none (DB / Redis credentials only) |
+
+One systemd unit per group (the `bookrunner@.service` sandbox per unit, `ReadWritePaths` limited to that group's
+`.data/mainnet/<group>`), one KMS key policy per role principal (the KMS key of one role cannot be used by another
+role's credentials), Redis / Postgres credentials per user, and the internet-facing API on a host or user that
+holds no KMS permission. `scripts/dev.ts --network mainnet` already hands each child only its own secret
+(`packages/shared/src/childenv.ts`) and refuses a mnemonic; the split replaces the shared user, not that rule.
+Until it is built the mainnet host runs `bookrunner@mainnet` as one user (MAINNET.md), which is the residual.

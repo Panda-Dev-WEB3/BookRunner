@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {PackedUserOperation} from "@openzeppelin/contracts/interfaces/IERC4337.sol";
@@ -116,7 +116,7 @@ contract DeskPullOracleTest is MandateBase {
         vm.warp(block.timestamp + 1 hours);
         IBookrunnerDesk.Action memory a = _hedgeAction(address(nvda), true, 15_000e6, 1);
         vm.prank(key);
-        vm.expectRevert(abi.encodeWithSelector(IAttestedOracle.StalePrice.selector, NVDA_ID, uint64(T0)));
+        vm.expectRevert(abi.encodeWithSelector(BookrunnerDesk.StaleTradePrice.selector, address(nvda), uint64(T0)));
         desk.execute(a);
 
         uint256 out = abi.decode(_execP(key, a, _fresh()), (uint256));

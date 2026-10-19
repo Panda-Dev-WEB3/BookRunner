@@ -66,6 +66,15 @@ RestrictRealtime=yes
 SystemCallArchitectures=native
 # AF_NETLINK: glibc getaddrinfo (AI_ADDRCONFIG) and interface enumeration probe it; no raw / packet sockets
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+# audit 2026-10 (shared service user, HARDENING.md): the stack never talks to Docker (bookrunner-infra.service
+# does) nor reads the root-only secrets dir, so neither is even visible, whatever groups the user gets later
+InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -/run/containerd -/etc/bookrunner
+# deny-list of syscall groups no bun / JavaScriptCore process uses (ptrace & co, mount, modules, raw I/O, clock
+# setting, swap, reboot, obsolete calls); EPERM instead of SIGSYS, so an unexpected call fails, never kills
+SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @raw-io @reboot @swap
+SystemCallErrorNumber=EPERM
+# SysV IPC / POSIX message queues of the bookrunner user are removed when the stack stops
+RemoveIPC=yes
 
 [Install]
 WantedBy=multi-user.target

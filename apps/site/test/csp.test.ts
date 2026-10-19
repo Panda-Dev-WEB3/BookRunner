@@ -104,12 +104,18 @@ describe("nginx rate limits", () => {
       expect(locations).toContain(`limit_req zone=${zone} `);
       expect(httpConf).toMatch(new RegExp(`limit_req_zone \\$binary_remote_addr zone=${zone}:\\d+m rate=\\d+r/s;`));
     }
-    const trpc = locations.match(/location \^~ \/trpc\/ \{[^}]*\}/)?.[0] ?? "";
+    const at = locations.indexOf("location ^~ /trpc/ {");
+    const trpc = at >= 0 ? locations.slice(at, locations.indexOf("\n}", at)) : "";
     expect(trpc).toContain("limit_req zone=bookrunner_trpc");
+    // receipts.* (audit M-4): a map-keyed zone, limited only for paths holding a receipts.* call
+    expect(trpc).toContain("limit_req zone=bookrunner_receipts");
+    expect(httpConf).toMatch(/limit_req_zone \$bookrunner_receipts_key zone=bookrunner_receipts:\d+m rate=\d+r\/s;/);
   });
 
-  test("the http-level conf holds only uniquely named zones (nothing that can clash with nginx.conf)", () => {
+  test("the http-level conf holds only uniquely named zones and their map (nothing that can clash with nginx.conf)", () => {
+    expect(httpConf).toMatch(/^map \$uri \$bookrunner_receipts_key \{/m);
     const directives = httpConf
+      .replace(/^map \$uri \$bookrunner_[a-z_]+ \{[^}]*\}$/gm, "")
       .split("\n")
       .map((l) => l.replace(/#.*/, "").trim())
       .filter(Boolean);

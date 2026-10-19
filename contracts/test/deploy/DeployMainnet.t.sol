@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
 import {stdJson} from "forge-std/StdJson.sol";
@@ -362,6 +362,67 @@ contract DeployMainnetTest is Test {
         assertGt(_verify(_mainnetOpts(), d), 0);
     }
 
+    /// @dev Audit 2026-10 D: VerifyHandover only checked that the expected holders had their roles, so a stray
+    ///      admin (or any extra role holder) still gave 0 failures.
+    function test_verify_flags_an_extra_config_admin() public {
+        (DeployMainnet.Deployed memory d,) = _deployAndVerify(_mainnetOpts(), "extra-admin");
+        BookrunnerConfig config = BookrunnerConfig(d.config);
+        bytes32 adminRole = config.DEFAULT_ADMIN_ROLE();
+        vm.prank(d.timelock);
+        config.grantRole(adminRole, makeAddr("stray admin"));
+        assertEq(_verify(_mainnetOpts(), d), 1, "exactly the role-holder row fails");
+    }
+
+    function test_verify_flags_an_extra_service_role_holder() public {
+        (DeployMainnet.Deployed memory d,) = _deployAndVerify(_mainnetOpts(), "extra-keeper");
+        BookrunnerConfig config = BookrunnerConfig(d.config);
+        bytes32 role = config.RISK_ROLE();
+        vm.prank(d.timelock);
+        config.grantRole(role, makeAddr("stray risk"));
+        assertEq(_verify(_mainnetOpts(), d), 1);
+    }
+
+    function test_verify_flags_an_extra_guardian() public {
+        (DeployMainnet.Deployed memory d,) = _deployAndVerify(_mainnetOpts(), "extra-guardian");
+        BookrunnerConfig config = BookrunnerConfig(d.config);
+        bytes32 role = config.GUARDIAN_ROLE();
+        vm.prank(d.timelock);
+        config.grantRole(role, makeAddr("stray guardian"));
+        assertEq(_verify(_mainnetOpts(), d), 1);
+    }
+
+    function test_verify_flags_an_extra_timelock_proposer() public {
+        (DeployMainnet.Deployed memory d,) = _deployAndVerify(_mainnetOpts(), "extra-proposer");
+        TimelockController t = TimelockController(payable(d.timelock));
+        bytes32 role = t.PROPOSER_ROLE();
+        vm.prank(d.timelock); // self-administered: only a timelock operation can grant it
+        t.grantRole(role, makeAddr("stray proposer"));
+        assertEq(_verify(_mainnetOpts(), d), 1);
+    }
+
+    /// @dev Review M-3: staking lockers and oracle signers are privileged sets too; an extra one must fail.
+    function test_verify_flags_an_extra_staking_locker() public {
+        (DeployMainnet.Deployed memory d,) = _deployAndVerify(_mainnetOpts(), "extra-locker");
+        address staking = BookrunnerConfig(d.config).staking();
+        vm.prank(d.timelock);
+        (bool ok,) = staking.call(
+            abi.encodeWithSignature("setLocker(address,bool)", makeAddr("stray locker"), true)
+        );
+        assertTrue(ok);
+        assertEq(_verify(_mainnetOpts(), d), 1);
+    }
+
+    function test_verify_flags_an_extra_oracle_signer() public {
+        (DeployMainnet.Deployed memory d,) = _deployAndVerify(_mainnetOpts(), "extra-signer");
+        AttestedOracle o = AttestedOracle(BookrunnerConfig(d.config).oracle());
+        bytes32 m = keccak256("stray measurement");
+        vm.startPrank(d.timelock);
+        o.setMeasurement(m, true);
+        o.setAttestedSigner(makeAddr("stray signer"), bytes32("AWS_NITRO"), m, keccak256("quote"));
+        vm.stopPrank();
+        assertGt(_verify(_mainnetOpts(), d), 0);
+    }
+
     function test_verify_flags_registry_admin_and_param_drift() public {
         (DeployMainnet.Deployed memory d,) = _deployAndVerify(_mainnetOpts(), "drift");
         vm.prank(d.timelock);
@@ -376,7 +437,8 @@ contract DeployMainnetTest is Test {
         (DeployMainnet.Deployed memory d,) = _deployAndVerify(_mainnetOpts(), "missing-role");
         Opts memory o = _mainnetOpts();
         o.extraKeeper = keeper2; // input claims a second keeper that was never granted
-        assertEq(_verify(o, d), 1);
+        // "KEEPER granted to every input holder" and the exact holder set (audit 2026-10 D) both fail
+        assertEq(_verify(o, d), 2);
     }
 
     function test_verify_flags_route_and_reference_drift() public {
@@ -395,8 +457,8 @@ contract DeployMainnetTest is Test {
         StockTokenRegistry(d.stockRegistry).setMultiplierSource(stocks[2], false);
         assertEq(_verify(_mainnetOpts(), d), 1);
         vm.prank(d.timelock);
-        AttestedOracle(d.oracle).setSigner(oracleSigner, false, bytes32(0)); // signer row + measurement row
-        assertEq(_verify(_mainnetOpts(), d), 3);
+        AttestedOracle(d.oracle).setSigner(oracleSigner, false, bytes32(0)); // signer row + measurement row + exact signer set
+        assertEq(_verify(_mainnetOpts(), d), 4);
     }
 
     function test_verify_flags_oracle_min_sources_drift() public {

@@ -95,6 +95,7 @@ export function faqItems(ctx: FaqContext): FaqItem[] {
       answer: [
         `Request a redemption from the book page or your portfolio. Senior requests settle at NAV at the next mark; Junior requests settle at the first mark after the book's notice period. Then you claim your ${sym}.`,
         "Notice is not a gate: a request is always accepted, and no pause or kill can block it. A claim can only wait for cash to come back from the venue.",
+        "Marks taken while the price is held (the stock market is closed) book gains and losses but settle no request and no top-up round: those settle at the first mark after the price is live again, so a reopening gap is shared by everyone who was in the book. After 30 days of held prices, marks settle again: a long hold delays exits but never blocks them.",
       ],
       terms: ["redemptionNotice", "killSwitch"],
       links: [{ to: "/portfolio", label: "Open your portfolio" }],

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+pragma solidity ^0.8.24;
 
 /// @title IScaledUIAmount — ERC-8056 "Scaled UI Amount" (subset read by the protocol).
 /// @notice Robinhood Stock Tokens implement ERC-8056: raw balances never change, a corporate-action

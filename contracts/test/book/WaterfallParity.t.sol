@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
 import {Waterfall} from "../../src/libraries/Waterfall.sol";
@@ -15,6 +15,8 @@ import {Waterfall} from "../../src/libraries/Waterfall.sol";
 ///            S', J', seniorImpairment', perfIndex', highWater', backstopCovered, |drawdownBps|,
 ///            backstopDebt, backstopRepaid, backstopDebt']
 ///   wallet: [commit, isSponsor(0|1), totalCommitted, sponsorCommitted, totalAllocated, shares, refund]
+///   credit: [senior, junior, juniorSupply, seniorImpairment, backstopDebt, seniorCredit, juniorCredit,
+///            seniorRestored, backstopRepaid, seniorImpairment', backstopDebt'] (audit L-1)
 contract WaterfallParityTest is Test {
     string internal json;
     uint256 internal count;
@@ -132,6 +134,28 @@ contract WaterfallParityTest is Test {
             assertEq(shares, v[5], string.concat(tag, " shares"));
             assertEq(refund, v[6], string.concat(tag, " refund"));
             assertLe(shares + refund, v[0], string.concat(tag, " never over-pays"));
+        }
+    }
+
+    function test_parity_credit() public view {
+        for (uint256 i = 0; i < count; i++) {
+            uint256[] memory v = _row("credit", i);
+            assertEq(v.length, 11, "credit row width");
+            Waterfall.DistributionResult memory r = Waterfall.applyDistribution(
+                Waterfall.DistributionInput({
+                    senior: v[0], junior: v[1], juniorSupply: v[2], seniorImpairment: v[3], backstopDebt: v[4]
+                })
+            );
+            string memory tag = string.concat("credit[", vm.toString(i), "]");
+            assertEq(r.seniorCredit, v[5], string.concat(tag, " seniorCredit"));
+            assertEq(r.juniorCredit, v[6], string.concat(tag, " juniorCredit"));
+            assertEq(r.seniorRestored, v[7], string.concat(tag, " seniorRestored"));
+            assertEq(r.backstopRepaid, v[8], string.concat(tag, " backstopRepaid"));
+            assertEq(r.seniorImpairment, v[9], string.concat(tag, " seniorImpairment'"));
+            assertEq(r.backstopDebt, v[10], string.concat(tag, " backstopDebt'"));
+            assertEq(
+                r.seniorCredit + r.juniorCredit + r.backstopRepaid, v[0] + v[1], string.concat(tag, " conservation")
+            );
         }
     }
 }

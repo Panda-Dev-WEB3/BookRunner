@@ -88,6 +88,32 @@ export const attestedOracleAbi = [
   },
   {
     "type": "function",
+    "name": "SETTLE_PRICE_BAND_BPS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "SETTLE_PRICE_DELAY",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "attestationDigest",
     "inputs": [
       {
@@ -170,6 +196,19 @@ export const attestedOracleAbi = [
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "cancelSettlePrice",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -331,6 +370,25 @@ export const attestedOracleAbi = [
   },
   {
     "type": "function",
+    "name": "lastLiveAt",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "latest",
     "inputs": [
       {
@@ -444,6 +502,24 @@ export const attestedOracleAbi = [
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "proposeSettlePrice",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "priceWad",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -655,6 +731,58 @@ export const attestedOracleAbi = [
   },
   {
     "type": "function",
+    "name": "settlePrice",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "priceWad",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "proposedAt",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "effectiveAt",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "pending",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
+        "name": "effective",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "signers",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address[]",
+        "internalType": "address[]"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "update",
     "inputs": [
       {
@@ -771,6 +899,50 @@ export const attestedOracleAbi = [
       },
       {
         "name": "incomingPublishedAt",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SettlePriceCancelled",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SettlePriceProposed",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "priceWad",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "storedPriceWad",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "effectiveAt",
         "type": "uint64",
         "indexed": false,
         "internalType": "uint64"
@@ -927,10 +1099,32 @@ export const attestedOracleAbi = [
   },
   {
     "type": "error",
+    "name": "MarketTrading",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "MeasurementNotAllowed",
     "inputs": [
       {
         "name": "measurement",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "NoSettlePrice",
+    "inputs": [
+      {
+        "name": "underlying",
         "type": "bytes32",
         "internalType": "bytes32"
       }
@@ -971,6 +1165,27 @@ export const attestedOracleAbi = [
         "name": "caller",
         "type": "address",
         "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "SettlePriceOutOfBand",
+    "inputs": [
+      {
+        "name": "underlying",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "priceWad",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "storedPriceWad",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ]
   },

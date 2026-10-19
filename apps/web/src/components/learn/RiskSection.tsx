@@ -12,7 +12,7 @@ import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { useShowcaseBook } from "./useLearnData";
 
 /** The NVDA launch book's quote limits (ARCHITECTURE.md §7), shown until the live mandate loads. */
-const DOC_LIMITS: QuoteLimits = { minQuoteWidthBps: 8, maxSkewBps: 25 };
+const DOC_LIMITS: QuoteLimits = { minQuoteWidthBps: 8, maxSkewBps: 4 };
 const ORACLE_PX = 100;
 
 interface Limit {

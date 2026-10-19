@@ -39,6 +39,8 @@ export interface CharterRecordView {
   decidedAt: number;
   juryDigest: Hex;
   book: Address;
+  /** MarketCharter.decisionDeadline (unix s, fixed at filing; audit 2026-10 D). Absent on an older charter. */
+  deadline?: number;
 }
 
 export interface LiquidityConfig {
@@ -65,7 +67,10 @@ export class CharterChain {
   // ------------------------------------------------------------ validation inputs
 
   async validationContextFor(ch: Charter): Promise<ValidationContext> {
-    const venueMin = await this.pub.readContract({ address: this.c.config, abi: bookrunnerConfigAbi, functionName: "venueMinIfUsd", args: [ch.venue] });
+    const [venueMin, markInterval] = await Promise.all([
+      this.pub.readContract({ address: this.c.config, abi: bookrunnerConfigAbi, functionName: "venueMinIfUsd", args: [ch.venue] }),
+      this.pub.readContract({ address: this.c.config, abi: bookrunnerConfigAbi, functionName: "markInterval" }),
+    ]);
     let canonical: string[] = [];
     let indexes: string[] = [];
     if (isTokenUnderlying(ch.underlying)) {
@@ -78,7 +83,7 @@ export class CharterChain {
       const ok = await this.pub.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "isIndex", args: [ch.underlying] });
       if (ok) indexes = [ch.underlying];
     }
-    return staticValidationContext({ venueMinIfUsd: { [ch.venue]: venueMin }, canonicalTokens: canonical, indexIds: indexes });
+    return staticValidationContext({ venueMinIfUsd: { [ch.venue]: venueMin }, canonicalTokens: canonical, indexIds: indexes, markInterval: Number(markInterval) });
   }
 
   /** eth_call MarketCharter.validate(c) — parity cross-check with the TS mirror. */
@@ -112,6 +117,7 @@ export class CharterChain {
     const r = await this.pub.readContract({ address: this.c.charter, abi: marketCharterAbi, functionName: "get", args: [BigInt(id)] });
     const status = CHARTER_STATUS[r.status] ?? "None";
     if (status === "None") return null;
+    const deadline = await this.decisionDeadline(id).catch(() => 0);
     return {
       charterId: id,
       charter: charterFromJson(r.charter),
@@ -120,7 +126,13 @@ export class CharterChain {
       decidedAt: Number(r.decidedAt),
       juryDigest: r.juryCid,
       book: r.book,
+      ...(deadline > 0 ? { deadline } : {}),
     };
+  }
+
+  /** MarketCharter.decisionDeadline: filedAt + the committee window as of filing (audit 2026-10 D). */
+  async decisionDeadline(id: number): Promise<number> {
+    return Number(await this.pub.readContract({ address: this.c.charter, abi: marketCharterAbi, functionName: "decisionDeadline", args: [BigInt(id)] }));
   }
 
   async juryVerdict(id: number): Promise<{ posted: boolean; digest: Hex; recommendApprove: boolean }> {

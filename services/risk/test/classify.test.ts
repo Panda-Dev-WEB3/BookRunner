@@ -2,6 +2,8 @@
 import { describe, expect, test } from "bun:test";
 import { HEDGE_BAND_GRACE_SECONDS, usd, wad } from "@bookrunner/shared";
 import { evaluate } from "../src/domain/evaluate";
+import { loadRiskEnv, settingsFromEnv } from "../src/config";
+import { effectiveDriftBps } from "../src/domain/quote";
 import type { BookObservation, HedgeBandState } from "../src/types";
 import { MANDATE, T0, chainObs, observation, quoteAt } from "./fakes";
 
@@ -74,6 +76,15 @@ describe("quote skew / width on a live quote", () => {
     expect(ev.snapshot.skewUtil).toBeGreaterThan(1);
   });
 
+  test("audit M-3: a quote entirely on one side of the oracle is a skew breach, even within maxSkewBps", () => {
+    // MANDATE is the pre-fix 25 / 8 (a cached mandate): mid 190.2 (+10.5 bps), width 10.5 bps, bid 5.3 bps ABOVE 190
+    // (past the 4 bps drift allowance = min(5, 8 / 2))
+    const ev = run({ quote: quoteAt(now - 1000, 190.1, 190.3) });
+    expect(ev.snapshot.skewUtil).toBeLessThan(1);
+    expect(ev.snapshot.breaches).toEqual(["SKEW"]);
+    expect(ev.snapshot.state).toBe("breach");
+  });
+
   test("width < minQuoteWidthBps is a breach", () => {
     // width 0.1 / 190 = 5.3 bps < 8
     const ev = run({ quote: quoteAt(now - 1000, 189.95, 190.05) });
@@ -98,18 +109,156 @@ describe("quote skew / width on a live quote", () => {
     expect(ev.snapshot.breaches).toEqual([]);
   });
 
-  test("an agent reference far from the attested oracle cannot hide a skewed quote", () => {
-    // agent claims oracle 190.6 (its quote looks centred), attested oracle is 190 -> +31.6 bps skew
-    const ev = run({ quote: quoteAt(now - 1000, 190.5, 190.7, 190.6) });
-    expect(ev.quote?.reference).toBe("oracle");
+  const m84 = { ...MANDATE, maxSkewBps: 4, minQuoteWidthBps: 8 };
+  /** A quote `widthBps` wide, `skewBps` off `refPx`, as the agent builds it around its own print. */
+  const quoteAround = (refPx: number, skewBps: number, widthBps: number, reportedRef = refPx) => {
+    const mid = refPx * (1 + skewBps / 1e4);
+    const half = (mid * widthBps) / 20_000;
+    return quoteAt(now - 1000, mid - half, mid + half, reportedRef);
+  };
+
+  test("audit M-3: the quote is checked against the attested price, never the agent's reported reference", () => {
+    // the agent reports a reference 20 bps above the attested 190 and centres its quote on it: against its own
+    // reference the quote straddles, against the attested price it sits entirely above the oracle
+    for (const shiftBps of [20, 15, -15, -24]) {
+      const fake = 190 * (1 + shiftBps / 1e4);
+      for (const mandate of [m84, MANDATE]) {
+        const ev = run({ mandate, quote: quoteAround(fake, 0, 8.5) });
+        expect(ev.quote?.reference).toBe("attested");
+        expect(ev.quote?.agentRefDevBps).toBeCloseTo(Math.abs(shiftBps), 6);
+        expect(ev.snapshot.breaches).toEqual(["SKEW"]);
+        expect(ev.snapshot.state).toBe("breach");
+      }
+    }
+  });
+
+  test("audit M-3: at the 8 / 4 terms, 4-5 bps of agent / attested print drift does not flag a straddling quote", () => {
+    for (const driftBps of [4, 5, -4, -5]) {
+      for (const skewBps of [0, 2, -2]) {
+        const agentPx = 190 * (1 + driftBps / 1e4);
+        const ev = run({ mandate: m84, quote: quoteAround(agentPx, skewBps, 8.5) });
+        expect(ev.quote?.used).toBe(true);
+        expect(ev.quote?.reference).toBe("attested");
+        expect(ev.snapshot.breaches).toEqual([]);
+        expect(ev.snapshot.state).toBe("ok");
+      }
+    }
+  });
+
+  test("audit M-3: the drift allowance is capped at 10 bps and at half the min quote width", () => {
+    expect(effectiveDriftBps(5, 8)).toBe(4);
+    expect(effectiveDriftBps(10, 8)).toBe(4);
+    expect(effectiveDriftBps(25, 100)).toBe(10);
+    expect(effectiveDriftBps(5, 30)).toBe(5);
+    expect(effectiveDriftBps(-1, 30)).toBe(0);
+    // configured 10 at 8 / 4: a bid 4.5 bps above the attested price is still one-sided
+    const q = quoteAround(190 * (1 + 8.75 / 1e4), 0, 8.5); // bid +4.5 bps, mid +8.75 bps
+    const ev = evaluate(observation({ mandate: m84, quote: q }), IN_BAND, { ...OPTS, quoteDriftBps: 10 });
     expect(ev.snapshot.breaches).toEqual(["SKEW"]);
   });
 
-  test("an agent reference within tolerance is used as the quote's reference", () => {
-    // attested 190 vs agent 190.1 (5.3 bps apart); quote centred on 190.1
-    const ev = run({ quote: quoteAt(now - 1000, 190.0, 190.2, 190.1) });
-    expect(ev.quote?.reference).toBe("agent");
+  const relaxed = { ...MANDATE, noNewRiskOffHours: false }; // isolate the hold from the off-hours rule
+  const stale = { priceWad: wad(190), publishedAt: T0 - 3600, held: false, stale: true, source: "chain" as const };
+  const redis = { priceWad: wad(190), publishedAt: T0, held: false, stale: false, source: "redis" as const };
+  const none = { priceWad: 0n, publishedAt: 0, held: false, stale: true, source: "none" as const };
+  const signed = { priceWad: wad(190), publishedAt: T0, held: false, stale: false, source: "signed" as const };
+
+  test("audit M-3: no fresh attested price -> no quote check and the book is held reduce-only, quote or not", () => {
+    for (const oracle of [stale, redis, none]) {
+      for (const quote of [quoteAround(190, 0, 10), null]) {
+        const ev = run({ mandate: relaxed, oracle, quote });
+        expect(ev.quote?.used ?? false).toBe(false);
+        expect(ev.quoteUnverified).toBe(true);
+        expect(ev.snapshot.breaches).toEqual([]);
+        expect(ev.snapshot.state).toBe("reduce_only");
+      }
+    }
+    // a fresh verified signed print checks the quote
+    const ok = run({ mandate: relaxed, oracle: signed, quote: quoteAround(190, 0, 10) });
+    expect(ok.quote?.used).toBe(true);
+    expect(ok.quoteUnverified).toBe(false);
+    expect(ok.snapshot.state).toBe("ok");
+  });
+
+  test("audit M-3: the hold does not flap when the agent obeys it, and lifts after 2 fresh ticks", () => {
+    // tick by tick: an attested-price outage of 4 ticks; the agent quotes two-sided, then obeys reduce_only with a
+    // one-sided quote; the price comes back on tick 5
+    const twoSided = quoteAround(190, 0, 10);
+    const oneSided = { ...twoSided, sides: { bid: false, ask: true } };
+    const steps = [
+      { oracle: redis, quote: twoSided, want: "reduce_only" },
+      { oracle: redis, quote: oneSided, want: "reduce_only" },
+      { oracle: stale, quote: oneSided, want: "reduce_only" },
+      { oracle: redis, quote: null, want: "reduce_only" },
+      { oracle: signed, quote: oneSided, want: "reduce_only" }, // first fresh tick: still held
+      { oracle: signed, quote: twoSided, want: "ok" }, // second consecutive fresh tick: lifted
+      { oracle: signed, quote: twoSided, want: "ok" },
+    ] as const;
+    let hold = { freshTicks: null as number | null };
+    for (const [i, st] of steps.entries()) {
+      const ev = evaluate(observation({ mandate: relaxed, oracle: st.oracle, quote: st.quote }), IN_BAND, OPTS, hold);
+      expect([i, ev.snapshot.state]).toEqual([i, st.want]);
+      expect(ev.quoteUnverified).toBe(st.want === "reduce_only");
+      hold = ev.quoteHold;
+    }
+    // a single fresh tick between outages does not reopen the book
+    let h = evaluate(observation({ mandate: relaxed, oracle: redis }), IN_BAND, OPTS).quoteHold;
+    h = evaluate(observation({ mandate: relaxed, oracle: signed }), IN_BAND, OPTS, h).quoteHold;
+    const again = evaluate(observation({ mandate: relaxed, oracle: redis }), IN_BAND, OPTS, h);
+    expect(again.snapshot.state).toBe("reduce_only");
+    expect(again.quoteHold.freshTicks).toBe(0);
+  });
+
+  test("audit M-3: a minutes-old (not stale) attested price holds instead of killing on SKEW", () => {
+    // pull mode, signed-feed outage: the stored chain price is 240 s old (within maxPriceAge 300 s, so not stale);
+    // the agent quotes at its max skew 3.5 bps around a live print 5 bps higher
+    const old = { priceWad: wad(190), publishedAt: T0 - 240, held: false, stale: false, source: "chain" as const };
+    const q = quoteAround(190 * (1 + 5 / 1e4), 3.5, 8.5);
+    const ev = run({ mandate: m84, oracle: old, quote: q });
+    expect(ev.quote?.used).toBe(false);
+    expect(ev.quote?.reference).toBe("none");
     expect(ev.snapshot.breaches).toEqual([]);
+    expect(ev.snapshot.state).toBe("reduce_only");
+    expect(ev.quoteUnverified).toBe(true);
+    // 14 s old is still fresh for the check (default bound 15 s); 16 s is not
+    const at = (ageSec: number) =>
+      run({ mandate: m84, oracle: { ...old, publishedAt: T0 - ageSec }, quote: quoteAround(190, 0, 8.5) });
+    expect(at(14).quote?.used).toBe(true);
+    expect(at(14).snapshot.state).toBe("ok");
+    expect(at(16).quote?.used).toBe(false);
+    expect(at(16).snapshot.state).toBe("reduce_only");
+    // the bound is a setting
+    const wide = evaluate(observation({ mandate: m84, oracle: { ...old, publishedAt: T0 - 16 }, quote: quoteAround(190, 0, 8.5) }), IN_BAND, {
+      ...OPTS,
+      quotePriceMaxAgeMs: 30_000,
+    });
+    expect(wide.quote?.used).toBe(true);
+  });
+
+  test("audit M-3: a held (market-closed) attested print is fresh for the quote check", () => {
+    const held = { ...signed, held: true };
+    const ev = run({ mandate: relaxed, oracle: held, quote: quoteAround(190, 0, 10) });
+    expect(ev.quote?.used).toBe(true);
+    expect(ev.quoteUnverified).toBe(false);
+  });
+
+  test("audit M-3: skew utilisation is measured against maxSkew + the drift allowance (never > 100% while ok)", () => {
+    // 8 / 4 terms, allowance 4: a quote 7 bps off the attested price (within 8) is ok at 87.5%
+    const ev = run({ mandate: m84, quote: quoteAround(190 * (1 + 4 / 1e4), 3, 8.5) });
+    expect(ev.snapshot.state).toBe("ok");
+    expect(ev.snapshot.skewUtil).toBeLessThanOrEqual(1);
+    expect(ev.snapshot.skewUtil).toBeCloseTo(7 / 8, 2);
+  });
+
+  test("audit M-3: RISK_QUOTE_PRICE_MAX_AGE_MS / RISK_QUOTE_HOLD_RELEASE_TICKS are validated at startup", () => {
+    expect(loadRiskEnv({}).RISK_QUOTE_PRICE_MAX_AGE_MS).toBe(15_000);
+    expect(loadRiskEnv({}).RISK_QUOTE_HOLD_RELEASE_TICKS).toBe(2);
+    expect(loadRiskEnv({}).RISK_QUOTE_DRIFT_BPS).toBe(5);
+    expect(() => loadRiskEnv({ RISK_QUOTE_PRICE_MAX_AGE_MS: "1000" })).toThrow(/RISK_QUOTE_PRICE_MAX_AGE_MS/);
+    expect(() => loadRiskEnv({ RISK_QUOTE_PRICE_MAX_AGE_MS: "300000" })).toThrow(/RISK_QUOTE_PRICE_MAX_AGE_MS/);
+    expect(() => loadRiskEnv({ RISK_QUOTE_HOLD_RELEASE_TICKS: "0" })).toThrow(/RISK_QUOTE_HOLD_RELEASE_TICKS/);
+    expect(() => loadRiskEnv({ RISK_QUOTE_DRIFT_BPS: "11" })).toThrow(/RISK_QUOTE_DRIFT_BPS/);
+    expect(settingsFromEnv(loadRiskEnv({ RISK_QUOTE_PRICE_MAX_AGE_MS: "20000" })).quotePriceMaxAgeMs).toBe(20_000);
   });
 });
 
@@ -221,5 +370,26 @@ describe("off-hours", () => {
       oracle: { priceWad: wad(190), publishedAt: T0, held: true, stale: false, source: "chain" },
     });
     expect(ev.snapshot.state).toBe("breach");
+  });
+});
+
+describe("audit M-2 split window (review I-4): no kill from a desk valuation the window distorts", () => {
+  // a reverse split at the audited valuation: the 16k hedge valued at 1/10 -> NAV 85.6k vs 100k accounted (-1440 bps)
+  const distorted = () =>
+    chainObs({ desk: { hedgeNotionalUsd: usd(1_600), valueUsd: usd(1_600) } });
+  test("outside the window the distorted valuation would breach DRAWDOWN (and leave the band)", () => {
+    const ev = evaluate(observation({}, distorted()), IN_BAND, OPTS);
+    expect(ev.snapshot.breaches).toContain("DRAWDOWN");
+    expect(ev.inBand).toBe(false);
+  });
+  test("in the window with a trusted (basis-multiplier) valuation: breaches still run", () => {
+    const ev = evaluate(observation({ deskSplitWindow: true }, distorted()), IN_BAND, OPTS);
+    expect(ev.snapshot.breaches).toContain("DRAWDOWN");
+  });
+  test("in the window with an untrusted valuation (no basis multiplier): DRAWDOWN and the HEDGE_BAND clock are suppressed", () => {
+    const ev = evaluate(observation({ deskSplitWindow: true, deskSplitUntrusted: true }, distorted()), { outOfBandSince: T0 - 3_600, lastObservedAt: T0 - 10 }, OPTS);
+    expect(ev.snapshot.breaches).toEqual([]);
+    expect(ev.inBand).toBe(true);
+    expect(ev.outOfBandSec).toBe(0);
   });
 });

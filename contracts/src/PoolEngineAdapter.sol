@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -20,6 +20,7 @@ import {IStockTokenRegistry} from "./interfaces/IStockTokenRegistry.sol";
 interface IPoolEngineControls {
     function setInventoryCap(uint256 marketId, uint128 capUsd) external;
     function startCloseOut(uint256 marketId, uint64 notice) external;
+    function setLossBudget(uint256 marketId, uint16 lossBudgetBps) external;
 }
 
 /// @title PoolEngineAdapter — a book's venue adapter for its in-house PoolEngine market.
@@ -44,6 +45,8 @@ contract PoolEngineAdapter is IPoolEngineAdapter, Initializable, UUPSUpgradeable
     /// @notice Wind-down: open positions may be force-closed at the oracle this many mark intervals after
     ///         the book starts retiring (traders' notice).
     uint256 public constant CLOSE_OUT_NOTICE_MARKS = 2;
+    /// @dev Mirrors PoolEngine.MAX_LOSS_BUDGET_BPS (the mandate's drawdown kill is bounded at -5000 the same way).
+    uint16 internal constant ENGINE_MAX_LOSS_BUDGET_BPS = 5000;
 
     // ------------------------------------------------------------------------------------------------
     // Storage
@@ -135,7 +138,7 @@ contract PoolEngineAdapter is IPoolEngineAdapter, Initializable, UUPSUpgradeable
     ///      run inside the proxy constructor (init data) when the factory pre-computes the proxy address.
     ///      Creates the market with the §2.8 defaults and sets the initial quote: spread =
     ///      mandate.minQuoteWidthBps (clamped to the engine bound), skew 0, maxNetExposure =
-    ///      mandate.maxInventoryUsd.
+    ///      mandate.maxInventoryUsd, and the audit M-3 per-period pool loss budget = |killAtDrawdownBps|.
     function initialize(address config_, uint256 bookId_, address book_) external initializer {
         if (config_ == address(0) || book_ == address(0)) revert ZeroAddress();
         if (config_ != address(EXPECTED_CONFIG)) revert ConfigMismatch(config_);
@@ -161,6 +164,7 @@ contract PoolEngineAdapter is IPoolEngineAdapter, Initializable, UUPSUpgradeable
         uint16 spread = ch.mandate.minQuoteWidthBps;
         if (spread > ENGINE_MAX_SPREAD_BPS) spread = ENGINE_MAX_SPREAD_BPS;
         eng.setQuote(id, spread, 0, maxInv);
+        IPoolEngineControls(address(eng)).setLossBudget(id, lossBudgetBps(ch.mandate));
         emit AdapterInitialized(bookId_, book_, address(eng), id, $.priceId);
     }
 
@@ -326,7 +330,8 @@ contract PoolEngineAdapter is IPoolEngineAdapter, Initializable, UUPSUpgradeable
 
     /// @notice Only the book's mandate, on a re-mandate: brings the live engine quote within the new terms
     ///         (inventory cap = maxInventoryUsd, quote cap <= it, spread >= minQuoteWidthBps, |skew| <=
-    ///         maxSkewBps) and holds the market reduce-only until a fresh key quotes under the new terms.
+    ///         maxSkewBps, loss budget = |killAtDrawdownBps|) and holds the market reduce-only until a fresh key
+    ///         quotes under the new terms.
     function applyMandate() external {
         AdapterStorage storage $ = _s();
         if (msg.sender != $.mandate) revert Unauthorized(msg.sender);
@@ -342,10 +347,22 @@ contract PoolEngineAdapter is IPoolEngineAdapter, Initializable, UUPSUpgradeable
         if (skew > md.maxSkewBps) skew = md.maxSkewBps;
         else if (skew < -md.maxSkewBps) skew = -md.maxSkewBps;
         IPoolEngineControls(address(eng)).setInventoryCap(id, md.maxInventoryUsd);
+        IPoolEngineControls(address(eng)).setLossBudget(id, lossBudgetBps(md));
         eng.setQuote(id, spread, skew, maxNet);
         eng.setReduceOnly(id, true);
         $.liftOnQuote = IBook($.book).state() == BRTypes.BookState.Live;
         emit MandateApplied(spread, skew, maxNet, md.maxInventoryUsd);
+    }
+
+    /// @notice Audit M-3: the engine's per-period pool loss budget for mandate `m`: |killAtDrawdownBps| bps of
+    ///         the pool equity at the period's first trade (the loss the mandate already treats as fatal for the
+    ///         book), clamped to 1..5000 (a cached charter mandate is not re-validated).
+    function lossBudgetBps(BRTypes.Mandate memory m) public pure returns (uint16) {
+        int256 k = m.killAtDrawdownBps;
+        uint256 bps = k < 0 ? uint256(-k) : 0;
+        if (bps == 0) bps = 1;
+        if (bps > ENGINE_MAX_LOSS_BUDGET_BPS) bps = ENGINE_MAX_LOSS_BUDGET_BPS;
+        return uint16(bps);
     }
 
     function _startCloseOut(AdapterStorage storage $) private {

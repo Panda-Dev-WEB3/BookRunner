@@ -115,7 +115,7 @@ network only, for the minute this takes.
 
 ```bash
 docker rm -f bookrunner-redis-restore 2>/dev/null
-docker create --name bookrunner-redis-restore --network $DNET redis:7-alpine redis-server --appendonly no --dir /data --dbfilename dump.rdb
+docker create --name bookrunner-redis-restore --network $DNET redis@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499 redis-server --appendonly no --dir /data --dbfilename dump.rdb
 docker cp "$S/redis.rdb" bookrunner-redis-restore:/data/dump.rdb
 docker start bookrunner-redis-restore
 until docker exec bookrunner-redis-restore redis-cli INFO persistence | tr -d '\r' | grep -qx 'loading:0'; do sleep 1; done

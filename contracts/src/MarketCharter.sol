@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -38,12 +38,14 @@ library CharterRules {
     uint256 internal constant MAX_ENGINE_TAKER_FEE_BPS = 100; // in-house venue taker fee cap (1%)
 
     /// @notice BAD_MANDATE when: maxInventoryUsd == 0, minQuoteWidthBps == 0, hedge band min > max,
-    ///         killAtDrawdownBps >= 0 or < -5000, maxSkewBps <= 0. Returns 0 when the mandate is valid.
+    ///         killAtDrawdownBps >= 0 or < -5000, maxSkewBps <= 0, or maxSkewBps > minQuoteWidthBps / 2 (audit
+    ///         M-3: a quote at the minimum width and the maximum skew must still straddle the oracle).
+    ///         Returns 0 when the mandate is valid.
     function mandateReason(BRTypes.Mandate memory m) internal pure returns (bytes32) {
         if (
             m.maxInventoryUsd == 0 || m.minQuoteWidthBps == 0 || m.hedgeRatioMinBps > m.hedgeRatioMaxBps
                 || m.killAtDrawdownBps >= 0 || m.killAtDrawdownBps < MIN_KILL_DRAWDOWN_BPS
-                || m.maxSkewBps <= 0
+                || m.maxSkewBps <= 0 || int256(m.maxSkewBps) * 2 > int256(uint256(m.minQuoteWidthBps))
         ) {
             return BAD_MANDATE;
         }
@@ -58,7 +60,8 @@ library CharterRules {
 
 /// @title MarketCharter — charter intake, sponsor bonds, charter fees, committee decisions, retirement.
 /// @notice Lifecycle: `file` (Filed: fee escrowed here, sponsor bond locked in BkrnStaking) ->
-///         `decide` by the RiskCommittee within `config.committeeWindow()` (Approved: fee forwarded to
+///         `decide` by the RiskCommittee before the deadline fixed at filing (`decisionDeadline`: filedAt +
+///         the `config.committeeWindow()` of that moment) (Approved: fee forwarded to
 ///         `config.expenseRecipient()`, book deployed through BookFactory | Rejected: fee refunded, bond
 ///         unlocked) or `expire` after the window (Expired: fee refunded, bond unlocked). An Approved
 ///         charter's bond stays locked until the book reports Retired (`onRetired`) or the window failed
@@ -85,6 +88,9 @@ contract MarketCharter is IMarketCharter, ReentrancyGuardTransient {
     uint256 private _count;
     mapping(uint256 id => CharterRecord) private _records;
     mapping(uint256 id => Escrow) private _escrow;
+    /// @dev filedAt + config.committeeWindow() at filing (audit 2026-10 D): a later window change neither
+    ///      expires a filed charter early nor revives an expired one.
+    mapping(uint256 id => uint64) private _deadline;
 
     error ZeroAddress();
     error NotCommittee();
@@ -137,6 +143,7 @@ contract MarketCharter is IMarketCharter, ReentrancyGuardTransient {
         r.charter = c;
         r.status = BRTypes.CharterStatus.Filed;
         r.filedAt = uint64(block.timestamp);
+        _deadline[id] = uint64(block.timestamp + cfg.committeeWindow());
         r.feePaidUsd = fee;
         r.bondBkrn = bond;
         Escrow storage e = _escrow[id];
@@ -165,15 +172,15 @@ contract MarketCharter is IMarketCharter, ReentrancyGuardTransient {
     // ------------------------------------------------------------------------------------------
 
     /// @inheritdoc IMarketCharter
-    /// @dev Only `config.committee()`, only while Filed and strictly before filedAt + committeeWindow.
-    ///      Approval requires a non-zero jury CID and `!newBooksPaused`; it forwards the escrowed fee to
+    /// @dev Only `config.committee()`, only while Filed and strictly before the deadline stored at filing
+    ///      (filedAt + the committeeWindow of that moment; decisionDeadline). Approval requires a non-zero jury CID and `!newBooksPaused`; it forwards the escrowed fee to
     ///      `config.expenseRecipient()` and calls `BookFactory.create(id, charter)`. Rejection refunds
     ///      the fee and unlocks the bond.
     function decide(uint256 id, bool ok, bytes32 juryCid) external nonReentrant {
         IBookrunnerConfig cfg = config;
         if (msg.sender != cfg.committee()) revert NotCommittee();
         CharterRecord storage r = _filedRecord(id);
-        uint256 deadline = uint256(r.filedAt) + cfg.committeeWindow();
+        uint256 deadline = _deadline[id];
         if (block.timestamp >= deadline) revert DecisionWindowClosed(id, deadline);
 
         r.decidedAt = uint64(block.timestamp);
@@ -188,6 +195,13 @@ contract MarketCharter is IMarketCharter, ReentrancyGuardTransient {
 
         if (juryCid == bytes32(0)) revert MissingJuryCid();
         if (cfg.newBooksPaused()) revert NewBooksPaused();
+        // audit M-1: the book caches config.markInterval() at creation (this transaction), and validate() checked
+        // the notice against the interval at filing; an interval raised in between must not yield a book whose
+        // Junior notice is below its own interval. (A later config change never affects a created book: Book and
+        // Tranche settle on their cached interval.)
+        if (r.charter.juniorNoticeSeconds < cfg.markInterval()) {
+            revert InvalidCharter(CharterRules.BAD_NOTICE);
+        }
         address recipient = cfg.expenseRecipient();
         if (recipient == address(0)) revert ZeroAddress();
         r.status = BRTypes.CharterStatus.Approved;
@@ -206,11 +220,10 @@ contract MarketCharter is IMarketCharter, ReentrancyGuardTransient {
     }
 
     /// @inheritdoc IMarketCharter
-    /// @dev Anyone, once block.timestamp >= filedAt + config.committeeWindow() and still Filed.
+    /// @dev Anyone, once block.timestamp >= the deadline stored at filing (decisionDeadline) and still Filed.
     function expire(uint256 id) external nonReentrant {
-        IBookrunnerConfig cfg = config;
         CharterRecord storage r = _filedRecord(id);
-        uint256 deadline = uint256(r.filedAt) + cfg.committeeWindow();
+        uint256 deadline = _deadline[id];
         if (block.timestamp < deadline) revert DecisionWindowOpen(id, deadline);
 
         r.status = BRTypes.CharterStatus.Expired;
@@ -298,8 +311,10 @@ contract MarketCharter is IMarketCharter, ReentrancyGuardTransient {
     }
 
     /// @inheritdoc IMarketCharter
-    function bondLockId(uint256 id) public pure returns (bytes32) {
-        return keccak256(abi.encode(SPONSOR_BOND_DOMAIN, id));
+    /// @dev Keyed by this contract's address too (audit 2026-10 D, charter repoint): a sponsor whose bond is still
+    ///      locked for id N on a previous MarketCharter can file id N on its replacement.
+    function bondLockId(uint256 id) public view returns (bytes32) {
+        return keccak256(abi.encode(SPONSOR_BOND_DOMAIN, address(this), id));
     }
 
     /// @notice Sponsor bond still locked for `id` (0 after release or full slash).
@@ -312,18 +327,16 @@ contract MarketCharter is IMarketCharter, ReentrancyGuardTransient {
         return _escrow[id];
     }
 
-    /// @notice Timestamp from which `decide` is closed and `expire` is open (0 for unknown ids).
+    /// @inheritdoc IMarketCharter
+    /// @dev filedAt + config.committeeWindow() as of filing (audit 2026-10 D); 0 for unknown ids.
     function decisionDeadline(uint256 id) external view returns (uint256) {
-        CharterRecord storage r = _records[id];
-        if (r.status == BRTypes.CharterStatus.None) return 0;
-        return uint256(r.filedAt) + config.committeeWindow();
+        return _deadline[id];
     }
 
-    /// @notice True while the charter is Filed and the committee window is still open.
+    /// @inheritdoc IMarketCharter
     function isOpen(uint256 id) external view returns (bool) {
-        CharterRecord storage r = _records[id];
-        return r.status == BRTypes.CharterStatus.Filed
-            && block.timestamp < uint256(r.filedAt) + config.committeeWindow();
+        if (_records[id].status != BRTypes.CharterStatus.Filed) return false;
+        return block.timestamp < _deadline[id];
     }
 
     // ------------------------------------------------------------------------------------------
@@ -365,7 +378,14 @@ contract MarketCharter is IMarketCharter, ReentrancyGuardTransient {
             c.subscriptionWindow < CharterRules.MIN_SUBSCRIPTION_WINDOW
                 || c.subscriptionWindow > CharterRules.MAX_SUBSCRIPTION_WINDOW
         ) return CharterRules.BAD_WINDOW;
-        if (c.juniorNoticeSeconds > CharterRules.MAX_JUNIOR_NOTICE) return CharterRules.BAD_NOTICE;
+        // audit M-1 (defence in depth beside held marks): at least one mark interval of notice, so a Junior
+        // request always bears at least one full mark period of P&L before its bucket settles
+        if (
+            c.juniorNoticeSeconds < config.markInterval()
+                || c.juniorNoticeSeconds > CharterRules.MAX_JUNIOR_NOTICE
+        ) {
+            return CharterRules.BAD_NOTICE;
+        }
         bytes32 mandateReason = CharterRules.mandateReason(c.mandate);
         if (mandateReason != bytes32(0)) return mandateReason;
         if (!_underlyingOk(c.underlying)) return CharterRules.BAD_UNDERLYING;

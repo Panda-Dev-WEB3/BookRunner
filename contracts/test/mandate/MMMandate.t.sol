@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
@@ -520,7 +520,7 @@ contract MMMandateTest is MandateBase {
     function _newTerms() internal view returns (BRTypes.Mandate memory m) {
         m = _defaultMandate();
         m.maxInventoryUsd = 60_000e6;
-        m.maxSkewBps = 30;
+        m.maxSkewBps = 3;
     }
 
     function test_remandate_onlyCommittee() public {
@@ -534,8 +534,8 @@ contract MMMandateTest is MandateBase {
     }
 
     function test_remandate_rejectsBadTerms() public {
-        BRTypes.Mandate[6] memory bad;
-        for (uint256 i; i < 6; ++i) {
+        BRTypes.Mandate[8] memory bad;
+        for (uint256 i; i < 8; ++i) {
             bad[i] = _newTerms();
         }
         bad[0].maxInventoryUsd = 0;
@@ -544,7 +544,10 @@ contract MMMandateTest is MandateBase {
         bad[3].killAtDrawdownBps = 0;
         bad[4].killAtDrawdownBps = -5001;
         bad[5].maxSkewBps = 0;
-        for (uint256 i; i < 6; ++i) {
+        // audit M-3: maxSkew above half the min width (a quote could sit entirely on one side of the oracle)
+        bad[6].maxSkewBps = 5; // min width 8
+        bad[7].minQuoteWidthBps = 5; // max skew 3
+        for (uint256 i; i < 8; ++i) {
             assertEq(mandate.validateMandate(bad[i]), "BAD_MANDATE");
             vm.prank(committee);
             vm.expectRevert(abi.encodeWithSelector(MMMandate.InvalidMandate.selector, bytes32("BAD_MANDATE")));
@@ -553,6 +556,10 @@ contract MMMandateTest is MandateBase {
         BRTypes.Mandate memory edge = _newTerms();
         edge.killAtDrawdownBps = -5000;
         edge.hedgeRatioMinBps = edge.hedgeRatioMaxBps;
+        assertEq(mandate.validateMandate(edge), bytes32(0));
+        edge.maxSkewBps = 4; // exactly half of the min width 8
+        assertEq(mandate.validateMandate(edge), bytes32(0));
+        edge.minQuoteWidthBps = 9; // odd width: floor(9 / 2) = 4
         assertEq(mandate.validateMandate(edge), bytes32(0));
     }
 
@@ -567,7 +574,7 @@ contract MMMandateTest is MandateBase {
         assertFalse(mandate.killed());
         assertEq(mandate.killReason(), bytes32(0));
         assertEq(mandate.getMandate().maxInventoryUsd, 60_000e6);
-        assertEq(mandate.getMandate().maxSkewBps, 30);
+        assertEq(mandate.getMandate().maxSkewBps, 3);
         // engine reduce-only stays latched until RISK lifts it
         assertTrue(adapter.reduceOnly());
         assertFalse(mandate.isActiveKey(key));
@@ -711,19 +718,19 @@ contract MMMandateTest is MandateBase {
     // ------------------------------------------------------------------ checkQuote
 
     function test_checkQuote_boundaries() public view {
-        mandate.checkQuote(key, 8, 25, MAX_INV);
-        mandate.checkQuote(key, 8, -25, 0);
+        mandate.checkQuote(key, 8, 4, MAX_INV);
+        mandate.checkQuote(key, 8, -4, 0);
         mandate.checkQuote(key, type(uint16).max, 0, 1);
     }
 
     function test_checkQuote_reverts() public {
         vm.expectRevert(abi.encodeWithSelector(IMMMandate.QuoteWidthTooNarrow.selector, uint16(7), uint16(8)));
         mandate.checkQuote(key, 7, 0, 1);
-        vm.expectRevert(abi.encodeWithSelector(IMMMandate.SkewTooWide.selector, int16(26), int16(25)));
-        mandate.checkQuote(key, 10, 26, 1);
-        vm.expectRevert(abi.encodeWithSelector(IMMMandate.SkewTooWide.selector, int16(-26), int16(25)));
-        mandate.checkQuote(key, 10, -26, 1);
-        vm.expectRevert(abi.encodeWithSelector(IMMMandate.SkewTooWide.selector, type(int16).min, int16(25)));
+        vm.expectRevert(abi.encodeWithSelector(IMMMandate.SkewTooWide.selector, int16(5), int16(4)));
+        mandate.checkQuote(key, 10, 5, 1);
+        vm.expectRevert(abi.encodeWithSelector(IMMMandate.SkewTooWide.selector, int16(-5), int16(4)));
+        mandate.checkQuote(key, 10, -5, 1);
+        vm.expectRevert(abi.encodeWithSelector(IMMMandate.SkewTooWide.selector, type(int16).min, int16(4)));
         mandate.checkQuote(key, 10, type(int16).min, 1);
         vm.expectRevert(
             abi.encodeWithSelector(IMMMandate.InventoryLimit.selector, uint256(MAX_INV) + 1, MAX_INV)
@@ -747,8 +754,8 @@ contract MMMandateTest is MandateBase {
         mandate.checkQuote(key, 19, 0, 30_000e6);
         vm.expectRevert(IMMMandate.OffHoursNewRisk.selector);
         mandate.checkQuote(key, 20, 0, 30_000e6 + 1);
-        mandate.checkQuote(key, 20, 5, 30_000e6);
-        mandate.checkQuote(key, 40, -5, 10_000e6);
+        mandate.checkQuote(key, 20, 4, 30_000e6);
+        mandate.checkQuote(key, 40, -4, 10_000e6);
         // stale counts as off-hours
         oracle.setHeld(NVDA_ID, false);
         vm.warp(block.timestamp + 301);

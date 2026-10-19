@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -13,6 +13,8 @@ import {IMarkRegistry} from "../interfaces/IMarkRegistry.sol";
 import {IMMMandate} from "../interfaces/IMMMandate.sol";
 import {IMarketCharter} from "../interfaces/IMarketCharter.sol";
 import {IBackstop} from "../interfaces/IBkrnFeeRouter.sol";
+import {IAttestedOracle} from "../interfaces/IAttestedOracle.sol";
+import {IStockTokenRegistry} from "../interfaces/IStockTokenRegistry.sol";
 import {Waterfall} from "./Waterfall.sol";
 import {Book, IVaultBackstopRepay} from "../Book.sol";
 
@@ -35,6 +37,18 @@ library BookLogic {
     uint256 internal constant RETIRED_SETTLE_INDEX = (1 << 128) - 1;
     /// @dev == Book.KILL_DRAWDOWN
     bytes32 internal constant KILL_DRAWDOWN = "DRAWDOWN";
+    /// @notice Longest a run of held marks defers settlement (audit M-1; decision in docs/AUDIT-2026-10.md).
+    ///         30 days: above every scheduled closed session (a weekend + holiday is ~4 days) and above the
+    ///         longest SEC single-name trading suspension (10 business days, ~14 calendar days), so a held
+    ///         price never settles a bucket during either. Past it, held marks settle at the held valuation
+    ///         for liveness of exits (a long hold defers them, it never blocks them), unless a governance settle
+    ///         price for the book's underlying is pending or in force (_governanceSettlePrice; Task 7).
+    uint256 internal constant MAX_HELD_DEFERRAL = 30 days;
+    /// @notice Hard bound on a hold run while a governance settle price is pending or in force (Task 7): past it held
+    ///         marks settle at the held valuation whatever governance does, so the settle path can never block exits.
+    uint256 internal constant MAX_SETTLE_PRICE_DEFERRAL = 60 days;
+    /// @notice Subscription timeout before {cancelStuckWindow} (Book.CLOSE_WINDOW_TIMEOUT reads it).
+    uint256 internal constant CLOSE_WINDOW_TIMEOUT = 7 days;
 
     /// @notice Working summary of a mark application (memory only; emitted as MarkSettled).
     ///         Arrays are indexed by tranche kind.
@@ -99,6 +113,18 @@ library BookLogic {
         if (mmAmount > 0) IUnderwritingVault(vault).deployToVenue(BRTypes.ACCOUNT_MM, mmAmount);
     }
 
+    /// @dev Book.cancelStuckWindow (Task 7 lead "unconfirmed deposits"): a window closeWindow could not close for
+    ///      CLOSE_WINDOW_TIMEOUT (its venue deposit keeps reverting) is cancelled; commitments refundable 1:1.
+    function cancelStuckWindow(Book.BookStorage storage $) external {
+        if ($.state != BRTypes.BookState.Subscription) revert Book.BadState($.state);
+        uint256 at = uint256($.subscriptionEnds) + CLOSE_WINDOW_TIMEOUT;
+        if (block.timestamp < at) revert Book.WindowNotStuck(uint64(at));
+        $.state = BRTypes.BookState.Cancelled;
+        emit IBook.BookCancelled($.bookId, "CLOSE_TIMEOUT");
+        ITranche($.components.senior).markCancelled();
+        ITranche($.components.junior).markCancelled();
+    }
+
     /// @dev Book.applyMark.
     function applyMark(Book.BookStorage storage $, uint256 markId) external {
         BRTypes.BookState st = $.state;
@@ -123,7 +149,8 @@ library BookLogic {
 
         int256 pnl = _applyPnl($, cfg, sum);
         _maybeDrawdownKill($);
-        _settleAtMark($, sum);
+        if (_settles($, m.input.held, markId, sum.periodEnd)) _settleAtMark($, sum);
+        else _setPrices($, sum);
 
         $.lastMark = Book.LastMark({
             markId: markId,
@@ -175,6 +202,41 @@ library BookLogic {
         $.unfunded[k] += assetsOwed;
         emit Book.RetiredRedemption($.bookId, k, assetsOwed);
         fundClaims($);
+    }
+
+    /// @dev Book.creditDistribution (msg.sender is the router: DELEGATECALL keeps it). Audit 2026-10 L-1: the
+    ///      residual follows the mark gain order (Waterfall.applyDistribution). A repayment earned here is netted
+    ///      from NAV (backstopPayable) and paid by the next fundClaims, exactly like one earned at a mark; the
+    ///      router's distribution does not wait for it.
+    function creditDistribution(Book.BookStorage storage $, uint256 seniorAmount, uint256 juniorAmount)
+        external
+    {
+        if (msg.sender != $.components.router) revert Book.NotRouter();
+        BRTypes.BookState st = $.state;
+        if (st == BRTypes.BookState.Subscription || st == BRTypes.BookState.Cancelled) revert Book.BadState(st);
+        Waterfall.DistributionResult memory r = Waterfall.applyDistribution(
+            Waterfall.DistributionInput({
+                senior: seniorAmount,
+                junior: juniorAmount,
+                juniorSupply: IERC20($.components.junior).totalSupply(),
+                seniorImpairment: $.seniorImpairment,
+                backstopDebt: $.backstopDebt
+            })
+        );
+        $.nav[S] += r.seniorCredit;
+        $.nav[J] += r.juniorCredit;
+        emit IBook.DistributionCredited($.bookId, r.seniorCredit, r.juniorCredit);
+        if (r.seniorRestored > 0 || r.backstopRepaid > 0) {
+            $.seniorImpairment = r.seniorImpairment;
+            $.backstopDebt = r.backstopDebt;
+            $.backstopPayable += r.backstopRepaid;
+            emit Book.DistributionRepaid($.bookId, r.seniorRestored, r.backstopRepaid);
+        }
+        if (st == BRTypes.BookState.Retired) {
+            // late fee flow raises the immediate-settlement price for the remaining holders
+            if (r.seniorCredit > 0) setRetiredPrice($, S, true);
+            if (r.juniorCredit > 0) setRetiredPrice($, J, true);
+        }
     }
 
     /// @dev Pays unfunded claims from vault idle, Senior first, then the backstop repayment owed (A5-01).
@@ -285,12 +347,71 @@ library BookLogic {
         }
     }
 
-    function _settleAtMark(Book.BookStorage storage $, MarkSummary memory sum) private {
-        uint256 interval = $.markInterval;
-        uint256 upTo = Waterfall.settlesUpTo(sum.periodEnd, interval);
-        bool topUpDue = $.topUpOpen && upTo * interval >= $.topUpEndsAt;
-        // prices from the post-P&L NAVs, before any settlement
-        uint256 seniorSupply;
+    /// @dev Audit M-1: whether this mark settles redemption buckets and a due top-up round. A non-held mark
+    ///      always does (and ends a hold run). A held mark (valued at a held oracle price, e.g. a closed
+    ///      session) applies P&L only, so nobody can exit or enter at a value the reopen is about to
+    ///      reprice: the buckets / round wait for the first non-held mark, which settles every bucket due
+    ///      by then at its post-P&L prices (at most Tranche.MAX_SETTLE_BUCKETS per tranche per mark; any
+    ///      further due bucket settles at the next mark, still a post-hold price). Bounded: once the run of
+    ///      held marks is MAX_HELD_DEFERRAL old, held marks settle again at the held valuation (liveness of
+    ///      exits), unless a governance settle price for the book's underlying (or an index component) is pending
+    ///      or in force: in force, the mark service values the book at it and signs NON-held marks, which settle
+    ///      whatever this hook says; a held mark reaching the chain then (an old or failing mark service, a mark
+    ///      signed before the price came into force) must not settle at the held valuation, which would let early
+    ///      exiters dodge the governance price. Bounded: past MAX_SETTLE_PRICE_DEFERRAL (60 days) of hold, held
+    ///      marks settle whatever governance does (repeated proposals, a stuck mark service cannot block exits).
+    function _settles(Book.BookStorage storage $, bool held, uint256 markId, uint64 periodEnd)
+        private
+        returns (bool)
+    {
+        if (!held) {
+            if ($.heldSince != 0) $.heldSince = 0;
+            return true;
+        }
+        uint64 since = $.heldSince;
+        if (since == 0) $.heldSince = since = periodEnd;
+        uint256 elapsed = periodEnd - since;
+        bool settles = elapsed >= MAX_HELD_DEFERRAL
+            && (elapsed >= MAX_SETTLE_PRICE_DEFERRAL || !_governanceSettlePrice($));
+        emit Book.MarkHeld($.bookId, markId, since, settles);
+        return settles;
+    }
+
+    /// @dev Audit M-1 x Task 7: whether a governance settle price is pending or in force in config.oracle() for the
+    ///      book's underlying (the oracle price id of `charter.underlying`, the price its marks are held on) or, for an
+    ///      index book, for any of the index's components (at most StockTokenRegistry.MAX_INDEX_COMPONENTS). Never
+    ///      reverts: no registry / oracle, an oracle without the settle path, or a failing read means false (the
+    ///      30-day fallback applies). Read only for a held mark past MAX_HELD_DEFERRAL.
+    function _governanceSettlePrice(Book.BookStorage storage $) private view returns (bool) {
+        IBookrunnerConfig cfg = IBookrunnerConfig($.config);
+        address reg = cfg.stockRegistry();
+        address oracle = cfg.oracle();
+        if (reg.code.length == 0 || oracle.code.length == 0) return false;
+        bytes32 u = $.charter.underlying;
+        if (_settlePriceSet(reg, oracle, u)) return true;
+        if (uint256(u) >> 160 == 0) return false; // a token, not an index id
+        try IStockTokenRegistry(reg).getIndex(u) returns (bytes32, IStockTokenRegistry.IndexComponent[] memory cs) {
+            for (uint256 i; i < cs.length; ++i) {
+                if (_settlePriceSet(reg, oracle, bytes32(uint256(uint160(cs[i].token))))) return true;
+            }
+        } catch {}
+        return false;
+    }
+
+    /// @dev A settle price pending or in force for the oracle price id of `underlying` (false on any failed read).
+    function _settlePriceSet(address reg, address oracle, bytes32 underlying) private view returns (bool set) {
+        try IStockTokenRegistry(reg).priceIdOf(underlying) returns (bytes32 pid) {
+            try IAttestedOracle(oracle).settlePrice(pid) returns (uint256, uint64, uint64, bool pending, bool effective) {
+                set = pending || effective;
+            } catch {}
+        } catch {}
+    }
+
+    /// @dev Share prices from the post-P&L NAVs, before any settlement; returns the Senior supply.
+    function _setPrices(Book.BookStorage storage $, MarkSummary memory sum)
+        private
+        returns (uint256 seniorSupply)
+    {
         for (uint8 k = 0; k < 2; k++) {
             uint256 supply = IERC20(tranche($, k)).totalSupply();
             if (k == S) seniorSupply = supply;
@@ -298,6 +419,13 @@ library BookLogic {
             $.price[k] = p;
             sum.priceWad[k] = p;
         }
+    }
+
+    function _settleAtMark(Book.BookStorage storage $, MarkSummary memory sum) private {
+        uint256 interval = $.markInterval;
+        uint256 upTo = Waterfall.settlesUpTo(sum.periodEnd, interval);
+        bool topUpDue = $.topUpOpen && upTo * interval >= $.topUpEndsAt;
+        uint256 seniorSupply = _setPrices($, sum);
         // Junior first so the Senior top-up cap sees the final Junior NAV
         _settleTranche($, sum, J, upTo, topUpDue ? $.topUpCapacity[J] : 0);
         // no Senior top-up while impaired: new shares would share the restoration owed to the old ones

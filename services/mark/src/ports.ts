@@ -99,6 +99,8 @@ export interface MarkStore {
   fundingInPeriod(bookId: number, periodStart: number, periodEnd: number): Promise<bigint>;
   /** pnl.unrealizedUsd of the latest mark before `periodEnd` (0 if none). */
   prevUnrealized(bookId: number, periodEnd: number): Promise<bigint>;
+  /** Desk token positions of the latest mark before `periodEnd` (empty if none): audit M-2 carry-forward. */
+  prevDeskPositions(bookId: number, periodEnd: number): Promise<Array<{ token: string; qtyRaw: bigint; valueUsd: bigint }>>;
   lastQuoteSkewBps(bookId: number, atOrBefore: number): Promise<number | null>;
   markForPeriod(bookId: number, periodEnd: number): Promise<StoredMark | null>;
   saveCommitted(row: MarkRow): Promise<void>;

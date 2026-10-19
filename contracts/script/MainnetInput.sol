@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {Script} from "forge-std/Script.sol";
 import {stdJson} from "forge-std/StdJson.sol";
@@ -521,6 +521,7 @@ abstract contract MainnetInput is Script {
             );
         }
         require(prm.maxPriceAge > 0 && prm.maxTradePriceAge > 0 && prm.maxMarkAge > 0, "input: zero age param");
+        require(prm.maxTradePriceAge <= 15, "input: maxTradePriceAge > 15 s (config MAX_TRADE_PRICE_AGE, audit L-2)");
         require(prm.backstopMaxCoverBps > 0 && prm.backstopMaxCoverBps <= 10_000, "input: backstopMaxCoverBps");
         require(prm.stakingCooldown >= 1 days, "input: stakingCooldown < 1 day");
         require(prm.oracleMinSources > 0, "input: oracleMinSources 0");

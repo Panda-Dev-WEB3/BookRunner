@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -7,7 +7,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IStockTokenRegistry} from "./interfaces/IStockTokenRegistry.sol";
 import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 import {IAttestedOracle} from "./interfaces/IAttestedOracle.sol";
-import {IScaledUIAmount} from "./interfaces/external/IScaledUIAmount.sol";
+import {IScaledUIAmount, IScaledUIAmountPending} from "./interfaces/external/IScaledUIAmount.sol";
 
 /// @title StockTokenRegistry — canonical Stock Token registry + multiplier-aware valuer.
 /// @notice Governance: `config.timelock()` or (devnet / launch) an `admin` set at construction, which
@@ -25,6 +25,9 @@ import {IScaledUIAmount} from "./interfaces/external/IScaledUIAmount.sol";
 ///         `multiplierBandBps` from it (and from the optional pre-approved `nextMultiplierAnchor`, for a
 ///         scheduled split) reverts MultiplierOutOfBand. The valuation then fails closed like a stale price
 ///         (the risk flatten path tolerates it) until governance re-anchors with {setMultiplier}.
+///         Split window (audit M-2): {valueUsd} also fails closed while the oracle price's share basis
+///         predates the last multiplier change ({multiplierChangedAt}), e.g. Friday's held price after a
+///         split took effect over the weekend, until the oracle signs a live price after the change.
 /// @dev Non-upgradeable. Tokens are never deleted: deactivating a token (`setActive(false)`) removes it
 ///      from the canonical set (no new hedges, charters) while existing inventory stays valuable.
 contract StockTokenRegistry is IStockTokenRegistry {
@@ -61,6 +64,22 @@ contract StockTokenRegistry is IStockTokenRegistry {
     mapping(address token => uint256) public nextMultiplierAnchor;
     /// @notice Max distance (bps) of a live multiplier from an anchor.
     uint16 public multiplierBandBps;
+    /// @notice Registry-side change of the effective multiplier (unix seconds, 0 = none): `setMultiplier` while
+    ///         the stored value is the effective one, and every `setMultiplierSource` (audit M-2).
+    mapping(address token => uint64) public multiplierSetAt;
+    /// @dev Reverse indexes for {splitGate}: an engine market is keyed by its price id.
+    mapping(bytes32 priceId => address[]) internal _tokensOfPriceId;
+    mapping(bytes32 priceId => bytes32 indexId) internal _indexOfPriceId;
+    /// @dev One registry-side change ({multiplierSetAt}): its time and the multiplier in force before it (stored
+    ///      mode: the previous stored value; live mode: the anchor before a split re-anchor or source switch).
+    struct MultiplierChange {
+        uint64 at;
+        uint256 before;
+    }
+
+    /// @dev Every registry-side change of a token, oldest first (Task 7, the full history behind {basisMultiplier}:
+    ///      fix round 2 N-I1 kept only the last one, so two changes after a basis read as unknown).
+    mapping(address token => MultiplierChange[]) internal _changes;
 
     error Unauthorized(address caller);
     error ZeroAddress();
@@ -77,6 +96,7 @@ contract StockTokenRegistry is IStockTokenRegistry {
     error UnknownUnderlying(bytes32 underlying);
     error MultiplierOutOfBand(address token, uint256 live, uint256 anchor);
     error BadBand(uint16 bandBps);
+    error MultiplierChangedSincePrice(address token, uint64 priceBasisAt, uint256 multiplierChangedAt);
 
     event AdminSet(address indexed admin);
     event TokenActiveSet(address indexed token, bool active);
@@ -127,6 +147,7 @@ contract StockTokenRegistry is IStockTokenRegistry {
             floatCapRaw: floatCapRaw
         });
         _tokenList.push(token);
+        _tokensOfPriceId[priceId].push(token);
         emit TokenRegistered(token, priceId, multiplierWad);
         emit FloatCapSet(token, floatCapRaw);
     }
@@ -136,17 +157,28 @@ contract StockTokenRegistry is IStockTokenRegistry {
     function setMultiplier(address token, uint256 multiplierWad) external override onlyGov {
         StockToken storage t = _registered(token);
         if (multiplierWad == 0) revert BadMultiplier();
+        uint256 old = t.multiplierWad;
         t.multiplierWad = multiplierWad;
+        // audit M-2. Stored mode: this IS the valuation multiplier, a price observed before it must not meet
+        // it. Live mode: an anchor moved beyond the band re-anchors a split; stamping it keeps the guard on
+        // when the token later stops reporting that split's effectiveAt (a newer change staged).
+        if (multiplierFromToken[token] ? !_inBand(multiplierWad, old) : multiplierWad != old) _stamp(token, old);
         emit MultiplierSet(token, multiplierWad);
     }
 
     /// @notice Multiplier source: true = the token's live ERC-8056 `uiMultiplier()` (mainnet Stock Tokens),
     ///         false = the stored value. Enabling reads the token once: it must implement `uiMultiplier()`
-    ///         and be within the band of the anchor (else MultiplierOutOfBand / a revert).
+    ///         and Robinhood's `effectiveAt()` (the change time the M-2 guard needs) and be within the band of
+    ///         the anchor (else MultiplierOutOfBand / a revert), plus `newUIMultiplier()` ({splitGate}). An
+    ///         actual switch counts as a change; a no-op re-call does not.
     function setMultiplierSource(address token, bool fromToken) external onlyGov {
         StockToken storage t = _registered(token);
+        if (multiplierFromToken[token] != fromToken) _stamp(token, t.multiplierWad);
         multiplierFromToken[token] = fromToken;
-        if (fromToken) _multiplier(t);
+        if (fromToken) {
+            _effective(t);
+            IScaledUIAmountPending(token).newUIMultiplier();
+        }
         emit MultiplierSourceSet(token, fromToken);
     }
 
@@ -210,7 +242,9 @@ contract StockTokenRegistry is IStockTokenRegistry {
 
         IndexData storage d = _indexes[indexId];
         if (d.priceId == bytes32(0)) _indexList.push(indexId);
+        else if (d.priceId != priceId) delete _indexOfPriceId[d.priceId];
         d.priceId = priceId;
+        _indexOfPriceId[priceId] = indexId;
         delete d.components;
         for (uint256 i; i < n; ++i) {
             d.components.push(components[i]);
@@ -253,6 +287,79 @@ contract StockTokenRegistry is IStockTokenRegistry {
     }
 
     /// @inheritdoc IStockTokenRegistry
+    /// @dev Live mode: the token's `effectiveAt()` once passed (a staged change that is not active yet does not
+    ///      count: the active multiplier is still the previous one), or the last registry-side change
+    ///      ({multiplierSetAt}: source switch, out-of-band re-anchor) if later. While a further change is
+    ///      staged the token no longer reports when the ACTIVE multiplier took effect: if that multiplier sits
+    ///      only in the pre-approved next anchor's band (a split governance has not re-anchored yet), the
+    ///      time is unknown and this returns `block.timestamp` (fail closed, review I-2). Stored mode:
+    ///      {multiplierSetAt}.
+    function multiplierChangedAt(address token) external view override returns (uint256 changedAt) {
+        (, changedAt,) = _effective(_registered(token));
+    }
+
+    /// @notice Multiplier in force at `basisAt` (fix round 2, N-I1; full history, Task 7). No change since: the
+    ///         effective one. A registry-side change after `basisAt` (stored `setMultiplier`, source switch, live
+    ///         split re-anchor): the value recorded before the FIRST such change, exact in stored mode whatever the
+    ///         number of changes since. Otherwise (live mode, a token-side change only): the stored anchor, which is
+    ///         the pre-split multiplier until the (stamped) re-anchor and, for an in-band change, within the band of
+    ///         the true value (the documented live case; the token's own update events are exact). Never 0 in stored
+    ///         mode; 0 only for a live token with no registry change after the basis and no anchor (never: the anchor
+    ///         is set at registration).
+    function basisMultiplier(address token, uint64 basisAt) external view override returns (uint256) {
+        StockToken storage t = _registered(token);
+        (uint256 mult, uint256 changedAt,) = _effective(t);
+        if (changedAt <= basisAt) return mult;
+        MultiplierChange[] storage cs = _changes[token];
+        // first change strictly after the basis (changes are appended in time order)
+        uint256 lo;
+        uint256 hi = cs.length;
+        while (lo < hi) {
+            uint256 mid = (lo + hi) / 2;
+            if (cs[mid].at > basisAt) hi = mid;
+            else lo = mid + 1;
+        }
+        if (lo < cs.length) return cs[lo].before;
+        return t.multiplierWad;
+    }
+
+    /// @notice Reverts MultiplierChangedSincePrice when the stored price's share basis predates the multiplier
+    ///         change, whatever its age (fix round 2, N-I2: the RISK flatten checks this before it may tolerate a
+    ///         stale price).
+    function checkPriceBasis(address token) external view override {
+        StockToken storage t = _registered(token);
+        (, uint256 changedAt,) = _effective(t);
+        if (changedAt == 0) return;
+        uint64 basis = _storedBasis(t);
+        if (changedAt > basis) revert MultiplierChangedSincePrice(token, basis, changedAt);
+    }
+
+    /// @notice Engine gate for a market keyed by `priceId` (a Stock Token's price id, or an index level's;
+    ///         audit N-1). `pending`: a token behind it (a component, for an index) has an out-of-band change
+    ///         pre-approved (`nextMultiplierAnchor` beyond the band of the anchor) or staged on the token
+    ///         (`newUIMultiplier()` beyond the band of the active one, `effectiveAt()` ahead): close-only.
+    ///         `window`: a token's {multiplierChangedAt} is after `basisAt` (the share basis of the engine's
+    ///         price): the price is in pre-change shares, every voluntary trade reverts. Reverts like a
+    ///         valuation when a live multiplier is out of band (fail closed).
+    function splitGate(bytes32 priceId, uint64 basisAt) external view override returns (bool pending, bool window) {
+        address[] storage toks = _tokensOfPriceId[priceId];
+        for (uint256 i; i < toks.length; ++i) {
+            (bool p, bool w) = _tokenGate(_tokens[toks[i]], basisAt);
+            pending = pending || p;
+            window = window || w;
+        }
+        bytes32 idx = _indexOfPriceId[priceId];
+        if (idx != bytes32(0)) {
+            IndexComponent[] storage cs = _indexes[idx].components;
+            for (uint256 i; i < cs.length; ++i) {
+                (bool p, bool w) = _tokenGate(_tokens[cs[i].token], basisAt);
+                pending = pending || p;
+                window = window || w;
+            }
+        }
+    }
+
+    /// @inheritdoc IStockTokenRegistry
     function getIndex(bytes32 indexId)
         external
         view
@@ -282,23 +389,44 @@ contract StockTokenRegistry is IStockTokenRegistry {
     }
 
     /// @inheritdoc IStockTokenRegistry
-    /// @dev Uses `AttestedOracle.priceOf` (reverts StalePrice beyond config.maxPriceAge()). A held
-    ///      (off-hours) price is still a valid valuation price.
+    /// @dev Reverts StalePrice beyond config.maxPriceAge() (AttestedOracle.priceOf's rule, applied here on ONE
+    ///      `latest()` read). A held (off-hours) price is still a valid valuation price, unless the multiplier
+    ///      changed after its share basis (audit M-2): a per-share price is quoted in the share count of the
+    ///      moment it was observed, so after a split (or any multiplier change) it may only meet the
+    ///      multiplier of that moment. The basis is the price's `publishedAt`, or for a held price
+    ///      `AttestedOracle.lastLiveAt` (a held price re-signs the last open-session print under a fresh
+    ///      timestamp). A basis older than {multiplierChangedAt} reverts MultiplierChangedSincePrice: no
+    ///      valuation, so desk trades and flattens revert until the oracle signs a live price after the change.
     function valueUsd(address token, uint256 qtyRaw) external view override returns (uint256) {
         StockToken storage t = _registered(token);
         if (qtyRaw == 0) return 0;
-        (uint256 priceWad,) = IAttestedOracle(config.oracle()).priceOf(t.priceId);
-        return _value(t, qtyRaw, priceWad);
+        IAttestedOracle o = IAttestedOracle(config.oracle());
+        bytes32 pid = t.priceId;
+        IAttestedOracle.PriceData memory d = o.latest(pid);
+        if (d.publishedAt == 0 || uint256(d.publishedAt) + config.maxPriceAge() < block.timestamp) {
+            revert IAttestedOracle.StalePrice(pid, d.publishedAt);
+        }
+        (uint256 mult, uint256 changedAt,) = _effective(t);
+        if (changedAt != 0) {
+            uint64 basis = d.held ? o.lastLiveAt(pid) : d.publishedAt;
+            if (changedAt > basis) revert MultiplierChangedSincePrice(token, basis, changedAt);
+        }
+        return _valueWith(t, qtyRaw, mult, d.priceWad);
     }
 
     /// @inheritdoc IStockTokenRegistry
+    /// @dev Pure valuation at a caller-supplied price: no staleness and no M-2 basis check (an off-chain
+    ///      caller applies them: the mark and risk services value a position whose price basis predates
+    ///      {multiplierChangedAt} at the multiplier of the basis, never at this one).
     function valueUsdAt(address token, uint256 qtyRaw, uint256 priceWad)
         external
         view
         override
         returns (uint256)
     {
-        return _value(_registered(token), qtyRaw, priceWad);
+        StockToken storage t = _registered(token);
+        if (qtyRaw == 0 || priceWad == 0) return 0;
+        return _valueWith(t, qtyRaw, _multiplier(t), priceWad);
     }
 
     /// @notice All registered tokens (active and inactive), registration order.
@@ -321,9 +449,13 @@ contract StockTokenRegistry is IStockTokenRegistry {
     /// @dev floor(qty * mult * price / (10**dec * 1e18 * 1e12)). The multiplier appears exactly once.
     ///      qty * mult is checked (reverts only for absurd quantities); the product with the price is
     ///      taken at 512-bit precision by Math.mulDiv.
-    function _value(StockToken storage t, uint256 qtyRaw, uint256 priceWad) internal view returns (uint256) {
+    function _valueWith(StockToken storage t, uint256 qtyRaw, uint256 mult, uint256 priceWad)
+        internal
+        view
+        returns (uint256)
+    {
         if (qtyRaw == 0 || priceWad == 0) return 0;
-        return Math.mulDiv(qtyRaw * _multiplier(t), priceWad, (10 ** uint256(t.decimals)) * SCALE);
+        return Math.mulDiv(qtyRaw * mult, priceWad, (10 ** uint256(t.decimals)) * SCALE);
     }
 
     /// @dev Stored multiplier, or the token's live ERC-8056 `uiMultiplier()` (WAD) within the band of the
@@ -331,13 +463,59 @@ contract StockTokenRegistry is IStockTokenRegistry {
     function _multiplier(StockToken storage t) internal view returns (uint256) {
         address token = t.token;
         if (!multiplierFromToken[token]) return t.multiplierWad;
-        uint256 live = IScaledUIAmount(token).uiMultiplier();
+        return _checkedLive(t, IScaledUIAmount(token).uiMultiplier());
+    }
+
+    function _checkedLive(StockToken storage t, uint256 live) internal view returns (uint256) {
         if (live == 0) revert BadMultiplier();
         uint256 anchor = t.multiplierWad;
         if (_inBand(live, anchor)) return live;
-        uint256 next = nextMultiplierAnchor[token];
+        uint256 next = nextMultiplierAnchor[t.token];
         if (next != 0 && _inBand(live, next)) return live;
-        revert MultiplierOutOfBand(token, live, anchor);
+        revert MultiplierOutOfBand(t.token, live, anchor);
+    }
+
+    /// @dev Effective multiplier, when it last changed ({multiplierChangedAt}) and, in live mode, the token's
+    ///      `effectiveAt()` (0 in stored mode), from ONE read of each token view. Live mode reverts on a token
+    ///      without `effectiveAt()` (fail closed).
+    function _effective(StockToken storage t) internal view returns (uint256 mult, uint256 changedAt, uint256 eff) {
+        address token = t.token;
+        changedAt = multiplierSetAt[token];
+        if (!multiplierFromToken[token]) return (t.multiplierWad, changedAt, 0);
+        mult = _checkedLive(t, IScaledUIAmount(token).uiMultiplier());
+        eff = IScaledUIAmountPending(token).effectiveAt();
+        if (eff <= block.timestamp) {
+            if (eff > changedAt) changedAt = eff;
+        } else if (!_inBand(mult, t.multiplierWad)) {
+            changedAt = block.timestamp; // review I-2: an active split whose time a staged change hides
+        }
+    }
+
+    /// @dev Records a registry-side multiplier change (audit M-2): its time and the value before it, appended to
+    ///      the token's history (Task 7). Several changes in one block keep their order: the first one's `before`
+    ///      is the value in force before that block.
+    function _stamp(address token, uint256 before) internal {
+        _changes[token].push(MultiplierChange({at: uint64(block.timestamp), before: before}));
+        multiplierSetAt[token] = uint64(block.timestamp);
+    }
+
+    /// @dev Share basis of the stored price of `t` (no staleness check): publishedAt, or lastLiveAt when held.
+    function _storedBasis(StockToken storage t) internal view returns (uint64 basis) {
+        IAttestedOracle o = IAttestedOracle(config.oracle());
+        IAttestedOracle.PriceData memory d = o.latest(t.priceId);
+        basis = d.held ? o.lastLiveAt(t.priceId) : d.publishedAt;
+    }
+
+    /// @dev {splitGate} for one token.
+    function _tokenGate(StockToken storage t, uint64 basisAt) internal view returns (bool pending, bool window) {
+        if (t.token == address(0)) return (false, false);
+        uint256 next = nextMultiplierAnchor[t.token];
+        pending = next != 0 && !_inBand(next, t.multiplierWad);
+        (uint256 mult, uint256 changedAt, uint256 eff) = _effective(t);
+        if (eff > block.timestamp && !_inBand(IScaledUIAmountPending(t.token).newUIMultiplier(), mult)) {
+            pending = true;
+        }
+        window = changedAt > basisAt;
     }
 
     function _inBand(uint256 live, uint256 anchor) internal view returns (bool) {

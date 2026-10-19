@@ -1,0 +1,365 @@
+{
+  "about": "Reviewed Slither false positives (scripts/slither-gate.ts). Every Medium/High finding outside this list fails CI. Entries name the detector and the function/variable, never a line. Reviewed 2026-10-19 against slither 0.11.6 on the audit-fixes branch (the audit 2026-10 triage: trusted calls behind nonReentrant, intended zero locals, timestamps). Global exclusions in slither.config.json: timestamp, weak-prng (period floors block.timestamp - block.timestamp % interval, no randomness anywhere), Low / Informational, lib/ test/ script/ src/mocks/.",
+  "entries": [
+    {
+      "check": "arbitrary-send-erc20",
+      "target": "UnderwritingVault.returnFromDesk",
+      "reason": "the from address is the book's own desk (set once at clone init) and only that desk may call (NotDesk); it approves the pull first (ReturnToVault)"
+    },
+    {
+      "check": "divide-before-multiply",
+      "target": "BkrnStaking._accrued",
+      "reason": "intentional integer arithmetic: the remainder of the division is carried forward explicitly (dust / unallocated reward), or the Uniswap TickMath reciprocal (type(uint256).max / ratio) ported verbatim"
+    },
+    {
+      "check": "divide-before-multiply",
+      "target": "BkrnStaking.notifyReward",
+      "reason": "intentional integer arithmetic: the remainder of the division is carried forward explicitly (dust / unallocated reward), or the Uniswap TickMath reciprocal (type(uint256).max / ratio) ported verbatim"
+    },
+    {
+      "check": "divide-before-multiply",
+      "target": "UniswapV3Twap.sqrtRatioAtTick",
+      "reason": "intentional integer arithmetic: the remainder of the division is carried forward explicitly (dust / unallocated reward), or the Uniswap TickMath reciprocal (type(uint256).max / ratio) ported verbatim"
+    },
+    {
+      "check": "incorrect-equality",
+      "target": "BkrnStaking.claimReward",
+      "reason": "equality on protocol-owned amounts / period ids / timestamps that an outsider cannot steer to dodge the check (zero-amount early returns, same-period anchors), not on token balances"
+    },
+    {
+      "check": "incorrect-equality",
+      "target": "OrderlyAdapter._forwardFees",
+      "reason": "equality on protocol-owned amounts / period ids / timestamps that an outsider cannot steer to dodge the check (zero-amount early returns, same-period anchors), not on token balances"
+    },
+    {
+      "check": "incorrect-equality",
+      "target": "OrderlyAdapter.sweepToVault",
+      "reason": "equality on protocol-owned amounts / period ids / timestamps that an outsider cannot steer to dodge the check (zero-amount early returns, same-period anchors), not on token balances"
+    },
+    {
+      "check": "incorrect-equality",
+      "target": "PoolEngine._anchorLossPeriod",
+      "reason": "equality on protocol-owned amounts / period ids / timestamps that an outsider cannot steer to dodge the check (zero-amount early returns, same-period anchors), not on token balances"
+    },
+    {
+      "check": "incorrect-equality",
+      "target": "PoolEngine._fundingDelta",
+      "reason": "equality on protocol-owned amounts / period ids / timestamps that an outsider cannot steer to dodge the check (zero-amount early returns, same-period anchors), not on token balances"
+    },
+    {
+      "check": "incorrect-equality",
+      "target": "PoolEngine.lossBudget",
+      "reason": "equality on protocol-owned amounts / period ids / timestamps that an outsider cannot steer to dodge the check (zero-amount early returns, same-period anchors), not on token balances"
+    },
+    {
+      "check": "incorrect-equality",
+      "target": "StockTokenRegistry.checkPriceBasis",
+      "reason": "equality on protocol-owned amounts / period ids / timestamps that an outsider cannot steer to dodge the check (zero-amount early returns, same-period anchors), not on token balances"
+    },
+    {
+      "check": "incorrect-equality",
+      "target": "Tranche.requestRedeem",
+      "reason": "equality on protocol-owned amounts / period ids / timestamps that an outsider cannot steer to dodge the check (zero-amount early returns, same-period anchors), not on token balances"
+    },
+    {
+      "check": "reentrancy-balance",
+      "target": "BkrnFeeRouter.executeBuyback",
+      "reason": "balance read before / after a call to a protocol component or a configured router inside a nonReentrant entry point; the difference is the measured output by design (audit 2026-10 triage: trusted calls behind nonReentrant)"
+    },
+    {
+      "check": "reentrancy-balance",
+      "target": "BookrunnerDesk._fundDesk",
+      "reason": "balance read before / after a call to a protocol component or a configured router inside a nonReentrant entry point; the difference is the measured output by design (audit 2026-10 triage: trusted calls behind nonReentrant)"
+    },
+    {
+      "check": "reentrancy-balance",
+      "target": "BookrunnerDesk._swap",
+      "reason": "balance read before / after a call to a protocol component or a configured router inside a nonReentrant entry point; the difference is the measured output by design (audit 2026-10 triage: trusted calls behind nonReentrant)"
+    },
+    {
+      "check": "reentrancy-balance",
+      "target": "HedgeExecutor._routeExactIn",
+      "reason": "balance read before / after a call to a protocol component or a configured router inside a nonReentrant entry point; the difference is the measured output by design (audit 2026-10 triage: trusted calls behind nonReentrant)"
+    },
+    {
+      "check": "reentrancy-balance",
+      "target": "OrderlyAdapter.depositToVenue",
+      "reason": "balance read before / after a call to a protocol component or a configured router inside a nonReentrant entry point; the difference is the measured output by design (audit 2026-10 triage: trusted calls behind nonReentrant)"
+    },
+    {
+      "check": "reentrancy-balance",
+      "target": "Tranche._ensureLiquidity",
+      "reason": "balance read before / after a call to a protocol component or a configured router inside a nonReentrant entry point; the difference is the measured output by design (audit 2026-10 triage: trusted calls behind nonReentrant)"
+    },
+    {
+      "check": "reentrancy-no-eth",
+      "target": "BkrnFeeRouter.executeBuyback",
+      "reason": "the external call goes to a protocol component or the configured staking / router contract inside a nonReentrant or role-gated function; state written after it is not readable mid-call by an attacker (audit 2026-10 triage)"
+    },
+    {
+      "check": "reentrancy-no-eth",
+      "target": "MarketCharter.slashSponsor",
+      "reason": "the external call goes to a protocol component or the configured staking / router contract inside a nonReentrant or role-gated function; state written after it is not readable mid-call by an attacker (audit 2026-10 triage)"
+    },
+    {
+      "check": "reentrancy-no-eth",
+      "target": "MMMandate._releaseBond",
+      "reason": "the external call goes to a protocol component or the configured staking / router contract inside a nonReentrant or role-gated function; state written after it is not readable mid-call by an attacker (audit 2026-10 triage)"
+    },
+    {
+      "check": "reentrancy-no-eth",
+      "target": "RiskCommittee.slashMember",
+      "reason": "the external call goes to a protocol component or the configured staking / router contract inside a nonReentrant or role-gated function; state written after it is not readable mid-call by an attacker (audit 2026-10 triage)"
+    },
+    {
+      "check": "reentrancy-no-eth",
+      "target": "Tranche.deposit",
+      "reason": "the external call goes to a protocol component or the configured staking / router contract inside a nonReentrant or role-gated function; state written after it is not readable mid-call by an attacker (audit 2026-10 triage)"
+    },
+    {
+      "check": "uninitialized-local",
+      "target": "AttestedOracle.update.maxAge",
+      "reason": "the local is meant to start at zero / false / address(0) and is assigned on the paths that use it (accumulators, optional out-values) (audit 2026-10 triage: intended zero locals)"
+    },
+    {
+      "check": "uninitialized-local",
+      "target": "BookLogic._applyPnl.covered",
+      "reason": "the local is meant to start at zero / false / address(0) and is assigned on the paths that use it (accumulators, optional out-values) (audit 2026-10 triage: intended zero locals)"
+    },
+    {
+      "check": "uninitialized-local",
+      "target": "BookLogic._settleRetiredBacklog.owed",
+      "reason": "the local is meant to start at zero / false / address(0) and is assigned on the paths that use it (accumulators, optional out-values) (audit 2026-10 triage: intended zero locals)"
+    },
+    {
+      "check": "uninitialized-local",
+      "target": "BookLogic.applyMark.sum",
+      "reason": "the local is meant to start at zero / false / address(0) and is assigned on the paths that use it (accumulators, optional out-values) (audit 2026-10 triage: intended zero locals)"
+    },
+    {
+      "check": "uninitialized-local",
+      "target": "BookLogic.onRetiredRedeem.k",
+      "reason": "the local is meant to start at zero / false / address(0) and is assigned on the paths that use it (accumulators, optional out-values) (audit 2026-10 triage: intended zero locals)"
+    },
+    {
+      "check": "uninitialized-local",
+      "target": "BookrunnerDesk._hedge.o",
+      "reason": "the local is meant to start at zero / false / address(0) and is assigned on the paths that use it (accumulators, optional out-values) (audit 2026-10 triage: intended zero locals)"
+    },
+    {
+      "check": "uninitialized-local",
+      "target": "HedgeExecutor._requireDesk.b",
+      "reason": "the local is meant to start at zero / false / address(0) and is assigned on the paths that use it (accumulators, optional out-values) (audit 2026-10 triage: intended zero locals)"
+    },
+    {
+      "check": "uninitialized-local",
+      "target": "MarkRegistry._commit.superseded",
+      "reason": "the local is meant to start at zero / false / address(0) and is assigned on the paths that use it (accumulators, optional out-values) (audit 2026-10 triage: intended zero locals)"
+    },
+    {
+      "check": "uninitialized-local",
+      "target": "MMMandate._engineQuote.mid",
+      "reason": "the local is meant to start at zero / false / address(0) and is assigned on the paths that use it (accumulators, optional out-values) (audit 2026-10 triage: intended zero locals)"
+    },
+    {
+      "check": "uninitialized-local",
+      "target": "MMMandate.offHours.pid",
+      "reason": "the local is meant to start at zero / false / address(0) and is assigned on the paths that use it (accumulators, optional out-values) (audit 2026-10 triage: intended zero locals)"
+    },
+    {
+      "check": "uninitialized-local",
+      "target": "PoolEngine._trade.c",
+      "reason": "the local is meant to start at zero / false / address(0) and is assigned on the paths that use it (accumulators, optional out-values) (audit 2026-10 triage: intended zero locals)"
+    },
+    {
+      "check": "uninitialized-local",
+      "target": "PoolEngine.withdrawLiquidity.price",
+      "reason": "the local is meant to start at zero / false / address(0) and is assigned on the paths that use it (accumulators, optional out-values) (audit 2026-10 triage: intended zero locals)"
+    },
+    {
+      "check": "uninitialized-local",
+      "target": "PoolEngine.withdrawMargin.price",
+      "reason": "the local is meant to start at zero / false / address(0) and is assigned on the paths that use it (accumulators, optional out-values) (audit 2026-10 triage: intended zero locals)"
+    },
+    {
+      "check": "uninitialized-local",
+      "target": "StockTokenRegistry.registerIndex.sum",
+      "reason": "the local is meant to start at zero / false / address(0) and is assigned on the paths that use it (accumulators, optional out-values) (audit 2026-10 triage: intended zero locals)"
+    },
+    {
+      "check": "uninitialized-local",
+      "target": "Waterfall.splitDistribution.junior",
+      "reason": "the local is meant to start at zero / false / address(0) and is assigned on the paths that use it (accumulators, optional out-values) (audit 2026-10 triage: intended zero locals)"
+    },
+    {
+      "check": "uninitialized-local",
+      "target": "Waterfall.splitDistribution.senior",
+      "reason": "the local is meant to start at zero / false / address(0) and is assigned on the paths that use it (accumulators, optional out-values) (audit 2026-10 triage: intended zero locals)"
+    },
+    {
+      "check": "uninitialized-state",
+      "target": "Tranche._ctrlBuckets",
+      "reason": "a mapping (address => uint256[]) written through a storage pointer (_pushControllerBucket: list.push), which Slither does not track; mappings need no initialisation"
+    },
+    {
+      "check": "unused-return",
+      "target": "AttestedOracle._verify",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "AttestedOracle.constructor",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "AttestedOracle.setAttestedSigner",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "AttestedOracle.setSigner",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "BkrnFeeRouter.executeBuyback",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "BkrnFeeRouter.referenceBkrnPerUsdc",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "BkrnStaking.setLocker",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "Book.onJuniorRedeemRequested",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "BookLogic._settleRetiredBacklog",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "BookLogic._settleTranche",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "BookLogic.closeWindow",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "BookrunnerDesk._swap",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "BookrunnerDesk._syncHeld",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "BookrunnerDesk._validateSignature",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "HedgeExecutor._routeExactIn",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "MarkRegistry._commit",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "MMMandate._revoke",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "MMMandate.registerKey",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "OrderlyAdapter._pullIfAccount",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "OrderlyAdapter.reportSigned",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "OrderlyAdapter.rescueToken",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "RiskCommittee.bond",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "StockTokenRegistry.setMultiplierSource",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "Tranche._ensureLiquidity",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "UniswapV3Twap.meanTick",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "UniswapV3Twap.spotTick",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "incorrect-equality",
+      "target": "AttestedOracle.settlePrice",
+      "reason": "equality on protocol-owned amounts / period ids / timestamps that an outsider cannot steer to dodge the check (zero-amount early returns, same-period anchors), not on token balances"
+    },
+    {
+      "check": "incorrect-equality",
+      "target": "PoolEngine.marginRatioBps",
+      "reason": "equality on protocol-owned amounts / period ids / timestamps that an outsider cannot steer to dodge the check (zero-amount early returns, same-period anchors), not on token balances"
+    },
+    {
+      "check": "unused-return",
+      "target": "BookLogic._settlePriceSet",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "PoolEngine._oracleOrSettle",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "uninitialized-local",
+      "target": "StockTokenRegistry.basisMultiplier.lo",
+      "reason": "the local is meant to start at zero / false / address(0) and is assigned on the paths that use it (accumulators, optional out-values) (audit 2026-10 triage: intended zero locals)"
+    },
+    {
+      "check": "unused-return",
+      "target": "BookLogic._governanceSettlePrice",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    }
+  ]
+}

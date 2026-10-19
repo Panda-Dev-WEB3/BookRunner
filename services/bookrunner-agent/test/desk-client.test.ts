@@ -70,7 +70,8 @@ describe("DeskClient gas", () => {
 
   test("SetQuote is sent with the buffered limit, not the raw estimate", async () => {
     const provider = fakeProvider();
-    const transport = custom({ request: provider.request });
+    // retryCount 0: viem retries a thrown fake-RPC error 3x with backoff (~1 s each), which pushed tests to the 5 s timeout
+    const transport = custom({ request: provider.request }, { retryCount: 0 });
     const pub = createPublicClient({ chain: localChain, transport, pollingInterval: 5 });
     const wallet = createWalletClient({ chain: localChain, transport, account: devAccount("deskKeyIndex") });
     const client = new DeskClient(pub as never, wallet, DESK, createLogger("desk-test", "silent"), 5_000);

@@ -1,12 +1,19 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// Not part of the BUSL-1.1 Licensed Work: MIT (LICENSE-MIT), Copyright (c) 2026 Panda-Dev-WEB3 (BookRunner).
+//
+// sqrtRatioAtTick: the algorithm and the per-bit constants are those of Uniswap v4-core TickMath.getSqrtPriceAtTick,
+// Copyright 2023 Universal Navigation Inc. (Uniswap Labs), MIT License (notice reproduced in LICENSE-MIT):
+// https://github.com/Uniswap/v4-core/blob/main/src/libraries/TickMath.sol
+// meanTick and quoteAtTick are written here from the formulas below; no code is taken from Uniswap v3-core or
+// v3-periphery (GPL-2.0-or-later).
+pragma solidity 0.8.30;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IUniswapV3PoolView} from "../interfaces/external/IUniswapV3.sol";
 
 /// @title UniswapV3Twap — time-weighted average price reads from a Uniswap v3 pool's oracle.
-/// @notice Same maths as Uniswap's `OracleLibrary.consult` / `getQuoteAtTick` and
-///         `TickMath.getSqrtRatioAtTick`, written for 0.8 (checked arithmetic, OZ `Math.mulDiv`):
+/// @notice The Uniswap v3 oracle maths (a pool's tick accumulator and its 1.0001^tick price), for 0.8 (checked
+///         arithmetic, OZ `Math.mulDiv`):
 ///           meanTick = floor((tickCumulative[now] - tickCumulative[now - window]) / window)  (rounds to -inf)
 ///           price(token1 per token0) = 1.0001^tick, sqrtPriceX96 = sqrt(1.0001^tick) * 2^96.
 ///         The per-bit constants are 2^128 / sqrt(1.0001)^(2^i) (verified to < 1e-27 relative error;
@@ -25,11 +32,11 @@ library UniswapV3Twap {
         uint32[] memory ago = new uint32[](2);
         ago[0] = window;
         (int56[] memory cum,) = IUniswapV3PoolView(pool).observe(ago);
-        int56 delta = cum[1] - cum[0];
-        int56 w = int56(uint56(window));
-        int56 t = delta / w;
-        if (delta < 0 && delta % w != 0) t--;
-        tick = int24(t);
+        // floor division: Solidity rounds toward zero, so a negative non-zero remainder means one tick lower
+        int56 elapsed = int56(uint56(window));
+        int56 q = (cum[1] - cum[0]) / elapsed;
+        if ((cum[1] - cum[0]) % elapsed < 0) q -= 1;
+        tick = int24(q);
     }
 
     /// @notice Current (spot) tick of `pool`.
@@ -44,21 +51,21 @@ library UniswapV3Twap {
         pure
         returns (uint256 quoteAmount)
     {
-        uint160 sqrtRatioX96 = sqrtRatioAtTick(tick);
-        if (sqrtRatioX96 <= type(uint128).max) {
-            uint256 ratioX192 = uint256(sqrtRatioX96) * sqrtRatioX96;
-            quoteAmount = baseToken < quoteToken
-                ? Math.mulDiv(ratioX192, baseAmount, 1 << 192)
-                : Math.mulDiv(1 << 192, baseAmount, ratioX192);
-        } else {
-            uint256 ratioX128 = Math.mulDiv(sqrtRatioX96, sqrtRatioX96, 1 << 64);
-            quoteAmount = baseToken < quoteToken
-                ? Math.mulDiv(ratioX128, baseAmount, 1 << 128)
-                : Math.mulDiv(1 << 128, baseAmount, ratioX128);
-        }
+        // price(token1 per token0) = sqrtP^2 / 2^192 with sqrtP = sqrtRatioAtTick(tick) (Q64.96). base = token0:
+        // quote = base * price; base = token1: quote = base / price, with price = num / den:
+        // den = 2^192 keeps every bit while sqrtP^2 fits in 256 bits (sqrtP < 2^128); above that, sqrtP^2 / 2^64
+        // against den = 2^128 (the floor loses < 1 part in 2^192 there, and it never overflows: sqrtP < 2^160).
+        (uint256 num, uint256 den) = _price(sqrtRatioAtTick(tick));
+        quoteAmount = baseToken < quoteToken ? Math.mulDiv(baseAmount, num, den) : Math.mulDiv(baseAmount, den, num);
     }
 
-    /// @notice sqrt(1.0001^tick) as a Q64.96, rounded up (identical to TickMath.getSqrtRatioAtTick).
+    function _price(uint160 sqrtP) private pure returns (uint256 num, uint256 den) {
+        if (sqrtP >> 128 == 0) return (uint256(sqrtP) * uint256(sqrtP), 1 << 192);
+        return (Math.mulDiv(sqrtP, sqrtP, 1 << 64), 1 << 128);
+    }
+
+    /// @notice sqrt(1.0001^tick) as a Q64.96, rounded up (Uniswap v4-core TickMath.getSqrtPriceAtTick, MIT; the
+    ///         constants are 2^128 / sqrt(1.0001)^(2^i) rounded to the nearest integer).
     function sqrtRatioAtTick(int24 tick) internal pure returns (uint160) {
         if (tick < MIN_TICK || tick > MAX_TICK) revert TickOutOfRange(tick);
         uint256 absTick = tick < 0 ? uint256(-int256(tick)) : uint256(int256(tick));
@@ -84,7 +91,7 @@ library UniswapV3Twap {
         if (absTick & 0x40000 != 0) ratio = (ratio * 0x2216e584f5fa1ea926041bedfe98) >> 128;
         if (absTick & 0x80000 != 0) ratio = (ratio * 0x48a170391f7dc42444e8fa2) >> 128;
         if (tick > 0) ratio = type(uint256).max / ratio;
-        // Q128.128 -> Q64.96, rounded up so that getTickAtSqrtRatio(result) == tick.
+        // Q128.128 -> Q64.96, rounded up (the result's tick, read back, is `tick`).
         return uint160((ratio >> 32) + (ratio % (1 << 32) == 0 ? 0 : 1));
     }
 }

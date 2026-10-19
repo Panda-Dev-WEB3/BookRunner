@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+pragma solidity ^0.8.24;
 
 /// @title IUnderwritingVault — holds a book's undeployed USDC. Capital leaves only to the book's
 ///        venue adapter (IF / MM accounts), the book's desk (hedge budget) or tranche escrows (claims).

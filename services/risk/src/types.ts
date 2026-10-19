@@ -1,4 +1,6 @@
-import type { BookComponents, BookState, LimitState, LimitsSnapshot, Mandate, VenueId } from "@bookrunner/shared";
+import type { QuoteHoldState } from "./domain/quote";
+import type { BookComponents, BookState, KillMsg, LimitState, LimitsSnapshot, Mandate, MonitorStateSig, QuoteMsg, RiskStateSig, VenueId } from "@bookrunner/shared";
+import type { QuoteAuth } from "./ports";
 import type { Hex } from "viem";
 
 /** Static facts about a book, resolved once at discovery. */
@@ -22,6 +24,21 @@ export interface OracleReading {
   stale: boolean;
   /** signed: the oracle service's signed print (pull oracle), newer than the stored on-chain one */
   source: "chain" | "signed" | "redis" | "none";
+}
+
+/**
+ * PoolEngine.lossBudget(marketId) (audit M-3 per-period pool loss budget; Task 7): the loss since the period's
+ * anchor against its budget. `blocked`: the pool lost more than the budget, the engine refuses new risk until the
+ * next period (it emits LossBudgetBreached once per period). Published for the alert, not a breach of its own: the
+ * engine already enforces it and the mandate's drawdown kill stays the kill path.
+ */
+export interface EngineLossBudget {
+  budgetBps: number;
+  period: number;
+  anchorEquityUsd: bigint;
+  lossUsd: bigint;
+  budgetUsd: bigint;
+  blocked: boolean;
 }
 
 /** Everything read from chain for one book in one tick. */
@@ -49,7 +66,7 @@ export interface ChainObservation {
    * than the stored one). priceStale: some held token's newest price is older than maxPriceAge.
    * signedPrices: the desk used at least one signed print.
    */
-  desk: { hedgeNotionalUsd: bigint; valueUsd: bigint; priceStale?: boolean; signedPrices?: boolean };
+  desk: { hedgeNotionalUsd: bigint; valueUsd: bigint; priceStale?: boolean; signedPrices?: boolean; splitWindow?: boolean; splitUntrusted?: boolean };
   vaultIdleUsd: bigint;
   unfundedClaimsUsd: bigint;
   seniorNavUsd: bigint;
@@ -59,6 +76,8 @@ export interface ChainObservation {
   /** null when the oracle read failed; the monitor then falls back to KEYS.oracleLast. */
   oracle: OracleReading | null;
   maxPriceAgeSec: number;
+  /** Engine books: PoolEngine.lossBudget (null when unreadable, e.g. a pre-M-3 engine); absent for Orderly books. */
+  lossBudget?: EngineLossBudget | null;
 }
 
 /** signed_report: ops-venue's signed venue report (newer than the adapter's on-chain one, LOW_GAS §2). */
@@ -78,9 +97,17 @@ export interface BookObservation {
   deskHedgeUsd: bigint;
   /** desk valued at the last attested price because the on-chain views reverted StalePrice */
   deskPriceStale?: boolean;
+  /** audit M-2: a held token is in the split window (its price predates its multiplier change): the
+   *  token is valued at the basis multiplier and the flatten skips it */
+  deskSplitWindow?: boolean;
+  /** some split-window token has no basis multiplier (valued at 0): the desk valuation is untrusted, the
+   *  desk-dependent breaches (DRAWDOWN, HEDGE_BAND) do not run */
+  deskSplitUntrusted?: boolean;
   nav: NavInputs;
   oracle: OracleReading;
   quote: QuoteObservation | null;
+  /** engine books: ChainObservation.lossBudget */
+  lossBudget?: EngineLossBudget | null;
 }
 
 export interface NavInputs {
@@ -94,13 +121,21 @@ export interface NavInputs {
   highWaterWad: bigint;
 }
 
-/** Subset of QuoteMsg (KEYS.agentQuote) the risk check needs. */
+/** Subset of QuoteMsg (KEYS.agentQuote) the risk check needs, plus what its signature covers (busAuth.ts AgentQuote). */
 export interface QuoteObservation {
   ts: number; // unix ms
   bid: number;
   ask: number;
   oracle: number;
   sides: { bid: boolean; ask: boolean };
+  bookId?: number;
+  size?: number;
+  /** EIP-712 AgentQuote signature by the book's desk session key (absent: unsigned) */
+  signature?: string;
+  /** the oracle print the quote was priced on (QuoteMsg.ref) */
+  ref?: QuoteMsg["ref"];
+  /** set by risk once the quote is authenticated: the verified reference price the quote is judged against */
+  refPx?: number;
 }
 
 export interface LiveNavResult {
@@ -177,6 +212,8 @@ export interface KillJournal {
   /** Tx that set killed=true on-chain (ours or external). */
   killTx: string | null;
   runs: number;
+  /** the RISK-signed KillOrder broadcast for this episode: corroborates the journal when it is restored (N-3) */
+  killOrder?: KillMsg;
 }
 
 export interface MonitorState {
@@ -188,6 +225,8 @@ export interface MonitorState {
   kill: KillJournal | null;
   /** Identifier (kill tx hash or reason marker) of the last on-chain kill whose follow-up is recorded. */
   handledKill: string | null;
+  /** Audit M-3 fail-safe hold (no fresh attested price): null freshTicks = not held. */
+  quoteHold?: QuoteHoldState;
 }
 
 export const initialMonitorState = (): MonitorState => ({
@@ -198,6 +237,7 @@ export const initialMonitorState = (): MonitorState => ({
   episode: null,
   kill: null,
   handledKill: null,
+  quoteHold: { freshTicks: null },
 });
 
 export interface RiskMeta {
@@ -221,7 +261,24 @@ export interface RiskMeta {
   liveNavUsd: string;
   drawdownBps: number;
   oracle: { priceId: string; price: number | null; publishedAt: number; held: boolean; stale: boolean; source: OracleReading["source"] };
-  quote: { ts: number; ageMs: number; used: boolean; reference: "agent" | "oracle"; widthBps: number; skewBps: number } | null;
+  quote: {
+    ts: number;
+    ageMs: number;
+    used: boolean;
+    reference: "attested" | "none";
+    agentRefDevBps: number | null;
+    widthBps: number;
+    skewBps: number;
+  } | null;
+  /** Audit M-3: a live quote could not be checked against a fresh attested price (book held reduce-only). */
+  quoteUnverified?: boolean;
+  /** Task 7: the engine pool's per-period loss budget (USD strings); null for Orderly books or when unreadable. */
+  lossBudget?: { budgetBps: number; period: number; anchorEquityUsd: string; lossUsd: string; budgetUsd: string; blocked: boolean } | null;
+  /**
+   * Who signed the agent's quote read from Redis (audit 2026-10 lead "Redis trust"): ok = an active desk key of the
+   * mandate; anything else = the quote is ignored (no quote check, never a breach). null = no quote / no check.
+   */
+  quoteAuth?: QuoteAuth | null;
   hedgeBand: { inBand: boolean; outOfBandSince: number | null; outOfBandSec: number; graceSec: number };
   killed: boolean;
   killReason: string | null;
@@ -232,4 +289,8 @@ export interface RiskMeta {
 /** JSON at KEYS.riskState(bookId) and on CHANNELS.riskState(bookId): LimitsSnapshot + meta. */
 export interface RiskStatePayload extends LimitsSnapshot {
   meta: RiskMeta;
+  /** RISK-key signature over (book, state, tsMs) (shared busAuth.ts RiskState): the agent acts only on signed states */
+  stateSig?: RiskStateSig;
+  /** RISK-signed copy of the state machine (busAuth.ts RiskMonitorState): the only one risk restores at restart (N-3) */
+  monitorSig?: MonitorStateSig<MonitorState>;
 }

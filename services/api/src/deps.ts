@@ -22,6 +22,8 @@ export interface ApiSettings {
   markIntervalSeconds: number;
   receiptsIntervalSeconds: number;
   maxPriceAgeSeconds: number;
+  /** Leaves kept by the receipts tree cache (API_RECEIPT_CACHE_LEAVES; default RECEIPT_TREE_CACHE.maxLeaves). */
+  receiptCacheLeaves?: number;
   /** Required for webhook management (disabled while unset). */
   adminToken?: string;
   /** WEBHOOK_ALLOW_HOSTS: host names / IP literals exempt from the webhook SSRF address rules (dev). */

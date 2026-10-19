@@ -2,7 +2,7 @@
 import { parseAbi, toFunctionSelector } from "viem";
 
 /** MarkRegistry.commitAndApply selector (bytecode feature detection on registries that strip revert data). */
-export const COMMIT_AND_APPLY_SELECTOR = toFunctionSelector("commitAndApply((uint256,uint64,uint256,uint256,uint64,bytes32,bytes32,bytes32),bytes,bytes,bytes)");
+export const COMMIT_AND_APPLY_SELECTOR = toFunctionSelector("commitAndApply((uint256,uint64,uint256,uint256,uint64,bytes32,bytes32,bytes32,bool),bytes,bytes,bytes)");
 
 /**
  * AttestedOracle.update(priceData) declared `view` here ONLY so it can sit in an eth_call aggregate (deployless

@@ -74,7 +74,7 @@ export function ladderModel(q: QuoteIn, b: QuoteBounds): LadderModel {
     widthBps: check.widthBps,
     skewBps: check.skewBps,
     widthOk: !check.violations.includes("WIDTH"),
-    skewOk: !check.violations.includes("SKEW"),
+    skewOk: !check.violations.includes("SKEW") && !check.violations.includes("ONE_SIDED"),
     crossed: check.violations.includes("CROSSED"),
     bandLow,
     bandHigh,

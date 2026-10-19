@@ -6,11 +6,11 @@ import type { ReceiptRow } from "../src/domain/receipts";
 
 export const silentLog = createLogger("test", "silent");
 
-/** NVDA launch mandate: 50k / 25 / 8 / 5000-12000 / -800. */
+/** NVDA launch mandate: 50k / 4 / 8 / 5000-12000 / -800 (audit M-3: max skew <= half the min width). */
 export function nvdaMandate(over: Partial<Mandate> = {}): Mandate {
   return {
     maxInventoryUsd: usd(50_000),
-    maxSkewBps: 25,
+    maxSkewBps: 4,
     minQuoteWidthBps: 8,
     maxHedgeLeverage: 100,
     hedgeRatioMinBps: 5_000,
@@ -43,6 +43,9 @@ export class FakeBus implements AgentBus {
   }
   async getJson<T>(key: string): Promise<T | null> {
     return (this.kv.get(key) as T | undefined) ?? null;
+  }
+  async setJson(key: string, value: object): Promise<void> {
+    this.kv.set(key, value);
   }
   async subscribe(channel: string, handler: (raw: string) => void): Promise<void> {
     this.subs.set(channel, [...(this.subs.get(channel) ?? []), handler]);

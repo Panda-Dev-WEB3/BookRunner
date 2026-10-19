@@ -1,6 +1,7 @@
 // What the alert rules see: one Snapshot per pass (collected from Postgres, Redis, the chain and the API by
 // collect.ts), plus the rolling samples the runner keeps between passes. Rules are pure functions of these.
 import type { VenueMarketMsg } from "@bookrunner/shared/venueMarket";
+import type { Sessions } from "@bookrunner/shared/sessions";
 import type { SupervisorStatus } from "@bookrunner/shared/supervisor";
 
 export type Severity = "warning" | "critical";
@@ -39,6 +40,16 @@ export interface RiskSnap {
   killReason: string | null;
   /** open kill journal (meta.monitor.kill): a kill sequence in progress or stuck */
   journal: RiskJournalSnap | null;
+  /** engine books (meta.lossBudget, Task 7): the pool's per-period loss budget; absent when not published */
+  lossBudget?: { blocked: boolean; lossUsd: number; budgetUsd: number; budgetBps: number; period: number };
+  /**
+   * meta.lossBudget published but unusable (null or malformed): risk could not read PoolEngine.lossBudget this tick. Risk
+   * publishes null for every Orderly book too, so only an engine book's flag means something (engine_loss_budget_unreadable).
+   * Absent when the key is absent (an older risk service) or the budget parsed.
+   */
+  lossBudgetUnreadable?: true;
+  /** meta.quoteUnverified (audit M-3): the book is held reduce-only, its live quote has no fresh attested price to check against */
+  quoteUnverified?: boolean;
 }
 
 export interface BookSnap {
@@ -71,6 +82,14 @@ export interface BookSnap {
   ifUnadopted?: Array<{ id: string; amount: string; status: string; createdAt: number | null }>;
   /** ops-venue (KEYS.venueSymbolIssues ifEquityDrops): builder IF equity below the adapter's insurance */
   ifEquityDrop?: { expectedUsd: string; venueUsd: string; at: number } | null;
+  /** the charter's trading sessions (charters.struct_json, SESSIONS_MODE=24x7 applied); null = unknown */
+  sessions?: Sessions | null;
+  /** the newest marks (Postgres marks, pnl_json.held), newest first; periodEnd unix s */
+  recentMarks?: Array<{ periodEnd: number; held: boolean }>;
+  /** agent (KEYS.agentDeskRejects): unix ms of the desk's StaleTradePrice refusals of the last hour */
+  deskStaleTradePrice?: number[];
+  /** agent (KEYS.agentStatus): desk key and risk-state verification status; null = no status (agent down / older) */
+  agentStatus?: { ts: number; deskKey: "active" | "inactive" | "missing"; deskKeySince: number | null; riskStateUnverifiedSince: number | null } | null;
 }
 
 export interface KillEventSnap {
@@ -259,6 +278,8 @@ export interface Snapshot {
   builderFeed?: BuilderFeedSnap | null;
   /** null/absent: no ops-venue status (or an older ops-venue) */
   venueOps?: VenueOpsSnap | null;
+  /** forged bus messages each service refused (KEYS.busForged: agent-<bookId>, ops-venue, risk) */
+  busForged?: Array<{ source: string; events: Array<{ at: number; kind: string; reason: string }> }>;
   /** collection failures that are themselves worth an alert (db / redis unreachable) */
   infraErrors: Array<{ source: "db" | "redis"; error: string }>;
 }

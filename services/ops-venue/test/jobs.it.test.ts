@@ -32,6 +32,7 @@ d("venue-ops queue (BullMQ)", () => {
     expect(await j1.waitUntilFinished(events, 15_000)).toEqual({ bookId: 1, symbol: "PERP_NVDA_USDC" });
     expect(t.mock.venue.requireSymbol("PERP_NVDA_USDC").ifAccountId).toBeTruthy();
 
+    t.chain.killed = true; // revoke_key revokes only once the mandate is killed on-chain
     const j2 = await queue.add("revoke_key", { kind: "revoke_key", bookId: 1 }, { jobId: "revoke_key-1-ep1" });
     const r = (await j2.waitUntilFinished(events, 15_000)) as { revokedNow: boolean };
     expect(r.revokedNow).toBe(true);

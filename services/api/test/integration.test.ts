@@ -42,6 +42,7 @@ import { charterToJson } from "../src/domain/charter";
 const IT = process.env.BKRN_IT === "1";
 const DB_URL = process.env.API_IT_DATABASE_URL ?? "postgres://bookrunner:bookrunner@127.0.0.1:54400/bkrn_api_it";
 const REDIS_URL = process.env.REDIS_URL ?? "redis://127.0.0.1:63790";
+const ADMIN = "it-admin-bearer"; // test-only API_ADMIN_TOKEN
 
 describe.skipIf(!IT)("integration (bkrn_api_it)", () => {
   if (!IT) return;
@@ -93,7 +94,9 @@ describe.skipIf(!IT)("integration (bkrn_api_it)", () => {
       { priceId: "NVDA", ts: new Date(now - 10_000), price: 191, held: false, sourceCount: 3, sources: [], sourcesHash: "0x", signature: "0x" },
     ]);
     deps = {
-      settings: { chainId: 31337, markIntervalSeconds: 300, receiptsIntervalSeconds: 60, maxPriceAgeSeconds: 300 },
+      // webhook management needs the admin bearer token; the receiver below listens on loopback, which only the
+      // explicit dev allow-list exempts from the webhook SSRF rules
+      settings: { chainId: 31337, markIntervalSeconds: 300, receiptsIntervalSeconds: 60, maxPriceAgeSeconds: 300, adminToken: ADMIN, webhookAllowHosts: ["127.0.0.1"] },
       log: silentLog,
       data,
       webhooks: store,
@@ -174,13 +177,13 @@ describe.skipIf(!IT)("integration (bkrn_api_it)", () => {
     const sub = new Redis(REDIS_URL, { maxRetriesPerRequest: null });
     const pub = new Redis(REDIS_URL);
     const { queue, enqueue } = createWebhookQueue(conn, 50, prefix);
-    const worker = createWebhookWorker(wconn, { store, fetch, now: Date.now, timeoutMs: 2000, log: silentLog }, 2, silentLog, prefix);
+    const worker = createWebhookWorker(wconn, { store, fetch, now: Date.now, timeoutMs: 2000, log: silentLog, allowHosts: new Set(["127.0.0.1"]) }, 2, silentLog, prefix);
     const dispatcher = new WebhookDispatcher({ store, enqueue, log: silentLog, now: Date.now, sweepIntervalMs: 60_000 });
     try {
       const app = createApp(deps, { origins: [] });
       const created = await app.request("/v1/webhooks", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", authorization: `Bearer ${ADMIN}` },
         body: JSON.stringify({ url: `http://127.0.0.1:${receiver.port}/hook`, eventTypes: ["kill.executed"], bookId: 1 }),
       });
       const { subscription, secret } = (await created.json()) as { subscription: { id: number }; secret: string };

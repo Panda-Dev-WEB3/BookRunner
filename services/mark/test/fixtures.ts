@@ -68,7 +68,7 @@ export function snapshot(over: Partial<MarkSnapshot> = {}): MarkSnapshot {
       hedgeAllowRoot: `0x${"00".repeat(32)}` as Hex,
     },
     killed: false,
-    underlyingPrice: { priceId: `0x${"4e56444100".padEnd(64, "0")}` as Hex, priceWad: 190n * WAD, publishedAt: P - 5, held: false },
+    underlyingPrice: { priceId: `0x${"4e56444100".padEnd(64, "0")}` as Hex, priceWad: 190n * WAD, publishedAt: P - 5, held: false, stale: false },
     ...over,
   };
 }
@@ -195,6 +195,10 @@ export class FakeMarkStore implements MarkStore {
   }
   async prevUnrealized() {
     return 0n;
+  }
+  prevPositions: Array<{ token: string; qtyRaw: bigint; valueUsd: bigint }> = [];
+  async prevDeskPositions() {
+    return this.prevPositions;
   }
   async lastQuoteSkewBps() {
     return 5;

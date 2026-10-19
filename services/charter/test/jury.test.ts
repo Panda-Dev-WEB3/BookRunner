@@ -21,6 +21,19 @@ describe("rule checks", () => {
     expect(statusOf(checks, "venue_min_if")).toEqual(["info"]); // exactly at the minimum
   });
 
+  test("audit M-3: quote check blocks skew above half the width, notes the zero-edge boundary", () => {
+    const at = (maxSkewBps: number, minQuoteWidthBps: number) => {
+      const c = nvdaCharter();
+      c.mandate = { ...c.mandate, maxSkewBps, minQuoteWidthBps };
+      return runRuleChecks(c, ruleContextFor(c)).filter((x) => x.id === "mandate_quote");
+    };
+    expect(at(25, 8).map((x) => x.status)).toEqual(["block"]);
+    const edge = at(4, 8);
+    expect(edge.map((x) => x.status)).toEqual(["info"]);
+    expect(edge[0]?.detail).toContain("no edge");
+    expect(at(3, 8).map((x) => x.status)).toEqual(["pass"]);
+  });
+
   test("Orderly venue symbol (VERIFY O19): blocks a charter no Orderly market can carry", () => {
     const at = (symbol: string, venue = 0, orderlyBrokerId: string | null = "bookrunner") => {
       const c = nvdaCharter({ symbol: strToBytes32(symbol), venue: venue as never, ...(venue === VENUE.POOL_ENGINE ? { oracle: ORACLE.ATTESTED } : {}) });

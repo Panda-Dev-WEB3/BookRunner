@@ -3,6 +3,7 @@
 // "resolved" when it stops. Keys are stable per (rule, subject) so the same problem never alerts twice.
 import { formatEther } from "viem";
 import type { RuleConfig } from "./config";
+import { HOLD_RULES } from "./rules-holds";
 import type { BookSnap, Condition, OracleConfirmSnap, OracleProbe, OracleSourceSnap, Sample, Snapshot } from "./types";
 
 /** States in which a book is marked every period (Book.sol: Live and Retiring). */
@@ -69,6 +70,55 @@ export function riskState(s: Snapshot, c: RuleConfig): Condition[] {
     } else if (c.riskWarn && (r.state === "warn" || r.state === "reduce_only")) {
       out.push({ key: `risk_warn:${b.bookId}`, rule: "risk_warn", severity: "warning", summary: `${bookLabel(b)}: risk state ${r.state}`, forSec: 300 });
     }
+  }
+  return out;
+}
+
+const usdFmt = (v: number) => `$${v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+/**
+ * Engine books (Task 7, audit M-3 budget breach): the pool has lost more than its per-period loss budget against the
+ * oracle (PoolEngine.lossBudget via the risk service's meta.lossBudget). The engine already refuses new risk until
+ * the next period and emits LossBudgetBreached; this pages the operator, because a pool losing the mandate's
+ * drawdown-kill share of its equity inside one mark interval is either a large move or a loss channel the quote rule
+ * does not cover. Critical; resolves when the next period re-anchors.
+ */
+export function engineLossBudget(s: Snapshot, _c: RuleConfig): Condition[] {
+  const out: Condition[] = [];
+  for (const b of s.books ?? []) {
+    const lb = b.risk?.lossBudget;
+    if (!lb?.blocked || ENDED.has(b.state)) continue;
+    out.push({
+      key: `engine_loss_budget:${b.bookId}`,
+      rule: "engine_loss_budget",
+      severity: "critical",
+      summary: `${bookLabel(b)}: the engine pool lost ${usdFmt(lb.lossUsd)} this period against its loss budget of ${usdFmt(lb.budgetUsd)} (${lb.budgetBps} bps) in period ${lb.period}: new risk is refused until the next period; check the market move, quotes and liquidations`,
+    });
+  }
+  return out;
+}
+
+/**
+ * Engine books (Task 7c, 7a review M-6): the risk service publishes meta.lossBudget = null because its
+ * PoolEngine.lossBudget read failed (RPC errors, a pre-M-3 engine, an adapter without marketId / engine), so
+ * engine_loss_budget cannot fire for the book. Only a fresh risk state of a markable, unkilled engine book counts
+ * (risk_stale and mandate_killed cover the others); Orderly books always publish null and are skipped. Warning after
+ * ALERT_LOSS_BUDGET_UNREADABLE_SECONDS (forSec: a failed read or two never fires); resolves after the dedupe clear
+ * window once a read succeeds again. The engine enforces the budget on-chain whatever this alert says.
+ */
+export function engineLossBudgetUnreadable(s: Snapshot, c: RuleConfig): Condition[] {
+  const out: Condition[] = [];
+  for (const b of s.books ?? []) {
+    const r = b.risk;
+    if (b.venue !== "pool_engine" || !MARKABLE.has(b.state) || !r?.lossBudgetUnreadable || r.killed || r.state === "killed") continue;
+    if (r.ts == null || (s.now - r.ts) / 1000 > c.riskStaleSec) continue;
+    out.push({
+      key: `engine_loss_budget_unreadable:${b.bookId}`,
+      rule: "engine_loss_budget_unreadable",
+      severity: "warning",
+      forSec: c.lossBudgetUnreadableSec,
+      summary: `${bookLabel(b)}: the risk service cannot read PoolEngine.lossBudget for this engine book (meta.lossBudget is null) for ${dur(c.lossBudgetUnreadableSec)}+: engine_loss_budget cannot fire; check the risk service's RPC and the book's adapter (marketId, engine)`,
+    });
   }
   return out;
 }
@@ -779,6 +829,8 @@ export function infra(s: Snapshot, _c: RuleConfig): Condition[] {
 export const RULES = {
   mark_overdue: markOverdue,
   risk_state: riskState,
+  engine_loss_budget: engineLossBudget,
+  engine_loss_budget_unreadable: engineLossBudgetUnreadable,
   kill_journal: killJournal,
   kill_event: killEvents,
   risk_stale: riskStale,
@@ -787,6 +839,7 @@ export const RULES = {
   venue_listing: venueListing,
   venue_if_account: venueIfAccount,
   builder_price_push: builderPricePush,
+  ...HOLD_RULES,
   processes,
   balances,
   rpc,

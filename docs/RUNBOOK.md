@@ -78,7 +78,7 @@ only (it deploys mocks and refuses 4663). Tick every box in order; two people fo
        ```bash
        RHC_RPC_URL=<archive rpc> bash scripts/deploy-mainnet.sh broadcast
        ```
-       It deploys the TimelockController (min delay 48h, proposer = executor = canceller = multisig, no admin)
+       It deploys the timelock (`BookrunnerTimelock`: OZ TimelockController with enumerable role holders; min delay 48h, proposer = executor = canceller = multisig, no admin)
        and every component (Book linked to BookLogic, OrderlyAdapter v3 with the input's broker / token hashes),
        sets params / HedgeExecutor v3 factory + one route per Stock Token / buyback params + reference source /
        oracle measurements + attested signers + `requireAttestations()` / Stock Tokens (live `uiMultiplier`
@@ -96,6 +96,9 @@ only (it deploys mocks and refuses 4663). Tick every box in order; two people fo
        - `StockTokenRegistry.admin() == 0` (follows `config.timelock()`);
        - `expenseRecipient` / `slashRecipient` == treasury (input), never the deployer;
        - service roles + GUARDIAN as input; committee seats as input; charter + committee are staking lockers;
+       - **no extra role holder** (audit 2026-10 D): the config's DEFAULT_ADMIN (= the timelock only), GUARDIAN,
+         MARK_SIGNER, RISK, OPS_VENUE, JURY and KEEPER holders, and the timelock's admin / proposer / executor /
+         canceller holders, are enumerated on-chain and must be exactly the input's (a stray admin fails);
        - every component reads this config; `config.usdc()` is the 6-decimal settlement token; vault /
          EntryPoint as input; all 8 factory implementations set; the Book implementation is linked to a
          deployed BookLogic; the OrderlyAdapter implementation is v3 (OrderlyIFAccount IF accounts, 6-dp
@@ -120,6 +123,13 @@ only (it deploys mocks and refuses 4663). Tick every box in order; two people fo
 9. [ ] Committee: each of the three members stakes `committeeBondBkrn` in BkrnStaking and calls
        `RiskCommittee.bond()` (sequence as in `scripts/launch-devnet.ts` `fundParticipants`).
 10. [ ] Agent operator stakes for its inventory tier (`config.agentTierBond`).
+    **Launch gate (audit 2026-10).** Every book is created on the deployment that carries the audit fixes; no
+    book, desk or mandate is carried over from an older deployment. Book components are clones bound at creation:
+    an older BookrunnerDesk clone keeps the unbounded RISK flatten in a split window (M-2) and the 300 s desk print
+    rule, an older MMMandate clone keeps the old `validateMandate` (M-3: 8/25-style terms), and an older
+    PoolEngineAdapter cannot re-mandate against a new engine. The Book proxy itself is upgradeable, its clones are
+    not, so recreate, never upgrade in place. Check before filing: `BookFactory` implementation slots (`DESK`,
+    `MANDATE`, `ENGINE_ADAPTER`) point at the current implementations, and VerifyHandover passes.
 11. [ ] Charter the three launch books (NVDA, TSLA on Orderly; the RHX5 index on the PoolEngine) from the studio
         treasury (sponsor): approve `charterFeeUsd` USDG to MarketCharter, stake `sponsorBondBkrn`, then
         `MarketCharter.file(charter)` per book (`ifTargetUsd >= venueMinIf`, i.e. > 25,000 USDG on Orderly;
@@ -399,30 +409,174 @@ can redo it during the timelock delay from the published quote.
   source, so nothing is signed for it in session and after `maxPriceAge` its valuations, trades and liquidations
   revert `StalePrice` until the pause ends; off-hours the price stays held at the last Chainlink price. Expect
   `oracle_source_failing:chainlink` for the ticker during the pause.
+- Split window (audit M-2): from `effectiveAt` until the oracle signs the first live price after it (normally
+  the next open), `StockTokenRegistry.valueUsd` for that token reverts `MultiplierChangedSincePrice`, because the
+  held price is still in pre-change shares. During that window:
+  - desk hedges and flattens of the token revert. That includes the RISK flatten, which is deferred until the
+    reprice instead of selling unbounded;
+  - the risk service values the token at its pre-change multiplier (on-chain `basisMultiplier`) and never sells
+    it; only when that multiplier is unknown does it hold back the `DRAWDOWN` / `HEDGE_BAND` breaches;
+  - the mark service refuses for up to one mark interval (warn log "split window: refusing ..."), then commits
+    held marks with the token at the multiplier of the price's basis. For a live-mode token that multiplier comes
+    from the token's `UIMultiplierUpdated` events (paged over `MARK_SPLIT_LOG_LOOKBACK_BLOCKS`; exact), else
+    `StockTokenRegistry.basisMultiplier` (on-chain: the pre-split anchor for a token-side change, within the band of
+    the true value); for a stored-mode token it is always the on-chain value, which is exact (the registry records
+    every change). Only when neither is known is the previous mark's value carried forward (no P&L), and only with
+    no previous value either is the token valued at 0 (error log "no basis multiplier and no previous mark value"):
+    then check the token and the lookback range. The refusal is counted from the first change after the basis;
+    when the events are out of range and your re-anchor lands inside the window, it can restart once, for at most
+    one more interval (bounded).
+
+  All of this is expected and clears by itself at the reprice. The Chainlink source also drops a round from
+  before a split until the feed's next round. A dividend update during a hold has the same effect until the
+  open. In stored-multiplier mode (devnet / testnet), a `setMultiplier` that changes the value counts as the
+  change.
+- Engine markets (audit N-1): from the moment a split is pre-approved (`setNextMultiplierAnchor`) or staged on the
+  token, PoolEngine markets on that price id (or an index containing the token) are close-only (`SplitPending`).
+  In the window, every voluntary trade reverts (`SplitWindow`); liquidations still run. The market reopens for
+  new risk only after the reprice **and** the cleanup: `setMultiplier(token, new)` and
+  `setNextMultiplierAnchor(token, 0)`. Do the cleanup right after the first live post-split print. Existing
+  positions are not rebased: wind down or cap engine markets before a split.
+- If the issuer stages another change before you re-anchor a split, valuations of the token stop until your
+  re-anchor plus the next live print, and so does every voluntary engine trade on its markets (closes and margin
+  withdrawals too; liquidations still run): re-anchor promptly.
+- The RISK flatten of a token in the split window waits for the reprice even when the price is stale (for example
+  the reopen before the feed's first post-split round); expect the kill sequence to retry it. It also waits
+  (`StockTokenRegistry.checkPriceBasis` reverts) in two cases without a split window proper:
+  - a change beyond the band activates on the token without a pre-approved anchor (`MultiplierOutOfBand`): until
+    your `setMultiplier` re-anchor; pre-approve splits with `setNextMultiplierAnchor` before `effectiveAt`;
+  - after an oracle cutover (a new AttestedOracle: `lastLiveAt` is 0) or for a price id never published, every
+    live-mode token's flatten waits for its first live print on the new oracle, because enabling live mode stamps
+    a change. Cut a new oracle over in session, and push a live price for every token before relying on the RISK
+    flatten.
+- Stored-multiplier mode (devnet / testnet): give engine markets a close-only period by calling
+  `setNextMultiplierAnchor(token, new)` before `setMultiplier(token, new)`, and clear it afterwards.
 
 ## Operations
 
 - **Kill switch for new business**: `BookrunnerConfig.setNewBooksPaused(true)` (GUARDIAN or timelock)
   — pauses new charters, books and deposits. Redemptions keep working; there is no switch for them.
 - **Re-mandate after a kill**: committee `proposeAction(bookId, "REMANDATE", abi.encode(mandate))`,
-  2-of-3 approve; the sponsor re-registers desk keys.
+  2-of-3 approve; the sponsor re-registers desk keys. Terms must have `maxSkewBps <= minQuoteWidthBps / 2`
+  (audit M-3; a re-mandate of the pre-fix devnet terms 8/25, 12/30, 10/25 reverts `InvalidMandate`).
+- **Engine loss budget spent** (in-house books, audit M-3): traders' new risk reverts `LossBudgetExceeded`
+  once the pool has lost more than |killAtDrawdownBps| of its equity at the period's first trade, until the
+  next `markInterval` period; reductions, closes and liquidations keep working. Read
+  `PoolEngine.lossBudget(marketId)` (anchor, loss, budget, blocked). The kill path is unchanged: the drawdown
+  kill at the next mark, or a RISK / committee kill if the loss is not market movement. The budget never
+  needs lifting by hand. The engine emits `LossBudgetBreached(marketId, period, loss, budget)` once per period
+  (from the first reduction, close, liquidation or close-out that sees it; anyone may call
+  `PoolEngine.pokeLossBudget(marketId)`), the risk service publishes the budget state every tick
+  (`meta.lossBudget`) and the alert `engine_loss_budget` (critical) pages until the next period re-anchors.
+  When risk cannot read the budget (it publishes `meta.lossBudget: null` for an engine book: RPC errors, an engine
+  without `lossBudget`, an adapter whose `marketId` / `engine` reads fail), `engine_loss_budget` cannot fire;
+  `engine_loss_budget_unreadable` (warning) says so after `ALERT_LOSS_BUDGET_UNREADABLE_SECONDS` (300). The engine
+  still enforces the budget on-chain; check risk's RPC and the book's adapter.
+- **Engine liquidations** (keeper policy): `PoolEngine.liquidate` is permissionless and pays the liquidator half
+  the nominal liquidation fee (`liquidationFeeBps` of the notional at the oracle), from the trader's remaining
+  margin first and from the market's IF when the margin is gone (capped by the IF after the bad debt it covers).
+  An underwater position therefore always carries a reward. No service of ours liquidates; until outside keepers
+  are seen on a market, run one from the operator account (`liquidate(marketId, trader, priceData)` for every
+  `isLiquidatable` position, gas from the reward).
+- **Delisted or permanently halted underlying (settle price)**. When a Stock Token's market will not trade again,
+  the oracle keeps the price held (or stale) and nothing on-chain can price the book finally: held marks defer
+  redemptions (audit M-1) for 30 days, then settle at the held price, and engine positions cannot close. Through the
+  timelock, propose a final price: `AttestedOracle.proposeSettlePrice(priceId, priceWad)`. It is refused while the
+  stored price is live and fresh (`MarketTrading`) and outside 50% of the stored price either way
+  (`SettlePriceOutOfBand`). The band is wide and symmetric on purpose: a delisting or halt can move the price a lot
+  either way (bankruptcy, cash-out merger), and the guard is the process (timelock, then 3 public days in which a
+  wrong price can be cancelled); a move beyond 50% needs a Book-level decision, not this path. It takes effect `SETTLE_PRICE_DELAY` (3 days) after the
+  proposal; with the 48 h timelock, schedule it by day 25 of the hold so it is in force before the 30-day fallback.
+  While it is pending or in force, books on that underlying (or an index containing it) do not settle held marks at
+  the held valuation; that deferral ends 60 days after the hold began whatever governance or the mark service does.
+  For an index book, propose the price for the delisted component; for a hedge token outside the book's underlying,
+  propose it for the underlying too or flatten the token. In force (`settlePrice(priceId)` returns `effective`):
+  - the mark service values the price id at it as a live price and signs non-held marks (warn log "valued at the
+    governance settle price"), so redemptions and top-ups settle at it;
+  - PoolEngine prices the market at it as held (no voluntary trade). Anyone calls `forceClose(marketId, trader)`
+    for every open position (no close-out schedule needed, no fee) promptly: funding keeps accruing until each
+    position is closed. Only positions below maintenance at the settle price can be liquidated (with the fee). Then
+    retire the book as usual and the adapter recalls the pool and the IF.
+  - the mark service refuses a mark (retries later) when it cannot read `settlePrice`; repeated "settlePrice ... failed"
+    warnings mean an RPC problem to fix, not a held mark.
+  A live print published after the proposal voids it (the market traded again). `cancelSettlePrice(priceId)`
+  (timelock) withdraws it at any time: the normal held-mark rules apply again.
+- **Subscription window that cannot close**: `closeWindow` reverts while the venue deposit of the IF / MM
+  inventory reverts (venue paused, adapter misconfigured), so the book stays in Subscription. Fix the venue side
+  and call `closeWindow` again, within 7 days of `subscriptionEnds`: after that anyone may cancel the window, even a
+  healthy one nobody closed. `Book.CLOSE_WINDOW_TIMEOUT` (7 days) after `subscriptionEnds`, anyone may call
+  `Book.cancelStuckWindow()`: the book is Cancelled and every commitment is refundable 1:1
+  (`Tranche.claimCancelledRefund`).
+- **Deploy the agent and the risk service together** (audit M-3). The risk service treats a quote that does not
+  straddle the oracle as a SKEW breach (kill after `RISK_BREACH_CONFIRM_TICKS`); an agent from before the fix can
+  quote one side of the oracle on a book with cached pre-fix terms (8/25, 12/30, 10/25). Roll both from the same
+  commit, agent first or in the same restart. Live quotes are judged against the attested oracle price (fresh
+  on-chain price or verified signed print), never the agent's reported reference; `RISK_QUOTE_DRIFT_BPS` (default 5,
+  0..10, capped at half the mandate's min quote width) is the print drift allowed on top of `maxSkewBps`. "Fresh"
+  for the quote check is `RISK_QUOTE_PRICE_MAX_AGE_MS` (default 15 000, 2 000..60 000, checked at startup), not
+  the 300 s `maxPriceAge` used for valuation; a held (market-closed) print counts. Without such a price (signed-feed
+  outage in pull mode, Redis-only, missing) no quote is checked and the book is held `reduce_only` (status
+  `quoteUnverified`) whatever the agent quotes, never killed on SKEW; the hold lifts after
+  `RISK_QUOTE_HOLD_RELEASE_TICKS` (default 2, 1..10) consecutive ticks with a fresh attested price. Restore the
+  oracle feed or the signed prints; nothing to lift by hand.
 - **Mark reconciliation break** (Day-30 kill criterion): freeze new charters until clean; compare the
   mark's `pnl_json` venue section against the venue statement for the period.
 - **Wind-down**: `MarketCharter.retire(bookId)` → agents flatten → keeper recalls IF + MM → final
   mark with zero deployed value → `finalizeRetirement` → every holder redeems at the final NAV.
-- **Replacing HedgeExecutor or BkrnFeeRouter** (plain, non-upgradeable contracts resolved through
+- **Replacing HedgeExecutor, BkrnFeeRouter or the Backstop** (plain, non-upgradeable contracts resolved through
   `config`): deploy the new contract, configure it (HedgeExecutor: router(s), `setV3Factory`, one
   `setRoute` per hedge asset; BkrnFeeRouter: `setBuybackRouter`, `setBuybackParams`, reference
   source), then `config.setAddress("hedgeExecutor" | "feeRouter", new)` through the timelock.
   Desks resolve `config.hedgeExecutor()` on every swap, RevenueRouters resolve `config.feeRouter()`
   on every distribution and `BkrnStaking.notifyReward` only accepts the current `config.feeRouter()`.
-  Before the fee-router repoint executes, drain the old router's `buybackPending` with
-  `executeBuyback` (its pending settlement token has no sweep and its buybacks stop working once
-  staking points at the new router). Agents / risk must run with `HEDGE_POOL_FEE` /
+  Once the fee-router repoint has executed, anyone calls `migrate()` on the old router: its whole
+  settlement-token balance (the pending buyback) moves to the new one, which adds it to its
+  `buybackPending` (audit 2026-10 D; a router deployed before that fix has no `migrate`: drain its
+  `buybackPending` with `executeBuyback` before the repoint, its buybacks stop once staking points at the
+  new router). **Replacing the Backstop** works the same way: deploy, `setMaxCoverBps`, repoint
+  `config.setAddress("backstop", new)`, then `migrate()` on the old one moves its whole balance to the new
+  one (books and the fee router resolve `config.backstop()` at every call). Agents / risk must run with `HEDGE_POOL_FEE` /
   `RISK_FLATTEN_POOL_FEE` = 0 (or the route's exact fee) against a route-aware HedgeExecutor.
 - **Route review**: `bun scripts/check-pools.ts` (read-only) before every `setRoute` proposal and
   periodically; a failing token (no pool, no liquidity, round trip beyond the bound) should be
   re-routed or removed from mandates' `hedgeAllowRoot` before agents hedge it.
+- **Stale charters** (audit review M-7): `bun scripts/sweep-charters.ts` lists the charters still Filed after their
+  decision deadline (dry run); `--send` expires them from the KEEPER key (fee refunded, bond released; anyone may
+  call `expire`). After a MarketCharter / committee repoint, run it with `--charter <old address>`: charters still
+  Filed there can no longer be decided.
+- **Kill orders are RISK-signed** (Redis is not trusted, SECURITY.md "Off-chain trust boundaries"): agents and
+  ops-venue act only on the risk service's signed `KillOrder` (a RISK_ROLE holder; pin it with `AGENT_RISK_SIGNERS` /
+  `OPS_RISK_SIGNERS` to take the RPC off the kill path). A forged one is logged `FORGED kill ... ignored` and raises
+  `bus_forged_message`: check who can reach Redis. Deploy risk, the agents and ops-venue together: an agent or
+  ops-venue from this commit ignores an unsigned kill from an older risk (the on-chain kill still halts and revokes),
+  and risk from this commit checks only signed agent quotes, restores only its own signed state (at the first
+  restart after the upgrade every book starts from a fresh state and logs it: the old copies carry no signature, which
+  is not counted as forged; only a signature that fails verification counts in `bus_forged_message`) and publishes signed states (an agent from this commit
+  goes reduce-only after `AGENT_RISK_STATE_TIMEOUT_MS` without one: alert `risk_state_unverified`). A halted agent with
+  `killConfirmedOnChain: false` got a signed kill whose on-chain step has not landed (alert `kill_stuck`): complete
+  the kill; it resumes after a remandate.
+- **Desk session keys** (one per book; an agent quotes new risk only while its key is active on the mandate, so risk
+  can verify every quote it judges; without one it runs reduce-only and `agent_no_desk_key` fires, critical after
+  `ALERT_NO_DESK_KEY_CRITICAL_SECONDS` on a Live book). Devnet / testnet / testnet-live: the launch registers the
+  launch books' keys and then every other book's derived key (`bun scripts/desk-keys.ts --send`: the three launch
+  roles, else mnemonic index 1000 + bookId; a book of another sponsor is listed with the call its sponsor makes).
+  Mainnet, before the book goes Live: the operator generates the book's key (`DESK_KEY_PRIVATE_KEY_<bookId>` in the
+  env file), the agent operator calls `MMMandate.consentKey(key, true)`, the sponsor calls
+  `registerKey(key, operator, validUntil, tier >= maxInventoryUsd)`; check `isActiveKey(key)`. Rotation: register the
+  new key, set `DESK_KEY_PRIVATE_KEY_<bookId>` and restart the agent, then `revokeKey(old)` (the agent goes
+  reduce-only for the restart only). Expiry: `bun scripts/desk-keys.ts` (testnet) reports keys expiring within 30
+  days; on mainnet watch `getKey(key).validUntil` and re-register before it lapses (at expiry the agent goes
+  reduce-only and the alert fires). A committee `REVOKE_KEY` has the same effect at the next state refresh.
+- **Hold alerts** (services/alerts): `held_marks_in_session` (a held run valued in, or lasting through,
+  `ALERT_HELD_MARK_SESSION_SECONDS` of open session: a price the NAV uses is held or stale, e.g. a desk token whose
+  feed stopped, or the daily mark time never falls in the charter session; settlement is deferred up to 30 days; see
+  the mark log "held" reasons), `risk_quote_unverified` (risk holds a book reduce-only for over
+  `ALERT_QUOTE_UNVERIFIED_SECONDS` in session: no fresh attested price; restore the oracle feed / signed prints),
+  `desk_stale_trade_price` (the desk refused `ALERT_STALE_TRADE_PRICE_MAX` key swaps with StaleTradePrice within
+  `ALERT_STALE_TRADE_PRICE_WINDOW_SECONDS`: the agent's signed prices are not reaching the desk; hedging is stuck),
+  `bus_forged_message` (a service refused `ALERT_FORGED_MESSAGES_MAX` forged kills / quotes / risk states within
+  `ALERT_FORGED_MESSAGES_WINDOW_SECONDS`: nothing acted on them, but something can write to Redis), `agent_no_desk_key`
+  and `risk_state_unverified` (above).
 
 ## Rollback and incidents (mainnet)
 

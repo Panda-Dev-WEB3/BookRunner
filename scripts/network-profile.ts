@@ -36,6 +36,8 @@ export const MAINNET_FIXED: Readonly<Record<string, string>> = {
   INDEXER_CONFIRMATIONS: "2",
   OPS_KEYS_DIR: ".data/mainnet/keys",
   OPS_SAGA_FILE: ".data/mainnet/ops-venue/sagas.json",
+  // not the default tmpdir: that is the unit's PrivateTmp, emptied on every restart (HARDENING.md)
+  MARK_SPOOL_DIR: ".data/mainnet/mark-spool",
 };
 
 /**
@@ -414,6 +416,9 @@ export const TESTNET_LIVE_PINNED: Readonly<Record<string, string>> = {
   DEPLOYMENT_FILE: "contracts/deployments/46630.live.json",
   OPS_KEYS_DIR: ".data/testnet-live/keys",
   OPS_SAGA_FILE: ".data/testnet-live/ops-venue/sagas.json",
+  // committed-mark rows waiting for Postgres (audit 2026-10, HARDENING.md): its own spool under the unit's writable
+  // .data, never the public stack's .data/testnet/mark-spool (those rows belong to the other DB) nor PrivateTmp
+  MARK_SPOOL_DIR: ".data/testnet-live/mark-spool",
   API_PORT: String(TESTNET_LIVE_PORTS.api),
   ORACLE_PORT: String(TESTNET_LIVE_PORTS.oracle),
   CHARTER_PORT: String(TESTNET_LIVE_PORTS.charter),

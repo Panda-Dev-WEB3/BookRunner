@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 
@@ -30,7 +30,7 @@ contract MarketCharterTest is GovBase {
     }
 
     function test_bondLockId_isDistinctAndDeterministic() public view {
-        assertEq(charter.bondLockId(1), keccak256(abi.encode(charter.SPONSOR_BOND_DOMAIN(), uint256(1))));
+        assertEq(charter.bondLockId(1), keccak256(abi.encode(charter.SPONSOR_BOND_DOMAIN(), address(charter), uint256(1))));
         assertTrue(charter.bondLockId(1) != charter.bondLockId(2));
     }
 
@@ -283,8 +283,13 @@ contract MarketCharterTest is GovBase {
         assertEq(_reason(c), bytes32("BAD_NOTICE"));
         c.juniorNoticeSeconds = 30 days;
         assertEq(_reason(c), bytes32(0));
-        c.juniorNoticeSeconds = 0;
+        // audit M-1: at least one mark interval (config.markInterval() == 300 here)
+        c.juniorNoticeSeconds = 300;
         assertEq(_reason(c), bytes32(0));
+        c.juniorNoticeSeconds = 299;
+        assertEq(_reason(c), bytes32("BAD_NOTICE"));
+        c.juniorNoticeSeconds = 0;
+        assertEq(_reason(c), bytes32("BAD_NOTICE"));
     }
 
     function test_validate_badMandate() public view {
@@ -378,7 +383,7 @@ contract MarketCharterTest is GovBase {
         c.juniorNoticeSeconds = notice;
         bytes32 expected;
         if (window < 60 || window > 30 days) expected = "BAD_WINDOW";
-        else if (notice > 30 days) expected = "BAD_NOTICE";
+        else if (notice < 300 || notice > 30 days) expected = "BAD_NOTICE";
         assertEq(_reason(c), expected);
     }
 
@@ -394,13 +399,36 @@ contract MarketCharterTest is GovBase {
         BRTypes.Charter memory c = _charter();
         c.mandate.killAtDrawdownBps = kill;
         c.mandate.maxSkewBps = skew;
-        bool bad = kill >= 0 || kill < -5000 || skew <= 0;
+        // audit M-3: maxSkew <= minQuoteWidth / 2 (the fixture's min width is 8)
+        bool bad = kill >= 0 || kill < -5000 || skew <= 0
+            || int256(skew) * 2 > int256(uint256(c.mandate.minQuoteWidthBps));
         assertEq(_reason(c), bad ? bytes32("BAD_MANDATE") : bytes32(0));
     }
 
     // ------------------------------------------------------------------------------------------
     // decide
     // ------------------------------------------------------------------------------------------
+
+    /// @dev Audit M-1: the notice is re-checked at approval against the interval the book will cache.
+    function test_decide_noticeBelowIntervalRaisedAfterFiling_reverts() public {
+        BRTypes.Charter memory c = _charter();
+        c.juniorNoticeSeconds = 300; // == markInterval at filing: valid
+        uint256 id = _file(c);
+        cfg.setMarkInterval(600);
+        vm.prank(address(committee));
+        vm.expectRevert(abi.encodeWithSelector(IMarketCharter.InvalidCharter.selector, bytes32("BAD_NOTICE")));
+        charter.decide(id, true, CID);
+        // rejection still works (fee refunded, bond released)
+        vm.prank(address(committee));
+        charter.decide(id, false, CID);
+        assertEq(uint8(_status(id)), uint8(BRTypes.CharterStatus.Rejected));
+        // at the unchanged interval it is approved
+        cfg.setMarkInterval(300);
+        uint256 id2 = _file(c);
+        vm.prank(address(committee));
+        charter.decide(id2, true, CID);
+        assertEq(uint8(_status(id2)), uint8(BRTypes.CharterStatus.Approved));
+    }
 
     function test_decide_onlyCommittee() public {
         uint256 id = _file();

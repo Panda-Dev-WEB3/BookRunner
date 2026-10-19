@@ -65,7 +65,7 @@ describe("MCP /mcp (stateless streamable HTTP)", () => {
     const l = await result<{ structuredContent: { bookId: number; state: string; mandate: { maxSkewBps: number }; series: { buckets: unknown[] } } }>(
       await rpc(app, "tools/call", { name: "book_limits", arguments: { bookId: 1 } }),
     );
-    expect(l.structuredContent).toMatchObject({ bookId: 1, state: "warn", mandate: { maxSkewBps: 25 } });
+    expect(l.structuredContent).toMatchObject({ bookId: 1, state: "warn", mandate: { maxSkewBps: 4 } });
     const c = await result<{ structuredContent: { charters: Array<{ charterId: number; status: string }> } }>(
       await rpc(app, "tools/call", { name: "charters", arguments: { status: "Approved" } }),
     );

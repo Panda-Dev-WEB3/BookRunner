@@ -224,6 +224,8 @@ if [ "$PHASE" = all ]; then
   echo "==> forge build"
   bash scripts/forge.sh build >/dev/null
   echo "==> Deploy.s.sol -> testnet"
+  # the mnemonic never goes on a command line (ps / /proc/<pid>/cmdline): forge gets DEV_MNEMONIC through docker -e NAME
+  # (the name only; the value travels in the environment, scripts/forge.sh) — audit 2026-10 Task 5
   DEV_MNEMONIC="${!MNEMONIC_VAR}" NETWORK=testnet MARK_INTERVAL_SECONDS="${MARK_INTERVAL_SECONDS:-3600}" \
     bash scripts/forge.sh script script/Deploy.s.sol:Deploy --rpc-url "$FORGE_RPC" --broadcast --slow -q
 fi

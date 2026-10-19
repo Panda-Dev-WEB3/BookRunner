@@ -43,7 +43,32 @@ gitignored).
 ./node_modules/.bin/bun run lint:copy          # copy rules for README and user-facing app text
 ```
 
-Integration tests that need running infrastructure are guarded by `BKRN_IT=1`.
+Integration tests that need running infrastructure are guarded by `BKRN_IT=1`. To run all of them the way CI
+does (each file against its own freshly migrated `*_it` database; an `anvil` binary on PATH or `ANVIL_BIN`):
+
+```bash
+bash scripts/forge.sh build                    # the chain tests deploy from contracts/out
+IT_PG_BASE=postgres://bookrunner:bookrunner@127.0.0.1:54400 REDIS_URL=redis://127.0.0.1:63790   bash scripts/ci-integration.sh [ops-venue]   # optional filter: a substring of the test path
+```
+
+## CI
+
+GitHub Actions run on every pull request and on `main`, with no secrets:
+
+- [`ci.yml`](.github/workflows/ci.yml): Foundry build + test at `FOUNDRY_PROFILE=ci` (fuzz 4,096 runs; every invariant
+  suite at 102,400 calls or more), `bun test` + both type checks + the copy linter, and the integration suite
+  (`scripts/ci-integration.sh`) on Postgres/Timescale and Redis service containers.
+- [`security.yml`](.github/workflows/security.yml) (also weekly): gitleaks over the history, Slither, Semgrep.
+  A new Medium / High Slither finding fails the job until it is fixed or, after review, listed in
+  [`contracts/slither-allowlist.json`](contracts/slither-allowlist.json) with its reason (`scripts/slither-gate.ts`).
+  A reviewed false positive of gitleaks goes in `.gitleaks.toml` / `.gitleaksignore`, of Semgrep in
+  `.semgrepignore` or a `nosemgrep` comment.
+
+Supply-chain rules: actions are pinned by full commit SHA with the tag in a comment, images by digest
+(`scripts/forge.sh` holds the one Foundry digest; compose files hold Postgres/Timescale and Redis); bump them
+deliberately and run the suites. `bunfig.toml` refuses versions published less than 7 days ago and
+`trustedDependencies` lists the only package allowed an install script (`bun`): adding to it needs a reason in
+the pull request.
 
 ## Commit style
 

@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
 
@@ -197,7 +197,7 @@ contract MandateInvariantTest is MandateBase {
         handler.hedgeBuy(15_000e6);
         assertEq(handler.hedgesOk(), 1);
         assertGt(nvda.balanceOf(address(desk)), 0);
-        handler.setQuote(20, 5, 10_000e6);
+        handler.setQuote(20, 4, 10_000e6);
         assertEq(handler.quotesOk(), 1);
         handler.revokeAndRace(1);
         handler.killAndRemandate(1);
@@ -225,6 +225,8 @@ contract MandateInvariantTest is MandateBase {
         assertGe(adapter.lastSpread(), m.minQuoteWidthBps);
         int256 sk = int256(adapter.lastSkew());
         assertLe(sk < 0 ? -sk : sk, int256(m.maxSkewBps));
+        // audit M-3: the quote straddles the oracle
+        assertLe((sk < 0 ? -sk : sk) * 2, int256(uint256(adapter.lastSpread())));
     }
 
     /// @notice Held-token bookkeeping matches balances (no untracked inventory, no stale entries).

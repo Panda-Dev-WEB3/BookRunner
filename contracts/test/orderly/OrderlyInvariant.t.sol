@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
 import {console2} from "forge-std/console2.sol";
@@ -361,6 +361,8 @@ contract OrderlyHandler is Test {
 
 /// forge-config: default.invariant.depth = 256
 /// forge-config: default.invariant.runs = 96
+/// forge-config: ci.invariant.depth = 256
+/// forge-config: ci.invariant.runs = 400
 contract OrderlyInvariantTest is OrderlyFixture {
     OrderlyHandler internal handler;
 

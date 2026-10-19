@@ -29,6 +29,26 @@ describe("charter form", () => {
     expect(issuesFor(bad, "mandate").length).toBeGreaterThan(3);
   });
 
+  test("audit M-1: Junior notice of at least one mark interval (the network's when known, else > 0)", () => {
+    const notice = (s: number, markIntervalSeconds?: number | null) => issuesFor(formIssues({ ...DEFAULT_FORM, sponsor: SPONSOR, juniorNoticeSeconds: String(s) }, { markIntervalSeconds }), "juniorNoticeSeconds");
+    expect(notice(3599, 3600)).toHaveLength(1);
+    expect(notice(3599, 3600)[0]?.message).toContain("1 h");
+    expect(notice(3600, 3600)).toEqual([]);
+    expect(notice(0)).toHaveLength(1);
+    expect(notice(100)).toEqual([]); // interval unknown: the API and MarketCharter.validate still check it
+    expect(notice(86_400, 86_400)).toEqual([]); // the default form passes a daily network
+  });
+
+  test("audit M-3: max skew at most half the min quote width", () => {
+    const skew = (maxSkewBps: string, minQuoteWidthBps: string) =>
+      issuesFor(formIssues({ ...DEFAULT_FORM, sponsor: SPONSOR, mandate: { ...DEFAULT_FORM.mandate, maxSkewBps, minQuoteWidthBps } }), "mandate.maxSkewBps");
+    expect(skew("25", "8")).toHaveLength(1);
+    expect(skew("25", "8")[0]?.message).toContain("4 bps");
+    expect(skew("5", "8")).toHaveLength(1);
+    expect(skew("4", "8")).toEqual([]);
+    expect(skew("4", "9")).toEqual([]);
+  });
+
   test("Orderly books need an Orderly perp symbol; in-house symbols are free-form", () => {
     const symbolIssues = (symbol: string, venue: "orderly" | "pool_engine" = "orderly") =>
       formIssues({ ...DEFAULT_FORM, sponsor: SPONSOR, symbol, venue, ifSizeUsd: "30000" }).filter((i) => i.field === "symbol");
@@ -63,11 +83,11 @@ describe("charter form", () => {
       seniorHurdleBps: 6000,
       seniorCapBps: 7000,
       subscriptionWindowSeconds: 600,
-      juniorNoticeSeconds: 900,
+      juniorNoticeSeconds: 86_400,
       takerFeeBps: 0,
       meta: { name: "NVDA book" },
     });
-    expect(d.mandate).toMatchObject({ maxSkewBps: 25, minQuoteWidthBps: 8, killAtDrawdownBps: -800, hedgeAllow: [{ asset: "NVDA", venue: "UNIV3" }] });
+    expect(d.mandate).toMatchObject({ maxSkewBps: 4, minQuoteWidthBps: 8, killAtDrawdownBps: -800, hedgeAllow: [{ asset: "NVDA", venue: "UNIV3" }] });
     expect(formToDraft({ ...DEFAULT_FORM, underlyingKind: "index", underlying: "RHX5" }).underlying).toEqual({ index: "RHX5" });
   });
 

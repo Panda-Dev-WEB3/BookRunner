@@ -6,7 +6,7 @@
 // after AttestedOracle.update(priceData) (deployless Multicall3 aggregate, nothing is sent). The mark tx is
 // MarkRegistry.commitAndApply when the registry has it (feature-detected on its bytecode), else commit +
 // Book.applyMark.
-import { type Deployment, type Mandate, type MarkInput, VENUE, bytes32ToStr } from "@bookrunner/shared";
+import { type Deployment, type Mandate, type MarkInput, VENUE, bytes32ToStr, readMultiplierAtBasis } from "@bookrunner/shared";
 import {
   attestedOracleAbi,
   backstopAbi,
@@ -24,6 +24,9 @@ import {
 import { type BookRef, type TxSender, bookStateName, codeHasSelector, describeRevert, scanEvents } from "@bookrunner/waterfall";
 import { type Abi, type Address, type Hex, type PublicClient, encodeFunctionData, erc20Abi, isAddressEqual, parseEventLogs, zeroHash } from "viem";
 import type { AdapterReportState } from "../../../ops-venue/src/report712";
+import { priceIsStale } from "../domain/held";
+import { deskPriceChoice, underlyingAtSettle } from "../domain/settle";
+import { SettlePriceReader } from "./settleRead";
 import { type SignedPrice, encodePriceData, pickSignedPrice, valuationRefTs } from "../domain/prices";
 import type { DeskPosition, MarkSnapshot } from "../domain/types";
 import type { AtomicMarkResult, CommittedMark, MarkAppliedEvent, MarkChain, SimulationResult } from "../ports";
@@ -40,6 +43,7 @@ const EMPTY_MARK: MarkInput = {
   inventoryRoot: zeroHash,
   pnlJsonHash: zeroHash,
   receiptsRoot: zeroHash,
+  held: false,
 };
 const ERRORS_ABI = [...markRegistryAbi, ...bookAbi, ...attestedOracleAbi, ...orderlyAdapterAbi] as Abi;
 
@@ -53,6 +57,7 @@ export class MarkChainAdapter implements MarkChain {
   private tickers = new Map<string, string>();
   /** Non-batching client for the deployless aggregate (batched multicall would split the calls). */
   private readonly raw: PublicClient;
+  private settleReader: SettlePriceReader | null = null;
 
   constructor(
     private readonly pc: PublicClient,
@@ -60,6 +65,8 @@ export class MarkChainAdapter implements MarkChain {
     private readonly deployment: Deployment,
     /** wall clock (ms): the valuation reference time for signed prices is max(snapshot block, now) */
     private readonly now: () => number = Date.now,
+    /** audit M-2 split window: blocks scanned back for the token's UIMultiplierUpdated events (MARK_SPLIT_LOG_LOOKBACK_BLOCKS) */
+    private readonly splitLogLookbackBlocks?: bigint,
   ) {
     for (const [ticker, t] of Object.entries(deployment.stockTokens ?? {})) this.tickers.set(t.token.toLowerCase(), ticker);
     this.raw = unbatchedClient(pc);
@@ -140,7 +147,7 @@ export class MarkChainAdapter implements MarkChain {
       eventName: "MarkCommitted",
       args: { markId },
       fromBlock: BigInt(this.deployment.startBlock ?? 0),
-      toBlock: await this.pc.getBlockNumber(),
+      toBlock: await this.pc.getBlockNumber({ cacheTime: 0 }), // never a cached head: the commit may be in the newest block
     });
     return logs[0]?.transactionHash ?? null;
   }
@@ -276,6 +283,7 @@ export class MarkChainAdapter implements MarkChain {
       this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "valuationAt", ...b }),
     ]);
 
+    const maxPriceAge = BigInt(await this.maxPriceAge());
     let underlyingPrice: MarkSnapshot["underlyingPrice"] = null;
     let underlyingPriceId: Hex | null = null;
     let onchainUnderlying: { priceWad: bigint; publishedAt: bigint; held: boolean } | null = null;
@@ -283,14 +291,17 @@ export class MarkChainAdapter implements MarkChain {
       underlyingPriceId = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "priceIdOf", args: [charter.underlying], ...b });
       const p = await this.pc.readContract({ address: this.c.oracle, abi: attestedOracleAbi, functionName: "latest", args: [underlyingPriceId], ...b });
       onchainUnderlying = { priceWad: p.priceWad, publishedAt: BigInt(p.publishedAt), held: p.held };
-      underlyingPrice = { priceId: underlyingPriceId, priceWad: p.priceWad, publishedAt: Number(p.publishedAt), held: p.held };
+      underlyingPrice = { priceId: underlyingPriceId, priceWad: p.priceWad, publishedAt: Number(p.publishedAt), held: p.held, stale: priceIsStale(p.publishedAt, refTs, maxPriceAge) };
     } catch {
       underlyingPrice = null;
     }
     const signedUnderlying = underlyingPriceId ? pickSignedPrice(prices, underlyingPriceId, onchainUnderlying?.publishedAt ?? 0n, refTs) : null;
     if (signedUnderlying && underlyingPriceId) {
-      underlyingPrice = { priceId: underlyingPriceId, priceWad: signedUnderlying.priceWad, publishedAt: Number(signedUnderlying.publishedAt), held: signedUnderlying.held };
+      underlyingPrice = { priceId: underlyingPriceId, priceWad: signedUnderlying.priceWad, publishedAt: Number(signedUnderlying.publishedAt), held: signedUnderlying.held, stale: priceIsStale(signedUnderlying.publishedAt, refTs, maxPriceAge) };
     }
+    // Task 7: a governance settle price in force values the underlying as a live, final price (the engine views
+    // price the market at it too), so the mark is not held and the book settles at it (domain/settle.ts)
+    if (underlyingPriceId) underlyingPrice = underlyingAtSettle(underlyingPrice, underlyingPriceId, await this.settle().read(underlyingPriceId, blockNumber), signedUnderlying, refTs);
 
     let poolCashUsd: bigint | null = null;
     let poolEquityUsd: bigint | null = null;
@@ -333,10 +344,9 @@ export class MarkChainAdapter implements MarkChain {
       this.pc.readContract({ address: desk, abi: bookrunnerDeskAbi, functionName: "valueUsd", ...b }).catch(() => null),
       this.pc.readContract({ address: desk, abi: bookrunnerDeskAbi, functionName: "hedgeNotionalUsd", ...b }).catch(() => null),
     ]);
-    const maxPriceAge = BigInt(await this.maxPriceAge());
     const positions: DeskPosition[] = [];
     for (const token of held) {
-      const { position, signed } = await this.position(token, desk, blockNumber, refTs, maxPriceAge, prices);
+      const { position, signed } = await this.position(token, desk, blockNumber, refTs, maxPriceAge, prices, blockTs);
       positions.push(position);
       if (signed) used.set(signed.underlying.toLowerCase(), signed);
     }
@@ -455,18 +465,54 @@ export class MarkChainAdapter implements MarkChain {
     refTs: bigint,
     maxPriceAge: bigint,
     prices?: ReadonlyMap<string, SignedPrice>,
+    blockTs: bigint = refTs,
   ): Promise<{ position: DeskPosition; signed: SignedPrice | null }> {
     const b = { blockNumber } as const;
     const [qtyRaw, info] = await Promise.all([
       this.pc.readContract({ address: token, abi: erc20Abi, functionName: "balanceOf", args: [desk], ...b }),
       this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "getToken", args: [token], ...b }),
     ]);
-    const latest = await this.pc.readContract({ address: this.c.oracle, abi: attestedOracleAbi, functionName: "latest", args: [info.priceId], ...b });
-    const signed = pickSignedPrice(prices, info.priceId, BigInt(latest.publishedAt), refTs);
-    const priceWad = signed ? signed.priceWad : latest.priceWad;
-    const publishedAt = signed ? signed.publishedAt : BigInt(latest.publishedAt);
+    // audit M-2: the price's share basis and the token's last multiplier change, at the same block (a revert,
+    // e.g. a live-mode token without effectiveAt(), fails the snapshot: never valued blind)
+    const [latest, lastLiveAt, multiplierChangedAt] = await Promise.all([
+      this.pc.readContract({ address: this.c.oracle, abi: attestedOracleAbi, functionName: "latest", args: [info.priceId], ...b }),
+      this.pc.readContract({ address: this.c.oracle, abi: attestedOracleAbi, functionName: "lastLiveAt", args: [info.priceId], ...b }),
+      this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "multiplierChangedAt", args: [token], ...b }),
+    ]);
+    // Task 7: a governance settle price in force is the token's price id's final, live price (domain/settle.ts);
+    // its share basis is the proposal (governance quotes it in the shares of that moment)
+    const choice = deskPriceChoice({
+      stored: { priceWad: latest.priceWad, publishedAt: BigInt(latest.publishedAt), held: latest.held },
+      lastLiveAt: BigInt(lastLiveAt),
+      signed: pickSignedPrice(prices, info.priceId, BigInt(latest.publishedAt), refTs),
+      settle: await this.settle().read(info.priceId, blockNumber),
+      refTs,
+      maxPriceAgeSec: maxPriceAge,
+    });
+    const { priceWad, held, basis, signed } = choice;
+    const settled = choice.settled;
+    const priceStale = choice.stale;
     const valueUsd = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "valueUsdAt", args: [token, qtyRaw, priceWad], ...b });
-    const priceStale = publishedAt === 0n || refTs > publishedAt + maxPriceAge;
+    // split window (audit M-2, fix round 2 N-I1, Task 7): the multiplier in force at the basis, from the token's
+    // update events (paged; live-mode tokens) or ON-CHAIN (StockTokenRegistry.basisMultiplier: the value before the
+    // first registry-side change after the basis, else the pre-split anchor), else unknown (domain/split.ts carries
+    // the previous mark's value forward: no P&L, never a loss). The window starts at the change (the I-2 marker
+    // changedAt == block time means unknown: then the basis), so the refusal always ends.
+    let split: Pick<DeskPosition, "basisMultiplierWad" | "splitWindowSince"> = {};
+    if (qtyRaw > 0n && multiplierChangedAt > basis) {
+      // live mode: the token's own update events first (exact; the on-chain fallback for a token-side change is the
+      // anchor, within the band of the true value: Task 2 review minor, Task 7); stored mode: the registry's full
+      // change history (exact on-chain since Task 7)
+      const live = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "multiplierFromToken", args: [token], ...b });
+      const r = live ? await readMultiplierAtBasis(this.pc, token, { basisAt: basis, nowSec: refTs, blockNumber, lookbackBlocks: this.splitLogLookbackBlocks }) : null;
+      let m: bigint | null = r?.multiplierWad ?? null;
+      const first: bigint | null = r?.firstChangeAt ?? null;
+      if (m === null) {
+        const onchain = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "basisMultiplier", args: [token, basis], ...b });
+        m = onchain > 0n ? onchain : null;
+      }
+      split = { basisMultiplierWad: m, splitWindowSince: first ?? (multiplierChangedAt < blockTs ? multiplierChangedAt : basis) };
+    }
     return {
       position: {
         token,
@@ -478,9 +524,20 @@ export class MarkChainAdapter implements MarkChain {
         valueUsd,
         priceStale,
         ...(signed ? { signedPrice: true } : {}),
+        ...(held ? { priceHeld: true } : {}),
+        ...(settled ? { settlePrice: true } : {}),
+        priceBasisAt: basis,
+        multiplierChangedAt,
+        ...split,
       },
       signed: signed && qtyRaw > 0n ? signed : null,
     };
+  }
+
+  /** AttestedOracle.settlePrice reader (adapters/settleRead.ts: a failed read refuses the mark, never "none"). */
+  private settle(): SettlePriceReader {
+    this.settleReader ??= new SettlePriceReader(this.pc, this.c.oracle);
+    return this.settleReader;
   }
 
   private tickerOf(token: Address, priceId: Hex): string {

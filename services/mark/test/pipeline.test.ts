@@ -93,6 +93,39 @@ describe("MarkPipeline", () => {
     expect(store.rows.get(1)?.appliedTx).toBeDefined();
   });
 
+  test("audit M-1: a valuation at a price the oracle signed as held commits a signed held mark", async () => {
+    const { chain, store, pipeline, signer } = setup();
+    chain.snap = { ...chain.snap, underlyingPrice: { ...chain.snap.underlyingPrice!, held: true } };
+    const out = await pipeline.run({ bookId: 1, periodEnd: P });
+    expect(out.status).toBe("applied");
+    if (out.status !== "applied") return;
+    expect(out.input.held).toBe(true);
+    const row = store.rows.get(1)!;
+    expect(row.input.held).toBe(true);
+    expect(row.pnl.held).toBe(true);
+    expect(await signer.recover(row.input, row.signature)).toBe(signer.address);
+    // the flag is signed: the same signature does not verify a non-held copy
+    expect(await signer.recover({ ...row.input, held: false }, row.signature)).not.toBe(signer.address);
+  });
+
+  test("audit M-1 fail closed: an unreadable or stale underlying price commits a held mark (signed and published)", async () => {
+    for (const underlyingPrice of [null, { ...setup().chain.snap.underlyingPrice!, stale: true }]) {
+      const { chain, store, pipeline } = setup();
+      chain.snap = { ...chain.snap, underlyingPrice };
+      const out = await pipeline.run({ bookId: 1, periodEnd: P });
+      expect(out.status).toBe("applied");
+      if (out.status !== "applied") return;
+      expect(out.input.held).toBe(true);
+      expect(store.rows.get(1)!.pnl.held).toBe(true);
+    }
+  });
+
+  test("live prices: the mark is not held", async () => {
+    const { pipeline } = setup();
+    const out = await pipeline.run({ bookId: 1, periodEnd: P });
+    expect(out.status === "applied" && out.input.held).toBe(false);
+  });
+
   test("dry run sends nothing", async () => {
     const { chain, pipeline } = setup();
     const out = await pipeline.run({ bookId: 1, periodEnd: P }, { dryRun: true });
@@ -122,6 +155,84 @@ describe("MarkPipeline", () => {
     chain.snap = { ...chain.snap, venue: { ...chain.snap.venue, valuationAt: P + 15 } };
     expect((await pipeline.run({ bookId: 1, periodEnd: P })).status).toBe("applied");
     expect(chain.commitCalls).toBe(1);
+  });
+
+  describe("audit M-2 split window (review I-1)", () => {
+    // 40 NVDA, Friday's per-share price re-stamped held after a 10:1 split: valueUsdAt says 10x ($76,000)
+    const fridayClose = BigInt(P - 86_400);
+    const splitOf = (pos: ReturnType<typeof setup>["chain"]["snap"]["desk"]["positions"][number], o: { since: bigint; m?: bigint | null; stale?: boolean; basis?: bigint }) => ({
+      ...pos,
+      priceHeld: true,
+      priceStale: o.stale ?? false,
+      valueUsd: pos.valueUsd * 10n,
+      multiplierWad: 10n * pos.multiplierWad,
+      priceBasisAt: o.basis ?? fridayClose,
+      multiplierChangedAt: o.since,
+      basisMultiplierWad: o.m === undefined ? pos.multiplierWad : o.m,
+      splitWindowSince: o.since,
+    });
+
+    test("young window (fresh price, < one interval since the change): retryable, nothing committed; a dry run flags it at the basis valuation", async () => {
+      const { chain, pipeline } = setup();
+      const pos = chain.snap.desk.positions[0]!;
+      chain.snap = { ...chain.snap, desk: { ...chain.snap.desk, onchainValueUsd: null, hedgeNotionalUsd: null, positions: [splitOf(pos, { since: BigInt(P) })] } };
+      await expect(pipeline.run({ bookId: 1, periodEnd: P })).rejects.toBeInstanceOf(RetryableMarkError);
+      await expect(pipeline.run({ bookId: 1, periodEnd: P })).rejects.toThrow("predates the multiplier change");
+      expect(chain.commitCalls).toBe(0);
+      const dry = await pipeline.run({ bookId: 1, periodEnd: P }, { dryRun: true });
+      if (dry.status !== "dry_run") throw new Error(dry.status);
+      expect(dry.computed.splitWindow.refuse).toHaveLength(1);
+      expect(dry.computed.input.navUsd).toBe(usd("110600")); // the continuous value, not +$68,400
+      expect(dry.computed.input.held).toBe(true);
+    });
+
+    test("past the refusal bound: a HELD mark is committed with the token at the basis multiplier (M-1 bound keeps running)", async () => {
+      const { chain, pipeline } = setup();
+      const pos = chain.snap.desk.positions[0]!;
+      chain.snap = { ...chain.snap, desk: { ...chain.snap.desk, onchainValueUsd: null, hedgeNotionalUsd: null, positions: [splitOf(pos, { since: BigInt(P - 600) })] } };
+      const out = await pipeline.run({ bookId: 1, periodEnd: P });
+      expect(out.status).toBe("applied");
+      if (out.status !== "applied") return;
+      expect(out.input.held).toBe(true);
+      expect(out.input.navUsd).toBe(usd("110600"));
+    });
+
+    test("split window + stale price (the oracle stopped): held at once, never refused", async () => {
+      const { chain, pipeline } = setup();
+      const pos = chain.snap.desk.positions[0]!;
+      chain.snap = { ...chain.snap, desk: { ...chain.snap.desk, onchainValueUsd: null, hedgeNotionalUsd: null, positions: [splitOf(pos, { since: BigInt(P), stale: true })] } };
+      const out = await pipeline.run({ bookId: 1, periodEnd: P });
+      expect(out.status === "applied" && out.input.held).toBe(true);
+    });
+
+    test("fix round 2 N-I1: basis multiplier unknown, token never reprices: committed held marks carry the previous mark's value (no P&L, no loss for the drawdown kill / backstop)", async () => {
+      const { chain, store, pipeline } = setup();
+      const pos = chain.snap.desk.positions[0]!;
+      store.prevPositions = [{ token: pos.token, qtyRaw: pos.qtyRaw, valueUsd: pos.valueUsd }]; // last mark: $7,600
+      chain.snap = { ...chain.snap, desk: { ...chain.snap.desk, onchainValueUsd: null, hedgeNotionalUsd: null, positions: [splitOf(pos, { since: BigInt(P - 30 * 86_400), basis: BigInt(P - 31 * 86_400), m: null })] } };
+      const out = await pipeline.run({ bookId: 1, periodEnd: P });
+      expect(out.status).toBe("applied");
+      if (out.status !== "applied") return;
+      expect(out.input.held).toBe(true);
+      expect(out.input.navUsd).toBe(usd("110600")); // the position keeps its previous value: no P&L for it
+    });
+
+    test("no basis multiplier and no previous value: 0 (the last resort, logged as an error)", async () => {
+      const { chain, pipeline } = setup();
+      const pos = chain.snap.desk.positions[0]!;
+      chain.snap = { ...chain.snap, desk: { ...chain.snap.desk, onchainValueUsd: null, hedgeNotionalUsd: null, positions: [splitOf(pos, { since: BigInt(P - 30 * 86_400), basis: BigInt(P - 31 * 86_400), m: null })] } };
+      const out = await pipeline.run({ bookId: 1, periodEnd: P });
+      expect(out.status === "applied" && out.input.navUsd).toBe(usd("103000")); // 110,600 - the 7,600 token position
+    });
+
+    test("fix round 2 minor: I-2 state (change time = block time) with no events: the window starts at the basis, so the refusal ends", async () => {
+      const { chain, pipeline } = setup();
+      const pos = chain.snap.desk.positions[0]!;
+      // the adapter sets splitWindowSince = basis when multiplierChangedAt is the block time (unknown)
+      const s = { ...splitOf(pos, { since: BigInt(P + 30) }), splitWindowSince: BigInt(P - 86_400) };
+      chain.snap = { ...chain.snap, desk: { ...chain.snap.desk, onchainValueUsd: null, hedgeNotionalUsd: null, positions: [s] } };
+      expect((await pipeline.run({ bookId: 1, periodEnd: P })).status).toBe("applied");
+    });
   });
 
   test("Retiring wind-down: token dust below the flatten floor does not block deployedValueUsd == 0", async () => {
@@ -172,7 +283,7 @@ describe("spool serialisation", () => {
       markId: 3,
       bookId: 1,
       periodEnd: P,
-      input: { bookId: 1n, periodEnd: BigInt(P), navUsd: 5n, deployedValueUsd: 4n, flowNonce: 2n, inventoryRoot: "0x01", pnlJsonHash: "0x02", receiptsRoot: "0x03" },
+      input: { bookId: 1n, periodEnd: BigInt(P), navUsd: 5n, deployedValueUsd: 4n, flowNonce: 2n, inventoryRoot: "0x01", pnlJsonHash: "0x02", receiptsRoot: "0x03", held: false },
       pnl: { bookId: "1" } as MarkRow["pnl"],
       signer: "0x0000000000000000000000000000000000000001",
       signature: "0x04",

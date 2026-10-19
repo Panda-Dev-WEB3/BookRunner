@@ -7,7 +7,7 @@ import type { QuotingConfig } from "./domain/quoting";
 import type { EwmaVolConfig } from "./domain/volatility";
 import type { EngineVenueConfig } from "./venues/engine";
 import type { HedgePlannerConfig } from "./domain/hedge-planner";
-import { usd } from "@bookrunner/shared";
+import { QUOTE_PRICE_MAX_AGE_MS, usd } from "@bookrunner/shared";
 
 const num = (d: number) => z.coerce.number().default(d);
 const flag = (d: boolean) => z.stringbool().default(d);
@@ -15,6 +15,10 @@ const flag = (d: boolean) => z.stringbool().default(d);
 export const agentEnvShape = {
   BOOK_ID: z.coerce.number().int().positive().optional(),
   DESK_KEY_PRIVATE_KEY: z.string().optional(),
+  /** pinned oracle signers (comma-separated): Redis prices are verified without an RPC per new signer; unset = AttestedOracle.isSigner */
+  AGENT_ORACLE_SIGNERS: z.string().optional(),
+  /** pinned RISK_ROLE holders whose signed kill orders are accepted; unset = config.hasRole on-chain */
+  AGENT_RISK_SIGNERS: z.string().optional(),
   ORACLE_PRICE_ID: z.string().optional(), // override the registry-derived price id (e.g. "NVDA")
   ORDERLY_ACCOUNT_ID: z.string().optional(), // override adapter.accountId(MM)
   DEPLOYMENT_RETRY_MS: num(10_000),
@@ -26,8 +30,12 @@ export const agentEnvShape = {
   AGENT_HEDGE_INTERVAL_MS: num(15_000),
   AGENT_HEARTBEAT_TTL_MS: num(60_000),
   AGENT_HALT_LOG_MS: num(60_000),
-  AGENT_PRICE_STALE_SECONDS: num(30), // no quoting without a price update this recent
+  // no quoting without a price update this recent: risk's quote-check bound (QUOTE_PRICE_MAX_AGE_MS), so the agent stops
+  // on a price as old as the one risk holds the book reduce-only for
+  AGENT_PRICE_STALE_SECONDS: num(QUOTE_PRICE_MAX_AGE_MS / 1000),
   AGENT_CHAIN_PRICE_FALLBACK_SECONDS: num(10), // poll AttestedOracle when Redis is this quiet
+  // no RISK-signed risk state verified for this long: reduce-only (never a halt; alerts risk_state_unverified)
+  AGENT_RISK_STATE_TIMEOUT_MS: num(30_000),
 
   // Avellaneda-Stoikov + clamps
   AGENT_GAMMA: num(50),
@@ -64,7 +72,11 @@ export const agentEnvShape = {
   AGENT_QUOTE_RECEIPT_MS: num(5_000),
 
   // pull oracle (docs/LOW_GAS.md §1): desk actions carry the freshest signed prices
-  /** auto: executeWithPrices when the deployed desk has it; on: always; off: plain execute (stored prices). */
+  /**
+   * auto: executeWithPrices when the deployed desk has it; on: always; off: plain execute (stored prices). With off,
+   * a key Hedge / Flatten works only while someone else landed a price within config.maxTradePriceAge (15 s): the
+   * desk refuses older ones (StaleTradePrice, audit 2026-10 "old prints").
+   */
   AGENT_PULL_PRICES: z.enum(["auto", "on", "off"]).default("auto"),
   // Orderly books: stay reduce-only while ops-venue reports the market not open for new risk (not listed, missing,
   // POST_ONLY, REDUCE_ONLY, DELISTING, DELISTED; Redis bkrn:<ns>:ops-venue:symbol-issues, docs/VERIFY.md O20)
@@ -79,6 +91,8 @@ export const agentEnvShape = {
   AGENT_VENUE_POST_ONLY_QUOTE: z.stringbool().optional(),
   /** Signed prices older than this are not carried (the desk then runs on the stored price). */
   AGENT_PRICE_DATA_MAX_AGE_SECONDS: num(60),
+  /** Swaps carry only prints younger than config.maxTradePriceAge minus this margin (time to inclusion). */
+  AGENT_SWAP_PRICE_MARGIN_SECONDS: num(3),
   /**
    * SetQuote / inventory moves carry no prices while the stored book price is in-hours and younger than
    * this (someone else already landed it; well below config.maxPriceAge = 300 s). 0 = always carry.

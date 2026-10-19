@@ -28,9 +28,12 @@ fail_on_revert = false
 [profile.ci.fuzz]
 runs = 4096
 
+# CI (FOUNDRY_PROFILE=ci, .github/workflows/ci.yml): every invariant suite at 800 x 128 = 102,400 calls (audit
+# 2026-10: >= 100k); suites with their own inline ci.* config (forge-config comments) keep it.
 [profile.ci.invariant]
-runs = 512
+runs = 800
 depth = 128
+fail_on_revert = false
 
 [fmt]
 line_length = 110

@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
@@ -7,7 +7,7 @@ import {BookrunnerConfig} from "../../src/BookrunnerConfig.sol";
 import {IBookrunnerConfig} from "../../src/interfaces/IBookrunnerConfig.sol";
 import {IBookrunnerConfigTradeAge} from "../../src/PoolEngine.sol";
 
-/// @notice LOW_GAS.md §1 parameter `maxTradePriceAge` (default 15 s, timelock-settable).
+/// @notice LOW_GAS.md §1 parameter `maxTradePriceAge` (default 15 s, timelock-settable up to MAX_TRADE_PRICE_AGE = 15 s).
 contract BookrunnerConfigLowGasTest is Test {
     BookrunnerConfig internal config;
     address internal admin = makeAddr("admin");
@@ -32,10 +32,10 @@ contract BookrunnerConfigLowGasTest is Test {
 
     function test_maxTradePriceAge_setByAdminOnly() public {
         vm.expectEmit(true, false, false, true, address(config));
-        emit IBookrunnerConfig.ParamSet("maxTradePriceAge", 30);
+        emit IBookrunnerConfig.ParamSet("maxTradePriceAge", 10);
         vm.prank(admin);
-        config.setParam("maxTradePriceAge", 30);
-        assertEq(config.maxTradePriceAge(), 30);
+        config.setParam("maxTradePriceAge", 10);
+        assertEq(config.maxTradePriceAge(), 10);
 
         bytes32 adminRole = config.DEFAULT_ADMIN_ROLE();
         vm.expectRevert(
@@ -43,7 +43,7 @@ contract BookrunnerConfigLowGasTest is Test {
         );
         vm.prank(stranger);
         config.setParam("maxTradePriceAge", 1);
-        assertEq(config.maxTradePriceAge(), 30);
+        assertEq(config.maxTradePriceAge(), 10);
     }
 
     function test_maxTradePriceAge_rangeChecks() public {
@@ -52,13 +52,14 @@ contract BookrunnerConfigLowGasTest is Test {
             abi.encodeWithSelector(BookrunnerConfig.ParamOutOfRange.selector, bytes32("maxTradePriceAge"), 0)
         );
         config.setParam("maxTradePriceAge", 0);
-        uint256 tooBig = uint256(type(uint32).max) + 1;
+        // audit 2026-10 L-2: capped at MAX_TRADE_PRICE_AGE (15 s)
+        uint256 tooBig = config.MAX_TRADE_PRICE_AGE() + 1;
         vm.expectRevert(
             abi.encodeWithSelector(BookrunnerConfig.ParamOutOfRange.selector, bytes32("maxTradePriceAge"), tooBig)
         );
         config.setParam("maxTradePriceAge", tooBig);
-        config.setParam("maxTradePriceAge", type(uint32).max);
-        assertEq(config.maxTradePriceAge(), type(uint32).max);
+        config.setParam("maxTradePriceAge", 15);
+        assertEq(config.maxTradePriceAge(), 15);
         config.setParam("maxTradePriceAge", 1);
         assertEq(config.maxTradePriceAge(), 1);
         vm.stopPrank();
@@ -67,12 +68,12 @@ contract BookrunnerConfigLowGasTest is Test {
     /// @dev Packed next to the other uint32 params: setting it never disturbs its slot neighbours.
     function test_maxTradePriceAge_independentOfOtherParams() public {
         vm.startPrank(admin);
-        config.setParam("maxTradePriceAge", 42);
+        config.setParam("maxTradePriceAge", 12);
         config.setParam("maxPriceAge", 77);
         config.setParam("committeeWindow", 1 days + 9);
         config.setNewBooksPaused(true);
         vm.stopPrank();
-        assertEq(config.maxTradePriceAge(), 42);
+        assertEq(config.maxTradePriceAge(), 12);
         assertEq(config.maxPriceAge(), 77);
         assertEq(config.committeeWindow(), 1 days + 9);
         assertTrue(config.newBooksPaused());
@@ -81,11 +82,11 @@ contract BookrunnerConfigLowGasTest is Test {
 
         bytes32[] memory keys = new bytes32[](2);
         uint256[] memory vals = new uint256[](2);
-        (keys[0], vals[0]) = ("maxTradePriceAge", 20);
+        (keys[0], vals[0]) = ("maxTradePriceAge", 14);
         (keys[1], vals[1]) = ("maxPriceAge", 300);
         vm.prank(admin);
         config.setParams(keys, vals);
-        assertEq(config.maxTradePriceAge(), 20);
+        assertEq(config.maxTradePriceAge(), 14);
         assertEq(config.maxPriceAge(), 300);
         assertTrue(config.newBooksPaused());
     }

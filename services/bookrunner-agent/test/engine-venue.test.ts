@@ -19,12 +19,13 @@ import {
   type EngineTrade,
   EngineVenue,
   engineParamsFromQuote,
+  paramsWithinMandate,
   shouldResend,
   tradeToFill,
 } from "../src/venues/engine";
 import { nvdaMandate } from "./helpers";
 
-const m = nvdaMandate({ maxInventoryUsd: usd(75_000), maxSkewBps: 25, minQuoteWidthBps: 10 }); // RHX5 launch mandate
+const m = nvdaMandate({ maxInventoryUsd: usd(75_000), maxSkewBps: 5, minQuoteWidthBps: 10 }); // RHX5 launch mandate (audit M-3: 10 / 5)
 
 describe("desk action encoding", () => {
   test("SetQuote = abi.encode(uint16 spreadBps, int16 skewBps, uint128 maxNetExposureUsd)", () => {
@@ -84,17 +85,28 @@ describe("engineParamsFromQuote", () => {
   test("spread rounds up, skew truncates toward zero (mandate-safe rounding)", () => {
     const p = engineParamsFromQuote(quote(100.025, 100.125), ctx)!; // mid 100.075: width 9.99 bps, skew +7.5 bps
     expect(p.spreadBps).toBe(10);
-    expect(p.skewBps).toBe(7);
-    const neg = engineParamsFromQuote(quote(99.825, 100.025), ctx)!; // mid 99.925: width 20.01 bps, skew -7.5 bps
-    expect(neg.skewBps).toBe(-7);
+    expect(p.skewBps).toBe(5); // capped at the max skew 5 (= half the spread)
+    const neg = engineParamsFromQuote(quote(99.875, 100.075), ctx)!; // mid 99.975: width 20.01 bps, skew -2.5 bps
+    expect(neg.skewBps).toBe(-2);
     expect(neg.spreadBps).toBe(21);
+  });
+
+  test("audit M-3: a cached pre-fix mandate (10 / 25) never yields a one-sided engine quote", () => {
+    const legacy = { ...ctx, mandate: { ...m, maxSkewBps: 25 } };
+    const p = engineParamsFromQuote(quote(100.025, 100.125), legacy)!; // width 9.99 -> 10, skew +7.5
+    expect(p.spreadBps).toBe(10);
+    expect(p.skewBps).toBe(5); // floor(spread / 2), not 7
+    const wide = engineParamsFromQuote(quote(101, 101.2), legacy)!; // width 19.8 -> 20, skew +110
+    expect(wide.skewBps).toBe(10);
+    expect(paramsWithinMandate({ spreadBps: 10, skewBps: 6, maxNetExposureUsd: 0n }, legacy.mandate)).toBe(false);
+    expect(paramsWithinMandate({ spreadBps: 10, skewBps: 5, maxNetExposureUsd: 0n }, legacy.mandate)).toBe(true);
   });
 
   test("never below min width / above max skew", () => {
     const tight = engineParamsFromQuote(quote(99.999, 100.001), ctx)!;
     expect(tight.spreadBps).toBe(10);
     const skewed = engineParamsFromQuote(quote(101, 101.2), ctx)!;
-    expect(skewed.skewBps).toBe(25);
+    expect(skewed.skewBps).toBe(5);
   });
 
   test("capacity: growth rounds up to the exposure step; capped at maxInventoryUsd", () => {
@@ -130,7 +142,7 @@ describe("shouldResend (change-threshold logic)", () => {
 
   test("rate limit, threshold and periodic refresh", () => {
     const small = { ...base, spreadBps: 13 };
-    const big = { ...base, skewBps: 6 };
+    const big = { ...base, skewBps: 5 };
     expect(shouldResend(sent(base, 0), big, 1_000, cfg, m)).toMatchObject({ send: false, reason: "RATE_LIMITED" });
     expect(shouldResend(sent(base, 0), big, 6_000, cfg, m)).toMatchObject({ send: true, reason: "CHANGED" });
     expect(shouldResend(sent(base, 0), small, 6_000, cfg, m)).toMatchObject({ send: false, reason: "BELOW_THRESHOLD" });
@@ -148,6 +160,7 @@ describe("shouldResend (change-threshold logic)", () => {
   test("never sends params outside the mandate", () => {
     expect(shouldResend(null, { ...base, spreadBps: 5 }, 0, cfg, m).send).toBe(false);
     expect(shouldResend(null, { ...base, skewBps: 26 }, 0, cfg, m).send).toBe(false);
+    expect(shouldResend(null, { ...base, spreadBps: 8, skewBps: 5 }, 0, cfg, nvdaMandate({ maxInventoryUsd: usd(75_000), minQuoteWidthBps: 8, maxSkewBps: 25 })).send).toBe(false); // audit M-3: one-sided
     expect(shouldResend(null, { ...base, maxNetExposureUsd: usd(75_001) }, 0, cfg, m).send).toBe(false);
   });
 });

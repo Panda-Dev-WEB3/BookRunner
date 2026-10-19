@@ -10,7 +10,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { DepositIndexer } from "@bookrunner/mock-orderly";
 import { ACCOUNT, type Deployment, devAccount, localChain } from "@bookrunner/shared";
-import { type Abi, type Address, createPublicClient, createWalletClient, type Hex, http } from "viem";
+import { type Abi, type Address, createPublicClient, createTestClient, createWalletClient, type Hex, http } from "viem";
 import { ViemChain } from "../src/chain";
 import fixture from "./fixtures/fake-orderly.json";
 import { BUILDER_ID, log, makeCtx, SYMBOL, trackedBook } from "./helpers";
@@ -35,6 +35,7 @@ d("ops-venue on a private anvil", () => {
   const ops = devAccount("opsVenue");
   const pc = createPublicClient({ chain: localChain, transport: http(RPC), pollingInterval: 100 });
   const wc = createWalletClient({ chain: localChain, transport: http(RPC), account: deployer });
+  const tc = createTestClient({ chain: localChain, transport: http(RPC), mode: "anvil" });
   const addr: Record<string, Address> = {};
 
   async function deploy(name: keyof typeof fixture, args: unknown[]): Promise<Address> {
@@ -96,7 +97,11 @@ d("ops-venue on a private anvil", () => {
 
     // 2) provision + report
     const reg = new BookRegistry(t.ctx);
-    const book = { ...trackedBook(), adapter: addr.adapter as Address, accounts };
+    // account owners as BookRegistry reads them: the fake adapter is pre-v3 (no accountOwner), so both accounts
+    // belong to the adapter and the venue pays withdrawals to it (trackedBook()'s owners are the unit-test fakes')
+    const owners = await chain.accountOwners(addr.adapter as Address);
+    expect(owners).toEqual({ if: addr.adapter as Address, mm: addr.adapter as Address });
+    const book = { ...trackedBook(), adapter: addr.adapter as Address, accounts, owners };
     reg.books.set(1, book);
     await new Provisioner(t.ctx, await loadOrCreateBuilderKey(t.keys, BUILDER_ID, undefined, 86_400_000, keyFromSecret)).ensure(book);
     t.mock.venue.setPrice("NVDA", 200, false);
@@ -104,6 +109,14 @@ d("ops-venue on a private anvil", () => {
     t.ctx.settings.reportSettleSec = 3600; // deposits just landed: held while the venue may not reflect them
     expect(await reporter.report(book)).toBeNull();
     t.ctx.settings.reportSettleSec = 0;
+    // strict report-after-flow rule: asOf is clamped to the chain head, and the head is still the last deposit's
+    // block, so no report can be strictly after that flow yet (the test failed here every run until it advanced the chain)
+    const flowHead = await chain.headTimestamp();
+    expect(await reporter.holdReason(book, flowHead, flowHead)).toMatch(/not strictly after the venue flow/);
+    expect(await reporter.report(book)).toBeNull();
+    await tc.increaseTime({ seconds: 2 });
+    await tc.mine({ blocks: 1 });
+    now = Number(await chain.headTimestamp()) * 1000; // the wall clock caught up with the new head
     const tx = await reporter.report(book);
     expect(tx).toMatch(/^0x/);
     const ins = await pc.readContract({ address: addr.adapter as Address, abi: fixture.FakeAdapter.abi as Abi, functionName: "insuranceEquityUsd" });
