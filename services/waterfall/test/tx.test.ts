@@ -59,7 +59,8 @@ function fakeProvider() {
 
 function sender() {
   const provider = fakeProvider();
-  const transport = custom({ request: provider.request });
+  // retryCount 0: viem retries a thrown fake-RPC error 3x with backoff (~1 s each), which pushed tests to the 5 s timeout
+  const transport = custom({ request: provider.request }, { retryCount: 0 });
   const pc = createPublicClient({ chain: localChain, transport, pollingInterval: 5 });
   const wallet = createWalletClient({ chain: localChain, transport, account: devAccount("keeper") });
   return { tx: new TxSender(pc as never, wallet, createLogger("tx-test", "silent"), { pollingIntervalMs: 5 }), sent: provider.sent };

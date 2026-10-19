@@ -210,7 +210,8 @@ function fakeProvider(reverts: ReadonlySet<string> = new Set()) {
 
 function makeChain(reverts?: ReadonlySet<string>, nowMs?: number) {
   const provider = fakeProvider(reverts);
-  const transport = custom({ request: provider.request });
+  // retryCount 0: viem retries a thrown fake-RPC error 3x with backoff (~1 s each), which pushed tests to the 5 s timeout
+  const transport = custom({ request: provider.request }, { retryCount: 0 });
   const pub = createPublicClient({ chain: localChain, transport, pollingInterval: 5 });
   const wallet = createWalletClient({ chain: localChain, transport, account: devAccount("risk") });
   const dep = { chainId: 31337, startBlock: 0, contracts: C, stockTokens: {}, books: [] } as unknown as Deployment;
