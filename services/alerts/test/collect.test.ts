@@ -37,6 +37,12 @@ describe("parsers", () => {
     expect(parseRisk(JSON.stringify({ state: "ok", meta: { ts: NOW, lossBudget: lb } }))!.lossBudget).toEqual({ blocked: true, lossUsd: 9000.5, budgetUsd: 8000, budgetBps: 800, period: 7 });
     expect(parseRisk(JSON.stringify({ state: "ok", meta: { ts: NOW, lossBudget: null } }))!.lossBudget).toBeUndefined();
     expect(parseRisk(JSON.stringify({ state: "ok", meta: { ts: NOW, lossBudget: { blocked: "yes" } } }))!.lossBudget).toBeUndefined();
+    // Task 7c (7a review M-6): a published but unusable lossBudget (null, malformed) = risk could not read
+    // PoolEngine.lossBudget; an absent key (an older risk service) is not
+    expect(parseRisk(JSON.stringify({ state: "ok", meta: { ts: NOW, lossBudget: null } }))!.lossBudgetUnreadable).toBe(true);
+    expect(parseRisk(JSON.stringify({ state: "ok", meta: { ts: NOW, lossBudget: { blocked: "yes" } } }))!.lossBudgetUnreadable).toBe(true);
+    expect(parseRisk(JSON.stringify({ state: "ok", meta: { ts: NOW } }))!.lossBudgetUnreadable).toBeUndefined();
+    expect(parseRisk(JSON.stringify({ state: "ok", meta: { ts: NOW, lossBudget: lb } }))!.lossBudgetUnreadable).toBeUndefined();
     expect(parseRisk("nope")).toBeNull();
     expect(parseRisk(JSON.stringify({ meta: {} }))).toBeNull();
     expect(parseRisk(null)).toBeNull();

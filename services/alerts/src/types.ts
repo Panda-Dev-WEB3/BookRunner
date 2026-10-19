@@ -42,6 +42,12 @@ export interface RiskSnap {
   journal: RiskJournalSnap | null;
   /** engine books (meta.lossBudget, Task 7): the pool's per-period loss budget; absent when not published */
   lossBudget?: { blocked: boolean; lossUsd: number; budgetUsd: number; budgetBps: number; period: number };
+  /**
+   * meta.lossBudget published but unusable (null or malformed): risk could not read PoolEngine.lossBudget this tick. Risk
+   * publishes null for every Orderly book too, so only an engine book's flag means something (engine_loss_budget_unreadable).
+   * Absent when the key is absent (an older risk service) or the budget parsed.
+   */
+  lossBudgetUnreadable?: true;
   /** meta.quoteUnverified (audit M-3): the book is held reduce-only, its live quote has no fresh attested price to check against */
   quoteUnverified?: boolean;
 }

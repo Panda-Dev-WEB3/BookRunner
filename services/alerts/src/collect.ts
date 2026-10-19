@@ -141,6 +141,7 @@ export function parseRisk(raw: string | null): RiskSnap | null {
         }
       : null,
     ...(lossBudget ? { lossBudget } : {}),
+    ...("lossBudget" in meta && !lossBudget ? { lossBudgetUnreadable: true as const } : {}),
   };
 }
 

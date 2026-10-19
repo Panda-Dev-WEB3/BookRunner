@@ -468,6 +468,10 @@ can redo it during the timelock delay from the published quote.
   (from the first reduction, close, liquidation or close-out that sees it; anyone may call
   `PoolEngine.pokeLossBudget(marketId)`), the risk service publishes the budget state every tick
   (`meta.lossBudget`) and the alert `engine_loss_budget` (critical) pages until the next period re-anchors.
+  When risk cannot read the budget (it publishes `meta.lossBudget: null` for an engine book: RPC errors, an engine
+  without `lossBudget`, an adapter whose `marketId` / `engine` reads fail), `engine_loss_budget` cannot fire;
+  `engine_loss_budget_unreadable` (warning) says so after `ALERT_LOSS_BUDGET_UNREADABLE_SECONDS` (300). The engine
+  still enforces the budget on-chain; check risk's RPC and the book's adapter.
 - **Engine liquidations** (keeper policy): `PoolEngine.liquidate` is permissionless and pays the liquidator half
   the nominal liquidation fee (`liquidationFeeBps` of the notional at the oracle), from the trader's remaining
   margin first and from the market's IF when the margin is gone (capped by the IF after the bad debt it covers).

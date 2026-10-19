@@ -98,6 +98,31 @@ export function engineLossBudget(s: Snapshot, _c: RuleConfig): Condition[] {
   return out;
 }
 
+/**
+ * Engine books (Task 7c, 7a review M-6): the risk service publishes meta.lossBudget = null because its
+ * PoolEngine.lossBudget read failed (RPC errors, a pre-M-3 engine, an adapter without marketId / engine), so
+ * engine_loss_budget cannot fire for the book. Only a fresh risk state of a markable, unkilled engine book counts
+ * (risk_stale and mandate_killed cover the others); Orderly books always publish null and are skipped. Warning after
+ * ALERT_LOSS_BUDGET_UNREADABLE_SECONDS (forSec: a failed read or two never fires); resolves after the dedupe clear
+ * window once a read succeeds again. The engine enforces the budget on-chain whatever this alert says.
+ */
+export function engineLossBudgetUnreadable(s: Snapshot, c: RuleConfig): Condition[] {
+  const out: Condition[] = [];
+  for (const b of s.books ?? []) {
+    const r = b.risk;
+    if (b.venue !== "pool_engine" || !MARKABLE.has(b.state) || !r?.lossBudgetUnreadable || r.killed || r.state === "killed") continue;
+    if (r.ts == null || (s.now - r.ts) / 1000 > c.riskStaleSec) continue;
+    out.push({
+      key: `engine_loss_budget_unreadable:${b.bookId}`,
+      rule: "engine_loss_budget_unreadable",
+      severity: "warning",
+      forSec: c.lossBudgetUnreadableSec,
+      summary: `${bookLabel(b)}: the risk service cannot read PoolEngine.lossBudget for this engine book (meta.lossBudget is null) for ${dur(c.lossBudgetUnreadableSec)}+: engine_loss_budget cannot fire; check the risk service's RPC and the book's adapter (marketId, engine)`,
+    });
+  }
+  return out;
+}
+
 /** An open kill journal = a kill sequence that has started; failed steps or a long run = stuck. */
 export function killJournal(s: Snapshot, _c: RuleConfig): Condition[] {
   const out: Condition[] = [];
@@ -805,6 +830,7 @@ export const RULES = {
   mark_overdue: markOverdue,
   risk_state: riskState,
   engine_loss_budget: engineLossBudget,
+  engine_loss_budget_unreadable: engineLossBudgetUnreadable,
   kill_journal: killJournal,
   kill_event: killEvents,
   risk_stale: riskStale,

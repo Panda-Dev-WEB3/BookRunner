@@ -155,6 +155,8 @@ const shape = {
   ALERT_NO_DESK_KEY_CRITICAL_SECONDS: int(600),
   /** risk_state_unverified: no RISK-signed state verified by the agent this long alerts (warning) */
   ALERT_RISK_STATE_UNVERIFIED_SECONDS: int(60),
+  /** engine_loss_budget_unreadable: an engine book whose risk state has carried no readable loss budget this long alerts (warning) */
+  ALERT_LOSS_BUDGET_UNREADABLE_SECONDS: int(300),
   /** the stack's SESSIONS_MODE (same enum and default as every service: 24x7 overrides the charter sessions) */
   SESSIONS_MODE: baseEnvSchema.shape.SESSIONS_MODE,
   ALERT_VENUE_REPORT_MAX_AGE_SECONDS: z.coerce.number().int().min(1).optional(),
@@ -216,6 +218,8 @@ export interface RuleConfig {
   forgedMessagesWindowSec: number;
   noDeskKeyCriticalSec: number;
   riskStateUnverifiedSec: number;
+  /** engine_loss_budget_unreadable: span (s) before the warning */
+  lossBudgetUnreadableSec: number;
   venueReportMaxAgeSec: number;
   /** builder_price_push: failing span (s) of a live builder price push in session */
   builderPushFailSec: number;
@@ -350,6 +354,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       forgedMessagesWindowSec: e.ALERT_FORGED_MESSAGES_WINDOW_SECONDS,
       noDeskKeyCriticalSec: e.ALERT_NO_DESK_KEY_CRITICAL_SECONDS,
       riskStateUnverifiedSec: e.ALERT_RISK_STATE_UNVERIFIED_SECONDS,
+      lossBudgetUnreadableSec: e.ALERT_LOSS_BUDGET_UNREADABLE_SECONDS,
       venueReportMaxAgeSec: e.ALERT_VENUE_REPORT_MAX_AGE_SECONDS ?? nd.venueReportMaxAgeSec,
       builderPushFailSec: e.ALERT_BUILDER_PUSH_FAIL_SECONDS,
       listingLiveGraceSec: e.ALERT_LISTING_LIVE_GRACE_SECONDS,

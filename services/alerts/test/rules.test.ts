@@ -18,6 +18,7 @@ import {
   riskStale,
   riskState,
   engineLossBudget,
+  engineLossBudgetUnreadable,
   rpc,
   venueIfAccount,
   venueReportAge,
@@ -838,5 +839,36 @@ describe("engine_loss_budget (Task 7: the engine pool spent its per-period loss 
     const s = snap({ books: [engineBook()] });
     expect(evaluate(s, rules()).map((c) => c.key)).toContain("engine_loss_budget:3");
     expect(evaluate(s, rules({ disabled: new Set(["engine_loss_budget"]) })).map((c) => c.key)).not.toContain("engine_loss_budget:3");
+  });
+});
+
+describe("engine_loss_budget_unreadable (Task 7c, 7a review M-6: risk cannot read an engine book's loss budget)", () => {
+  const engine = (over: Partial<NonNullable<ReturnType<typeof book>["risk"]>> = {}, state = "Live") =>
+    book({ venue: "pool_engine", state, risk: { ...book().risk!, lossBudgetUnreadable: true, ...over } });
+  test("an engine book whose risk state carries meta.lossBudget = null: warning after ALERT_LOSS_BUDGET_UNREADABLE_SECONDS", () => {
+    const c = engineLossBudgetUnreadable(snap({ books: [engine()] }), rules());
+    expect(keys(c)).toEqual(["engine_loss_budget_unreadable:3"]);
+    expect(c[0]!.severity).toBe("warning");
+    expect(c[0]!.forSec).toBe(300); // hysteresis: a failed read or two never fires; the dedupe's clear window resolves it
+    expect(c[0]!.summary).toContain("engine_loss_budget cannot fire");
+    expect(engineLossBudgetUnreadable(snap({ books: [engine()] }), rules({ lossBudgetUnreadableSec: 900 }))[0]!.forSec).toBe(900);
+  });
+  test("readable, Orderly (always null), not markable, killed, stale risk state (risk_stale covers it) or no risk state: quiet", () => {
+    expect(engineLossBudgetUnreadable(snap({ books: [engine({ lossBudgetUnreadable: undefined })] }), rules())).toEqual([]);
+    expect(engineLossBudgetUnreadable(snap({ books: [book({ risk: { ...book().risk!, lossBudgetUnreadable: true } })] }), rules())).toEqual([]);
+    for (const state of ["Subscription", "Cancelled", "Retired"]) expect(engineLossBudgetUnreadable(snap({ books: [engine({}, state)] }), rules())).toEqual([]);
+    expect(keys(engineLossBudgetUnreadable(snap({ books: [engine({}, "Retiring")] }), rules()))).toEqual(["engine_loss_budget_unreadable:3"]);
+    expect(engineLossBudgetUnreadable(snap({ books: [engine({ killed: true })] }), rules())).toEqual([]);
+    expect(engineLossBudgetUnreadable(snap({ books: [engine({ ts: NOW - 301_000 })] }), rules())).toEqual([]);
+    expect(engineLossBudgetUnreadable(snap({ books: [engine({ ts: null })] }), rules())).toEqual([]);
+    expect(engineLossBudgetUnreadable(snap({ books: [book({ venue: "pool_engine", risk: null })] }), rules())).toEqual([]);
+    expect(engineLossBudgetUnreadable(snap({ books: null }), rules())).toEqual([]);
+  });
+  test("registered in RULES (can be disabled); ALERT_LOSS_BUDGET_UNREADABLE_SECONDS", () => {
+    const s = snap({ books: [engine()] });
+    expect(evaluate(s, rules()).map((c) => c.key)).toContain("engine_loss_budget_unreadable:3");
+    expect(evaluate(s, rules({ disabled: new Set(["engine_loss_budget_unreadable"]) })).map((c) => c.key)).not.toContain("engine_loss_budget_unreadable:3");
+    expect(loadConfig({ NETWORK: "testnet", ALERT_LOSS_BUDGET_UNREADABLE_SECONDS: "120" }).rules.lossBudgetUnreadableSec).toBe(120);
+    expect(rules().lossBudgetUnreadableSec).toBe(300);
   });
 });
