@@ -1,7 +1,7 @@
 // Domain events -> webhook deliveries. Low latency via the CHANNELS.domainEvents pub/sub; durability
 // via a periodic sweep of the events table from a cursor (chain_cursor row "api:webhooks:events").
 // Delivery rows are unique per (subscription, event), so every path is idempotent.
-import { CHANNELS, type Logger, WEBHOOK_EVENTS, type WebhookJob } from "@bookrunner/shared";
+import { CHANNELS, type Logger, WEBHOOK_EVENTS, type WebhookJob, busDropper } from "@bookrunner/shared";
 import type { EventRow, WebhookStore } from "../data/types";
 import { EVENTS_CURSOR, isWebhookEventType, matchesSubscription } from "./policy";
 
@@ -27,6 +27,8 @@ export interface DispatcherDeps {
 export class WebhookDispatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
   private chain: Promise<unknown> = Promise.resolve();
+  /** domain events of another stack (bus namespace) are dropped, logged once */
+  private readonly foreign = busDropper((msg, meta) => this.d.log.warn(meta, msg));
   private sweeping = false;
   private subscriber: Subscriber | null = null;
   private stopped = false;
@@ -109,6 +111,7 @@ export class WebhookDispatcher {
       this.subscriber = subscriber;
       subscriber.on("message", (channel, message) => {
         if (channel !== CHANNELS.domainEvents) return;
+        if (this.foreign(channel, message)) return; // another stack's event (bus namespace)
         // serialize handling; errors are logged, the sweep is the safety net
         this.chain = this.chain
           .then(() => this.onMessage(message))

@@ -7,11 +7,14 @@ writes one **set** per run to `/var/backups/bookrunner/daily/<UTC stamp>/` and h
 | File | What | How |
 |---|---|---|
 | `postgres.dump` | `bookrunner_<network>` (Timescale hypertables and compressed chunks included) | `pg_dump -Fc`, checked with `pg_restore -l` |
+| `postgres-live.dump` | testnet host with the live-Orderly rehearsal stack (`bookrunner@testnet-live`): `bookrunner_testnet_live` | as above; only when that database exists (`BACKUP_LIVE_REHEARSAL=off` skips it) |
+| `redis-live.rdb` | the rehearsal stack's own Redis (`redis-live`) | `BGSAVE` with `REDIS_LIVE_PASSWORD`; only with `postgres-live.dump` and a running container |
 | `redis.rdb` | every Redis db (risk journals, signed venue reports, oracle bundle, queues, alert state) | `BGSAVE` then `docker cp` of `dump.rdb` |
-| `state.tar.gz` | `.data/<network>/` (mock venue snapshot, **ops keys**, sagas; logs left out) and `contracts/deployments/*.json` | `tar` (symlinks are stored as links, never followed) |
+| `state.tar.gz` | `.data/<network>/` (mock venue snapshot, **ops keys**, sagas; logs left out), with the rehearsal stack also `.data/testnet-live/` (its **Orderly keys**: they control accounts holding real testnet USDG), and `contracts/deployments/*.json` (incl. `46630.live.json` and archived `46630.live.<stamp>.json`) | `tar` (symlinks are stored as links, never followed) |
 | `MANIFEST`, `SHA256SUMS` | app commit, image references, checksums | |
 
-**Not in the sets:** `.env.<network>` (mnemonic, `ORACLE_SEED`, API keys) and `.env.infra`. Keep a copy of
+**Not in the sets:** `.env.<network>` (mnemonic, `ORACLE_SEED`, API keys), the rehearsal stack's
+`/etc/bookrunner/testnet-live.env` (`BKRN_TESTNET_LIVE_MNEMONIC`, its `ORACLE_SEED`, `ORDERLY_BUILDER_KEY_SECRET`) and `.env.infra`. Keep a copy of
 `.env.<network>` offline (password manager / sealed storage): without it a restored stack cannot sign. A new
 host generates a new `.env.infra`.
 
@@ -35,7 +38,9 @@ sudo /usr/local/lib/bookrunner-deploy/backup.sh --verify  # restore drill of the
 `--verify` is non-destructive: it checks the checksums and the tar, restores `postgres.dump` into a scratch
 database `bookrunner_restore_check` (Timescale pre/post restore), compares row counts of the main tables with
 the live database, drops the scratch database, loads `redis.rdb` into a throwaway Redis container without
-network and compares the key count. Live data is never touched. Expected output ends with
+network and compares the key count. A set with `postgres-live.dump` also restores it into
+`bookrunner_restore_check_live` (row counts vs `bookrunner_testnet_live`, dropped after) and counts the
+`.data/testnet-live/keys` entries in the tar. Live data is never touched. Expected output ends with
 `==> restore drill OK`.
 
 ## Restore (same host, or a new host after install)
@@ -68,6 +73,7 @@ with step 2. Skip the `RENAME` in step 3 (there is no old database).
 
 ```bash
 systemctl stop bookrunner bookrunner-backup.timer
+systemctl stop bookrunner@testnet-live 2>/dev/null || true   # the rehearsal stack, if it runs here (last section)
 systemctl is-active bookrunner-infra                      # active: Postgres + Redis stay up
 ```
 
@@ -130,6 +136,7 @@ files are kept next to them.
 
 ```bash
 mv "$APP/.data/$NET" "$APP/.data/$NET.pre-restore-$STAMP"
+[ ! -d "$APP/.data/testnet-live" ] || mv "$APP/.data/testnet-live" "$APP/.data/testnet-live.pre-restore-$STAMP"   # the set may carry it
 mkdir -p /root/pre-restore-$STAMP && cp -a "$APP/contracts/deployments" /root/pre-restore-$STAMP/
 cat "$S/state.tar.gz" | sudo -u bookrunner tar -C "$APP" -xzf - --no-same-owner
 ls -la "$APP/.data/$NET" "$APP/contracts/deployments"
@@ -170,3 +177,42 @@ systemctl start bookrunner
 Redis has no pre-restore copy (the live dataset is replaced); take one first if it matters:
 `docker exec -e REDISCLI_AUTH $RD redis-cli BGSAVE` and `docker cp $RD:/data/dump.rdb /root/pre-restore-$STAMP/`
 before step 4, restorable with step 4.
+
+## Live-Orderly rehearsal stack (testnet host, `bookrunner@testnet-live`)
+
+The rehearsal stack runs next to the public testnet stack (docs/RUNBOOK.md "Testnet rehearsal on real Orderly"). The
+daily set covers it automatically once `bookrunner_testnet_live` exists: `postgres-live.dump`, `.data/testnet-live/`
+(ops / trade keys of the Orderly accounts that hold **real testnet USDG**: without them and the record, those funds can
+only be recovered through Orderly) and `contracts/deployments/46630.live.json` in `state.tar.gz`, its own Redis
+(`redis-live`, 127.0.0.1:63791) in `redis-live.rdb`. Keep `/etc/bookrunner/testnet-live.env` offline as well. `backup.sh --verify` restores `postgres-live.dump` into a
+scratch database and counts the keys in the tar (the monthly drill covers it). Restore only the rehearsal stack:
+
+```bash
+NET=testnet-live; DB=bookrunner_testnet_live                # step 0, after choosing the set
+systemctl stop bookrunner@testnet-live                      # step 1 (the public stack keeps running)
+docker exec $PG psql -v ON_ERROR_STOP=1 -U bookrunner -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$DB' AND pid <> pg_backend_pid()"
+docker exec $PG psql -v ON_ERROR_STOP=1 -U bookrunner -d postgres -c "ALTER DATABASE $DB RENAME TO ${DB}_pre_restore_$STAMP"
+docker exec $PG psql -v ON_ERROR_STOP=1 -U bookrunner -d postgres -c "CREATE DATABASE $DB"
+docker exec $PG psql -v ON_ERROR_STOP=1 -U bookrunner -d $DB -c "CREATE EXTENSION IF NOT EXISTS timescaledb" -c "SELECT timescaledb_pre_restore()"
+docker cp "$S/postgres-live.dump" $PG:/tmp/restore-live.dump
+docker exec $PG pg_restore -U bookrunner -d $DB --no-owner /tmp/restore-live.dump
+docker exec $PG psql -v ON_ERROR_STOP=1 -U bookrunner -d $DB -c "SELECT timescaledb_post_restore()"
+docker exec $PG rm /tmp/restore-live.dump
+# its state and record only (the public stack's files stay as they are)
+mv "$APP/.data/$NET" "$APP/.data/$NET.pre-restore-$STAMP"
+cp -a "$APP/contracts/deployments/46630.live.json" "/root/46630.live.pre-restore-$STAMP.json"
+cat "$S/state.tar.gz" | sudo -u bookrunner tar -C "$APP" -xzf - --no-same-owner ./.data/testnet-live ./contracts/deployments/46630.live.json
+ls -la "$APP/.data/$NET/keys"
+systemctl start bookrunner@testnet-live; sleep 60; curl -s http://127.0.0.1:4500/health; echo
+```
+
+Redis: the rehearsal has its own instance, so step 4 with `RD=bookrunner-redis-live-1` and `redis-live.rdb` restores it
+without touching the public stack's Redis (`REDISCLI_AUTH` = `REDIS_LIVE_PASSWORD` from `.env.infra`); or skip it:
+ops-venue re-signs its venue reports within a minute and the risk service rebuilds its state from the chain.
+
+**Archived rehearsal state (retention).** A rehearsal redeploy (`rehearsal-deploy.sh --redeploy`) archives the old state as
+`.data/testnet-live.<stamp>/` with the old Orderly keys, `postgres.dump` (the old database) and `redis-live.rdb` (the
+old live Redis) inside it; every daily set carries these directories (`state.tar.gz`) for as long as they exist, and
+the renamed database `bookrunner_testnet_live_<stamp>` stays on the host. Remove both by hand only once the old books'
+Orderly accounts are empty (retired and recalled): `rm -rf .data/testnet-live.<stamp>` and `DROP DATABASE
+bookrunner_testnet_live_<stamp>`; the sets of the last 14 days / 8 weeks still hold them.

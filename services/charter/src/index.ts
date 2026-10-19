@@ -106,7 +106,7 @@ function scheduleCommittee(ms: number) {
 async function onDeployment(dep: Deployment) {
   if (dep.chainId !== env.CHAIN_ID) logger.warn({ deployment: dep.chainId, env: env.CHAIN_ID }, "deployment chainId differs from CHAIN_ID");
   deployment = dep;
-  chain = new CharterChain(dep, { chainId: env.CHAIN_ID, rpcUrl: env.RPC_URL, logger, liquidity: parseLiquidityJson(env.JURY_LIQUIDITY_JSON, logger) });
+  chain = new CharterChain(dep, { chainId: env.CHAIN_ID, rpcUrl: env.RPC_URL, logger, liquidity: parseLiquidityJson(env.JURY_LIQUIDITY_JSON, logger), orderlyBrokerId: env.ORDERLY_BROKER_ID });
   const ports = juryPorts(chain);
   scheduler = new JuryScheduler({
     redisUrl: env.REDIS_URL,

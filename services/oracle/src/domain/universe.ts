@@ -1,12 +1,12 @@
 // Pure assembly of the published universe from discovered equities, indexes and books.
-import { VENUE, bytes32ToStr, priceId as priceIdOf } from "@bookrunner/shared";
+import { VENUE, type VenueSymbolConfig, bytes32ToStr, priceId as priceIdOf, resolveVenueSymbol } from "@bookrunner/shared";
 import type { Hex } from "viem";
 import type { IndexComponent, UniverseEntry } from "./types";
 
 export interface BookInfo {
   bookId: number;
   venue: number;
-  /** venue symbol (Orderly symbol for Orderly books) */
+  /** charter symbol (buildUniverse maps it to the Orderly venue symbol for Orderly books) */
   symbol: string;
   /** price id label the book quotes on */
   oracleKey: string;
@@ -19,6 +19,12 @@ export interface UniverseInput {
   indexes: Array<{ priceId: string; underlying: Hex; components: IndexComponent[] }>;
   books: BookInfo[];
   defaultSessions: Hex;
+  /**
+   * ORDERLY_MODE + ORDERLY_BROKER_ID: Orderly books' charter symbols become their venue symbols (shared
+   * resolveVenueSymbol, the mapping ops-venue / the agents use), e.g. PERP_NVDA_USDC_bookrunner in live mode.
+   * Absent = mock mode (the charter symbol).
+   */
+  venueSymbols?: VenueSymbolConfig;
 }
 
 export interface BuiltUniverse {
@@ -67,7 +73,13 @@ export function buildUniverse(input: UniverseInput): BuiltUniverse {
     }
     if (!e.bookIds.includes(b.bookId)) e.bookIds.push(b.bookId);
     if (b.sessions && !e.sessions.includes(b.sessions)) e.sessions.push(b.sessions);
-    if (b.venue === VENUE.ORDERLY && b.symbol && !e.venueSymbols.includes(b.symbol)) e.venueSymbols.push(b.symbol);
+    if (b.venue !== VENUE.ORDERLY || !b.symbol) continue;
+    const r = resolveVenueSymbol({ charterSymbol: b.symbol, ...(input.venueSymbols ?? { mode: "mock" }) });
+    if (r.symbol === null) {
+      warnings.push(`book ${b.bookId}: no builder price push: ${r.error}`);
+      continue;
+    }
+    if (!e.venueSymbols.includes(r.symbol)) e.venueSymbols.push(r.symbol);
   }
 
   // Components without their own book follow the sessions of the index books built on them.

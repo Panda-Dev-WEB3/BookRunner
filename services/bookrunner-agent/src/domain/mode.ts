@@ -3,7 +3,9 @@
 //   halt        kill message / mandate.killed() / risk "killed" / book Retired|Cancelled:
 //               cancel-all, stop quoting, exit the loop (risk flattens on kill)
 //   idle        book not Live yet (Subscription): no quotes, keep watching
-//   reduce_only risk "breach" or "reduce_only" (stop new risk immediately), book Retiring
+//   reduce_only risk "breach" or "reduce_only" (stop new risk immediately), book Retiring, or the book's Orderly
+//               market not open for new risk (ops-venue listing check: not listed / missing / POST_ONLY /
+//               REDUCE_ONLY / DELISTING / DELISTED, shared venueMarketGate; docs/VERIFY.md O20)
 //   quote       normal operation (the mandate's own off-hours / utilisation gating still applies)
 
 import type { BookState, LimitState } from "@bookrunner/shared";
@@ -16,6 +18,8 @@ export interface ModeInputs {
   mandateKilled: boolean;
   riskState: LimitState | null;
   bookState: BookState | null;
+  /** the venue market gate (Orderly books): a reason to stop new risk, null = open / unknown */
+  venueGate?: { reason: string } | null;
 }
 
 export interface ModeDecision {
@@ -34,5 +38,6 @@ export function resolveMode(i: ModeInputs): ModeDecision {
   if (i.bookState === "Retiring") return { mode: "reduce_only", hedgeMode: "flatten", reason: "BOOK_RETIRING" };
   if (i.riskState === "breach") return { mode: "reduce_only", hedgeMode: "reduce_only", reason: "RISK_BREACH" };
   if (i.riskState === "reduce_only") return { mode: "reduce_only", hedgeMode: "reduce_only", reason: "RISK_REDUCE_ONLY" };
+  if (i.venueGate) return { mode: "reduce_only", hedgeMode: "reduce_only", reason: i.venueGate.reason };
   return { mode: "quote", hedgeMode: "normal", reason: "OK" };
 }

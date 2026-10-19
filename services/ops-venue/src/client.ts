@@ -2,16 +2,17 @@
 // only the base URL, auth strictness and the builder (Perp Anything) endpoints differ.
 //   OrderlyVenue          implements QuotingVenue for ONE book account (the MM account + trade key).
 //                         Used by bookrunner-agent and risk.
-//   OrderlyBuilderClient  implements OrderlyBuilderApi (ops-venue): symbols, builder price, IF, fee
+//   OrderlyBuilderClient  implements OrderlyBuilderApi (ops-venue): symbols, mock builder price, IF, fee
 //                         settlements, withdrawals (EIP-712 via the delegate signer), key revocation.
-import type { OrderlyBuilderApi, QuotingVenue, TwoSidedQuote, VenueAccount, VenueFill } from "@bookrunner/shared";
+//                         Live builder prices: Builder Oracle WebSocket, src/builderOracle (not this client).
+import { type OrderlyBuilderApi, type QuotingVenue, type TwoSidedQuote, type VenueAccount, type VenueFill } from "@bookrunner/shared";
 import type { Address, LocalAccount } from "viem";
 import { KeyStore, resolveKeysDir } from "./keys";
-import { type Ed25519Key, keyFromSecret, keyPrefix, signMessage } from "./orderly/auth";
+import { type Ed25519Key, keyFromSecret, keyPrefix } from "./orderly/auth";
 import { type DailyFeeRevenueData, dateWindows, FEE_REVENUE_MAX_DAYS, type HoldingData, type PositionsData, parseAssetHistory, parseDailyFeeRevenue, quoteOrders, toVenueAccount, toVenueFill, usdRaw } from "./orderly/convert";
 import { type AddKeyParams, ORDERLY_LEDGER_MAINNET, signAddKey, signDelegateSigner, signWithdraw } from "./orderly/eip712";
 import { type FetchLike, OrderlyHttp, OrderlyHttpError } from "./orderly/http";
-import { BUILDER_PATHS, ORDERLY_ORACLE_WS, ORDERLY_PATHS } from "./orderly/paths";
+import { BUILDER_PATHS, ORDERLY_PATHS } from "./orderly/paths";
 
 export type OrderlyMode = "mock" | "live";
 
@@ -127,7 +128,8 @@ export class OrderlyVenue implements QuotingVenue {
     await this.cancelAll();
     const orders = quoteOrders(q, {
       symbol: this.opts.symbol,
-      orderType: this.opts.quoteOrderType ?? "POST_ONLY",
+      // a postOnly quote (market in Orderly's POST_ONLY launch phase) is always maker-only, whatever the configured type
+      orderType: q.postOnly ? "POST_ONLY" : (this.opts.quoteOrderType ?? "POST_ONLY"),
       priceTick: ticks.price,
       qtyTick: ticks.qty,
       clientId: (s) => this.clientId(s),
@@ -220,7 +222,6 @@ export interface OrderlyBuilderClientOptions {
   /** EIP-712 signer: delegate signer of the adapters' accounts and owner of the builder account. */
   signer: LocalAccount;
   ledgerAddress?: Address;
-  oracleWsUrl?: string;
   /** Live: earliest day queried for builder fee revenue (cumulative sweep accounting starts here). */
   feeHistoryStartMs?: number;
   /** Settlement token symbol on Orderly (withdrawals, transfers): "USDC" (default); "USDG" on Robinhood Chain. */
@@ -230,10 +231,13 @@ export interface OrderlyBuilderClientOptions {
   now?: () => number;
 }
 
+/** GET /v1/asset/history page size (withdrawals) and how many pages a lookup by id reads at most. */
+export const WITHDRAW_PAGE_SIZE = 100;
+export const WITHDRAW_MAX_PAGES = 50;
+
 export class OrderlyBuilderClient implements OrderlyBuilderApi {
   private readonly http: OrderlyHttp;
   private readonly now: () => number;
-  private ws: WebSocket | null = null;
 
   constructor(readonly o: OrderlyBuilderClientOptions) {
     this.http = new OrderlyHttp({ baseUrl: o.baseUrl, accountId: o.builderAccountId, key: o.builderKey, ...(o.fetch ? { fetch: o.fetch } : {}), ...(o.now ? { now: o.now } : {}), ...(o.sleep ? { sleep: o.sleep } : {}) });
@@ -319,7 +323,18 @@ export class OrderlyBuilderClient implements OrderlyBuilderApi {
     return { symbol: r.symbol ?? p.symbol, ...(r.status ? { status: r.status } : {}) };
   }
 
-  /** Delist / reduce-only a symbol (retirement). Mock contract path; live VERIFY (Orderly One admin). */
+  /**
+   * The venue symbol's listing on Orderly: GET /v1/public/info/{symbol} (public, both modes). `listed: false` when the
+   * symbol is absent (live: 200 with no data); `status` is Orderly's market status when the row carries one. Read-only:
+   * ORDERLY_LISTING_MODE=manual relies on it instead of any listing endpoint (VERIFY O20).
+   */
+  async listingStatus(symbol: string): Promise<{ listed: boolean; status: string | null }> {
+    const r = await this.http.request<{ symbol?: unknown; status?: unknown }>("GET", `${ORDERLY_PATHS.publicInfo}/${encodeURIComponent(symbol)}`, { key: null, retries: 1 });
+    const listed = typeof r?.symbol === "string" && r.symbol === symbol;
+    return { listed, status: listed && typeof r.status === "string" && r.status ? r.status : null };
+  }
+
+  /** Delist / reduce-only a symbol (retirement). Mock contract path; live VERIFY O20 (ORDERLY_LISTING_MODE=api only). */
   async setSymbolStatus(symbol: string, status: "ACTIVE" | "REDUCE_ONLY" | "DELISTED"): Promise<{ symbol: string; status: string }> {
     return this.http.request("POST", this.o.mode === "mock" ? BUILDER_PATHS.mock.symbolStatus : BUILDER_PATHS.live.symbolStatus, { body: { symbol, status } });
   }
@@ -329,35 +344,8 @@ export class OrderlyBuilderClient implements OrderlyBuilderApi {
       await this.http.request("POST", "/mock/price", { body: { symbol: p.symbol, price: p.price, held: p.held, ts: p.ts }, key: null });
       return;
     }
-    // live: Builder Oracle WebSocket push (docs: user-flows/builder-oracle). Held sessions: Orderly
-    // freezes the index while OFF_MARKET, so we simply stop publishing while held.
-    if (p.held) return;
-    const ws = await this.oracleSocket();
-    const base = p.symbol.replace(/^PERP_/, "").replace(/_USDC$/, "");
-    ws.send(JSON.stringify({ id: `px_${base}_${p.ts}`, event: "publish", topic: ORDERLY_ORACLE_WS.topic, ts: p.ts, data: { base_ccy: base, price: p.price } }));
-  }
-
-  private async oracleSocket(): Promise<WebSocket> {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) return this.ws;
-    if (!this.o.builderKey) throw new Error("builder key required for the builder oracle feed");
-    const ts = this.now();
-    const sign = (await signMessage(this.o.builderKey, String(ts))).replace(/=+$/, ""); // unpadded base64url (VERIFY)
-    const url = `${this.o.oracleWsUrl ?? ORDERLY_ORACLE_WS.mainnet}${ORDERLY_ORACLE_WS.path(this.o.builderAccountId)}?orderly_key=${encodeURIComponent(this.o.builderKey.orderlyKey)}&timestamp=${ts}&sign=${sign}`;
-    const ws = new WebSocket(url);
-    await new Promise<void>((resolve, reject) => {
-      ws.addEventListener("open", () => resolve(), { once: true });
-      ws.addEventListener("error", () => reject(new Error("builder oracle websocket error")), { once: true });
-    });
-    ws.addEventListener("close", () => {
-      if (this.ws === ws) this.ws = null;
-    });
-    this.ws = ws;
-    return ws;
-  }
-
-  close() {
-    this.ws?.close();
-    this.ws = null;
+    // live: a persistent, authenticated stream at >= 1 publish/s, owned by builderOracle/feed.ts (BuilderPriceFeed)
+    throw new Error("live builder prices go through the Builder Oracle WebSocket (ops-venue BuilderPriceFeed), not setBuilderPrice");
   }
 
   // ---------------------------------------------------------------- insurance fund
@@ -437,6 +425,16 @@ export class OrderlyBuilderClient implements OrderlyBuilderApi {
     return (r.rows ?? []).map((k) => ({ orderlyKey: k.orderly_key, scope: k.scope, status: k.key_status }));
   }
 
+  /** Remove `orderlyKey` from `accountId`, authenticated with `key` itself (a retired key no longer in the store). Idempotent. */
+  async removeKeyWith(accountId: string, key: Ed25519Key, orderlyKey: string): Promise<void> {
+    try {
+      await this.http.request("POST", ORDERLY_PATHS.removeKey, { body: { orderly_key: orderlyKey }, accountId, key, retries: 1 });
+    } catch (err) {
+      if (err instanceof OrderlyHttpError && (err.code === -1006 || /not found/i.test(err.message))) return;
+      throw err;
+    }
+  }
+
   /** Remove the trade key whose prefix matches (authenticated with the account's ops key). Idempotent. */
   async revokeTradeKey(p: { accountId: string; keyPrefix: string; orderlyKey?: string }): Promise<void> {
     let full = p.orderlyKey;
@@ -496,13 +494,27 @@ export class OrderlyBuilderClient implements OrderlyBuilderApi {
   }
 
   /** Latest withdrawals of the account (GET /v1/asset/history?side=WITHDRAW, newest first; settlement token only). */
-  async withdrawals(accountId: string): Promise<WithdrawRecordView[]> {
-    const r = await this.asAccount<{ rows?: Array<Record<string, unknown>> }>(accountId, "GET", ORDERLY_PATHS.assetHistory, { query: { token: this.token, side: "WITHDRAW", page: 1, size: 100 } });
+  async withdrawals(accountId: string, page = 1): Promise<WithdrawRecordView[]> {
+    const r = await this.asAccount<{ rows?: Array<Record<string, unknown>> }>(accountId, "GET", ORDERLY_PATHS.assetHistory, { query: { token: this.token, side: "WITHDRAW", page, size: WITHDRAW_PAGE_SIZE } });
     return parseAssetHistory(r);
   }
 
+  /**
+   * One withdrawal by id, paging through the history (newest first) until it is found, a short page ends it, a page
+   * brings nothing new (a server ignoring `page`) or WITHDRAW_MAX_PAGES: an old withdrawal beyond the first page is
+   * still found instead of reading as "not there yet" forever.
+   */
   async withdrawal(accountId: string, withdrawId: string): Promise<WithdrawRecordView | null> {
-    return (await this.withdrawals(accountId)).find((w) => String(w.id) === withdrawId) ?? null;
+    const seen = new Set<string>();
+    for (let page = 1; page <= WITHDRAW_MAX_PAGES; page++) {
+      const rows = await this.withdrawals(accountId, page);
+      const hit = rows.find((w) => String(w.id) === withdrawId);
+      if (hit) return hit;
+      const fresh = rows.filter((w) => !seen.has(String(w.id)));
+      for (const w of rows) seen.add(String(w.id));
+      if (rows.length < WITHDRAW_PAGE_SIZE || fresh.length === 0) return null;
+    }
+    return null;
   }
 
   // ---------------------------------------------------------------- mock-only helpers

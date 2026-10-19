@@ -115,6 +115,12 @@ describe("mainnet profile (scripts/dev.ts --network mainnet)", () => {
     expect(errors).toHaveLength(2);
   });
 
+  test("builder IF mode (fallback, VERIFY O10) is refused on mainnet without the owner's sign-off flag", () => {
+    expect(mainnetProfile({ ...goodEnv(), ORDERLY_IF_MODE: "builder" }, hostRoot(GOOD_DEP)).errors).toEqual([expect.stringMatching(/ORDERLY_IF_MODE=builder is not for mainnet without the owner's explicit sign-off/)]);
+    expect(mainnetProfile({ ...goodEnv(), ORDERLY_IF_MODE: "builder", ORDERLY_IF_MODE_BUILDER_ACK: "1" }, hostRoot(GOOD_DEP)).errors).toEqual([]);
+    expect(mainnetProfile({ ...goodEnv(), ORDERLY_IF_MODE: "contract" }, hostRoot(GOOD_DEP)).errors).toEqual([]);
+  });
+
   test("local RPC, mock venue, http origins and synthetic-only oracle are refused", () => {
     const { errors } = mainnetProfile(
       { ...goodEnv(), RHC_RPC_URL: "http://127.0.0.1:8547", ORDERLY_BASE_URL: "http://127.0.0.1:4420", WEB_ORIGIN: "http://x", ORACLE_CHAINLINK_FEEDS: "{}" },

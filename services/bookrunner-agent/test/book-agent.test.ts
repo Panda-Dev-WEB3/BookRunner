@@ -9,6 +9,7 @@ import {
   type TwoSidedQuote,
   type VenueAccount,
   type VenueFill,
+  KEYS,
   checkQuote,
   usd,
 } from "@bookrunner/shared";
@@ -20,6 +21,8 @@ import type { HedgePlan } from "../src/domain/hedge-planner";
 import { DEFAULT_QUOTING_CONFIG } from "../src/domain/quoting";
 import { RuleBasedSizing } from "../src/domain/sizing";
 import { DEFAULT_VOL_CONFIG, EwmaVolatility } from "../src/domain/volatility";
+import { loadAgentEnv, resolveVenuePostOnlyQuote } from "../src/config";
+import { MockOrderlyHttpVenue } from "../src/venues/orderly";
 import { FakeBus, FakeStore, nvdaMandate, silentLog } from "./helpers";
 
 class FakeVenue implements QuotingVenue {
@@ -199,6 +202,160 @@ describe("BookAgent quoting", () => {
     await agent.refreshState();
     await agent.quoteTick();
     expect(venue.replaced.length).toBe(0);
+  });
+});
+
+describe("BookAgent Orderly market gate (ops-venue listing check, VERIFY O20)", () => {
+  // ops-venue's KEYS.venueSymbolIssues markets, as built from testnet-like /v1/public/info rows
+  const market = (phase: string, venueStatus: string | null, bookIds = [1]) => ({
+    v: 1,
+    ts: 1,
+    mode: "live",
+    books: [],
+    listingMode: "manual",
+    markets: [{ symbol: "PERP_NVDA_USDC_bookrunner", bookIds, phase, venueStatus, openForRisk: phase === "listed" && (venueStatus === null || venueStatus === "ACTIVE"), everListed: phase !== "awaiting", since: 1, checkedAt: 1, failures: 0, error: null }],
+  });
+  const long = async (issues: unknown, o: { kind?: "orderly" | "engine"; allowPostOnly?: boolean } = {}) => {
+    const t = setup();
+    if (o.kind) t.venue.kind = o.kind;
+    if (o.allowPostOnly !== undefined) (t.agent as unknown as { cfg: BookAgentConfig }).cfg.venueGate = { enabled: true, allowPostOnly: o.allowPostOnly };
+    t.venue.exposure = usd(10_000); // long inventory: reduce-only = ask side only
+    if (issues !== undefined) t.bus.kv.set(KEYS.venueSymbolIssues, issues);
+    await t.agent.refreshState();
+    await t.agent.quoteTick();
+    return { ...t, q: t.venue.replaced.at(-1) };
+  };
+
+  test("not listed / missing / REDUCE_ONLY / DELISTING / POST_ONLY / undocumented: reduce-only quotes", async () => {
+    for (const [phase, status] of [["awaiting", null], ["awaiting", "PENDING"], ["missing", null], ["listed", "REDUCE_ONLY"], ["listed", "DELISTING"], ["listed", "DELISTED"], ["listed", "POST_ONLY"], ["listed", "HALTED"]] as const) {
+      const { q } = await long(market(phase, status));
+      expect([phase, status, q?.bid, q?.reduceOnly]).toEqual([phase, status, undefined, true]);
+      expect(q?.ask).toBeDefined();
+    }
+  });
+
+  test("ACTIVE, a row without status, no entry for the book, unknown phase, no key, malformed key: unchanged two-sided quoting", async () => {
+    for (const issues of [market("listed", "ACTIVE"), market("listed", null), market("awaiting", null, [2]), market("unknown", null), undefined, "{not json", { markets: "x" }]) {
+      const { q } = await long(issues);
+      expect(q?.bid).toBeDefined();
+      expect(q?.ask).toBeDefined();
+    }
+  });
+
+  test("POST_ONLY allowed (live default): both sides, maker-only; restricted / unlisted still reduce-only; engine never gated", async () => {
+    const po = await long(market("listed", "POST_ONLY"), { allowPostOnly: true });
+    expect([!!po.q?.bid, !!po.q?.ask, po.q?.postOnly, !!po.q?.reduceOnly]).toEqual([true, true, true, false]);
+    for (const [phase, status] of [["listed", "REDUCE_ONLY"], ["listed", "DELISTING"], ["listed", "DELISTED"], ["missing", null], ["awaiting", null]] as const) {
+      const { q } = await long(market(phase, status), { allowPostOnly: true });
+      expect([phase, status, q?.bid, q?.reduceOnly, q?.postOnly]).toEqual([phase, status, undefined, true, undefined]);
+    }
+    const active = await long(market("listed", "ACTIVE"), { allowPostOnly: true });
+    expect(active.q?.postOnly).toBeUndefined();
+    expect((await long(market("awaiting", null), { kind: "engine" })).q?.bid).toBeDefined();
+  });
+
+  test("leaving POST_ONLY re-quotes as plain limit orders", async () => {
+    const t = setup();
+    (t.agent as unknown as { cfg: BookAgentConfig }).cfg.venueGate = { enabled: true, allowPostOnly: true };
+    t.bus.kv.set(KEYS.venueSymbolIssues, market("listed", "POST_ONLY"));
+    await t.agent.refreshState();
+    await t.agent.quoteTick();
+    expect(t.venue.replaced.at(-1)?.postOnly).toBe(true);
+    t.bus.kv.set(KEYS.venueSymbolIssues, market("listed", "ACTIVE"));
+    await t.agent.refreshState();
+    await t.agent.quoteTick();
+    expect(t.venue.replaced.length).toBe(2);
+    expect(t.venue.replaced.at(-1)?.postOnly).toBeUndefined();
+  });
+
+  test("AGENT_VENUE_POST_ONLY_QUOTE: default true with ORDERLY_MODE=live, false in mock mode, overridable", () => {
+    expect(resolveVenuePostOnlyQuote(loadAgentEnv({ ORDERLY_MODE: "live" }))).toBe(true);
+    expect(resolveVenuePostOnlyQuote(loadAgentEnv({ ORDERLY_MODE: "mock" }))).toBe(false);
+    expect(resolveVenuePostOnlyQuote(loadAgentEnv({ ORDERLY_MODE: "live", AGENT_VENUE_POST_ONLY_QUOTE: "false" }))).toBe(false);
+    expect(resolveVenuePostOnlyQuote(loadAgentEnv({ ORDERLY_MODE: "mock", AGENT_VENUE_POST_ONLY_QUOTE: "true" }))).toBe(true);
+  });
+
+  test("the mock-orderly fallback venue sends POST_ONLY orders for a postOnly quote, LIMIT otherwise (ops-venue's OrderlyVenue: POST_ONLY whatever its configured type)", async () => {
+    const bodies: Array<{ orders: Array<{ order_type: string; side: string }> }> = [];
+    const v = new MockOrderlyHttpVenue({ baseUrl: "http://orderly.test", accountId: "0xabc", bookId: 1, symbol: "PERP_NVDA_USDC_bookrunner" }, async (_url, init) => {
+      if (init?.method === "POST") bodies.push(JSON.parse(String(init.body)));
+      return { ok: true, status: 200, text: async () => JSON.stringify({ success: true, data: {} }) };
+    });
+    await v.replaceQuote({ bid: { px: 189, qty: 1 }, ask: { px: 191, qty: 1 }, postOnly: true });
+    await v.replaceQuote({ bid: { px: 189, qty: 1 }, ask: { px: 191, qty: 1 } });
+    expect(bodies.map((b) => b.orders.map((o) => o.order_type))).toEqual([["POST_ONLY", "POST_ONLY"], ["LIMIT", "LIMIT"]]);
+  });
+
+  test("gated then key removed stays gated until the hold expires", async () => {
+    const t = setup();
+    (t.agent as unknown as { cfg: BookAgentConfig }).cfg.venueGate = { enabled: true, allowPostOnly: true, holdMs: 300_000 };
+    t.venue.exposure = usd(10_000);
+    const tick = async (advanceMs = 0) => {
+      t.advance(advanceMs);
+      t.price.ingest(priceMsg(190, t.now() / 1000)); // keep the price fresh across the advance
+      await t.agent.refreshState();
+      await t.agent.quoteTick();
+      return t.venue.replaced.at(-1);
+    };
+    t.bus.kv.set(KEYS.venueSymbolIssues, market("listed", "REDUCE_ONLY"));
+    expect((await tick())?.bid).toBeUndefined();
+    t.bus.kv.delete(KEYS.venueSymbolIssues); // TTL expired / key removed
+    expect((await tick(60_000))?.bid).toBeUndefined();
+    t.bus.kv.set(KEYS.venueSymbolIssues, "{not json"); // malformed
+    expect((await tick(60_000))?.bid).toBeUndefined();
+    t.bus.kv.set(KEYS.venueSymbolIssues, market("unknown", null)); // ops-venue restarted, no check yet
+    expect((await tick(60_000))?.bid).toBeUndefined();
+    t.bus.kv.set(KEYS.venueSymbolIssues, market("listed", "ACTIVE", [2])); // no entry for this book
+    expect((await tick(119_000))?.bid).toBeUndefined(); // 299 s after the data was last seen
+    t.bus.kv.delete(KEYS.venueSymbolIssues);
+    const lifted = await tick(1_000); // 300 s: the hold expired
+    expect([!!lifted?.bid, !!lifted?.ask, !!lifted?.reduceOnly]).toEqual([true, true, false]);
+  });
+
+  test("the hold restarts from fresh data, a failed read holds POST_ONLY too, and open data lifts at once", async () => {
+    const t = setup();
+    (t.agent as unknown as { cfg: BookAgentConfig }).cfg.venueGate = { enabled: true, allowPostOnly: true, holdMs: 300_000 };
+    const tick = async (advanceMs = 0) => {
+      t.advance(advanceMs);
+      t.price.ingest(priceMsg(190, t.now() / 1000));
+      await t.agent.refreshState();
+      await t.agent.quoteTick();
+      return t.venue.replaced.at(-1);
+    };
+    t.bus.kv.set(KEYS.venueSymbolIssues, market("listed", "POST_ONLY"));
+    expect((await tick())?.postOnly).toBe(true);
+    const getJson = t.bus.getJson.bind(t.bus);
+    t.bus.getJson = (async () => {
+      throw new Error("redis down");
+    }) as typeof t.bus.getJson;
+    expect((await tick(200_000))?.postOnly).toBe(true); // read failed: still maker-only
+    t.bus.getJson = getJson;
+    expect((await tick(50_000))?.postOnly).toBe(true); // fresh POST_ONLY data at 250 s: the hold restarts
+    t.bus.kv.delete(KEYS.venueSymbolIssues);
+    expect((await tick(299_000))?.postOnly).toBe(true);
+    t.bus.kv.set(KEYS.venueSymbolIssues, market("listed", "ACTIVE"));
+    expect((await tick(1_000))?.postOnly).toBeUndefined(); // open data: lifted without waiting
+  });
+
+  test("the gate applies at the next state refresh and lifts once the market is open; hedging follows (reduce_only)", async () => {
+    const t = setup({ hedger: true });
+    t.venue.exposure = usd(10_000);
+    t.bus.kv.set(KEYS.venueSymbolIssues, market("listed", "ACTIVE"));
+    await t.agent.refreshState();
+    await t.agent.quoteTick();
+    await t.agent.hedgeTick();
+    expect(t.venue.replaced.at(-1)?.bid).toBeDefined();
+    t.bus.kv.set(KEYS.venueSymbolIssues, market("listed", "REDUCE_ONLY"));
+    await t.agent.refreshState();
+    await Bun.sleep(25); // the gate change triggers a quote tick at once
+    expect(t.venue.replaced.at(-1)?.bid).toBeUndefined();
+    await t.agent.hedgeTick();
+    t.bus.kv.set(KEYS.venueSymbolIssues, market("listed", "ACTIVE"));
+    await t.agent.refreshState();
+    await t.agent.quoteTick();
+    await t.agent.hedgeTick();
+    expect(t.venue.replaced.at(-1)?.bid).toBeDefined();
+    expect(t.hedger!.calls.map((c) => c.mode)).toEqual(["normal", "reduce_only", "normal"]);
   });
 });
 

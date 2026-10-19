@@ -82,6 +82,22 @@ interface IVaultFlowNotify {
 ///         account))` (accepted only by MockOrderlyVault in non-strict mode) until the timelock calls
 ///         `migrateToOrderlyAccounts` (only while nothing is venue-side).
 ///
+///         IF account mode (v4, docs/VERIFY.md O10: whether Orderly accepts a contract account as a market's IF
+///         account is unconfirmed, so both models are supported; ops-venue's ORDERLY_IF_MODE must match):
+///           contract (default)  the IF account is the per-book `OrderlyIFAccount`'s Orderly account,
+///                               keccak256(abi.encode(ifAccount, brokerHash)); payouts land on that contract.
+///           builder             `setIfAccountOwner(eoa)` (timelock): the IF account is the Orderly account of an
+///                               operator EOA, keccak256(abi.encode(eoa, brokerHash)). An EOA is ONE private key: the
+///                               multisig / timelock controls only this binding, never the EOA or its Orderly account.
+///                               IF deposits still go through `depositToVenue` (`Vault.depositTo(eoa, ...)`, recorded
+///                               by `OrderlyDeposit(IF, accountId, ...)` like any deposit), but Orderly pays IF
+///                               withdrawals to the EOA, which returns them to this adapter by a plain transfer
+///                               (operator step; the attribution rules above apply on arrival). A payout not returned
+///                               in time is written off from NAV (`writeOffOperatorPayout`). Builder mode therefore
+///                               moves IF custody off the adapter to the operator's key: a fallback only if Orderly
+///                               refuses a contract account as the IF account, never for mainnet without the owner's
+///                               explicit sign-off.
+///
 ///         Settlement token: `config.usdc()` (USDC on devnet, USDG on Robinhood Chain: any 6-decimals token the
 ///         Orderly Vault lists under `tokenHash`); "USDC" in names below means that settlement token.
 /// @custom:oz-upgrades-unsafe-allow constructor state-variable-immutable
@@ -97,7 +113,8 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         Requested, // vault asked; still venue-side
         Confirmed, // executed on Orderly; in transit to the adapter
         Cancelled, // ops-venue could not execute it; nothing moved
-        Failed // confirmed, then failed on the venue; funds back venue-side
+        Failed, // confirmed, then failed on the venue; funds back venue-side
+        WrittenOff // appended (v4): builder IF payout not returned by the operator in time; out of NAV
     }
 
     struct WithdrawRequest {
@@ -146,6 +163,8 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         uint64 lastSweptPeriod;
         // appended (v3): owner of the Orderly IF account (OrderlyIFAccount); address(0) = devnet derivation
         address ifAccount;
+        // appended (v4): builder IF mode, the operator EOA owning the IF account; address(0) = contract mode
+        address ifAccountOwner;
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -159,6 +178,9 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     ///         forward cumulatively), so at most (1 + lookback) caps can be earmarked in a burst.
     uint64 public constant FEE_SWEEP_LOOKBACK_PERIODS = 2;
     uint256 private constant BPS = 10_000;
+    /// @notice Builder IF mode: a payout can be written off from NAV at the earliest this long after confirmation
+    ///         (ops-venue's own limit, OPS_IF_RETURN_WRITE_OFF_MS, is longer by default).
+    uint64 public constant WRITE_OFF_MIN_AGE = 1 hours;
     /// @notice Decimals the protocol's USD accounting assumes for the settlement token (USDC / USDG).
     uint8 public constant SETTLEMENT_DECIMALS = 6;
 
@@ -213,6 +235,12 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     event CapitalFlowNotifyFailed(address indexed vault);
     /// @notice The book's Orderly accounts: MM = this adapter's account, IF = `ifAccount`'s account.
     event OrderlyAccountsBound(address indexed ifAccount, bytes32 ifAccountId, bytes32 mmAccountId);
+    /// @notice IF account mode changed (`setIfAccountOwner`): `owner` = the builder EOA, address(0) = contract mode
+    ///         (the OrderlyIFAccount). `ifAccountId` is the book's IF account from now on.
+    event IfAccountOwnerSet(address indexed owner, bytes32 ifAccountId);
+    /// @notice Builder IF mode: confirmed IF payout `requestNonce` (paid to the operator's EOA, not returned) left
+    ///         in-transit / NAV (`writeOffOperatorPayout`); a later return is swept to the vault as a gain.
+    event OperatorPayoutWrittenOff(uint256 indexed requestNonce, uint256 amount);
     /// @notice ETH added for Orderly deposit fees (`fundNative`).
     event NativeFunded(address indexed from, uint256 amount, uint256 balance);
 
@@ -260,6 +288,10 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     error UnsupportedTokenDecimals(uint8 decimals);
     error AlreadyOrderlyAccounts(address ifAccount);
     error VenueStateNotEmpty();
+    error OrderlyAccountsNotBound();
+    error IfOwnerNotEoa(address owner);
+    error NotBuilderIfPayout(uint256 requestNonce);
+    error WriteOffTooEarly(uint256 requestNonce, uint64 earliest);
 
     // ---------------------------------------------------------------------------------------------
     // Construction / initialization
@@ -420,10 +452,7 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
             // (defence in depth on top of the sweep window gate). Best-effort: never blocks a sweep.
             // Unattributed USDC (donations, cancelled earmarks) never bumps the nonce: it was never in
             // deployedValueUsd, so a mark counts it once via vault.idle() and stays applicable.
-            try IVaultFlowNotify($.vault).notifyCapitalFlow() {}
-            catch {
-                emit CapitalFlowNotifyFailed($.vault);
-            }
+            _notifyFlow($);
         }
     }
 
@@ -617,10 +646,7 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     /// @param amount Amount of pending fees to cancel (<= pendingFeesUsd).
     function cancelPendingFees(uint256 amount) external {
         AdapterStorage storage $ = _s();
-        IBookrunnerConfig cfg = $.config;
-        if (!cfg.hasRole(cfg.OPS_VENUE_ROLE(), msg.sender) && msg.sender != cfg.timelock()) {
-            revert NotOpsVenueOrTimelock();
-        }
+        _checkOpsVenueOrTimelock($);
         if (amount == 0) revert ZeroAmount();
         uint256 pending = $.pendingFeesUsd;
         if (amount > pending) revert ExceedsPendingFees(amount, pending);
@@ -662,6 +688,54 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         address ifAcc = _deployIfAccount($);
         address signer = $.delegateSigner;
         if (signer != address(0)) OrderlyIFAccount(ifAcc).delegateSigner(address($.orderlyVault), $.brokerHash, signer);
+    }
+
+    /// @notice Timelock. IF account mode (see the contract notes, VERIFY O10). `owner != 0`: builder mode, the IF
+    ///         account becomes the Orderly account of the operator EOA `owner` (it must have registered that account
+    ///         with Orderly itself; IF deposits go `Vault.depositTo(owner, ...)`, its withdrawals are paid to `owner`).
+    ///         `owner == 0`: back to contract mode (the book's OrderlyIFAccount). The IF account id changes, so only on
+    ///         a migrated (v3) proxy while the IF account holds nothing on our books: no insurance, no IF withdrawal
+    ///         pending. A confirmed IF payout still in transit arrives from the previous owner and is attributed as usual.
+    ///         Sets `lastFlowAt` (no snapshot of the previous account can be reported). The EOA's Orderly account must
+    ///         be fresh (no equity): anything on it would be reported as book insurance (ops-venue refuses to report
+    ///         such a book, `prior_equity`). After the switch the admin re-assigns the market's IF account in Orderly One.
+    /// @param owner The builder EOA, or address(0) for contract mode.
+    function setIfAccountOwner(address owner) external {
+        _checkTimelock();
+        AdapterStorage storage $ = _s();
+        if ($.ifAccount == address(0)) revert OrderlyAccountsNotBound();
+        if (owner != address(0) && owner.code.length != 0) revert IfOwnerNotEoa(owner); // incl. this adapter and the IF contract
+        if ($.insuranceUsd != 0 || $.pendingWithdrawUsd[BRTypes.ACCOUNT_IF] != 0) revert VenueStateNotEmpty();
+        $.ifAccountOwner = owner;
+        // a venue snapshot of the previous IF account can no longer be reported (report requires asOf > lastFlowAt)
+        $.lastFlowAt = uint64(block.timestamp);
+        bytes32 ifId = _accountId(BRTypes.ACCOUNT_IF);
+        emit IfAccountOwnerSet(owner, ifId);
+        emit OrderlyAccountsBound(_accountOwner($, BRTypes.ACCOUNT_IF), ifId, _accountId(BRTypes.ACCOUNT_MM));
+    }
+
+    /// @notice OPS_VENUE or timelock. Builder IF mode: Orderly paid confirmed IF withdrawal `requestNonce` to the
+    ///         operator's EOA and the operator has not returned it within ops-venue's limit. Confirmed -> WrittenOff: its
+    ///         expected return (`amount - venueFee`) leaves in-transit, so `deployedValueUsd` (NAV) stops counting money
+    ///         held in a private wallet, and the vault is notified (flowNonce++: a mark valued with it cannot be
+    ///         applied). USDC the operator returns later is unattributed and swept to the vault as a gain. Only for
+    ///         an IF request while the IF account is builder-held, at least WRITE_OFF_MIN_AGE after confirmation.
+    /// @param requestNonce The confirmed IF request whose payout was not returned.
+    function writeOffOperatorPayout(uint256 requestNonce) external {
+        AdapterStorage storage $ = _s();
+        _checkOpsVenueOrTimelock($);
+        WithdrawRequest storage r = $.requests[requestNonce];
+        if (r.status != WithdrawStatus.Confirmed) revert RequestNotConfirmed(requestNonce, r.status);
+        if (r.account != BRTypes.ACCOUNT_IF || $.ifAccountOwner == address(0)) revert NotBuilderIfPayout(requestNonce);
+        uint64 earliest = r.confirmedAt + WRITE_OFF_MIN_AGE;
+        if (block.timestamp < earliest) revert WriteOffTooEarly(requestNonce, earliest);
+        r.status = WithdrawStatus.WrittenOff;
+        uint256 expected = r.amount - r.venueFee;
+        uint256 transit = $.inTransitUsd;
+        $.inTransitUsd = transit - Math.min(transit, expected);
+        $.lastFlowAt = uint64(block.timestamp);
+        emit OperatorPayoutWrittenOff(requestNonce, expected);
+        _notifyFlow($);
     }
 
     /// @notice Timelock. Sets the per-period fee sweep cap (0 disables fee sweeps).
@@ -725,7 +799,8 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
 
     /// @notice Address that owns `account`'s Orderly account: the receiver of its deposits, the
     ///         `delegateContract` of its API keys and withdrawals, and the address Orderly pays withdrawals to.
-    ///         MM (and both accounts before migration) = this adapter; IF = `ifAccount()`.
+    ///         MM (and both accounts before migration) = this adapter; IF = `ifAccount()` (contract mode) or
+    ///         `ifAccountOwner()` (builder mode).
     function accountOwner(uint8 account) external view returns (address) {
         _checkAccount(account);
         return _accountOwner(_s(), account);
@@ -734,6 +809,12 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     /// @notice The book's OrderlyIFAccount (owner of the IF account); address(0) = devnet derivation (pre-v3).
     function ifAccount() external view returns (address) {
         return _s().ifAccount;
+    }
+
+    /// @notice Builder IF mode: the operator EOA owning the book's IF account; address(0) = contract mode
+    ///         (the IF account is `ifAccount()`'s). See `setIfAccountOwner`.
+    function ifAccountOwner() external view returns (address) {
+        return _s().ifAccountOwner;
     }
 
     /// @notice Native (ETH) fee the venue charges for depositing `amount` into `account` now
@@ -986,9 +1067,12 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         return keccak256(abi.encode(_accountOwner($, account), $.brokerHash));
     }
 
+    /// @dev IF: the builder EOA (builder mode), else the OrderlyIFAccount (contract mode), else (pre-v3) this adapter.
     function _accountOwner(AdapterStorage storage $, uint8 account) private view returns (address) {
         address ifAcc = $.ifAccount;
-        return (account == BRTypes.ACCOUNT_IF && ifAcc != address(0)) ? ifAcc : address(this);
+        if (account != BRTypes.ACCOUNT_IF || ifAcc == address(0)) return address(this);
+        address builderOwner = $.ifAccountOwner;
+        return builderOwner != address(0) ? builderOwner : ifAcc;
     }
 
     /// @dev Deploys the book's OrderlyIFAccount (CREATE2 from this proxy, salt = bookId) and binds it.
@@ -1004,6 +1088,21 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         bal = $.usdc.balanceOf(address(this));
         address ifAcc = $.ifAccount;
         if (ifAcc != address(0)) bal += $.usdc.balanceOf(ifAcc);
+    }
+
+    function _checkOpsVenueOrTimelock(AdapterStorage storage $) private view {
+        IBookrunnerConfig cfg = $.config;
+        if (!cfg.hasRole(cfg.OPS_VENUE_ROLE(), msg.sender) && msg.sender != cfg.timelock()) {
+            revert NotOpsVenueOrTimelock();
+        }
+    }
+
+    /// @dev flowNonce++ on the vault (best-effort: never blocks the caller).
+    function _notifyFlow(AdapterStorage storage $) private {
+        try IVaultFlowNotify($.vault).notifyCapitalFlow() {}
+        catch {
+            emit CapitalFlowNotifyFailed($.vault);
+        }
     }
 
     function _pullIfAccount(AdapterStorage storage $) private {

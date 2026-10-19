@@ -4,14 +4,14 @@
 // mainnet). Tolerant parsers over the JSON other services keep in Redis; nothing here trusts a signature —
 // the signer is recovered for display, the chain checks it when the data is relayed.
 import { type PriceUpdate, priceTypedData } from "@bookrunner/shared/eip712";
-import type { OraclePriceMsg } from "@bookrunner/shared/queues";
+import { KEYS, type OraclePriceMsg } from "@bookrunner/shared/queues";
 import { type Address, type Hex, decodeAbiParameters, isAddress, isHex, recoverTypedDataAddress } from "viem";
 import { parseSignedVenueReport, verifyVenueReport } from "../../../ops-venue/src/report712";
 
 /** Redis key of the oracle's signed bundle (= KEYS.oracleBundle, JSON OracleBundleMsg). */
-export const ORACLE_BUNDLE_KEY = "bkrn:oracle:bundle";
+export const ORACLE_BUNDLE_KEY = KEYS.oracleBundle;
 /** Redis key of a book's latest signed venue report (= KEYS.venueReport(bookId), ops-venue). */
-export const venueReportKey = (bookId: number) => `bkrn:venue:report:${bookId}`;
+export const venueReportKey = (bookId: number) => KEYS.venueReport(bookId);
 
 const PRICE_DATA_PARAMS = [
   {

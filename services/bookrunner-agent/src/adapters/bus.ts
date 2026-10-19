@@ -1,7 +1,7 @@
 // Redis adapter: latest quote + heartbeat keys, quote/fill channels, subscriptions (oracle price,
 // risk state, kill). Two connections: commands and a dedicated subscriber.
 
-import { CHANNELS, type FillMsg, KEYS, type Logger, type QuoteMsg } from "@bookrunner/shared";
+import { CHANNELS, type FillMsg, KEYS, type Logger, type QuoteMsg, busDropper, busJson } from "@bookrunner/shared";
 import { Redis } from "ioredis";
 
 export interface AgentBus {
@@ -18,6 +18,8 @@ export class RedisBus implements AgentBus {
   private readonly cmd: Redis;
   private readonly sub: Redis;
   private readonly handlers = new Map<string, Array<(raw: string) => void>>();
+  /** channels are namespaced per stack; a message stamped with another stack's namespace is dropped (logged once) */
+  private readonly foreign: (channel: string, raw: string) => boolean;
 
   constructor(url: string, private readonly log: Logger) {
     const opts = { maxRetriesPerRequest: 2, enableOfflineQueue: true, retryStrategy: (n: number) => Math.min(30_000, 500 * 2 ** Math.min(n, 6)) };
@@ -26,7 +28,9 @@ export class RedisBus implements AgentBus {
     for (const [name, c] of [["cmd", this.cmd], ["sub", this.sub]] as const) {
       c.on("error", (err: Error) => this.log.warn({ conn: name, err: err.message }, "redis error"));
     }
+    this.foreign = busDropper((msg, meta) => this.log.warn(meta, msg));
     this.sub.on("message", (channel: string, message: string) => {
+      if (this.foreign(channel, message)) return;
       for (const h of this.handlers.get(channel) ?? []) {
         try {
           h(message);
@@ -38,7 +42,7 @@ export class RedisBus implements AgentBus {
   }
 
   async publishQuote(q: QuoteMsg, ttlMs: number): Promise<void> {
-    const body = JSON.stringify(q);
+    const body = busJson(q);
     await this.cmd.set(KEYS.agentQuote(q.bookId), body, "PX", Math.max(1_000, Math.floor(ttlMs)));
     await this.cmd.publish(CHANNELS.quotes(q.bookId), body);
   }
@@ -48,7 +52,7 @@ export class RedisBus implements AgentBus {
   }
 
   async publishFill(f: FillMsg): Promise<void> {
-    await this.cmd.publish(CHANNELS.fills(f.bookId), JSON.stringify(f));
+    await this.cmd.publish(CHANNELS.fills(f.bookId), busJson(f));
   }
 
   async heartbeat(bookId: number, ttlMs: number): Promise<void> {

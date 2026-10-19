@@ -73,6 +73,15 @@ describe("agent mode", () => {
     expect(resolveMode({ ...live, bookState: "Retiring", mandateKilled: true }).mode).toBe("halt");
   });
 
+  test("the Orderly venue market gate stops new risk; Retiring still flattens, kills still halt (VERIFY O20)", () => {
+    expect(resolveMode({ ...live, venueGate: { reason: "VENUE_REDUCE_ONLY" } })).toEqual({ mode: "reduce_only", hedgeMode: "reduce_only", reason: "VENUE_REDUCE_ONLY" });
+    expect(resolveMode({ ...live, venueGate: null }).mode).toBe("quote");
+    expect(resolveMode({ ...live, bookState: "Retiring", venueGate: { reason: "VENUE_NOT_LISTED" } })).toMatchObject({ mode: "reduce_only", hedgeMode: "flatten" });
+    expect(resolveMode({ ...live, riskState: "killed", venueGate: { reason: "VENUE_NOT_LISTED" } }).mode).toBe("halt");
+    expect(resolveMode({ ...live, bookState: "Subscription", venueGate: { reason: "VENUE_NOT_LISTED" } }).mode).toBe("idle");
+    expect(resolveMode({ ...live, riskState: "breach", venueGate: { reason: "VENUE_NOT_LISTED" } }).reason).toBe("RISK_BREACH");
+  });
+
   test("breach and reduce_only stop new risk; Retiring flattens hedges", () => {
     expect(resolveMode({ ...live, riskState: "breach" })).toMatchObject({ mode: "reduce_only", hedgeMode: "reduce_only" });
     expect(resolveMode({ ...live, riskState: "reduce_only" })).toMatchObject({ mode: "reduce_only", hedgeMode: "reduce_only" });

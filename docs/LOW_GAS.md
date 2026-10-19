@@ -75,7 +75,7 @@ function reportSigned(uint256 insuranceUsd, int256 marginUsd, int256 netExposure
   as `report`. `report` (role-gated, unsigned) stays for compatibility.
 - The mark keeper submits the latest signed report inside the daily mark transaction (§3). Desk hedge
   legs on Orderly books carry it the same way when they need a fresh exposure.
-- ops-venue publishes signed reports to Redis `bkrn:venue:report:<bookId>` and its HTTP API.
+- ops-venue publishes signed reports to Redis `bkrn:<ns>:venue:report:<bookId>` (bus namespace, packages/shared queues.ts) and its HTTP API.
 
 ## 3. One mark transaction per book per period
 

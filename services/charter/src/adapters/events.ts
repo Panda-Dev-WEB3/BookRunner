@@ -1,6 +1,6 @@
 // Domain-event protocol: insert into events (ON CONFLICT (dedupe_key) DO NOTHING), then publish
 // {id, type, createdAt, data} on CHANNELS.domainEvents. Publish failures are logged; the row stays.
-import { CHANNELS, type Logger } from "@bookrunner/shared";
+import { CHANNELS, type Logger, busJson } from "@bookrunner/shared";
 import type { PendingEvent } from "../jury/pipeline";
 
 export interface EventSink {
@@ -25,7 +25,7 @@ export class EventBus {
     const msg = { id: row.id, type: e.type, createdAt: row.createdAt.toISOString(), data: e.payload };
     if (this.publisher) {
       try {
-        await this.publisher.publish(CHANNELS.domainEvents, JSON.stringify(msg));
+        await this.publisher.publish(CHANNELS.domainEvents, busJson(msg));
       } catch (err) {
         this.logger.warn({ err, eventId: row.id, type: e.type }, "domain event publish failed (row persisted)");
       }

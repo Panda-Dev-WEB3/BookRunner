@@ -31,7 +31,10 @@ export const ORDERLY_PATHS = {
   delegateWithdraw: "/v1/delegate_withdraw_request", // POST [confirmed] as withdraw + message.delegateContract; receiver MUST equal delegateContract (LedgerImplA state 8)
   internalTransfer: "/v1/internal_transfer", // POST VERIFY {token, amount, receiver_account_id}
   publicInsuranceFund: "/v1/public/insurancefund", // GET [confirmed path] VERIFY row shape
-  publicInfo: "/v1/public/info", // GET /{symbol} VERIFY -> {quote_tick, base_tick, min_notional, ...}
+  // GET /{symbol} [confirmed path] -> {symbol, quote_tick, base_tick, min_notional, ...}; live rows also carry `status`
+  // (NEW | PENDING | POST_ONLY | ACTIVE | REDUCE_ONLY | DELISTING | DELISTED, market-operations docs) and `broker_id`,
+  // neither in the OpenAPI schema; an unknown symbol answers 200 {success: true} with no data (observed 2026-10-18)
+  publicInfo: "/v1/public/info",
 } as const;
 
 export const BUILDER_PATHS = {
@@ -52,16 +55,14 @@ export const BUILDER_PATHS = {
     // date = 00:00 UTC after the revenue day), permissionless_listing_fee_share, distributor_fee_share, builder_fee_revenue,
     // cross_broker_fee, total_revenue}] newest first; broker-wide (no symbol)
     dailyFeeRevenue: "/v1/broker/daily_fee_revenue",
-    symbolStatus: "/v1/builder/symbol/status", // VERIFY: no public API found; delisting via Orderly One admin
+    // VERIFY O20: no builder endpoint documented (Orderly moves markets to REDUCE_ONLY / DELISTING itself; the admin acts
+    // in Orderly One). Called only with ORDERLY_LISTING_MODE=api.
+    symbolStatus: "/v1/builder/symbol/status",
   },
 } as const;
 
-/** Builder Oracle push (docs: user-flows/builder-oracle): WebSocket, not REST. VERIFY host per env. */
-export const ORDERLY_ORACLE_WS = {
-  mainnet: "wss://ws-oracle.orderly.org",
-  path: (accountId: string) => `/v1/ws/oracle/push/${accountId}`, // ?orderly_key&timestamp&sign (unpadded base64url of ed25519(timestamp))
-  topic: "indexpricefeed", // {id, event:"publish", topic, ts, data:{base_ccy, price}}; >= 1/s while the session is open
-} as const;
+// Builder Oracle push (docs: user-flows/builder-oracle): a WebSocket, not REST — src/builderOracle/socket.ts
+// (ORACLE_WS_DOMAINS, path, auth, message format; docs/VERIFY.md O18).
 
 /** Documented REST rate limits (requests per window) — enforced client-side as minimum spacing. */
 export const RATE_SPACING_MS: Record<string, number> = {

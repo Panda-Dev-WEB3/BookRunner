@@ -2,7 +2,8 @@
 # One-time host setup for the Bookrunner testnet stack. Run as root from the ROOT-OWNED clone
 # /usr/local/lib/bookrunner-src (HARDENING.md), after the app is cloned to /opt/bookrunner/app and
 # `bun install` ran as the bookrunner user. Idempotent. Does NOT copy secrets/state (.env.testnet,
-# contracts/deployments/46630.json, .data/testnet, the DB dump) and does NOT start or restart anything.
+# contracts/deployments/46630.json, .data/testnet, the DB dump; the live-Orderly rehearsal's .env.testnet-live,
+# 46630.live.json, .data/testnet-live, bookrunner_testnet_live) and does NOT start or restart anything.
 #   sudo git clone https://github.com/Panda-Dev-WEB3/BookRunner.git /usr/local/lib/bookrunner-src
 #   sudo bash /usr/local/lib/bookrunner-src/deploy/server/install.sh
 set -euo pipefail
@@ -36,6 +37,11 @@ if [ ! -f "$INFRA_ENV" ]; then
   docker volume inspect bookrunner_pgdata >/dev/null 2>&1 \
     && echo "!! the Postgres volume already exists: set the new password in the DB BEFORE restarting anything (HARDENING.md step 4)"
 fi
+# the live-Orderly rehearsal stack's own Redis (redis-live) has its own password: added once to an existing file
+if ! grep -q '^REDIS_LIVE_PASSWORD=' "$INFRA_ENV"; then
+  ( umask 077; printf 'REDIS_LIVE_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> "$INFRA_ENV" )
+  echo "==> added REDIS_LIVE_PASSWORD to $INFRA_ENV (redis-live, 127.0.0.1:63791; applied at the next bookrunner-infra start / reload)"
+fi
 chown root:root "$INFRA_ENV"
 chmod 0600 "$INFRA_ENV"
 
@@ -43,6 +49,11 @@ chmod 0600 "$INFRA_ENV"
 install -m 0644 "$DEPLOY/bookrunner-infra.service" /etc/systemd/system/bookrunner-infra.service
 install -m 0644 "$DEPLOY/bookrunner.service" /etc/systemd/system/bookrunner.service
 install -m 0644 "$DEPLOY/logrotate-bookrunner" /etc/logrotate.d/bookrunner
+# the network-parametrised unit + the live-Orderly rehearsal drop-in (bookrunner@testnet-live runs NEXT TO
+# bookrunner.service, own keys / record / DB / state / ports): installed, never enabled or started here
+install -m 0644 "$DEPLOY/bookrunner@.service" /etc/systemd/system/bookrunner@.service
+install -d -m 0755 /etc/systemd/system/bookrunner@testnet-live.service.d
+install -m 0644 "$DEPLOY/bookrunner@testnet-live.service.d/override.conf" /etc/systemd/system/bookrunner@testnet-live.service.d/override.conf
 # daily backup (root runs the root-owned $DEPLOY/backup.sh; RESTORE.md): units, backup dir, settings template
 install -m 0644 "$DEPLOY/bookrunner-backup.service" /etc/systemd/system/bookrunner-backup.service
 install -m 0644 "$DEPLOY/bookrunner-backup.timer" /etc/systemd/system/bookrunner-backup.timer
@@ -76,7 +87,7 @@ nginx_patch_site_hsts || echo "!! nginx site HSTS NOT updated (see the nginx -t 
 NGINX_WILDCARD_SRC="$DEPLOY/nginx-bookrunner-wildcard.conf"
 nginx_install_wildcard_site || echo "!! nginx wildcard site NOT installed (see the nginx -t output above)" >&2
 install -d -o bookrunner -g bookrunner -m 0755 /var/www/bookrunner /var/www/bookrunner/app
-install -d -o bookrunner -g bookrunner -m 0750 "$APP/.data" "$APP/.data/testnet"
+install -d -o bookrunner -g bookrunner -m 0750 "$APP/.data" "$APP/.data/testnet" "$APP/.data/testnet-live"
 systemctl daemon-reload
 nginx -t
 systemctl reload nginx

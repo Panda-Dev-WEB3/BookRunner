@@ -48,6 +48,15 @@ describe("OrderlyVenue (QuotingVenue) against mock-orderly", () => {
     expect(acct.equityUsd).toBe(75_000_000_000n + 400_000n + 300_000n);
   });
 
+  test("a postOnly quote (market in Orderly's POST_ONLY launch phase) is sent POST_ONLY even with quoteOrderType LIMIT", async () => {
+    const m = liveVenue();
+    const v = new OrderlyVenue({ baseUrl: BASE, accountId: MM_ID, symbol: SYMBOL, tradeKey: await generateKey(), mode: "mock", fetch: m.fetch, bookId: 1, quoteOrderType: "LIMIT" });
+    await v.replaceQuote({ bid: { px: 189, qty: 1 }, ask: { px: 191, qty: 1 }, postOnly: true });
+    expect(m.venue.openOrders(MM_ID).map((o) => o.type)).toEqual(["POST_ONLY", "POST_ONLY"]);
+    await v.replaceQuote({ bid: { px: 189, qty: 1 }, ask: { px: 191, qty: 1 } });
+    expect(m.venue.openOrders(MM_ID).map((o) => o.type)).toEqual(["LIMIT", "LIMIT"]);
+  });
+
   test("one-sided quote uses POST /v1/order; a crossing POST_ONLY leg throws OrderlyQuoteError", async () => {
     const m = liveVenue();
     const other = `0x${"c3".repeat(32)}`;

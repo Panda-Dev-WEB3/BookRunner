@@ -4,6 +4,7 @@ import {
   apiHealth,
   backup,
   balances,
+  builderPricePush,
   buyback,
   buybackStuck,
   evaluate,
@@ -17,11 +18,16 @@ import {
   riskStale,
   riskState,
   rpc,
+  venueIfAccount,
   venueReportAge,
+  venueListing,
+  venueSymbol,
 } from "../src/rules";
-import { oracleDown } from "../src/collect";
+import { BUILDER_FEED_STATUS_TTL_SEC, type BuilderFeedStatusMsg, KEYS, VENUE_SYMBOL_ISSUES_TTL_SEC } from "@bookrunner/shared/queues";
+import { collect, emptyMemory, oracleDown, parseIfAccounts } from "../src/collect";
 import { loadConfig } from "../src/config";
-import type { OracleConfirmSnap, OracleProbe, OracleSourceSnap } from "../src/types";
+import type { VenueMarketMsg } from "@bookrunner/shared/venueMarket";
+import type { BuilderFeedSnap, VenueOpsSnap, OracleConfirmSnap, OracleProbe, OracleSourceSnap } from "../src/types";
 import { NOW, NOW_S, book, confirmOracle, rules, snap, supervisor } from "./fixtures";
 
 const keys = (cs: Array<{ key: string }>) => cs.map((c) => c.key);
@@ -100,6 +106,108 @@ describe("risk_state / kill journal / kill events / risk_stale", () => {
   });
 });
 
+describe("insurance-fund account (ops-venue ORDERLY_IF_MODE, VERIFY O10)", () => {
+  const ks = (cs: ReturnType<typeof venueIfAccount>) => cs.map((x) => [x.key, x.severity]);
+  const mismatch = { issue: "mismatch" as const, detail: "ORDERLY_IF_MODE=builder but the adapter's IF account is the OrderlyIFAccount", accountId: "0xaa", since: null };
+  const pending = { issue: "key_pending" as const, detail: "the operator (wallet 0xE0A) must register ops-venue's IF key for 0xaa", accountId: "0xaa", since: NOW - 3_600_000 };
+
+  test("venue_if_account: mismatch warning in Subscription, critical Live / Retiring; key_pending warning; Cancelled / Retired quiet", () => {
+    expect(ks(venueIfAccount(snap({ books: [book({ state: "Subscription", ifAccountIssue: mismatch })] }), rules()))).toEqual([["venue_if_account:3", "warning"]]);
+    expect(ks(venueIfAccount(snap({ books: [book({ ifAccountIssue: mismatch })] }), rules()))).toEqual([["venue_if_account:3", "critical"]]);
+    expect(ks(venueIfAccount(snap({ books: [book({ state: "Retiring", ifAccountIssue: mismatch })] }), rules()))).toEqual([["venue_if_account:3", "critical"]]);
+    const p = venueIfAccount(snap({ books: [book({ ifAccountIssue: pending })] }), rules());
+    expect(ks(p)).toEqual([["venue_if_account:3", "warning"]]);
+    expect(p[0]?.summary).toContain("waits 60m");
+    for (const state of ["Cancelled", "Retired"]) expect(venueIfAccount(snap({ books: [book({ state, ifAccountIssue: mismatch })] }), rules())).toEqual([]);
+    expect(venueIfAccount(snap({ books: [book({ venue: "pool_engine", ifAccountIssue: mismatch })] }), rules())).toEqual([]);
+    expect(venueIfAccount(snap({ books: [book()] }), rules())).toEqual([]);
+  });
+
+  test("venue_if_operator_pending: warning, critical after 6 h; withdraw vs return wording", () => {
+    const w = (step: "withdraw" | "return", ageMs: number) => ({ nonce: "4", step, amount: "10000000000", owner: "0xE0A", adapter: "0xAD", since: NOW - ageMs });
+    const a = venueIfAccount(snap({ books: [book({ ifOperatorWaits: [w("withdraw", 600_000)] })] }), rules());
+    expect(ks(a)).toEqual([["venue_if_operator_pending:3:4", "warning"]]);
+    expect(a[0]?.summary).toContain("withdraw it promptly on Orderly from the builder IF account (wallet 0xE0A;");
+    expect(a[0]?.summary).toContain("then transfer it to the adapter 0xAD");
+    expect(a[0]?.summary).toContain("10,000 USD");
+    const r = venueIfAccount(snap({ books: [book({ ifOperatorWaits: [w("return", 21_600_000)] })] }), rules());
+    expect(ks(r)).toEqual([["venue_if_operator_pending:3:4", "critical"]]);
+    expect(r[0]?.summary).toContain("transfer it (one transfer, the full amount) to the adapter 0xAD");
+    // a Retired (or Cancelled) book keeps alerting while its last IF payout is unreturned
+    for (const state of ["Retired", "Cancelled"]) {
+      const ret = venueIfAccount(snap({ books: [book({ state, ifOperatorWaits: [w("return", 21_600_000)] })] }), rules());
+      expect(ks(ret)).toEqual([["venue_if_operator_pending:3:4", "critical"]]);
+      expect(ret[0]?.summary).toContain(`(state ${state})`);
+    }
+  });
+
+  test("written off from NAV: critical at once; unadopted withdrawal and IF equity drop: critical; prior_equity critical, reassign warning", () => {
+    const wo = venueIfAccount(snap({ books: [book({ ifOperatorWaits: [{ nonce: "4", step: "return", amount: "1000000", owner: "0xE0A", adapter: "0xAD", since: NOW - 60_000, writtenOffAt: NOW - 1_000 }] })] }), rules());
+    expect(ks(wo)).toEqual([["venue_if_operator_pending:3:4", "critical"]]);
+    expect(wo[0]?.summary).toContain("WRITTEN OFF from NAV");
+    const u = venueIfAccount(snap({ books: [book({ ifUnadopted: [{ id: "90", amount: "7000000", status: "COMPLETED", createdAt: 1 }] })] }), rules());
+    expect(ks(u)).toEqual([["venue_if_unadopted_withdrawal:3:90", "critical"]]);
+    expect(u[0]?.summary).toContain("without any on-chain request");
+    const d = venueIfAccount(snap({ books: [book({ ifEquityDrop: { expectedUsd: "30000000000", venueUsd: "25000000000", at: NOW } })] }), rules());
+    expect(ks(d)).toEqual([["venue_if_equity_drop:3", "critical"]]);
+    expect(d[0]?.summary).toContain("25,000 USD is below the adapter's insurance 30,000 USD");
+    expect(ks(venueIfAccount(snap({ books: [book({ ifAccountIssue: { issue: "prior_equity", detail: "held 3", accountId: "0xaa", since: NOW } })] }), rules()))).toEqual([["venue_if_account:3", "critical"]]);
+    expect(ks(venueIfAccount(snap({ books: [book({ ifAccountIssue: { issue: "reassign", detail: "re-assign", accountId: "0xaa", since: NOW } })] }), rules()))).toEqual([["venue_if_account:3", "warning"]]);
+  });
+
+  test("payout step (confirmed on-chain, Orderly not visibly paid): published until back or written off; failed sagas alert (IF critical, any state)", () => {
+    const p = venueIfAccount(snap({ books: [book({ ifOperatorWaits: [{ nonce: "5", step: "payout", amount: "3000000000", owner: "0xE0A", adapter: "0xAD", since: NOW - 600_000 }] })] }), rules());
+    expect(ks(p)).toEqual([["venue_if_operator_pending:3:5", "warning"]]);
+    expect(p[0]?.summary).toContain("confirmed on-chain 10m ago and is not back on the adapter");
+    expect(p[0]?.summary).toContain("written off from NAV after");
+    const wo = venueIfAccount(snap({ books: [book({ ifOperatorWaits: [{ nonce: "5", step: "payout", amount: "1", owner: "0xE0A", adapter: "0xAD", since: NOW - 600_000, writtenOffAt: NOW }] })] }), rules());
+    expect(ks(wo)).toEqual([["venue_if_operator_pending:3:5", "critical"]]);
+    const f = (account: number, state = "Live") => venueIfAccount(snap({ books: [book({ state, failedWithdrawals: [{ nonce: "9", account, amount: "1000000", error: "venue down", at: NOW }] })] }), rules());
+    expect(ks(f(0))).toEqual([["venue_withdraw_failed:3:9", "critical"]]);
+    expect(ks(f(1))).toEqual([["venue_withdraw_failed:3:9", "warning"]]);
+    expect(ks(f(0, "Retired"))).toEqual([["venue_withdraw_failed:3:9", "critical"]]);
+    expect(f(0)[0]?.summary).toContain("insurance-fund withdrawal #9 (1 USD) FAILED in ops-venue (venue down)");
+    const parsed = parseIfAccounts(JSON.stringify({ failedWithdrawals: [{ bookId: 3, nonce: "9", account: 0, amount: "1", error: "x", at: 5 }, { bookId: 3 }], ifOperatorWaits: [{ bookId: 3, nonce: "5", step: "payout", amount: "1", owner: "o", adapter: "a", since: 1 }] }));
+    expect(parsed.failed.get(3)).toEqual([{ nonce: "9", account: 0, amount: "1", error: "x", at: 5 }]);
+    expect(parsed.waits.get(3)?.[0]?.step).toBe("payout");
+  });
+
+  test("venue_market_restricted POST_ONLY text follows AGENT_VENUE_POST_ONLY_QUOTE when set", () => {
+    const live = { ts: NOW, mode: "live" as const, builderPush: true, listingMode: "manual" as const };
+    const m = { symbol: "PERP_NVDA_USDC_bookrunner", bookIds: [3], phase: "listed" as const, venueStatus: "POST_ONLY", openForRisk: false, everListed: true, since: NOW, checkedAt: NOW, failures: 0, error: null };
+    const text = (c: ReturnType<typeof rules>) => venueListing(snap({ venueOps: live, books: [book({ venueMarket: m })] }), c)[0]?.summary ?? "";
+    expect(text(rules())).toContain("maker-only");
+    expect(text(rules({ venuePostOnlyQuote: false }))).toContain("reduce-only");
+    expect(text(rules({ venuePostOnlyQuote: false }))).not.toContain("maker-only");
+    expect(loadConfig({ NETWORK: "testnet", CHAIN_ID: "46630", AGENT_VENUE_POST_ONLY_QUOTE: "false" }).rules.venuePostOnlyQuote).toBe(false);
+    expect(loadConfig({ NETWORK: "testnet", CHAIN_ID: "46630" }).rules.venuePostOnlyQuote).toBeUndefined();
+  });
+
+  test("parseIfAccounts: per book, malformed entries dropped", () => {
+    const raw = JSON.stringify({
+      ifAccounts: [{ bookId: 3, accountId: "0xaa", binding: "builder", issue: "key_pending", detail: "d", since: 5 }, { bookId: 4, issue: "weird", detail: "x" }, null],
+      ifOperatorWaits: [{ bookId: 3, nonce: "1", step: "return", amount: "5", owner: "0xE", adapter: "0xA", since: 9 }, { bookId: 3, step: "withdraw" }],
+    });
+    const p = parseIfAccounts(raw);
+    expect([...p.issues]).toEqual([[3, { issue: "key_pending", detail: "d", accountId: "0xaa", since: 5 }]]);
+    expect(p.waits.get(3)).toEqual([{ nonce: "1", step: "return", amount: "5", owner: "0xE", adapter: "0xA", since: 9, writtenOffAt: null }]);
+    const more = parseIfAccounts(
+      JSON.stringify({
+        ifAccounts: [{ bookId: 3, accountId: "0xaa", issue: "reassign", detail: "r" }, { bookId: 3, accountId: "0xaa", issue: "mismatch", detail: "m" }],
+        ifUnadopted: [{ bookId: 3, accountId: "0xaa", id: "90", amount: "7", status: "COMPLETED", createdAt: 5 }, { bookId: 3 }],
+        ifEquityDrops: [{ bookId: 3, accountId: "0xaa", expectedUsd: "2", venueUsd: "1", at: 7 }, { bookId: 4 }],
+        ifOperatorWaits: [{ bookId: 3, nonce: "1", step: "return", amount: "5", owner: "0xE", adapter: "0xA", since: 9, writtenOffAt: 10 }],
+      }),
+    );
+    expect(more.issues.get(3)?.issue).toBe("mismatch"); // a mismatch outranks a notice
+    expect(more.unadopted.get(3)).toEqual([{ id: "90", amount: "7", status: "COMPLETED", createdAt: 5 }]);
+    expect([...more.drops]).toEqual([[3, { expectedUsd: "2", venueUsd: "1", at: 7 }]]);
+    expect(more.waits.get(3)?.[0]?.writtenOffAt).toBe(10);
+    expect(parseIfAccounts("{bad").issues.size).toBe(0);
+    expect(parseIfAccounts(null).waits.size).toBe(0);
+  });
+});
+
 describe("venue_report_stale", () => {
   test("orderly live book: too old or missing", () => {
     expect(keys(venueReportAge(snap({ books: [book({ venueReportAsOf: NOW_S - 901 })] }), rules()))).toEqual(["venue_report_stale:3"]);
@@ -108,6 +216,183 @@ describe("venue_report_stale", () => {
   });
   test("pool-engine books have no venue report", () => {
     expect(venueReportAge(snap({ books: [book({ venue: "pool_engine", venueReportAsOf: null })] }), rules())).toEqual([]);
+  });
+
+  test("venue_symbol_unmapped: an Orderly book ops-venue tracks without listing / trading (VERIFY O19)", () => {
+    const c = venueSymbol(snap({ books: [book({ venueSymbolError: 'charter symbol "NVDA-PERP" is not an Orderly perp symbol' })] }), rules());
+    expect(c.map((x) => [x.key, x.severity])).toEqual([["venue_symbol_unmapped:3", "critical"]]);
+    expect(c[0]?.summary).toMatch(/NVDA-PERP.*withdrawals still run/);
+    expect(venueSymbol(snap({ books: [book({ venueSymbolError: null })] }), rules())).toEqual([]);
+    expect(venueSymbol(snap({ books: [book()] }), rules())).toEqual([]);
+    // a Retired / Cancelled book has nothing left on the venue
+    for (const state of ["Retired", "Cancelled"]) expect(venueSymbol(snap({ books: [book({ state, venueSymbolError: "no market" })] }), rules())).toEqual([]);
+    expect(keys(venueSymbol(snap({ books: [book({ state: "Retiring", venueSymbolError: "no market" })] }), rules()))).toEqual(["venue_symbol_unmapped:3"]);
+  });
+
+  describe("Orderly market state (ops-venue listing check, VERIFY O20)", () => {
+    const manual = { ts: NOW, mode: "live" as const, builderPush: true, listingMode: "manual" as const };
+    const apiLive = { ...manual, listingMode: "api" as const };
+    const apiMock = { ...apiLive, mode: "mock" as const };
+    const mk = (over: Partial<VenueMarketMsg> = {}): VenueMarketMsg => ({ symbol: "PERP_NVDA_USDC_bookrunner", bookIds: [3], phase: "awaiting", venueStatus: null, openForRisk: false, everListed: false, since: NOW - 600_000, checkedAt: NOW, failures: 0, error: null, ...over });
+    const run = (ops: VenueOpsSnap | null, b: Partial<ReturnType<typeof book>>) => venueListing(snap({ venueOps: ops, books: [book(b)] }), rules());
+    const ks = (cs: ReturnType<typeof venueListing>) => cs.map((x) => [x.key, x.severity]);
+
+    test("venue_listing_pending (manual): warning in Subscription / Retiring and during the Live grace, critical after it", () => {
+      expect(ks(run(manual, { state: "Subscription", venueMarket: mk() }))).toEqual([["venue_listing_pending:3", "warning"]]);
+      expect(ks(run(manual, { state: "Retiring", venueMarket: mk() }))).toEqual([["venue_listing_pending:3", "warning"]]);
+      // Live for 10 min (< 30 min grace): warning; the grace counts from going Live, not from the first not-listed check
+      expect(ks(run(manual, { liveSince: NOW_S - 600, venueMarket: mk({ since: NOW - 86_400_000 }) }))).toEqual([["venue_listing_pending:3", "warning"]]);
+      const crit = run(manual, { liveSince: NOW_S - 1_801, venueMarket: mk() });
+      expect(ks(crit)).toEqual([["venue_listing_pending:3", "critical"]]);
+      expect(crit[0]?.summary).toMatch(/PERP_NVDA_USDC_bookrunner awaiting listing in Orderly One for 10m \(not on \/v1\/public\/info\)/);
+      expect(crit[0]?.summary).toContain("with no market");
+      expect(ks(run(manual, { liveSince: NOW_S - 1_000, venueMarket: mk() }))).toEqual([["venue_listing_pending:3", "warning"]]);
+      expect(run(manual, { state: "Subscription", venueMarket: mk({ venueStatus: "PENDING" }) })[0]?.summary).toContain("Orderly status PENDING");
+      expect(ks(run(manual, { liveSince: NOW_S - 7_200, venueMarket: mk() }))).toEqual([["venue_listing_pending:3", "critical"]]);
+      for (const state of ["Retired", "Cancelled"]) expect(run(manual, { state, venueMarket: mk() })).toEqual([]);
+      expect(run(null, { venueMarket: mk() })).toEqual([]);
+      expect(run(manual, { venueMarket: null })).toEqual([]);
+    });
+
+    test("venue_listing_pending (api mode): only ORDERLY_MODE=live and a Live book; never api + mock (devnet)", () => {
+      expect(ks(run(apiLive, { liveSince: NOW_S - 7_200, venueMarket: mk({ venueStatus: "PENDING" }) }))).toEqual([["venue_listing_pending:3", "critical"]]);
+      expect(run(apiLive, { liveSince: NOW_S - 7_200, venueMarket: mk() })[0]?.summary).toContain("not launched on Orderly (listing API)");
+      expect(run(apiLive, { state: "Subscription", venueMarket: mk() })).toEqual([]);
+      expect(run(apiMock, { liveSince: NOW_S - 7_200, venueMarket: mk({ venueStatus: "PENDING" }) })).toEqual([]);
+    });
+
+    test("venue_market_restricted: listed but not open; DELISTING / DELISTED on a Live book critical, Retiring quiet", () => {
+      const listed = (venueStatus: string) => mk({ phase: "listed", venueStatus, everListed: true, openForRisk: false });
+      expect(ks(run(manual, { venueMarket: listed("REDUCE_ONLY") }))).toEqual([["venue_market_restricted:3", "warning"]]);
+      expect(ks(run(apiMock, { venueMarket: listed("REDUCE_ONLY") }))).toEqual([["venue_market_restricted:3", "warning"]]); // any mode
+      expect(ks(run(manual, { venueMarket: listed("DELISTING") }))).toEqual([["venue_market_restricted:3", "critical"]]);
+      expect(ks(run(manual, { venueMarket: listed("DELISTED") }))).toEqual([["venue_market_restricted:3", "critical"]]);
+      expect(ks(run(manual, { venueMarket: listed("POST_ONLY") }))).toEqual([["venue_market_restricted:3", "warning"]]);
+      expect(ks(run(manual, { venueMarket: listed("HALTED") }))).toEqual([["venue_market_restricted:3", "warning"]]); // undocumented
+      expect(run(manual, { venueMarket: listed("DELISTING") })[0]?.summary).toContain("being delisted");
+      expect(run(manual, { state: "Retiring", venueMarket: listed("DELISTED") })).toEqual([]);
+      expect(ks(run(manual, { state: "Subscription", venueMarket: listed("REDUCE_ONLY") }))).toEqual([["venue_market_restricted:3", "warning"]]);
+      expect(run(manual, { state: "Subscription", venueMarket: listed("POST_ONLY") })).toEqual([]); // launch phase
+      // POST_ONLY in live mode: the agent quotes maker-only (AGENT_VENUE_POST_ONLY_QUOTE default), never "reduce-only"
+      const po = run(manual, { venueMarket: listed("POST_ONLY") })[0]?.summary ?? "";
+      expect(po).toContain("maker-only");
+      expect(po).not.toContain("reduce-only");
+      expect(run(apiMock, { venueMarket: listed("POST_ONLY") })[0]?.summary).toContain("reduce-only"); // mock default: reduce-only
+      expect(run(manual, { venueMarket: listed("REDUCE_ONLY") })[0]?.summary).toContain("reduce-only");
+      expect(run(manual, { venueMarket: mk({ phase: "listed", venueStatus: "ACTIVE", everListed: true, openForRisk: true }) })).toEqual([]);
+    });
+
+    test("venue_market_missing: was listed, now absent; Live critical, Retiring a one-off warning", () => {
+      const missing = mk({ phase: "missing", everListed: true, venueStatus: null });
+      const live = run(manual, { venueMarket: missing });
+      expect(ks(live)).toEqual([["venue_market_missing:3", "critical"]]);
+      expect(live[0]?.summary).not.toContain("awaiting");
+      const ret = run(manual, { state: "Retiring", venueMarket: missing });
+      expect(ks(ret)).toEqual([["venue_market_missing:3", "warning"]]);
+      expect(ret[0]?.notifyResolve).toBe(false);
+      expect(run(manual, { state: "Retired", venueMarket: missing })).toEqual([]);
+    });
+
+    test("venue_listing_check: N consecutive failures warn (the last known state stays)", () => {
+      expect(run(manual, { venueMarket: mk({ phase: "unknown", failures: 4, error: "timed out" }) })).toEqual([]);
+      const c = run(manual, { venueMarket: mk({ phase: "unknown", failures: 5, error: "timed out" }) });
+      expect(ks(c)).toEqual([["venue_listing_check:3", "warning"]]);
+      expect(c[0]?.summary).toContain("failed 5 times in a row (timed out)");
+      expect(loadConfig({}).rules.listingCheckFailures).toBe(5);
+      expect(loadConfig({}).rules.listingLiveGraceSec).toBe(1800);
+    });
+
+    test("venue_delist_pending: an IF withdrawal waiting for the admin's delisting; critical after 6 h", () => {
+      const listed = mk({ phase: "listed", venueStatus: "ACTIVE", everListed: true, openForRisk: true });
+      expect(ks(run(manual, { state: "Retiring", venueMarket: listed, delistWaitSince: NOW - 600_000 }))).toEqual([["venue_delist_pending:3", "warning"]]);
+      expect(ks(run(manual, { state: "Retiring", venueMarket: listed, delistWaitSince: NOW - 21_600_000 }))).toEqual([["venue_delist_pending:3", "critical"]]);
+      expect(run(manual, { state: "Retired", delistWaitSince: NOW - 21_600_000 })).toEqual([]);
+    });
+  });
+});
+
+describe("builder_price_push (live Orderly builder prices, VERIFY O18)", () => {
+  const sym = (over: Record<string, unknown> = {}) => ({ symbol: "PERP_NVDA_USDC_bookrunner", bookIds: [3], state: "pushing", lastPushAt: NOW, failingSince: null, error: null, preListing: false, ...over });
+  const feed = (symbols: ReturnType<typeof sym>[], ts = NOW) => ({ ts, socket: { state: "ready", lastError: null }, symbols }) as BuilderFeedSnap;
+  const liveOps = { ts: NOW, mode: "live" as const, builderPush: true, listingMode: "manual" as const };
+  test("a symbol failing >= 30 s in session is critical; shorter, held or pushing is quiet", () => {
+    const c = builderPricePush(snap({ builderFeed: feed([sym({ state: "disconnected", failingSince: NOW - 31_000, error: "auth failed" })]) }), rules());
+    expect(c.map((x) => [x.key, x.severity])).toEqual([["builder_price_push:PERP_NVDA_USDC_bookrunner", "critical"]]);
+    expect(c[0]!.summary).toMatch(/book 3.*31s.*disconnected: auth failed.*reduce-only/);
+    expect(builderPricePush(snap({ builderFeed: feed([sym({ state: "stale", failingSince: NOW - 29_000 })]) }), rules())).toEqual([]);
+    expect(builderPricePush(snap({ builderFeed: feed([sym({ state: "held" }), sym()]) }), rules())).toEqual([]);
+    expect(builderPricePush(snap({ builderFeed: null }), rules())).toEqual([]);
+    expect(builderPricePush(snap(), rules())).toEqual([]);
+  });
+  test("books still in Subscription (preListing) are not paged", () => {
+    expect(builderPricePush(snap({ builderFeed: feed([sym({ state: "rejected", failingSince: NOW - 300_000, preListing: true })]) }), rules())).toEqual([]);
+  });
+  test("the span stops at ops-venue's status time; a status that stopped updating alerts on its own", () => {
+    const old = feed([sym({ state: "stale", failingSince: NOW - 100_000 })], NOW - 90_000); // failing 10 s when last written
+    expect(builderPricePush(snap({ builderFeed: old }), rules()).map((x) => x.key)).toEqual(["builder_price_push_status"]);
+    expect(builderPricePush(snap({ builderFeed: feed([sym()], NOW - 59_000) }), rules())).toEqual([]);
+  });
+  test("missing status: critical only when ops-venue reports live mode with the push on and an Orderly book is live", () => {
+    expect(builderPricePush(snap({ builderFeed: null, venueOps: liveOps }), rules()).map((x) => [x.key, x.severity])).toEqual([["builder_price_push_status", "critical"]]);
+    expect(builderPricePush(snap({ builderFeed: null, venueOps: { ...liveOps, builderPush: false } }), rules())).toEqual([]);
+    expect(builderPricePush(snap({ builderFeed: null, venueOps: { ...liveOps, mode: "mock" } }), rules())).toEqual([]);
+    expect(builderPricePush(snap({ builderFeed: null, venueOps: liveOps, books: [book({ state: "Subscription" })] }), rules())).toEqual([]);
+    expect(builderPricePush(snap({ builderFeed: null, venueOps: null }), rules())).toEqual([]);
+  });
+  test("ALERT_BUILDER_PUSH_FAIL_SECONDS", () => {
+    expect(loadConfig({}).rules.builderPushFailSec).toBe(30);
+    const c = builderPricePush(snap({ builderFeed: feed([sym({ state: "stale", failingSince: NOW - 31_000 })]) }), rules({ builderPushFailSec: 60 }));
+    expect(c).toEqual([]);
+  });
+
+  // Through the real key lifetimes: ops-venue writes the status / issues with their shared TTLs into a TTL-honouring
+  // store; collect() reads it back at later times (no hand-built snapshot).
+  test("through Redis TTLs: a stalled push loop alerts while its status lives, a stopped one as a missing status", async () => {
+    let clock = NOW;
+    const store = new Map<string, { v: string; exp: number }>();
+    const set = (k: string, v: unknown, ttlSec: number) => store.set(k, { v: JSON.stringify(v), exp: clock + ttlSec * 1000 });
+    const get = (k: string) => {
+      const e = store.get(k);
+      return e && e.exp > clock ? e.v : null;
+    };
+    const kv = { get: async (k: string) => get(k), mget: async (ks: string[]) => ks.map(get) };
+    const db = {
+      books: async () => [{ id: 3, name: "NVDA", symbol: "PERP_NVDA_USDC", state: "Live", venue: 0, subscriptionEnds: new Date(NOW - 86_400_000) }],
+      latestMarkPeriodEnds: async () => [],
+      killsSince: async () => [],
+      cursors: async () => [],
+    };
+    const chain = { head: async () => ({ number: 1, timestamp: clock / 1000 }), balance: async () => 0n, buybackPending: async () => null, markInterval: async () => 3600 };
+    const fetchOk = (async () => new Response(JSON.stringify({ ok: true }))) as unknown as typeof fetch;
+    const settings = { network: "testnet", chainId: 46630, apiUrl: "http://api", markIntervalSec: 3600, roles: [], rpcWindowSec: 900 };
+    const statusMsg = (ts: number): BuilderFeedStatusMsg => ({
+      v: 1,
+      ts,
+      intervalMs: 1000,
+      maxAgeMs: 10_000,
+      socket: { state: "ready", lastError: null, host: "ws-oracle.orderly.org" },
+      symbols: [{ symbol: "PERP_NVDA_USDC_bookrunner", base: "NVDA", bookIds: [3], state: "pushing", lastPushAt: ts, price: 190, failingSince: null, error: null, preListing: false }],
+    });
+    const issues = (ts: number) => ({ v: 1, ts, mode: "live", builderPush: true, books: [] });
+    const evalAt = async (t: number) => {
+      clock = t;
+      const { snapshot } = await collect({ db, kv, chain, fetch: fetchOk, now: () => clock }, settings, emptyMemory(), 86_400);
+      return builderPricePush(snapshot, rules()).map((x) => x.key);
+    };
+    // healthy: both written now
+    set(KEYS.builderFeedStatus, statusMsg(NOW), BUILDER_FEED_STATUS_TTL_SEC);
+    set(KEYS.venueSymbolIssues, issues(NOW), VENUE_SYMBOL_ISSUES_TTL_SEC);
+    expect(await evalAt(NOW)).toEqual([]);
+    // the push loop stalls (no status write) while the book poll keeps going: 90 s later the old status still exists
+    clock = NOW + 85_000;
+    set(KEYS.venueSymbolIssues, issues(clock), VENUE_SYMBOL_ISSUES_TTL_SEC);
+    expect(await evalAt(NOW + 90_000)).toEqual(["builder_price_push_status"]);
+    // past the status TTL the key is gone: the missing-status branch takes over (issues refreshed by the book poll)
+    clock = NOW + BUILDER_FEED_STATUS_TTL_SEC * 1000 - 5_000;
+    set(KEYS.venueSymbolIssues, issues(clock), VENUE_SYMBOL_ISSUES_TTL_SEC);
+    expect(await evalAt(NOW + BUILDER_FEED_STATUS_TTL_SEC * 1000 + 1)).toEqual(["builder_price_push_status"]);
+    expect(get(KEYS.builderFeedStatus)).toBeNull();
+    expect(BUILDER_FEED_STATUS_TTL_SEC).toBeGreaterThan(rules().builderPushFailSec + 30);
   });
 });
 

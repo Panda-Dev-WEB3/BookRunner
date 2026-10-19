@@ -24,7 +24,7 @@ import { OpsService } from "../src/worker/service";
 import { WithdrawProcessor } from "../src/worker/withdrawals";
 
 /** OrderlyAdapter.WithdrawStatus (mirrors src/chain WITHDRAW_STATUS). */
-export const WS = { None: 0, Requested: 1, Confirmed: 2, Cancelled: 3, Failed: 4 } as const;
+export const WS = { None: 0, Requested: 1, Confirmed: 2, Cancelled: 3, Failed: 4, WrittenOff: 5 } as const;
 
 export const log = createLogger("ops-venue-test", "silent");
 export const OPS = devAccount("opsVenue");
@@ -58,6 +58,8 @@ export function trackedBook(state: BookState = "Live"): TrackedBook {
     mandate: MANDATE,
     vault: VAULT,
     router: ROUTER,
+    charterSymbol: SYMBOL,
+    venueSymbolError: null,
     symbol: SYMBOL,
     baseAsset: "NVDA",
     sessions: `0x${"00".repeat(32)}`,
@@ -75,12 +77,14 @@ export interface FakeAdapterState {
   vault: Address;
   router: Address;
   nonce: bigint;
-  requests: Map<string, { status: number; amount: bigint; account: number; requestedAt: bigint }>;
+  requests: Map<string, { status: number; amount: bigint; account: number; requestedAt: bigint; confirmedAt?: bigint }>;
   inTransit: bigint;
   pendingWithdraw: [bigint, bigint];
   pendingFees: bigint;
   feeSwept: Map<string, bigint>;
   lastFlowAt: bigint;
+  /** adapter.insuranceEquityUsd() (tests set it; builder IF drop check) */
+  insurance: bigint;
 }
 
 /**
@@ -122,6 +126,8 @@ export class FakeChain implements ChainPort {
   delegateTxs = new Map<string, Hex>();
   /** far-future head so tests' injected clock wins the min(now, head) clamp */
   headTs = 1n << 40n;
+  /** block.timestamp the adapter records (confirmedAt); tests with a clock set it (default: the head) */
+  clockSec: () => bigint = () => this.headTs;
   private seq = 0;
 
   adapter(a: Address): FakeAdapterState {
@@ -129,7 +135,7 @@ export class FakeChain implements ChainPort {
     let s = this.adapters.get(k);
     if (!s) {
       const b = this.books.find((x) => x.adapter.toLowerCase() === k);
-      s = { vault: b?.vault ?? VAULT, router: b?.router ?? ROUTER, nonce: 0n, requests: new Map(), inTransit: 0n, pendingWithdraw: [0n, 0n], pendingFees: 0n, feeSwept: new Map(), lastFlowAt: 0n };
+      s = { vault: b?.vault ?? VAULT, router: b?.router ?? ROUTER, nonce: 0n, requests: new Map(), inTransit: 0n, pendingWithdraw: [0n, 0n], pendingFees: 0n, feeSwept: new Map(), lastFlowAt: 0n, insurance: 0n };
       this.adapters.set(k, s);
     }
     return s;
@@ -247,7 +253,12 @@ export class FakeChain implements ChainPort {
     return { if: IF_ID, mm: MM_ID };
   }
   async accountOwners(adapter: Address) {
-    return { if: this.ifOwners.get(adapter.toLowerCase()) ?? adapter, mm: adapter };
+    return { if: this.builderIfOwners.get(adapter.toLowerCase()) ?? this.ifOwners.get(adapter.toLowerCase()) ?? adapter, mm: adapter };
+  }
+  /** builder IF mode: adapter -> operator EOA (adapter.setIfAccountOwner); IF payouts go to the EOA, not the IF contract */
+  builderIfOwners = new Map<string, Address>();
+  async ifAccountOwner(adapter: Address) {
+    return this.builderIfOwners.get(adapter.toLowerCase()) ?? null;
   }
   async nativeFeeState(adapter: Address, deposits: Array<{ account: number; amount: bigint }>) {
     return { balance: this.native.get(adapter.toLowerCase()) ?? 0n, required: this.depositFee * BigInt(deposits.length) };
@@ -286,11 +297,35 @@ export class FakeChain implements ChainPort {
   }
   async withdrawStatus(adapter: Address, nonce: bigint): Promise<WithdrawRequestView> {
     const r = this.adapter(adapter).requests.get(nonce.toString());
-    return r ? { status: r.status, amount: r.amount, account: r.account, requestedAt: r.requestedAt } : { status: WS.None, amount: 0n, account: 0, requestedAt: 0n };
+    return r ? { status: r.status, amount: r.amount, account: r.account, requestedAt: r.requestedAt, confirmedAt: r.confirmedAt ?? 0n } : { status: WS.None, amount: 0n, account: 0, requestedAt: 0n, confirmedAt: 0n };
   }
   async adapterFlowState(adapter: Address): Promise<AdapterFlowState> {
     const a = this.adapter(adapter);
-    return { lastFlowAt: a.lastFlowAt, pendingWithdrawUsd: a.pendingWithdraw[0] + a.pendingWithdraw[1], inTransitUsd: a.inTransit, pendingFeesUsd: a.pendingFees, usdcBalance: this.attributed(adapter) };
+    // like OrderlyAdapter._usdcBalance: the adapter plus its OrderlyIFAccount CONTRACT, never a builder EOA's wallet
+    return { lastFlowAt: a.lastFlowAt, pendingWithdrawUsd: a.pendingWithdraw[0] + a.pendingWithdraw[1], inTransitUsd: a.inTransit, pendingFeesUsd: a.pendingFees, usdcBalance: this.attributed(adapter), insuranceUsd: a.insurance };
+  }
+  /** settlement-token Transfer logs (tokenTransfer records them) */
+  transfers: Array<{ from: string; to: string; amount: bigint; block: bigint; txHash: Hex; logIndex: number }> = [];
+  /** An ERC-20 transfer by `from` (e.g. the operator EOA returning a payout to the adapter): moves balances + logs it. */
+  tokenTransfer(from: Address, to: Address, amount: bigint) {
+    this.move(from, to, amount);
+    this.block++;
+    this.transfers.push({ from: from.toLowerCase(), to: to.toLowerCase(), amount, block: this.block, txHash: `0x${"7a".repeat(31)}${(this.transfers.length + 1).toString(16).padStart(2, "0")}` as Hex, logIndex: 0 });
+  }
+  async tokenTransfers(from: Address, to: Address, fromBlock: bigint, toBlock: bigint) {
+    return this.transfers.filter((t) => t.from === from.toLowerCase() && t.to === to.toLowerCase() && t.block >= fromBlock && t.block <= toBlock).map((t) => ({ txHash: t.txHash, logIndex: t.logIndex, block: t.block, amount: t.amount }));
+  }
+  async writeOffOperatorPayout(adapter: Address, nonce: bigint, opts?: WriteOpts) {
+    const a = this.adapter(adapter);
+    const r = a.requests.get(nonce.toString());
+    if (!r || r.status !== WS.Confirmed) throw new Error(`RequestNotConfirmed(${nonce}, ${r?.status ?? 0})`);
+    if (r.account !== 0 || !this.builderIfOwners.has(adapter.toLowerCase())) throw new Error(`NotBuilderIfPayout(${nonce})`);
+    if (this.clockSec() < (r.confirmedAt ?? 0n) + 3600n) throw new Error(`WriteOffTooEarly(${nonce})`);
+    const h = this.begin("writeOffOperatorPayout", [adapter, nonce], opts);
+    r.status = WS.WrittenOff;
+    a.inTransit -= a.inTransit < r.amount ? a.inTransit : r.amount;
+    a.lastFlowAt = this.headTs;
+    return this.end("writeOffOperatorPayout", h);
   }
   async feeSweptForPeriod(adapter: Address, period: bigint) {
     return this.adapter(adapter).feeSwept.get(period.toString()) ?? 0n;
@@ -325,6 +360,7 @@ export class FakeChain implements ChainPort {
     if (!r || r.status !== WS.Requested) throw new Error(`RequestNotPending(${nonce}, ${r?.status ?? 0})`);
     const h = this.begin("confirmWithdraw", [adapter, nonce], opts);
     r.status = WS.Confirmed;
+    r.confirmedAt = this.clockSec();
     a.pendingWithdraw[r.account as 0 | 1] -= r.amount;
     a.inTransit += r.amount;
     a.lastFlowAt = this.headTs;
@@ -488,7 +524,7 @@ export const testReportSigner = (chainId = 31337): ReportSigner => ({
  * Test context. `reportMode` defaults to "onchain" (the scenarios below assert report txs); the service
  * default is OPS_REPORT_MODE=signed (see report712.test.ts for the signed flow).
  */
-export async function makeCtx(o: { mode?: "mock" | "live"; authMode?: "strict" | "permissive"; now?: () => number; reportMode?: "signed" | "onchain" } = {}) {
+export async function makeCtx(o: { mode?: "mock" | "live"; authMode?: "strict" | "permissive"; now?: () => number; reportMode?: "signed" | "onchain"; listingMode?: "api" | "manual" } = {}) {
   const mock = makeMock(o.authMode ?? "permissive", o.now);
   const chain = new FakeChain();
   const store = new MemoryStore();
@@ -525,6 +561,7 @@ export async function makeCtx(o: { mode?: "mock" | "live"; authMode?: "strict" |
       reportDropConfirmations: 3,
       reportSettleSec: 30,
       reportMode: o.reportMode ?? "onchain",
+      ...(o.listingMode ? { listingMode: o.listingMode } : {}),
     },
     chain,
     store,
@@ -542,7 +579,7 @@ export async function makeCtx(o: { mode?: "mock" | "live"; authMode?: "strict" |
   return { ctx, mock, chain, store, sagas, keys, builder, builderKey, reports };
 }
 
-const provisioner = async (t: Awaited<ReturnType<typeof makeCtx>>) => new Provisioner(t.ctx, await loadOrCreateBuilderKey(t.keys, BUILDER_ID, undefined, 86_400_000, keyFromSecret));
+export const provisioner = async (t: Awaited<ReturnType<typeof makeCtx>>) => new Provisioner(t.ctx, await loadOrCreateBuilderKey(t.keys, BUILDER_ID, undefined, 86_400_000, keyFromSecret));
 
 /** Withdraw saga fixture: provisioned book (IF 25k / MM 75k on the venue and in the mock vault ledger). */
 export async function setupWithdraw(state: "Live" | "Retiring" = "Live", authMode: "strict" | "permissive" = "permissive") {

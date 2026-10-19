@@ -157,6 +157,31 @@ describe("buildUniverse", () => {
     expect(r.entries[0]!.sessions).toEqual([ALWAYS]);
   });
 
+  test("Orderly builder-price targets are venue symbols: live = PERP_<T>_USDC_<broker>, unmappable charters are skipped with a warning", () => {
+    const input = {
+      equities: [
+        { priceId: "NVDA", underlying: priceId("NVDA") },
+        { priceId: "TSLA", underlying: priceId("TSLA") },
+      ],
+      indexes: [],
+      books: [
+        { bookId: 1, venue: VENUE.ORDERLY, symbol: "PERP_NVDA_USDC", oracleKey: "NVDA", sessions: null },
+        { bookId: 2, venue: VENUE.ORDERLY, symbol: "PERP_NVDA_USDC_bookrunner", oracleKey: "NVDA", sessions: null }, // same market: once
+        { bookId: 3, venue: VENUE.ORDERLY, symbol: "PERP_TSLA_USDC_mythos", oracleKey: "TSLA", sessions: null }, // another broker's market
+        { bookId: 4, venue: VENUE.POOL_ENGINE, symbol: "TSLA-PERP", oracleKey: "TSLA", sessions: null },
+      ],
+      defaultSessions: ALWAYS,
+    };
+    const live = buildUniverse({ ...input, venueSymbols: { mode: "live", brokerId: "bookrunner" } });
+    const byId = Object.fromEntries(live.entries.map((e) => [e.priceId, e]));
+    expect(byId.NVDA!.venueSymbols).toEqual(["PERP_NVDA_USDC_bookrunner"]);
+    expect(byId.TSLA!.venueSymbols).toEqual([]);
+    expect(byId.TSLA!.bookIds).toEqual([3, 4]); // still priced for the book; only the venue push is skipped
+    expect(live.warnings).toEqual([expect.stringContaining("book 3: no builder price push")]);
+    const mock = buildUniverse(input); // mock (default): the charter symbol
+    expect(mock.entries.find((e) => e.priceId === "NVDA")!.venueSymbols).toEqual(["PERP_NVDA_USDC", "PERP_NVDA_USDC_bookrunner"]);
+  });
+
   test("priceIdLabel decodes ASCII bytes32, falls back for hashes", () => {
     expect(priceIdLabel(priceId("NVDA"))).toBe("NVDA");
     const h = indexUnderlying("RHX5");

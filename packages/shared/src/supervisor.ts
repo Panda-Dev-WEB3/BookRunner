@@ -2,8 +2,10 @@
 // every child it runs to Redis (SUPERVISOR_STATUS_KEY, short TTL, refreshed every few seconds and on every
 // exit / restart). services/alerts reads it to detect exited and crash-looping services, so alerting never
 // needs the log file. Pure helpers here; the Redis write itself lives in dev.ts.
+import { KEYS } from "./queues";
 
-export const SUPERVISOR_STATUS_KEY = "bkrn:supervisor:status";
+/** This stack's status key (bus namespace, packages/shared queues.ts): bkrn:<ns>:supervisor:status */
+export const SUPERVISOR_STATUS_KEY = KEYS.supervisorStatus;
 /** dev.ts refreshes the key this often ... */
 export const SUPERVISOR_PUBLISH_MS = 15_000;
 /** ... and it expires after this long (a dead supervisor = a missing key). */
@@ -36,6 +38,8 @@ export interface SupervisorStatus {
   /** unix ms the supervisor started */
   startedAt: number;
   procs: SupervisedProc[];
+  /** Address of the stack's deployer key (role index 0; testnet variants): the other variant refuses to start on the same keys. */
+  deployer?: string | null;
 }
 
 export function newProc(name: string, now: number, oneShot = false): SupervisedProc {
@@ -58,12 +62,13 @@ export function recordStart(p: SupervisedProc, now: number): SupervisedProc {
   return { ...p, state: "running", startedAt: now };
 }
 
-export function supervisorStatus(network: string, startedAt: number, procs: Iterable<SupervisedProc>, now: number): SupervisorStatus {
+export function supervisorStatus(network: string, startedAt: number, procs: Iterable<SupervisedProc>, now: number, deployer?: string | null): SupervisorStatus {
   return {
     v: 1,
     ts: now,
     network,
     startedAt,
+    ...(deployer ? { deployer } : {}),
     procs: [...procs].map((p) => ({ ...p, recentExits: p.recentExits.filter((t) => now - t < SUPERVISOR_EXIT_HISTORY_MS) })),
   };
 }

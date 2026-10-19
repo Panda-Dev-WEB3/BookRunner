@@ -1,14 +1,14 @@
 // OracleService: per tick collect -> aggregate (median, or primary-confirm: Chainlink signs, the DEX TWAP / Pyth confirm
 // it, domain/confirm.ts) -> session hold -> sign -> publish (Redis per-price keys +
-// the pull bundle, venue), and on the push policy -> oracle_prices rows (+ AttestedOracle.pushMany in
+// the pull bundle, the venue feed per Orderly venue symbol; mock venue: POST to mock-orderly), and on the push policy -> oracle_prices rows (+ AttestedOracle.pushMany in
 // heartbeat mode only; pull mode never pushes — consumers carry the signed bundle, docs/LOW_GAS.md §1).
 // All I/O is injected so the whole pipeline runs against fakes in tests.
-import { type Logger, type OracleBundleMsg, type OraclePriceMsg, type PriceUpdate, encodePriceData, priceUpdateFromMsg } from "@bookrunner/shared";
+import { type Logger, type OracleBundleMsg, type OraclePriceMsg, type OracleVenueFeedMsg, type PriceUpdate, encodePriceData, priceUpdateFromMsg } from "@bookrunner/shared";
 import type { Address, Hex } from "viem";
 import type { OracleChain } from "./adapters/chain";
 import type { PriceStore } from "./adapters/db";
 import type { PricePublisher } from "./adapters/redis";
-import { type BuilderPriceClient, NotConfiguredError } from "./adapters/venue";
+import type { BuilderPriceClient } from "./adapters/venue";
 import { type AggregateResult, type CollectedQuote, type ConfirmResult, type ConfirmStatus, aggregate } from "./domain/aggregate";
 import { type ConfirmRun, nextConfirmRun, primaryConfirm } from "./domain/confirm";
 import { type Decision, type LastOpen, decide, marketOpen } from "./domain/hold";
@@ -29,7 +29,10 @@ export interface OracleSettings {
   pushIntervalMs: number;
   pushDeviationBps: number;
   sessionsMode: string | undefined;
+  /** builder prices for Orderly books: mock venue client (mock), or the venue feed (Redis, pushed by ops-venue; live) */
   venuePrices: boolean;
+  /** ORACLE_TICK_MS, carried in the venue feed (ops-venue's staleness floor = 3 ticks) */
+  tickMs?: number;
   /** pull: never push on a timer (consumers carry the bundle); heartbeat: pushMany on the push policy */
   pushMode: PushMode;
   /** price ids whose latest signed update is older than this are left out of the bundle */
@@ -63,6 +66,7 @@ export interface OracleServiceDeps {
   signer: PriceSigner;
   publisher: PricePublisher | null;
   store: PriceStore | null;
+  /** mock venue only (POST to mock-orderly); live = null: ops-venue pushes the venue feed to Orderly */
   venue: BuilderPriceClient | null;
   settings: OracleSettings;
   now?: () => number;
@@ -161,6 +165,8 @@ export class OracleService {
 
   private readonly lastOpen = new Map<string, LastOpen>();
   private readonly latest = new Map<string, OraclePriceMsg>();
+  /** wall clock (unix ms) at which `latest` was signed: the age ops-venue checks before re-sending a builder price */
+  private readonly latestAt = new Map<string, number>();
   /** Last update per key confirmed on-chain (pushMany receipt success): what the public HTTP serves. */
   private readonly landed = new Map<string, OraclePriceMsg>();
   private readonly pushed = new Map<string, PushedState>();
@@ -183,10 +189,12 @@ export class OracleService {
   private minSourcesProblem: string | null = null;
   private chainFailures = 0;
   private chainBackoffUntil = 0;
-  private venueDisabled: string | null = null;
   private venueBackoffUntil = 0;
   private venueFailures = 0;
+  /** latest venue feed publication (health): unix ms + symbols */
+  private venueFeed: { ts: number; symbols: string[]; error: string | null } | null = null;
   private lastRedisWarn = 0;
+  private lastVenueFeedWarn = 0;
   private lastStoreWarn = 0;
   private pushInFlight: Promise<void> | null = null;
 
@@ -228,6 +236,7 @@ export class OracleService {
       this.pushed.clear();
       this.landed.clear();
       this.latest.clear();
+      this.latestAt.clear();
       this.bundle = null;
       this.pullSupported = null;
       this.chainFailures = 0;
@@ -391,6 +400,7 @@ export class OracleService {
       const msg = await this.buildMsg(ctx, e, d, publishedAt);
       msgs.push(msg);
       this.latest.set(e.priceId, msg);
+      this.latestAt.set(e.priceId, nowMs);
       summary.published.push(e.priceId);
       componentPrices.set(e.priceId, { price: msg.price, sourceCount: msg.sourceCount, ts: msg.publishedAt * 1000 });
     }
@@ -402,6 +412,7 @@ export class OracleService {
       s.bundleMaxAgeMs / 1000,
     );
     await this.publishRedis(msgs, this.bundle);
+    await this.publishVenueFeed(nowMs);
     this.pushVenue(msgs);
 
     const due = msgs.filter((m) => pushReason(this.pushed.get(m.priceId), m, nowMs, { intervalMs: s.pushIntervalMs, deviationBps: s.pushDeviationBps }) !== null);
@@ -585,9 +596,61 @@ export class OracleService {
     }
   }
 
+  /**
+   * Pure view: the latest signed price of every Orderly venue symbol (builder-price push targets). `stale` = in session
+   * and nothing publishable THIS tick (the unpublished run's hysteresis after recovery does not count); `held` comes
+   * from the signed message itself. Symbols without any signed price yet are left out.
+   */
+  venueFeedMsg(nowMs = this.now()): OracleVenueFeedMsg {
+    const prices: OracleVenueFeedMsg["prices"] = [];
+    for (const e of this.universe) {
+      const m = this.latest.get(e.priceId);
+      if (!m) continue;
+      const u = this.unpublished.get(e.priceId);
+      const stale = u !== undefined && u.publishedAt === null;
+      for (const symbol of e.venueSymbols) {
+        prices.push({
+          symbol,
+          priceId: e.priceId,
+          price: m.price,
+          held: m.held,
+          stale,
+          publishedAt: m.publishedAt,
+          signedAt: this.latestAt.get(e.priceId) ?? m.publishedAt * 1000,
+          // the signed PriceUpdate + signature: ops-venue verifies it before pushing (never trusts the unsigned fields)
+          underlying: m.underlying,
+          priceWad: m.priceWad,
+          sourceCount: m.sourceCount,
+          sourcesHash: m.sourcesHash,
+          signature: m.signature,
+        });
+      }
+    }
+    const tickMs = this.deps.settings.tickMs;
+    const ctx = this.ctx;
+    return { v: 1, ts: nowMs, ...(tickMs ? { tickMs } : {}), ...(ctx ? { chainId: ctx.chainId, oracle: ctx.oracle } : {}), prices };
+  }
+
+  /** Live only (no mock venue client): mock mode keeps its POST to mock-orderly and writes no feed. */
+  private async publishVenueFeed(nowMs: number): Promise<void> {
+    if (!this.deps.publisher || !this.deps.settings.venuePrices || this.deps.venue) return;
+    if (!this.universe.some((e) => e.venueSymbols.length > 0)) return;
+    const msg = this.venueFeedMsg(nowMs);
+    try {
+      await this.deps.publisher.publishVenueFeed(msg);
+      this.venueFeed = { ts: nowMs, symbols: msg.prices.map((p) => p.symbol), error: null };
+    } catch (e) {
+      this.venueFeed = { ts: this.venueFeed?.ts ?? 0, symbols: this.venueFeed?.symbols ?? [], error: errMsg(e) ?? "publish failed" };
+      if (this.now() - this.lastVenueFeedWarn > 30_000) {
+        this.lastVenueFeedWarn = this.now();
+        this.log.warn({ err: errMsg(e) }, "venue feed publish failed (Orderly builder prices go stale)");
+      }
+    }
+  }
+
   private pushVenue(msgs: OraclePriceMsg[]): void {
     const venue = this.deps.venue;
-    if (!venue || !this.deps.settings.venuePrices || this.venueDisabled || this.now() < this.venueBackoffUntil) return;
+    if (!venue || !this.deps.settings.venuePrices || this.now() < this.venueBackoffUntil) return;
     const byId = new Map(this.universe.map((e) => [e.priceId, e]));
     for (const m of msgs) {
       for (const symbol of byId.get(m.priceId)?.venueSymbols ?? []) {
@@ -600,11 +663,6 @@ export class OracleService {
             this.venueFailures = 0;
           })
           .catch((e: unknown) => {
-            if (e instanceof NotConfiguredError) {
-              if (!this.venueDisabled) this.log.error({ err: e.message }, "venue builder prices disabled");
-              this.venueDisabled = e.message;
-              return;
-            }
             this.venueFailures++;
             const wait = Math.min(1_000 * 2 ** Math.min(this.venueFailures, 5), 30_000);
             this.venueBackoffUntil = this.now() + wait;
@@ -762,7 +820,16 @@ export class OracleService {
         minSourcesProblem: this.minSourcesProblem,
         backoffUntil: this.chainBackoffUntil > this.now() ? this.chainBackoffUntil : null,
       },
-      venue: { mode: this.deps.venue?.mode ?? null, enabled: this.deps.settings.venuePrices && !this.venueDisabled, disabledReason: this.venueDisabled },
+      /**
+       * Builder prices for Orderly books. mode mock: posted to mock-orderly by the oracle; null (live): the venue feed
+       * (Redis KEYS.oracleVenueFeed) is pushed to Orderly's Builder Oracle by ops-venue (bkrn:<ns>:ops-venue:builder-feed).
+       */
+      venue: {
+        mode: this.deps.venue?.mode ?? null,
+        enabled: this.deps.settings.venuePrices,
+        pushedBy: this.deps.venue ? "oracle" : "ops-venue",
+        feed: this.venueFeed,
+      },
     };
   }
 

@@ -5,7 +5,7 @@ import { RECEIPT_KIND } from "@bookrunner/shared";
 import { prefixOf, toKey } from "../keys";
 import { errMsg, nowSec } from "../util";
 import type { BookRegistry } from "./books";
-import type { OpsContext } from "./context";
+import { type OpsContext, tradable } from "./context";
 
 export type RevokeSource = "job" | "kill_channel" | "mandate_kill";
 
@@ -33,15 +33,17 @@ export class Revoker {
       const prefix = prefixOf(trade);
       const already = !!trade.revokedAt;
       if (!already) {
-        const symbol = this.registry.get(bookId)?.symbol;
-        if (symbol) {
+        const book = this.registry.get(bookId);
+        // a book without an Orderly market never quoted, and its trade key was never registered (provision.ts)
+        const neverTraded = !!book && !tradable(book);
+        if (book && !neverTraded) {
           try {
-            await this.ctx.cancelAll(trade.accountId, symbol, await toKey(trade));
+            await this.ctx.cancelAll(trade.accountId, book.symbol, await toKey(trade));
           } catch (err) {
             log.warn({ bookId, err: errMsg(err) }, "pre-revoke cancel-all failed (continuing with revocation)");
           }
         }
-        await builder.revokeTradeKey({ accountId: trade.accountId, keyPrefix: prefix, orderlyKey: trade.orderlyKey });
+        if (!(neverTraded && !trade.registeredAt)) await builder.revokeTradeKey({ accountId: trade.accountId, keyPrefix: prefix, orderlyKey: trade.orderlyKey });
         keys.markTradeRevoked(bookId, reason, this.ctx.now());
         log.warn({ bookId, key: prefix, reason, source }, "venue trade key revoked");
       }

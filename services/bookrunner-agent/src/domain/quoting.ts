@@ -43,6 +43,8 @@ export interface AgentQuote {
   bid?: { px: number; qty: number };
   ask?: { px: number; qty: number };
   reduceOnly?: boolean;
+  /** maker-only orders (Orderly market in POST_ONLY, set by the agent's venue market gate) */
+  postOnly?: boolean;
   oraclePx: number;
   /** Full two-sided quote the mandate check ran on (published sides are a subset). */
   theoretical: { bidPx: number; askPx: number };

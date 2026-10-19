@@ -4,6 +4,7 @@ import { type Charter, type Deployment, type Mandate, ORACLE, VENUE } from "@boo
 import { HEDGE_VENUES, bytes32ToStr, indexUnderlying, isTokenUnderlying, strToBytes32, tokenUnderlying, underlyingToToken } from "@bookrunner/shared/bytes32";
 import { SESSIONS_24X5, SESSIONS_24X7, SESSIONS_NYSE_RTH, type Sessions, encodeSessions } from "@bookrunner/shared/sessions";
 import { hedgeAllowTree } from "@bookrunner/shared/merkle";
+import { orderlyCharterSymbolIssue } from "@bookrunner/shared/venueSymbol";
 import { type Address, type Hex, getAddress, isAddress, toBytes, zeroHash } from "viem";
 import { z } from "zod";
 import { parseUsd, usdStr } from "../format";
@@ -229,6 +230,8 @@ export interface ValidationContext {
   /** true/false when checked against the registry; null/undefined when unknown. */
   underlyingKnown?: boolean | null;
   newBooksPaused?: boolean;
+  /** ORDERLY_BROKER_ID: an Orderly charter may name only our own builder market (PERP_<T>_USDC_<broker>). */
+  orderlyBrokerId?: string | null;
 }
 
 /** Mirrors MarketCharter.validate (ARCHITECTURE §2.6); reports every failing rule, not only the first. */
@@ -268,6 +271,12 @@ export function validateCharterLocal(c: Charter, ctx: ValidationContext = {}): C
     add("BAD_UNDERLYING", "underlying", "Underlying is neither a canonical Stock Token nor a registered index");
   }
   if (c.symbol === zeroHash) add("BAD_SYMBOL", "symbol", "Venue symbol is required");
+  else if (c.venue === VENUE.ORDERLY) {
+    // off-chain rule (MarketCharter only checks non-empty): a book must be able to trade on Orderly whatever
+    // ORDERLY_MODE is when it goes live (packages/shared/src/venueSymbol.ts, VERIFY O19)
+    const issue = orderlyCharterSymbolIssue(bytes32ToStr(c.symbol), ctx.orderlyBrokerId);
+    if (issue) add("BAD_SYMBOL", "symbol", `Venue symbol rejected: ${issue}`);
+  }
   if (c.venue === VENUE.POOL_ENGINE && c.takerFeeBps > MAX_IN_HOUSE_TAKER_FEE_BPS) {
     add("BAD_FEES", "takerFeeBps", "In-house taker fee must be at most 100 bps");
   }

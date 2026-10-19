@@ -49,7 +49,12 @@ export class Runtime {
       deployment: dep,
       chain: clients.reader,
       db: this.db,
-      cfg: { tickers: this.cfg.tickers, indexes: this.cfg.indexes, defaultSessions: DEFAULT_SESSIONS[this.cfg.ORACLE_DEFAULT_SESSIONS] },
+      cfg: {
+        tickers: this.cfg.tickers,
+        indexes: this.cfg.indexes,
+        defaultSessions: DEFAULT_SESSIONS[this.cfg.ORACLE_DEFAULT_SESSIONS],
+        venueSymbols: { mode: this.cfg.ORDERLY_MODE, brokerId: this.cfg.ORDERLY_BROKER_ID },
+      },
     });
     const warnings = [...result.warnings];
     if (this.cfg.ORACLE_PYTH) {

@@ -3,7 +3,7 @@
 // at the builder price, base taker fees with a 50% builder share settled per period, insurance fund
 // balances per symbol, withdrawal requests (paid on-chain by ops-venue), and orderly-key registry.
 // All cash amounts are integer micro-USD (µ) internally; REST responses render USD decimals.
-import type { Side } from "@bookrunner/shared";
+import { parseVenueSymbol, type Side, type VenueSymbolParts } from "@bookrunner/shared";
 import { builderShareMicro, DEFAULT_FEES, type FeeKind, type FeeSchedule, feeMicro, fromMicro, settlementPeriodOf, toMicro } from "./fees";
 import { DEFAULT_FLOW, type FlowParams, sampleArrivals, updateEma } from "./flow";
 import { applyTrade, matchTaker, reducibleQty, type RestingOrder, roundQty, wouldCross } from "./matching";
@@ -249,13 +249,28 @@ export function normalizeAccountId(id: string): string {
   return /^0x[0-9a-fA-F]+$/.test(t) ? t.toLowerCase() : t;
 }
 
-export function baseAssetOf(symbolOrBase: string): string {
-  const s = symbolOrBase.trim().toUpperCase();
-  const m = /^PERP_(.+)_USDC$/.exec(s);
-  return m?.[1] ?? s;
+/**
+ * Orderly symbol parts via the services' parser (packages/shared venueSymbol.ts): PERP_<BASE>_USDC, or a builder
+ * (Perp Anything) market PERP_<BASE>_USDC_<broker_id> as live Orderly names it (docs/VERIFY.md O14). The mock is
+ * lenient about case: an all-uppercase input is retried with its broker id lowercased.
+ */
+function partsOf(symbol: string): VenueSymbolParts | null {
+  const t = symbol.trim();
+  const up = t.toUpperCase();
+  const p = parseVenueSymbol(t) ?? parseVenueSymbol(up);
+  if (p) return p;
+  const i = up.indexOf("_USDC_");
+  return i > 0 ? parseVenueSymbol(up.slice(0, i + 5) + up.slice(i + 5).toLowerCase()) : null;
 }
 
+export function baseAssetOf(symbolOrBase: string): string {
+  return partsOf(symbolOrBase)?.base ?? symbolOrBase.trim().toUpperCase();
+}
+
+/** Canonical symbol: PERP_<BASE>_USDC, or PERP_<BASE>_USDC_<broker> with the broker id kept lowercase. */
 export function symbolOf(symbolOrBase: string): string {
+  const p = partsOf(symbolOrBase);
+  if (p) return `PERP_${p.base}_${p.quote}${p.broker ? `_${p.broker}` : ""}`;
   const s = symbolOrBase.trim().toUpperCase();
   return s.startsWith("PERP_") ? s : `PERP_${s}_USDC`;
 }
@@ -392,7 +407,8 @@ export class MockVenue {
   // ------------------------------------------------------------------ symbols & prices
   createSymbol(p: { symbol: string; baseAsset?: string; priceSource?: string; sessions?: string; ifAccountId?: string; builderAccountId?: string }): SymbolState {
     const symbol = symbolOf(p.symbol);
-    if (!/^PERP_[A-Z0-9]{1,24}_USDC$/.test(symbol)) throw new VenueError(400, ERR.INVALID_PARAM, `invalid symbol ${p.symbol}`);
+    const parsedBase = parseVenueSymbol(symbol)?.base;
+    if (!parsedBase || parsedBase.length > 24) throw new VenueError(400, ERR.INVALID_PARAM, `invalid symbol ${p.symbol}`);
     if (p.builderAccountId) this.setBuilder(p.builderAccountId);
     let s = this.symbols.get(symbol);
     if (!s) {

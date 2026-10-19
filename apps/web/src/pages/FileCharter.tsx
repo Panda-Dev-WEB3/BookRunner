@@ -22,6 +22,7 @@ import {
   stepOf,
   suggestSymbol,
 } from "../lib/charterForm";
+import { config } from "../lib/config";
 import { TRANCHE_COPY } from "../lib/copy";
 import { bpsPct, fmtBps, fmtDuration, fmtNum, fmtUsd } from "../lib/format";
 import { useSettlementSymbol } from "../wallet/settlementSymbol";
@@ -92,7 +93,7 @@ export function FileCharterPage() {
   const [form, setForm] = useState<CharterForm>(loadDraft);
   const [step, setStep] = useState<StepId>("market");
   const file = trpc.charter.file.useMutation();
-  const issues = useMemo(() => formIssues(form), [form]);
+  const issues = useMemo(() => formIssues(form, { chainId: config.chainId }), [form]);
   const errors = issues.filter((i) => i.severity === "error");
 
   useEffect(() => {

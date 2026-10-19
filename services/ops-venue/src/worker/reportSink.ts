@@ -1,8 +1,9 @@
 // Signed venue reports (OPS_REPORT_MODE=signed): the OPS_VENUE key signs, Redis carries them to the mark
 // keeper (MarkRegistry.commitAndApply), risk and the api. Formats: src/report712.ts.
+import { BUILDER_FEED_STATUS_TTL_SEC, type BuilderFeedStatusMsg, KEYS, VENUE_SYMBOL_ISSUES_TTL_SEC, type VenueSymbolIssuesMsg } from "@bookrunner/shared";
 import type { Address, Hex, LocalAccount } from "viem";
 import { type SignedVenueReportJson, VENUE_REPORT_RECENT_MAX, type VenueReportValues, signVenueReport, venueReportKey, venueReportRecentKey } from "../report712";
-import type { ReportPublisher, ReportSigner } from "./context";
+import type { ReportPublisher, ReportSigner, StatusPublisher } from "./context";
 
 /** ReportSigner over the ops-venue LocalAccount (roleAccount("opsVenue")). */
 export function accountReportSigner(account: LocalAccount, chainId: number): ReportSigner {
@@ -56,5 +57,37 @@ export class MemoryReportPublisher implements ReportPublisher {
     this.published.push(r);
     this.latest.set(r.bookId, r);
     this.recent.set(r.bookId, [r, ...(this.recent.get(r.bookId) ?? [])].slice(0, VENUE_REPORT_RECENT_MAX));
+  }
+}
+
+/** Structural subset of ioredis for the status key (SET with expiry). */
+export interface RedisSetExLike {
+  set(key: string, value: string, mode: "EX", seconds: number): Promise<unknown>;
+}
+
+/** KEYS.venueEverListed (a Redis SET, no TTL): the listing tracker's persisted everListed symbols. */
+export class RedisEverListedStore {
+  constructor(private readonly redis: { smembers(key: string): Promise<string[]>; sadd(key: string, ...members: string[]): Promise<number> }) {}
+
+  load(): Promise<string[]> {
+    return this.redis.smembers(KEYS.venueEverListed);
+  }
+
+  async add(symbol: string): Promise<void> {
+    await this.redis.sadd(KEYS.venueEverListed, symbol);
+  }
+}
+
+/** KEYS.venueSymbolIssues (read by services/alerts), refreshed every book poll, expires when ops-venue stops. */
+export class RedisStatusPublisher implements StatusPublisher {
+  constructor(private readonly redis: RedisSetExLike) {}
+
+  async venueSymbolIssues(msg: VenueSymbolIssuesMsg): Promise<void> {
+    await this.redis.set(KEYS.venueSymbolIssues, JSON.stringify(msg), "EX", VENUE_SYMBOL_ISSUES_TTL_SEC);
+  }
+
+  /** Live builder price push state (builderOracle/feed.ts) for services/alerts builder_price_push. */
+  async builderFeed(msg: BuilderFeedStatusMsg): Promise<void> {
+    await this.redis.set(KEYS.builderFeedStatus, JSON.stringify(msg), "EX", BUILDER_FEED_STATUS_TTL_SEC);
   }
 }

@@ -1,6 +1,6 @@
 // risk service entry: wiring + graceful shutdown. See ARCHITECTURE.md §3 flow 4 and §4 (risk row).
 import { createDb } from "@bookrunner/db";
-import { createLogger, publicClientFor, roleSigner, tryLoadDeployment, walletClientFor } from "@bookrunner/shared";
+import { assertVenueSymbolConfig, createLogger, publicClientFor, roleSigner, tryLoadDeployment, walletClientFor } from "@bookrunner/shared";
 import { Redis } from "ioredis";
 import { type Hex, zeroHash } from "viem";
 import { ViemChain } from "./adapters/chain";
@@ -35,6 +35,7 @@ async function main(): Promise<void> {
     },
     "risk service starting",
   );
+  assertVenueSymbolConfig({ mode: env.ORDERLY_MODE, brokerId: env.ORDERLY_BROKER_ID }); // live: books trade PERP_<T>_USDC_<broker>
 
   const { db, close: closeDb } = createDb(env.DATABASE_URL, 4);
   const store = new DrizzleStore(db);
@@ -85,6 +86,7 @@ async function main(): Promise<void> {
     makeVenues: (chain: ChainGateway) =>
       new OrderlyVenueProvider({
         mode: env.ORDERLY_MODE,
+        brokerId: env.ORDERLY_BROKER_ID,
         baseUrl: env.ORDERLY_BASE_URL,
         signer,
         timeoutMs: env.RISK_VENUE_TIMEOUT_MS,

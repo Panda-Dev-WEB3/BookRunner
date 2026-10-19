@@ -1,6 +1,6 @@
 // Indexer: decoding, dynamic book watch, cursor advance, idempotent re-application, poison logs.
 import { describe, expect, test } from "bun:test";
-import { CHANNELS, createLogger } from "@bookrunner/shared";
+import { BUS_NS, CHANNELS, createLogger } from "@bookrunner/shared";
 import { bookAbi, trancheAbi } from "@bookrunner/shared/abi";
 import { CURSORS } from "../src/config";
 import { cidFromDigest } from "../src/convert";
@@ -130,7 +130,8 @@ describe("indexer runner", () => {
     expect(published.every((p) => p.channel === CHANNELS.domainEvents)).toBe(true);
     const decided = published.find((p) => p.msg.type === "charter.decided")!.msg;
     expect(decided).toMatchObject({ data: { charterId: 1, approved: true, juryCid: cidFromDigest(DIGEST), book: ADDR.book } });
-    expect(Object.keys(decided).sort()).toEqual(["createdAt", "data", "id", "type"]);
+    expect(Object.keys(decided).sort()).toEqual(["createdAt", "data", "id", "ns", "type"]); // ns: the stack's bus namespace
+    expect((decided as { ns?: string }).ns).toBe(BUS_NS);
   });
 
   test("small batches reach the same state (cursor advances range by range)", async () => {
