@@ -7,6 +7,19 @@ export const bookAbi = [
   },
   {
     "type": "function",
+    "name": "CLOSE_WINDOW_TIMEOUT",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "KILL_DRAWDOWN",
     "inputs": [],
     "outputs": [
@@ -100,6 +113,13 @@ export const bookAbi = [
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "cancelStuckWindow",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -1952,6 +1972,17 @@ export const bookAbi = [
         "name": "markId",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "WindowNotStuck",
+    "inputs": [
+      {
+        "name": "cancellableAt",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ]
   },
