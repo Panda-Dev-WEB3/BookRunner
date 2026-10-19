@@ -11,6 +11,8 @@
 // state change). Venue calls are serialized so a cancel can never be overtaken by an in-flight replace.
 
 import {
+  AGENT_STATUS_TTL_SEC,
+  type AgentStatusMsg,
   type BookState,
   type FillMsg,
   KEYS,
@@ -25,6 +27,7 @@ import {
   type VenueFill,
   isOpen,
   parseVenueMarkets,
+  quoteRefOf,
   usdToNumber,
   venueMarketGate,
   venueMarketPostOnly,
@@ -52,6 +55,8 @@ export interface AgentChain {
   venueExposureUsd?(): Promise<bigint>;
   /** adapter.valuationAt() (unix seconds). */
   venueValuationAt?(): Promise<number>;
+  /** MMMandate.isActiveKey(the agent's desk session key); absent = the agent has no desk key */
+  deskKeyActive?(): Promise<boolean>;
 }
 
 export interface BookAgentConfig {
@@ -92,6 +97,14 @@ export interface BookAgentConfig {
    * signed; held / stale / closed-session from the feed itself still apply.
    */
   pullPrices?: boolean;
+  /**
+   * The agent quotes new risk only with an active desk session key (Task 7b: every quote risk judges is signed by one);
+   * without one it runs reduce-only and reports it (KEYS.agentStatus, alerts agent_no_desk_key). Default false
+   * (tests); the service sets it.
+   */
+  requireDeskKey?: boolean;
+  /** No verified (RISK-signed) risk state for this long: reduce-only (AGENT_RISK_STATE_TIMEOUT_MS, default 30 s). */
+  riskStateTimeoutMs?: number;
 }
 
 export interface BookAgentDeps {
@@ -113,7 +126,15 @@ export interface BookAgentDeps {
    * signed by an active desk key (audit 2026-10 lead "Redis trust"). Absent: published unsigned (no risk quote check).
    */
   signQuote?: (q: QuoteMsg) => Promise<`0x${string}`>;
+  /**
+   * Verifies a risk state read from Redis (RISK-signed, fresh, newer; AgentRiskStateGate): the state, or null when it
+   * is not acted on. Absent (tests): the state is taken as read.
+   */
+  verifyRiskState?: (raw: unknown) => Promise<LimitState | null>;
 }
+
+/** AGENT_RISK_STATE_TIMEOUT_MS default: no verified risk state for this long = reduce-only. */
+export const DEFAULT_RISK_STATE_TIMEOUT_MS = 30_000;
 
 /** AGENT_VENUE_GATE_HOLD_MS default: how long a venue restriction outlives its market data (BookAgentConfig.venueGate). */
 export const DEFAULT_VENUE_GATE_HOLD_MS = 5 * 60_000;
@@ -136,6 +157,13 @@ export class BookAgent {
   private venueDataAt = 0;
   /** the current hold (data gone while restricted) was logged */
   private venueHoldLogged = false;
+  /** desk session key on the mandate (requireDeskKey) and since when it is not active */
+  private deskKey: AgentStatusMsg["deskKey"] = "missing";
+  private deskKeySince: number | null = null;
+  private deskKeyKnown = false;
+  /** agent clock of the last verified risk state (verifyRiskState) and of the start (the timeout's reference) */
+  private lastVerifiedRiskAt: number | null = null;
+  private readonly startedAt: number;
 
   private resting: AgentQuote | null = null;
   private restingSince = 0;
@@ -168,6 +196,7 @@ export class BookAgent {
   ) {
     this.mandate = d.initialMandate;
     this.now = d.now ?? Date.now;
+    this.startedAt = this.now();
   }
 
   // ---------------------------------------------------------------- external signals
@@ -196,6 +225,16 @@ export class BookAgent {
   }
 
   onRiskState(raw: string): void {
+    const verify = this.d.verifyRiskState;
+    if (verify) {
+      // Redis is not trusted: only a RISK-signed, fresh, newer state is acted on (halting needs a signed "killed")
+      void verify(raw)
+        .then((s) => {
+          if (s) this.acceptRiskState(s);
+        })
+        .catch((err) => this.d.log.debug({ err: errMsg(err) }, "risk state verification failed"));
+      return;
+    }
     let state: unknown;
     try {
       state = (JSON.parse(raw) as { state?: unknown }).state;
@@ -204,6 +243,22 @@ export class BookAgent {
     }
     if (typeof state !== "string" || !LIMIT_STATES.includes(state as LimitState)) return;
     this.setRiskState(state as LimitState);
+  }
+
+  private acceptRiskState(s: LimitState): void {
+    this.lastVerifiedRiskAt = this.now();
+    this.setRiskState(s);
+  }
+
+  /** No verified risk state for the timeout (only with a verifier): reduce-only, never a halt. */
+  private riskUnverified(now: number): boolean {
+    if (!this.d.verifyRiskState) return false;
+    return now - (this.lastVerifiedRiskAt ?? this.startedAt) > (this.cfg.riskStateTimeoutMs ?? DEFAULT_RISK_STATE_TIMEOUT_MS);
+  }
+
+  private deskKeyActiveForMode(): boolean | undefined {
+    if (!this.cfg.requireDeskKey) return undefined;
+    return this.deskKey === "active";
   }
 
   private setRiskState(s: LimitState): void {
@@ -326,14 +381,56 @@ export class BookAgent {
     if (failed.length > 0 && failed.length < 4) this.d.log.debug({ failed: failed.length, err: errMsg(failed[0]?.reason) }, "partial chain state refresh");
 
     const risk = await this.d.bus.getJson<{ state?: string }>(KEYS.riskState(this.d.bookId)).catch(() => null);
-    if (risk && typeof risk.state === "string" && LIMIT_STATES.includes(risk.state as LimitState)) this.setRiskState(risk.state as LimitState);
+    if (this.d.verifyRiskState) {
+      const s = risk ? await this.d.verifyRiskState(risk).catch(() => null) : null;
+      if (s) this.acceptRiskState(s);
+    } else if (risk && typeof risk.state === "string" && LIMIT_STATES.includes(risk.state as LimitState)) this.setRiskState(risk.state as LimitState);
+    await this.refreshDeskKey();
     await this.refreshVenueGate();
+    await this.publishStatus();
 
     if (this.d.chain.oracleFallback && this.d.price.ageSec(this.now()) > this.cfg.chainPriceFallbackSec) {
       const p = await this.d.chain.oracleFallback().catch(() => null);
       if (this.d.price.ingest(p)) this.d.log.debug({ price: p?.price }, "price from AttestedOracle fallback");
     }
     if (failed.length === 4) throw new Error(`chain state unavailable: ${errMsg(failed[0]?.reason)}`);
+  }
+
+  /** MMMandate.isActiveKey of the agent's desk key (requireDeskKey): an inactive / missing key = reduce-only. */
+  private async refreshDeskKey(): Promise<void> {
+    if (!this.cfg.requireDeskKey) return;
+    let next: AgentStatusMsg["deskKey"] = "missing";
+    if (this.d.chain.deskKeyActive) {
+      try {
+        next = (await this.d.chain.deskKeyActive()) ? "active" : "inactive";
+      } catch (err) {
+        if (this.deskKeyKnown) return; // RPC blip: keep the last known status
+        this.d.log.debug({ err: errMsg(err) }, "desk key status unreadable");
+        next = "inactive";
+      }
+    }
+    this.deskKeyKnown = true;
+    if (next !== this.deskKey) {
+      this.d.log[next === "active" ? "info" : "warn"]({ from: this.deskKey, to: next }, next === "active" ? "desk session key active: quoting allowed" : "no active desk session key on the mandate: reduce-only (register / re-register the key)");
+      this.deskKeySince = next === "active" ? null : this.now();
+      if (next !== "active") void this.quoteTickSafe(); // stop new risk now
+    } else if (next !== "active" && this.deskKeySince === null) this.deskKeySince = this.now();
+    this.deskKey = next;
+  }
+
+  /** The agent's status for services/alerts (agent_no_desk_key, risk_state_unverified): KEYS.agentStatus. */
+  private async publishStatus(): Promise<void> {
+    if (!this.cfg.requireDeskKey && !this.d.verifyRiskState) return;
+    const now = this.now();
+    const msg: AgentStatusMsg = {
+      v: 1,
+      bookId: this.d.bookId,
+      ts: now,
+      deskKey: this.cfg.requireDeskKey ? this.deskKey : "active",
+      deskKeySince: this.cfg.requireDeskKey && this.deskKey !== "active" ? (this.deskKeySince ?? now) : null,
+      riskStateUnverifiedSince: this.riskUnverified(now) ? (this.lastVerifiedRiskAt ?? this.startedAt) : null,
+    };
+    await this.d.bus.setJson(KEYS.agentStatus(this.d.bookId), msg, AGENT_STATUS_TTL_SEC * 1000).catch((err) => this.d.log.debug({ err: errMsg(err) }, "agent status publish failed"));
   }
 
   /** ops-venue's Orderly market state for this book (Redis, written by ops-venue): restricts only. */
@@ -384,7 +481,7 @@ export class BookAgent {
     const now = this.now();
     void this.d.bus.heartbeat(this.d.bookId, this.cfg.heartbeatTtlMs).catch((err) => this.d.log.debug({ err: errMsg(err) }, "heartbeat failed"));
 
-    const md = resolveMode({ killMessage: this.killMsg, mandateKilled: this.mandateKilled, riskState: this.riskState, bookState: this.bookState, venueGate: this.venueGate });
+    const md = this.mode(now);
     if (md.reason !== this.lastModeReason) {
       this.d.log.info({ mode: md.mode, hedgeMode: md.hedgeMode, reason: md.reason }, "agent mode");
       this.lastModeReason = md.reason;
@@ -442,6 +539,18 @@ export class BookAgent {
     if (placed || this.resting) await this.sample(this.resting ?? q, exposure, now);
   }
 
+  private mode(now: number) {
+    return resolveMode({
+      killMessage: this.killMsg,
+      mandateKilled: this.mandateKilled,
+      riskState: this.riskState,
+      bookState: this.bookState,
+      venueGate: this.venueGate,
+      riskUnverified: this.riskUnverified(now),
+      ...(this.cfg.requireDeskKey ? { deskKeyActive: this.deskKeyActiveForMode() } : {}),
+    });
+  }
+
   private needsRequote(q: AgentQuote, oraclePx: number, now: number): boolean {
     if (this.d.venue.kind === "engine") return true; // EngineVenue applies its own change thresholds
     if (!this.resting || this.cancelled) return true;
@@ -465,7 +574,9 @@ export class BookAgent {
   }
 
   toQuoteMsg(q: AgentQuote, exposure: bigint, now: number): QuoteMsg {
+    const px = this.d.price.latest();
     return {
+      ...(px ? { ref: quoteRefOf(px) } : {}),
       bookId: this.d.bookId,
       ts: now,
       bid: q.theoretical.bidPx,
@@ -485,7 +596,8 @@ export class BookAgent {
     const changed = key !== this.sampleKey;
     this.sampleKey = key;
     const msg = this.toQuoteMsg(q, exposure, now);
-    const sign = this.d.signQuote;
+    // signed only with an active desk key (risk accepts only those); the signature covers the reference print
+    const sign = this.deskKey === "active" || !this.cfg.requireDeskKey ? this.d.signQuote : undefined;
     void (async () => {
       const signature = sign ? await sign(msg).catch((err) => (this.d.log.debug({ err: errMsg(err) }, "quote signing failed"), undefined)) : undefined;
       await this.d.bus.publishQuote(signature ? { ...msg, signature } : msg, this.cfg.quoteTtlMs);
@@ -601,7 +713,7 @@ export class BookAgent {
 
   async hedgeTick(): Promise<void> {
     if (!this.d.hedger) return;
-    const md = resolveMode({ killMessage: this.killMsg, mandateKilled: this.mandateKilled, riskState: this.riskState, bookState: this.bookState, venueGate: this.venueGate });
+    const md = this.mode(this.now());
     if (md.hedgeMode === "off" || this.stopped) return;
     // plan against the exposure the on-chain hedge check uses; the venue view is the fallback
     const exposure = this.d.chain.venueExposureUsd

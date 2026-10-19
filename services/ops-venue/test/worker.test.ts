@@ -107,9 +107,9 @@ describe("kill -> venue key revocation", () => {
       if (o.riskCheckDown?.()) throw new Error("rpc down");
       return a.toLowerCase() === RISK.address.toLowerCase();
     };
-    const verifier = () => new KillVerifier({ chainId: 31337, config: CONFIG, isRiskSigner: isRiskSigner as never, now: () => t.ctx.now() });
+    const verifier = (consumeNonces: boolean) => new KillVerifier({ chainId: 31337, config: CONFIG, isRiskSigner: isRiskSigner as never, now: () => t.ctx.now(), consumeNonces });
     const forgedWrites: BusForgedMsg[] = [];
-    t.ctx.killAuth = { channel: verifier(), job: verifier(), forged: new ForgedLog("ops-venue", async (m) => void forgedWrites.push(m), () => t.ctx.now()) };
+    t.ctx.killAuth = { channel: verifier(true), job: verifier(false), forged: new ForgedLog("ops-venue", async (m) => void forgedWrites.push(m), () => t.ctx.now()) };
     t.mock.venue.credit(MM_ID, 75_000_000_000);
     t.mock.venue.setPrice("NVDA", 190, false);
     t.mock.venue.credit(IF_ID, 25_000_000_000);
@@ -198,6 +198,22 @@ describe("kill -> venue key revocation", () => {
     await t.svc.handleJob({ kind: "revoke_key", bookId: 1, kill: old });
     expect(t.keys.loadBook(1)?.trade?.revokedAt).toBeNull();
     expect(t.forgedWrites).toHaveLength(0); // replays are not forgeries
+  });
+
+  test("a revoke_key job retried after a transient failure re-verifies its signed order and revokes at once", async () => {
+    const t = await authed();
+    const job = { kind: "revoke_key" as const, bookId: 1, kill: await t.kill() };
+    const revokeTradeKey = t.ctx.builder.revokeTradeKey.bind(t.ctx.builder);
+    let fail = true;
+    t.ctx.builder.revokeTradeKey = async (p) => {
+      if (fail) throw new Error("orderly 503");
+      return revokeTradeKey(p);
+    };
+    await expect(t.svc.handleJob(job)).rejects.toThrow("orderly 503"); // BullMQ retries the same job data
+    fail = false;
+    expect(t.chain.killed).toBe(false);
+    const r = await t.svc.handleJob(job);
+    expect(r.revokedNow).toBe(true);
   });
 
   test("RISK role check unavailable (RPC): cancel the orders, revoke only on the on-chain kill", async () => {

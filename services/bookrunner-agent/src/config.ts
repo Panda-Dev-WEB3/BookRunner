@@ -34,6 +34,8 @@ export const agentEnvShape = {
   // on a price as old as the one risk holds the book reduce-only for
   AGENT_PRICE_STALE_SECONDS: num(QUOTE_PRICE_MAX_AGE_MS / 1000),
   AGENT_CHAIN_PRICE_FALLBACK_SECONDS: num(10), // poll AttestedOracle when Redis is this quiet
+  // no RISK-signed risk state verified for this long: reduce-only (never a halt; alerts risk_state_unverified)
+  AGENT_RISK_STATE_TIMEOUT_MS: num(30_000),
 
   // Avellaneda-Stoikov + clamps
   AGENT_GAMMA: num(50),

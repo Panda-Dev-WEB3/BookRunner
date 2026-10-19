@@ -5,7 +5,7 @@
 //   - unsigned / forged: ignored, logged and counted (alerts bus_forged_message): a Redis writer cannot halt the agent;
 //   - the RISK role check could not run (RPC): ignored with an error log. A genuine kill also lands on-chain
 //     (MMMandate.kill): the agent's state refresh halts on mandate.killed(), and risk cancels at the venue directly.
-import type { ForgedLog, KillMsg, KillVerifier, Logger } from "@bookrunner/shared";
+import type { ForgedLog, KillMsg, KillVerifier, LimitState, Logger, RiskStateVerifier } from "@bookrunner/shared";
 
 export class AgentKillGate {
   constructor(
@@ -32,6 +32,38 @@ export class AgentKillGate {
       this.log.error({ reason: v.reason }, "kill message could not be verified (RPC): ignored; the on-chain kill (mandate.killed) still halts the agent");
     } else {
       this.log.info({ reason: v.reason }, "kill message ignored (stale or replayed)");
+    }
+    return null;
+  }
+}
+
+/**
+ * Risk states from Redis (KEYS.riskState / CHANNELS.riskState) reach the BookAgent only when RISK-signed, fresh and
+ * newer than the last accepted (shared RiskStateVerifier). Unsigned / forged ones are ignored and counted (alerts
+ * bus_forged_message); replays and stale ones are ignored silently. Without a verified state for its timeout the agent
+ * goes reduce-only (never halts).
+ */
+export class AgentRiskStateGate {
+  private lastLog = 0;
+
+  constructor(
+    private readonly verifier: RiskStateVerifier,
+    private readonly forged: ForgedLog,
+    private readonly log: Logger,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  async accept(raw: unknown): Promise<LimitState | null> {
+    const v = await this.verifier.verify(raw);
+    if (v.ok) return v.state;
+    if (v.forged) {
+      this.forged.note("state", v.reason);
+      if (this.now() - this.lastLog > 60_000) {
+        this.lastLog = this.now();
+        this.log.warn({ reason: v.reason }, "FORGED risk state ignored (no valid RISK signature)");
+      }
+    } else if (v.unavailable) {
+      this.log.warn({ reason: v.reason }, "risk state could not be verified (RPC): ignored");
     }
     return null;
   }

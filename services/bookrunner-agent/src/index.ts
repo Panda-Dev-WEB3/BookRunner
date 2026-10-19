@@ -15,12 +15,14 @@ import {
   ForgedLog,
   KillVerifier,
   OraclePriceVerifier,
+  RiskStateVerifier,
   type QuoteMsg,
   type QuotingVenue,
   VENUE,
   assertVenueSymbolConfig,
   bytes32ToStr,
   cachedAddressCheck,
+  derivedDeskAccount,
   createLogger,
   deploymentPath,
   effectiveSessions,
@@ -28,7 +30,6 @@ import {
   oracleSignerCheck,
   priceId as priceIdOfTicker,
   publicClientFor,
-  roleAccount,
   signQuote,
   tryLoadDeployment,
   underlyingToToken,
@@ -42,7 +43,7 @@ import { BookAgent } from "./agent/book-agent";
 import { type HedgeChain, Hedger } from "./agent/hedger";
 import { makeVenueReportRelay } from "./chain/venue-report-relay";
 import { DeskRejects } from "./agent/desk-rejects";
-import { AgentKillGate } from "./agent/kill-gate";
+import { AgentKillGate, AgentRiskStateGate } from "./agent/kill-gate";
 import { PriceFeed, VerifiedPriceInput, oracleMsgFromChain } from "./agent/price-feed";
 import { BookChain } from "./chain/book-chain";
 import { DeskClient } from "./chain/desk-client";
@@ -59,7 +60,6 @@ import { EngineVenue } from "./venues/engine";
 import { createOrderlyVenue } from "./venues/orderly";
 import { VenueSymbolError, agentVenueSymbol, idleUntilAborted } from "./venues/symbol";
 
-const DESK_ROLES = ["deskKeyNvda", "deskKeyTsla", "deskKeyIndex"] as const;
 
 interface BookContext {
   deployment: Deployment;
@@ -76,12 +76,11 @@ interface BookContext {
 }
 
 /** Desk session key: DESK_KEY_PRIVATE_KEY, else the devnet key for the book's launch order. */
-export function deskAccountFor(env: AgentEnv, deployment: Deployment, bookId: number): LocalAccount | null {
+export function deskAccountFor(env: AgentEnv, deployment: Deployment, bookId: number, procEnv: Record<string, string | undefined> = process.env): LocalAccount | null {
   if (env.DESK_KEY_PRIVATE_KEY) return privateKeyToAccount(env.DESK_KEY_PRIVATE_KEY as Hex);
-  const order = [...deployment.books].sort((a, b) => a.bookId - b.bookId).findIndex((b) => b.bookId === bookId);
-  const role = DESK_ROLES[order];
-  if (!role) return null;
-  return roleAccount(role, process.env);
+  // launch books: their launch role; every other book (devnet / testnet): its own derived key (scripts/desk-keys.ts
+  // registers it); mainnet: none (DESK_KEY_PRIVATE_KEY_<bookId>)
+  return derivedDeskAccount(deployment.books.map((b) => b.bookId), bookId, procEnv);
 }
 
 async function bootstrap(env: AgentEnv, log: Logger, signal: AbortSignal): Promise<BookContext | null> {
@@ -149,6 +148,8 @@ interface Holder {
   prices: VerifiedPriceInput | null;
   /** Redis kill messages -> RISK-signed kill orders for this book */
   kills: AgentKillGate | null;
+  /** Redis risk states -> RISK-signed states for this book (monotonic across agent restarts in the process) */
+  riskStates: AgentRiskStateGate | null;
 }
 
 /**
@@ -166,14 +167,18 @@ export function oracleVerifierFor(ctx: Pick<BookContext, "pub" | "deployment">, 
  * The kill-order check of the kill channel (audit 2026-10 lead "Redis trust"): RISK-signed EIP-712 KillOrder under
  * (CHAIN_ID, BookrunnerConfig); signer = config.hasRole(RISK_ROLE) on-chain (cached) or the pinned AGENT_RISK_SIGNERS.
  */
-export function killVerifierFor(ctx: Pick<BookContext, "pub" | "deployment">, chainId: number, pinned?: string): KillVerifier {
+export function riskSignerCheckFor(ctx: Pick<BookContext, "pub" | "deployment">, pinned?: string): (a: Hex) => Promise<boolean> {
   const config = ctx.deployment.contracts.config;
   let role: Hex | null = null;
   const onChain = async (a: Hex) => {
     role ??= (await ctx.pub.readContract({ address: config, abi: bookrunnerConfigAbi, functionName: "RISK_ROLE" })) as Hex;
     return (await ctx.pub.readContract({ address: config, abi: bookrunnerConfigAbi, functionName: "hasRole", args: [role, a] })) as boolean;
   };
-  return new KillVerifier({ chainId, config, isRiskSigner: cachedAddressCheck({ pinned, pinnedEnv: "AGENT_RISK_SIGNERS", onChain }) });
+  return cachedAddressCheck({ pinned, pinnedEnv: "AGENT_RISK_SIGNERS", onChain });
+}
+
+export function killVerifierFor(ctx: Pick<BookContext, "pub" | "deployment">, chainId: number, isRiskSigner: (a: Hex) => Promise<boolean>): KillVerifier {
+  return new KillVerifier({ chainId, config: ctx.deployment.contracts.config, isRiskSigner });
 }
 
 async function runOnce(
@@ -343,6 +348,8 @@ async function runOnce(
         oracleFallback: async () => oracleMsgFromChain(ctx.priceIdStr, ctx.priceIdHex, await ctx.chain.oracleLatest(ctx.priceIdHex)),
         venueExposureUsd: reportRelay ? async () => (await reportRelay.view()).exposureUsd : () => ctx.chain.adapterExposureUsd(),
         venueValuationAt: reportRelay ? async () => (await reportRelay.view()).valuationAt : () => ctx.chain.adapterValuationAt(),
+        // quoting new risk needs an active desk session key (read every state refresh: expiry / REVOKE_KEY take effect)
+        ...(ctx.deskAccount ? { deskKeyActive: () => ctx.chain.isActiveKey((ctx.deskAccount as LocalAccount).address) } : {}),
       },
       price,
       vol,
@@ -354,7 +361,8 @@ async function runOnce(
       initialMandate: mandate,
       log,
       // risk checks only quotes signed by an active desk key of the mandate (Redis is not trusted)
-      ...(ctx.deskAccount && ctx.deskKeyActive ? { signQuote: (q: QuoteMsg) => signQuote(ctx.deskAccount as LocalAccount, env.CHAIN_ID, ctx.chain.components.mandate, q) } : {}),
+      ...(ctx.deskAccount ? { signQuote: (q: QuoteMsg) => signQuote(ctx.deskAccount as LocalAccount, env.CHAIN_ID, ctx.chain.components.mandate, q) } : {}),
+      ...(holder.riskStates ? { verifyRiskState: (raw: unknown) => (holder.riskStates as AgentRiskStateGate).accept(raw) } : {}),
     },
     {
       quoting: quotingConfigFrom(env),
@@ -375,6 +383,8 @@ async function runOnce(
       quoteTtlMs: Math.max(5_000, env.AGENT_QUOTE_INTERVAL_MS * 10),
       fillLookbackMs: 15 * 60_000,
       pullPrices: pull,
+      requireDeskKey: true,
+      riskStateTimeoutMs: env.AGENT_RISK_STATE_TIMEOUT_MS,
       venueGate: { enabled: env.AGENT_VENUE_MARKET_GATE, allowPostOnly: resolveVenuePostOnlyQuote(env), holdMs: env.AGENT_VENUE_GATE_HOLD_MS },
     },
   );
@@ -426,7 +436,7 @@ async function main(): Promise<void> {
   const log = createLogger("bookrunner-agent", env.LOG_LEVEL);
   assertVenueSymbolConfig({ mode: env.ORDERLY_MODE, brokerId: env.ORDERLY_BROKER_ID }); // live: books trade PERP_<T>_USDC_<broker>
   const ctl = new AbortController();
-  const holder: Holder = { agent: null, prices: null, kills: null };
+  const holder: Holder = { agent: null, prices: null, kills: null, riskStates: null };
   let forceExit: ReturnType<typeof setTimeout> | null = null;
   const onSignal = (sig: string) => {
     log.info({ sig, graceMs: env.AGENT_SHUTDOWN_GRACE_MS }, "shutdown requested");
@@ -463,10 +473,17 @@ async function main(): Promise<void> {
       if (!ctx) break;
       const verifier = oracleVerifierFor(ctx, env.CHAIN_ID, env.AGENT_ORACLE_SIGNERS);
       const forgedSource = `agent-${ctx.bookId}`;
+      const isRiskSigner = riskSignerCheckFor(ctx, env.AGENT_RISK_SIGNERS);
+      const forgedLog = new ForgedLog(forgedSource, (m) => bus.setJson(KEYS.busForged(forgedSource), m, FORGED_WINDOW_SEC * 1000));
+      holder.riskStates = new AgentRiskStateGate(
+        new RiskStateVerifier({ chainId: env.CHAIN_ID, config: ctx.deployment.contracts.config, bookId: ctx.bookId, isRiskSigner }),
+        forgedLog,
+        log.child({ bookId: ctx.bookId, part: "risk-state" }),
+      );
       holder.kills = new AgentKillGate(
         ctx.bookId,
-        killVerifierFor(ctx, env.CHAIN_ID, env.AGENT_RISK_SIGNERS),
-        new ForgedLog(forgedSource, (m) => bus.setJson(KEYS.busForged(forgedSource), m, FORGED_WINDOW_SEC * 1000)),
+        killVerifierFor(ctx, env.CHAIN_ID, isRiskSigner),
+        forgedLog,
         log.child({ bookId: ctx.bookId, part: "kill" }),
       );
       holder.prices = new VerifiedPriceInput(verifier, ctx.priceIdHex, log.child({ bookId: ctx.bookId, part: "price" }));

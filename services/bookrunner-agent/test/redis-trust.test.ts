@@ -8,6 +8,7 @@ import {
   ForgedLog,
   KEYS,
   KillVerifier,
+  type LimitState,
   OraclePriceVerifier,
   type OraclePriceMsg,
   type PriceUpdate,
@@ -20,16 +21,18 @@ import {
   killNonce,
   priceId,
   priceTypedData,
+  RiskStateVerifier,
   recoverQuoteSigner,
   signKill,
+  signRiskState,
   signQuote,
   usd,
 } from "@bookrunner/shared";
 import { type Address, keccak256, toHex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { type AgentChain, BookAgent, type BookAgentConfig } from "../src/agent/book-agent";
+import { type AgentChain, BookAgent, type BookAgentConfig, type BookAgentDeps } from "../src/agent/book-agent";
 import { DeskRejects } from "../src/agent/desk-rejects";
-import { AgentKillGate } from "../src/agent/kill-gate";
+import { AgentKillGate, AgentRiskStateGate } from "../src/agent/kill-gate";
 import { PriceFeed, VerifiedPriceInput } from "../src/agent/price-feed";
 import { PullPrices } from "../src/chain/pull-prices";
 import { DEFAULT_QUOTING_CONFIG } from "../src/domain/quoting";
@@ -101,19 +104,20 @@ const cfg: BookAgentConfig = {
   fillLookbackMs: 60_000,
 };
 
-function setup() {
+function setup(o: { chain?: Partial<AgentChain>; cfg?: Partial<BookAgentConfig>; deps?: Partial<BookAgentDeps> } = {}) {
   let now = T0 * 1000;
   const venue = new FakeVenue();
   const vol = new EwmaVolatility(DEFAULT_VOL_CONFIG);
   const price = new PriceFeed("NVDA", vol);
   const input = new VerifiedPriceInput(verifier(), NVDA, silentLog);
+  const bus = new FakeBus();
   const agent = new BookAgent(
-    { bookId: 1, venue, chain, price, vol, sizing: new RuleBasedSizing(), store: new FakeStore(), bus: new FakeBus(), hedger: null, sessions: SESSIONS_24X7, initialMandate: nvdaMandate(), log: silentLog, now: () => now },
-    cfg,
+    { bookId: 1, venue, chain: { ...chain, ...o.chain }, price, vol, sizing: new RuleBasedSizing(), store: new FakeStore(), bus, hedger: null, sessions: SESSIONS_24X7, initialMandate: nvdaMandate(), log: silentLog, now: () => now, ...o.deps },
+    { ...cfg, ...o.cfg },
   );
   /** what the agent's channel subscription does with a raw Redis message */
   const publish = async (raw: unknown) => agent.onPrice(await input.accept(typeof raw === "string" ? raw : JSON.stringify(raw)));
-  return { agent, venue, price, input, publish, advance: (ms: number) => (now += ms) };
+  return { agent, venue, price, input, publish, bus, advance: (ms: number) => (now += ms) };
 }
 
 const mid = (q: TwoSidedQuote) => (q.bid!.px + q.ask!.px) / 2;
@@ -291,5 +295,102 @@ describe("desk StaleTradePrice rejections (alerts desk_stale_trade_price)", () =
     expect(restarted.recent()).toHaveLength(2);
     now += DESK_REJECTS_WINDOW_SEC * 1000 - 30_000; // the first one ages out
     expect(restarted.recent()).toEqual([T0 * 1000 + 60_000]);
+  });
+});
+
+describe("risk state: only a RISK-signed state is acted on; none for the timeout = reduce-only, never a halt", () => {
+  const CONFIG = "0x00000000000000000000000000000000000c0f19" as Address;
+  const RISK = privateKeyToAccount(keccak256(toHex("risk-key")));
+  const stateMsg = async (state: LimitState, tsMs: number, who = RISK) => ({ state, breaches: [], stateSig: { tsMs, signature: await signRiskState(who, CHAIN, CONFIG, { bookId: 1, state, tsMs }) } });
+
+  function guarded() {
+    const forged: BusForgedMsg[] = [];
+    let clock = T0 * 1000;
+    const gate = new AgentRiskStateGate(
+      new RiskStateVerifier({ chainId: CHAIN, config: CONFIG, bookId: 1, isRiskSigner: async (a) => a.toLowerCase() === RISK.address.toLowerCase(), now: () => clock }),
+      new ForgedLog("agent-1", async (m) => void forged.push(m), () => clock),
+      silentLog,
+      () => clock,
+    );
+    const t = setup({ deps: { verifyRiskState: (raw) => gate.accept(raw), now: () => clock }, cfg: { riskStateTimeoutMs: 30_000 } });
+    const settle = () => new Promise((r) => setTimeout(r, 10));
+    return { ...t, forged, settle, tick: (ms: number) => (clock += ms), clock: () => clock };
+  }
+
+  test("an unsigned or forged 'killed' state never halts (counted as forged); a RISK-signed one does", async () => {
+    const g = guarded();
+    await g.publish(await signed(upd(190, T0)));
+    g.agent.onRiskState(JSON.stringify({ state: "killed" })); // the pre-fix shape
+    g.agent.onRiskState(JSON.stringify(await stateMsg("killed", g.clock(), attacker)));
+    await g.settle();
+    expect(g.agent.halted).toBeNull();
+    expect(g.forged.at(-1)?.events).toHaveLength(2);
+    g.agent.onRiskState(JSON.stringify(await stateMsg("killed", g.clock())));
+    await g.settle();
+    expect(g.agent.halted).toBe("RISK_KILLED");
+  });
+
+  test("no verified state for the timeout: reduce-only (no two-sided quote), never a halt; a signed state lifts it", async () => {
+    const g = guarded();
+    await g.publish(await signed(upd(190, T0)));
+    await g.agent.refreshState();
+    await g.agent.quoteTick(); // within the timeout from the start: quotes
+    expect(g.venue.replaced.at(-1)?.bid && g.venue.replaced.at(-1)?.ask).toBeTruthy();
+    g.tick(31_000);
+    g.advance(31_000);
+    await g.publish(await signed(upd(190, T0 + 31)));
+    const before = g.venue.replaced.length;
+    await g.agent.quoteTick();
+    for (const q of g.venue.replaced.slice(before)) expect(!!q.bid && !!q.ask).toBe(false);
+    expect(g.agent.halted).toBeNull();
+    g.agent.onRiskState(JSON.stringify(await stateMsg("ok", g.clock())));
+    await g.settle();
+    g.advance(1_000);
+    await g.agent.quoteTick();
+    expect(g.venue.replaced.at(-1)?.bid && g.venue.replaced.at(-1)?.ask).toBeTruthy();
+    // a replay of an older signed state is ignored, not counted as forged
+    g.agent.onRiskState(JSON.stringify(await stateMsg("killed", g.clock() - 5_000)));
+    await g.settle();
+    expect(g.agent.halted).toBeNull();
+    expect(g.forged).toHaveLength(0);
+  });
+});
+
+describe("desk session key: quoting new risk needs an active key", () => {
+  test("no desk key: reduce-only (never a two-sided quote), status 'missing'; quotes are unsigned", async () => {
+    const t = setup({ cfg: { requireDeskKey: true }, deps: { signQuote: async () => "0x01" } });
+    await t.publish(await signed(upd(190, T0)));
+    await t.agent.refreshState();
+    await t.agent.quoteTick();
+    for (const q of t.venue.replaced) expect(!!q.bid && !!q.ask).toBe(false);
+    expect(t.bus.kv.get(KEYS.agentStatus(1))).toMatchObject({ deskKey: "missing", deskKeySince: T0 * 1000 });
+    expect(t.bus.quotes.every((q) => q.signature === undefined)).toBe(true);
+  });
+
+  test("a key expiring mid-session: reduce-only and status 'inactive' (alert agent_no_desk_key), signatures stop", async () => {
+    let active = true;
+    const desk = privateKeyToAccount(keccak256(toHex("desk-key")));
+    const mandate = "0x00000000000000000000000000000000000a0a02" as Address;
+    const t = setup({ cfg: { requireDeskKey: true }, chain: { deskKeyActive: async () => active }, deps: { signQuote: (q) => signQuote(desk, CHAIN, mandate, q) } });
+    await t.publish(await signed(upd(190, T0)));
+    await t.agent.refreshState();
+    await t.agent.quoteTick();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(t.venue.replaced.at(-1)?.bid && t.venue.replaced.at(-1)?.ask).toBeTruthy();
+    const q = t.bus.quotes.at(-1)!;
+    expect(q.ref?.priceWad).toBe((190n * 10n ** 18n).toString()); // the reference print is in the message ...
+    expect(await recoverQuoteSigner(CHAIN, mandate, q)).toBe(desk.address); // ... and under the desk key's signature
+    active = false; // validUntil passed / REVOKE_KEY
+    t.advance(1_000);
+    await t.agent.refreshState();
+    const n = t.venue.replaced.length;
+    await t.agent.quoteTick();
+    for (const r of t.venue.replaced.slice(n)) expect(!!r.bid && !!r.ask).toBe(false);
+    expect(t.bus.kv.get(KEYS.agentStatus(1))).toMatchObject({ deskKey: "inactive" });
+    const quotesAfter = t.bus.quotes.length;
+    await t.agent.quoteTick();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(t.bus.quotes.slice(quotesAfter).every((x) => x.signature === undefined)).toBe(true);
+    expect(t.agent.halted).toBeNull();
   });
 });
