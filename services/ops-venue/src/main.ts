@@ -16,6 +16,7 @@ import { assertVenueSymbolConfig, CHANNELS, createLogger, QUEUES, roleSigner, tr
 import { Worker } from "bullmq";
 import { Redis } from "ioredis";
 import type { Address } from "viem";
+import { expectedUnderlyingResolver } from "./builderOracle/feed";
 import { builderPushEnabled, oracleSignerCheck, startBuilderPriceFeed } from "./builderOracle/wire";
 import { ViemChain } from "./chain";
 import { OrderlyBuilderClient, OrderlyVenue } from "./client";
@@ -164,6 +165,8 @@ async function main() {
     publishStatus: (s) => statusPublisher.builderFeed(s),
     // every pushed price must be the oracle's EIP-712 signed PriceUpdate under this deployment's AttestedOracle
     verifier: oracleSignerCheck({ chainId: env.CHAIN_ID, oracle: dep.contracts.oracle, pinned: env.OPS_BUILDER_ORACLE_SIGNERS, isSignerOnChain: (a) => chain.isOracleSigner(a) }),
+    // the signed underlying each market must carry: from the deployment record (stock tokens), never from Redis
+    expectedUnderlying: expectedUnderlyingResolver(dep.stockTokens),
     signal: abort.signal,
   });
 

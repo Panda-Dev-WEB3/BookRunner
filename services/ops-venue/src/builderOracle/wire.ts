@@ -1,7 +1,7 @@
 // Wiring of the live builder price push (main.ts): gating, the pushing account / key, the WebSocket client, and the
 // two inputs of the oracle venue feed (channel + periodic key re-read). Redis is injected so tests drive it with fakes.
 import { type BuilderFeedStatusMsg, KEYS, type Logger, busDropper } from "@bookrunner/shared";
-import { type Address, getAddress, isAddress } from "viem";
+import { type Address, getAddress, type Hex, isAddress } from "viem";
 import type { Ed25519Key } from "../orderly/auth";
 import type { TrackedBook } from "../worker/context";
 import { BuilderPriceFeed, builderFeedTargets, type PriceSignerCheck } from "./feed";
@@ -53,6 +53,8 @@ export interface BuilderFeedDeps {
   publishStatus: (s: BuilderFeedStatusMsg) => Promise<void>;
   /** who may sign a pushed price (oracleSignerCheck): every price is verified before it is pushed */
   verifier: PriceSignerCheck;
+  /** the signed underlying each book's price must carry (expectedUnderlyingResolver over the deployment record) */
+  expectedUnderlying: (b: Pick<TrackedBook, "underlying">) => Hex | null;
   signal: AbortSignal;
   webSocket?: WebSocketFactory;
 }
@@ -66,7 +68,7 @@ export interface BuilderFeedHandle {
 
 /**
  * The signer check of the push: the pinned OPS_BUILDER_ORACLE_SIGNERS when set (comma-separated addresses), else
- * AttestedOracle.isSigner on-chain (cached 60 s; an RPC error is a "no", retried at the next read, never cached).
+ * AttestedOracle.isSigner on-chain (cached 60 s; an RPC error THROWS: "signer check unavailable", never cached as a "no").
  */
 export function oracleSignerCheck(o: { chainId: number; oracle: Address; pinned?: string | undefined; isSignerOnChain: (a: Address) => Promise<boolean>; now?: () => number }): PriceSignerCheck {
   const now = o.now ?? Date.now;
@@ -84,13 +86,9 @@ export function oracleSignerCheck(o: { chainId: number; oracle: Address; pinned?
       const k = a.toLowerCase();
       const hit = cache.get(k);
       if (hit && now() - hit.at < 60_000) return hit.ok;
-      try {
-        const ok = await o.isSignerOnChain(a);
-        cache.set(k, { ok, at: now() });
-        return ok;
-      } catch {
-        return false;
-      }
+      const ok = await o.isSignerOnChain(a); // an RPC error propagates: the feed reports it, nothing is cached
+      cache.set(k, { ok, at: now() });
+      return ok;
     },
   };
 }
@@ -126,7 +124,7 @@ export async function startBuilderPriceFeed(d: BuilderFeedDeps): Promise<Builder
     ...(env.OPS_BUILDER_PRICE_MAX_DEVIATION_BPS !== undefined ? { maxDeviationBps: env.OPS_BUILDER_PRICE_MAX_DEVIATION_BPS } : {}),
     ...(env.OPS_BUILDER_PRICE_DEVIATION_ACCEPT_MS !== undefined ? { deviationAcceptMs: env.OPS_BUILDER_PRICE_DEVIATION_ACCEPT_MS } : {}),
     notConfigured: "no Builder Oracle WebSocket domain (ORDERLY_ORACLE_WS_URL)",
-    targets: () => builderFeedTargets(d.books()),
+    targets: () => builderFeedTargets(d.books(), d.expectedUnderlying),
     log,
     intervalMs: env.OPS_BUILDER_PRICE_INTERVAL_MS,
     maxAgeMs: env.OPS_BUILDER_PRICE_MAX_AGE_MS,

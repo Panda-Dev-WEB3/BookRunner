@@ -3,11 +3,11 @@
 // held / stale, rejects, reconnect with backoff. No network beyond 127.0.0.1, no real keys.
 import { afterEach, describe, expect, test } from "bun:test";
 import * as ed from "@noble/ed25519";
-import { type BuilderFeedStatusMsg, KEYS, type OracleVenueFeedMsg, type OracleVenuePrice, priceTypedData } from "@bookrunner/shared";
+import { type BuilderFeedStatusMsg, KEYS, type OracleVenueFeedMsg, type OracleVenuePrice, priceTypedData, strToBytes32, tokenUnderlying } from "@bookrunner/shared";
 import type { Address, Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import type { Server, ServerWebSocket } from "bun";
-import { BuilderPriceFeed, builderFeedTargets, type FeedSocket } from "../src/builderOracle/feed";
+import { BuilderPriceFeed, builderFeedTargets, expectedUnderlyingResolver, type FeedSocket, type PushTarget } from "../src/builderOracle/feed";
 import { BuilderOracleSocket, backoffMs, ORACLE_WS_DOMAINS, oracleWsUrl, resolveOracleWsDomain, roundPushPrice } from "../src/builderOracle/socket";
 import { type BuilderFeedEnv, builderPushEnabled, oracleSignerCheck, startBuilderPriceFeed } from "../src/builderOracle/wire";
 import { loadOpsEnv } from "../src/config";
@@ -144,13 +144,16 @@ const ORACLE: Address = "0x00000000000000000000000000000000000000aa";
 const VERIFIER = { chainId: CHAIN, oracle: ORACLE, isOracleSigner: async (a: Address) => a.toLowerCase() === ORACLE_SIGNER.address.toLowerCase() };
 const UNDERLYING: Hex = `0x${"00".repeat(12)}${"ab".repeat(20)}`;
 const SOURCES: Hex = `0x${"cd".repeat(32)}`;
+/** the default push target: SYM, whose books expect prices signed under UNDERLYING */
+const T1: PushTarget = { symbol: SYM, bookIds: [1], underlying: UNDERLYING };
 /** One signed entry: priceWad from price (8 dp), publishedAt (signed, s) from signedAt (ms) so the age is the same. */
 async function sign(p: OracleVenuePrice, signer = ORACLE_SIGNER, domain = { chainId: CHAIN, oracle: ORACLE }): Promise<OracleVenuePrice> {
   const publishedAt = Math.floor(p.signedAt / 1000);
   const priceWad = (BigInt(Math.round(p.price * 1e8)) * 10n ** 10n).toString();
-  const u = { underlying: UNDERLYING, priceWad: BigInt(priceWad), publishedAt: BigInt(publishedAt), held: p.held, sourceCount: 3, sourcesHash: SOURCES };
+  const underlying = (p.underlying as Hex | undefined) ?? UNDERLYING;
+  const u = { underlying, priceWad: BigInt(priceWad), publishedAt: BigInt(publishedAt), held: p.held, sourceCount: 3, sourcesHash: SOURCES };
   const signature = await signer.signTypedData(priceTypedData(domain.chainId, domain.oracle, u));
-  return { ...p, publishedAt, underlying: UNDERLYING, priceWad, sourceCount: 3, sourcesHash: SOURCES, signature };
+  return { ...p, publishedAt, underlying, priceWad, sourceCount: 3, sourcesHash: SOURCES, signature };
 }
 const feedMsg = async (ts: number, prices: OracleVenuePrice[]): Promise<OracleVenueFeedMsg> => ({ v: 1, ts, chainId: CHAIN, oracle: ORACLE, prices: await Promise.all(prices.map((x) => sign(x))) });
 
@@ -339,10 +342,10 @@ class FakeSocket implements FeedSocket {
   }
 }
 
-function feedHarness(over: { socket?: FakeSocket | null; targets?: Array<{ symbol: string; bookIds: number[]; preListing?: boolean }> } = {}) {
+function feedHarness(over: { socket?: FakeSocket | null; targets?: PushTarget[] } = {}) {
   let clock = 1_000;
   const socket = over.socket === undefined ? new FakeSocket() : over.socket;
-  const feed = new BuilderPriceFeed({ verifier: VERIFIER, socket, targets: () => over.targets ?? [{ symbol: SYM, bookIds: [1] }], log, now: () => clock, maxAgeMs: 10_000 });
+  const feed = new BuilderPriceFeed({ verifier: VERIFIER, socket, targets: () => over.targets ?? [T1], log, now: () => clock, maxAgeMs: 10_000 });
   return {
     feed,
     socket,
@@ -479,14 +482,14 @@ describe("builder price feed", () => {
   });
 
   test("preListing is carried to the status (alerts do not page it)", async () => {
-    const h = feedHarness({ targets: [{ symbol: SYM, bookIds: [1], preListing: true }] });
+    const h = feedHarness({ targets: [{ ...T1, preListing: true }] });
     h.feed.tick();
     expect(h.sym()).toMatchObject({ state: "no-price", preListing: true });
   });
 
   test("run: a hung Redis read or status write never blocks the 1/s publishes", async () => {
     const socket = new FakeSocket();
-    const feed = new BuilderPriceFeed({ verifier: VERIFIER, socket, targets: () => [{ symbol: SYM, bookIds: [1] }], log, intervalMs: 20, ioTimeoutMs: 50 });
+    const feed = new BuilderPriceFeed({ verifier: VERIFIER, socket, targets: () => [T1], log, intervalMs: 20, ioTimeoutMs: 50 });
     await feed.onFeed(await feedMsg(Date.now(), [price({ signedAt: Date.now() })]));
     const ac = new AbortController();
     let reads = 0;
@@ -510,7 +513,7 @@ describe("builder price feed", () => {
   });
 
   test("symbols no longer targeted drop out of the status", async () => {
-    let targets = [{ symbol: SYM, bookIds: [1] }];
+    let targets: PushTarget[] = [T1];
     let clock = 1_000;
     const feed = new BuilderPriceFeed({ verifier: VERIFIER, socket: new FakeSocket(), targets: () => targets, log, now: () => clock });
     feed.tick();
@@ -526,7 +529,7 @@ describe("builder price feed", () => {
 describe("builder price feed over the fake WS server", () => {
   test("cadence: one publish per interval with the same signed price, stops once the oracle marks it stale", async () => {
     const { srv, sock } = await setup();
-    const feed = new BuilderPriceFeed({ verifier: VERIFIER, socket: sock, targets: () => [{ symbol: SYM, bookIds: [1] }], log, intervalMs: 50, maxAgeMs: 60_000 });
+    const feed = new BuilderPriceFeed({ verifier: VERIFIER, socket: sock, targets: () => [T1], log, intervalMs: 50, maxAgeMs: 60_000 });
     sock.start();
     await until(() => sock.ready);
     await feed.onFeed(await feedMsg(Date.now(), [price({ signedAt: Date.now() })]));
@@ -595,7 +598,7 @@ describe("builder price feed wiring (startBuilderPriceFeed) and config", () => {
     expect(builderPushEnabled({ ...ENV, ORDERLY_SYMBOL_PRICE_SOURCE: "chainlink" })).toBe(false);
     const f = fakes(null);
     const key = await keyFromSecret(SEED);
-    const h = await startBuilderPriceFeed({ env: { ...ENV, ORDERLY_MODE: "mock" }, log, builderAccountId: ACCOUNT, builderKey: key, keyFromSecret, books: () => [book], redis: f.redis, sub: f.sub, publishStatus: async () => {}, verifier: VERIFIER, signal: new AbortController().signal });
+    const h = await startBuilderPriceFeed({ env: { ...ENV, ORDERLY_MODE: "mock" }, log, builderAccountId: ACCOUNT, builderKey: key, keyFromSecret, books: () => [book], redis: f.redis, sub: f.sub, publishStatus: async () => {}, verifier: VERIFIER, expectedUnderlying: () => UNDERLYING, signal: new AbortController().signal });
     expect(h).toBeNull();
     expect(f.subscribed).toEqual([]);
   });
@@ -603,7 +606,7 @@ describe("builder price feed wiring (startBuilderPriceFeed) and config", () => {
   test("the key re-read and the channel both feed the push; status is published", async () => {
     const { srv } = await setup();
     const now = Date.now();
-    const f = fakes(JSON.stringify(await feedMsg(now, [price({ signedAt: now, price: 190 })])));
+    const f = fakes(JSON.stringify(await feedMsg(now, [price({ signedAt: now - 2_000, price: 190 })]))); // an older second: the 191 below is strictly newer
     const ac = new AbortController();
     const key = await keyFromSecret(SEED);
     const h = (await startBuilderPriceFeed({
@@ -617,6 +620,7 @@ describe("builder price feed wiring (startBuilderPriceFeed) and config", () => {
       sub: f.sub,
       publishStatus: async (s) => void f.statuses.push(s),
       verifier: VERIFIER,
+      expectedUnderlying: () => UNDERLYING,
       signal: ac.signal,
     }))!;
     cleanups.push(() => ac.abort());
@@ -648,7 +652,7 @@ describe("builder price feed: only the oracle's SIGNED price is pushed (Redis is
   function harness(over: { maxDeviationBps?: number; deviationAcceptMs?: number } = {}) {
     let clock = 1_000;
     const socket = new FakeSocket();
-    const feed = new BuilderPriceFeed({ verifier: VERIFIER, socket, targets: () => [{ symbol: SYM, bookIds: [1] }], log, now: () => clock, maxAgeMs: 10_000, ...over });
+    const feed = new BuilderPriceFeed({ verifier: VERIFIER, socket, targets: () => [T1], log, now: () => clock, maxAgeMs: 10_000, ...over });
     return { feed, socket, at: (ms: number) => void (clock = ms), sym: () => feed.status().symbols.find((x) => x.symbol === SYM)! };
   }
 
@@ -743,7 +747,7 @@ describe("builder price feed: only the oracle's SIGNED price is pushed (Redis is
     expect(h.socket.sent.at(-1)).toEqual({ base: "NVDA", price: 125 });
   });
 
-  test("signer check: a pinned OPS_BUILDER_ORACLE_SIGNERS list, else AttestedOracle.isSigner on-chain (cached, RPC error = no)", async () => {
+  test("signer check: a pinned OPS_BUILDER_ORACLE_SIGNERS list, else AttestedOracle.isSigner on-chain (cached; an RPC error throws, never cached)", async () => {
     const pinned = oracleSignerCheck({ chainId: CHAIN, oracle: ORACLE, pinned: ORACLE_SIGNER.address.toLowerCase(), isSignerOnChain: async () => true });
     expect(await pinned.isOracleSigner(ORACLE_SIGNER.address)).toBe(true);
     expect(await pinned.isOracleSigner("0x0000000000000000000000000000000000000001")).toBe(false);
@@ -759,10 +763,148 @@ describe("builder price feed: only the oracle's SIGNED price is pushed (Redis is
         return true;
       },
     });
-    expect(await chain.isOracleSigner(ORACLE_SIGNER.address)).toBe(false); // RPC error: no, not cached
+    await expect(chain.isOracleSigner(ORACLE_SIGNER.address)).rejects.toThrow("rpc down"); // unavailable, not a "no", not cached
     fail = false;
     expect(await chain.isOracleSigner(ORACLE_SIGNER.address)).toBe(true);
     expect(await chain.isOracleSigner(ORACLE_SIGNER.address)).toBe(true); // cached
     expect(calls).toBe(2);
+  });
+
+  test("an RPC error is 'signer check unavailable' (not 'not an oracle signer') and is not cached: the same signed price passes once the RPC is back", async () => {
+    let down = true;
+    let clock = 1_000;
+    const socket = new FakeSocket();
+    const verifier = {
+      chainId: CHAIN,
+      oracle: ORACLE,
+      isOracleSigner: async (a: Address) => {
+        if (down) throw new Error("rpc down");
+        return a.toLowerCase() === ORACLE_SIGNER.address.toLowerCase();
+      },
+    };
+    const feed = new BuilderPriceFeed({ verifier, socket, targets: () => [T1], log, now: () => clock, maxAgeMs: 10_000 });
+    const msg = await feedMsg(1_000, [price({ signedAt: 1_000 })]);
+    await feed.onFeed(msg);
+    feed.tick();
+    const sym = () => feed.status().symbols.find((x) => x.symbol === SYM)!;
+    expect(socket.sent).toEqual([]);
+    expect(sym().state).toBe("invalid");
+    expect(sym().error).toContain("signer check unavailable");
+    expect(sym().error).not.toContain("not an oracle signer");
+    down = false;
+    await feed.onFeed(msg); // the very same signed entry (same verdict cache key)
+    clock = 1_500;
+    feed.tick();
+    expect(socket.sent).toEqual([{ base: "NVDA", price: 190.25 }]);
+  });
+
+  test("only a strictly newer signed publishedAt is pushed: an older replay never replaces, a different price under the same publishedAt is refused, the same latest one is re-sent", async () => {
+    const h = harness();
+    await h.feed.onFeed(await feedMsg(5_000, [price({ signedAt: 5_000, price: 100 })]));
+    h.at(5_000);
+    h.feed.tick();
+    // a replay of an older signed price in a NEWER feed message (a Redis writer reordering): ignored, the latest re-sent
+    await h.feed.onFeed(await feedMsg(6_000, [price({ signedAt: 3_000, price: 99 })]));
+    h.at(6_000);
+    h.feed.tick();
+    expect(h.socket.sent).toEqual([
+      { base: "NVDA", price: 100 },
+      { base: "NVDA", price: 100 },
+    ]);
+    expect(h.sym().state).toBe("pushing");
+    // another signed price with the same publishedAt (same second) as the last pushed: refused
+    await h.feed.onFeed(await feedMsg(7_000, [price({ signedAt: 5_400, price: 101 })]));
+    h.at(7_000);
+    h.feed.tick();
+    expect(h.socket.sent).toHaveLength(2);
+    expect(h.sym().state).toBe("invalid");
+    expect(h.sym().error).toContain("not newer than the last pushed");
+    // a strictly newer one is pushed again
+    await h.feed.onFeed(await feedMsg(8_000, [price({ signedAt: 8_000, price: 101 })]));
+    h.at(8_000);
+    h.feed.tick();
+    expect(h.socket.sent.at(-1)).toEqual({ base: "NVDA", price: 101 });
+    expect(h.sym().state).toBe("pushing");
+  });
+});
+
+describe("builder price feed: the signed underlying must be the one the market's books expect (the symbol is unsigned)", () => {
+  const TSLA = "PERP_TSLA_USDC_bookrunner";
+  const NVDA_TOKEN: Address = "0x00000000000000000000000000000000000000b1";
+  const TSLA_TOKEN: Address = "0x00000000000000000000000000000000000000b2";
+  const NVDA_ID = strToBytes32("nvda");
+  const TSLA_ID = strToBytes32("tsla");
+  // the deployment record (not Redis) says which price id each book's Stock Token is signed under
+  const stockTokens = {
+    NVDA: { token: NVDA_TOKEN, priceId: NVDA_ID, multiplierWad: "1000000000000000000" },
+    TSLA: { token: TSLA_TOKEN, priceId: TSLA_ID, multiplierWad: "1000000000000000000" },
+  };
+  const books = [
+    { bookId: 1, symbol: SYM, state: "Live" as const, venueSymbolError: null, underlying: tokenUnderlying(NVDA_TOKEN) },
+    { bookId: 2, symbol: TSLA, state: "Live" as const, venueSymbolError: null, underlying: tokenUnderlying(TSLA_TOKEN) },
+  ];
+  const resolver = expectedUnderlyingResolver(stockTokens);
+
+  function harness() {
+    let clock = 1_000;
+    const socket = new FakeSocket();
+    const feed = new BuilderPriceFeed({ verifier: VERIFIER, socket, targets: () => builderFeedTargets(books, resolver), log, now: () => clock, maxAgeMs: 10_000 });
+    return { feed, socket, at: (ms: number) => void (clock = ms), sym: (s: string) => feed.status().symbols.find((x) => x.symbol === s)! };
+  }
+
+  test("targets carry the expected underlying from the deployment record; unknown or inconsistent -> null with a reason", () => {
+    expect(builderFeedTargets(books, resolver)).toEqual([
+      { symbol: SYM, bookIds: [1], preListing: false, underlying: NVDA_ID.toLowerCase() as Hex },
+      { symbol: TSLA, bookIds: [2], preListing: false, underlying: TSLA_ID.toLowerCase() as Hex },
+    ]);
+    const mixed = builderFeedTargets([books[0]!, { ...books[1]!, symbol: SYM }], resolver);
+    expect(mixed[0]).toMatchObject({ symbol: SYM, underlying: null });
+    expect(mixed[0]!.underlyingError).toContain("different underlyings");
+    const unknown = builderFeedTargets([{ ...books[0]!, underlying: tokenUnderlying("0x00000000000000000000000000000000000000c3") }], resolver);
+    expect(unknown[0]).toMatchObject({ underlying: null });
+    expect(unknown[0]!.underlyingError).toContain("no registered Stock Token");
+  });
+
+  test("a valid NVDA signed price relabelled TSLA is refused on the first push, after a good TSLA push, and after a restart", async () => {
+    const nvdaAsTsla = (t: number, px = 190) => feedMsg(t, [price({ symbol: TSLA, priceId: "TSLA", underlying: NVDA_ID, signedAt: t, price: px })]);
+    // first push: never pushed, invalid (alert)
+    const h = harness();
+    await h.feed.onFeed(await nvdaAsTsla(1_000));
+    h.feed.tick();
+    expect(h.socket.sent).toEqual([]);
+    expect(h.sym(TSLA).state).toBe("invalid");
+    expect(h.sym(TSLA).error).toContain("this market's books expect " + TSLA_ID.toLowerCase());
+    // the right TSLA price and the right NVDA price are pushed under their own symbols
+    await h.feed.onFeed(
+      await feedMsg(2_000, [price({ symbol: TSLA, priceId: "TSLA", underlying: TSLA_ID, signedAt: 2_000, price: 250 }), price({ underlying: NVDA_ID, signedAt: 2_000, price: 190 })]),
+    );
+    h.at(2_000);
+    h.feed.tick();
+    expect(h.socket.sent).toEqual([
+      { base: "NVDA", price: 190 },
+      { base: "TSLA", price: 250 },
+    ]);
+    // a later NVDA price under TSLA: refused, the TSLA push stops (neither the relabelled value nor the old one)
+    await h.feed.onFeed(await nvdaAsTsla(3_000, 191));
+    h.at(3_000);
+    h.feed.tick();
+    expect(h.socket.sent.filter((x) => x.base === "TSLA")).toEqual([{ base: "TSLA", price: 250 }]);
+    expect(h.sym(TSLA).state).toBe("invalid");
+    // restart: a fresh feed whose first entry is the NVDA price labelled TSLA -> refused as well
+    const r = harness();
+    r.at(4_000);
+    await r.feed.onFeed(await nvdaAsTsla(4_000));
+    r.feed.tick();
+    expect(r.socket.sent).toEqual([]);
+    expect(r.sym(TSLA).state).toBe("invalid");
+  });
+
+  test("a market whose expected underlying is unknown pushes nothing", async () => {
+    const socket = new FakeSocket();
+    const feed = new BuilderPriceFeed({ verifier: VERIFIER, socket, targets: () => [{ symbol: SYM, bookIds: [1] }], log, now: () => 1_000, maxAgeMs: 10_000 });
+    await feed.onFeed(await feedMsg(1_000, [price({ signedAt: 1_000 })]));
+    feed.tick();
+    expect(socket.sent).toEqual([]);
+    expect(feed.status().symbols[0]).toMatchObject({ state: "invalid" });
   });
 });

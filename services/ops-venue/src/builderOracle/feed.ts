@@ -11,7 +11,11 @@
 // (publishedAt) and held come from the SIGNED fields only. An unsigned / wrongly signed entry is never pushed (state
 // invalid -> alert), and a signed price more than maxDeviationBps away from the last pushed one is held back (invalid ->
 // alert) unless it persists for deviationAcceptMs (a real gap open, re-signed every tick), then accepted with a warning.
-import { baseAssetOf, type BuilderFeedStatusMsg, type BuilderPushState, type Logger, type OracleVenueFeedMsg, type OracleVenuePrice, type PriceUpdate, recoverPriceSigner } from "@bookrunner/shared";
+// The entry's symbol is NOT signed: each push target carries the signed underlying its books expect (the stock token's
+// price id from the deployment record, never from Redis) and an entry signed for another underlying is refused (a valid
+// NVDA price can never be pushed as TSLA). A signed publishedAt older than the last pushed one for the symbol is refused
+// (no replay / reorder inside the age window); re-sending the same latest signed price between ticks stays the norm.
+import { baseAssetOf, type BuilderFeedStatusMsg, type BuilderPushState, type Deployment, isTokenUnderlying, type Logger, type OracleVenueFeedMsg, type OracleVenuePrice, type PriceUpdate, recoverPriceSigner, underlyingToToken } from "@bookrunner/shared";
 import type { Address, Hex } from "viem";
 import { type TrackedBook, tradable } from "../worker/context";
 import type { PublishReject } from "./socket";
@@ -34,6 +38,22 @@ export interface PushTarget {
    * first listing check: every book on it is in Subscription); failures are logged, not paged
    */
   preListing?: boolean;
+  /**
+   * the signed PriceUpdate.underlying the books of this market expect (lowercase), from the deployment record; null =
+   * unknown or inconsistent across the books (nothing is pushed, underlyingError says why)
+   */
+  underlying?: Hex | null;
+  underlyingError?: string;
+}
+
+/**
+ * The signed underlying an Orderly book's price must carry: the oracle signs an equity book's price under its Stock
+ * Token's price id (deployment record stockTokens[].priceId, as the oracle's universe does), never the book's token
+ * address. null when the book's underlying is not a registered Stock Token (nothing pushed for it).
+ */
+export function expectedUnderlyingResolver(stockTokens: Deployment["stockTokens"]): (b: Pick<TrackedBook, "underlying">) => Hex | null {
+  const byToken = new Map(Object.values(stockTokens ?? {}).map((st) => [st.token.toLowerCase(), st.priceId.toLowerCase() as Hex]));
+  return (b) => (b.underlying && isTokenUnderlying(b.underlying) ? (byToken.get(underlyingToToken(b.underlying).toLowerCase()) ?? null) : null);
 }
 
 /** Who may sign a pushed price: the oracle's EIP-712 domain and its signer set. */
@@ -41,6 +61,7 @@ export interface PriceSignerCheck {
   chainId: number;
   /** the deployment's AttestedOracle (EIP-712 verifying contract) */
   oracle: Address;
+  /** true / false = a signer or not; THROWS when the check is unavailable (RPC): never a cached "no" */
   isOracleSigner(addr: Address): Promise<boolean>;
 }
 
@@ -84,11 +105,15 @@ interface SymbolState {
   logged?: boolean;
   /** since when the signed price has been beyond the deviation cap (null = within) */
   capSince?: number | null;
+  /** signed publishedAt (ms) of the last pushed price: an older one is never pushed */
+  lastPushedPublishedAtMs?: number | null;
 }
 
 /** A verified entry: price, age and held from the SIGNED PriceUpdate; stale (can only stop a push) from the feed. */
 interface VerifiedPrice {
   symbol: string;
+  /** the signed underlying (lowercase) */
+  underlying: Hex;
   price: number;
   held: boolean;
   stale: boolean;
@@ -113,16 +138,26 @@ function preListingOf(b: Pick<TrackedBook, "state" | "listing">): boolean {
 }
 
 /** Push targets: tradable Orderly books (they have a builder market) in a listed state, one entry per venue symbol. */
-export function builderFeedTargets(books: ReadonlyArray<Pick<TrackedBook, "bookId" | "symbol" | "state" | "venueSymbolError" | "listing">>): PushTarget[] {
-  const by = new Map<string, { bookIds: number[]; preListing: boolean }>();
+export function builderFeedTargets(
+  books: ReadonlyArray<Pick<TrackedBook, "bookId" | "symbol" | "state" | "venueSymbolError" | "listing"> & Partial<Pick<TrackedBook, "underlying">>>,
+  expected?: (b: Pick<TrackedBook, "underlying">) => Hex | null,
+): PushTarget[] {
+  const by = new Map<string, { bookIds: number[]; preListing: boolean; underlyings: Set<string> }>();
   for (const b of books) {
     if (!tradable(b) || !FED_STATES.has(b.state)) continue;
-    const cur = by.get(b.symbol) ?? { bookIds: [], preListing: true };
+    const cur = by.get(b.symbol) ?? { bookIds: [], preListing: true, underlyings: new Set<string>() };
     cur.bookIds = [...cur.bookIds, b.bookId].sort((x, y) => x - y);
     cur.preListing &&= preListingOf(b);
+    if (expected) cur.underlyings.add(String(expected({ underlying: b.underlying as Hex }) ?? "unknown"));
     by.set(b.symbol, cur);
   }
-  return [...by.entries()].map(([symbol, v]) => ({ symbol, bookIds: v.bookIds, preListing: v.preListing }));
+  return [...by.entries()].map(([symbol, v]) => {
+    const t: PushTarget = { symbol, bookIds: v.bookIds, preListing: v.preListing };
+    if (!expected) return t;
+    const u = [...v.underlyings];
+    if (u.length === 1 && u[0] !== "unknown") return { ...t, underlying: u[0] as Hex };
+    return { ...t, underlying: null, underlyingError: u.includes("unknown") ? "a book of this market has no registered Stock Token price id (deployment record)" : `the books of this market expect different underlyings (${u.join(", ")})` };
+  });
 }
 
 const FAILING: ReadonlySet<BuilderPushState> = new Set(["stale", "no-price", "invalid", "disconnected", "rejected", "not-configured"]);
@@ -181,6 +216,8 @@ export class BuilderPriceFeed {
       const verdict = domainOk ? await this.verify(p) : `signature domain ${msg.chainId ?? "?"} / ${msg.oracle ?? "?"} is not this deployment's (${v.chainId} / ${v.oracle})`;
       // re-check after the await: a newer message may have landed meanwhile (never let an older one win)
       if (msg.ts < Math.max(this.prices.get(p.symbol)?.feedTs ?? -Infinity, this.invalid.get(p.symbol)?.feedTs ?? -Infinity)) continue;
+      // a signed price older than the one held for this symbol never replaces it (no replay / reorder by a Redis writer)
+      if (typeof verdict !== "string" && verdict.publishedAtMs < (this.prices.get(p.symbol)?.publishedAtMs ?? -Infinity)) continue;
       if (typeof verdict === "string") {
         this.invalid.set(p.symbol, { feedTs: msg.ts, error: verdict });
         if (this.invalidWarned.get(p.symbol) !== verdict) {
@@ -211,12 +248,23 @@ export class BuilderPriceFeed {
     let verdict = this.verdicts.get(key);
     if (verdict === undefined) {
       const signer = await recoverPriceSigner(this.o.verifier.chainId, this.o.verifier.oracle, u, p.signature as Hex);
-      verdict = !signer ? "malformed signature" : (await this.o.verifier.isOracleSigner(signer)) ? signer : `signed by ${signer}, which is not an oracle signer`;
+      if (!signer) {
+        verdict = "malformed signature";
+      } else {
+        let ok: boolean;
+        try {
+          ok = await this.o.verifier.isOracleSigner(signer);
+        } catch (err) {
+          // the check could not run (RPC): not a "no", never cached; the next feed message asks again
+          return `signer check unavailable for ${signer}: ${err instanceof Error ? err.message : String(err)}`;
+        }
+        verdict = ok ? signer : `signed by ${signer}, which is not an oracle signer`;
+      }
       if (this.verdicts.size >= 1_024) this.verdicts.clear();
       this.verdicts.set(key, verdict);
     }
     if (verdict.startsWith("0x") && !verdict.includes(" ")) {
-      return { symbol: p.symbol, price: Number(wad) / 1e18, held: p.held, stale: p.stale === true, publishedAtMs: Number(u.publishedAt) * 1_000 };
+      return { symbol: p.symbol, underlying: p.underlying.toLowerCase() as Hex, price: Number(wad) / 1e18, held: p.held, stale: p.stale === true, publishedAtMs: Number(u.publishedAt) * 1_000 };
     }
     return verdict;
   }
@@ -261,7 +309,14 @@ export class BuilderPriceFeed {
       const cur = targets.get(t.symbol);
       targets.set(
         t.symbol,
-        cur ? { symbol: t.symbol, bookIds: [...new Set([...cur.bookIds, ...t.bookIds])].sort((a, b) => a - b), preListing: !!cur.preListing && !!t.preListing } : t,
+        cur
+          ? {
+              ...cur,
+              bookIds: [...new Set([...cur.bookIds, ...t.bookIds])].sort((a, b) => a - b),
+              preListing: !!cur.preListing && !!t.preListing,
+              ...(cur.underlying?.toLowerCase() === t.underlying?.toLowerCase() ? {} : { underlying: null, underlyingError: "the sources of this market disagree on its expected underlying" }),
+            }
+          : t,
       );
     }
     for (const s of [...this.states.keys()]) if (!targets.has(s)) this.states.delete(s);
@@ -283,6 +338,18 @@ export class BuilderPriceFeed {
         // the newest entry failed verification: nothing is pushed (not even the older verified price)
         next = "invalid";
         error = bad.error;
+      } else if (!t.underlying) {
+        // the signed underlying this market's books expect is unknown: no price can be bound to it
+        next = "invalid";
+        error = t.underlyingError ?? "no expected underlying for this market (deployment record)";
+      } else if (p && p.underlying !== t.underlying.toLowerCase()) {
+        // the symbol is unsigned: a price signed for another underlying (e.g. NVDA under TSLA) is never pushed
+        next = "invalid";
+        error = `signed price is for underlying ${p.underlying}, this market's books expect ${t.underlying.toLowerCase()}`;
+      } else if (p && st.lastPushedPublishedAtMs != null && (p.publishedAtMs < st.lastPushedPublishedAtMs || (p.publishedAtMs === st.lastPushedPublishedAtMs && p.price !== st.price))) {
+        // only a strictly newer signed price, or the same latest one re-sent (the >= 1/s resend), is pushed
+        next = "invalid";
+        error = `signed price published at ${p.publishedAtMs} is not newer than the last pushed (${st.lastPushedPublishedAtMs})`;
       } else if (!p) {
         next = "no-price";
         error = "no oracle price for this symbol";
@@ -305,10 +372,12 @@ export class BuilderPriceFeed {
         next = "pushing"; // another symbol with the same base_ccy was just sent
         st.lastPushAt = now;
         st.price = p.price;
+        st.lastPushedPublishedAtMs = p.publishedAtMs;
       } else if (this.o.socket.publish(base, p.price) !== null) {
         sentBase.add(base);
         st.lastPushAt = now;
         st.price = p.price;
+        st.lastPushedPublishedAtMs = p.publishedAtMs;
         const reject = this.rejectFor(base, now);
         next = reject ? "rejected" : "pushing";
         if (reject) error = reject.error;

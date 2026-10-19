@@ -65,7 +65,6 @@ export interface RedisSetExLike {
   set(key: string, value: string, mode: "EX", seconds: number): Promise<unknown>;
 }
 
-/** KEYS.venueSymbolIssues (read by services/alerts), refreshed every book poll, expires when ops-venue stops. */
 /** KEYS.venueEverListed (a Redis SET, no TTL): the listing tracker's persisted everListed symbols. */
 export class RedisEverListedStore {
   constructor(private readonly redis: { smembers(key: string): Promise<string[]>; sadd(key: string, ...members: string[]): Promise<number> }) {}
@@ -79,6 +78,7 @@ export class RedisEverListedStore {
   }
 }
 
+/** KEYS.venueSymbolIssues (read by services/alerts), refreshed every book poll, expires when ops-venue stops. */
 export class RedisStatusPublisher implements StatusPublisher {
   constructor(private readonly redis: RedisSetExLike) {}
 
