@@ -26,7 +26,7 @@ interface IMarketCharter {
     function file(BRTypes.Charter calldata c) external returns (uint256 id);
     /// @notice Only RiskCommittee (2-of-3 + jury CID). Approve -> BookFactory.create; reject -> refund fee, unlock bond.
     function decide(uint256 id, bool ok, bytes32 juryCid) external;
-    /// @notice Anyone after filedAt + committeeWindow with no decision: Expired, fee refunded, bond unlocked.
+    /// @notice Anyone from decisionDeadline(id) with no decision: Expired, fee refunded, bond unlocked.
     function expire(uint256 id) external;
     /// @notice Sponsor or committee: book.retire().
     function retire(uint256 bookId) external;
@@ -39,7 +39,12 @@ interface IMarketCharter {
 
     function get(uint256 id) external view returns (CharterRecord memory);
     function count() external view returns (uint256);
-    function bondLockId(uint256 id) external pure returns (bytes32);
+    function bondLockId(uint256 id) external view returns (bytes32);
+    /// @notice filedAt + config.committeeWindow() as of filing (a later window change does not move it); 0 for
+    ///         unknown ids. `decide` is open strictly before it, `expire` from it.
+    function decisionDeadline(uint256 id) external view returns (uint256);
+    /// @notice True while the charter is Filed and before its decisionDeadline.
+    function isOpen(uint256 id) external view returns (bool);
 
     event CharterFiled(uint256 indexed id, address indexed sponsor, bytes32 underlying, uint8 venue, bytes32 symbol, uint256 feeUsd, uint256 bondBkrn);
     event CharterDecided(uint256 indexed id, bool approved, bytes32 juryCid, address book);
