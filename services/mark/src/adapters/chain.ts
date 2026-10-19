@@ -25,8 +25,8 @@ import { type BookRef, type TxSender, bookStateName, codeHasSelector, describeRe
 import { type Abi, type Address, type Hex, type PublicClient, encodeFunctionData, erc20Abi, isAddressEqual, parseEventLogs, zeroHash } from "viem";
 import type { AdapterReportState } from "../../../ops-venue/src/report712";
 import { priceIsStale } from "../domain/held";
-import { priceBasisAt } from "../domain/split";
-import { type SettleState, settlePriceInForce } from "../domain/settle";
+import { deskPriceChoice, underlyingAtSettle } from "../domain/settle";
+import { SettlePriceReader } from "./settleRead";
 import { type SignedPrice, encodePriceData, pickSignedPrice, valuationRefTs } from "../domain/prices";
 import type { DeskPosition, MarkSnapshot } from "../domain/types";
 import type { AtomicMarkResult, CommittedMark, MarkAppliedEvent, MarkChain, SimulationResult } from "../ports";
@@ -57,6 +57,7 @@ export class MarkChainAdapter implements MarkChain {
   private tickers = new Map<string, string>();
   /** Non-batching client for the deployless aggregate (batched multicall would split the calls). */
   private readonly raw: PublicClient;
+  private settleReader: SettlePriceReader | null = null;
 
   constructor(
     private readonly pc: PublicClient,
@@ -300,10 +301,7 @@ export class MarkChainAdapter implements MarkChain {
     }
     // Task 7: a governance settle price in force values the underlying as a live, final price (the engine views
     // price the market at it too), so the mark is not held and the book settles at it (domain/settle.ts)
-    const underlyingSettle = underlyingPriceId ? settlePriceInForce(await this.settleState(underlyingPriceId, blockNumber), signedUnderlying) : null;
-    if (underlyingSettle !== null && underlyingPriceId) {
-      underlyingPrice = { priceId: underlyingPriceId, priceWad: underlyingSettle, publishedAt: Number(refTs), held: false, stale: false, settled: true };
-    }
+    if (underlyingPriceId) underlyingPrice = underlyingAtSettle(underlyingPrice, underlyingPriceId, await this.settle().read(underlyingPriceId, blockNumber), signedUnderlying, refTs);
 
     let poolCashUsd: bigint | null = null;
     let poolEquityUsd: bigint | null = null;
@@ -481,18 +479,20 @@ export class MarkChainAdapter implements MarkChain {
       this.pc.readContract({ address: this.c.oracle, abi: attestedOracleAbi, functionName: "lastLiveAt", args: [info.priceId], ...b }),
       this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "multiplierChangedAt", args: [token], ...b }),
     ]);
-    let signed = pickSignedPrice(prices, info.priceId, BigInt(latest.publishedAt), refTs);
     // Task 7: a governance settle price in force is the token's price id's final, live price (domain/settle.ts);
     // its share basis is the proposal (governance quotes it in the shares of that moment)
-    const settle = await this.settleState(info.priceId, blockNumber);
-    const settled = settlePriceInForce(settle, signed);
-    if (settled !== null) signed = null;
-    const priceWad = settled ?? (signed ? signed.priceWad : latest.priceWad);
-    const publishedAt = settled !== null ? refTs : signed ? signed.publishedAt : BigInt(latest.publishedAt);
-    const held = settled !== null ? false : signed ? signed.held : latest.held;
+    const choice = deskPriceChoice({
+      stored: { priceWad: latest.priceWad, publishedAt: BigInt(latest.publishedAt), held: latest.held },
+      lastLiveAt: BigInt(lastLiveAt),
+      signed: pickSignedPrice(prices, info.priceId, BigInt(latest.publishedAt), refTs),
+      settle: await this.settle().read(info.priceId, blockNumber),
+      refTs,
+      maxPriceAgeSec: maxPriceAge,
+    });
+    const { priceWad, held, basis, signed } = choice;
+    const settled = choice.settled;
+    const priceStale = choice.stale;
     const valueUsd = await this.pc.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "valueUsdAt", args: [token, qtyRaw, priceWad], ...b });
-    const priceStale = settled !== null ? false : priceIsStale(publishedAt, refTs, maxPriceAge);
-    const basis = settled !== null && settle ? settle.proposedAt : priceBasisAt({ held, publishedAt, lastLiveAt: BigInt(lastLiveAt) });
     // split window (audit M-2, fix round 2 N-I1, Task 7): the multiplier in force at the basis, from the token's
     // update events (paged; live-mode tokens) or ON-CHAIN (StockTokenRegistry.basisMultiplier: the value before the
     // first registry-side change after the basis, else the pre-split anchor), else unknown (domain/split.ts carries
@@ -525,7 +525,7 @@ export class MarkChainAdapter implements MarkChain {
         priceStale,
         ...(signed ? { signedPrice: true } : {}),
         ...(held ? { priceHeld: true } : {}),
-        ...(settled !== null ? { settlePrice: true } : {}),
+        ...(settled ? { settlePrice: true } : {}),
         priceBasisAt: basis,
         multiplierChangedAt,
         ...split,
@@ -534,14 +534,10 @@ export class MarkChainAdapter implements MarkChain {
     };
   }
 
-  /** AttestedOracle.settlePrice(priceId) at `blockNumber`; null when the oracle has none (pre-Task-7) or the read fails. */
-  private async settleState(priceId: Hex, blockNumber: bigint): Promise<SettleState | null> {
-    try {
-      const [priceWad, proposedAt, effectiveAt, pending, effective] = await this.pc.readContract({ address: this.c.oracle, abi: attestedOracleAbi, functionName: "settlePrice", args: [priceId], blockNumber });
-      return { priceWad, proposedAt: BigInt(proposedAt), effectiveAt: BigInt(effectiveAt), pending, effective };
-    } catch {
-      return null;
-    }
+  /** AttestedOracle.settlePrice reader (adapters/settleRead.ts: a failed read refuses the mark, never "none"). */
+  private settle(): SettlePriceReader {
+    this.settleReader ??= new SettlePriceReader(this.pc, this.c.oracle);
+    return this.settleReader;
   }
 
   private tickerOf(token: Address, priceId: Hex): string {

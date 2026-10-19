@@ -45,9 +45,10 @@ export const markEnvShape = {
   /**
    * Retiring books: desk token positions worth less than this (USD 6dp; default 1000 = 0.001 USD,
    * the agent's Retiring flatten floor) are valued at 0 so the final mark can reach
-   * deployedValueUsd == 0. 0 disables.
+   * deployedValueUsd == 0. 0 disables. A position valued 0 this way also no longer holds the mark (Task 7 dust rule),
+   * so the bound is capped at 1 USD (1000000): startup refuses anything above it.
    */
-  MARK_RETIRE_TOKEN_DUST_USD: z.coerce.bigint().min(0n).default(1_000n),
+  MARK_RETIRE_TOKEN_DUST_USD: z.coerce.bigint().min(0n).max(1_000_000n, "MARK_RETIRE_TOKEN_DUST_USD above 1 USD (1000000): material positions would be written off").default(1_000n),
 };
 
 export function loadMarkConfig(source: Record<string, string | undefined> = process.env) {

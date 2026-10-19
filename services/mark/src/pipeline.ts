@@ -16,6 +16,7 @@ import { type BookLookup, type BookRef, type DomainEventSink, describeRevert, sl
 import type { Hex } from "viem";
 import { type SignedVenueReport, encodeVenueReport, reportIncludable } from "../../ops-venue/src/report712";
 import { markHeld } from "./domain/held";
+import { RetryableMarkError } from "./errors";
 import { buildInventory } from "./domain/inventory";
 import { RETIRE_TOKEN_DUST_USD, composeNav, navCrossChecks, type NavComposition, writeOffRetiringDust } from "./domain/nav";
 import { buildMarkPnl, pnlJsonHash } from "./domain/pnl";
@@ -28,7 +29,7 @@ import { applySignedVenueReport } from "./domain/venue";
 import type { MarkAppliedEvent, MarkChain, MarkFeeds, MarkRow, MarkSignerPort, MarkStore, ReceiptsRootPort } from "./ports";
 import type { MarkSpool } from "./spool";
 
-export class RetryableMarkError extends Error {}
+export { RetryableMarkError };
 
 /** 4 x the default maxPriceAge (300s): MMMandate's freshness rule for Orderly reports. */
 export const DEFAULT_MAX_VENUE_REPORT_AGE_SEC = 1200;
