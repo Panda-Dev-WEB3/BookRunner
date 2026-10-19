@@ -335,6 +335,9 @@ Business Source License 1.1 ([LICENSE](LICENSE)). Licensor: Panda-Dev-WEB3 (Book
 free; there is no Additional Use Grant. Each version becomes available under the MIT License on its Change Date,
 2030-10-18 at the latest.
 
+The contract interfaces (`contracts/src/interfaces/`) and `contracts/src/libraries/UniswapV3Twap.sol` are not part of
+the licensed work: they are MIT ([LICENSE-MIT](LICENSE-MIT)), so integrators can import them freely.
+
 ## Contact
 
 - Website: https://bookrunner.tech
