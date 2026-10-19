@@ -52,6 +52,11 @@ contract UpgradeBookScriptTest is Test {
     uint256 internal constant TIMELOCK_PK = 0x71E10C;
     string internal constant OUT = "deployments/upgrade-book-rehearsal.json";
 
+    /// @dev Deployment file of the rehearsal (a contract inheriting this test uses its own: suites run in parallel).
+    function _rehearsalOut() internal pure virtual returns (string memory) {
+        return OUT;
+    }
+
     address internal timelock;
     address internal charterAddr = makeAddr("marketCharter");
     address internal sponsor = makeAddr("sponsor");
@@ -123,7 +128,7 @@ contract UpgradeBookScriptTest is Test {
         // a deployments/<chain>.json as Deploy.s.sol + launch-devnet.ts write it (fields the script reads)
         vm.createDir("deployments", true);
         vm.writeFile(
-            OUT,
+            _rehearsalOut(),
             string.concat(
                 '{"contracts":{"factory":"',
                 vm.toString(address(factory)),
@@ -132,8 +137,8 @@ contract UpgradeBookScriptTest is Test {
                 '"}}]}'
             )
         );
-        Book impl = new UpgradeBook().upgrade(OUT, TIMELOCK_PK);
-        vm.removeFile(OUT);
+        Book impl = new UpgradeBook().upgrade(_rehearsalOut(), TIMELOCK_PK);
+        vm.removeFile(_rehearsalOut());
 
         address newImpl = factory.implementation(factory.BOOK());
         assertEq(newImpl, address(impl));
