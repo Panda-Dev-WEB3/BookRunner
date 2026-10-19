@@ -4,7 +4,7 @@
 //
 //   priceData = abi.encode(PriceUpdate[] updates, bytes[] signatures)      (AttestedOracle.update)
 //
-// Sources (tolerant parsing, the oracle service owns the formats): Redis `bkrn:oracle:bundle` (an object
+// Sources (tolerant parsing, the oracle service owns the formats): Redis `bkrn:<ns>:oracle:bundle` (an object
 // with `priceData` hex and/or an array of signed price messages, or a bare array) and the per-key signed
 // messages `KEYS.oracleLast(priceId)` (OraclePriceMsg incl. `signature`).
 import { KEYS, type PriceUpdate } from "@bookrunner/shared";

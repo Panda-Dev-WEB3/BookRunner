@@ -807,7 +807,7 @@ export class OracleService {
       },
       /**
        * Builder prices for Orderly books. mode mock: posted to mock-orderly by the oracle; null (live): the venue feed
-       * (Redis KEYS.oracleVenueFeed) is pushed to Orderly's Builder Oracle by ops-venue (bkrn:ops-venue:builder-feed).
+       * (Redis KEYS.oracleVenueFeed) is pushed to Orderly's Builder Oracle by ops-venue (bkrn:<ns>:ops-venue:builder-feed).
        */
       venue: {
         mode: this.deps.venue?.mode ?? null,

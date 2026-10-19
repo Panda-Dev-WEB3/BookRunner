@@ -1,7 +1,7 @@
 // ops-venue service entry: Orderly builder operations for every Orderly-venue book.
 //   loops : book discovery + provisioning, chain logs (withdrawals, kills, re-mandates), venue reports
 //           every OPS_REPORT_INTERVAL_MS (OPS_REPORT_MODE=signed: EIP-712 signed + published to Redis
-//           bkrn:venue:report:<bookId>, no tx; onchain: adapter.report tx), builder fee sweeps per mark period
+//           bkrn:<ns>:venue:report:<bookId>, no tx; onchain: adapter.report tx), builder fee sweeps per mark period
 //   queue : BullMQ QUEUES.venueOps (create_symbol, fund_if, deposit_mm, execute_withdraw, report,
 //           sweep_fees, revoke_key)
 //   redis : CHANNELS.kill(*) -> revoke the book's venue trade key

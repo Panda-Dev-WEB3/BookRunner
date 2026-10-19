@@ -16,7 +16,7 @@ never on a developer PC. Same layout and hardening as the testnet host ([README.
 | Alerts | `services/alerts` (role addresses derived from the mnemonic) | `services/alerts` (role addresses: local keys derived, KMS roles resolved by dev.ts, or `ALERT_ROLE_ADDRESSES`); delivery credentials reach the alerts process only |
 | Orderly | mock | live (`ORDERLY_MODE=live`, builder key from the env file) |
 | Deployment record | `contracts/deployments/46630.json` (launch appends books) | `contracts/deployments/4663.json` (copied from the deploy machine; `scripts/record-books.ts` appends chartered books; read-only to the stack) |
-| Database / Redis | `bookrunner_testnet`, Redis db 1 | `bookrunner_mainnet`, Redis db 0, passwords required |
+| Database / Redis | `bookrunner_testnet`, Redis db 1, bus namespace `testnet` (`bkrn:testnet:…`, queues `bkrn-testnet-…`) | `bookrunner_mainnet`, Redis db 0, passwords required, bus namespace `mainnet` (`bkrn:mainnet:…`, queues `bkrn-mainnet-…`; `NETWORK=mainnet`, packages/shared queues.ts; dev.ts migrates legacy keys at start, a no-op on a fresh host) |
 
 `scripts/dev.ts --network mainnet` refuses to start while any required env var, any role signer, the oracle
 sources (a Chainlink feed and a DEX confirm pool per ticker; `ORACLE_POLICY=primary-confirm` and

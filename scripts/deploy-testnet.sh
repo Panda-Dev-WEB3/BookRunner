@@ -12,6 +12,8 @@
 # Keys: the public stack's role keys derive from BKRN_TESTNET_MNEMONIC (.env.testnet), the rehearsal's from
 # BKRN_TESTNET_LIVE_MNEMONIC (.env.testnet-live): live mode refuses a missing one or one deriving the same deployer.
 # Mnemonics never appear on a command line or in the output (addresses are derived by bun from the environment).
+# Infra passwords (POSTGRES_PASSWORD, REDIS_LIVE_PASSWORD) come from the environment, else from the root-only
+# /usr/local/lib/bookrunner-deploy/.env.infra when the script runs as root (INFRA_ENV_FILE overrides the path).
 # The deployer is index 0 and must hold testnet ETH (faucet: https://faucet.testnet.chain.robinhood.com).
 # Live venue: Deploy.s.sol refuses unless Orderly's vault allows USDG and broker `bookrunner` (getAllowedToken /
 # getAllowedBroker); this script runs `scripts/orderly-readiness.ts --stage venue` (read-only) first. Stock Tokens, the
@@ -61,6 +63,15 @@ case "$VENUE" in
   *) echo "ORDERLY_VENUE must be mock or live (got $VENUE)"; exit 1 ;;
 esac
 export REC
+# infra passwords: from the environment, else (run as root on the server) the root-only deploy copy's .env.infra
+INFRA_ENV_FILE="${INFRA_ENV_FILE:-/usr/local/lib/bookrunner-deploy/.env.infra}"
+if [ -r "$INFRA_ENV_FILE" ]; then
+  [ -n "${POSTGRES_PASSWORD:-}" ] || POSTGRES_PASSWORD="$(sed -n 's/^POSTGRES_PASSWORD=//p' "$INFRA_ENV_FILE" | head -1)"
+  [ -n "${REDIS_LIVE_PASSWORD:-}" ] || REDIS_LIVE_PASSWORD="$(sed -n 's/^REDIS_LIVE_PASSWORD=//p' "$INFRA_ENV_FILE" | head -1)"
+fi
+export REDIS_LIVE_PASSWORD="${REDIS_LIVE_PASSWORD:-}"
+# redis-cli in the redis-live container; its password travels as an env var (REDISCLI_AUTH), never on a command line
+rcli_live() { ( if [ -n "${REDIS_LIVE_PASSWORD:-}" ]; then export REDISCLI_AUTH="$REDIS_LIVE_PASSWORD"; else unset REDISCLI_AUTH; fi; docker exec -e REDISCLI_AUTH bookrunner-redis-live-1 redis-cli --no-auth-warning "$@" 2>&1 ); }
 # the oracle refuses synthetic prices on a public chain without a secret seed (services/oracle config.ts)
 : "${ORACLE_SEED:?ORACLE_SEED not set: add one with  echo ORACLE_SEED=\$(openssl rand -hex 32) >> .env.testnet (live: .env.testnet-live)}"
 # the deployer (protocol admin) derives from the mnemonic only with this opt-in (packages/shared devkeys.ts)
@@ -95,8 +106,13 @@ if [ -f "$REC" ]; then
     if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet bookrunner@testnet-live 2>/dev/null; then
       echo "!! bookrunner@testnet-live is running: stop it first (sudo systemctl stop bookrunner@testnet-live)"; exit 7
     fi
+    # the live Redis must answer with REDIS_LIVE_PASSWORD BEFORE anything is archived (the archive snapshots and empties it)
+    if docker inspect bookrunner-redis-live-1 >/dev/null 2>&1 && [ "$(rcli_live PING | tr -d '\r')" != PONG ]; then
+      echo "!! the live Redis (redis-live) refuses REDIS_LIVE_PASSWORD (missing or wrong): run this as root so the script reads"
+      echo "!! $INFRA_ENV_FILE, or export REDIS_LIVE_PASSWORD (docs/RUNBOOK.md rehearsal step 3.1). Nothing archived."; exit 8
+    fi
     if ! "$BUN" scripts/rehearsal-guard.ts --supervisor; then
-      echo "!! the testnet-live supervisor is alive (its status key is fresh): stop that stack first"; exit 7
+      echo "!! the testnet-live supervisor is alive (fresh status key) or its Redis is unreadable: stop that stack first"; exit 7
     fi
     echo "==> REDEPLOY of the live rehearsal: are its books retired and empty? (read-only)"
     if ! "$BUN" scripts/rehearsal-guard.ts --record "$REC" --rpc "$RPC"; then
@@ -137,12 +153,11 @@ if [ "$ARCHIVE" = 1 ]; then
     echo "    archived database $DB -> $DB_AR (dump in $AR/postgres.dump; drop the renamed DB by hand once no longer needed)"
   fi
   if docker inspect bookrunner-redis-live-1 >/dev/null 2>&1; then
-    (
-      if [ -n "${REDIS_LIVE_PASSWORD:-}" ]; then export REDISCLI_AUTH="$REDIS_LIVE_PASSWORD"; else unset REDISCLI_AUTH; fi
-      docker exec -e REDISCLI_AUTH bookrunner-redis-live-1 redis-cli --no-auth-warning SAVE >/dev/null
-      docker cp bookrunner-redis-live-1:/data/dump.rdb "$AR/redis-live.rdb"
-      docker exec -e REDISCLI_AUTH bookrunner-redis-live-1 redis-cli --no-auth-warning FLUSHDB >/dev/null
-    ) && echo "    archived the live Redis snapshot -> $AR/redis-live.rdb, live Redis db 0 emptied"
+    # every step checked (redis-cli prints an error reply but may exit 0): a failure stops here, loudly
+    [ "$(rcli_live SAVE | tr -d '\r')" = OK ] || { echo "!! redis-live SAVE failed: the old Redis was NOT archived or emptied (state and DB are archived in $AR)"; exit 8; }
+    docker cp bookrunner-redis-live-1:/data/dump.rdb "$AR/redis-live.rdb" || { echo "!! copying the redis-live snapshot failed"; exit 8; }
+    [ "$(rcli_live FLUSHDB | tr -d '\r')" = OK ] || { echo "!! redis-live FLUSHDB failed: empty it before starting the new stack"; exit 8; }
+    echo "    archived the live Redis snapshot -> $AR/redis-live.rdb, live Redis db 0 emptied"
   fi
 fi
 

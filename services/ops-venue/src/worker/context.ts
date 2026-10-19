@@ -90,7 +90,7 @@ export interface ReportSigner {
   sign(adapter: Address, r: VenueReportValues): Promise<Hex>;
 }
 
-/** Where signed reports go (Redis `bkrn:venue:report:<bookId>` in production, see worker/reportSink.ts). */
+/** Where signed reports go (Redis `bkrn:<ns>:venue:report:<bookId>` in production, see worker/reportSink.ts). */
 export interface ReportPublisher {
   publish(r: SignedVenueReportJson): Promise<void>;
 }

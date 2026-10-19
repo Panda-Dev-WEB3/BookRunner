@@ -148,7 +148,7 @@ curl -sI http://leveret.bookrunner.tech/ | head -1                              
 ## Alerts, backups, status
 
 - **Alerts** (`services/alerts`, a child of `scripts/dev.ts` like every service; no signing key): every 60 s it
-  checks marks, risk / kills, supervised processes (Redis heartbeat `bkrn:supervisor:status` written by
+  checks marks, risk / kills, supervised processes (Redis heartbeat `bkrn:<ns>:supervisor:status` written by
   dev.ts), role-key and gas-funder ETH, RPC errors / head lag, indexer lag, venue-report age, buybackPending,
   the API's `/health`, the oracle's `/health` (a live price source failing in-session tickers for > 60 s:
   `oracle_source_failing`, `ALERT_ORACLE_SOURCE_FAIL_SECONDS` — mainnet / primary-confirm: critical for the Chainlink

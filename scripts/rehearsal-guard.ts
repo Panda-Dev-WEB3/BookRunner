@@ -10,7 +10,7 @@
 // Is the testnet-live stack running? Reads its supervisor status key (bus namespace testnet-live) on its own Redis
 // (REDIS_LIVE_URL, else 127.0.0.1:63791 db 0 with REDIS_LIVE_PASSWORD from the environment; never on a command line).
 // Exit 0 = not running (no fresh status; an unreachable Redis counts as not running: the systemd check runs too),
-// 1 = running.
+// 1 = running, 2 = the live Redis refuses the password (cannot tell: refused by deploy-testnet.sh).
 import { RedisClient } from "bun";
 import { type Address, getAddress } from "viem";
 import { bookAbi, orderlyAdapterAbi } from "../packages/shared/src/abi";
@@ -37,7 +37,13 @@ async function supervisorCheck(): Promise<never> {
     raw = (await c.send("GET", [key])) as string | null;
     c.close();
   } catch (err) {
-    console.log(`[rehearsal-guard] the live Redis is unreachable (${(err as Error).message}): treated as not running`);
+    const msg = (err as Error).message;
+    // a wrong / missing password is not "not running": fail closed (deploy-testnet.sh refuses to archive)
+    if (/NOAUTH|WRONGPASS|auth/i.test(msg)) {
+      console.log(`[rehearsal-guard] the live Redis refuses the credentials (${msg}): cannot tell whether the stack runs`);
+      process.exit(2);
+    }
+    console.log(`[rehearsal-guard] the live Redis is unreachable (${msg}): treated as not running`);
   }
   const running = supervisorRunning(raw, Date.now());
   console.log(`[rehearsal-guard] testnet-live supervisor: ${running ? "RUNNING (fresh status)" : "not running"}`);

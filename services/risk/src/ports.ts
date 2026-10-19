@@ -20,7 +20,7 @@ export type SignedPriceMap = ReadonlyMap<string, SignedPrice>;
 /**
  * Signed off-chain inputs (docs/LOW_GAS.md §1-§2), signature- and role-checked: the oracle service's signed
  * prints (Redis bundle + per-key messages; signer = active AttestedOracle signer) and ops-venue's signed
- * venue reports (Redis `bkrn:venue:report:<bookId>`; signer holds OPS_VENUE). Risk values from these, never
+ * venue reports (Redis `bkrn:<ns>:venue:report:<bookId>`; signer holds OPS_VENUE). Risk values from these, never
  * from strict on-chain views that revert when no update landed recently.
  */
 export interface SignedFeedsPort {

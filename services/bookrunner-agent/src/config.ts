@@ -67,7 +67,7 @@ export const agentEnvShape = {
   /** auto: executeWithPrices when the deployed desk has it; on: always; off: plain execute (stored prices). */
   AGENT_PULL_PRICES: z.enum(["auto", "on", "off"]).default("auto"),
   // Orderly books: stay reduce-only while ops-venue reports the market not open for new risk (not listed, missing,
-  // POST_ONLY, REDUCE_ONLY, DELISTING, DELISTED; Redis bkrn:ops-venue:symbol-issues, docs/VERIFY.md O20)
+  // POST_ONLY, REDUCE_ONLY, DELISTING, DELISTED; Redis bkrn:<ns>:ops-venue:symbol-issues, docs/VERIFY.md O20)
   AGENT_VENUE_MARKET_GATE: flag(true),
   // the market data disappears (key gone / TTL expired, read failed, no entry, phase unknown): a reduce-only / POST_ONLY
   // restriction already in force is kept this long after the data was last seen, then lifted

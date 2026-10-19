@@ -41,6 +41,7 @@ import {
 } from "../packages/shared/src/supervisor";
 import { roleSigner } from "../packages/shared/src/signer";
 import { busNames, busNamespace } from "../packages/shared/src/queues";
+import { describeMigration, migrateBus } from "./bus-migrate";
 import {
   LIVE_MNEMONIC_ENV,
   MAINNET_EXCLUDED,
@@ -143,7 +144,7 @@ if (testnetLike) {
     ORACLE_PUSH_DEVIATION_BPS: "50",
     ORACLE_TICK_MS: "2000",
     RISK_INTERVAL_MS: "5000",
-    // signed venue reports (EIP-712, Redis bkrn:venue:report:<bookId>), relayed inside the mark's
+    // signed venue reports (EIP-712, Redis bkrn:<ns>:venue:report:<bookId>), relayed inside the mark's
     // commitAndApply tx: no report txs, so a short interval costs no gas and keeps risk + marks fresh
     OPS_REPORT_MODE: "signed",
     OPS_REPORT_INTERVAL_MS: "60000",
@@ -309,6 +310,33 @@ if (testnetLike && myDeployer) {
   const conflict = supervisorConflict(parseSupervisorStatus(raw), myDeployer, Date.now(), SUPERVISOR_TTL_MS);
   if (conflict) {
     console.error(`[dev] refusing to start ${network}: ${conflict}`);
+    process.exit(1);
+  }
+}
+
+// Bus namespace migration (scripts/bus-migrate.ts), BEFORE any service starts: the shared keys and BullMQ queues of
+// code from before the per-stack namespace move to bkrn:<ns>:… / bkrn-<ns>-…, so no service ever starts on empty
+// namespaced keys (risk state + journal meta, signed venue reports, queued jobs). Idempotent (marker key), never
+// overwrites a newer value. Redis must answer: the stack does not start without it (systemd restarts dev.ts).
+{
+  const ns = busNamespace(env);
+  const url = env.REDIS_URL || "redis://127.0.0.1:63790";
+  let done = false;
+  for (let attempt = 1; attempt <= 12 && !done; attempt++) {
+    try {
+      const c = new RedisClient(url, { connectionTimeout: 5_000, enableOfflineQueue: false, autoReconnect: false });
+      await c.connect();
+      const m = await migrateBus(c, ns);
+      c.close();
+      for (const line of describeMigration(ns, m)) console.log(`[dev] ${line}`);
+      done = true;
+    } catch (err) {
+      console.warn(`[dev] bus namespace migration: Redis not ready (${(err as Error).message}), attempt ${attempt}/12`);
+      await new Promise((r) => setTimeout(r, 5_000));
+    }
+  }
+  if (!done) {
+    console.error(`[dev] refusing to start: the bus namespace migration could not run on ${redactUrl(url)}`);
     process.exit(1);
   }
 }

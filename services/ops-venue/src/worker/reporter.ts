@@ -2,7 +2,7 @@
 //
 //   OPS_REPORT_MODE=signed (default, docs/LOW_GAS.md §2): the report is EIP-712 signed by the OPS_VENUE key
 //     (domain verifyingContract = the book's adapter, src/report712.ts) and published to Redis
-//     `bkrn:venue:report:<bookId>` (+ the `:recent` list). NO transaction: the mark keeper relays the latest
+//     `bkrn:<ns>:venue:report:<bookId>` (+ the `:recent` list). NO transaction: the mark keeper relays the latest
 //     report inside its daily MarkRegistry.commitAndApply (OrderlyAdapter.reportSigned), desk hedge legs
 //     carry it when they need a fresh exposure. An adapter whose implementation predates reportSigned gets
 //     the same report posted with `report` as well (old deployments keep a fresh on-chain venue view).

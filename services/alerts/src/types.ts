@@ -201,7 +201,7 @@ export interface BackupSnap {
 }
 
 /**
- * ops-venue's live builder price push (Redis bkrn:ops-venue:builder-feed, BuilderFeedStatusMsg): the oracle's signed
+ * ops-venue's live builder price push (Redis bkrn:<ns>:ops-venue:builder-feed, BuilderFeedStatusMsg): the oracle's signed
  * price per Orderly builder market, pushed >= 1/s to Orderly's Builder Oracle in session (docs/VERIFY.md O18).
  */
 export interface BuilderFeedSnap {
