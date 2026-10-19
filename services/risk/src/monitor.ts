@@ -232,6 +232,7 @@ export class BookMonitor {
       },
       oracle,
       quote,
+      ...(c.lossBudget !== undefined ? { lossBudget: c.lossBudget } : {}),
     };
   }
 
@@ -309,6 +310,16 @@ export class BookMonitor {
       },
       quote: ev.quote,
       quoteUnverified: ev.quoteUnverified,
+      lossBudget: obs.lossBudget
+        ? {
+            budgetBps: obs.lossBudget.budgetBps,
+            period: obs.lossBudget.period,
+            anchorEquityUsd: usdStr(obs.lossBudget.anchorEquityUsd),
+            lossUsd: usdStr(obs.lossBudget.lossUsd),
+            budgetUsd: usdStr(obs.lossBudget.budgetUsd),
+            blocked: obs.lossBudget.blocked,
+          }
+        : null,
       hedgeBand: {
         inBand: ev.inBand,
         outOfBandSince: ev.band.outOfBandSince,

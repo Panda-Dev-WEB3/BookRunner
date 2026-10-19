@@ -73,6 +73,30 @@ export function riskState(s: Snapshot, c: RuleConfig): Condition[] {
   return out;
 }
 
+const usdFmt = (v: number) => `$${v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+/**
+ * Engine books (Task 7, audit M-3 budget breach): the pool has lost more than its per-period loss budget against the
+ * oracle (PoolEngine.lossBudget via the risk service's meta.lossBudget). The engine already refuses new risk until
+ * the next period and emits LossBudgetBreached; this pages the operator, because a pool losing the mandate's
+ * drawdown-kill share of its equity inside one mark interval is either a large move or a loss channel the quote rule
+ * does not cover. Critical; resolves when the next period re-anchors.
+ */
+export function engineLossBudget(s: Snapshot, _c: RuleConfig): Condition[] {
+  const out: Condition[] = [];
+  for (const b of s.books ?? []) {
+    const lb = b.risk?.lossBudget;
+    if (!lb?.blocked || ENDED.has(b.state)) continue;
+    out.push({
+      key: `engine_loss_budget:${b.bookId}`,
+      rule: "engine_loss_budget",
+      severity: "critical",
+      summary: `${bookLabel(b)}: the engine pool lost ${usdFmt(lb.lossUsd)} this period against its loss budget of ${usdFmt(lb.budgetUsd)} (${lb.budgetBps} bps) in period ${lb.period}: new risk is refused until the next period; check the market move, quotes and liquidations`,
+    });
+  }
+  return out;
+}
+
 /** An open kill journal = a kill sequence that has started; failed steps or a long run = stuck. */
 export function killJournal(s: Snapshot, _c: RuleConfig): Condition[] {
   const out: Condition[] = [];
@@ -779,6 +803,7 @@ export function infra(s: Snapshot, _c: RuleConfig): Condition[] {
 export const RULES = {
   mark_overdue: markOverdue,
   risk_state: riskState,
+  engine_loss_budget: engineLossBudget,
   kill_journal: killJournal,
   kill_event: killEvents,
   risk_stale: riskStale,

@@ -17,6 +17,7 @@ import {
   processes,
   riskStale,
   riskState,
+  engineLossBudget,
   rpc,
   venueIfAccount,
   venueReportAge,
@@ -813,5 +814,29 @@ describe("evaluate", () => {
     const s = snap({ books: [book({ risk: null, venueReportAsOf: null })] });
     expect(keys(evaluate(s, rules()))).toEqual(["risk_stale:3", "venue_report_stale:3"]);
     expect(keys(evaluate(s, rules({ disabled: new Set(["venue_report_stale"]) })))).toEqual(["risk_stale:3"]);
+  });
+});
+
+describe("engine_loss_budget (Task 7: the engine pool spent its per-period loss budget)", () => {
+  const lb = { blocked: true, lossUsd: 9000.5, budgetUsd: 8000, budgetBps: 800, period: 7 };
+  const engineBook = (over: Partial<NonNullable<ReturnType<typeof book>["risk"]>> = {}, state = "Live") =>
+    book({ venue: "pool_engine", state, risk: { ...book().risk!, lossBudget: lb, ...over } });
+  test("blocked = critical with the loss and the budget", () => {
+    const c = engineLossBudget(snap({ books: [engineBook()] }), rules());
+    expect(keys(c)).toEqual(["engine_loss_budget:3"]);
+    expect(c[0]!.severity).toBe("critical");
+    expect(c[0]!.summary).toContain("$9,000.50");
+    expect(c[0]!.summary).toContain("$8,000.00 (800 bps)");
+  });
+  test("within budget, no reading, or an ended book: nothing", () => {
+    expect(engineLossBudget(snap({ books: [engineBook({ lossBudget: { ...lb, blocked: false } })] }), rules())).toEqual([]);
+    expect(engineLossBudget(snap({ books: [book()] }), rules())).toEqual([]);
+    expect(engineLossBudget(snap({ books: [engineBook({}, "Retired")] }), rules())).toEqual([]);
+    expect(engineLossBudget(snap({ books: null }), rules())).toEqual([]);
+  });
+  test("registered in RULES (can be disabled)", () => {
+    const s = snap({ books: [engineBook()] });
+    expect(evaluate(s, rules()).map((c) => c.key)).toContain("engine_loss_budget:3");
+    expect(evaluate(s, rules({ disabled: new Set(["engine_loss_budget"]) })).map((c) => c.key)).not.toContain("engine_loss_budget:3");
   });
 });

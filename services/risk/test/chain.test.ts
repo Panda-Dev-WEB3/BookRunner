@@ -10,6 +10,7 @@ import {
   bookrunnerDeskAbi,
   mMMandateAbi,
   orderlyAdapterAbi,
+  poolEngineAbi,
   poolEngineAdapterAbi,
   stockTokenRegistryAbi,
   underwritingVaultAbi,
@@ -52,6 +53,7 @@ const C = {
   desk: A(0x701),
   adapter: A(0x801),
   usdc: A(0x900),
+  poolEngine: A(0xe9),
 };
 
 const ABIS: Record<string, Abi> = {
@@ -66,6 +68,7 @@ const ABIS: Record<string, Abi> = {
   [C.adapter]: [...poolEngineAdapterAbi, ...orderlyAdapterAbi] as Abi,
   [NVDA_TOKEN]: erc20Abi,
   [C.usdc]: erc20Abi,
+  [C.poolEngine]: poolEngineAbi,
 };
 
 const components = { book: C.book, senior: C.senior, junior: C.junior, vault: C.vault, mandate: C.mandate, router: C.router, desk: C.desk, adapter: C.adapter };
@@ -123,6 +126,10 @@ const RESULTS: Record<string, unknown> = {
   [`${C.stockRegistry}:basisMultiplier`]: 0n,
   [`${C.mandate}:kill`]: undefined,
   [`${C.adapter}:setReduceOnly`]: undefined,
+  // Task 7: the engine's per-period loss budget (audit M-3) read every tick for an engine book
+  [`${C.adapter}:marketId`]: 3n,
+  [`${C.adapter}:engine`]: C.poolEngine,
+  [`${C.poolEngine}:lossBudget`]: [800, 5_966_667n, usd(100_000), usd(9_000), usd(8_000), true],
 };
 
 function fakeProvider(reverts: ReadonlySet<string> = new Set()) {
@@ -275,6 +282,23 @@ describe("ViemChain reads with the oracle's signed prints (pull oracle, LOW_GAS 
     const { chain } = makeChain(undefined, (T0 + 60) * 1000);
     const h = await chain.deskHoldings(await chain.loadRef(1), pricesOf(print(210, T0 + 55)));
     expect(h[0]).toMatchObject({ priceWad: wad(210), valueUsd: usd(2_100), publishedAt: T0 + 55, signed: true });
+  });
+});
+
+describe("ViemChain: engine loss budget (Task 7, audit M-3 budget breach)", () => {
+  test("an engine book reads PoolEngine.lossBudget(marketId) every tick", async () => {
+    const { chain } = makeChain();
+    const ref = { ...(await chain.loadRef(1)), venue: VENUE.POOL_ENGINE };
+    const o = await chain.observe(ref);
+    expect(o.lossBudget).toEqual({ budgetBps: 800, period: 5_966_667, anchorEquityUsd: usd(100_000), lossUsd: usd(9_000), budgetUsd: usd(8_000), blocked: true });
+  });
+
+  test("an Orderly book has none; an engine without the view (pre-M-3) reads null, never fails the tick", async () => {
+    const { chain } = makeChain();
+    expect((await chain.observe(await chain.loadRef(1))).lossBudget).toBeUndefined();
+    const old = makeChain(new Set([`${C.poolEngine}:lossBudget`]));
+    const ref = { ...(await old.chain.loadRef(1)), venue: VENUE.POOL_ENGINE };
+    expect((await old.chain.observe(ref)).lossBudget).toBeNull();
   });
 });
 

@@ -108,6 +108,11 @@ export function parseRisk(raw: string | null): RiskSnap | null {
   const monitor = (meta.monitor && typeof meta.monitor === "object" ? meta.monitor : {}) as Record<string, unknown>;
   const k = monitor.kill && typeof monitor.kill === "object" ? (monitor.kill as Record<string, unknown>) : null;
   const ts = num(meta.ts ?? o.ts);
+  const lb = meta.lossBudget && typeof meta.lossBudget === "object" ? (meta.lossBudget as Record<string, unknown>) : null;
+  const lossBudget =
+    lb && typeof lb.blocked === "boolean"
+      ? { blocked: lb.blocked, lossUsd: num(lb.lossUsd) ?? 0, budgetUsd: num(lb.budgetUsd) ?? 0, budgetBps: num(lb.budgetBps) ?? 0, period: num(lb.period) ?? 0 }
+      : null;
   return {
     state: o.state,
     breaches: Array.isArray(o.breaches) ? o.breaches.map(String) : [],
@@ -124,6 +129,7 @@ export function parseRisk(raw: string | null): RiskSnap | null {
           failed: Object.fromEntries(Object.entries((k.failed ?? {}) as Record<string, unknown>).map(([s, n]) => [s, num(n) ?? 0])),
         }
       : null,
+    ...(lossBudget ? { lossBudget } : {}),
   };
 }
 

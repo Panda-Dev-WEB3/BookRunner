@@ -39,6 +39,8 @@ export interface RiskSnap {
   killReason: string | null;
   /** open kill journal (meta.monitor.kill): a kill sequence in progress or stuck */
   journal: RiskJournalSnap | null;
+  /** engine books (meta.lossBudget, Task 7): the pool's per-period loss budget; absent when not published */
+  lossBudget?: { blocked: boolean; lossUsd: number; budgetUsd: number; budgetBps: number; period: number };
 }
 
 export interface BookSnap {

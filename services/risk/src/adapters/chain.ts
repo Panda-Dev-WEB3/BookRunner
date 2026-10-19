@@ -25,6 +25,7 @@ import {
   bookrunnerDeskAbi,
   mMMandateAbi,
   orderlyAdapterAbi,
+  poolEngineAbi,
   poolEngineAdapterAbi,
   stockTokenRegistryAbi,
   underwritingVaultAbi,
@@ -48,7 +49,7 @@ import type { FlattenOrder, Holding } from "../domain/flatten";
 import { stockValueUsd } from "../domain/flatten";
 import { oracleFromChain, oracleFromSigned } from "../domain/oracle";
 import type { ChainPort, DiscoveryPort, KillLog, SignedPriceMap } from "../ports";
-import type { BookRef, ChainObservation, OracleReading } from "../types";
+import type { BookRef, ChainObservation, EngineLossBudget, OracleReading } from "../types";
 import { Mutex, errMsg } from "../util/async";
 
 /** BookrunnerDesk.ActionKind.Flatten */
@@ -188,6 +189,7 @@ export class ViemChain implements ChainPort, DiscoveryPort {
         hedgeNotionalUsd !== null && deskValueUsd !== null
           ? { hedgeNotionalUsd, valueUsd: deskValueUsd, priceStale: false }
           : await this.deskAtLastPrice(ref);
+    const lossBudget = ref.venue === VENUE.POOL_ENGINE ? await this.engineLossBudget(ref) : undefined;
     let adapter = { netExposureUsd, deployedValueUsd, insuranceEquityUsd };
     let adapterSource: NonNullable<ChainObservation["adapter"]["source"]> = "onchain";
     if (ref.venue === VENUE.POOL_ENGINE && signedUnderlying) {
@@ -218,7 +220,23 @@ export class ViemChain implements ChainPort, DiscoveryPort {
       highWaterWad: perf[1],
       oracle,
       maxPriceAgeSec,
+      ...(lossBudget !== undefined ? { lossBudget } : {}),
     };
+  }
+
+  /** PoolEngine.lossBudget for the book's market (Task 7); null when unreadable (never fails the tick). */
+  private async engineLossBudget(ref: BookRef): Promise<EngineLossBudget | null> {
+    const a = ref.components.adapter;
+    try {
+      const [marketId, engine] = await Promise.all([
+        this.pub.readContract({ address: a, abi: poolEngineAdapterAbi, functionName: "marketId" }),
+        this.pub.readContract({ address: a, abi: poolEngineAdapterAbi, functionName: "engine" }).catch(() => this.c.poolEngine),
+      ]);
+      const [budgetBps, period, anchorEquityUsd, lossUsd, budgetUsd, blocked] = await this.pub.readContract({ address: engine, abi: poolEngineAbi, functionName: "lossBudget", args: [marketId] });
+      return { budgetBps: Number(budgetBps), period: Number(period), anchorEquityUsd, lossUsd, budgetUsd, blocked };
+    } catch {
+      return null;
+    }
   }
 
   /**

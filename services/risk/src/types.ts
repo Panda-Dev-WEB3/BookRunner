@@ -25,6 +25,21 @@ export interface OracleReading {
   source: "chain" | "signed" | "redis" | "none";
 }
 
+/**
+ * PoolEngine.lossBudget(marketId) (audit M-3 per-period pool loss budget; Task 7): the loss since the period's
+ * anchor against its budget. `blocked`: the pool lost more than the budget, the engine refuses new risk until the
+ * next period (it emits LossBudgetBreached once per period). Published for the alert, not a breach of its own: the
+ * engine already enforces it and the mandate's drawdown kill stays the kill path.
+ */
+export interface EngineLossBudget {
+  budgetBps: number;
+  period: number;
+  anchorEquityUsd: bigint;
+  lossUsd: bigint;
+  budgetUsd: bigint;
+  blocked: boolean;
+}
+
 /** Everything read from chain for one book in one tick. */
 export interface ChainObservation {
   bookState: BookState;
@@ -60,6 +75,8 @@ export interface ChainObservation {
   /** null when the oracle read failed; the monitor then falls back to KEYS.oracleLast. */
   oracle: OracleReading | null;
   maxPriceAgeSec: number;
+  /** Engine books: PoolEngine.lossBudget (null when unreadable, e.g. a pre-M-3 engine); absent for Orderly books. */
+  lossBudget?: EngineLossBudget | null;
 }
 
 /** signed_report: ops-venue's signed venue report (newer than the adapter's on-chain one, LOW_GAS §2). */
@@ -88,6 +105,8 @@ export interface BookObservation {
   nav: NavInputs;
   oracle: OracleReading;
   quote: QuoteObservation | null;
+  /** engine books: ChainObservation.lossBudget */
+  lossBudget?: EngineLossBudget | null;
 }
 
 export interface NavInputs {
@@ -242,6 +261,8 @@ export interface RiskMeta {
   } | null;
   /** Audit M-3: a live quote could not be checked against a fresh attested price (book held reduce-only). */
   quoteUnverified?: boolean;
+  /** Task 7: the engine pool's per-period loss budget (USD strings); null for Orderly books or when unreadable. */
+  lossBudget?: { budgetBps: number; period: number; anchorEquityUsd: string; lossUsd: string; budgetUsd: string; blocked: boolean } | null;
   hedgeBand: { inBand: boolean; outOfBandSince: number | null; outOfBandSec: number; graceSec: number };
   killed: boolean;
   killReason: string | null;

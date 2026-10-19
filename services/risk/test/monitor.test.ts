@@ -307,3 +307,22 @@ describe("runMonitorLoop", () => {
     expect(r.snapshot.state).toBe("ok");
   });
 });
+
+describe("engine loss budget (Task 7): published for the alert, never a breach or a kill by itself", () => {
+  test("an engine book publishes the budget state in meta.lossBudget", async () => {
+    const lossBudget = { budgetBps: 800, period: 7, anchorEquityUsd: usd(100_000), lossUsd: usd(9_000), budgetUsd: usd(8_000), blocked: true };
+    const w = makeWorld({ ref: { ...makeRef(), venue: VENUE.POOL_ENGINE }, obs: chainObs({ lossBudget }) });
+    const m = monitorFor(w, { ...makeRef(), venue: VENUE.POOL_ENGINE });
+    await m.tick();
+    const st = riskState(w);
+    expect(st?.meta.lossBudget).toEqual({ budgetBps: 800, period: 7, anchorEquityUsd: "100000", lossUsd: "9000", budgetUsd: "8000", blocked: true });
+    expect(st?.breaches ?? []).not.toContain("LOSS_BUDGET");
+    expect(st?.meta.killed).toBe(false);
+  });
+
+  test("an Orderly book (no engine) publishes null", async () => {
+    const w = makeWorld();
+    await monitorFor(w).tick();
+    expect(riskState(w)?.meta.lossBudget).toBeNull();
+  });
+});
