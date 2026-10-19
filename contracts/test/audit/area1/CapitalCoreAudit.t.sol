@@ -131,8 +131,9 @@ contract CapitalCoreAuditTest is BookFixture {
         // loss of 40k: Junior (30k) wiped, Senior impaired by 10k; the backstop is empty
         _markWithPnl(-40_000e6);
         assertEq(book.seniorImpairment(), 10_000e6);
-        // a fee distribution gives Junior a non-zero price again
+        // a fee distribution: audit L-1, its Junior residual restores Senior first (Junior keeps a zero price)
         _credit(0, 300e6);
+        assertEq(book.seniorImpairment(), 9700e6, "fee flow restores Senior before Junior (L-1)");
 
         vm.prank(sponsor);
         book.openTopUp(600, 20_000e6, 50_000e6);
@@ -144,10 +145,10 @@ contract CapitalCoreAuditTest is BookFixture {
         }
         // FIX (A1-03): no Senior top-up while Senior is impaired -> the Senior part is refunded in full
         assertEq(senior.roundInfo(1).accepted, 0, "Senior top-up refused while Senior is impaired");
-        assertEq(book.seniorImpairment(), 10_000e6);
+        assertEq(book.seniorImpairment(), 9700e6);
 
         // the venue recovers exactly the impairment
-        _markWithPnl(10_000e6);
+        _markWithPnl(9700e6);
         assertEq(book.seniorImpairment(), 0, "impairment fully restored");
 
         uint256 oldShares = 70_000e6; // alice 40k + bob 30k, bought at par
