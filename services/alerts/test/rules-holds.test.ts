@@ -2,10 +2,10 @@
 import { describe, expect, test } from "bun:test";
 import { KEYS } from "@bookrunner/shared/queues";
 import { SESSIONS_24X5, SESSIONS_24X7, SESSIONS_NYSE_RTH, encodeSessions } from "@bookrunner/shared/sessions";
-import { type DbPort, collect, emptyMemory, parseDeskRejects, parseRisk, sessionsOf } from "../src/collect";
+import { type DbPort, collect, emptyMemory, parseAgentStatus, parseDeskRejects, parseRisk, sessionsOf } from "../src/collect";
 import { emptyState, step } from "../src/dedupe";
 import { evaluate } from "../src/rules";
-import { busForgedMessages, deskStaleTradePrice, heldMarksInSession, riskQuoteUnverified } from "../src/rules-holds";
+import { agentNoDeskKey, busForgedMessages, deskStaleTradePrice, heldMarksInSession, riskQuoteUnverified, riskStateUnverified } from "../src/rules-holds";
 import { NOW, NOW_S, book, rules, snap } from "./fixtures";
 
 const keys = (cs: Array<{ key: string }>) => cs.map((c) => c.key);
@@ -245,5 +245,42 @@ describe("bus_forged_message", () => {
     expect(snapshot.books).toHaveLength(1);
     expect(snapshot.books![0]!.recentMarks).toEqual([]);
     expect(snapshot.infraErrors).toEqual([]);
+  });
+});
+
+describe("Task 7b round 2: open boundary, desk key, risk state", () => {
+  test("24x5: a held mark at the Sunday 20:00 ET open (Monday 00:00 UTC) is not a weekly false warning", () => {
+    const D = 86_400;
+    const MON = Date.UTC(2026, 9, 12, 0, 0, 0) / 1000;
+    const b = book({ sessions: SESSIONS_24X5, recentMarks: [{ periodEnd: MON, held: true }, { periodEnd: MON - D, held: true }, { periodEnd: MON - 2 * D, held: true }, { periodEnd: MON - 3 * D, held: false }] });
+    expect(heldMarksInSession(snap({ now: (MON + 60) * 1000, books: [b] }), rules())).toEqual([]);
+    // the next daily mark still held (Tuesday 00:00 UTC, a whole session day): alerts
+    const tue = book({ sessions: SESSIONS_24X5, recentMarks: [{ periodEnd: MON + D, held: true }, ...b.recentMarks!] });
+    expect(keys(heldMarksInSession(snap({ now: (MON + D + 60) * 1000, books: [tue] }), rules()))).toEqual(["held_marks_in_session:3"]);
+  });
+
+  test("agent_no_desk_key: warning, critical for a Live book after 10 min; never a forged-message alert", () => {
+    const st = (deskKey: "active" | "inactive" | "missing", sinceAgo: number) => ({ ts: NOW - 5_000, deskKey, deskKeySince: deskKey === "active" ? null : NOW - sinceAgo * 1000, riskStateUnverifiedSince: null });
+    expect(agentNoDeskKey(snap({ books: [book({ agentStatus: st("active", 0) })] }), rules())).toEqual([]);
+    const w = agentNoDeskKey(snap({ books: [book({ agentStatus: st("inactive", 60) })] }), rules());
+    expect(w).toEqual([expect.objectContaining({ key: "agent_no_desk_key:3", severity: "warning" })]);
+    expect(w[0]!.summary).toContain("no longer active");
+    expect(agentNoDeskKey(snap({ books: [book({ agentStatus: st("missing", 601) })] }), rules())[0]!.severity).toBe("critical");
+    expect(agentNoDeskKey(snap({ books: [book({ state: "Retiring", agentStatus: st("missing", 6_000) })] }), rules())[0]!.severity).toBe("warning");
+    expect(agentNoDeskKey(snap({ books: [book({ state: "Subscription", agentStatus: st("missing", 6_000) })] }), rules())).toEqual([]);
+    expect(keys(evaluate(snap({ books: [book({ agentStatus: st("missing", 60) })] }), rules()))).toEqual(["agent_no_desk_key:3"]);
+  });
+
+  test("risk_state_unverified after ALERT_RISK_STATE_UNVERIFIED_SECONDS", () => {
+    const st = (sinceAgo: number | null) => ({ ts: NOW, deskKey: "active" as const, deskKeySince: null, riskStateUnverifiedSince: sinceAgo === null ? null : NOW - sinceAgo * 1000 });
+    expect(riskStateUnverified(snap({ books: [book({ agentStatus: st(null) })] }), rules())).toEqual([]);
+    expect(riskStateUnverified(snap({ books: [book({ agentStatus: st(30) })] }), rules())).toEqual([]);
+    expect(riskStateUnverified(snap({ books: [book({ agentStatus: st(61) })] }), rules())).toEqual([expect.objectContaining({ key: "risk_state_unverified:3", severity: "warning" })]);
+  });
+
+  test("parseAgentStatus", () => {
+    expect(parseAgentStatus(JSON.stringify({ v: 1, bookId: 3, ts: NOW, deskKey: "inactive", deskKeySince: NOW - 1, riskStateUnverifiedSince: null }))).toEqual({ ts: NOW, deskKey: "inactive", deskKeySince: NOW - 1, riskStateUnverifiedSince: null });
+    expect(parseAgentStatus(JSON.stringify({ ts: NOW, deskKey: "maybe" }))).toBeNull();
+    expect(parseAgentStatus("x")).toBeNull();
   });
 });

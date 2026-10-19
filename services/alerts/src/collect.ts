@@ -165,6 +165,20 @@ export function parseBusForged(raw: string | null): { source: string; events: Ar
   }
 }
 
+/** KEYS.agentStatus JSON (AgentStatusMsg); malformed -> null. */
+export function parseAgentStatus(raw: string | null): NonNullable<BookSnap["agentStatus"]> | null {
+  if (!raw) return null;
+  try {
+    const o = JSON.parse(raw) as Record<string, unknown>;
+    const ts = num(o.ts);
+    const deskKey = o.deskKey;
+    if (ts === null || (deskKey !== "active" && deskKey !== "inactive" && deskKey !== "missing")) return null;
+    return { ts, deskKey, deskKeySince: num(o.deskKeySince), riskStateUnverifiedSince: num(o.riskStateUnverifiedSince) };
+  } catch {
+    return null;
+  }
+}
+
 /** The charter's sessions (bytes32 hex), SESSIONS_MODE applied; null when absent or undecodable. */
 export function sessionsOf(hex: string | null | undefined, mode: string | undefined): Sessions | null {
   if (mode === "24x7") return SESSIONS_24X7;
@@ -493,6 +507,7 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
   let venueRaw: Array<string | null> = [];
   let rejectsRaw: Array<string | null> = [];
   let busForged: Snapshot["busForged"] = [];
+  let statusRaw: Array<string | null> = [];
   let symbolIssues = new Map<number, string>();
   let markets = new Map<number, VenueMarketMsg>();
   let delistWaits = new Map<number, number>();
@@ -502,7 +517,7 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
   try {
     const ids = bookRows.map((b) => b.id);
     const forgedSources = ["ops-venue", "risk", ...ids.map((id) => `agent-${id}`)];
-    const [sup, bk, risk, venue, issues, feed, rejects, forged] = await Promise.all([
+    const [sup, bk, risk, venue, issues, feed, rejects, forged, status] = await Promise.all([
       d.kv.get(SUPERVISOR_STATUS_KEY),
       d.kv.get(BACKUP_STATUS_KEY),
       ids.length ? d.kv.mget(ids.map((id) => KEYS.riskState(id))) : Promise.resolve([]),
@@ -511,7 +526,9 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
       d.kv.get(KEYS.builderFeedStatus),
       ids.length ? d.kv.mget(ids.map((id) => KEYS.agentDeskRejects(id))) : Promise.resolve([]),
       d.kv.mget(forgedSources.map((src) => KEYS.busForged(src))),
+      ids.length ? d.kv.mget(ids.map((id) => KEYS.agentStatus(id))) : Promise.resolve([]),
     ]);
+    statusRaw = status;
     rejectsRaw = rejects;
     busForged = forged.map(parseBusForged).filter((x): x is NonNullable<typeof x> => x !== null);
     symbolIssues = parseVenueSymbolIssues(issues);
@@ -551,6 +568,7 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
       sessions: sessionsOf(b.sessions, st.sessionsMode),
       recentMarks: recentBy.get(Number(b.id)) ?? [],
       deskStaleTradePrice: parseDeskRejects(rejectsRaw[i] ?? null),
+      agentStatus: parseAgentStatus(statusRaw[i] ?? null),
     }));
   }
 

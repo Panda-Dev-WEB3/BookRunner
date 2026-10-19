@@ -80,6 +80,8 @@ export interface BookSnap {
   recentMarks?: Array<{ periodEnd: number; held: boolean }>;
   /** agent (KEYS.agentDeskRejects): unix ms of the desk's StaleTradePrice refusals of the last hour */
   deskStaleTradePrice?: number[];
+  /** agent (KEYS.agentStatus): desk key and risk-state verification status; null = no status (agent down / older) */
+  agentStatus?: { ts: number; deskKey: "active" | "inactive" | "missing"; deskKeySince: number | null; riskStateUnverifiedSince: number | null } | null;
 }
 
 export interface KillEventSnap {

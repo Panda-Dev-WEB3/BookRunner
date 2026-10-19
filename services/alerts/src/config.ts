@@ -151,6 +151,10 @@ const shape = {
   /** bus_forged_message: forged bus messages refused by one service within the window before a warning (3x: critical) */
   ALERT_FORGED_MESSAGES_MAX: z.coerce.number().int().min(1).default(3),
   ALERT_FORGED_MESSAGES_WINDOW_SECONDS: z.coerce.number().int().min(60).max(3_600).default(900),
+  /** agent_no_desk_key: a Live book without an active desk key this long pages critical (warning before) */
+  ALERT_NO_DESK_KEY_CRITICAL_SECONDS: int(600),
+  /** risk_state_unverified: no RISK-signed state verified by the agent this long alerts (warning) */
+  ALERT_RISK_STATE_UNVERIFIED_SECONDS: int(60),
   /** the stack's SESSIONS_MODE (same enum and default as every service: 24x7 overrides the charter sessions) */
   SESSIONS_MODE: baseEnvSchema.shape.SESSIONS_MODE,
   ALERT_VENUE_REPORT_MAX_AGE_SECONDS: z.coerce.number().int().min(1).optional(),
@@ -210,6 +214,8 @@ export interface RuleConfig {
   /** bus_forged_message: refusals within the window before a warning */
   forgedMessagesMax: number;
   forgedMessagesWindowSec: number;
+  noDeskKeyCriticalSec: number;
+  riskStateUnverifiedSec: number;
   venueReportMaxAgeSec: number;
   /** builder_price_push: failing span (s) of a live builder price push in session */
   builderPushFailSec: number;
@@ -342,6 +348,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       staleTradePriceWindowSec: e.ALERT_STALE_TRADE_PRICE_WINDOW_SECONDS,
       forgedMessagesMax: e.ALERT_FORGED_MESSAGES_MAX,
       forgedMessagesWindowSec: e.ALERT_FORGED_MESSAGES_WINDOW_SECONDS,
+      noDeskKeyCriticalSec: e.ALERT_NO_DESK_KEY_CRITICAL_SECONDS,
+      riskStateUnverifiedSec: e.ALERT_RISK_STATE_UNVERIFIED_SECONDS,
       venueReportMaxAgeSec: e.ALERT_VENUE_REPORT_MAX_AGE_SECONDS ?? nd.venueReportMaxAgeSec,
       builderPushFailSec: e.ALERT_BUILDER_PUSH_FAIL_SECONDS,
       listingLiveGraceSec: e.ALERT_LISTING_LIVE_GRACE_SECONDS,

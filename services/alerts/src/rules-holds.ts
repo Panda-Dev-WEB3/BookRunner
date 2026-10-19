@@ -4,7 +4,8 @@
 // clearSec (ALERT_CLEAR_SECONDS) before "resolved".
 //
 // - held_marks_in_session:<bookId> — the newest mark is held and the current held run covers the book's open session:
-//   a mark of the run was valued while the charter session was open, OR the run (from its first held mark to the
+//   a mark of the run was valued while the charter session had been open for ALERT_HELD_MARK_SESSION_SECONDS, OR the
+//   run (from its first held mark to the
 //   newest) spans at least ALERT_HELD_MARK_SESSION_SECONDS of open session (the calendar sampled every 5 min). The
 //   second test catches books whose marks are always valued off-session (daily 00:00 UTC marks on NYSE-RTH charters):
 //   a held run that lasts through a trading day means no mark there ever settles. A held mark settles no redemption
@@ -45,7 +46,9 @@ export function heldMarksInSession(s: Snapshot, c: RuleConfig): Condition[] {
     const sessions = b.sessions;
     const firstUnheld = marks.findIndex((m) => !m.held);
     const run = firstUnheld < 0 ? marks : marks.slice(0, firstUnheld);
-    const inSession = run.filter((m) => isOpen(sessions, new Date(m.periodEnd * 1000)));
+    // a mark counts as valued in session only when the session had been open for heldMarkSessionSec before it: a mark
+    // at the very open (24x5: Sunday 20:00 ET) may still carry the held print of the close (no weekly false warning)
+    const inSession = run.filter((m) => openSecondsWithin(sessions, m.periodEnd - c.heldMarkSessionSec, m.periodEnd, c.heldMarkSessionSec) >= c.heldMarkSessionSec);
     const openSec = inSession.length > 0 ? 0 : openSecondsWithin(sessions, run[run.length - 1]!.periodEnd, marks[0]!.periodEnd, c.heldMarkSessionSec);
     if (inSession.length === 0 && openSec < c.heldMarkSessionSec) continue;
     // the run started after the last non-held mark (unknown beyond the window: at least the oldest held one seen)
@@ -130,9 +133,56 @@ export function busForgedMessages(s: Snapshot, c: RuleConfig): Condition[] {
   return out;
 }
 
+/**
+ * agent_no_desk_key:<bookId> — the book's agent has no active desk session key on the mandate (none configured,
+ * expired, revoked; KEYS.agentStatus): it runs reduce-only (an agent quotes new risk only with a key, so risk can verify
+ * every quote). WARNING; CRITICAL once a Live book has been without one for ALERT_NO_DESK_KEY_CRITICAL_SECONDS. Not a
+ * Redis intrusion (that is bus_forged_message): register / re-register the key (RUNBOOK "Desk session keys").
+ */
+export function agentNoDeskKey(s: Snapshot, c: RuleConfig): Condition[] {
+  const out: Condition[] = [];
+  for (const b of s.books ?? []) {
+    const st = b.agentStatus;
+    if (!MARKABLE.has(b.state) || !st || st.deskKey === "active") continue;
+    const since = st.deskKeySince ?? st.ts;
+    const age = (s.now - since) / 1000;
+    out.push({
+      key: `agent_no_desk_key:${b.bookId}`,
+      rule: "agent_no_desk_key",
+      severity: b.state === "Live" && age >= c.noDeskKeyCriticalSec ? "critical" : "warning",
+      summary: `${label(b)} (state ${b.state}): the agent has ${st.deskKey === "missing" ? "no desk session key" : "a desk session key that is no longer active on the mandate (expired, revoked or mandate killed)"} for ${dur(age)}: it quotes reduce-only (no new risk). The sponsor registers a key (MMMandate.registerKey after the operator's consentKey); RUNBOOK "Desk session keys"`,
+    });
+  }
+  return out;
+}
+
+/**
+ * risk_state_unverified:<bookId> — the agent has seen no RISK-signed risk state for ALERT_RISK_STATE_UNVERIFIED_SECONDS
+ * (KEYS.agentStatus): it runs reduce-only (never halts). Risk is down / not signing, or its state in Redis is deleted or
+ * forged. WARNING. risk_stale covers a risk service that stopped writing at all.
+ */
+export function riskStateUnverified(s: Snapshot, c: RuleConfig): Condition[] {
+  const out: Condition[] = [];
+  for (const b of s.books ?? []) {
+    const since = b.agentStatus?.riskStateUnverifiedSince;
+    if (!MARKABLE.has(b.state) || since == null) continue;
+    const age = (s.now - since) / 1000;
+    if (age < c.riskStateUnverifiedSec) continue;
+    out.push({
+      key: `risk_state_unverified:${b.bookId}`,
+      rule: "risk_state_unverified",
+      severity: "warning",
+      summary: `${label(b)}: no RISK-signed risk state verified by the agent for ${dur(age)}: the agent quotes reduce-only. Check the risk service (running, signing with its RISK key) and Redis (state deleted or forged? see bus_forged_message)`,
+    });
+  }
+  return out;
+}
+
 export const HOLD_RULES = {
   held_marks_in_session: heldMarksInSession,
   risk_quote_unverified: riskQuoteUnverified,
   desk_stale_trade_price: deskStaleTradePrice,
   bus_forged_message: busForgedMessages,
+  agent_no_desk_key: agentNoDeskKey,
+  risk_state_unverified: riskStateUnverified,
 } as const;
