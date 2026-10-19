@@ -88,6 +88,9 @@ async function main() {
       if (!deadline) {
         window ??= await read<bigint>(dep.contracts.config as Address, bookrunnerConfigAbi as Abi, "committeeWindow").then(Number, () => null);
         deadline = window === null ? null : Number(r.filedAt) + window;
+        // an older charter (no decisionDeadline) or a failed read: the current window may not be the one it applies;
+        // the expire simulation below still refuses a premature expire
+        console.log(`[sweep-charters] #${id}: decisionDeadline unavailable, deadline estimated as filedAt + current committeeWindow`);
       }
     }
     rows.push({ id, status, deadline });

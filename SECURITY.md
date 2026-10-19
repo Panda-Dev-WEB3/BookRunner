@@ -44,16 +44,27 @@ and are handled the same way.
 Redis (the bus between the services, namespaced `bkrn:<ns>:…`) is a shared trust domain: anyone who can write to
 it is assumed hostile (audit 2026-10 lead). What such a writer can and cannot do:
 
-- **Prices.** No service acts on an unsigned price from Redis. The agent quotes, and plans hedges, only on the
-  oracle's EIP-712 signed `PriceUpdate` for its own price id, recovered to an `AttestedOracle` signer under this
-  chain and oracle (`packages/shared/src/oracleVerify.ts`), taking price, age and `held` from the signed fields.
-  ops-venue's builder price push and the mark and risk signed feeds apply the same check. A forged, tampered,
-  relabelled or replayed print is dropped; withholding prices only stops quoting (stale price).
-- **Kill channel.** A kill message makes the agent cancel its orders and halt: a forged one is a stop, never
-  anything else. ops-venue cancels the book's Orderly orders on a kill message or a `revoke_key` job, but revokes
-  the venue trade key only once the mandate is killed on-chain (`MMMandate.killed()`; the risk kill sequence's
-  `mandate_kill` step, whose `Kill` log ops-venue also watches). The on-chain kill is the authoritative one; a
-  halted agent whose kill the chain never confirmed logs `killConfirmedOnChain: false` and resumes on a restart.
+- **Prices.** The agent quotes, and plans hedges, only on the oracle's EIP-712 signed `PriceUpdate` for its own
+  price id, recovered to an `AttestedOracle` signer under this chain and oracle (`packages/shared/src/oracleVerify.ts`;
+  `AGENT_ORACLE_SIGNERS` pins the signers), taking price, age and `held` from the signed fields. ops-venue's builder
+  price push, the mark service and risk's valuation feed apply the same check. A forged, tampered, relabelled or
+  replayed print is dropped; withholding prices only stops quoting (stale price). One unsigned read remains: when the
+  on-chain price is stale and no verified print exists, risk reads `oracle:last` for its off-hours flag and display
+  only; it never counts for the quote check (audit M-3), and the agent re-checks off-hours itself.
+- **Kill orders.** A kill message (kill channel or the `revoke_key` job) is acted on only when it is the risk
+  service's EIP-712 `KillOrder` (book, reason hash, issue time, episode nonce) signed with the RISK key under this
+  chain and `BookrunnerConfig`, by a holder of `RISK_ROLE` (on-chain check, cached; or pinned with
+  `AGENT_RISK_SIGNERS` / `OPS_RISK_SIGNERS`), at most 120 s old and not replayed (`packages/shared/src/busAuth.ts`).
+  Then, as before: the agent cancels and halts, ops-venue revokes the venue trade key at once (unless the key was
+  created after the order was issued). An unsigned or forged kill is ignored, logged and counted (alert
+  `bus_forged_message`): a Redis writer can no longer halt an agent or revoke a key. When the RISK role check
+  cannot run (RPC), ops-venue cancels the book's orders and revokes on the on-chain kill; the mandate `Kill` log
+  (`MMMandate.killed()`) stays a second trigger in every case, and the agent halts on it at its next state refresh.
+- **Agent quotes.** Risk checks the agent's published quote (skew, width) only when it carries an EIP-712
+  `AgentQuote` signature by an active desk session key of the book's mandate (`MMMandate.isActiveKey`). An
+  unsigned, forged or unverifiable quote is no quote: it never causes a breach, so a Redis writer cannot make risk
+  kill and flatten a book. An agent without an active desk key publishes unsigned quotes, so risk does not check
+  them; engine books are bounded by the on-chain mandate check of every quote either way.
 - **Signed reports and marks.** Venue reports and marks are EIP-712 signed by role keys and verified on-chain.
 
 ## Accepted risks
@@ -86,12 +97,14 @@ a way to exceed the stated bound is in scope.
   Desk keys are held to the same freshness rule for their own swaps (audit lead "old prints"): a key's Hedge or
   Flatten needs the token's price within `min(maxPriceAge, maxTradePriceAge)`.
 - **Redis write access** (audit 2026-10 lead, see "Off-chain trust boundaries"). A Redis writer can deny service:
-  stop quoting (withhold prices, send kills), drop jobs, blank the status keys the alerts read. It can also lift a
-  restriction the risk service publishes through Redis (its risk state, e.g. a `reduce_only` hold): the agent then
+  withhold prices (the agent stops quoting), drop or delay jobs, blank the status keys the alerts read (including
+  the forged-message counts). It can also lift a restriction published through Redis: the risk state (a
+  `reduce_only` or `breach` state, a few ticks before a kill) and ops-venue's Orderly market gate. The agent then
   quotes both sides again, still at the verified oracle price, within the mandate (checked on-chain for engine
-  books) and subject to the on-chain kill, which no Redis message can undo. Not in Redis: keys, prices the agent
-  trusts, kills that revoke keys. The server's Redis has a password (`requirepass`) and listens on 127.0.0.1 only
-  ([deploy/server/HARDENING.md](deploy/server/HARDENING.md)).
+  books) and subject to the on-chain kill, which no Redis message can undo; the agent's own price-age bound equals
+  risk's quote bound (15 s), so the M-3 price hold is enforced by the agent itself. Not possible from Redis: moving
+  a price the agent trusts, halting an agent, revoking a key, making risk kill a book. The server's Redis has a
+  password (`requirepass`) and listens on 127.0.0.1 only ([deploy/server/HARDENING.md](deploy/server/HARDENING.md)).
 
 ## What to include
 

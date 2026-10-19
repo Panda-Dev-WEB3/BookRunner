@@ -484,17 +484,22 @@ can redo it during the timelock delay from the published quote.
   decision deadline (dry run); `--send` expires them from the KEEPER key (fee refunded, bond released; anyone may
   call `expire`). After a MarketCharter / committee repoint, run it with `--charter <old address>`: charters still
   Filed there can no longer be decided.
-- **Unconfirmed kill** (Redis is not trusted, SECURITY.md "Off-chain trust boundaries"): a kill message halts the
-  agent and cancels the book's Orderly orders, but ops-venue revokes the venue trade key only once the mandate is
-  killed on-chain (log `venue key revocation deferred`). An agent halted with `killConfirmedOnChain: false` that
-  risk did not kill (no `kill.executed`, mandate not killed) received a forged or alert-mode message: check Redis
-  access, then restart the agent.
-- **Hold alerts** (services/alerts): `held_marks_in_session` (a mark held while the session was open: a price the
-  NAV uses is held or stale, e.g. a desk token whose feed stopped; settlement is deferred up to 30 days; see the
-  mark log "held" reasons), `risk_quote_unverified` (risk holds a book reduce-only for over
+- **Kill orders are RISK-signed** (Redis is not trusted, SECURITY.md "Off-chain trust boundaries"): agents and
+  ops-venue act only on the risk service's signed `KillOrder` (a RISK_ROLE holder; pin it with `AGENT_RISK_SIGNERS` /
+  `OPS_RISK_SIGNERS` to take the RPC off the kill path). A forged one is logged `FORGED kill ... ignored` and raises
+  `bus_forged_message`: check who can reach Redis. Deploy risk, the agents and ops-venue together: an agent or
+  ops-venue from this commit ignores an unsigned kill from an older risk (the on-chain kill still halts and revokes),
+  and risk from this commit checks only signed agent quotes. A halted agent with `killConfirmedOnChain: false` got a
+  signed kill whose on-chain step has not landed (alert `kill_stuck`): complete the kill; it resumes after a remandate.
+- **Hold alerts** (services/alerts): `held_marks_in_session` (a held run valued in, or lasting through,
+  `ALERT_HELD_MARK_SESSION_SECONDS` of open session: a price the NAV uses is held or stale, e.g. a desk token whose
+  feed stopped, or the daily mark time never falls in the charter session; settlement is deferred up to 30 days; see
+  the mark log "held" reasons), `risk_quote_unverified` (risk holds a book reduce-only for over
   `ALERT_QUOTE_UNVERIFIED_SECONDS` in session: no fresh attested price; restore the oracle feed / signed prints),
   `desk_stale_trade_price` (the desk refused `ALERT_STALE_TRADE_PRICE_MAX` key swaps with StaleTradePrice within
-  `ALERT_STALE_TRADE_PRICE_WINDOW_SECONDS`: the agent's signed prices are not reaching the desk; hedging is stuck).
+  `ALERT_STALE_TRADE_PRICE_WINDOW_SECONDS`: the agent's signed prices are not reaching the desk; hedging is stuck),
+  `bus_forged_message` (a service refused `ALERT_FORGED_MESSAGES_MAX` forged kills / quotes within
+  `ALERT_FORGED_MESSAGES_WINDOW_SECONDS`: nothing acted on them, but something can write to Redis).
 
 ## Rollback and incidents (mainnet)
 

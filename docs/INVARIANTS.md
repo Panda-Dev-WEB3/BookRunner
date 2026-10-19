@@ -144,8 +144,9 @@ The services re-implement some on-chain rules. Shared vectors keep them identica
 | Multiplier applied once | `mandate/StockTokenRegistryLiveMultiplier.t.sol` `test_vector_*` | `packages/shared/test/stock-tokens.test.ts` |
 | Allow-list Merkle leaves | `mandate/MandateRedTeam.t.sol` `test_redteam_allowList_*` | `packages/shared/src/merkle.ts` |
 
-Service-side invariants that do not live on-chain (the agent's quote never uses an unsigned Redis price, a Redis-only
-kill never revokes a venue key, alert hysteresis) are tested in `services/*/test` and described in `SECURITY.md`.
+Service-side invariants that do not live on-chain (the agent never quotes on an unsigned Redis price, only a
+RISK-signed kill order halts an agent or revokes a venue key, risk never breaches on an unsigned agent quote, alert
+hysteresis) are tested in `services/*/test` and described in `SECURITY.md`.
 
 ## Suite index
 
