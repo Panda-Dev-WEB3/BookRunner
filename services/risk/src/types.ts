@@ -1,5 +1,5 @@
 import type { QuoteHoldState } from "./domain/quote";
-import type { BookComponents, BookState, LimitState, LimitsSnapshot, Mandate, QuoteMsg, RiskStateSig, VenueId } from "@bookrunner/shared";
+import type { BookComponents, BookState, KillMsg, LimitState, LimitsSnapshot, Mandate, MonitorStateSig, QuoteMsg, RiskStateSig, VenueId } from "@bookrunner/shared";
 import type { QuoteAuth } from "./ports";
 import type { Hex } from "viem";
 
@@ -193,6 +193,8 @@ export interface KillJournal {
   /** Tx that set killed=true on-chain (ours or external). */
   killTx: string | null;
   runs: number;
+  /** the RISK-signed KillOrder broadcast for this episode: corroborates the journal when it is restored (N-3) */
+  killOrder?: KillMsg;
 }
 
 export interface MonitorState {
@@ -268,4 +270,6 @@ export interface RiskStatePayload extends LimitsSnapshot {
   meta: RiskMeta;
   /** RISK-key signature over (book, state, tsMs) (shared busAuth.ts RiskState): the agent acts only on signed states */
   stateSig?: RiskStateSig;
+  /** RISK-signed copy of the state machine (busAuth.ts RiskMonitorState): the only one risk restores at restart (N-3) */
+  monitorSig?: MonitorStateSig<MonitorState>;
 }

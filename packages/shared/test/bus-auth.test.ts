@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { type Address, keccak256, toHex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { FORGED_WINDOW_SEC, ForgedLog, KILL_MAX_AGE_SEC, KillVerifier, RiskStateVerifier, cachedAddressCheck, killNonce, recoverQuoteSigner, signKill, signQuote, signRiskState } from "../src/busAuth";
+import { FORGED_WINDOW_SEC, ForgedLog, KILL_MAX_AGE_SEC, KillVerifier, RiskStateVerifier, cachedAddressCheck, killNonce, recoverKillOrderSigner, recoverMonitorStateSigner, recoverQuoteSigner, signKill, signMonitorState, signQuote, signRiskState } from "../src/busAuth";
 import type { QuoteMsg } from "../src/queues";
 
 const CHAIN = 31337;
@@ -125,5 +125,18 @@ describe("RiskStateVerifier (RISK-signed risk state)", () => {
     }
     expect(await v.verify(await state("killed", now - 61_000))).toMatchObject({ ok: false, forged: false, replay: true });
     expect(await v.verify(await state("killed", now))).toMatchObject({ ok: true, state: "killed" });
+  });
+});
+
+describe("persisted monitor state signature", () => {
+  test("recovers the signer over the canonical JSON (key order irrelevant); any change is another signer", async () => {
+    const monitor = { b: 1, a: { kill: { done: ["broadcast"], episodeId: "e" } } };
+    const sig = await signMonitorState(RISK, CHAIN, CONFIG, { bookId: 3, monitor, tsMs: T * 1000 });
+    expect(await recoverMonitorStateSigner(CHAIN, CONFIG, { bookId: 3, monitor: { a: { kill: { episodeId: "e", done: ["broadcast"] } }, b: 1 }, tsMs: T * 1000, signature: sig })).toBe(RISK.address);
+    expect(await recoverMonitorStateSigner(CHAIN, CONFIG, { bookId: 3, monitor: { ...monitor, b: 2 }, tsMs: T * 1000, signature: sig })).not.toBe(RISK.address);
+    expect(await recoverMonitorStateSigner(CHAIN, CONFIG, { bookId: 4, monitor, tsMs: T * 1000, signature: sig })).not.toBe(RISK.address);
+    expect(await recoverMonitorStateSigner(CHAIN, CONFIG, { bookId: 3, monitor, tsMs: T * 1000, signature: "0x" })).toBeNull();
+    const k = await kill();
+    expect(await recoverKillOrderSigner(CHAIN, CONFIG, k)).toBe(RISK.address);
   });
 });

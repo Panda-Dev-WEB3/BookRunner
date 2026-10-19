@@ -3,6 +3,7 @@
 import {
   HEDGE_BAND_GRACE_SECONDS,
   type LimitsSnapshot,
+  type MonitorStateSig,
   RISK_STATE_RESIGN_MS,
   type Logger,
   type QuotingVenue,
@@ -16,7 +17,7 @@ import { type Evaluation, evaluate } from "./domain/evaluate";
 import { trustLiveVenueEquity, venueDeployedValue } from "./domain/nav";
 import { oracleFromRedis, oraclePrice } from "./domain/oracle";
 import { finite, jsonSafe, receiptRow, usdNum, usdStr } from "./domain/records";
-import { type Effect, decide, newKillJournal } from "./domain/transitions";
+import { type Effect, decide, isJournalComplete, newKillJournal } from "./domain/transitions";
 import { dedupe, emitDomainEvent } from "./events";
 import { runKillSequence } from "./kill/sequence";
 import { reportDeployedValueUsd } from "../../ops-venue/src/report712";
@@ -66,6 +67,9 @@ export interface TickResult {
   killComplete: boolean | null;
 }
 
+/** A restored kill journal corroborated only by its own signed KillOrder resumes when the copy is at most this old. */
+const RESTORE_KILL_MAX_AGE_MS = 10 * 60_000;
+
 /** Persisted state is read at most this many times before the monitor proceeds without it. */
 const RESTORE_ATTEMPTS = 5;
 
@@ -88,6 +92,8 @@ export class BookMonitor {
   private quoteAuth: RiskMeta["quoteAuth"] = null;
   /** the last quote accepted (signed, fresh, newer, verified print); kept until a newer one, aged out by the evaluation */
   private acceptedQuote: QuoteObservation | null = null;
+  /** the last signed copy of the state machine (re-signed when it changes materially or after RISK_STATE_RESIGN_MS) */
+  private monitorSig: { key: string; sig: MonitorStateSig<MonitorState> } | null = null;
   /** the last signed state (re-signed on change or after RISK_STATE_RESIGN_MS) */
   private stateSig: { state: string; tsMs: number; signature: Hex } | null = null;
   private lastForgedQuoteLog = Number.NEGATIVE_INFINITY;
@@ -311,7 +317,8 @@ export class BookMonitor {
     const snap = ev.snapshot;
     const meta = this.meta(obs, ev);
     const stateSig = await this.signState(snap.state, obs.nowMs);
-    const payload = jsonSafe<RiskStatePayload>({ ...snap, meta, ...(stateSig ? { stateSig } : {}) });
+    const monitorSig = await this.signMonitor(obs.nowMs);
+    const payload = jsonSafe<RiskStatePayload>({ ...snap, meta, ...(stateSig ? { stateSig } : {}), ...(monitorSig ? { monitorSig } : {}) });
     this.lastPayload = payload;
     await this.soft("saveRiskState", () => this.d.bus.saveRiskState(this.ref.bookId, payload), undefined);
     await this.soft("saveLiveNav", () => this.d.bus.saveLiveNav(this.ref.bookId, this.liveNav(obs, ev)), undefined);
@@ -406,9 +413,71 @@ export class BookMonitor {
   /** Re-saves the last published risk state with the current state machine (journal included). */
   private async persist(): Promise<void> {
     if (!this.lastPayload) return;
-    const payload = jsonSafe<RiskStatePayload>({ ...this.lastPayload, meta: { ...this.lastPayload.meta, monitor: this.state } });
+    const monitorSig = await this.signMonitor(this.d.clock.nowMs());
+    const payload = jsonSafe<RiskStatePayload>({ ...this.lastPayload, meta: { ...this.lastPayload.meta, monitor: this.state }, ...(monitorSig ? { monitorSig } : {}) });
     this.lastPayload = payload;
     await this.soft("persistRiskState", () => this.d.bus.saveRiskState(this.ref.bookId, payload), undefined);
+  }
+
+  /**
+   * The RISK-signed copy of the state machine to persist (N-3): re-signed when its material part (breach episode, kill
+   * journal, handled kill, streak, last state) changes, or after RISK_STATE_RESIGN_MS; otherwise the last signed copy
+   * is re-used (risk restores that copy, never the unsigned meta.monitor). A signing failure persists none.
+   */
+  private async signMonitor(nowMs: number): Promise<MonitorStateSig<MonitorState> | undefined> {
+    const sign = this.d.auth?.signMonitor;
+    if (!sign) return undefined;
+    const s = this.state;
+    const key = JSON.stringify({ kill: s.kill, episode: s.episode, handledKill: s.handledKill, breachStreak: s.breachStreak, lastState: s.lastState, quoteHold: s.quoteHold });
+    const prev = this.monitorSig;
+    if (prev && prev.key === key && nowMs - prev.sig.tsMs < RISK_STATE_RESIGN_MS && nowMs >= prev.sig.tsMs) return prev.sig;
+    try {
+      const monitor = jsonSafe(s);
+      const signature = await sign.call(this.d.auth, { bookId: this.ref.bookId, monitor, tsMs: nowMs });
+      this.monitorSig = { key, sig: { tsMs: nowMs, monitor, signature } };
+      return this.monitorSig.sig;
+    } catch (err) {
+      this.log.warn({ err: errMsg(err) }, "risk monitor state signing failed (not persisted signed)");
+      return undefined;
+    }
+  }
+
+  /**
+   * The state machine to restore (N-3: Redis is not trusted). With authentication: only the copy THIS risk key signed
+   * (monitorSig) is restored; a missing one starts fresh, an unsigned / invalid / foreign one starts fresh and is
+   * counted as forged. A restored, unfinished kill journal resumes only when corroborated: the mandate is already
+   * killed on-chain, or the journal carries the episode's KillOrder signed by this risk key and the copy is at most
+   * RESTORE_KILL_MAX_AGE_MS old. Otherwise the journal is dropped and the book is re-evaluated from its limits.
+   */
+  private async restoredMonitor(p: RiskStatePayload | null): Promise<MonitorState | null> {
+    const auth = this.d.auth;
+    if (!auth?.isOwnMonitor) return p?.meta?.monitor ?? null;
+    const ms = p?.monitorSig;
+    if (!ms) {
+      if (p?.meta?.monitor) {
+        this.log.warn("persisted risk state is not signed by this risk key: starting from a fresh state");
+        auth.forged?.("state", `book ${this.ref.bookId}: unsigned persisted risk state`);
+      }
+      return null;
+    }
+    if (!(await auth.isOwnMonitor({ bookId: this.ref.bookId, monitor: ms.monitor, tsMs: ms.tsMs, signature: ms.signature }))) {
+      this.log.warn("persisted risk state signature invalid or from another signer: starting from a fresh state");
+      auth.forged?.("state", `book ${this.ref.bookId}: persisted risk state with an invalid signature`);
+      return null;
+    }
+    const m: MonitorState = { ...initialMonitorState(), ...ms.monitor };
+    if (m.kill && !isJournalComplete(m.kill)) {
+      const killedOnChain = await this.d.chain.isKilled(this.ref); // an RPC error retries the restore
+      const fresh = this.d.clock.nowMs() - ms.tsMs <= RESTORE_KILL_MAX_AGE_MS;
+      const ownOrder = fresh && auth.isOwnKillOrder ? await auth.isOwnKillOrder(this.ref.bookId, m.kill.episodeId, m.kill.killOrder) : false;
+      if (!killedOnChain && !ownOrder) {
+        this.log.warn({ episodeId: m.kill.episodeId, done: m.kill.done, ageMs: this.d.clock.nowMs() - ms.tsMs }, "restored kill journal not corroborated (mandate not killed on-chain, no signed KillOrder of this episode): dropped; limits re-evaluated");
+        m.kill = null;
+        m.episode = null;
+        m.breachStreak = 0;
+      }
+    }
+    return m;
   }
 
   private async restore(): Promise<void> {
@@ -419,7 +488,8 @@ export class BookMonitor {
       if (p?.meta?.monitor && !sameDeployment) {
         this.log.warn({ storedMandate: p.meta.mandate ?? null }, "persisted risk state belongs to another deployment; ignoring it");
       } else if (p?.meta?.monitor) {
-        this.state = { ...initialMonitorState(), ...p.meta.monitor };
+        const restored = await this.restoredMonitor(p);
+        if (restored) this.state = { ...initialMonitorState(), ...restored };
         this.log.info(
           { lastState: this.state.lastState, killJournal: this.state.kill?.episodeId ?? null, handledKill: this.state.handledKill },
           "restored risk state",

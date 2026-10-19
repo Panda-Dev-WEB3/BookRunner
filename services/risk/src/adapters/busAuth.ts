@@ -17,8 +17,11 @@ import {
   type PriceSignerCheck,
   QUOTE_SIGNED_MAX_AGE_MS,
   killNonce,
+  recoverKillOrderSigner,
+  recoverMonitorStateSigner,
   recoverQuoteSigner,
   signKill,
+  signMonitorState,
   signRiskState,
 } from "@bookrunner/shared";
 import type { Address, Hex, LocalAccount } from "viem";
@@ -32,7 +35,7 @@ export interface RiskBusAuthOptions {
   /** BookrunnerConfig of the deployment (KillOrder / RiskState domain) */
   config: Address;
   /** the RISK role key (local or KMS) */
-  account: Pick<LocalAccount, "signTypedData">;
+  account: Pick<LocalAccount, "signTypedData" | "address">;
   /**
    * The desk-key status of `key` on `mandate`: active (isActiveKey), inactive (registered once: getKey().validUntil > 0,
    * now expired / revoked / mandate killed) or unknown (never a key). THROWS when the read fails.
@@ -113,6 +116,20 @@ export function riskBusAuth(o: RiskBusAuthOptions): RiskBusAuth {
     },
     forged(kind, reason) {
       o.forged?.note(kind, reason);
+    },
+    signMonitor(k): Promise<Hex> {
+      return signMonitorState(o.account, o.chainId, o.config, k);
+    },
+    async isOwnMonitor(k): Promise<boolean> {
+      const signer = await recoverMonitorStateSigner(o.chainId, o.config, k);
+      return !!signer && signer.toLowerCase() === o.account.address.toLowerCase();
+    },
+    async isOwnKillOrder(bookId, episodeId, msg): Promise<boolean> {
+      if (!msg || typeof msg !== "object") return false;
+      const m = msg as Partial<KillMsg>;
+      if (Number(m.bookId) !== bookId || typeof m.nonce !== "string" || m.nonce.toLowerCase() !== killNonce(bookId, episodeId).toLowerCase()) return false;
+      const signer = await recoverKillOrderSigner(o.chainId, o.config, m);
+      return !!signer && signer.toLowerCase() === o.account.address.toLowerCase();
     },
   };
 }

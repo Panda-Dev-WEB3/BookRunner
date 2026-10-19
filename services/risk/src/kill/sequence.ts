@@ -88,7 +88,12 @@ export async function runKillSequence(journal: KillJournal, ctx: KillContext, po
 
   const steps: Record<KillStep, () => Promise<void>> = {
     broadcast: async () => {
-      await retry("broadcast", async () => ports.bus.publishKill(bookId, await killOrder()));
+      await retry("broadcast", async () => {
+        const order = await killOrder();
+        await ports.bus.publishKill(bookId, order);
+        // the signed order corroborates this journal if risk restarts before the kill completes (N-3)
+        if (order.signature) j.killOrder = order;
+      });
       j.actions.push("kill_broadcast");
     },
 

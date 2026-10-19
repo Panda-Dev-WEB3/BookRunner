@@ -16,6 +16,7 @@
 import { type Address, type Hex, type LocalAccount, getAddress, isAddress, keccak256, recoverTypedDataAddress, toHex } from "viem";
 import type { KillMsg, OraclePriceMsg, QuoteMsg } from "./queues";
 import type { LimitState } from "./mandate";
+import { canonicalJson } from "./merkle";
 
 // ------------------------------------------------------------------ cached on-chain address checks
 
@@ -309,6 +310,69 @@ export class RiskStateVerifier {
     if (!isRisk) return { ok: false, reason: `risk state signed by ${signer}, which does not hold RISK_ROLE (or for another book)`, forged: true };
     this.lastTsMs = sig.tsMs;
     return { ok: true, state, tsMs: sig.tsMs };
+  }
+}
+
+// ------------------------------------------------------------------ risk's persisted monitor state
+
+/**
+ * Risk persists its state machine (breach episode, kill journal, holds) in Redis and restores it at restart (Task 7b
+ * N-3). Redis is not trusted: the persisted copy is signed by the RISK key over keccak256 of its canonical JSON (keys
+ * sorted), bound to (bookId, tsMs) under the (chainId, BookrunnerConfig) domain; risk restores only a copy it signed
+ * itself, and resumes a restored kill only when the chain or the kill's own signed KillOrder corroborates it.
+ */
+export const monitorStateTypes = {
+  RiskMonitorState: [
+    { name: "bookId", type: "uint256" },
+    { name: "stateHash", type: "bytes32" },
+    { name: "tsMs", type: "uint64" },
+  ],
+} as const;
+
+/** keccak256 of the canonical JSON (merkle.ts canonicalJson: sorted keys) of the state AS PERSISTED (JSON round trip). */
+export const monitorStateHash = (monitor: unknown): Hex =>
+  keccak256(toHex(canonicalJson(JSON.parse(JSON.stringify(monitor ?? null, (_k, x) => (typeof x === "bigint" ? x.toString() : x))))));
+
+/** The signed copy of risk's monitor state (RiskStatePayload.monitorSig). */
+export interface MonitorStateSig<T = unknown> {
+  tsMs: number;
+  monitor: T;
+  signature: Hex;
+}
+
+export function signMonitorState(account: Pick<LocalAccount, "signTypedData">, chainId: number, config: Address, k: { bookId: number; monitor: unknown; tsMs: number }): Promise<Hex> {
+  return account.signTypedData({ domain: killDomain(chainId, config), types: monitorStateTypes, primaryType: "RiskMonitorState", message: { bookId: BigInt(k.bookId), stateHash: monitorStateHash(k.monitor), tsMs: BigInt(k.tsMs) } });
+}
+
+/** The signer of a persisted monitor state; null when unsigned or malformed. */
+export async function recoverMonitorStateSigner(chainId: number, config: Address, k: { bookId: number; monitor: unknown; tsMs: unknown; signature: unknown }): Promise<Address | null> {
+  if (typeof k.signature !== "string" || !SIG_RE.test(k.signature) || typeof k.tsMs !== "number" || !Number.isSafeInteger(k.tsMs) || k.tsMs < 0) return null;
+  try {
+    return await recoverTypedDataAddress({
+      domain: killDomain(chainId, config),
+      types: monitorStateTypes,
+      primaryType: "RiskMonitorState",
+      message: { bookId: BigInt(k.bookId), stateHash: monitorStateHash(k.monitor), tsMs: BigInt(k.tsMs) },
+      signature: k.signature as Hex,
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** The signer of a KillOrder message (no age / replay rule: for corroborating a restored kill journal). */
+export async function recoverKillOrderSigner(chainId: number, config: Address, m: Partial<KillMsg>): Promise<Address | null> {
+  if (typeof m.signature !== "string" || !SIG_RE.test(m.signature) || typeof m.reason !== "string" || typeof m.issuedAt !== "number" || typeof m.nonce !== "string" || !Number.isSafeInteger(Number(m.bookId))) return null;
+  try {
+    return await recoverTypedDataAddress({
+      domain: killDomain(chainId, config),
+      types: killTypes,
+      primaryType: "KillOrder",
+      message: killOrderOf({ bookId: Number(m.bookId), reason: m.reason, issuedAt: m.issuedAt, nonce: m.nonce as Hex }),
+      signature: m.signature as Hex,
+    });
+  } catch {
+    return null;
   }
 }
 

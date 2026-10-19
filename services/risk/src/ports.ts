@@ -185,6 +185,12 @@ export interface RiskBusAuth {
   signKill(k: { bookId: number; reason: string; breaches: string[]; episodeId: string; issuedAt: number }): Promise<KillMsg>;
   /** A forged message was refused (published for alerts bus_forged_message). */
   forged?(kind: "quote" | "state", reason: string): void;
+  /** The RISK key's signature over the persisted state machine (busAuth.ts RiskMonitorState). */
+  signMonitor?(k: { bookId: number; monitor: unknown; tsMs: number }): Promise<Hex>;
+  /** Was this persisted state machine signed by THIS risk service's key (no RPC)? */
+  isOwnMonitor?(k: { bookId: number; monitor: unknown; tsMs: unknown; signature: unknown }): Promise<boolean>;
+  /** Is `msg` a KillOrder this risk key signed for (bookId, episodeId) (no RPC)? */
+  isOwnKillOrder?(bookId: number, episodeId: string, msg: unknown): Promise<boolean>;
 }
 
 /** Live venue clients (QuotingVenue) per book; null when none is available (engine books, no keys). */

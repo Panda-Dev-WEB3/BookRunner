@@ -1,14 +1,15 @@
 // Audit 2026-10 lead "Redis is a shared trust domain" (Task 7b fix rounds 1-2): a Redis writer must not be able to make
 // risk kill a book through a forged or replayed agent quote; risk's kill orders and published states are RISK-signed.
 import { describe, expect, test } from "bun:test";
-import { type KillMsg, KillVerifier, type PriceUpdate, type QuoteMsg, RiskStateVerifier, VENUE, priceTypedData, signQuote } from "@bookrunner/shared";
+import { type BusForgedMsg, ForgedLog, type KillMsg, KillVerifier, type PriceUpdate, type QuoteMsg, RiskStateVerifier, VENUE, priceTypedData, signMonitorState, signQuote } from "@bookrunner/shared";
 import { type Address, keccak256, toHex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { riskBusAuth } from "../src/adapters/busAuth";
 import type { QuoteAuth } from "../src/ports";
 import { BookMonitor } from "../src/monitor";
-import type { RiskStatePayload } from "../src/types";
-import { type World, makeRef, makeWorld, settings, silentLog } from "./fakes";
+import { newKillJournal } from "../src/domain/transitions";
+import { type RiskStatePayload, initialMonitorState } from "../src/types";
+import { T0, type World, makeRef, makeWorld, settings, silentLog } from "./fakes";
 
 const CHAIN = 31337;
 const CONFIG = "0x00000000000000000000000000000000000c0f19" as Address;
@@ -140,5 +141,74 @@ describe("genuine quotes are still checked; kills and states are RISK-signed", (
       sigs.push(riskState(t.w).stateSig!.tsMs);
     }
     expect(new Set(sigs).size).toBe(2); // 16 s of ticks every 2 s: one re-sign after 10 s
+  });
+});
+
+describe("N-3: risk restores only its own signed state, and resumes a kill only when corroborated", () => {
+  function restart(w: World, o: { forged?: BusForgedMsg[] } = {}) {
+    const auth = riskBusAuth({
+      chainId: CHAIN,
+      config: CONFIG,
+      account: RISK,
+      deskKeyStatus: async (_m, key) => (key.toLowerCase() === DESK.address.toLowerCase() ? "active" : "unknown"),
+      oracle: { chainId: CHAIN, oracle: ORACLE, isOracleSigner: async (a) => a.toLowerCase() === ORACLE_KEY.address.toLowerCase() },
+      forged: new ForgedLog("risk", async (m) => void o.forged?.push(m), () => w.clock.t),
+      now: () => w.clock.t,
+    });
+    return { w, m: new BookMonitor(REF, { chain: w.chain, store: w.store, bus: w.bus, queue: w.queue, venues: w.venues, clock: w.clock, settings: settings(), log: silentLog, sleep: async () => {}, auth }) };
+  }
+  const plantedJournal = (episodeId = "1-1") => ({ ...newKillJournal({ id: episodeId, breaches: ["SKEW"] }, {}, T0 - 60) });
+  const payload = (monitor: unknown, extra: Record<string, unknown> = {}) => JSON.stringify({ state: "ok", breaches: [], meta: { mandate: MANDATE, monitor }, ...extra });
+  const healthy = async (t: { w: World; m: BookMonitor }, n = 4) => {
+    for (let i = 0; i < n; i++) await tick(t, await quote(t.w, 189.92, 190.08, await print(t.w, 190)));
+  };
+
+  test("a planted unsigned kill record does nothing at restart (counted as forged)", async () => {
+    const w = makeWorld();
+    w.bus.kv.set("risk:1", payload({ ...initialMonitorState(), kill: plantedJournal() }));
+    const forged: BusForgedMsg[] = [];
+    await healthy(restart(w, { forged }));
+    expect(killed(w)).toEqual([]);
+    expect(w.calls.filter((c) => c.startsWith("chain.flatten") || c === "chain.setReduceOnly")).toEqual([]);
+    expect(forged.at(-1)?.events.map((e) => e.kind)).toEqual(["state"]);
+  });
+
+  test("a validly signed but stale kill record, no on-chain corroboration, limits OK: no kill", async () => {
+    for (const ageMs of [3_600_000, 0]) {
+      const w = makeWorld();
+      const monitor = { ...initialMonitorState(), kill: plantedJournal() }; // no signed KillOrder in it
+      const tsMs = w.clock.t - ageMs;
+      const signature = await signMonitorState(RISK, CHAIN, CONFIG, { bookId: 1, monitor, tsMs });
+      w.bus.kv.set("risk:1", payload(monitor, { monitorSig: { tsMs, monitor, signature } }));
+      await healthy(restart(w));
+      expect(killed(w)).toEqual([]);
+    }
+  });
+
+  test("a copy signed by another key is refused (forged) even with a KillOrder in it", async () => {
+    const w = makeWorld();
+    const monitor = { ...initialMonitorState(), kill: plantedJournal() };
+    const signature = await signMonitorState(WRITER, CHAIN, CONFIG, { bookId: 1, monitor, tsMs: w.clock.t });
+    w.bus.kv.set("risk:1", payload(monitor, { monitorSig: { tsMs: w.clock.t, monitor, signature } }));
+    const forged: BusForgedMsg[] = [];
+    await healthy(restart(w, { forged }));
+    expect(killed(w)).toEqual([]);
+    expect(forged.at(-1)?.events).toHaveLength(1);
+  });
+
+  test("a genuine kill interrupted by a restart still completes (its own signed KillOrder corroborates it)", async () => {
+    const t = setup();
+    t.w.chain.state.failMandateKill = 1_000; // the on-chain kill keeps failing: the run stops with the journal open
+    for (let i = 0; i < 4; i++) await tick(t, await quote(t.w, 190.6, 190.8, await print(t.w, 190)));
+    expect(t.w.calls).toContain("bus.publishKill");
+    expect(t.w.chain.state.killed).toBe(false);
+    const persisted = JSON.parse(t.w.bus.kv.get("risk:1")!) as RiskStatePayload;
+    expect(persisted.monitorSig?.monitor.kill?.killOrder?.signature).toBeDefined();
+    // restart: a new monitor, the market is fine now, the chain accepts the kill
+    t.w.chain.state.failMandateKill = 0;
+    const r = restart(t.w);
+    await healthy(r, 2);
+    expect(t.w.calls.some((c) => c.startsWith("chain.mandateKill"))).toBe(true);
+    expect(t.w.chain.state.killed).toBe(true);
   });
 });
