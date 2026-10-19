@@ -145,7 +145,7 @@ export class MarkChainAdapter implements MarkChain {
       eventName: "MarkCommitted",
       args: { markId },
       fromBlock: BigInt(this.deployment.startBlock ?? 0),
-      toBlock: await this.pc.getBlockNumber(),
+      toBlock: await this.pc.getBlockNumber({ cacheTime: 0 }), // never a cached head: the commit may be in the newest block
     });
     return logs[0]?.transactionHash ?? null;
   }

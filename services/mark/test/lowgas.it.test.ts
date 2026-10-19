@@ -65,7 +65,7 @@ describe.skipIf(!ENABLED)("on-chain: MarkRegistry.commitAndApply + pull-oracle r
     new MarkChainAdapter(pc, new TxSender(pc, walletClientFor(31337, RPC, markSigner), log, { pollingIntervalMs: 50 }), { ...deployment, contracts: { ...deployment.contracts, markRegistry: registry } });
 
   beforeAll(async () => {
-    anvil = Bun.spawn(["anvil", "--port", String(PORT), "--silent"], { stdout: "ignore", stderr: "ignore" });
+    anvil = Bun.spawn([process.env.ANVIL_BIN ?? "anvil", "--port", String(PORT), "--silent"], { stdout: "ignore", stderr: "ignore" });
     for (let i = 0; i < 100; i++) {
       try {
         await pc.getBlockNumber();
