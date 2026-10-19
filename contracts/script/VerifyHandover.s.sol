@@ -24,6 +24,11 @@ interface IHasConfig {
     function config() external view returns (address);
 }
 
+interface IRoleEnumerable {
+    function getRoleMemberCount(bytes32 role) external view returns (uint256);
+    function getRoleMember(bytes32 role, uint256 index) external view returns (address);
+}
+
 interface IERC20Min {
     function balanceOf(address) external view returns (uint256);
     function decimals() external view returns (uint8);
@@ -32,7 +37,8 @@ interface IERC20Min {
 /// @title VerifyHandover — read-only check of every RUNBOOK mainnet post-condition.
 /// @notice Reads the JSON input (DEPLOY_INPUT) and deployments/<chainId>.json (DEPLOY_OUT), queries the chain
 ///         and prints a PASS/FAIL table; reverts if any row fails. Never broadcasts. Post-conditions:
-///         deployer holds no role anywhere (config roles, timelock roles, BKRN); config.timelock() == the
+///         deployer holds no role anywhere (config roles, timelock roles, BKRN); no role holder beyond the input on
+///         the config or the timelock (both enumerate their holders, audit 2026-10 D); config.timelock() == the
 ///         controller; controller roles = multisig (proposer / executor / canceller), self-administered, no
 ///         open executor, delay as input (>= 48h on mainnet); StockTokenRegistry admin == 0 (follows the
 ///         timelock); expense / slash recipients = treasury; service roles + guardian as input; every
@@ -79,6 +85,7 @@ contract VerifyHandover is MainnetInput {
         _checkConfigGovernance();
         _checkTimelock();
         _checkServiceRoles();
+        _checkNoExtraRoleHolders();
         _checkComponents();
         _checkImplementations();
         _checkParams();
@@ -156,6 +163,70 @@ contract VerifyHandover is MainnetInput {
         _rowHolders(cfg.OPS_VENUE_ROLE(), opsVenueHolders, "OPS_VENUE granted to every input holder");
         _rowHolders(cfg.JURY_ROLE(), juryHolders, "JURY granted to every input holder");
         _rowHolders(cfg.KEEPER_ROLE(), keeperHolders, "KEEPER granted to every input holder");
+    }
+
+    /// @dev Audit 2026-10 D: every role any contract consults has EXACTLY the expected holders. The checks above only
+    ///      prove the expected holders have their roles; a stray admin, guardian or service-role holder (or an extra
+    ///      timelock proposer / executor / canceller / admin) fails here. Both contracts enumerate their holders
+    ///      (BookrunnerConfig and BookrunnerTimelock are AccessControlEnumerable); a non-enumerable one fails.
+    function _checkNoExtraRoleHolders() internal {
+        address[] memory one = new address[](1);
+        bool ok = true;
+        one[0] = tl;
+        ok = _exactHolders(address(cfg), cfg.DEFAULT_ADMIN_ROLE(), one, "config DEFAULT_ADMIN") && ok;
+        one[0] = gov.guardian;
+        ok = _exactHolders(address(cfg), cfg.GUARDIAN_ROLE(), one, "config GUARDIAN") && ok;
+        ok = _exactHolders(address(cfg), cfg.MARK_SIGNER_ROLE(), markSigners, "config MARK_SIGNER") && ok;
+        ok = _exactHolders(address(cfg), cfg.RISK_ROLE(), riskHolders, "config RISK") && ok;
+        ok = _exactHolders(address(cfg), cfg.OPS_VENUE_ROLE(), opsVenueHolders, "config OPS_VENUE") && ok;
+        ok = _exactHolders(address(cfg), cfg.JURY_ROLE(), juryHolders, "config JURY") && ok;
+        ok = _exactHolders(address(cfg), cfg.KEEPER_ROLE(), keeperHolders, "config KEEPER") && ok;
+        _row(ok, "config: no role holder beyond the input (7 roles enumerated)");
+
+        TimelockController t = TimelockController(payable(tl));
+        bool tok = true;
+        one[0] = tl;
+        tok = _exactHolders(tl, t.DEFAULT_ADMIN_ROLE(), one, "timelock DEFAULT_ADMIN") && tok;
+        one[0] = gov.multisig;
+        tok = _exactHolders(tl, t.PROPOSER_ROLE(), one, "timelock PROPOSER") && tok;
+        tok = _exactHolders(tl, t.EXECUTOR_ROLE(), one, "timelock EXECUTOR") && tok;
+        tok = _exactHolders(tl, t.CANCELLER_ROLE(), one, "timelock CANCELLER") && tok;
+        _row(tok, "timelock: no role holder beyond the multisig / itself (BookrunnerTimelock enumerated)");
+    }
+
+    /// @dev True when `ac` enumerates `role` and its holders are exactly the distinct addresses of `expected`.
+    function _exactHolders(address ac, bytes32 role, address[] memory expected, string memory what)
+        internal
+        view
+        returns (bool ok)
+    {
+        uint256 n;
+        try IRoleEnumerable(ac).getRoleMemberCount(role) returns (uint256 c) {
+            n = c;
+        } catch {
+            console2.log(string.concat("    ", what, ": holders not enumerable"));
+            return false;
+        }
+        uint256 distinct;
+        for (uint256 i; i < expected.length; ++i) {
+            bool dup;
+            for (uint256 j; j < i; ++j) {
+                if (expected[j] == expected[i]) dup = true;
+            }
+            if (!dup) ++distinct;
+        }
+        ok = n == distinct;
+        for (uint256 i; i < n; ++i) {
+            address h = IRoleEnumerable(ac).getRoleMember(role, i);
+            bool known;
+            for (uint256 j; j < expected.length; ++j) {
+                if (expected[j] == h) known = true;
+            }
+            if (!known) {
+                ok = false;
+                console2.log(string.concat("    ", what, ": unexpected holder"), h);
+            }
+        }
     }
 
     function _checkComponents() internal {

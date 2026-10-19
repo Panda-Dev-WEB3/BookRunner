@@ -76,7 +76,7 @@ only (it deploys mocks and refuses 4663). Tick every box in order; two people fo
        ```bash
        RHC_RPC_URL=<archive rpc> bash scripts/deploy-mainnet.sh broadcast
        ```
-       It deploys the TimelockController (min delay 48h, proposer = executor = canceller = multisig, no admin)
+       It deploys the timelock (`BookrunnerTimelock`: OZ TimelockController with enumerable role holders; min delay 48h, proposer = executor = canceller = multisig, no admin)
        and every component (Book linked to BookLogic, OrderlyAdapter v3 with the input's broker / token hashes),
        sets params / HedgeExecutor v3 factory + one route per Stock Token / buyback params + reference source /
        oracle measurements + attested signers + `requireAttestations()` / Stock Tokens (live `uiMultiplier`
@@ -94,6 +94,9 @@ only (it deploys mocks and refuses 4663). Tick every box in order; two people fo
        - `StockTokenRegistry.admin() == 0` (follows `config.timelock()`);
        - `expenseRecipient` / `slashRecipient` == treasury (input), never the deployer;
        - service roles + GUARDIAN as input; committee seats as input; charter + committee are staking lockers;
+       - **no extra role holder** (audit 2026-10 D): the config's DEFAULT_ADMIN (= the timelock only), GUARDIAN,
+         MARK_SIGNER, RISK, OPS_VENUE, JURY and KEEPER holders, and the timelock's admin / proposer / executor /
+         canceller holders, are enumerated on-chain and must be exactly the input's (a stray admin fails);
        - every component reads this config; `config.usdc()` is the 6-decimal settlement token; vault /
          EntryPoint as input; all 8 factory implementations set; the Book implementation is linked to a
          deployed BookLogic; the OrderlyAdapter implementation is v3 (OrderlyIFAccount IF accounts, 6-dp

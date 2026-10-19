@@ -3,7 +3,7 @@ pragma solidity 0.8.30;
 
 import {console2} from "forge-std/Script.sol";
 import {VmSafe} from "forge-std/Vm.sol";
-import {TimelockController} from "@openzeppelin/contracts/governance/TimelockController.sol";
+import {BookrunnerTimelock} from "../src/BookrunnerTimelock.sol";
 
 import {MainnetInput} from "./MainnetInput.sol";
 import {BookrunnerConfig} from "../src/BookrunnerConfig.sol";
@@ -33,7 +33,8 @@ import {IStockTokenRegistry} from "../src/interfaces/IStockTokenRegistry.sol";
 /// @title DeployMainnet — Robinhood Chain MAINNET (4663) deployment + governance handover in one broadcast.
 /// @notice No mocks. Every external address and parameter comes from the JSON input (MainnetInput.sol,
 ///         schema contracts/deploy-inputs/README.md). Sequence: validate input -> check externals on-chain
-///         (code, 6-decimal settlement token, Orderly vault token) -> TimelockController (proposer = executor
+///         (code, 6-decimal settlement token, Orderly vault token) -> BookrunnerTimelock (OZ TimelockController with
+///         enumerable role holders, audit 2026-10 D) (proposer = executor
 ///         = canceller = multisig, NO admin: self-administered) -> core + venues + governance wired as
 ///         Deploy.s.sol does (HedgeExecutor SwapRouter02 + v3 factory + one route per Stock Token; BkrnFeeRouter
 ///         buyback params + reference source FIXED / TWAP / ATTESTED) -> params (venueMinIf[Orderly] > 25,000e6),
@@ -119,7 +120,7 @@ contract DeployMainnet is MainnetInput {
         address[] memory ms = new address[](1);
         ms[0] = gov.multisig;
         // admin = address(0): the controller administers itself; no EOA ever holds its DEFAULT_ADMIN_ROLE.
-        d.timelock = address(new TimelockController(gov.timelockMinDelay, ms, ms, address(0)));
+        d.timelock = address(new BookrunnerTimelock(gov.timelockMinDelay, ms, ms, address(0)));
     }
 
     function _deployCore() internal {
