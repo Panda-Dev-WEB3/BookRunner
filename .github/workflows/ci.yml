@@ -96,6 +96,8 @@ jobs:
           # shellcheck disable=SC2016 # the ${FOUNDRY_IMAGE:-...} in the pattern is literal text of scripts/forge.sh
           image=$(sed -n 's/^IMAGE="${FOUNDRY_IMAGE:-\(.*\)}"$/\1/p' scripts/forge.sh)
           case "$image" in *@sha256:*) ;; *) echo "scripts/forge.sh image is not pinned by digest: $image"; exit 1 ;; esac
+          # the runner's DNS for ghcr.io times out now and then: retry the pull
+          for i in 1 2 3 4 5; do docker pull -q "$image" && break; [ "$i" = 5 ] && exit 1; sleep $((i * 10)); done
           id=$(docker create "$image")
           mkdir -p "$RUNNER_TEMP/foundry"
           docker cp "$id:/usr/local/bin/anvil" "$RUNNER_TEMP/foundry/anvil"
