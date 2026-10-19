@@ -442,6 +442,11 @@ can redo it during the timelock delay from the published quote.
   `PoolEngine.lossBudget(marketId)` (anchor, loss, budget, blocked). The kill path is unchanged: the drawdown
   kill at the next mark, or a RISK / committee kill if the loss is not market movement. The budget never
   needs lifting by hand.
+- **Deploy the agent and the risk service together** (audit M-3). The risk service treats a quote that does not
+  straddle the oracle as a SKEW breach (kill after `RISK_BREACH_CONFIRM_TICKS`); an agent from before the fix can
+  quote one side of the oracle on a book with cached pre-fix terms (8/25, 12/30, 10/25). Roll both from the same
+  commit, agent first or in the same restart. `RISK_QUOTE_REF_TOLERANCE_BPS` (default 25) is how far the agent's
+  reference price may sit from the attested one before the quote is judged against the attested price.
 - **Mark reconciliation break** (Day-30 kill criterion): freeze new charters until clean; compare the
   mark's `pnl_json` venue section against the venue statement for the period.
 - **Wind-down**: `MarketCharter.retire(bookId)` → agents flatten → keeper recalls IF + MM → final
