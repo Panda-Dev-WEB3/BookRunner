@@ -74,6 +74,12 @@ it is assumed hostile (audit 2026-10 lead). What such a writer can and cannot do
   at most 15 s older than the quote; it judges the quote against THAT print. A forged, stale or replayed quote is no
   new quote and can never cause a breach; a replayed genuine quote cannot either, since it is judged against its
   own price. A quote signed by a desk key that expired or was revoked is reported as such, not as a forgery.
+- **Risk's own persisted state.** Risk keeps its state machine (breach episode, kill journal, holds) in Redis across
+  restarts. It restores only a copy signed with its own RISK key (EIP-712 over the canonical JSON, bound to the book,
+  chain and `BookrunnerConfig`); a missing copy starts fresh, an unsigned or foreign one starts fresh and is counted
+  as forged. A restored, unfinished kill resumes only when the mandate is already killed on-chain, or the journal
+  carries the episode's KillOrder signed by this key and the copy is at most 10 minutes old; otherwise the book is
+  re-evaluated from its limits.
 - **Signed reports and marks.** Venue reports and marks are EIP-712 signed by role keys and verified on-chain.
 
 ## Accepted risks
@@ -112,8 +118,9 @@ a way to exceed the stated bound is in scope.
   market Orderly does not open for new risk, where Orderly applies the market status itself. Not possible from Redis:
   moving a price the agent trusts; halting an agent (needs a signed `KillOrder`, a signed `killed` state or the
   on-chain kill); revoking a venue key (needs a signed `KillOrder` or the on-chain kill); making risk breach, kill or
-  flatten a book (quotes are signed, fresh, monotonic and judged against their own signed print); lifting a
-  risk-published restriction (states are signed, fresh and monotonic). The server's Redis has a password
+  flatten a book (quotes are signed, fresh, monotonic and judged against their own signed print; risk restores only
+  its own signed state and resumes a kill only when corroborated); lifting a risk-published restriction (states are
+  signed, fresh and monotonic). The server's Redis has a password
   (`requirepass`) and listens on 127.0.0.1 only ([deploy/server/HARDENING.md](deploy/server/HARDENING.md)).
 
 ## What to include

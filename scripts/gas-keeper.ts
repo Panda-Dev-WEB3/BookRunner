@@ -10,10 +10,11 @@
 //   bun scripts/gas-keeper.ts --address    # print the funder address (fund it from the faucet)
 //   BKRN_ALLOW_ADMIN_KEY=1 bun scripts/gas-keeper.ts --seed-funder 0.2
 //                                          # operator, once: move 0.2 test ETH from the deployer to the funder
-import { type Account, type Address, type Chain, createPublicClient, createWalletClient, formatEther, http, type PublicClient, parseAbi, parseEther, type Transport, type WalletClient } from "viem";
+import { type Abi, type Account, type Address, type Chain, createPublicClient, createWalletClient, formatEther, type Hex, http, type PublicClient, parseAbi, parseEther, type Transport, type WalletClient, zeroHash } from "viem";
+import { bookAbi, bookFactoryAbi, mMMandateAbi } from "../packages/shared/src/abi";
 import { chainFor } from "../packages/shared/src/chains";
 import { tryLoadDeployment } from "../packages/shared/src/deployments";
-import { type DevRole, roleAccount } from "../packages/shared/src/devkeys";
+import { type DevRole, bookDeskAccount, roleAccount } from "../packages/shared/src/devkeys";
 
 const RPC = process.env.RPC_URL ?? "http://127.0.0.1:8547";
 const CHAIN_ID = Number(process.env.CHAIN_ID ?? 31337);
@@ -49,15 +50,57 @@ export const GAS_PLAN: Array<[DevRole, string, string]> = [
 
 const chain = () => chainFor(CHAIN_ID, RPC);
 
+/** Trigger / target (ETH) of a per-book desk key that needs gas (as the launch books' single-token desks). */
+export const BOOK_DESK_KEY_GAS: [string, string] = ["0.004", "0.015"];
+
+/**
+ * Pure: does a book's desk key sign transactions? Engine books (desk SetQuote), and books whose mandate allows hedges
+ * (Hedge / Flatten legs; on Orderly books the agent also relays the signed venue report before each leg). Ended books
+ * (Cancelled = 1, Retired = 4) need nothing; an Orderly book with no hedge allow-list only quotes off-chain.
+ */
+export function deskKeyNeedsGas(b: { state: number; venue: number; hedgeAllowRoot: Hex }): boolean {
+  if (b.state === 1 || b.state === 4) return false;
+  return b.venue === 1 || b.hedgeAllowRoot !== zeroHash;
+}
+
+/** The per-book desk keys (Task 7b: every book has one) beyond the three launch roles that need gas. */
+async function bookDeskKeys(pub: PublicClient): Promise<Array<{ role: string; to: Address }>> {
+  const dep = tryLoadDeployment();
+  if (!dep?.contracts.factory) return [];
+  const launch = new Set(dep.books.map((b) => b.bookId));
+  const read = <T>(address: Address, abi: Abi, functionName: string, args: readonly unknown[] = []) => pub.readContract({ address, abi, functionName, args } as never) as Promise<T>;
+  const out: Array<{ role: string; to: Address }> = [];
+  for (const id of (await read<bigint[]>(dep.contracts.factory, bookFactoryAbi as Abi, "bookIds")).map(Number)) {
+    if (launch.has(id)) continue; // the launch roles are in GAS_PLAN
+    const c = await read<{ book: Address; mandate: Address }>(dep.contracts.factory, bookFactoryAbi as Abi, "componentsOf", [BigInt(id)]);
+    const [state, charter, mandate] = await Promise.all([
+      read<number>(c.book, bookAbi as Abi, "state"),
+      read<{ venue: number }>(c.book, bookAbi as Abi, "getCharter"),
+      read<{ hedgeAllowRoot: Hex }>(c.mandate, mMMandateAbi as Abi, "getMandate"),
+    ]);
+    if (!deskKeyNeedsGas({ state: Number(state), venue: Number(charter.venue), hedgeAllowRoot: mandate.hedgeAllowRoot })) continue;
+    out.push({ role: `deskKeyBook${id}`, to: bookDeskAccount(id).address });
+  }
+  return out;
+}
+
 async function pass(): Promise<void> {
   const pub = createPublicClient({ chain: chain(), transport: http(RPC) });
   const funder = roleAccount("funder");
   const wallet = createWalletClient({ chain: chain(), transport: http(RPC), account: funder });
-  const gaps: Array<{ role: DevRole; to: Address; value: bigint; bal: bigint }> = [];
+  const gaps: Array<{ role: DevRole | string; to: Address; value: bigint; bal: bigint }> = [];
   for (const [role, trigger, target] of GAS_PLAN) {
     const to = roleAccount(role).address;
     const bal = await pub.getBalance({ address: to });
     if (bal < parseEther(trigger)) gaps.push({ role, to, value: parseEther(target) - bal, bal });
+  }
+  const books = await bookDeskKeys(pub).catch((err) => {
+    log("warn", "per-book desk keys unreadable this pass", { err: err instanceof Error ? err.message : String(err) });
+    return [];
+  });
+  for (const { role, to } of books) {
+    const bal = await pub.getBalance({ address: to });
+    if (bal < parseEther(BOOK_DESK_KEY_GAS[0])) gaps.push({ role, to, value: parseEther(BOOK_DESK_KEY_GAS[1]) - bal, bal });
   }
   let have = await pub.getBalance({ address: funder.address });
   if (have < FUNDER_WARN) log("warn", "funder gas low: fund it from the faucet", { funder: funder.address, eth: formatEther(have), faucet: "https://faucet.testnet.chain.robinhood.com" });

@@ -489,7 +489,9 @@ can redo it during the timelock delay from the published quote.
   `OPS_RISK_SIGNERS` to take the RPC off the kill path). A forged one is logged `FORGED kill ... ignored` and raises
   `bus_forged_message`: check who can reach Redis. Deploy risk, the agents and ops-venue together: an agent or
   ops-venue from this commit ignores an unsigned kill from an older risk (the on-chain kill still halts and revokes),
-  and risk from this commit checks only signed agent quotes and publishes signed states (an agent from this commit
+  and risk from this commit checks only signed agent quotes, restores only its own signed state (at the first
+  restart after the upgrade every book starts from a fresh state, logged and counted once in `bus_forged_message`: the
+  old copies are unsigned) and publishes signed states (an agent from this commit
   goes reduce-only after `AGENT_RISK_STATE_TIMEOUT_MS` without one: alert `risk_state_unverified`). A halted agent with
   `killConfirmedOnChain: false` got a signed kill whose on-chain step has not landed (alert `kill_stuck`): complete
   the kill; it resumes after a remandate.
