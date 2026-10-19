@@ -7,7 +7,7 @@ import type { QuotingConfig } from "./domain/quoting";
 import type { EwmaVolConfig } from "./domain/volatility";
 import type { EngineVenueConfig } from "./venues/engine";
 import type { HedgePlannerConfig } from "./domain/hedge-planner";
-import { usd } from "@bookrunner/shared";
+import { QUOTE_PRICE_MAX_AGE_MS, usd } from "@bookrunner/shared";
 
 const num = (d: number) => z.coerce.number().default(d);
 const flag = (d: boolean) => z.stringbool().default(d);
@@ -15,6 +15,10 @@ const flag = (d: boolean) => z.stringbool().default(d);
 export const agentEnvShape = {
   BOOK_ID: z.coerce.number().int().positive().optional(),
   DESK_KEY_PRIVATE_KEY: z.string().optional(),
+  /** pinned oracle signers (comma-separated): Redis prices are verified without an RPC per new signer; unset = AttestedOracle.isSigner */
+  AGENT_ORACLE_SIGNERS: z.string().optional(),
+  /** pinned RISK_ROLE holders whose signed kill orders are accepted; unset = config.hasRole on-chain */
+  AGENT_RISK_SIGNERS: z.string().optional(),
   ORACLE_PRICE_ID: z.string().optional(), // override the registry-derived price id (e.g. "NVDA")
   ORDERLY_ACCOUNT_ID: z.string().optional(), // override adapter.accountId(MM)
   DEPLOYMENT_RETRY_MS: num(10_000),
@@ -26,7 +30,9 @@ export const agentEnvShape = {
   AGENT_HEDGE_INTERVAL_MS: num(15_000),
   AGENT_HEARTBEAT_TTL_MS: num(60_000),
   AGENT_HALT_LOG_MS: num(60_000),
-  AGENT_PRICE_STALE_SECONDS: num(30), // no quoting without a price update this recent
+  // no quoting without a price update this recent: risk's quote-check bound (QUOTE_PRICE_MAX_AGE_MS), so the agent stops
+  // on a price as old as the one risk holds the book reduce-only for
+  AGENT_PRICE_STALE_SECONDS: num(QUOTE_PRICE_MAX_AGE_MS / 1000),
   AGENT_CHAIN_PRICE_FALLBACK_SECONDS: num(10), // poll AttestedOracle when Redis is this quiet
 
   // Avellaneda-Stoikov + clamps

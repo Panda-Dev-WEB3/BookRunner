@@ -1,4 +1,4 @@
-import type { BookState, ListingMode, Logger, VenueAccount, VenueSymbolIssuesMsg } from "@bookrunner/shared";
+import type { BookState, ForgedLog, KillVerifier, ListingMode, Logger, VenueAccount, VenueSymbolIssuesMsg } from "@bookrunner/shared";
 import type { Address, Hex } from "viem";
 import type { ChainPort, OrderlyBook } from "../chain";
 import type { FeeSettlement, OrderlyBuilderClient } from "../client";
@@ -121,6 +121,12 @@ export interface OpsContext {
    * restart keeps a listed market that disappeared "missing" instead of flipping it back to "awaiting"
    */
   everListed?: EverListedStore;
+  /**
+   * RISK-signed kill orders (audit 2026-10 lead "Redis trust"): one verifier per input (kill channel, revoke_key job:
+   * a nonce is consumed once per input) and the log of forged ones (alerts bus_forged_message). Absent: every kill
+   * message is treated as unverifiable (the on-chain kill gate applies).
+   */
+  killAuth?: { channel: KillVerifier; job: KillVerifier; forged: ForgedLog };
 }
 
 export interface EverListedStore {

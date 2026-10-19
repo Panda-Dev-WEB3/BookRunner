@@ -1,10 +1,13 @@
 // Audit 2026-10 lead "Redis is a shared trust domain": an attacker with Redis write access must not be able to make the
-// agent quote off-price (only oracle-signed prints of the book's price id are used), and a forged kill must at worst
-// stop the agent (cancel-all + halt), nothing else.
+// agent quote off-price (only oracle-signed prints of the book's price id are used), nor halt it (only a RISK-signed
+// kill order does); the agent signs the quotes it publishes so risk can tell them from forged ones.
 import { describe, expect, test } from "bun:test";
 import {
+  type BusForgedMsg,
   DESK_REJECTS_WINDOW_SEC,
+  ForgedLog,
   KEYS,
+  KillVerifier,
   OraclePriceVerifier,
   type OraclePriceMsg,
   type PriceUpdate,
@@ -14,14 +17,19 @@ import {
   type VenueAccount,
   devAccount,
   encodePriceData,
+  killNonce,
   priceId,
   priceTypedData,
+  recoverQuoteSigner,
+  signKill,
+  signQuote,
   usd,
 } from "@bookrunner/shared";
 import { type Address, keccak256, toHex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { type AgentChain, BookAgent, type BookAgentConfig } from "../src/agent/book-agent";
 import { DeskRejects } from "../src/agent/desk-rejects";
+import { AgentKillGate } from "../src/agent/kill-gate";
 import { PriceFeed, VerifiedPriceInput } from "../src/agent/price-feed";
 import { PullPrices } from "../src/chain/pull-prices";
 import { DEFAULT_QUOTING_CONFIG } from "../src/domain/quoting";
@@ -153,21 +161,96 @@ describe("quote price from Redis: only oracle-signed prints of this book's price
   });
 });
 
-describe("kill channel: a forged kill is at worst a safe stop", () => {
-  test("any kill message for the book (even unreadable) cancels and halts; quoting stops, nothing else happens", async () => {
-    for (const raw of [JSON.stringify({ bookId: 1, ts: 0, reason: "FORGED", breaches: [] }), "garbage"]) {
-      const t = setup();
-      await t.publish(await signed(upd(190, T0)));
-      await t.agent.refreshState();
-      await t.agent.quoteTick();
-      const placed = t.venue.replaced.length;
-      t.agent.onKill(raw);
-      const res = await t.agent.run();
-      expect(res.halted).toBe(true);
-      expect(t.venue.cancels).toBeGreaterThanOrEqual(1);
-      await t.agent.quoteTick();
-      expect(t.venue.replaced.length).toBe(placed); // stopped: no new quote, no other venue action
-    }
+describe("kill channel: only a RISK-signed kill order halts the agent", () => {
+  const CONFIG = "0x00000000000000000000000000000000000c0f19" as Address;
+  const RISK = privateKeyToAccount(keccak256(toHex("risk-key")));
+
+  function gate(t: ReturnType<typeof setup>, o: { down?: boolean } = {}) {
+    const forged: BusForgedMsg[] = [];
+    const v = new KillVerifier({
+      chainId: CHAIN,
+      config: CONFIG,
+      now: () => T0 * 1000 + 5_000,
+      isRiskSigner: async (a) => {
+        if (o.down) throw new Error("rpc down");
+        return a.toLowerCase() === RISK.address.toLowerCase();
+      },
+    });
+    const g = new AgentKillGate(1, v, new ForgedLog("agent-1", async (m) => void forged.push(m), () => T0 * 1000), silentLog);
+    /** what the agent's kill subscription does with a raw Redis message */
+    const deliver = async (raw: unknown) => {
+      const m = await g.accept(typeof raw === "string" ? raw : JSON.stringify(raw));
+      if (m) t.agent.onKill(m);
+    };
+    return { deliver, forged };
+  }
+  const order = (who = RISK, over: { bookId?: number; issuedAt?: number; episode?: string } = {}) =>
+    signKill(who, CHAIN, CONFIG, { bookId: over.bookId ?? 1, reason: "DRAWDOWN", breaches: ["DRAWDOWN"], issuedAt: over.issuedAt ?? T0, nonce: killNonce(over.bookId ?? 1, over.episode ?? "ep1") });
+
+  test("unsigned, forged, tampered and unreadable kills are ignored (no cancel, no halt) and counted", async () => {
+    const t = setup();
+    const g = gate(t);
+    await t.publish(await signed(upd(190, T0)));
+    await t.agent.refreshState();
+    await t.agent.quoteTick();
+    const placed = t.venue.replaced.length;
+    for (const raw of [
+      { bookId: 1, ts: 0, reason: "FORGED", breaches: [] }, // the pre-fix unsigned shape
+      await order(attacker), // signed by a key without RISK_ROLE
+      { ...(await order(RISK, { episode: "ep2" })), reason: "TAMPERED" },
+      "garbage",
+    ]) await g.deliver(raw);
+    expect(t.agent.halted).toBeNull();
+    expect(t.venue.cancels).toBe(0);
+    expect(g.forged.at(-1)?.events).toHaveLength(4);
+    t.advance(1_000);
+    await t.agent.quoteTick(); // still quoting
+    expect(t.venue.replaced.length).toBeGreaterThanOrEqual(placed);
+    expect(t.agent.halted).toBeNull();
+  });
+
+  test("a RISK-signed kill cancels and halts; a replay, a stale one or another book's is ignored", async () => {
+    const t = setup();
+    const g = gate(t);
+    await g.deliver(await order(RISK, { episode: "old", issuedAt: T0 - 3_600 })); // stale
+    await g.deliver(await order(RISK, { bookId: 2, episode: "b2" })); // another book's (valid) order
+    expect(t.agent.halted).toBeNull();
+    const k = await order();
+    await g.deliver(k);
+    expect(t.agent.halted).toBe("KILL_MSG:DRAWDOWN");
+    const res = await t.agent.run();
+    expect(res.halted).toBe(true);
+    expect(t.venue.cancels).toBeGreaterThanOrEqual(1);
+    expect(g.forged).toHaveLength(0); // none of these is a forgery
+  });
+
+  test("RISK role check unavailable (RPC): ignored, not a halt (the on-chain kill still halts via mandate.killed)", async () => {
+    const t = setup();
+    const g = gate(t, { down: true });
+    await g.deliver(await order());
+    expect(t.agent.halted).toBeNull();
+  });
+});
+
+describe("published quotes are signed by the desk key (risk checks only those)", () => {
+  test("the quote in Redis carries an AgentQuote signature that recovers to the desk key", async () => {
+    const desk = privateKeyToAccount(keccak256(toHex("desk-key")));
+    const mandate = "0x00000000000000000000000000000000000a0a02" as Address;
+    const now = T0 * 1000;
+    const bus = new FakeBus();
+    const vol = new EwmaVolatility(DEFAULT_VOL_CONFIG);
+    const price = new PriceFeed("NVDA", vol);
+    price.ingest(await new VerifiedPriceInput(verifier(), NVDA, silentLog).accept(JSON.stringify(await signed(upd(190, T0)))));
+    const agent = new BookAgent(
+      { bookId: 1, venue: new FakeVenue(), chain, price, vol, sizing: new RuleBasedSizing(), store: new FakeStore(), bus, hedger: null, sessions: SESSIONS_24X7, initialMandate: nvdaMandate(), log: silentLog, now: () => now, signQuote: (q) => signQuote(desk, CHAIN, mandate, q) },
+      cfg,
+    );
+    await agent.refreshState();
+    await agent.quoteTick();
+    for (let i = 0; i < 20 && bus.quotes.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
+    const q = bus.quotes[0]!;
+    expect(q.signature).toBeDefined();
+    expect(await recoverQuoteSigner(CHAIN, mandate, q)).toBe(desk.address);
   });
 });
 

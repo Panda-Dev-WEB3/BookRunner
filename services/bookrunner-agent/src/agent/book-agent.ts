@@ -108,6 +108,11 @@ export interface BookAgentDeps {
   initialMandate: Mandate;
   log: Logger;
   now?: () => number;
+  /**
+   * Signs each published quote with the desk session key (EIP-712 AgentQuote, busAuth.ts): risk checks only quotes
+   * signed by an active desk key (audit 2026-10 lead "Redis trust"). Absent: published unsigned (no risk quote check).
+   */
+  signQuote?: (q: QuoteMsg) => Promise<`0x${string}`>;
 }
 
 /** AGENT_VENUE_GATE_HOLD_MS default: how long a venue restriction outlives its market data (BookAgentConfig.venueGate). */
@@ -179,14 +184,12 @@ export class BookAgent {
     return this.resting;
   }
 
-  onKill(raw: string): void {
-    let msg: KillMsg | null = null;
-    try {
-      msg = JSON.parse(raw) as KillMsg;
-    } catch {
-      msg = { bookId: this.d.bookId, ts: this.now(), reason: "KILL", breaches: [] };
-    }
-    if (msg.bookId !== undefined && Number(msg.bookId) !== this.d.bookId) return;
+  /**
+   * A VERIFIED kill order (RISK-signed, checked by AgentKillGate before it gets here): cancel-all and halt. Unsigned /
+   * forged kill messages never reach this (Redis is not trusted).
+   */
+  onKill(msg: KillMsg): void {
+    if (Number(msg.bookId) !== this.d.bookId) return;
     this.killMsg = msg;
     this.d.log.warn({ reason: msg.reason, breaches: msg.breaches }, "kill message received");
     void this.halt(`KILL_MSG:${msg.reason}`);
@@ -482,7 +485,11 @@ export class BookAgent {
     const changed = key !== this.sampleKey;
     this.sampleKey = key;
     const msg = this.toQuoteMsg(q, exposure, now);
-    void this.d.bus.publishQuote(msg, this.cfg.quoteTtlMs).catch((err) => this.d.log.debug({ err: errMsg(err) }, "quote publish failed"));
+    const sign = this.d.signQuote;
+    void (async () => {
+      const signature = sign ? await sign(msg).catch((err) => (this.d.log.debug({ err: errMsg(err) }, "quote signing failed"), undefined)) : undefined;
+      await this.d.bus.publishQuote(signature ? { ...msg, signature } : msg, this.cfg.quoteTtlMs);
+    })().catch((err) => this.d.log.debug({ err: errMsg(err) }, "quote publish failed"));
     if (!changed && now - this.lastPersistMs < this.cfg.quoteSampleMs) return;
     const withReceipt = changed || now - this.lastReceiptMs >= this.cfg.quoteReceiptMs;
     try {

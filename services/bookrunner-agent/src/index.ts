@@ -11,11 +11,16 @@ import {
   type Deployment,
   KEYS,
   type Logger,
+  FORGED_WINDOW_SEC,
+  ForgedLog,
+  KillVerifier,
   OraclePriceVerifier,
+  type QuoteMsg,
   type QuotingVenue,
   VENUE,
   assertVenueSymbolConfig,
   bytes32ToStr,
+  cachedAddressCheck,
   createLogger,
   deploymentPath,
   effectiveSessions,
@@ -24,6 +29,7 @@ import {
   priceId as priceIdOfTicker,
   publicClientFor,
   roleAccount,
+  signQuote,
   tryLoadDeployment,
   underlyingToToken,
   walletClientFor,
@@ -36,6 +42,7 @@ import { BookAgent } from "./agent/book-agent";
 import { type HedgeChain, Hedger } from "./agent/hedger";
 import { makeVenueReportRelay } from "./chain/venue-report-relay";
 import { DeskRejects } from "./agent/desk-rejects";
+import { AgentKillGate } from "./agent/kill-gate";
 import { PriceFeed, VerifiedPriceInput, oracleMsgFromChain } from "./agent/price-feed";
 import { BookChain } from "./chain/book-chain";
 import { DeskClient } from "./chain/desk-client";
@@ -140,17 +147,33 @@ interface Holder {
   agent: BookAgent | null;
   /** Redis prints -> verified prints of this book's price id (set once the book's context is known) */
   prices: VerifiedPriceInput | null;
+  /** Redis kill messages -> RISK-signed kill orders for this book */
+  kills: AgentKillGate | null;
 }
 
 /**
  * The oracle signature check of every price read from Redis (audit 2026-10 lead "Redis is a shared trust domain"):
  * EIP-712 PriceUpdate under (CHAIN_ID, the deployment's AttestedOracle), signer = AttestedOracle.isSigner on-chain.
  */
-export function oracleVerifierFor(ctx: Pick<BookContext, "pub" | "deployment">, chainId: number): OraclePriceVerifier {
+export function oracleVerifierFor(ctx: Pick<BookContext, "pub" | "deployment">, chainId: number, pinned?: string): OraclePriceVerifier {
   const oracle = ctx.deployment.contracts.oracle;
   return new OraclePriceVerifier(
-    oracleSignerCheck({ chainId, oracle, isSignerOnChain: (a) => ctx.pub.readContract({ address: oracle, abi: attestedOracleAbi, functionName: "isSigner", args: [a] }) }),
+    oracleSignerCheck({ chainId, oracle, pinned, pinnedEnv: "AGENT_ORACLE_SIGNERS", isSignerOnChain: (a) => ctx.pub.readContract({ address: oracle, abi: attestedOracleAbi, functionName: "isSigner", args: [a] }) }),
   );
+}
+
+/**
+ * The kill-order check of the kill channel (audit 2026-10 lead "Redis trust"): RISK-signed EIP-712 KillOrder under
+ * (CHAIN_ID, BookrunnerConfig); signer = config.hasRole(RISK_ROLE) on-chain (cached) or the pinned AGENT_RISK_SIGNERS.
+ */
+export function killVerifierFor(ctx: Pick<BookContext, "pub" | "deployment">, chainId: number, pinned?: string): KillVerifier {
+  const config = ctx.deployment.contracts.config;
+  let role: Hex | null = null;
+  const onChain = async (a: Hex) => {
+    role ??= (await ctx.pub.readContract({ address: config, abi: bookrunnerConfigAbi, functionName: "RISK_ROLE" })) as Hex;
+    return (await ctx.pub.readContract({ address: config, abi: bookrunnerConfigAbi, functionName: "hasRole", args: [role, a] })) as boolean;
+  };
+  return new KillVerifier({ chainId, config, isRiskSigner: cachedAddressCheck({ pinned, pinnedEnv: "AGENT_RISK_SIGNERS", onChain }) });
 }
 
 async function runOnce(
@@ -330,6 +353,8 @@ async function runOnce(
       sessions: effectiveSessions(charter.sessions, env.SESSIONS_MODE),
       initialMandate: mandate,
       log,
+      // risk checks only quotes signed by an active desk key of the mandate (Redis is not trusted)
+      ...(ctx.deskAccount && ctx.deskKeyActive ? { signQuote: (q: QuoteMsg) => signQuote(ctx.deskAccount as LocalAccount, env.CHAIN_ID, ctx.chain.components.mandate, q) } : {}),
     },
     {
       quoting: quotingConfigFrom(env),
@@ -387,7 +412,7 @@ async function waitForResume(ctx: BookContext, env: AgentEnv, log: Logger, bus: 
       }
     }
     if (Date.now() - lastLog >= env.AGENT_HALT_LOG_MS) {
-      // a Redis kill message (or risk "killed") the chain never confirms stays a stop until a restart: possibly forged
+      // a RISK-signed kill message (or risk "killed") the chain never confirms (alert-mode kill) stays a stop until a restart
       log.warn({ bookId: ctx.bookId, reason, waitingFor: terminal ? "shutdown" : "remandate", killConfirmedOnChain: sawKilled }, "agent halted: not quoting");
       lastLog = Date.now();
     }
@@ -401,7 +426,7 @@ async function main(): Promise<void> {
   const log = createLogger("bookrunner-agent", env.LOG_LEVEL);
   assertVenueSymbolConfig({ mode: env.ORDERLY_MODE, brokerId: env.ORDERLY_BROKER_ID }); // live: books trade PERP_<T>_USDC_<broker>
   const ctl = new AbortController();
-  const holder: Holder = { agent: null, prices: null };
+  const holder: Holder = { agent: null, prices: null, kills: null };
   let forceExit: ReturnType<typeof setTimeout> | null = null;
   const onSignal = (sig: string) => {
     log.info({ sig, graceMs: env.AGENT_SHUTDOWN_GRACE_MS }, "shutdown requested");
@@ -436,12 +461,22 @@ async function main(): Promise<void> {
     while (!ctl.signal.aborted) {
       const ctx = await bootstrap(env, log, ctl.signal);
       if (!ctx) break;
-      const verifier = oracleVerifierFor(ctx, env.CHAIN_ID);
+      const verifier = oracleVerifierFor(ctx, env.CHAIN_ID, env.AGENT_ORACLE_SIGNERS);
+      const forgedSource = `agent-${ctx.bookId}`;
+      holder.kills = new AgentKillGate(
+        ctx.bookId,
+        killVerifierFor(ctx, env.CHAIN_ID, env.AGENT_RISK_SIGNERS),
+        new ForgedLog(forgedSource, (m) => bus.setJson(KEYS.busForged(forgedSource), m, FORGED_WINDOW_SEC * 1000)),
+        log.child({ bookId: ctx.bookId, part: "kill" }),
+      );
       holder.prices = new VerifiedPriceInput(verifier, ctx.priceIdHex, log.child({ bookId: ctx.bookId, part: "price" }));
       subscribeOnce(CHANNELS.oraclePrice(ctx.priceIdStr), (raw) => {
         void holder.prices?.accept(raw).then((m) => holder.agent?.onPrice(m));
       });
-      subscribeOnce(CHANNELS.kill(ctx.bookId), (raw) => holder.agent?.onKill(raw));
+      subscribeOnce(CHANNELS.kill(ctx.bookId), (raw) => {
+        // only a RISK-signed kill order halts the agent (a forged one is logged and counted)
+        void holder.kills?.accept(raw).then((m) => m && holder.agent?.onKill(m));
+      });
       subscribeOnce(CHANNELS.riskState(ctx.bookId), (raw) => holder.agent?.onRiskState(raw));
       let result: { halted: boolean; reason: string };
       try {

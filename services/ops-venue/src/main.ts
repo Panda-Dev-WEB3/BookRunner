@@ -13,7 +13,7 @@
 //           (src/builderOracle), state -> KEYS.builderFeedStatus for alerts
 // Idles (log + retry) until contracts/deployments/<chainId>.json exists.
 import { createDb } from "@bookrunner/db";
-import { assertVenueSymbolConfig, CHANNELS, createLogger, QUEUES, roleSigner, tryLoadDeployment, type VenueOpsJob } from "@bookrunner/shared";
+import { assertVenueSymbolConfig, busJson, cachedAddressCheck, CHANNELS, createLogger, FORGED_WINDOW_SEC, ForgedLog, KEYS, KillVerifier, QUEUES, roleSigner, tryLoadDeployment, type VenueOpsJob } from "@bookrunner/shared";
 import { Worker } from "bullmq";
 import { Redis } from "ioredis";
 import type { Address } from "viem";
@@ -130,6 +130,13 @@ async function main() {
     reportPublisher: new RedisReportPublisher(redis),
     status: statusPublisher,
     everListed: new RedisEverListedStore(redis),
+    killAuth: (() => {
+      // RISK-signed kill orders only (Redis is not trusted); OPS_RISK_SIGNERS pins the RISK key (no RPC on the kill path)
+      const isRiskSigner = cachedAddressCheck({ pinned: env.OPS_RISK_SIGNERS, pinnedEnv: "OPS_RISK_SIGNERS", onChain: (a) => chain.isRiskSigner(a) });
+      const verifier = () => new KillVerifier({ chainId: env.CHAIN_ID, config: dep.contracts.config, isRiskSigner });
+      const forged = new ForgedLog("ops-venue", async (m) => void (await redis.set(KEYS.busForged("ops-venue"), busJson(m), "PX", FORGED_WINDOW_SEC * 1000)));
+      return { channel: verifier(), job: verifier(), forged };
+    })(),
   };
   if (env.ORDERLY_IF_MODE === "builder") log.warn({ books: [...parseIfBuilderAccounts(env.ORDERLY_IF_BUILDER_ACCOUNTS).keys()] }, "ORDERLY_IF_MODE=builder (FALLBACK): IF accounts are operator-EOA accounts (adapter.setIfAccountOwner), i.e. IF custody with one operator key; the operator registers ops-venue's IF keys and performs IF withdrawals (VERIFY O10)");
   const service = new OpsService(ctx, new Provisioner(ctx, builderKey));
