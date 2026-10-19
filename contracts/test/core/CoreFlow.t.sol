@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {CoreFixture} from "./utils/CoreFixture.sol";
 import {BRTypes} from "../../src/interfaces/BRTypes.sol";

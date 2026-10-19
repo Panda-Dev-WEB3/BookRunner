@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 /// @title IVenueAdapter — common surface of OrderlyAdapter and PoolEngineAdapter (both UUPS, 48h timelock).
 /// @notice Withdrawals only to the book's UnderwritingVault. Fee flow only to the book's RevenueRouter.

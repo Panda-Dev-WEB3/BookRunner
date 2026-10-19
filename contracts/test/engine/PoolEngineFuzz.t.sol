@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {EngineBase} from "./utils/EngineBase.sol";
 import {PoolEngine} from "../../src/PoolEngine.sol";

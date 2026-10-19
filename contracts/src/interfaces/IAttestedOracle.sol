@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 /// @title IAttestedOracle — single on-chain price surface. Prices are produced by the oracle service
 ///        (multi-source median inside an attested TEE; AttestedOracle.setAttestedSigner, VERIFY E1) and signed by a

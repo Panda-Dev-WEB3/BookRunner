@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 /// @title IOrderlyVault — Orderly Network chain Vault (omnichain deposits).
 /// @notice VERIFY: struct layout, function names, and the RHC (4663) deployment address against

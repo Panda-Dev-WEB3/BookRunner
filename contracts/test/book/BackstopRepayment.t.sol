@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {UnderwritingVault} from "../../src/UnderwritingVault.sol";
 import {BookFixture} from "./utils/BookFixture.sol";

@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 import {CoreFixture} from "../../core/utils/CoreFixture.sol";
 import {CAMockBook, CAMockAdapter, CAMockOracle} from "../../core/MarkRegistryCommitAndApply.t.sol";

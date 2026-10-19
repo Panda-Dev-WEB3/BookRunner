@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 /// @title IRevenueRouter — per-book fee-flow waterfall.
 /// @notice distribute(): expenses (capped) -> protocol carry (config.carryBps of net) -> Senior share

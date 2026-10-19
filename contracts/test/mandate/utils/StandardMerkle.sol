@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.30;
 
 /// @dev Solidity port of @openzeppelin/merkle-tree StandardMerkleTree (v1.0.x) for (bytes32, bytes32)
 ///      leaves: leaf = keccak256(bytes.concat(keccak256(abi.encode(a, b)))), leaves sorted ascending by
