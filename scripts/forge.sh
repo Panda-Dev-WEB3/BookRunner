@@ -6,6 +6,7 @@
 #   scripts/forge.sh build
 #   scripts/forge.sh test -vvv --match-contract WaterfallTest
 #   FOUNDRY_TOOL=cast scripts/forge.sh call ...
+#   FORGE_SUBDIR=cache/mutation-ws/Tranche scripts/forge.sh test   (runs in that directory under contracts/)
 #
 # RPC on the host (anvil from docker-compose) is reachable as http://host.docker.internal:8547
 set -euo pipefail
@@ -29,11 +30,15 @@ if [ -t 1 ]; then TTY_FLAGS=(-t); fi
 # stdin attached when interactive: `forge script ... --interactive` (deploy-mainnet.sh) prompts for the key
 if [ -t 0 ] && [ -t 1 ]; then TTY_FLAGS=(-i -t); fi
 
-MSYS_NO_PATHCONV=1 exec docker run --rm "${TTY_FLAGS[@]}" \
+# Extra docker run flags, e.g. FORGE_DOCKER_ARGS="--cpus=2 --memory=3g" to cap a long run (scripts/mutation.sh).
+# Empty by default: normal use is unchanged.
+read -r -a EXTRA_DOCKER_ARGS <<<"${FORGE_DOCKER_ARGS:-}"
+
+MSYS_NO_PATHCONV=1 exec docker run --rm "${TTY_FLAGS[@]}" "${EXTRA_DOCKER_ARGS[@]}" \
   -v "$MOUNT:/repo" \
   --user root -e HOME=/root -v bookrunner-svm:/root/.svm \
   -v bookrunner-foundry-cache:/root/.foundry/cache \
-  -w /repo/contracts \
+  -w "/repo/contracts${FORGE_SUBDIR:+/$FORGE_SUBDIR}" \
   --add-host=host.docker.internal:host-gateway \
   -e FOUNDRY_PROFILE="${FOUNDRY_PROFILE:-default}" \
   -e ETH_RPC_URL -e PRIVATE_KEY -e DEPLOY_OUT \

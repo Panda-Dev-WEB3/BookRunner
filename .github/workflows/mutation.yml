@@ -1,0 +1,44 @@
+# Mutation testing (audit 2026-10, Task 7c) of the four core contracts through scripts/mutation.sh: one workspace per
+# target (its suites and what they import), every generated mutant (MUTATION_SAMPLE=0), an incremental compile per
+# mutant in the pinned Foundry image. Manual only: it takes hours on a hosted runner. Results and the triage of
+# survivors: docs/MUTATION-2026-10.md.
+# Supply chain: actions pinned by commit SHA (tag in the comment); Foundry from the image digest in scripts/forge.sh.
+name: Mutation
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Contract to mutate (Tranche, BookLogic, MMMandate, PoolEngine) or all"
+        required: true
+        default: all
+
+permissions:
+  contents: read
+
+jobs:
+  mutation:
+    name: Mutation (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [Tranche, BookLogic, MMMandate, PoolEngine]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: inputs.target == 'all' || inputs.target == matrix.target
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        if: inputs.target == 'all' || inputs.target == matrix.target
+        with:
+          bun-version: 1.4.2
+      - name: bun install (frozen lockfile)
+        if: inputs.target == 'all' || inputs.target == matrix.target
+        run: bun install --frozen-lockfile
+      - name: mutation testing (score per operator and the survivors at the end of the log)
+        if: inputs.target == 'all' || inputs.target == matrix.target
+        env:
+          TARGET: ${{ matrix.target }}
+        run: FORGE_DOCKER_ARGS= MUTATION_SAMPLE=0 MUTATION_MINUTES=330 MUTATION_JOBS="$(nproc)" bash scripts/mutation.sh "$TARGET"
