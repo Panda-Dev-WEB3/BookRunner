@@ -42,12 +42,12 @@ library BookLogic {
     ///         longest SEC single-name trading suspension (10 business days, ~14 calendar days), so a held
     ///         price never settles a bucket during either. Past it, held marks settle at the held valuation
     ///         for liveness of exits (a long hold defers them, it never blocks them), unless a governance settle
-    ///         price for the book's underlying is pending (_governanceSettlePending; Task 7).
+    ///         price for the book's underlying is pending or in force (_governanceSettlePrice; Task 7).
     uint256 internal constant MAX_HELD_DEFERRAL = 30 days;
-    /// @notice Hard bound on a hold run while a governance settle price is pending (Task 7): past it held marks settle
-    ///         at the held valuation whatever governance does, so the settle path can never block exits.
+    /// @notice Hard bound on a hold run while a governance settle price is pending or in force (Task 7): past it held
+    ///         marks settle at the held valuation whatever governance does, so the settle path can never block exits.
     uint256 internal constant MAX_SETTLE_PRICE_DEFERRAL = 60 days;
-    /// @dev == Book.CLOSE_WINDOW_TIMEOUT
+    /// @notice Subscription timeout before {cancelStuckWindow} (Book.CLOSE_WINDOW_TIMEOUT reads it).
     uint256 internal constant CLOSE_WINDOW_TIMEOUT = 7 days;
 
     /// @notice Working summary of a mark application (memory only; emitted as MarkSettled).
@@ -354,11 +354,12 @@ library BookLogic {
     ///      by then at its post-P&L prices (at most Tranche.MAX_SETTLE_BUCKETS per tranche per mark; any
     ///      further due bucket settles at the next mark, still a post-hold price). Bounded: once the run of
     ///      held marks is MAX_HELD_DEFERRAL old, held marks settle again at the held valuation (liveness of
-    ///      exits), unless a governance settle price for the book's underlying is PENDING: it comes into force
-    ///      within AttestedOracle.SETTLE_PRICE_DELAY (3 days), the mark service then values the book at it and
-    ///      signs non-held marks, which settle; settling at the held valuation just before would let early
-    ///      exiters dodge it. Bounded: past MAX_SETTLE_PRICE_DEFERRAL (60 days) of hold, held marks settle
-    ///      whatever governance does (repeated proposals cannot block exits).
+    ///      exits), unless a governance settle price for the book's underlying (or an index component) is pending
+    ///      or in force: in force, the mark service values the book at it and signs NON-held marks, which settle
+    ///      whatever this hook says; a held mark reaching the chain then (an old or failing mark service, a mark
+    ///      signed before the price came into force) must not settle at the held valuation, which would let early
+    ///      exiters dodge the governance price. Bounded: past MAX_SETTLE_PRICE_DEFERRAL (60 days) of hold, held
+    ///      marks settle whatever governance does (repeated proposals, a stuck mark service cannot block exits).
     function _settles(Book.BookStorage storage $, bool held, uint256 markId, uint64 periodEnd)
         private
         returns (bool)
@@ -371,23 +372,37 @@ library BookLogic {
         if (since == 0) $.heldSince = since = periodEnd;
         uint256 elapsed = periodEnd - since;
         bool settles = elapsed >= MAX_HELD_DEFERRAL
-            && (elapsed >= MAX_SETTLE_PRICE_DEFERRAL || !_governanceSettlePending($));
+            && (elapsed >= MAX_SETTLE_PRICE_DEFERRAL || !_governanceSettlePrice($));
         emit Book.MarkHeld($.bookId, markId, since, settles);
         return settles;
     }
 
-    /// @dev Audit M-1 x Task 7: whether a governance settle price for the book's underlying (the oracle price id of
-    ///      `charter.underlying`, the price its marks are held on) is pending in config.oracle(). Never reverts:
-    ///      no registry / oracle, an oracle without the settle path, or a failing read means false (the 30-day
-    ///      fallback applies).
-    function _governanceSettlePending(Book.BookStorage storage $) private view returns (bool pending) {
+    /// @dev Audit M-1 x Task 7: whether a governance settle price is pending or in force in config.oracle() for the
+    ///      book's underlying (the oracle price id of `charter.underlying`, the price its marks are held on) or, for an
+    ///      index book, for any of the index's components (at most StockTokenRegistry.MAX_INDEX_COMPONENTS). Never
+    ///      reverts: no registry / oracle, an oracle without the settle path, or a failing read means false (the
+    ///      30-day fallback applies). Read only for a held mark past MAX_HELD_DEFERRAL.
+    function _governanceSettlePrice(Book.BookStorage storage $) private view returns (bool) {
         IBookrunnerConfig cfg = IBookrunnerConfig($.config);
         address reg = cfg.stockRegistry();
         address oracle = cfg.oracle();
         if (reg.code.length == 0 || oracle.code.length == 0) return false;
-        try IStockTokenRegistry(reg).priceIdOf($.charter.underlying) returns (bytes32 pid) {
-            try IAttestedOracle(oracle).settlePrice(pid) returns (uint256, uint64, uint64, bool p, bool) {
-                pending = p;
+        bytes32 u = $.charter.underlying;
+        if (_settlePriceSet(reg, oracle, u)) return true;
+        if (uint256(u) >> 160 == 0) return false; // a token, not an index id
+        try IStockTokenRegistry(reg).getIndex(u) returns (bytes32, IStockTokenRegistry.IndexComponent[] memory cs) {
+            for (uint256 i; i < cs.length; ++i) {
+                if (_settlePriceSet(reg, oracle, bytes32(uint256(uint160(cs[i].token))))) return true;
+            }
+        } catch {}
+        return false;
+    }
+
+    /// @dev A settle price pending or in force for the oracle price id of `underlying` (false on any failed read).
+    function _settlePriceSet(address reg, address oracle, bytes32 underlying) private view returns (bool set) {
+        try IStockTokenRegistry(reg).priceIdOf(underlying) returns (bytes32 pid) {
+            try IAttestedOracle(oracle).settlePrice(pid) returns (uint256, uint64, uint64, bool pending, bool effective) {
+                set = pending || effective;
             } catch {}
         } catch {}
     }

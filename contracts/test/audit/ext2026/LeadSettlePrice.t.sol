@@ -210,6 +210,30 @@ contract LeadSettlePriceEngineTest is EngineBase {
         assertTrue(pending);
     }
 
+    /// @notice Review I-3: a settled market has no reopen gap, so liquidation uses the maintenance requirement. A
+    ///         position between maintenance and 2 x initial margin at the settle price is not liquidatable (no fee for
+    ///         a keeper) and is force-closed fee-free; one below maintenance still pays its keeper.
+    function test_lead_settle_liquidationUsesMaintenanceOnceSettled() public {
+        // alice long 100 @ 100.05, margin 1,989.995; at $85: equity 484.995, MM 425, 2 x IM 1,700
+        _effective(85e18);
+        assertFalse(engine.isLiquidatable(mid, alice), "view: maintenance rule");
+        vm.prank(keeper);
+        vm.expectRevert(abi.encodeWithSelector(PoolEngine.NotLiquidatable.selector, alice));
+        engine.liquidate(mid, alice);
+        vm.prank(keeper);
+        engine.forceClose(mid, alice);
+        assertEq(engine.positionOf(mid, alice).marginUsd, 484_995_000, "fee-free close at the settle price");
+        assertEq(usdc.balanceOf(keeper), 0);
+    }
+
+    function test_lead_settle_belowMaintenanceStillLiquidatable() public {
+        _effective(82e18); // alice equity 184.995 < MM 410
+        vm.prank(keeper);
+        uint256 reward = engine.liquidate(mid, alice);
+        assertEq(reward, 100 * 82 * 50 / 1e4 / 2 * 1e6);
+        assertEq(usdc.balanceOf(address(engine)), _ledger(mid));
+    }
+
     /// @notice The delay keeps the governance path inside Book's 30-day deferral.
     function test_lead_settle_delayInsideMaxHeldDeferral() public view {
         assertLt(uint256(oracle.SETTLE_PRICE_DELAY()) + 21 days, BookLogic.MAX_HELD_DEFERRAL);
@@ -300,8 +324,10 @@ contract LeadSettlePriceBookTest is BookFixture {
         assertEq(junior.claimableAssets(carol), 4500e6, "settled at the governance valuation");
     }
 
-    /// @notice In force but the marks stay held (an old mark service): the 30-day fallback applies again (liveness).
-    function test_lead_settle_book_effectiveButHeldMarks_fallbackSettles() public {
+    /// @notice Review I-1: in force, a HELD mark (an old or failing mark service, a mark signed before the price came
+    ///         into force) still does not settle at the held valuation past 30 days; the first mark valued at the
+    ///         governance price (non-held) settles.
+    function test_lead_settle_book_effectiveHeldMarksStillDeferred() public {
         vm.prank(carol);
         uint256 rid = junior.requestRedeem(5000e6, carol, carol);
         _heldMarkWithPnl(0);
@@ -310,6 +336,30 @@ contract LeadSettlePriceBookTest is BookFixture {
         vm.prank(timelock);
         oracle.proposeSettlePrice(PID, 80e18);
         uint256 id = _heldMarkAt(since + BookLogic.MAX_HELD_DEFERRAL);
+        (,,,, bool effective) = oracle.settlePrice(PID);
+        assertTrue(effective);
+        vm.expectEmit(true, true, false, true, address(book));
+        emit Book.MarkHeld(BOOK_ID, id, since, false);
+        book.applyMark(id);
+        assertEq(junior.pendingRedeemRequest(rid, carol), 5000e6, "no held-valuation settlement while in force");
+        _recall(20_000e6);
+        _markWithPnl(-3000e6); // the mark service values at $80: non-held, settles
+        assertEq(junior.claimableAssets(carol), 4500e6);
+    }
+
+    /// @notice Review I-1: the 60-day hard bound still settles when the settle price is in force and only held marks
+    ///         arrive (a mark service that never values at it cannot block exits).
+    function test_lead_settle_book_effectiveCappedAtSixtyDays() public {
+        vm.prank(carol);
+        uint256 rid = junior.requestRedeem(5000e6, carol, carol);
+        _heldMarkWithPnl(0);
+        uint64 since = book.heldSince();
+        vm.warp(since + 10 days);
+        vm.prank(timelock);
+        oracle.proposeSettlePrice(PID, 80e18);
+        book.applyMark(_heldMarkAt(since + BookLogic.MAX_SETTLE_PRICE_DEFERRAL - INTERVAL));
+        assertEq(junior.pendingRedeemRequest(rid, carol), 5000e6);
+        uint256 id = _heldMarkAt(since + BookLogic.MAX_SETTLE_PRICE_DEFERRAL);
         vm.expectEmit(true, true, false, true, address(book));
         emit Book.MarkHeld(BOOK_ID, id, since, true);
         book.applyMark(id);
@@ -375,5 +425,100 @@ contract LeadSettlePriceBookTest is BookFixture {
         cfg.setStockRegistry(address(0));
         book.applyMark(_heldMarkAt(since + BookLogic.MAX_HELD_DEFERRAL + INTERVAL));
         assertEq(uint8(book.state()), uint8(BRTypes.BookState.Live));
+    }
+}
+
+/// @notice Registry with one index (two components): price ids per underlying, components for getIndex.
+contract IndexRegistry {
+    struct Component {
+        address token;
+        uint256 weightBps;
+    }
+
+    mapping(bytes32 => bytes32) public pid;
+    bytes32 public indexId;
+    address[2] internal comps;
+
+    constructor(bytes32 indexId_, bytes32 indexPid, address a, bytes32 aPid, address b, bytes32 bPid) {
+        indexId = indexId_;
+        pid[indexId_] = indexPid;
+        pid[bytes32(uint256(uint160(a)))] = aPid;
+        pid[bytes32(uint256(uint160(b)))] = bPid;
+        comps = [a, b];
+    }
+
+    function priceIdOf(bytes32 u) external view returns (bytes32) {
+        bytes32 p = pid[u];
+        require(p != bytes32(0), "unknown");
+        return p;
+    }
+
+    function getIndex(bytes32) external view returns (bytes32, Component[] memory cs) {
+        cs = new Component[](2);
+        cs[0] = Component(comps[0], 5000);
+        cs[1] = Component(comps[1], 5000);
+        return (pid[indexId], cs);
+    }
+}
+
+/// @notice Review M-2: an index book's held marks are also deferred while a component has a settle price.
+contract LeadSettlePriceIndexBookTest is BookFixture {
+    bytes32 internal constant INDEX = keccak256("BKRN.INDEX.TEST");
+    bytes32 internal constant PID_INDEX = bytes32("RHX5");
+    bytes32 internal constant PID_A = bytes32("AAA");
+    bytes32 internal constant PID_B = bytes32("BBB");
+    uint256 internal constant SIGNER_PK = 0xA11CE;
+    AttestedOracle internal oracle;
+
+    function setUp() public {
+        _deployInfra();
+        BRTypes.Charter memory c = _defaultCharter();
+        c.underlying = INDEX;
+        _deployBook(c);
+        oracle = new AttestedOracle(address(cfg), vm.addr(SIGNER_PK), bytes32(0));
+        cfg.setOracle(address(oracle));
+        cfg.setStockRegistry(address(new IndexRegistry(INDEX, PID_INDEX, address(0xA1), PID_A, address(0xB1), PID_B)));
+        cfg.grantRole(cfg.KEEPER_ROLE(), address(this));
+        _goLive();
+        _markWithPnl(0);
+        _push(PID_INDEX, 100e18);
+        _push(PID_A, 100e18);
+        _push(PID_B, 50e18); // component B is delisted: held from here on
+    }
+
+    function _push(bytes32 id, uint256 price) internal {
+        IAttestedOracle.PriceUpdate memory u = IAttestedOracle.PriceUpdate({
+            underlying: id,
+            priceWad: price,
+            publishedAt: uint64(block.timestamp),
+            held: true,
+            sourceCount: 3,
+            sourcesHash: bytes32(0)
+        });
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(SIGNER_PK, oracle.hashPrice(u));
+        oracle.push(u, abi.encodePacked(r, s, v));
+    }
+
+    function test_lead_settle_indexBook_componentSettlePriceDefers() public {
+        vm.prank(carol);
+        uint256 rid = junior.requestRedeem(5000e6, carol, carol);
+        _heldMarkWithPnl(0);
+        uint64 since = book.heldSince();
+        vm.warp(since + 28 days);
+        vm.prank(timelock);
+        oracle.proposeSettlePrice(PID_B, 30e18); // the component, not the index level
+        vm.warp(since + BookLogic.MAX_HELD_DEFERRAL);
+        uint256 id = _commitMark(uint64(block.timestamp), adapter.value(), book.flowNonce(), true);
+        vm.expectEmit(true, true, false, true, address(book));
+        emit Book.MarkHeld(BOOK_ID, id, since, false);
+        book.applyMark(id);
+        assertEq(junior.pendingRedeemRequest(rid, carol), 5000e6);
+        // cancelled: the 30-day fallback applies again
+        vm.prank(timelock);
+        oracle.cancelSettlePrice(PID_B);
+        vm.warp(block.timestamp + INTERVAL);
+        id = _commitMark(uint64(block.timestamp), adapter.value(), book.flowNonce(), true);
+        book.applyMark(id);
+        assertEq(junior.claimableRedeemRequest(rid, carol), 5000e6);
     }
 }

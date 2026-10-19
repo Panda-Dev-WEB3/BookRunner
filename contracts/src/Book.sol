@@ -48,7 +48,7 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
     /// @notice Audit 2026-10 lead "unconfirmed deposits": once the subscription window has been over this long
     ///         and the book is still in Subscription (closeWindow keeps reverting, e.g. the venue deposit), anyone
     ///         may cancel it ({cancelStuckWindow}); every commitment is then refundable 1:1.
-    uint256 public constant CLOSE_WINDOW_TIMEOUT = 7 days; // == BookLogic.CLOSE_WINDOW_TIMEOUT
+    uint256 public constant CLOSE_WINDOW_TIMEOUT = BookLogic.CLOSE_WINDOW_TIMEOUT;
 
     bytes32 public constant KILL_DRAWDOWN = "DRAWDOWN"; // == BookLogic.KILL_DRAWDOWN
     bytes32 public constant KILL_RETIRE = "RETIRE";
@@ -149,8 +149,9 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
     /// @notice A mark valued at a held oracle price was applied (audit M-1): its P&L is booked; `settled`
     ///         false = redemption buckets and a due top-up round were left for the first non-held mark;
     ///         true = the hold run (since `heldSince`) reached BookLogic.MAX_HELD_DEFERRAL (30 days) and no
-    ///         governance settle price is pending for the book's underlying (AttestedOracle.settlePrice; at most
-    ///         BookLogic.MAX_SETTLE_PRICE_DEFERRAL, 60 days, of hold), so they settled at the held valuation.
+    ///         governance settle price is pending or in force for the book's underlying (AttestedOracle.settlePrice;
+    ///         ignored past BookLogic.MAX_SETTLE_PRICE_DEFERRAL, 60 days of hold), so they settled at the held
+    ///         valuation.
     event MarkHeld(uint256 indexed bookId, uint256 indexed markId, uint64 heldSince, bool settled);
     /// @notice Audit 2026-10 L-1: part of a fee distribution's residual restored Senior impairment
     ///         (`seniorRestored`, credited to Senior) and repaid backstop debt (`backstopRepaid`, owed to the

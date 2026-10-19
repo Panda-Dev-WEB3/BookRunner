@@ -26,7 +26,7 @@ import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 ///         stored price is held or stale, within SETTLE_PRICE_BAND_BPS of it, in force SETTLE_PRICE_DELAY later and
 ///         void once a live print published after the proposal is stored ({settlePrice}). PoolEngine closes positions
 ///         at it; the mark service values the book at it (a non-held mark: Book settles); Book defers its 30-day
-///         held-mark fallback while it is pending (bounded). It never changes {latest}.
+///         held-mark fallback while it is pending or in force (bounded). It never changes {latest}.
 /// @dev    Non-upgradeable (ARCHITECTURE §2.0). EIP-712 domain ("Bookrunner AttestedOracle", "1"); the type
 ///         string MUST stay byte-identical to `packages/shared/src/eip712.ts` (`priceTypes`).
 contract AttestedOracle is IAttestedOracle, EIP712 {

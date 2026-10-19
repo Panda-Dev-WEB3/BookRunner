@@ -682,9 +682,11 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         Market storage m = _market(marketId);
         Position storage p = _positions[marketId][trader];
         if (p.size == 0) revert NoPosition(trader);
-        (uint256 price, bool held,) = _oracle(m);
+        (uint256 price, bool held,, bool settled) = _oracleOrSettle(m);
         _accrue(marketId, m, price);
-        if (!_isLiquidatable(m, p, price, m.fundingIndex, held)) revert NotLiquidatable(trader);
+        // a settled market has no reopen gap (its price is final): the maintenance requirement applies, not the
+        // off-hours one, so solvent positions are force-closed fee-free instead of liquidated for a fee
+        if (!_isLiquidatable(m, p, price, m.fundingIndex, held && !settled)) revert NotLiquidatable(trader);
 
         (int256 size,, uint256 badDebt) = _closeAtOracle(marketId, m, p, trader, price);
 
@@ -833,8 +835,8 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         Market storage m = _market(marketId);
         Position storage p = _positions[marketId][trader];
         if (p.size == 0) return false;
-        (uint256 price, bool held,) = _oracle(m);
-        return _isLiquidatable(m, p, price, _pendingIndex(m, price), held);
+        (uint256 price, bool held,, bool settled) = _oracleOrSettle(m);
+        return _isLiquidatable(m, p, price, _pendingIndex(m, price), held && !settled);
     }
 
     /// @notice Trader equity (margin + unrealised PnL - unsettled funding) at the latest price, USD 6dp.
@@ -941,10 +943,10 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     }
 
     /// @dev {_oracle}, or the governance settle price once in force (Task 7 lead "no settle path": a delisted /
-    ///      permanently held market): the market is then priced at it as held (no voluntary trade, liquidations
-    ///      at the off-hours requirement), `publishedAt` is now (views and withdrawals do not go stale) and
-    ///      `settled` lets {forceClose} close at it. Looked up only when the stored price is held or older than
-    ///      NEW_RISK_MAX_PRICE_AGE (a settle price is void once a live print after its proposal is stored, and it
+    ///      permanently held market): the market is then priced at it as held (no voluntary trade), `publishedAt`
+    ///      is now (views and withdrawals do not go stale) and `settled` lets {forceClose} close at it and
+    ///      {liquidate} use the maintenance requirement (a final price has no reopen gap). Looked up only when the
+    ///      stored price is held or older than NEW_RISK_MAX_PRICE_AGE (a settle price is void once a live print after its proposal is stored, and it
     ///      takes days to come into force), so live trading pays nothing for it.
     function _oracleOrSettle(Market storage m)
         internal
