@@ -13,6 +13,8 @@ import {IMarkRegistry} from "../interfaces/IMarkRegistry.sol";
 import {IMMMandate} from "../interfaces/IMMMandate.sol";
 import {IMarketCharter} from "../interfaces/IMarketCharter.sol";
 import {IBackstop} from "../interfaces/IBkrnFeeRouter.sol";
+import {IAttestedOracle} from "../interfaces/IAttestedOracle.sol";
+import {IStockTokenRegistry} from "../interfaces/IStockTokenRegistry.sol";
 import {Waterfall} from "./Waterfall.sol";
 import {Book, IVaultBackstopRepay} from "../Book.sol";
 
@@ -39,9 +41,14 @@ library BookLogic {
     ///         30 days: above every scheduled closed session (a weekend + holiday is ~4 days) and above the
     ///         longest SEC single-name trading suspension (10 business days, ~14 calendar days), so a held
     ///         price never settles a bucket during either. Past it, held marks settle at the held valuation
-    ///         for liveness of exits (a long hold defers them, it never blocks them), unless governance set a
-    ///         settle-at-price for the book (_governanceSettlePriceSet; Task 7).
+    ///         for liveness of exits (a long hold defers them, it never blocks them), unless a governance settle
+    ///         price for the book's underlying is pending (_governanceSettlePending; Task 7).
     uint256 internal constant MAX_HELD_DEFERRAL = 30 days;
+    /// @notice Hard bound on a hold run while a governance settle price is pending (Task 7): past it held marks settle
+    ///         at the held valuation whatever governance does, so the settle path can never block exits.
+    uint256 internal constant MAX_SETTLE_PRICE_DEFERRAL = 60 days;
+    /// @dev == Book.CLOSE_WINDOW_TIMEOUT
+    uint256 internal constant CLOSE_WINDOW_TIMEOUT = 7 days;
 
     /// @notice Working summary of a mark application (memory only; emitted as MarkSettled).
     ///         Arrays are indexed by tranche kind.
@@ -104,6 +111,18 @@ library BookLogic {
         emit IBook.CapitalDeployed($.bookId, ifAmount, mmAmount);
         if (ifAmount > 0) IUnderwritingVault(vault).deployToVenue(BRTypes.ACCOUNT_IF, ifAmount);
         if (mmAmount > 0) IUnderwritingVault(vault).deployToVenue(BRTypes.ACCOUNT_MM, mmAmount);
+    }
+
+    /// @dev Book.cancelStuckWindow (Task 7 lead "unconfirmed deposits"): a window closeWindow could not close for
+    ///      CLOSE_WINDOW_TIMEOUT (its venue deposit keeps reverting) is cancelled; commitments refundable 1:1.
+    function cancelStuckWindow(Book.BookStorage storage $) external {
+        if ($.state != BRTypes.BookState.Subscription) revert Book.BadState($.state);
+        uint256 at = uint256($.subscriptionEnds) + CLOSE_WINDOW_TIMEOUT;
+        if (block.timestamp < at) revert Book.WindowNotStuck(uint64(at));
+        $.state = BRTypes.BookState.Cancelled;
+        emit IBook.BookCancelled($.bookId, "CLOSE_TIMEOUT");
+        ITranche($.components.senior).markCancelled();
+        ITranche($.components.junior).markCancelled();
     }
 
     /// @dev Book.applyMark.
@@ -335,8 +354,11 @@ library BookLogic {
     ///      by then at its post-P&L prices (at most Tranche.MAX_SETTLE_BUCKETS per tranche per mark; any
     ///      further due bucket settles at the next mark, still a post-hold price). Bounded: once the run of
     ///      held marks is MAX_HELD_DEFERRAL old, held marks settle again at the held valuation (liveness of
-    ///      exits), unless governance has set a settle-at-price for this book, in which case they keep
-    ///      deferring and that path settles the buckets instead.
+    ///      exits), unless a governance settle price for the book's underlying is PENDING: it comes into force
+    ///      within AttestedOracle.SETTLE_PRICE_DELAY (3 days), the mark service then values the book at it and
+    ///      signs non-held marks, which settle; settling at the held valuation just before would let early
+    ///      exiters dodge it. Bounded: past MAX_SETTLE_PRICE_DEFERRAL (60 days) of hold, held marks settle
+    ///      whatever governance does (repeated proposals cannot block exits).
     function _settles(Book.BookStorage storage $, bool held, uint256 markId, uint64 periodEnd)
         private
         returns (bool)
@@ -347,18 +369,27 @@ library BookLogic {
         }
         uint64 since = $.heldSince;
         if (since == 0) $.heldSince = since = periodEnd;
-        bool settles = periodEnd - since >= MAX_HELD_DEFERRAL && !_governanceSettlePriceSet($);
+        uint256 elapsed = periodEnd - since;
+        bool settles = elapsed >= MAX_HELD_DEFERRAL
+            && (elapsed >= MAX_SETTLE_PRICE_DEFERRAL || !_governanceSettlePending($));
         emit Book.MarkHeld($.bookId, markId, since, settles);
         return settles;
     }
 
-    /// @dev HOOK (audit M-1 x Task 7): true once governance (timelock) has set a settle-at-price for this book
-    ///      (the delisted / permanently held market path). Past MAX_HELD_DEFERRAL a held mark then does NOT
-    ///      settle at the held valuation; the governance price path settles the buckets.
-    // TODO(Task 7, audit lead "settle path for delisted / permanently held markets"): read the book's
-    //      timelocked settle-at-price state (appended BookStorage field) here and settle through it.
-    function _governanceSettlePriceSet(Book.BookStorage storage) private pure returns (bool) {
-        return false;
+    /// @dev Audit M-1 x Task 7: whether a governance settle price for the book's underlying (the oracle price id of
+    ///      `charter.underlying`, the price its marks are held on) is pending in config.oracle(). Never reverts:
+    ///      no registry / oracle, an oracle without the settle path, or a failing read means false (the 30-day
+    ///      fallback applies).
+    function _governanceSettlePending(Book.BookStorage storage $) private view returns (bool pending) {
+        IBookrunnerConfig cfg = IBookrunnerConfig($.config);
+        address reg = cfg.stockRegistry();
+        address oracle = cfg.oracle();
+        if (reg.code.length == 0 || oracle.code.length == 0) return false;
+        try IStockTokenRegistry(reg).priceIdOf($.charter.underlying) returns (bytes32 pid) {
+            try IAttestedOracle(oracle).settlePrice(pid) returns (uint256, uint64, uint64, bool p, bool) {
+                pending = p;
+            } catch {}
+        } catch {}
     }
 
     /// @dev Share prices from the post-P&L NAVs, before any settlement; returns the Senior supply.

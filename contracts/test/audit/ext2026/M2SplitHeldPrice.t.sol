@@ -299,11 +299,12 @@ contract M2SplitHeldPriceTest is MandateBase {
         vm.prank(timelock);
         registry.setMultiplier(address(nvda), 10e18); // stamped split re-anchor: records the anchor before it
         assertEq(registry.basisMultiplier(address(nvda), fri), 1e18);
-        // stored mode: the recorded previous value for one change after the basis, unknown for two
+        // stored mode: the value before the first registry change after the basis, however many followed (Task 7
+        // full history; the round-2 registry returned 0 here)
         vm.warp(block.timestamp + 10);
         vm.prank(timelock);
         registry.setMultiplierSource(address(nvda), false); // a second registry change after the basis
-        assertEq(registry.basisMultiplier(address(nvda), fri), 0);
+        assertEq(registry.basisMultiplier(address(nvda), fri), 1e18);
         assertEq(registry.basisMultiplier(address(nvda), uint64(block.timestamp - 5)), 10e18);
     }
 

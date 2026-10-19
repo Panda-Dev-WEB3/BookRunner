@@ -330,6 +330,31 @@
       "check": "unused-return",
       "target": "UniswapV3Twap.spotTick",
       "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "incorrect-equality",
+      "target": "AttestedOracle.settlePrice",
+      "reason": "equality on protocol-owned amounts / period ids / timestamps that an outsider cannot steer to dodge the check (zero-amount early returns, same-period anchors), not on token balances"
+    },
+    {
+      "check": "incorrect-equality",
+      "target": "PoolEngine.marginRatioBps",
+      "reason": "equality on protocol-owned amounts / period ids / timestamps that an outsider cannot steer to dodge the check (zero-amount early returns, same-period anchors), not on token balances"
+    },
+    {
+      "check": "unused-return",
+      "target": "BookLogic._governanceSettlePending",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "PoolEngine._oracleOrSettle",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "uninitialized-local",
+      "target": "StockTokenRegistry.basisMultiplier.lo",
+      "reason": "the local is meant to start at zero / false / address(0) and is assigned on the paths that use it (accumulators, optional out-values) (audit 2026-10 triage: intended zero locals)"
     }
   ]
 }

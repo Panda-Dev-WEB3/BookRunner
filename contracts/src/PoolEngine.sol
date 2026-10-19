@@ -144,7 +144,11 @@ library PoolEngineMath {
 ///         pool can lose through any other channel before the next mark: once the pool's equity marked at the
 ///         oracle is more than `lossBudgetBps` of its value at the period's first trade below that value, new
 ///         risk reverts LossBudgetExceeded for as long as that holds in the period (reductions, closes and
-///         liquidations stay open); the next period (config.markInterval() long) re-anchors.
+///         liquidations stay open); the next period (config.markInterval() long) re-anchors; the first successful
+///         transaction that sees the budget spent emits LossBudgetBreached (once per period; {pokeLossBudget}).
+///         Settled market (Task 7 lead "no settle path"): once the timelock's settle price for the underlying is in
+///         force (AttestedOracle.settlePrice), the market is priced at it as held (no voluntary trade) and anyone may
+///         {forceClose} any position at it, so margins and the IF are released without a final live print.
 contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
 
@@ -206,6 +210,7 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         uint16 lossBudgetBps; // audit M-3: max pool loss per period, bps of the period's anchor equity
         uint64 lossPeriod; // period the anchor belongs to (block.timestamp / markInterval + 1; 0 = none yet)
         int128 lossAnchorUsd; // pool equity at the period's first trade (+/- liquidity moved since)
+        uint64 lossBreachPeriod; // last period a LossBudgetBreached was emitted for (0 = none)
     }
 
     /// @notice Protocol registry (oracle, factory, maxPriceAge are read live).
@@ -268,6 +273,14 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     event CloseOutScheduled(uint256 indexed marketId, uint64 closeOutAfter);
     event LossBudgetSet(uint256 indexed marketId, uint16 lossBudgetBps);
     event LossPeriodStarted(uint256 indexed marketId, uint64 period, int256 anchorEquityUsd);
+    /// @notice Audit M-3 / Task 7: the pool has lost more than its per-period budget against the oracle (new risk
+    ///         reverts LossBudgetExceeded for the rest of `period`). Once per market and period, from the first
+    ///         successful transaction that observes it (a reduction, close, liquidation, close-out or
+    ///         {pokeLossBudget}).
+    event LossBudgetBreached(uint256 indexed marketId, uint64 period, int256 lossUsd, uint256 budgetUsd);
+    /// @notice Task 7 lead "liquidation reward": the part of the liquidator's reward the forfeited margin could
+    ///         not pay, paid from the market's insurance fund.
+    event LiquidationRewardFromInsurance(uint256 indexed marketId, address indexed liquidator, uint256 amountUsd);
     event ClosedOut(
         uint256 indexed marketId,
         address indexed trader,
@@ -632,6 +645,7 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
 
         if (c.fundingUsd != 0) emit FundingSettled(marketId, msg.sender, c.fundingUsd);
         _postTradeChecks(marketId, m, p, c);
+        if (!c.newRisk) _noteLossBudget(marketId, m, _poolEquity(m, c.price, m.fundingIndex));
 
         emit Trade(marketId, msg.sender, sizeDelta, c.fill, c.feeUsd, c.pnlUsd, c.newSize);
         return (c.fill, c.feeUsd);
@@ -643,8 +657,11 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     ///      the liquidation fee, so a stored price is not a free option for the trader. Closes the whole
     ///      position at the oracle price; losses + funding settle against the pool; any shortfall is bad
     ///      debt paid by this market's IF, the remainder absorbed by this market's pool (ADL). The
-    ///      liquidation fee (liquidationFeeBps of notional, capped by remaining margin) is split 50% to
-    ///      the liquidator, 50% to the IF. Leftover margin stays withdrawable by the trader.
+    ///      liquidation fee (liquidationFeeBps of notional) is taken from the remaining margin; the liquidator
+    ///      always earns half of the NOMINAL fee, from that margin first and the rest from this market's IF
+    ///      (after the bad debt, capped by its balance: Task 7 lead "liquidation reward", a position whose margin
+    ///      is gone still pays its keeper); the rest of the fee goes to the IF. Leftover margin stays
+    ///      withdrawable by the trader.
     function liquidate(uint256 marketId, address trader) external nonReentrant returns (uint256 rewardUsd) {
         return _liquidate(marketId, trader);
     }
@@ -671,18 +688,32 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
 
         (int256 size,, uint256 badDebt) = _closeAtOracle(marketId, m, p, trader, price);
 
+        uint256 feeUsd;
+        (feeUsd, rewardUsd) = _liquidationFee(marketId, m, p, PoolEngineMath.notionalUsd(size, price));
+        emit Liquidation(marketId, trader, msg.sender, size, price, feeUsd, badDebt);
+        _noteLossBudget(marketId, m, _poolEquity(m, price, m.fundingIndex));
+        if (rewardUsd != 0) usdc.safeTransfer(msg.sender, rewardUsd);
+    }
+
+    /// @dev Liquidation fee and reward. The fee (`liquidationFeeBps` of the notional) is taken from what margin is
+    ///      left. The liquidator's half of the NOMINAL fee is paid from it first, then from this market's IF (after the
+    ///      bad debt the IF just covered, capped by its balance), so a position whose margin is gone still pays its
+    ///      keeper (Task 7 lead "liquidation reward"). The rest of the fee goes to the IF.
+    function _liquidationFee(uint256 marketId, Market storage m, Position storage p, uint256 notional)
+        internal
+        returns (uint256 feeUsd, uint256 rewardUsd)
+    {
+        uint256 nominalFee = Math.mulDiv(notional, m.cfg.liquidationFeeBps, PoolEngineMath.BPS);
         uint256 margin = p.marginUsd;
-        uint256 feeUsd = Math.min(
-            margin,
-            Math.mulDiv(PoolEngineMath.notionalUsd(size, price), m.cfg.liquidationFeeBps, PoolEngineMath.BPS)
-        );
-        rewardUsd = feeUsd / 2;
+        feeUsd = Math.min(margin, nominalFee);
+        uint256 fromFee = Math.min(nominalFee / 2, feeUsd);
+        uint256 ins = m.insuranceUsd + feeUsd - fromFee;
+        uint256 fromIf = Math.min(nominalFee / 2 - fromFee, ins);
+        rewardUsd = fromFee + fromIf;
         p.marginUsd = margin - feeUsd;
         m.totalMarginUsd -= feeUsd;
-        m.insuranceUsd += feeUsd - rewardUsd;
-
-        emit Liquidation(marketId, trader, msg.sender, size, price, feeUsd, badDebt);
-        if (rewardUsd != 0) usdc.safeTransfer(msg.sender, rewardUsd);
+        m.insuranceUsd = ins - fromIf;
+        if (fromIf != 0) emit LiquidationRewardFromInsurance(marketId, msg.sender, fromIf);
     }
 
     /// @notice Anyone, once a wind-down close-out is open (book Retiring, notice elapsed): closes `trader`'s
@@ -691,7 +722,9 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     ///         trade, the price must be live (not held) and within maxTradePriceAge: the position owner can
     ///         call it too, so a held / stale price would be a fee-free free option (close-outs wait for the
     ///         session to reopen; callers carry the price via the `priceData` overload). Leftover margin
-    ///         stays withdrawable by the trader. O(1) per position.
+    ///         stays withdrawable by the trader. O(1) per position. Settled market (Task 7): once a governance
+    ///         settle price is in force for the underlying (AttestedOracle.settlePrice: a delisted / permanently
+    ///         held market), anyone may close any position at it, with no close-out schedule and no live price.
     function forceClose(uint256 marketId, address trader) external nonReentrant {
         _forceClose(marketId, trader);
     }
@@ -704,17 +737,22 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
 
     function _forceClose(uint256 marketId, address trader) internal {
         Market storage m = _market(marketId);
-        uint64 at = m.closeOutAfter;
-        if (at == 0 || block.timestamp < at) revert CloseOutNotOpen(marketId, at);
+        (uint256 price, bool held, uint64 publishedAt, bool settled) = _oracleOrSettle(m);
+        if (!settled) {
+            uint64 at = m.closeOutAfter;
+            if (at == 0 || block.timestamp < at) revert CloseOutNotOpen(marketId, at);
+        }
         Position storage p = _positions[marketId][trader];
         if (p.size == 0) revert NoPosition(trader);
-        (uint256 price, bool held, uint64 publishedAt) = _oracle(m);
-        if (held) revert OffHours(marketId);
-        if (_tradeStale(publishedAt)) revert StalePrice(m.cfg.underlying, publishedAt);
+        if (!settled) {
+            if (held) revert OffHours(marketId);
+            if (_tradeStale(publishedAt)) revert StalePrice(m.cfg.underlying, publishedAt);
+        }
         _accrue(marketId, m, price);
         (int256 size, int256 pnl, uint256 badDebt) = _closeAtOracle(marketId, m, p, trader, price);
         emit Trade(marketId, trader, -size, price, 0, pnl, 0);
         emit ClosedOut(marketId, trader, msg.sender, size, price, badDebt);
+        _noteLossBudget(marketId, m, _poolEquity(m, price, m.fundingIndex));
     }
 
     // ------------------------------------------------------------------------------------------------
@@ -875,6 +913,14 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         blocked = lossUsd > int256(budgetUsd);
     }
 
+    /// @notice Anyone: emits LossBudgetBreached when the pool's loss in the current period (measured like
+    ///         {lossBudget}) is over its budget and it was not reported yet for this period.
+    function pokeLossBudget(uint256 marketId) external {
+        Market storage m = _market(marketId);
+        uint256 price = _viewPrice(m);
+        _noteLossBudget(marketId, m, _poolEquity(m, price, _pendingIndex(m, price)));
+    }
+
     /// @notice Timestamp of the last funding accrual for the market.
     function lastFundingTime(uint256 marketId) external view returns (uint64) {
         return _market(marketId).lastFundingTime;
@@ -891,12 +937,32 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
 
     /// @dev Latest attested price, held flag and publication time. Reverts when the underlying was never priced.
     function _oracle(Market storage m) internal view returns (uint256 price, bool held, uint64 publishedAt) {
-        IAttestedOracle.PriceData memory d = IAttestedOracle(protocolConfig.oracle()).latest(m.cfg.underlying);
+        (price, held, publishedAt,) = _oracleOrSettle(m);
+    }
+
+    /// @dev {_oracle}, or the governance settle price once in force (Task 7 lead "no settle path": a delisted /
+    ///      permanently held market): the market is then priced at it as held (no voluntary trade, liquidations
+    ///      at the off-hours requirement), `publishedAt` is now (views and withdrawals do not go stale) and
+    ///      `settled` lets {forceClose} close at it. Looked up only when the stored price is held or older than
+    ///      NEW_RISK_MAX_PRICE_AGE (a settle price is void once a live print after its proposal is stored, and it
+    ///      takes days to come into force), so live trading pays nothing for it.
+    function _oracleOrSettle(Market storage m)
+        internal
+        view
+        returns (uint256 price, bool held, uint64 publishedAt, bool settled)
+    {
+        IAttestedOracle o = IAttestedOracle(protocolConfig.oracle());
+        bytes32 u = m.cfg.underlying;
+        IAttestedOracle.PriceData memory d = o.latest(u);
         price = d.priceWad;
-        if (price == 0 || d.publishedAt == 0) revert NoPrice(m.cfg.underlying);
-        if (price > MAX_PRICE_WAD) revert PriceOutOfRange(price);
+        if (price == 0 || d.publishedAt == 0) revert NoPrice(u);
         held = d.held;
         publishedAt = d.publishedAt;
+        if (held || _stale(publishedAt, NEW_RISK_MAX_PRICE_AGE)) {
+            (uint256 sp,,,, bool effective) = o.settlePrice(u);
+            if (effective) (price, held, publishedAt, settled) = (sp, true, uint64(block.timestamp), true);
+        }
+        if (price > MAX_PRICE_WAD) revert PriceOutOfRange(price);
     }
 
     /// @dev Audit N-1: positions are in units of the price id (shares) and are never rebased, so a split's
@@ -1198,6 +1264,19 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         uint256 budget = _lossBudgetUsd(anchor, m.lossBudgetBps);
         int256 loss = anchor - poolEq;
         if (loss > int256(budget)) revert LossBudgetExceeded(marketId, loss, budget);
+    }
+
+    /// @dev Emits LossBudgetBreached once per period when the pool's equity `poolEq` is more than the budget below
+    ///      the current period's anchor (no anchor this period: no trade yet, nothing to report).
+    function _noteLossBudget(uint256 marketId, Market storage m, int256 poolEq) internal {
+        uint64 period = m.lossPeriod;
+        if (period == 0 || m.lossBreachPeriod == period || period != _lossPeriodNow()) return;
+        int256 anchor = m.lossAnchorUsd;
+        uint256 budget = _lossBudgetUsd(anchor, m.lossBudgetBps);
+        int256 loss = anchor - poolEq;
+        if (loss <= int256(budget)) return;
+        m.lossBreachPeriod = period;
+        emit LossBudgetBreached(marketId, period, loss, budget);
     }
 
     function _requiredPoolMargin(Market storage m, uint256 price) internal view returns (uint256) {

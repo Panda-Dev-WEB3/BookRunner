@@ -257,18 +257,36 @@ contract PoolEngineFuzzTest is EngineBase {
         uint256 fullFee = (10 * crashPx / 1e12) * 50 / 1e4; // notional (floored to 6dp) * 50 bps
         uint256 fee = rem < fullFee ? rem : fullFee;
 
+        uint256 cover = badDebt < s0.insuranceUsd ? badDebt : s0.insuranceUsd;
+
         vm.prank(keeper);
         uint256 reward = engine.liquidate(mA, alice);
-        assertEq(reward, fee / 2);
+        {
+            (uint256 expReward, uint256 expIns) = _liquidationSplit(s0.insuranceUsd - cover, fee, fullFee);
+            assertEq(reward, expReward);
+            assertEq(reward, fullFee / 2, "the IF is large enough here");
+            assertEq(engine.state(mA).insuranceUsd, expIns);
+        }
         IPoolEngine.MarketState memory s1 = engine.state(mA);
         IPoolEngine.Position memory p1 = engine.positionOf(mA, alice);
         assertEq(p1.size, 0);
         assertEq(p1.marginUsd, rem - fee);
-        uint256 cover = badDebt < s0.insuranceUsd ? badDebt : s0.insuranceUsd;
-        assertEq(s1.insuranceUsd, s0.insuranceUsd - cover + (fee - fee / 2));
         assertEq(int256(s1.poolCashUsd), int256(s0.poolCashUsd) - pnl - int256(badDebt) + int256(cover));
         assertEq(usdc.balanceOf(keeper), reward);
         _conserved();
+    }
+
+    /// @dev Task 7 lead "liquidation reward": the keeper's half of the NOMINAL fee, from the forfeited margin (`fee`)
+    ///      first, then from the IF (`ins`: after the bad debt it covered), capped by it.
+    function _liquidationSplit(uint256 ins, uint256 fee, uint256 fullFee)
+        internal
+        pure
+        returns (uint256 reward, uint256 insAfter)
+    {
+        uint256 fromFee = fee < fullFee / 2 ? fee : fullFee / 2;
+        ins += fee - fromFee;
+        uint256 fromIf = fullFee / 2 - fromFee < ins ? fullFee / 2 - fromFee : ins;
+        return (fromFee + fromIf, ins - fromIf);
     }
 
     // ------------------------------------------------------------------ funding

@@ -78,6 +78,14 @@ contract MockBookConfig is IBookrunnerConfig {
         charter = a;
     }
 
+    function setOracle(address a) external {
+        oracle = a;
+    }
+
+    function setStockRegistry(address a) external {
+        stockRegistry = a;
+    }
+
     function setFactory(address a) external {
         factory = a;
     }
@@ -165,6 +173,7 @@ contract MockVenueAdapter is IVenueAdapter {
     uint256 public value;
     uint256 public ifEquity;
     bool public revertWithdraw;
+    bool public revertDeposit;
 
     constructor(MockERC20 usdc_) {
         usdcToken = usdc_;
@@ -182,12 +191,17 @@ contract MockVenueAdapter is IVenueAdapter {
         revertWithdraw = r;
     }
 
+    function setRevertDeposit(bool r) external {
+        revertDeposit = r;
+    }
+
     function venueKind() external pure returns (uint8) {
         return BRTypes.VENUE_POOL_ENGINE;
     }
 
     function depositToVenue(uint8 account, uint256 amount) external {
         require(msg.sender == vault, "MockVenueAdapter: not vault");
+        require(!revertDeposit, "MockVenueAdapter: deposit disabled");
         IERC20(address(usdcToken)).transferFrom(vault, address(this), amount);
         value += amount;
         if (account == BRTypes.ACCOUNT_IF) ifEquity += amount;

@@ -45,6 +45,10 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
     uint8 internal constant J = BRTypes.JUNIOR;
     /// @notice Longest top-up round the sponsor may open.
     uint256 public constant MAX_TOPUP_WINDOW = 30 days;
+    /// @notice Audit 2026-10 lead "unconfirmed deposits": once the subscription window has been over this long
+    ///         and the book is still in Subscription (closeWindow keeps reverting, e.g. the venue deposit), anyone
+    ///         may cancel it ({cancelStuckWindow}); every commitment is then refundable 1:1.
+    uint256 public constant CLOSE_WINDOW_TIMEOUT = 7 days; // == BookLogic.CLOSE_WINDOW_TIMEOUT
 
     bytes32 public constant KILL_DRAWDOWN = "DRAWDOWN"; // == BookLogic.KILL_DRAWDOWN
     bytes32 public constant KILL_RETIRE = "RETIRE";
@@ -122,6 +126,7 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
     error TopUpActive();
     error BadTopUp();
     error NewBooksPaused();
+    error WindowNotStuck(uint64 cancellableAt);
     /// @dev OZ SafeCast's error (same signature/selector), raised by Waterfall.applyMarkPnl inside the
     ///      linked BookLogic library and bubbled through Book. Declared here so Book's ABI still lists it
     ///      (an external library's errors are not part of the linking contract's ABI).
@@ -144,7 +149,8 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
     /// @notice A mark valued at a held oracle price was applied (audit M-1): its P&L is booked; `settled`
     ///         false = redemption buckets and a due top-up round were left for the first non-held mark;
     ///         true = the hold run (since `heldSince`) reached BookLogic.MAX_HELD_DEFERRAL (30 days) and no
-    ///         governance settle-at-price is set, so they settled at the held valuation.
+    ///         governance settle price is pending for the book's underlying (AttestedOracle.settlePrice; at most
+    ///         BookLogic.MAX_SETTLE_PRICE_DEFERRAL, 60 days, of hold), so they settled at the held valuation.
     event MarkHeld(uint256 indexed bookId, uint256 indexed markId, uint64 heldSince, bool settled);
     /// @notice Audit 2026-10 L-1: part of a fee distribution's residual restored Senior impairment
     ///         (`seniorRestored`, credited to Senior) and repaid backstop debt (`backstopRepaid`, owed to the
@@ -357,6 +363,13 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
     ///         inventory are deployed through the vault -> adapter.
     function closeWindow() external nonReentrant {
         BookLogic.closeWindow(_s());
+    }
+
+    /// @notice Anyone, once the book has stayed in Subscription for CLOSE_WINDOW_TIMEOUT past `subscriptionEnds`
+    ///         (closeWindow kept reverting, e.g. its venue deposit): Subscription -> Cancelled, so every
+    ///         commitment is refundable 1:1 (Tranche.claimCancelledRefund). Emits BookCancelled("CLOSE_TIMEOUT").
+    function cancelStuckWindow() external nonReentrant {
+        BookLogic.cancelStuckWindow(_s());
     }
 
     /// @notice Anyone. Applies a committed mark: must be for this book, not applied, the book's latest

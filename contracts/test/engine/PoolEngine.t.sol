@@ -829,9 +829,11 @@ contract PoolEngineTest is EngineBase {
         vm.expectEmit(true, true, true, true, address(engine));
         emit Liquidation(mA, alice, keeper, 10e18, 80e18, 0, 91_500_500);
         vm.prank(keeper);
-        assertEq(engine.liquidate(mA, alice), 0);
+        // Task 7 lead "liquidation reward": margin gone, the keeper's half of the nominal fee ($800 x 50 bps / 2)
+        // comes from the IF after the bad debt
+        assertEq(engine.liquidate(mA, alice), 2e6);
         IPoolEngine.MarketState memory s = engine.state(mA);
-        assertEq(s.insuranceUsd, IF - 91_500_500);
+        assertEq(s.insuranceUsd, IF - 91_500_500 - 2e6);
         assertEq(s.poolCashUsd, POOL + 200_500_000); // pool made whole
         assertEq(engine.positionOf(mA, alice).marginUsd, 0);
         assertEq(engine.totalMarginUsd(mA), 0);

@@ -21,6 +21,12 @@ import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 ///         restricted to an active signer, the KEEPER role or the timelock (backwards compatible). A `held`
 ///         price is the feed holding a closed session's last price (off-hours): consumers go reduce-only but
 ///         keep liquidating at the held price.
+///         Settle price (Task 7, audit 2026-10 lead "no settle path"): for a market that will not trade again
+///         (delisted, permanently halted), the timelock proposes a final price ({proposeSettlePrice}): only while the
+///         stored price is held or stale, within SETTLE_PRICE_BAND_BPS of it, in force SETTLE_PRICE_DELAY later and
+///         void once a live print published after the proposal is stored ({settlePrice}). PoolEngine closes positions
+///         at it; the mark service values the book at it (a non-held mark: Book settles); Book defers its 30-day
+///         held-mark fallback while it is pending (bounded). It never changes {latest}.
 /// @dev    Non-upgradeable (ARCHITECTURE §2.0). EIP-712 domain ("Bookrunner AttestedOracle", "1"); the type
 ///         string MUST stay byte-identical to `packages/shared/src/eip712.ts` (`priceTypes`).
 contract AttestedOracle is IAttestedOracle, EIP712 {
@@ -37,6 +43,7 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
     uint32 public constant DEFAULT_MIN_SOURCES = 3;
     /// @dev BookrunnerConfig KEEPER role id (relayers besides the signers and the timelock).
     bytes32 internal constant KEEPER_ROLE = keccak256("KEEPER");
+    uint256 internal constant BPS = 10_000;
 
     /// @notice Protocol registry (timelock + maxPriceAge).
     IBookrunnerConfig public immutable config;
@@ -73,6 +80,21 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
     /// @inheritdoc IAttestedOracle
     mapping(bytes32 underlying => uint64) public override lastLiveAt;
 
+    // ---- settle price (audit 2026-10 lead "no settle path for a delisted / permanently held market") ------
+    /// @notice Delay between a settle price proposal and its effect. With the timelock's own delay (mainnet
+    ///         >= 48 h) the path completes well inside Book's MAX_HELD_DEFERRAL (30 days).
+    uint64 public constant SETTLE_PRICE_DELAY = 3 days;
+    /// @notice A settle price lies within this band of the stored (last attested / held) price.
+    uint16 public constant SETTLE_PRICE_BAND_BPS = 5000;
+
+    struct SettlePrice {
+        uint256 priceWad;
+        uint64 proposedAt;
+        uint64 effectiveAt;
+    }
+
+    mapping(bytes32 underlying => SettlePrice) internal _settlePrices;
+
     error NotTimelock(address caller);
     error ZeroAddress();
     error ZeroPrice(bytes32 underlying);
@@ -84,6 +106,9 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
     error MeasurementNotAllowed(bytes32 measurement);
     error AttestationRequired();
     error BadAttestation();
+    error MarketTrading(bytes32 underlying);
+    error SettlePriceOutOfBand(bytes32 underlying, uint256 priceWad, uint256 storedPriceWad);
+    error NoSettlePrice(bytes32 underlying);
 
     /// @notice Emitted by `pushMany` for an entry that was validly signed but not newer than stored.
     event PriceSkipped(bytes32 indexed underlying, uint64 storedPublishedAt, uint64 incomingPublishedAt);
@@ -315,6 +340,46 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
         return keccak256(
             abi.encode(ATTESTATION_TYPEHASH, block.chainid, address(this), signer, platform, measurement, quoteHash)
         );
+    }
+
+    /// @inheritdoc IAttestedOracle
+    /// @dev A live print published at or after `proposedAt` voids it (the market trades again); consumers read
+    ///      `pending` / `effective` only, never `priceWad` alone.
+    function settlePrice(bytes32 underlying)
+        external
+        view
+        returns (uint256 priceWad, uint64 proposedAt, uint64 effectiveAt, bool pending, bool effective)
+    {
+        SettlePrice memory s = _settlePrices[underlying];
+        (priceWad, proposedAt, effectiveAt) = (s.priceWad, s.proposedAt, s.effectiveAt);
+        if (proposedAt == 0 || lastLiveAt[underlying] >= proposedAt) return (priceWad, proposedAt, effectiveAt, false, false);
+        pending = block.timestamp < effectiveAt;
+        effective = !pending;
+    }
+
+    /// @inheritdoc IAttestedOracle
+    /// @dev Reverts StalePrice(underlying, 0) for a never-priced id, MarketTrading while the stored price is live
+    ///      and fresh, SettlePriceOutOfBand outside [stored x (1 - band), stored x (1 + band)] (0 included).
+    function proposeSettlePrice(bytes32 underlying, uint256 priceWad) external onlyTimelock {
+        PriceData memory d = _prices[underlying];
+        if (d.publishedAt == 0) revert StalePrice(underlying, 0);
+        if (!d.held && !_stale(d.publishedAt)) revert MarketTrading(underlying);
+        uint256 ref = d.priceWad;
+        uint256 dev = priceWad > ref ? priceWad - ref : ref - priceWad;
+        if (priceWad == 0 || dev * BPS > ref * SETTLE_PRICE_BAND_BPS) {
+            revert SettlePriceOutOfBand(underlying, priceWad, ref);
+        }
+        uint64 effectiveAt = uint64(block.timestamp) + SETTLE_PRICE_DELAY;
+        _settlePrices[underlying] =
+            SettlePrice({priceWad: priceWad, proposedAt: uint64(block.timestamp), effectiveAt: effectiveAt});
+        emit SettlePriceProposed(underlying, priceWad, ref, effectiveAt);
+    }
+
+    /// @inheritdoc IAttestedOracle
+    function cancelSettlePrice(bytes32 underlying) external onlyTimelock {
+        if (_settlePrices[underlying].proposedAt == 0) revert NoSettlePrice(underlying);
+        delete _settlePrices[underlying];
+        emit SettlePriceCancelled(underlying);
     }
 
     /// @notice Timelock: minimum distinct sources for a non-held price (held prices may carry fewer).

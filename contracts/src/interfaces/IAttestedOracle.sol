@@ -52,10 +52,27 @@ interface IAttestedOracle {
     /// @notice Minimum distinct sources required for a non-held price.
     function minSources() external view returns (uint32);
 
+    /// @notice Governance settle price of a market that stopped trading (delisted / permanently held; audit
+    ///         2026-10 lead "no settle path"). `pending`: proposed, takes effect at `effectiveAt`; `effective`:
+    ///         in force. Both are false when none was proposed, or once a live print published at or after
+    ///         `proposedAt` was stored (the market traded again: the signed feed supersedes it).
+    function settlePrice(bytes32 underlying)
+        external
+        view
+        returns (uint256 priceWad, uint64 proposedAt, uint64 effectiveAt, bool pending, bool effective);
+    /// @notice Timelock: proposes the settle price of a market whose stored price is held or stale. It must lie
+    ///         within the settle band of the stored (last attested) price and takes effect after the settle
+    ///         delay. Replaces any earlier proposal (the delay restarts).
+    function proposeSettlePrice(bytes32 underlying, uint256 priceWad) external;
+    /// @notice Timelock: withdraws a proposed or effective settle price.
+    function cancelSettlePrice(bytes32 underlying) external;
+
     error StalePrice(bytes32 underlying, uint64 publishedAt);
     error BadSigner(address recovered);
     error NotNewer(uint64 stored, uint64 incoming);
 
     event PricePushed(bytes32 indexed underlying, uint256 priceWad, uint64 publishedAt, bool held, uint32 sourceCount, address signer);
     event SignerSet(address indexed signer, bool active, bytes32 attestation);
+    event SettlePriceProposed(bytes32 indexed underlying, uint256 priceWad, uint256 storedPriceWad, uint64 effectiveAt);
+    event SettlePriceCancelled(bytes32 indexed underlying);
 }

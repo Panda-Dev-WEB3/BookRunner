@@ -70,16 +70,16 @@ contract StockTokenRegistry is IStockTokenRegistry {
     /// @dev Reverse indexes for {splitGate}: an engine market is keyed by its price id.
     mapping(bytes32 priceId => address[]) internal _tokensOfPriceId;
     mapping(bytes32 priceId => bytes32 indexId) internal _indexOfPriceId;
-    /// @dev Last registry-side change ({multiplierSetAt}) with the time of the one before it and the multiplier in
-    ///      force before it (stored mode: the previous stored value; live mode: the anchor before a split re-anchor
-    ///      or source switch), for {basisMultiplier} (fix round 2, N-I1).
+    /// @dev One registry-side change ({multiplierSetAt}): its time and the multiplier in force before it (stored
+    ///      mode: the previous stored value; live mode: the anchor before a split re-anchor or source switch).
     struct MultiplierChange {
         uint64 at;
-        uint64 prevAt;
         uint256 before;
     }
 
-    mapping(address token => MultiplierChange) internal _lastChange;
+    /// @dev Every registry-side change of a token, oldest first (Task 7, the full history behind {basisMultiplier}:
+    ///      fix round 2 N-I1 kept only the last one, so two changes after a basis read as unknown).
+    mapping(address token => MultiplierChange[]) internal _changes;
 
     error Unauthorized(address caller);
     error ZeroAddress();
@@ -298,18 +298,29 @@ contract StockTokenRegistry is IStockTokenRegistry {
         (, changedAt,) = _effective(_registered(token));
     }
 
-    /// @notice Multiplier in force at `basisAt` (fix round 2, N-I1), 0 = unknown. No change since: the effective
-    ///         one. Latest change registry-side (stored `setMultiplier`, source switch, live split re-anchor): the
-    ///         recorded value before it, if it is the only registry change after `basisAt`. A token-side change
-    ///         (live mode): the stored anchor, which is the pre-split multiplier until the (stamped) re-anchor;
-    ///         for an in-band change it is within the band of both (approximate, at most the band off).
+    /// @notice Multiplier in force at `basisAt` (fix round 2, N-I1; full history, Task 7). No change since: the
+    ///         effective one. A registry-side change after `basisAt` (stored `setMultiplier`, source switch, live
+    ///         split re-anchor): the value recorded before the FIRST such change, exact in stored mode whatever the
+    ///         number of changes since. Otherwise (live mode, a token-side change only): the stored anchor, which is
+    ///         the pre-split multiplier until the (stamped) re-anchor and, for an in-band change, within the band of
+    ///         the true value (the documented live case; the token's own update events are exact). Never 0 in stored
+    ///         mode; 0 only for a live token with no registry change after the basis and no anchor (never: the anchor
+    ///         is set at registration).
     function basisMultiplier(address token, uint64 basisAt) external view override returns (uint256) {
         StockToken storage t = _registered(token);
         (uint256 mult, uint256 changedAt,) = _effective(t);
         if (changedAt <= basisAt) return mult;
-        MultiplierChange storage c = _lastChange[token];
-        if (c.at > basisAt) return c.prevAt <= basisAt ? c.before : 0; // earliest change after the basis
-        return multiplierFromToken[token] ? t.multiplierWad : 0;
+        MultiplierChange[] storage cs = _changes[token];
+        // first change strictly after the basis (changes are appended in time order)
+        uint256 lo;
+        uint256 hi = cs.length;
+        while (lo < hi) {
+            uint256 mid = (lo + hi) / 2;
+            if (cs[mid].at > basisAt) hi = mid;
+            else lo = mid + 1;
+        }
+        if (lo < cs.length) return cs[lo].before;
+        return t.multiplierWad;
     }
 
     /// @notice Reverts MultiplierChangedSincePrice when the stored price's share basis predates the multiplier
@@ -480,12 +491,11 @@ contract StockTokenRegistry is IStockTokenRegistry {
         }
     }
 
-    /// @dev Records a registry-side multiplier change (audit M-2): its time, the previous one's, the value before.
+    /// @dev Records a registry-side multiplier change (audit M-2): its time and the value before it, appended to
+    ///      the token's history (Task 7). Several changes in one block keep their order: the first one's `before`
+    ///      is the value in force before that block.
     function _stamp(address token, uint256 before) internal {
-        MultiplierChange storage c = _lastChange[token];
-        c.prevAt = c.at;
-        c.at = uint64(block.timestamp);
-        c.before = before;
+        _changes[token].push(MultiplierChange({at: uint64(block.timestamp), before: before}));
         multiplierSetAt[token] = uint64(block.timestamp);
     }
 
