@@ -48,8 +48,9 @@ const db: DbPort = {
   cursors: () => sql<Array<{ name: string; block: number; updatedAt: Date }>>`
     select name, block_number as block, updated_at as "updatedAt" from chain_cursor`.then((r) => [...r]),
   recentMarks: (perBook) => sql<Array<{ bookId: number; periodEnd: Date; held: boolean | null }>>`
-    select book_id::int8 as "bookId", period_end as "periodEnd", (pnl_json->>'held')::boolean as held
-    from (select book_id, period_end, pnl_json, row_number() over (partition by book_id order by period_end desc) as rn from marks) m
+    select book_id::int8 as "bookId", period_end as "periodEnd", (pnl_json->>'held') = 'true' as held
+    from (select book_id, period_end, pnl_json, row_number() over (partition by book_id order by period_end desc) as rn
+          from marks where period_end > now() - interval '45 days') m
     where rn <= ${perBook}`.then((r) => r.map((x) => ({ ...x, bookId: Number(x.bookId) }))),
 };
 

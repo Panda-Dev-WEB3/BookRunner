@@ -268,6 +268,8 @@ export interface Snapshot {
   builderFeed?: BuilderFeedSnap | null;
   /** null/absent: no ops-venue status (or an older ops-venue) */
   venueOps?: VenueOpsSnap | null;
+  /** forged bus messages each service refused (KEYS.busForged: agent-<bookId>, ops-venue, risk) */
+  busForged?: Array<{ source: string; events: Array<{ at: number; kind: string; reason: string }> }>;
   /** collection failures that are themselves worth an alert (db / redis unreachable) */
   infraErrors: Array<{ source: "db" | "redis"; error: string }>;
 }

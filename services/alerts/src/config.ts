@@ -1,5 +1,6 @@
 // services/alerts configuration: thresholds (with per-network defaults) and delivery channels.
 // Every threshold is an env var; the defaults below are what the rules use when it is unset.
+import { baseEnvSchema } from "@bookrunner/shared/env";
 import { z } from "zod";
 
 export type Network = "devnet" | "testnet" | "mainnet";
@@ -138,8 +139,8 @@ const shape = {
    */
   AGENT_VENUE_POST_ONLY_QUOTE: z.stringbool().optional(),
   ALERT_RISK_WARN: bool(false),
-  /** held_marks_in_session: this many marks of the current held run valued while the book's session was open alert (warning) */
-  ALERT_HELD_MARKS_IN_SESSION: z.coerce.number().int().min(1).default(1),
+  /** held_marks_in_session: a held run spanning this much open session (or a mark valued in session) alerts (warning) */
+  ALERT_HELD_MARK_SESSION_SECONDS: z.coerce.number().int().min(300).default(900),
   /** held_marks_in_session: a held run (since the last non-held mark) this long pages critical */
   ALERT_HELD_MARK_CRITICAL_SECONDS: int(86_400),
   /** risk_quote_unverified: a book held reduce-only for quoteUnverified this long in session alerts */
@@ -147,8 +148,11 @@ const shape = {
   /** desk_stale_trade_price: this many StaleTradePrice refusals of a book's desk swaps within the window alert (3x: critical) */
   ALERT_STALE_TRADE_PRICE_MAX: z.coerce.number().int().min(1).default(3),
   ALERT_STALE_TRADE_PRICE_WINDOW_SECONDS: z.coerce.number().int().min(60).max(3_600).default(900),
-  /** the stack's SESSIONS_MODE (24x7 overrides the charter sessions, as for the agents and risk) */
-  SESSIONS_MODE: z.string().optional(),
+  /** bus_forged_message: forged bus messages refused by one service within the window before a warning (3x: critical) */
+  ALERT_FORGED_MESSAGES_MAX: z.coerce.number().int().min(1).default(3),
+  ALERT_FORGED_MESSAGES_WINDOW_SECONDS: z.coerce.number().int().min(60).max(3_600).default(900),
+  /** the stack's SESSIONS_MODE (same enum and default as every service: 24x7 overrides the charter sessions) */
+  SESSIONS_MODE: baseEnvSchema.shape.SESSIONS_MODE,
   ALERT_VENUE_REPORT_MAX_AGE_SECONDS: z.coerce.number().int().min(1).optional(),
   ALERT_RESTART_WINDOW_SECONDS: int(900),
   ALERT_RESTART_MAX: int(3),
@@ -194,8 +198,8 @@ export interface RuleConfig {
   markGraceSec: number;
   riskStaleSec: number;
   riskWarn: boolean;
-  /** held_marks_in_session: marks of the held run valued in session before a warning */
-  heldMarksInSession: number;
+  /** held_marks_in_session: open-session seconds a held run must span (when no mark of it was valued in session) */
+  heldMarkSessionSec: number;
   /** held_marks_in_session: held run length (s) before critical */
   heldMarkCriticalSec: number;
   /** risk_quote_unverified: hold (s) in session before the alert */
@@ -203,6 +207,9 @@ export interface RuleConfig {
   /** desk_stale_trade_price: refusals within the window before a warning */
   staleTradePriceMax: number;
   staleTradePriceWindowSec: number;
+  /** bus_forged_message: refusals within the window before a warning */
+  forgedMessagesMax: number;
+  forgedMessagesWindowSec: number;
   venueReportMaxAgeSec: number;
   /** builder_price_push: failing span (s) of a live builder price push in session */
   builderPushFailSec: number;
@@ -269,7 +276,7 @@ export interface AlertsConfig {
   deploymentFile: string;
   markIntervalSec: number;
   /** SESSIONS_MODE (24x7: charter sessions ignored) */
-  sessionsMode: string | undefined;
+  sessionsMode: "charter" | "24x7";
   intervalSec: number;
   apiUrl: string;
   oracleUrl: string;
@@ -328,11 +335,13 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       markGraceSec: e.ALERT_MARK_GRACE_SECONDS ?? nd.markGraceSec,
       riskStaleSec: e.ALERT_RISK_STALE_SECONDS,
       riskWarn: e.ALERT_RISK_WARN,
-      heldMarksInSession: e.ALERT_HELD_MARKS_IN_SESSION,
+      heldMarkSessionSec: e.ALERT_HELD_MARK_SESSION_SECONDS,
       heldMarkCriticalSec: e.ALERT_HELD_MARK_CRITICAL_SECONDS,
       quoteUnverifiedSec: e.ALERT_QUOTE_UNVERIFIED_SECONDS,
       staleTradePriceMax: e.ALERT_STALE_TRADE_PRICE_MAX,
       staleTradePriceWindowSec: e.ALERT_STALE_TRADE_PRICE_WINDOW_SECONDS,
+      forgedMessagesMax: e.ALERT_FORGED_MESSAGES_MAX,
+      forgedMessagesWindowSec: e.ALERT_FORGED_MESSAGES_WINDOW_SECONDS,
       venueReportMaxAgeSec: e.ALERT_VENUE_REPORT_MAX_AGE_SECONDS ?? nd.venueReportMaxAgeSec,
       builderPushFailSec: e.ALERT_BUILDER_PUSH_FAIL_SECONDS,
       listingLiveGraceSec: e.ALERT_LISTING_LIVE_GRACE_SECONDS,

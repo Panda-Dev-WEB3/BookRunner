@@ -5,7 +5,7 @@ import { SESSIONS_24X5, SESSIONS_24X7, SESSIONS_NYSE_RTH, encodeSessions } from 
 import { type DbPort, collect, emptyMemory, parseDeskRejects, parseRisk, sessionsOf } from "../src/collect";
 import { emptyState, step } from "../src/dedupe";
 import { evaluate } from "../src/rules";
-import { deskStaleTradePrice, heldMarksInSession, riskQuoteUnverified } from "../src/rules-holds";
+import { busForgedMessages, deskStaleTradePrice, heldMarksInSession, riskQuoteUnverified } from "../src/rules-holds";
 import { NOW, NOW_S, book, rules, snap } from "./fixtures";
 
 const keys = (cs: Array<{ key: string }>) => cs.map((c) => c.key);
@@ -31,13 +31,27 @@ describe("held_marks_in_session", () => {
     expect(keys(heldMarksInSession(snap({ books: [{ ...b, sessions: SESSIONS_24X5 }] }), rules()))).toEqual(["held_marks_in_session:3"]);
   });
 
-  test("hysteresis: ALERT_HELD_MARKS_IN_SESSION marks of the run, resolved by the first settled mark", () => {
-    const one = book({ sessions: SESSIONS_24X7, recentMarks: [{ periodEnd: NOW_S - 60, held: true }, { periodEnd: NOW_S - 60 - H, held: false }] });
-    const two = book({ sessions: SESSIONS_24X7, recentMarks: [{ periodEnd: NOW_S - 60, held: true }, { periodEnd: NOW_S - 60 - H, held: true }, { periodEnd: NOW_S - 60 - 2 * H, held: false }] });
-    expect(heldMarksInSession(snap({ books: [one] }), rules({ heldMarksInSession: 2 }))).toEqual([]);
-    expect(keys(heldMarksInSession(snap({ books: [two] }), rules({ heldMarksInSession: 2 })))).toEqual(["held_marks_in_session:3"]);
+  test("resolved by the first settled mark", () => {
     const settled = book({ sessions: SESSIONS_24X7, recentMarks: [{ periodEnd: NOW_S - 60, held: false }, { periodEnd: NOW_S - 60 - H, held: true }] });
     expect(heldMarksInSession(snap({ books: [settled] }), rules())).toEqual([]);
+  });
+
+  test("daily 00:00 UTC marks on an NYSE-RTH charter (always valued off-session): a held run through a trading day alerts", () => {
+    const D = 86_400;
+    const SAT = Date.UTC(2026, 9, 10, 0, 0, 0) / 1000; // Fri 20:00 EDT
+    // Thu 00:00 settled; Fri 00:00 and Sat 00:00 held: the run spans Fri 9:30-16:00 EDT -> alert
+    const fri = book({ sessions: SESSIONS_NYSE_RTH, recentMarks: [{ periodEnd: SAT, held: true }, { periodEnd: SAT - D, held: true }, { periodEnd: SAT - 2 * D, held: false }] });
+    const c = heldMarksInSession(snap({ books: [fri] }), rules());
+    expect(keys(c)).toEqual(["held_marks_in_session:3"]);
+    expect(c[0]!.summary).toContain("HELD through open session (marks valued off-session)");
+    // a weekend-only run (Sat 00:00 -> Sun 00:00 UTC, no session in between) stays quiet
+    const weekend = book({ sessions: SESSIONS_NYSE_RTH, recentMarks: [{ periodEnd: SAT + D, held: true }, { periodEnd: SAT, held: true }, { periodEnd: SAT - D, held: false }] });
+    expect(heldMarksInSession(snap({ now: (SAT + D + 60) * 1000, books: [weekend] }), rules())).toEqual([]);
+    // one held mark alone spans nothing: quiet until the run reaches through open session
+    const single = book({ sessions: SESSIONS_NYSE_RTH, recentMarks: [{ periodEnd: SAT, held: true }, { periodEnd: SAT - D, held: false }] });
+    expect(heldMarksInSession(snap({ books: [single] }), rules())).toEqual([]);
+    // the open-session threshold: Friday's session is 6.5 h; asking for more than that keeps the same run quiet
+    expect(heldMarksInSession(snap({ books: [fri] }), rules({ heldMarkSessionSec: 7 * H }))).toEqual([]);
   });
 
   test("critical once the held run is ALERT_HELD_MARK_CRITICAL_SECONDS old (at least the window when no settled mark is in it)", () => {
@@ -177,5 +191,59 @@ describe("collection", () => {
       { periodEnd: NOW_S - 2 * H, held: false },
     ]);
     expect(b.deskStaleTradePrice).toEqual([NOW - 5]);
+  });
+});
+
+describe("bus_forged_message", () => {
+  const ev = (n: number, spacingMs = 60_000) => Array.from({ length: n }, (_, i) => ({ at: NOW - i * spacingMs, kind: "kill", reason: "unsigned kill message (no RISK signature)" }));
+
+  test("forged messages refused by a service within the window: warning at the limit, critical at 3x, decays with the window", () => {
+    expect(busForgedMessages(snap({ busForged: [{ source: "agent-3", events: ev(2) }] }), rules())).toEqual([]);
+    const w = busForgedMessages(snap({ busForged: [{ source: "agent-3", events: ev(3) }] }), rules());
+    expect(w).toEqual([expect.objectContaining({ key: "bus_forged_message:agent-3", severity: "warning" })]);
+    expect(w[0]!.summary).toContain("Nothing acted on them");
+    expect(busForgedMessages(snap({ busForged: [{ source: "ops-venue", events: ev(9) }] }), rules())[0]!.severity).toBe("critical");
+    expect(busForgedMessages(snap({ busForged: [{ source: "risk", events: ev(3, 600_000) }] }), rules())).toEqual([]); // 0, 10, 20 min: 2 within 15
+    expect(keys(evaluate(snap({ busForged: [{ source: "risk", events: ev(3) }] }), rules()))).toEqual(["bus_forged_message:risk"]);
+  });
+
+  test("collect reads every source's key (ops-venue, risk, one per book's agent)", async () => {
+    const kv = new Map([
+      [KEYS.busForged("agent-3"), JSON.stringify({ v: 1, source: "agent-3", ts: NOW, events: [{ at: NOW - 5, kind: "kill", reason: "x" }, { at: "bad" }] })],
+      [KEYS.busForged("risk"), "garbage"],
+    ]);
+    const asked: string[] = [];
+    const { snapshot } = await collect(
+      {
+        db: { books: async () => [{ id: 3, name: "NVDA", symbol: "PERP_NVDA_USDC", state: "Live", venue: 0, subscriptionEnds: null }], latestMarkPeriodEnds: async () => [], killsSince: async () => [], cursors: async () => [] },
+        kv: { get: async (k) => kv.get(k) ?? null, mget: async (ks) => (asked.push(...ks), ks.map((k) => kv.get(k) ?? null)) },
+        chain: { head: async () => ({ number: 1, timestamp: NOW_S }), balance: async () => 0n, buybackPending: async () => null, markInterval: async () => null },
+        fetch: (async () => new Response("{}")) as unknown as typeof fetch,
+        now: () => NOW,
+      },
+      { network: "testnet", chainId: 46630, apiUrl: "http://api", markIntervalSec: 3600, roles: [], rpcWindowSec: 900 },
+      emptyMemory(),
+      86_400,
+    );
+    expect(asked).toEqual(expect.arrayContaining([KEYS.busForged("ops-venue"), KEYS.busForged("risk"), KEYS.busForged("agent-3")]));
+    expect(snapshot.busForged).toEqual([{ source: "agent-3", events: [{ at: NOW - 5, kind: "kill", reason: "x" }] }]);
+  });
+
+  test("a recentMarks failure blinds only the held-marks rule", async () => {
+    const { snapshot } = await collect(
+      {
+        db: { books: async () => [{ id: 3, name: "NVDA", symbol: "S", state: "Live", venue: 0, subscriptionEnds: null }], latestMarkPeriodEnds: async () => [], killsSince: async () => [], cursors: async () => [], recentMarks: async () => Promise.reject(new Error("bad cast")) },
+        kv: { get: async () => null, mget: async (ks) => ks.map(() => null) },
+        chain: { head: async () => ({ number: 1, timestamp: NOW_S }), balance: async () => 0n, buybackPending: async () => null, markInterval: async () => null },
+        fetch: (async () => new Response("{}")) as unknown as typeof fetch,
+        now: () => NOW,
+      },
+      { network: "testnet", chainId: 46630, apiUrl: "http://api", markIntervalSec: 3600, roles: [], rpcWindowSec: 900 },
+      emptyMemory(),
+      86_400,
+    );
+    expect(snapshot.books).toHaveLength(1);
+    expect(snapshot.books![0]!.recentMarks).toEqual([]);
+    expect(snapshot.infraErrors).toEqual([]);
   });
 });
