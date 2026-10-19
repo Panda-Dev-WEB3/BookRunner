@@ -798,7 +798,7 @@ describe("builder price feed: only the oracle's SIGNED price is pushed (Redis is
     expect(socket.sent).toEqual([{ base: "NVDA", price: 190.25 }]);
   });
 
-  test("only a strictly newer signed publishedAt is pushed: an older replay never replaces, a different price under the same publishedAt is refused, the same latest one is re-sent", async () => {
+  test("an older signed publishedAt is never pushed: a replay never replaces; the same publishedAt (oracle clamp while the head lags) is pushed", async () => {
     const h = harness();
     await h.feed.onFeed(await feedMsg(5_000, [price({ signedAt: 5_000, price: 100 })]));
     h.at(5_000);
@@ -812,13 +812,12 @@ describe("builder price feed: only the oracle's SIGNED price is pushed (Redis is
       { base: "NVDA", price: 100 },
     ]);
     expect(h.sym().state).toBe("pushing");
-    // another signed price with the same publishedAt (same second) as the last pushed: refused
+    // another signed price with the same publishedAt (the oracle clamps publishedAt to head + 4 s): pushed
     await h.feed.onFeed(await feedMsg(7_000, [price({ signedAt: 5_400, price: 101 })]));
     h.at(7_000);
     h.feed.tick();
-    expect(h.socket.sent).toHaveLength(2);
-    expect(h.sym().state).toBe("invalid");
-    expect(h.sym().error).toContain("not newer than the last pushed");
+    expect(h.socket.sent.at(-1)).toEqual({ base: "NVDA", price: 101 });
+    expect(h.sym().state).toBe("pushing");
     // a strictly newer one is pushed again
     await h.feed.onFeed(await feedMsg(8_000, [price({ signedAt: 8_000, price: 101 })]));
     h.at(8_000);

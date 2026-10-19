@@ -346,10 +346,11 @@ export class BuilderPriceFeed {
         // the symbol is unsigned: a price signed for another underlying (e.g. NVDA under TSLA) is never pushed
         next = "invalid";
         error = `signed price is for underlying ${p.underlying}, this market's books expect ${t.underlying.toLowerCase()}`;
-      } else if (p && st.lastPushedPublishedAtMs != null && (p.publishedAtMs < st.lastPushedPublishedAtMs || (p.publishedAtMs === st.lastPushedPublishedAtMs && p.price !== st.price))) {
-        // only a strictly newer signed price, or the same latest one re-sent (the >= 1/s resend), is pushed
+      } else if (p && st.lastPushedPublishedAtMs != null && p.publishedAtMs < st.lastPushedPublishedAtMs) {
+        // an older signed price never replaces a newer one (replay / reorder). An equal publishedAt is accepted: the
+        // oracle clamps publishedAt to head + 4 s, so while the chain head lags, successive prices share one publishedAt
         next = "invalid";
-        error = `signed price published at ${p.publishedAtMs} is not newer than the last pushed (${st.lastPushedPublishedAtMs})`;
+        error = `signed price published at ${p.publishedAtMs} is older than the last pushed (${st.lastPushedPublishedAtMs})`;
       } else if (!p) {
         next = "no-price";
         error = "no oracle price for this symbol";
