@@ -279,6 +279,9 @@ export class MarkPipeline {
     // published as pnl.held
     const hold = markHeld(snapshot);
     if (hold.held) log.warn({ reasons: hold.reasons }, "valuation at a held, unreadable or stale price: the mark is held (P&L only, no settlement)");
+    // Task 7: a governance settle price in force (delisted / permanently held market) is valued as a final live price
+    const settled = [...(snapshot.underlyingPrice?.settled ? [`underlying:${snapshot.underlyingPrice.priceWad}`] : []), ...snapshot.desk.positions.filter((p) => p.settlePrice).map((p) => `${p.ticker}:${p.priceWad}`)];
+    if (settled.length) log.warn({ settled }, "valued at the governance settle price in force (AttestedOracle.settlePrice): the mark settles at it");
     const dist = await this.d.store.distribution(ref.bookId, periodEnd);
     const pnl = buildMarkPnl({
       snapshot,

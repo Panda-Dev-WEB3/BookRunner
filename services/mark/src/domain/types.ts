@@ -27,6 +27,8 @@ export interface DeskPosition {
   splitWindowSince?: bigint;
   /** set by resolveSplitWindow: valued at the basis multiplier (or 0), the mark is held */
   splitWindow?: boolean;
+  /** priceWad is the governance settle price in force for the token's price id (domain/settle.ts): live, final */
+  settlePrice?: boolean;
 }
 
 /** Everything a mark needs, read at ONE block. */
@@ -85,9 +87,10 @@ export interface MarkSnapshot {
   killed: boolean;
   /**
    * The underlying's price the valuation used (the signed bundle print when newer than the stored one), null
-   * when unreadable. `stale`: older than config.maxPriceAge at the valuation time (domain/held.ts: held).
+   * when unreadable. `stale`: older than config.maxPriceAge at the valuation time (domain/held.ts: held). `settled`:
+   * the governance settle price in force (domain/settle.ts), valued as a live price (never held / stale).
    */
-  underlyingPrice: { priceId: Hex; priceWad: bigint; publishedAt: number; held: boolean; stale: boolean } | null;
+  underlyingPrice: { priceId: Hex; priceWad: bigint; publishedAt: number; held: boolean; stale: boolean; settled?: boolean } | null;
   /**
    * Signed oracle prices this valuation used that are newer than the chain's stored ones (desk tokens,
    * engine underlying). They form the mark tx's priceData so the chain ends up on the prices the NAV used.
