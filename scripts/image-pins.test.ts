@@ -9,7 +9,8 @@ import { resolve } from "node:path";
 const ROOT = resolve(import.meta.dir, "..");
 const tracked = execFileSync("git", ["ls-files", "-z"], { cwd: ROOT, encoding: "utf8" })
   .split("\0")
-  .filter((f) => f && /(\.ya?ml|\.sh|\.ts|\.md|\.toml|Dockerfile|\.service)$/.test(f) && !f.startsWith("docs/superpowers/") && !f.startsWith("apps/site/public/"));
+  // this file names the floating tags itself, so it is not scanned
+  .filter((f) => f && /(\.ya?ml|\.sh|\.ts|\.md|\.toml|Dockerfile|\.service)$/.test(f) && !f.startsWith("docs/superpowers/") && !f.startsWith("apps/site/public/") && f !== "scripts/image-pins.test.ts");
 const texts = tracked.map((f) => ({ f, t: readFileSync(resolve(ROOT, f), "utf8") }));
 
 const IMAGES: Record<string, RegExp> = {

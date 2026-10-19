@@ -91,7 +91,7 @@ library UniswapV3Twap {
         if (absTick & 0x40000 != 0) ratio = (ratio * 0x2216e584f5fa1ea926041bedfe98) >> 128;
         if (absTick & 0x80000 != 0) ratio = (ratio * 0x48a170391f7dc42444e8fa2) >> 128;
         if (tick > 0) ratio = type(uint256).max / ratio;
-        // Q128.128 -> Q64.96, rounded up so that getTickAtSqrtRatio(result) == tick.
+        // Q128.128 -> Q64.96, rounded up (the result's tick, read back, is `tick`).
         return uint160((ratio >> 32) + (ratio % (1 << 32) == 0 ? 0 : 1));
     }
 }
