@@ -478,21 +478,29 @@ can redo it during the timelock delay from the published quote.
   the oracle keeps the price held (or stale) and nothing on-chain can price the book finally: held marks defer
   redemptions (audit M-1) for 30 days, then settle at the held price, and engine positions cannot close. Through the
   timelock, propose a final price: `AttestedOracle.proposeSettlePrice(priceId, priceWad)`. It is refused while the
-  stored price is live and fresh (`MarketTrading`) and outside 50% of the stored price (`SettlePriceOutOfBand`; a
-  bigger write-down needs a Book upgrade, not this path). It takes effect `SETTLE_PRICE_DELAY` (3 days) after the
+  stored price is live and fresh (`MarketTrading`) and outside 50% of the stored price either way
+  (`SettlePriceOutOfBand`). The band is wide and symmetric on purpose: a delisting or halt can move the price a lot
+  either way (bankruptcy, cash-out merger), and the guard is the process (timelock, then 3 public days in which a
+  wrong price can be cancelled); a move beyond 50% needs a Book-level decision, not this path. It takes effect `SETTLE_PRICE_DELAY` (3 days) after the
   proposal; with the 48 h timelock, schedule it by day 25 of the hold so it is in force before the 30-day fallback.
-  While it is pending, books on that underlying do not fall back to the held valuation; that deferral ends 60 days
-  after the hold began whatever governance does. In force (`settlePrice(priceId)` returns `effective`):
+  While it is pending or in force, books on that underlying (or an index containing it) do not settle held marks at
+  the held valuation; that deferral ends 60 days after the hold began whatever governance or the mark service does.
+  For an index book, propose the price for the delisted component; for a hedge token outside the book's underlying,
+  propose it for the underlying too or flatten the token. In force (`settlePrice(priceId)` returns `effective`):
   - the mark service values the price id at it as a live price and signs non-held marks (warn log "valued at the
     governance settle price"), so redemptions and top-ups settle at it;
   - PoolEngine prices the market at it as held (no voluntary trade). Anyone calls `forceClose(marketId, trader)`
-    for every open position (no close-out schedule needed, no fee); then retire the book as usual and the adapter
-    recalls the pool and the IF.
+    for every open position (no close-out schedule needed, no fee) promptly: funding keeps accruing until each
+    position is closed. Only positions below maintenance at the settle price can be liquidated (with the fee). Then
+    retire the book as usual and the adapter recalls the pool and the IF.
+  - the mark service refuses a mark (retries later) when it cannot read `settlePrice`; repeated "settlePrice ... failed"
+    warnings mean an RPC problem to fix, not a held mark.
   A live print published after the proposal voids it (the market traded again). `cancelSettlePrice(priceId)`
   (timelock) withdraws it at any time: the normal held-mark rules apply again.
 - **Subscription window that cannot close**: `closeWindow` reverts while the venue deposit of the IF / MM
   inventory reverts (venue paused, adapter misconfigured), so the book stays in Subscription. Fix the venue side
-  and call `closeWindow` again. `Book.CLOSE_WINDOW_TIMEOUT` (7 days) after `subscriptionEnds`, anyone may call
+  and call `closeWindow` again, within 7 days of `subscriptionEnds`: after that anyone may cancel the window, even a
+  healthy one nobody closed. `Book.CLOSE_WINDOW_TIMEOUT` (7 days) after `subscriptionEnds`, anyone may call
   `Book.cancelStuckWindow()`: the book is Cancelled and every commitment is refundable 1:1
   (`Tranche.claimCancelledRefund`).
 - **Deploy the agent and the risk service together** (audit M-3). The risk service treats a quote that does not

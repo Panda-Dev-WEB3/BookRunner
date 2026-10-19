@@ -240,10 +240,10 @@ Subscription --closeWindow ok--> Live --retire--> Retiring --finalizeRetirement-
   a reopen gap is shared by everyone who was in the book when the session closed). `heldSince` = the
   first held mark's periodEnd of the current run (0 after a non-held mark); once
   `periodEnd − heldSince ≥ MAX_HELD_DEFERRAL` (30 days, docs/AUDIT-2026-10.md D-M1-1) held marks settle
-  again at the held valuation, unless a governance settle price for the book's underlying is pending
-  (`AttestedOracle.settlePrice`, Task 7: in force within 3 days, the mark service then values the book at it and
-  signs non-held marks); that deferral ends at `MAX_SETTLE_PRICE_DEFERRAL` (60 days of hold) whatever governance
-  does. So a long hold (a suspended or delisted underlying) defers exits but never blocks them. The first settling mark
+  again at the held valuation, unless a governance settle price for the book's underlying (or an index component)
+  is pending or in force (`AttestedOracle.settlePrice`, Task 7: in force within 3 days, the mark service then values
+  the book at it and signs non-held marks, which settle); that deferral ends at `MAX_SETTLE_PRICE_DEFERRAL` (60 days
+  of hold) whatever governance or the mark service does. So a long hold (a suspended or delisted underlying) defers exits but never blocks them. The first settling mark
   settles at most `MAX_SETTLE_BUCKETS` (256) due buckets per tranche; the rest settle at the next mark (also
   post-hold). Each held mark emits `MarkHeld(bookId, markId, heldSince, settled)`. `requestRedeem` and
   claims are unaffected. `MarketCharter.decide` re-checks the minimum notice against the interval the book
@@ -481,7 +481,8 @@ engine (audit N-1, below).
     (anyone, once the close-out is open) instead needs a live, fresh price like a trade (optionally
     carried as `priceData`), so it never fills at a held price, except at a governance settle price in force
     for the underlying (`AttestedOracle.settlePrice`: a delisted / permanently held market), where anyone closes
-    any position at it, fee-free, with no close-out schedule, and the market is priced at it as held (Task 7);
+    any position at it, fee-free, with no close-out schedule, the market is priced at it as held and liquidation uses
+    the maintenance requirement (a final price has no reopen gap) (Task 7);
     bad debt paid by IF, then **ADL within that market only** (pool cash reduced by shortfall,
     `ADL` event) — never touches other markets.
   - `withdrawLiquidity` keeps `poolEquity - amount >= requiredPoolMargin` (pool must cover current
