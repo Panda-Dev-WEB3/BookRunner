@@ -323,16 +323,21 @@ if (testnetLike && myDeployer) {
   const url = env.REDIS_URL || "redis://127.0.0.1:63790";
   let done = false;
   for (let attempt = 1; attempt <= 12 && !done; attempt++) {
+    const c = new RedisClient(url, { connectionTimeout: 5_000, enableOfflineQueue: false, autoReconnect: false });
     try {
-      const c = new RedisClient(url, { connectionTimeout: 5_000, enableOfflineQueue: false, autoReconnect: false });
       await c.connect();
       const m = await migrateBus(c, ns);
-      c.close();
       for (const line of describeMigration(ns, m)) console.log(`[dev] ${line}`);
-      done = true;
+      done = true; // an incomplete run (logged) starts the stack too: its marker is not written, the next start retries
     } catch (err) {
       console.warn(`[dev] bus namespace migration: Redis not ready (${(err as Error).message}), attempt ${attempt}/12`);
       await new Promise((r) => setTimeout(r, 5_000));
+    } finally {
+      try {
+        c.close();
+      } catch {
+        // already closed
+      }
     }
   }
   if (!done) {

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { busNames } from "../packages/shared/src/queues";
-import { type RedisSend, describeMigration, migratedMarkerKey, migrateBus, migrationPlan, valueTimestampMs } from "./bus-migrate";
+import { type RedisSend, describeMigration, migratedMarkerKey, migrateBus, migrationPlan, queueMovingKey, valueTimestampMs } from "./bus-migrate";
 
 /** In-memory Redis with the commands migrateBus uses (strings, and opaque other types). */
 class FakeRedis implements RedisSend {
@@ -123,8 +123,59 @@ describe("bus namespace migration (dev.ts runs it before any service starts)", (
     expect(m.moved).toEqual([`bkrn:oracle:last:NVDA -> ${n.oracleLast("NVDA")}`]);
     expect(m.queueConflicts[0]).toContain("bull:bkrn-webhooks (1 keys) -> bull:bkrn-testnet-webhooks");
     expect(r.data.has("bull:bkrn-webhooks:1")).toBe(true);
-    // second start: marker present -> nothing more
+    // a blocked queue is not a completed move: no marker, the next start retries (and logs it again)
+    expect(m.incomplete).toBe(true);
+    expect(r.data.has(migratedMarkerKey("testnet"))).toBe(false);
+    expect(describeMigration("testnet", m)).toContain("  INCOMPLETE: no marker written, the next start retries what is left");
+    const again = await migrateBus(r, "testnet");
+    expect([again.skipped, again.incomplete, again.queueConflicts.length]).toEqual([false, true, 1]);
+    // once the conflict is resolved by hand, the next start completes and writes the marker
+    r.data.delete("bull:bkrn-testnet-webhooks:2");
+    const done = await migrateBus(r, "testnet");
+    expect([done.incomplete, r.data.has("bull:bkrn-testnet-webhooks:1"), r.data.has(migratedMarkerKey("testnet"))]).toEqual([false, true, true]);
     expect((await migrateBus(r, "testnet")).skipped).toBe(true);
+  });
+
+  test("an interrupted queue move resumes at the next start (marked in progress), never stranded", async () => {
+    const r = new FakeRedis();
+    r.set("bull:bkrn-marks:wait", "[list]", "list");
+    r.set("bull:bkrn-marks:1", "{job}", "hash");
+    r.set("bull:bkrn-marks:2", "{job}", "hash");
+    // Redis drops after the first rename of the queue
+    let renames = 0;
+    const send = r.send.bind(r);
+    r.send = async (cmd, args) => {
+      if (cmd === "RENAMENX" && args[0]?.startsWith("bull:") && ++renames === 2) throw new Error("connection lost");
+      return send(cmd, args);
+    };
+    await expect(migrateBus(r, "testnet")).rejects.toThrow("connection lost");
+    expect(r.data.has(queueMovingKey("testnet", "marks"))).toBe(true);
+    expect(r.data.has(migratedMarkerKey("testnet"))).toBe(false);
+    r.send = send; // Redis back: dev.ts retries
+    const m = await migrateBus(r, "testnet");
+    expect(m.incomplete).toBe(false);
+    expect(m.queuesMoved[0]).toContain("resumed");
+    expect(["bull:bkrn-testnet-marks:wait", "bull:bkrn-testnet-marks:1", "bull:bkrn-testnet-marks:2"].every((k) => r.data.has(k))).toBe(true);
+    expect([...r.data.keys()].some((k) => k.startsWith("bull:bkrn-marks:"))).toBe(false);
+    expect(r.data.has(queueMovingKey("testnet", "marks"))).toBe(false);
+    expect(r.data.has(migratedMarkerKey("testnet"))).toBe(true);
+  });
+
+  test("a legacy key that expires before its move is reported as expired (not a conflict) and does not block the marker", async () => {
+    const r = new FakeRedis();
+    r.set("bkrn:agent:hb:1", "1700000000000");
+    const send = r.send.bind(r);
+    r.send = async (cmd, args) => {
+      if (cmd === "RENAMENX" && args[0] === "bkrn:agent:hb:1") {
+        r.data.delete("bkrn:agent:hb:1"); // the TTL fires between the scan and the rename
+        return 0;
+      }
+      return send(cmd, args);
+    };
+    const m = await migrateBus(r, "testnet");
+    expect(m.expired).toEqual(["bkrn:agent:hb:1 (expired before its move)"]);
+    expect([m.conflicts, m.incomplete]).toEqual([[], false]);
+    expect(r.data.has(migratedMarkerKey("testnet"))).toBe(true);
   });
 
   test("dry run writes nothing; timestamps: ts / meta.ts / asOf / publishedAt / bare ms", async () => {

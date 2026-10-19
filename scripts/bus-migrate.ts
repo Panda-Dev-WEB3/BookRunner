@@ -8,11 +8,15 @@
 // units, mainnet): idempotent, a no-op once the marker key `bkrn:<ns>:bus:migrated` exists. It never overwrites a newer
 // value: a legacy key whose target is absent is renamed; when the target exists (a service already wrote the new name),
 // the newer of the two wins where the value carries a timestamp (ts / asOf / publishedAt / updatedAt / meta.*), else the
-// target is kept and the conflict logged. A BullMQ queue moves only while its new name has no keys.
+// target is kept and the conflict logged. A BullMQ queue moves only while its new name has no keys, or to resume a move
+// an interrupted start began (bkrn:<ns>:bus:migrating:<q>). The marker is written only after a COMPLETE run (a target
+// that appeared meanwhile or a blocked queue leaves it unwritten: the next start retries); a legacy key that expired
+// before its rename is reported as expired, not as a conflict.
 // The CLI is for inspection (dry run by default):
 //   sudo sh -c '. /usr/local/lib/bookrunner-deploy/.env.infra; REDIS_URL="redis://:$REDIS_PASSWORD@127.0.0.1:63790/1" \
+//     exec sudo --preserve-env=REDIS_URL -u bookrunner HOME=/opt/bookrunner \
 //     /opt/bookrunner/app/node_modules/.bin/bun /opt/bookrunner/app/scripts/bus-migrate.ts --ns testnet [--apply]'
-// (the password is expanded inside sh -c, never typed on the shell line).
+// (root only reads its own .env.infra; the password is expanded inside sh -c, never typed; bun runs as the stack user).
 import { RedisClient } from "bun";
 
 /** Old (pre-namespace) key prefixes of the shared KEYS, as they were named before the bus namespace. */
@@ -83,7 +87,13 @@ export interface MigrationResult {
   conflicts: string[]; // target existed, no timestamp to compare: both kept, target used
   queuesMoved: string[];
   queueConflicts: string[];
+  expired: string[]; // the legacy key vanished (TTL) between the scan and its rename: nothing to move
+  /** a move did not complete (a target appeared meanwhile, a queue blocked): no marker, the next start retries */
+  incomplete: boolean;
 }
+
+/** Set while a queue is being moved: a retry after an interruption resumes it instead of calling it a conflict. */
+export const queueMovingKey = (ns: string, q: string) => `bkrn:${ns}:bus:migrating:${q}`;
 
 async function scanAll(r: RedisSend, pattern: string): Promise<string[]> {
   const keys: string[] = [];
@@ -102,13 +112,18 @@ async function scanAll(r: RedisSend, pattern: string): Promise<string[]> {
  */
 export async function migrateBus(r: RedisSend, ns: string, opts: { apply?: boolean; now?: number } = {}): Promise<MigrationResult> {
   const apply = opts.apply ?? true;
-  const res: MigrationResult = { skipped: false, moved: [], replacedOlder: [], keptNewer: [], conflicts: [], queuesMoved: [], queueConflicts: [] };
+  const res: MigrationResult = { skipped: false, moved: [], replacedOlder: [], keptNewer: [], conflicts: [], queuesMoved: [], queueConflicts: [], expired: [], incomplete: false };
   if (Number(await r.send("EXISTS", [migratedMarkerKey(ns)])) === 1) return { ...res, skipped: true };
 
   for (const [from, to] of migrationPlan(await scanAll(r, "bkrn:*"), ns)) {
     if (Number(await r.send("EXISTS", [to])) === 0) {
       if (apply && Number(await r.send("RENAMENX", [from, to])) !== 1) {
-        res.conflicts.push(`${from} -> ${to} (target appeared meanwhile)`);
+        if (Number(await r.send("EXISTS", [from])) === 0) {
+          res.expired.push(`${from} (expired before its move)`);
+        } else {
+          res.conflicts.push(`${from} -> ${to} (target appeared meanwhile: retried at the next start)`);
+          res.incomplete = true;
+        }
         continue;
       }
       res.moved.push(`${from} -> ${to}`);
@@ -135,15 +150,31 @@ export async function migrateBus(r: RedisSend, ns: string, opts: { apply?: boole
     const oldKeys = await scanAll(r, `bull:bkrn-${q}:*`);
     if (oldKeys.length === 0) continue;
     const newName = `bkrn-${ns}-${q}`;
-    if ((await scanAll(r, `bull:${newName}:*`)).length > 0) {
-      res.queueConflicts.push(`bull:bkrn-${q} (${oldKeys.length} keys) -> bull:${newName}: the new queue has keys already, legacy jobs left in place`);
+    // resume a move an earlier start began (marked) and could not finish; otherwise only into an empty queue
+    const resuming = Number(await r.send("EXISTS", [queueMovingKey(ns, q)])) === 1;
+    if (!resuming && (await scanAll(r, `bull:${newName}:*`)).length > 0) {
+      res.queueConflicts.push(`bull:bkrn-${q} (${oldKeys.length} keys) -> bull:${newName}: the new queue has keys already, legacy jobs left in place (retried at the next start)`);
+      res.incomplete = true;
       continue;
     }
-    if (apply) for (const k of oldKeys) await r.send("RENAMENX", [k, `bull:${newName}:${k.slice(`bull:bkrn-${q}:`.length)}`]);
-    res.queuesMoved.push(`bull:bkrn-${q} -> bull:${newName} (${oldKeys.length} keys)`);
+    let left = 0;
+    if (apply) {
+      await r.send("SET", [queueMovingKey(ns, q), String(opts.now ?? Date.now())]);
+      for (const k of oldKeys) {
+        if (Number(await r.send("RENAMENX", [k, `bull:${newName}:${k.slice(`bull:bkrn-${q}:`.length)}`])) === 1) continue;
+        if (Number(await r.send("EXISTS", [k])) === 1) left++; // target taken: left for a retry (expired keys are fine)
+      }
+      if (left === 0) await r.send("DEL", [queueMovingKey(ns, q)]);
+      else {
+        res.queueConflicts.push(`bull:bkrn-${q}: ${left} key(s) could not move (target exists): retried at the next start`);
+        res.incomplete = true;
+      }
+    }
+    res.queuesMoved.push(`bull:bkrn-${q} -> bull:${newName} (${oldKeys.length - left} keys${resuming ? ", resumed" : ""})`);
   }
 
-  if (apply) {
+  // the marker only after a COMPLETE run: anything left (a target that appeared, a blocked queue) is retried next start
+  if (apply && !res.incomplete) {
     const marker = { v: 1, at: opts.now ?? Date.now(), moved: res.moved.length, replacedOlder: res.replacedOlder.length, keptNewer: res.keptNewer.length, conflicts: res.conflicts.length, queues: res.queuesMoved.length };
     await r.send("SET", [migratedMarkerKey(ns), JSON.stringify(marker)]);
   }
@@ -158,6 +189,8 @@ export function describeMigration(ns: string, m: MigrationResult): string[] {
   ];
   for (const x of [...m.moved, ...m.replacedOlder, ...m.queuesMoved]) out.push(`  moved ${x}`);
   for (const x of m.keptNewer) out.push(`  kept ${x}`);
+  for (const x of m.expired) out.push(`  expired ${x}`);
+  if (m.incomplete) out.push("  INCOMPLETE: no marker written, the next start retries what is left");
   for (const x of [...m.conflicts, ...m.queueConflicts]) out.push(`  CONFLICT ${x}`);
   return out;
 }

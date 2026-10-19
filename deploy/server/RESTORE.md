@@ -210,7 +210,7 @@ Redis: the rehearsal has its own instance, so step 4 with `RD=bookrunner-redis-l
 without touching the public stack's Redis (`REDISCLI_AUTH` = `REDIS_LIVE_PASSWORD` from `.env.infra`); or skip it:
 ops-venue re-signs its venue reports within a minute and the risk service rebuilds its state from the chain.
 
-**Archived rehearsal state (retention).** A rehearsal `REDEPLOY` (scripts/deploy-testnet.sh) archives the old state as
+**Archived rehearsal state (retention).** A rehearsal redeploy (`rehearsal-deploy.sh --redeploy`) archives the old state as
 `.data/testnet-live.<stamp>/` with the old Orderly keys, `postgres.dump` (the old database) and `redis-live.rdb` (the
 old live Redis) inside it; every daily set carries these directories (`state.tar.gz`) for as long as they exist, and
 the renamed database `bookrunner_testnet_live_<stamp>` stays on the host. Remove both by hand only once the old books'

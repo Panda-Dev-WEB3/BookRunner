@@ -510,7 +510,8 @@ kept and the conflict logged; a queue moves only while its new name is empty), t
 moved N key(s) …`, one line per key, `CONFLICT` lines). dev.ts does not start the stack while Redis cannot be reached
 for the migration (12 tries over a minute, then exit 1; systemd restarts it). Inspection only (dry run, the password
 expanded inside `sh -c`, never typed):
-`sudo sh -c '. /usr/local/lib/bookrunner-deploy/.env.infra; REDIS_URL="redis://:$REDIS_PASSWORD@127.0.0.1:63790/1" /opt/bookrunner/app/node_modules/.bin/bun /opt/bookrunner/app/scripts/bus-migrate.ts --ns testnet'`.
+`sudo sh -c '. /usr/local/lib/bookrunner-deploy/.env.infra; REDIS_URL="redis://:$REDIS_PASSWORD@127.0.0.1:63790/1" exec sudo --preserve-env=REDIS_URL -u bookrunner HOME=/opt/bookrunner /opt/bookrunner/app/node_modules/.bin/bun /opt/bookrunner/app/scripts/bus-migrate.ts --ns testnet'`
+(root only reads its own `.env.infra`; bun runs as the stack user).
 
 ### Rehearsal procedure (end to end)
 
@@ -519,7 +520,7 @@ expanded inside `sh -c`, never typed):
 | R1 | operator | Readiness, read-only (step 0): `bun scripts/orderly-readiness.ts --stage venue` | exit 0 (Orderly enabled USDG + broker `bookrunner` on the testnet vault, chain 46630 listed) |
 | R2 | Orderly / admin wallet | Orderly side (step 2.1); builder admin key registered by the admin wallet (step 2.2) | readiness `--stage venue` 0; `--builder-key ed25519:<pub>` row `builder key` PASS |
 | R3 | operator | Rehearsal env + funds (step 3.0): `.env.testnet-live` with a NEW mnemonic; the live deployer gets ETH (faucet) + the USDG budget (open question, VERIFY O17), the live gas funder ETH | the live deployer holds the launch budget |
-| R4 | operator | Deploy: `ORDERLY_VENUE=live bash scripts/deploy-testnet.sh` (step 3.1) | `46630.live.json` written, `orderly.venue = "live"`; readiness `record orderly` PASS |
+| R4 | operator | Deploy: `sudo /usr/local/lib/bookrunner-deploy/rehearsal-deploy.sh` (step 3.1; root-owned wrapper, bun / scripts as bookrunner) | `46630.live.json` written, `orderly.venue = "live"`; readiness `record orderly` PASS |
 | R5 | operator (root) | `systemctl start bookrunner@testnet-live` (step 3.6); the public stack keeps running | `[dev] venue: LIVE Orderly testnet` in `.data/testnet-live/dev.log`; the launch charters NVDA / TSLA (rehearsal sizes, step 3.3) |
 | R6 | operator | Per book: delegate signer (step 3.4), native deposit fee if any (step 3.5) | ops-venue `Orderly delegate signer confirmed` x2 per book, `book venue provisioned` |
 | R7 | admin (Orderly One) | List `PERP_NVDA_USDC_bookrunner` / `PERP_TSLA_USDC_bookrunner` (step 2.3), assign each market's IF account (step 2.4) | readiness `symbol` rows listed; `venue_listing_pending` clears |
@@ -702,10 +703,27 @@ and 2 stay on the mock stack; retire them there (Operations "Wind-down") only wh
    MockSwapRouter (`transfer(swapRouter, x)`; the owner's `withdraw` takes it back) if hedge SELLS must fill: the router
    cannot mint the real token (hedge buys still mint the mock Stock Tokens); without it a hedge sell reverts
    `InsufficientLiquidity`.
-1. **Deployment with the real externals** (G1), as the `bookrunner` user in `/opt/bookrunner/app`:
+1. **Deployment with the real externals** (G1). On the server, from the root-owned deploy copy (like `update.sh`):
    ```bash
-   ORDERLY_VENUE=live bash scripts/deploy-testnet.sh
+   sudo /usr/local/lib/bookrunner-deploy/rehearsal-deploy.sh                    # first deployment
+   sudo /usr/local/lib/bookrunner-deploy/rehearsal-deploy.sh --redeploy [--force-archive]
    ```
+   (on a developer machine with Docker: `ORDERLY_VENUE=live bash scripts/deploy-testnet.sh`, every step in-process).
+   **Who runs what** (HARDENING.md: root runs only root-owned code): the wrapper runs every bun / script step AS the
+   `bookrunner` user (`scripts/deploy-testnet.sh --phase check | archive-files | migrate | finish`, which reads its own
+   `.env.testnet` / `.env.testnet-live`), with `POSTGRES_PASSWORD` / `REDIS_LIVE_PASSWORD` from the root-only `.env.infra`
+   handed over in the environment (`sudo --preserve-env`, never on a command line). Root itself only drives Docker: the
+   database (create, `pg_dump` of an archived one, rename) and the live Redis (PING, SAVE, FLUSHDB) through `docker exec`
+   on the infra containers, and forge in the pinned Foundry image (by digest, `FOUNDRY_IMAGE`) run as the bookrunner
+   uid (`--cap-drop ALL`, no-new-privileges, only the app tree and `/opt/bookrunner/.foundry-docker` mounted, no Docker
+   socket). Residual: forge compiles and runs the Solidity deploy script from the app tree inside that unprivileged
+   container, where it can write only what the bookrunner user can write anyway. Root never sources a file from the app
+   tree: it parses the check phase's plan (fixed keys, validated) and, for the forge container, `BKRN_TESTNET_LIVE_MNEMONIC`
+   / `RHC_TESTNET_RPC_URL` / `FORGE_RPC_URL` / `MARK_INTERVAL_SECONDS` from `.env.testnet-live` (KEY=VALUE lines,
+   validated, symlinks refused). Every file it creates in the app tree is created by the bookrunner user (dumps through
+   `sudo -u bookrunner dd`, forge output as its uid), so nothing root-owned is left behind; the wrapper refuses to run
+   while `contracts/{out,cache,broadcast,deployments}` hold files from an earlier root run (it prints the one-off
+   `chown -R --no-dereference`). `scripts/deploy-testnet.sh` itself refuses to run as root from the app tree.
    It reads `.env.testnet-live` (and `.env.testnet` only to compare the deployer addresses: refused when they match),
    runs `orderly-readiness.ts --stage venue` (exit 5 = Orderly not ready: nothing deployed), creates and migrates the
    `bookrunner_testnet_live` database, and runs `Deploy.s.sol` with the live mnemonic and `DEPLOY_ORDERLY_VAULT=0x2A5b…E24d`,
@@ -728,18 +746,15 @@ and 2 stay on the mock stack; retire them there (Operations "Wind-down") only wh
    `.data/testnet-live.<stamp>` (keys kept) with `postgres.dump` (the old database) and `redis-live.rdb` (the old live
    Redis) inside it, the database renamed to `bookrunner_testnet_live_<stamp>` and the live Redis db 0 emptied; nothing
    is deleted. The archived directory is in every daily backup until removed by hand (RESTORE.md retention).
-   **Infra passwords** (`POSTGRES_PASSWORD` for the migration, `REDIS_LIVE_PASSWORD` for the archive of the live
-   Redis): the script takes them from the environment, else reads the root-only `/usr/local/lib/bookrunner-deploy/.env.infra`
-   when it runs as root (`INFRA_ENV_FILE` overrides the path). On the server run it as root from `/opt/bookrunner/app`
-   (`sudo ORDERLY_VENUE=live bash scripts/deploy-testnet.sh`), then give the files back to the stack user:
-   `sudo chown -R bookrunner:bookrunner /opt/bookrunner/app/contracts/deployments /opt/bookrunner/app/.data`. A
-   redeploy refuses (exit 8, nothing archived) when `redis-live` does not answer `PING` with that password, and stops
-   loudly (exit 8) if snapshotting or emptying it fails. **Order of a redeploy:** checks -> readiness gate -> archive
-   (record copied, state moved, DB dumped + renamed, live Redis snapshotted + emptied) -> new DB -> forge. A forge failure
-   after the archive leaves the OLD record in place (it is copied, not moved) next to a moved state, renamed DB and empty
-   live Redis: recoverable either way: re-run `REDEPLOY=1 ORDERLY_VENUE=live` (the old record's books are archived
-   again under a new stamp), or restore the old stack from `.data/testnet-live.<stamp>` (move it back, `ALTER DATABASE
-   bookrunner_testnet_live_<stamp> RENAME TO bookrunner_testnet_live`, load its `redis-live.rdb` as in RESTORE.md step 4).
+   A redeploy refuses (exit 8, nothing archived) when `redis-live` does not answer `PING` with `REDIS_LIVE_PASSWORD`
+   (the wrapper reads it from `.env.infra`; `update.sh` / `install.sh` create it), and stops loudly (exit 8) if
+   snapshotting or emptying it fails. **Order of a redeploy:** checks + readiness gate (stack user) -> root checks (unit
+   stopped, Redis password, no root-owned build files) -> archive (record copied, state moved, DB dumped + renamed, live
+   Redis snapshotted + emptied) -> new DB + migrations -> forge -> finish. A forge failure after the archive leaves the
+   OLD record in place (it is copied, not moved) next to a moved state, renamed DB and empty live Redis: recoverable
+   either way: re-run with `--redeploy` (the old record's books are archived again under a new stamp), or restore the
+   old stack from `.data/testnet-live.<stamp>` (move it back, `ALTER DATABASE bookrunner_testnet_live_<stamp> RENAME TO
+   bookrunner_testnet_live`, load its `redis-live.rdb` as in RESTORE.md step 4).
 2. **`UpgradeOrderlyAdapters.s.sol`** is not part of the rehearsal (the live deployment already has the current
    implementation). **Never run it on the mock stack with `DEPLOY_ORDERLY_TOKEN=USDG`**: the mock vault only allows
    `keccak256("USDC")`, so every new Orderly book would revert `TokenNotAllowedByVenue` at `initialize`, and books 1 and 2

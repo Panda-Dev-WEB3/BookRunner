@@ -129,6 +129,7 @@ sudo systemctl status bookrunner bookrunner-infra   # stack, infra
 sudo tail -f /opt/bookrunner/app/.data/testnet/dev.log
 sudo systemctl restart bookrunner
 sudo systemctl start bookrunner@testnet-live              # rehearsal stack next to it (stop: systemctl stop bookrunner@testnet-live)
+sudo /usr/local/lib/bookrunner-deploy/rehearsal-deploy.sh  # deploy the rehearsal contracts (root-owned wrapper; RUNBOOK step 3.1)
 sudo /usr/local/lib/bookrunner-deploy/update.sh            # deploy origin/main
 sudo /usr/local/lib/bookrunner-deploy/update.sh --web-only # site + app + nginx + units, no restart
 ```
