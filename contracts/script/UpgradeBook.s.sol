@@ -24,7 +24,8 @@ import {IMarkRegistry} from "../src/interfaces/IMarkRegistry.sol";
 ///              implementation) carries every function the new Book / BookLogic calls on it (`TRANCHE_CALLED`,
 ///              `VAULT_CALLED`, `MANDATE_CALLED`; calls the Book wraps in try/catch are optional and only logged);
 ///           3. `config.markRegistry().getMark` returns the Mark struct the new Book decodes (same ABI size), e.g. a
-///              registry older than the M-1 `held` field is refused;
+///              registry older than the M-1 `held` field is refused (probed on the book's latest mark; a book with no
+///              mark yet, in Subscription or Cancelled, has nothing to decode and is not probed);
 ///         and after the upgrades (simulated before broadcasting, so a failure broadcasts nothing): every view the old
 ///         implementation answered returns exactly the same bytes through the new one (storage layout compatible:
 ///         a moved namespace or a reordered field changes them).
@@ -182,6 +183,11 @@ contract UpgradeBook is Script {
         IBookrunnerConfig cfg = IBookrunnerConfig(book.config());
         address reg = cfg.markRegistry();
         uint256 id = IMarkRegistry(reg).latestMarkId(book.bookId());
+        if (id == 0) {
+            // no mark yet (Subscription / Cancelled): getMark(0) reverts UnknownMark; nothing of this book to decode
+            console2.log("  note: no mark yet, registry ABI not probed for book", address(book));
+            return;
+        }
         (bool ok, bytes memory ret) = reg.staticcall(abi.encodeCall(IMarkRegistry.getMark, (id)));
         BRTypes.Mark memory empty;
         require(
@@ -231,8 +237,10 @@ contract UpgradeBook is Script {
 
     // ------------------------------------------------------------------------------------------- state snapshot
 
-    /// @dev Views whose answers must be identical before and after the upgrade (state carried by storage).
-    function _views() internal pure returns (bytes[] memory v) {
+    /// @dev Views whose answers must be identical before and after the upgrade (state carried by storage). An upgrade
+    ///      that intentionally changes a view's output (e.g. a share-price fix) overrides this list without that view,
+    ///      in a script subclass reviewed with the upgrade (review M-4).
+    function _views() internal pure virtual returns (bytes[] memory v) {
         v = new bytes[](22);
         v[0] = abi.encodeWithSignature("bookId()");
         v[1] = abi.encodeWithSignature("state()");

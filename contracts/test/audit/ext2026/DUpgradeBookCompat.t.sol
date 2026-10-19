@@ -130,6 +130,43 @@ contract DUpgradeBookCompatTest is UpgradeBookScriptTest {
         vm.removeFile(out);
     }
 
+    /// @dev Review I-1: a book with no mark (still in Subscription, or Cancelled) has latestMarkId 0 and getMark(0)
+    ///      reverts; it must not block the upgrade of the deployment.
+    function test_D_unmarkedSubscriptionAndCancelledBooks_upgrade() public {
+        vm.startPrank(charterAddr);
+        Book subscribing = Book(factory.create(2, _charter()).book);
+        Book cancelled = Book(factory.create(3, _charter()).book);
+        vm.stopPrank();
+        vm.warp(cancelled.subscriptionEnds());
+        cancelled.closeWindow(); // no commitment: NO_JUNIOR
+        assertEq(uint8(cancelled.state()), uint8(BRTypes.BookState.Cancelled));
+        assertEq(uint8(subscribing.state()), uint8(BRTypes.BookState.Subscription));
+        assertEq(registry.latestMarkId(2), 0);
+
+        string memory out = "deployments/upgrade-book-compat-unmarked.json";
+        vm.createDir("deployments", true);
+        vm.writeFile(
+            out,
+            string.concat(
+                '{"contracts":{"factory":"',
+                vm.toString(address(factory)),
+                '"},"books":[{"bookId":1,"components":{"book":"',
+                vm.toString(address(book)),
+                '"}},{"bookId":2,"components":{"book":"',
+                vm.toString(address(subscribing)),
+                '"}},{"bookId":3,"components":{"book":"',
+                vm.toString(address(cancelled)),
+                '"}}]}'
+            )
+        );
+        Book impl = new UpgradeBook().upgrade(out, TIMELOCK_PK);
+        vm.removeFile(out);
+        bytes32 slot = bytes32(uint256(keccak256("eip1967.proxy.implementation")) - 1);
+        assertEq(address(uint160(uint256(vm.load(address(subscribing), slot)))), address(impl));
+        assertEq(address(uint160(uint256(vm.load(address(cancelled), slot)))), address(impl));
+        assertEq(uint8(cancelled.state()), uint8(BRTypes.BookState.Cancelled));
+    }
+
     function test_D_newImplementationMissingAHook_refused() public {
         string memory out = _writeOut("hook");
         UpgradeBookWithImpl s = new UpgradeBookWithImpl(address(new MockERC20("x", "x", 6)));
