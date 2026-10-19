@@ -42,6 +42,7 @@ contract PoolEquityHandler is Test {
     uint256 public deposited;
     uint256 public withdrawn;
     uint256 public trades;
+    uint256 public tradeAttempts;
     uint256 public newRiskTrades;
     uint256 public quotesSet;
     uint256 public rawQuotesSet;
@@ -103,10 +104,20 @@ contract PoolEquityHandler is Test {
 
     // ------------------------------------------------------------------ desk (colluding)
 
-    function quote(uint16 spread, int16 skew, uint128 maxNet) external {
-        spread = uint16(bound(spread, 0, 120));
-        skew = int16(bound(skew, -80, 80));
-        maxNet = uint128(bound(maxNet, 0, maxInv));
+    /// @dev `inMandate`: a quote inside the current mandate at up to the largest skew it allows (keeps trades
+    ///      filling); otherwise arbitrary terms (the auditor's one-sided quotes; most are refused).
+    function quote(bool inMandate, uint16 spread, int16 skew, uint128 maxNet) external {
+        maxNet = uint128(bound(maxNet, maxInv / 4, maxInv));
+        if (inMandate) {
+            BRTypes.Mandate memory m = mandate.getMandate();
+            spread = uint16(bound(spread, m.minQuoteWidthBps, uint256(m.minQuoteWidthBps) + 40));
+            int256 lim = int256(uint256(spread / 2));
+            if (lim > m.maxSkewBps) lim = m.maxSkewBps;
+            skew = int16(bound(skew, -lim, lim));
+        } else {
+            spread = uint16(bound(spread, 0, 120));
+            skew = int16(bound(skew, -80, 80));
+        }
         IBookrunnerDesk.Action memory a;
         a.kind = IBookrunnerDesk.ActionKind.SetQuote;
         a.data = abi.encode(spread, skew, maxNet);
@@ -120,7 +131,7 @@ contract PoolEquityHandler is Test {
     function rawQuote(uint16 spread, int16 skew, uint128 maxNet) external {
         spread = uint16(bound(spread, 0, 5000));
         skew = int16(bound(skew, -2500, 2500));
-        maxNet = uint128(bound(maxNet, 0, maxInv));
+        maxNet = uint128(bound(maxNet, maxInv / 4, maxInv));
         vm.prank(address(adapter));
         try engine.setQuote(mid, spread, skew, maxNet) {
             rawQuotesSet++;
@@ -140,6 +151,15 @@ contract PoolEquityHandler is Test {
         if (!mandate.getKey(key).active) {
             vm.prank(sponsor);
             try mandate.registerKey(key, sponsor, uint64(block.timestamp + 365 days), maxInv) {} catch {}
+            // the desk re-quotes under the new terms at once (lifts the re-mandate's reduce-only)
+            BRTypes.Mandate memory t = mandate.getMandate();
+            IBookrunnerDesk.Action memory a;
+            a.kind = IBookrunnerDesk.ActionKind.SetQuote;
+            a.data = abi.encode(t.minQuoteWidthBps, int16(0), maxInv);
+            vm.prank(key);
+            try desk.execute(a) {
+                quotesSet++;
+            } catch {}
         }
     }
 
@@ -167,9 +187,26 @@ contract PoolEquityHandler is Test {
 
     function trade(uint256 actorSeed, int256 size) external {
         address a = actors[actorSeed % N];
-        size = bound(size, -1000e18, 1000e18);
+        // up to 180 units ($18k): a single trade from flat always fits the smallest cap a quote can set
+        // (maxInventory / 4), so the first trade attempted in a run fills and the productivity check holds
+        size = bound(size, -180e18, 180e18);
         if (size == 0) return;
+        _topUp(a, engine.positionOf(mid, a).size + size);
         _trade(a, size);
+    }
+
+    /// @dev Keeps trades productive: margin for 20% of the post-trade notional (initial margin is 10%), so a
+    ///      trade fails only on the rules under test (quote, caps, reduce-only), not on a missing deposit.
+    function _topUp(address a, int256 newSize) internal {
+        uint256 absSize = uint256(newSize >= 0 ? newSize : -newSize);
+        uint256 need = absSize * price / 1e30 / 5 + 1e6;
+        uint256 have = engine.positionOf(mid, a).marginUsd;
+        if (have >= need) return;
+        uint256 amount = need - have;
+        usdc.mint(a, amount);
+        vm.prank(a);
+        engine.depositMargin(mid, amount);
+        deposited += amount;
     }
 
     function closeAll(uint256 actorSeed) external {
@@ -179,6 +216,7 @@ contract PoolEquityHandler is Test {
     }
 
     function _trade(address a, int256 size) internal {
+        tradeAttempts++;
         int256 o = engine.positionOf(mid, a).size;
         vm.prank(a);
         try engine.trade(mid, size, size > 0 ? type(uint256).max : 0) {
@@ -219,6 +257,7 @@ contract PoolEquityHandler is Test {
 contract M3PoolEquityInvariantTest is M3Stack {
     PoolEquityHandler internal handler;
     int256 internal eq0;
+    uint256 internal cash0;
     /// @dev Rounding allowance: the engine floors the pool's mark at the final 6dp conversion; every realised
     ///      P&L, funding and entry rounding is in the pool's favour. 1 micro-USD per trade plus a constant.
     int256 internal constant ROUNDING_PER_TRADE = 1;
@@ -231,6 +270,7 @@ contract M3PoolEquityInvariantTest is M3Stack {
         );
         cfg.grantRole(cfg.KEEPER_ROLE(), address(handler));
         eq0 = engine.poolEquityUsd(mid);
+        cash0 = engine.state(mid).poolCashUsd;
         targetContract(address(handler));
     }
 
@@ -249,6 +289,24 @@ contract M3PoolEquityInvariantTest is M3Stack {
         assertLe(out, int256(handler.deposited()) + _tolerance(), "colluding traders extracted value");
     }
 
+    /// With every position closed, realised pool cash never falls, with zero tolerance (all realised rounding,
+    /// fees aside, is in the pool's favour; no liquidity moves in this handler).
+    function invariant_flatPoolCashNeverFalls() public view {
+        IPoolEngine.MarketState memory st = engine.state(mid);
+        if (st.longSize != 0 || st.shortSize != 0) return;
+        assertGe(st.poolCashUsd, cash0, "pool cash fell with every position closed");
+        assertGe(engine.poolEquityUsd(mid), int256(cash0), "flat pool equity below its starting cash");
+    }
+
+    /// Productivity: the suite is not a no-op. Every run that attempts a trade fills at least one (the handler
+    /// keeps margin topped up, re-quotes after a re-mandate and bounds sizes under the smallest cap, so the
+    /// first attempt always fills under the rules): a fixture change making every trade revert (a stale price,
+    /// a sticky reduce-only, a mis-wired quote) fails here instead of passing silently.
+    function afterInvariant() public view {
+        if (handler.tradeAttempts() == 0) return;
+        assertGt(handler.trades(), 0, "no trade filled in the run");
+    }
+
     /// Conservation still holds: the engine's USDC equals the market's ledgers.
     function invariant_conservation() public view {
         assertEq(usdc.balanceOf(address(engine)), _ledger(mid));
@@ -260,9 +318,9 @@ contract M3PoolEquityInvariantTest is M3Stack {
         handler.depositMargin(0, 30_000e6);
         handler.depositMargin(1, 30_000e6);
         for (uint256 i; i < 25; ++i) {
-            handler.quote(MIN_WIDTH, -MAX_SKEW, MAX_INV);
-            handler.trade(0, 700e18);
-            handler.quote(MIN_WIDTH, MAX_SKEW, MAX_INV);
+            handler.quote(false, MIN_WIDTH, -MAX_SKEW, MAX_INV);
+            handler.trade(0, 180e18);
+            handler.quote(false, MIN_WIDTH, MAX_SKEW, MAX_INV);
             handler.closeAll(0);
             invariant_poolEquityNeverFallsAtConstantPrice();
             invariant_coalitionNeverProfits();
@@ -274,18 +332,19 @@ contract M3PoolEquityInvariantTest is M3Stack {
             uint256 a = seed >> 8;
             uint256 b = seed >> 40;
             uint256 c = seed >> 80;
-            if (op == 0) handler.quote(uint16(a), int16(int256(b % 161) - 80), uint128(c));
+            if (op == 0) handler.quote(c % 2 == 0, uint16(a), int16(int256(b % 161) - 80), uint128(c));
             else if (op == 1) handler.rawQuote(uint16(a), int16(int256(b % 5001) - 2500), uint128(c));
             else if (op == 2) handler.remandate(uint16(a), int16(int256(b % 80)), -int16(int256(c % 5000)));
             else if (op == 3) handler.depositMargin(a, b);
             else if (op == 4) handler.withdrawMargin(a, b);
-            else if (op <= 6) handler.trade(a, int256(b % 1200e18) - 600e18);
+            else if (op <= 6) handler.trade(a, int256(b % 360e18) - 180e18);
             else if (op == 7) handler.closeAll(a);
             else if (op == 8) handler.liquidate(a);
             else handler.tick(a);
             invariant_poolEquityNeverFallsAtConstantPrice();
             invariant_coalitionNeverProfits();
             invariant_conservation();
+            invariant_flatPoolCashNeverFalls();
         }
         assertGt(handler.trades(), 50, "trades");
         assertGt(handler.newRiskTrades(), 20, "new-risk trades");

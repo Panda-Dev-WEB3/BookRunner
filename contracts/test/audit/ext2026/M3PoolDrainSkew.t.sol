@@ -50,6 +50,9 @@ contract M3PoolDrainSkewTest is M3Stack {
         console2.log("trade legs filled", legs);
         console2.log("pool equity change (USD 6dp)", eq1 - eq0);
         console2.log("trader margin change (USD 6dp)", int256(margin1) - int256(MARGIN));
+        // not vacuous: every leg filled (at the straddling quote left in place), no one-sided quote landed
+        assertEq(legs, 50, "trade legs filled");
+        assertEq(quotesAccepted, 0, "one-sided quotes accepted");
         assertEq(engine.positionOf(mid, mallory).size, 0, "round trips closed");
         assertGe(eq1, eq0, "pool drained by in-mandate quotes at a constant oracle price");
         assertLe(margin1, MARGIN, "colluding trader extracted value from the pool");
