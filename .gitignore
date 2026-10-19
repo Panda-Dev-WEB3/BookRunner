@@ -39,3 +39,7 @@ video/public/demos/
 video/.secrets/
 # Pyth Pro access token for local source-check runs (PYTH_API_KEY=...): never committed
 .env.pyth
+# Slither (CI security workflow): build output, cache and report
+contracts/out-slither/
+contracts/cache-slither/
+contracts/slither-out.json

@@ -7,6 +7,7 @@ import { buildMessage, encodeHeader, sendMail } from "../src/smtp";
 
 // TEST-ONLY self-signed certificate for CN=localhost / 127.0.0.1 (no real system trusts it; used by the fake
 // SMTP server below and passed to the client as its CA).
+// nosemgrep: generic.secrets.security.detected-private-key.detected-private-key
 const KEY = `-----BEGIN PRIVATE KEY-----
 MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg3+fpwl0tuT6oQ034
 NHtMRjK1UpoukcymrpXbCrDA1P+hRANCAASSKYHjahOWMS5d7wYNGu+fgG2uB2EN

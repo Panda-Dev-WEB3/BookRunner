@@ -361,6 +361,8 @@ contract OrderlyHandler is Test {
 
 /// forge-config: default.invariant.depth = 256
 /// forge-config: default.invariant.runs = 96
+/// forge-config: ci.invariant.depth = 256
+/// forge-config: ci.invariant.runs = 400
 contract OrderlyInvariantTest is OrderlyFixture {
     OrderlyHandler internal handler;
 

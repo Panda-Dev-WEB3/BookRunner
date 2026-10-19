@@ -1,0 +1,110 @@
+# Build and test: Foundry suite (ci profile), TypeScript unit tests + type checks + copy linter, and the
+# BKRN_IT=1 integration suite against Postgres/Timescale, Redis and anvil. Needs no secrets.
+# Supply chain: every action is pinned by commit SHA (tag in the comment); Foundry, Postgres/Timescale and Redis
+# run from images pinned by digest (Foundry: the one digest in scripts/forge.sh, read from there).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  contracts:
+    name: Foundry (ci profile)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: forge build
+        run: bash scripts/forge.sh build
+      - name: forge test (fuzz 4,096 runs, invariants 800 x 128 = 102,400 calls)
+        env:
+          FOUNDRY_PROFILE: ci
+        run: bash scripts/forge.sh test
+
+  typescript:
+    name: TypeScript (unit tests, typecheck, copy)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+      - name: bun install (frozen lockfile; bunfig.toml + trustedDependencies control install scripts)
+        run: bun install --frozen-lockfile
+      - name: unit tests (integration tests skip without BKRN_IT=1)
+        run: bun test
+      - name: typecheck (every workspace)
+        run: bun run typecheck
+      - name: typecheck (scripts)
+        run: bun run typecheck:scripts
+      - name: copy linter
+        run: bun run lint:copy
+
+  integration:
+    name: Integration (BKRN_IT=1)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: timescale/timescaledb@sha256:b346edcdb51a1fd6020e3965e0bd1c9f3406fa6d5fbce1e28f4852587ef934e2 # latest-pg17 (PG 17.11, Timescale 2.30.2)
+        env:
+          POSTGRES_USER: bookrunner
+          POSTGRES_PASSWORD: bookrunner
+          POSTGRES_DB: bookrunner
+        ports:
+          - 54400:5432
+        options: >-
+          --health-cmd "pg_isready -U bookrunner -d bookrunner"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 30
+      redis:
+        image: redis@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499 # 7-alpine (Redis 7.4.11)
+        ports:
+          - 63790:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+      - name: bun install
+        run: bun install --frozen-lockfile
+      - name: anvil from the pinned Foundry image
+        run: |
+          # shellcheck disable=SC2016 # the ${FOUNDRY_IMAGE:-...} in the pattern is literal text of scripts/forge.sh
+          image=$(sed -n 's/^IMAGE="${FOUNDRY_IMAGE:-\(.*\)}"$/\1/p' scripts/forge.sh)
+          case "$image" in *@sha256:*) ;; *) echo "scripts/forge.sh image is not pinned by digest: $image"; exit 1 ;; esac
+          id=$(docker create "$image")
+          mkdir -p "$RUNNER_TEMP/foundry"
+          docker cp "$id:/usr/local/bin/anvil" "$RUNNER_TEMP/foundry/anvil"
+          docker rm "$id" >/dev/null
+          echo "$RUNNER_TEMP/foundry" >> "$GITHUB_PATH"
+      - name: forge build (the chain tests deploy from contracts/out)
+        run: bash scripts/forge.sh build
+      - name: integration suite (one migrated *_it database per test file)
+        env:
+          IT_PG_BASE: postgres://bookrunner:bookrunner@127.0.0.1:54400
+          REDIS_URL: redis://127.0.0.1:63790
+        run: bash scripts/ci-integration.sh

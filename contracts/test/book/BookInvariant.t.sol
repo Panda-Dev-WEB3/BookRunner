@@ -99,18 +99,21 @@ contract BookInvariantTest is StdInvariant, BookFixture {
 
     /// @dev (a) RED-TEAM: redemption never permission-gated.
     /// forge-config: default.invariant.fail-on-revert = true
+    /// forge-config: ci.invariant.fail-on-revert = true
     function invariant_redemptionNeverPermissionGated() public view {
         assertFalse(handler.permissionViolation(), handler.lastViolationTag());
     }
 
     /// @dev (b) waterfall conservation after each applyMark.
     /// forge-config: default.invariant.fail-on-revert = true
+    /// forge-config: ci.invariant.fail-on-revert = true
     function invariant_waterfallConservation() public view {
         assertFalse(handler.conservationViolation(), "S + J != marked NAV + backstop cover - repayment");
     }
 
     /// @dev marks and retirement are never blocked.
     /// forge-config: default.invariant.fail-on-revert = true
+    /// forge-config: ci.invariant.fail-on-revert = true
     function invariant_marksNeverBlocked() public view {
         assertFalse(handler.markViolation(), handler.lastViolationTag());
         assertFalse(handler.finalizeViolation(), handler.lastViolationTag());
@@ -119,6 +122,7 @@ contract BookInvariantTest is StdInvariant, BookFixture {
     /// @dev audit M-1: held marks inside the deferral bound settle nothing (lastSettledIndex and the top-up round
     ///      untouched); the first settling mark clears every due bucket (within MAX_SETTLE_BUCKETS per tranche).
     /// forge-config: default.invariant.fail-on-revert = true
+    /// forge-config: ci.invariant.fail-on-revert = true
     function invariant_heldMarksDeferSettlement() public view {
         assertFalse(handler.heldSettlementViolation(), "a held mark inside the bound settled something");
         assertFalse(handler.dueBucketViolation(), "a settling mark left a due bucket pending");
@@ -126,6 +130,7 @@ contract BookInvariantTest is StdInvariant, BookFixture {
 
     /// @dev book accounting identity (venue value is always marked immediately by the handler).
     /// forge-config: default.invariant.fail-on-revert = true
+    /// forge-config: ci.invariant.fail-on-revert = true
     function invariant_accountingIdentity() public view {
         (uint256 lhs, uint256 rhs) = _accountingIdentity();
         assertEq(lhs, rhs, "S + J + unfunded != idle + deployed");
@@ -133,6 +138,7 @@ contract BookInvariantTest is StdInvariant, BookFixture {
 
     /// @dev (c) claimable <= escrow + unfunded, per tranche.
     /// forge-config: default.invariant.fail-on-revert = true
+    /// forge-config: ci.invariant.fail-on-revert = true
     function invariant_claimableCovered() public view {
         _checkClaimable(senior, BRTypes.SENIOR);
         _checkClaimable(junior, BRTypes.JUNIOR);
@@ -150,6 +156,7 @@ contract BookInvariantTest is StdInvariant, BookFixture {
 
     /// @dev tranche shares are only ever held by known parties or in escrow.
     /// forge-config: default.invariant.fail-on-revert = true
+    /// forge-config: ci.invariant.fail-on-revert = true
     function invariant_supplyAccounted() public view {
         _checkSupply(senior);
         _checkSupply(junior);

@@ -1,0 +1,5 @@
+# Reviewed gitleaks findings (fingerprint = commit:file:rule:line). Test fixtures only, never real secrets:
+# self-signed CN=localhost certificate key used by the fake SMTP server in the alerts tests
+5070f5a929ea28a53208f5f5bbd53c99449f3a8b:services/alerts/test/smtp.test.ts:private-key:10
+# fixed synthetic-oracle seed of the determinism test (a real ORACLE_SEED lives only in .env.testnet)
+ba5ea1b62f2379dbe7e3ea863d3e9658e09b5e87:services/oracle/test/synthetic-entropy.test.ts:generic-api-key:10
