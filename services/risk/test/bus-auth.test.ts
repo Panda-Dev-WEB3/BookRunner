@@ -163,13 +163,23 @@ describe("N-3: risk restores only its own signed state, and resumes a kill only 
     for (let i = 0; i < n; i++) await tick(t, await quote(t.w, 189.92, 190.08, await print(t.w, 190)));
   };
 
-  test("a planted unsigned kill record does nothing at restart (counted as forged)", async () => {
+  test("a planted unsigned kill record does nothing at restart (a record without signature is legacy: not counted)", async () => {
     const w = makeWorld();
     w.bus.kv.set("risk:1", payload({ ...initialMonitorState(), kill: plantedJournal() }));
     const forged: BusForgedMsg[] = [];
     await healthy(restart(w, { forged }));
     expect(killed(w)).toEqual([]);
     expect(w.calls.filter((c) => c.startsWith("chain.flatten") || c === "chain.setReduceOnly")).toEqual([]);
+    expect(forged).toEqual([]);
+  });
+
+  test("a record whose signature fails verification starts fresh and IS counted as forged", async () => {
+    const w = makeWorld();
+    const monitor = { ...initialMonitorState(), kill: plantedJournal() };
+    w.bus.kv.set("risk:1", payload(monitor, { monitorSig: { tsMs: w.clock.t, monitor, signature: `0x${"ab".repeat(65)}` } }));
+    const forged: BusForgedMsg[] = [];
+    await healthy(restart(w, { forged }));
+    expect(killed(w)).toEqual([]);
     expect(forged.at(-1)?.events.map((e) => e.kind)).toEqual(["state"]);
   });
 

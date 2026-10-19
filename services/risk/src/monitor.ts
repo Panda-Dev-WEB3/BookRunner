@@ -453,11 +453,9 @@ export class BookMonitor {
     const auth = this.d.auth;
     if (!auth?.isOwnMonitor) return p?.meta?.monitor ?? null;
     const ms = p?.monitorSig;
-    if (!ms) {
-      if (p?.meta?.monitor) {
-        this.log.warn("persisted risk state is not signed by this risk key: starting from a fresh state");
-        auth.forged?.("state", `book ${this.ref.bookId}: unsigned persisted risk state`);
-      }
+    if (!ms || typeof ms.signature !== "string") {
+      // a legacy (pre-signing) record, or none: start fresh, not a forgery (only a failing signature is counted)
+      if (p?.meta?.monitor) this.log.warn("persisted risk state carries no signature (legacy record): starting from a fresh state");
       return null;
     }
     if (!(await auth.isOwnMonitor({ bookId: this.ref.bookId, monitor: ms.monitor, tsMs: ms.tsMs, signature: ms.signature }))) {

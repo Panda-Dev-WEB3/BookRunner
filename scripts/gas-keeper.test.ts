@@ -1,7 +1,16 @@
 // scripts/gas-keeper.ts: which per-book desk keys get gas (Task 7b: every book has a desk key).
 import { describe, expect, test } from "bun:test";
 import { zeroHash } from "viem";
-import { deskKeyNeedsGas } from "./gas-keeper";
+import { deskKeyNeedsGas, launchRoleBookIds } from "./gas-keeper";
+
+describe("launchRoleBookIds", () => {
+  test("only the first three recorded books use (already funded) launch roles; a 4th recorded book gets its own key funded", () => {
+    const launch = launchRoleBookIds([4, 2, 1, 3]);
+    expect([...launch].sort()).toEqual([1, 2, 3]);
+    expect(launch.has(4)).toBe(false);
+    expect(launchRoleBookIds([]).size).toBe(0);
+  });
+});
 
 describe("deskKeyNeedsGas", () => {
   const root = `0x${"11".repeat(32)}` as const;

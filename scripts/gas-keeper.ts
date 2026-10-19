@@ -14,7 +14,7 @@ import { type Abi, type Account, type Address, type Chain, createPublicClient, c
 import { bookAbi, bookFactoryAbi, mMMandateAbi } from "../packages/shared/src/abi";
 import { chainFor } from "../packages/shared/src/chains";
 import { tryLoadDeployment } from "../packages/shared/src/deployments";
-import { type DevRole, bookDeskAccount, roleAccount } from "../packages/shared/src/devkeys";
+import { type DevRole, LAUNCH_DESK_ROLES, bookDeskAccount, roleAccount } from "../packages/shared/src/devkeys";
 
 const RPC = process.env.RPC_URL ?? "http://127.0.0.1:8547";
 const CHAIN_ID = Number(process.env.CHAIN_ID ?? 31337);
@@ -63,11 +63,19 @@ export function deskKeyNeedsGas(b: { state: number; venue: number; hedgeAllowRoo
   return b.venue === 1 || b.hedgeAllowRoot !== zeroHash;
 }
 
+/**
+ * Pure: the book ids whose desk key is a launch role (GAS_PLAN funds those): the first LAUNCH_DESK_ROLES.length books of
+ * the deployment record by id (devkeys derivedDeskAccount). Every other book, recorded or not, has its own derived key.
+ */
+export function launchRoleBookIds(recordedBookIds: readonly number[]): Set<number> {
+  return new Set([...recordedBookIds].sort((a, b) => a - b).slice(0, LAUNCH_DESK_ROLES.length));
+}
+
 /** The per-book desk keys (Task 7b: every book has one) beyond the three launch roles that need gas. */
 async function bookDeskKeys(pub: PublicClient): Promise<Array<{ role: string; to: Address }>> {
   const dep = tryLoadDeployment();
   if (!dep?.contracts.factory) return [];
-  const launch = new Set(dep.books.map((b) => b.bookId));
+  const launch = launchRoleBookIds(dep.books.map((b) => b.bookId));
   const read = <T>(address: Address, abi: Abi, functionName: string, args: readonly unknown[] = []) => pub.readContract({ address, abi, functionName, args } as never) as Promise<T>;
   const out: Array<{ role: string; to: Address }> = [];
   for (const id of (await read<bigint[]>(dep.contracts.factory, bookFactoryAbi as Abi, "bookIds")).map(Number)) {
