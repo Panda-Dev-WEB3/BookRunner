@@ -9,9 +9,15 @@
 //    quote that sits entirely on one side of the oracle look centred. Ordinary drift between the agent's
 //    print and the attested one is covered by a small allowance (`driftAllowanceBps`, see below), never by
 //    trusting the reported reference;
-//  - no fresh attested price (missing, stale, or only the unsigned Redis fallback) while a live two-sided
-//    quote exists → the quote is `unverified`: it is not passed as checked; evaluate() holds the book
-//    reduce-only (the off-hours convention) until it can be verified.
+//  - "fresh" for this check is its own tight bound (RISK_QUOTE_PRICE_MAX_AGE_MS, default 15 s), not the 300 s
+//    maxPriceAge used for valuation: in pull mode the stored on-chain price is minutes old by design, and a few
+//    bps of allowance against it would turn a signed-feed outage into a false SKEW kill. A held (market-closed)
+//    print is accepted: it is signed and current, and off-hours the book is reduce-only anyway
+//    (noNewRiskOffHours);
+//  - no such price (missing, older than the bound, or only the unsigned Redis fallback) → no quote check, and the
+//    book is held reduce-only (the off-hours convention) whatever the agent quotes, until a fresh attested
+//    price has been seen on `releaseTicks` consecutive ticks (stepQuoteHold). Basing the hold on the price, not
+//    on the quote, keeps it from flapping when an obedient agent drops to one side.
 import { type QuoteProposal, quoteSkewBps, quoteWidthBps } from "@bookrunner/shared";
 import type { OracleReading, QuoteObservation } from "../types";
 import { oraclePrice } from "./oracle";
@@ -21,13 +27,18 @@ const FUTURE_TOLERANCE_MS = 5_000;
 export const DEFAULT_QUOTE_DRIFT_BPS = 5;
 /** Upper bound of the configurable allowance (bps). */
 export const MAX_QUOTE_DRIFT_BPS = 10;
+/** Default max age (ms) of the attested price a quote is checked against (RISK_QUOTE_PRICE_MAX_AGE_MS). */
+export const DEFAULT_QUOTE_PRICE_MAX_AGE_MS = 15_000;
+/** Bounds of RISK_QUOTE_PRICE_MAX_AGE_MS (validated at startup). */
+export const MIN_QUOTE_PRICE_MAX_AGE_MS = 2_000;
+export const MAX_QUOTE_PRICE_MAX_AGE_MS = 60_000;
+/** Default consecutive ticks with a fresh attested price before the hold lifts (RISK_QUOTE_HOLD_RELEASE_TICKS). */
+export const DEFAULT_QUOTE_HOLD_RELEASE_TICKS = 2;
 
 export interface QuoteSelection {
   proposal: QuoteProposal | undefined;
   /** Allowance applied when checking `proposal` (bps): min(configured, minQuoteWidthBps / 2). */
   driftBps: number;
-  /** A live two-sided quote exists but no fresh attested price could check it (fail safe: hold). */
-  unverified: boolean;
   info: {
     ts: number;
     ageMs: number;
@@ -40,10 +51,37 @@ export interface QuoteSelection {
   } | null;
 }
 
-/** Fresh attested price: the chain's stored price or a verified signed print, not stale. Redis is unsigned. */
-export function attestedPrice(o: OracleReading): number | null {
+/**
+ * Attested price fresh enough to check a quote against: the chain's stored price or a verified signed print (Redis
+ * is unsigned), not stale, and published at most `maxAgeMs` ago. Held prints count (see the header).
+ */
+export function attestedPrice(o: OracleReading, nowMs: number, maxAgeMs: number): number | null {
   if (o.stale || (o.source !== "chain" && o.source !== "signed")) return null;
+  if (o.publishedAt <= 0 || nowMs - o.publishedAt * 1000 > maxAgeMs) return null;
   return oraclePrice(o);
+}
+
+/** Fail-safe hold state: null = not held; n = consecutive ticks with a fresh attested price since the hold. */
+export interface QuoteHoldState {
+  freshTicks: number | null;
+}
+
+export const NO_QUOTE_HOLD: QuoteHoldState = { freshTicks: null };
+
+/**
+ * No fresh attested price: held (reduce-only), whatever the agent quotes. The hold lifts after `releaseTicks`
+ * consecutive ticks with one (a single good print between outages does not reopen the book).
+ */
+export function stepQuoteHold(
+  prev: QuoteHoldState,
+  priceOk: boolean,
+  releaseTicks: number,
+): { state: QuoteHoldState; held: boolean } {
+  if (!priceOk) return { state: { freshTicks: 0 }, held: true };
+  if (prev.freshTicks === null) return { state: NO_QUOTE_HOLD, held: false };
+  const n = prev.freshTicks + 1;
+  if (n >= Math.max(1, releaseTicks)) return { state: NO_QUOTE_HOLD, held: false };
+  return { state: { freshTicks: n }, held: true };
 }
 
 /**
@@ -62,7 +100,7 @@ export function selectLiveQuote(
   maxAgeMs: number,
   driftBps: number,
 ): QuoteSelection {
-  if (!q) return { proposal: undefined, driftBps, unverified: false, info: null };
+  if (!q) return { proposal: undefined, driftBps, info: null };
   const ageMs = nowMs - q.ts;
   const live = ageMs <= maxAgeMs && ageMs >= -FUTURE_TOLERANCE_MS;
   const twoSided = q.sides.bid && q.sides.ask && q.bid > 0 && q.ask > 0;
@@ -74,7 +112,6 @@ export function selectLiveQuote(
   return {
     proposal: used ? proposal : undefined,
     driftBps,
-    unverified: live && twoSided && !hasPx,
     info: {
       ts: q.ts,
       ageMs,

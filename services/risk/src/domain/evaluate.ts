@@ -5,7 +5,18 @@ import type { BookObservation, HedgeBandState, LiveNavResult } from "../types";
 import { stepHedgeBand } from "./hedgeBand";
 import { computeLiveNav } from "./nav";
 import { isOffHours } from "./oracle";
-import { DEFAULT_QUOTE_DRIFT_BPS, type QuoteSelection, attestedPrice, effectiveDriftBps, selectLiveQuote } from "./quote";
+import {
+  DEFAULT_QUOTE_DRIFT_BPS,
+  DEFAULT_QUOTE_HOLD_RELEASE_TICKS,
+  DEFAULT_QUOTE_PRICE_MAX_AGE_MS,
+  NO_QUOTE_HOLD,
+  type QuoteHoldState,
+  type QuoteSelection,
+  attestedPrice,
+  effectiveDriftBps,
+  selectLiveQuote,
+  stepQuoteHold,
+} from "./quote";
 
 export interface EvaluateOptions {
   quoteMaxAgeMs: number;
@@ -14,6 +25,10 @@ export interface EvaluateOptions {
    * 5, at most 10, and never more than half the mandate's min quote width).
    */
   quoteDriftBps?: number;
+  /** Max age (ms) of the attested price a quote is checked against (default 15 s; audit M-3). */
+  quotePriceMaxAgeMs?: number;
+  /** Consecutive ticks with a fresh attested price before the fail-safe hold lifts (default 2). */
+  quoteHoldReleaseTicks?: number;
   /** Max gap between observations for the out-of-band clock to keep running. */
   bandMaxGapSec: number;
   /** An offsetting perp hedge venue is enabled (spot-only books: false — long exposure is unhedgeable). */
@@ -28,17 +43,25 @@ export interface Evaluation {
   outOfBandSec: number;
   offHours: boolean;
   quote: QuoteSelection["info"];
-  /** A live quote could not be checked against a fresh attested price: the book is held reduce-only. */
+  /** No fresh attested price (or not yet for releaseTicks ticks): quotes unverifiable, book held reduce-only. */
   quoteUnverified: boolean;
+  quoteHold: QuoteHoldState;
 }
 
-export function evaluate(obs: BookObservation, prevBand: HedgeBandState, o: EvaluateOptions): Evaluation {
+export function evaluate(
+  obs: BookObservation,
+  prevBand: HedgeBandState,
+  o: EvaluateOptions,
+  prevHold: QuoteHoldState = NO_QUOTE_HOLD,
+): Evaluation {
   const nowSec = Math.floor(obs.nowMs / 1000);
   const m = obs.mandate;
   const nav = computeLiveNav(obs.nav);
   const offHours = isOffHours(obs.oracle);
   const driftBps = effectiveDriftBps(o.quoteDriftBps ?? DEFAULT_QUOTE_DRIFT_BPS, m.minQuoteWidthBps);
-  const quote = selectLiveQuote(obs.quote, attestedPrice(obs.oracle), obs.nowMs, o.quoteMaxAgeMs, driftBps);
+  const quotePx = attestedPrice(obs.oracle, obs.nowMs, o.quotePriceMaxAgeMs ?? DEFAULT_QUOTE_PRICE_MAX_AGE_MS);
+  const hold = stepQuoteHold(prevHold, quotePx !== null, o.quoteHoldReleaseTicks ?? DEFAULT_QUOTE_HOLD_RELEASE_TICKS);
+  const quote = selectLiveQuote(obs.quote, quotePx, obs.nowMs, o.quoteMaxAgeMs, driftBps);
   const canHedgeLong = o.canHedgeLong ?? false;
   // audit M-2 split window: a held token in it is valued at the multiplier of its price's basis (on-chain
   // basisMultiplier) and never flattened. Only when that multiplier is unknown (valued at 0) is the desk valuation
@@ -63,9 +86,9 @@ export function evaluate(obs: BookObservation, prevBand: HedgeBandState, o: Eval
     canHedgeLong,
     quoteDriftBps: quote.driftBps,
   });
-  // fail safe (audit M-3): a live quote nobody can verify is never passed as checked; hold the book reduce-only
-  // (the off-hours convention: the agent stops new risk) until a fresh attested price is back
-  if (quote.unverified && (snapshot.state === "ok" || snapshot.state === "warn")) snapshot.state = "reduce_only";
+  // fail safe (audit M-3): without a fresh attested price no quote can be verified; hold the book reduce-only (the
+  // off-hours convention: the agent stops new risk) until one has been seen for releaseTicks consecutive ticks
+  if (hold.held && (snapshot.state === "ok" || snapshot.state === "warn")) snapshot.state = "reduce_only";
   return {
     snapshot,
     nav,
@@ -74,7 +97,8 @@ export function evaluate(obs: BookObservation, prevBand: HedgeBandState, o: Eval
     outOfBandSec: band.outOfBandSec,
     offHours,
     quote: quote.info,
-    quoteUnverified: quote.unverified,
+    quoteUnverified: hold.held,
+    quoteHold: hold.state,
   };
 }
 

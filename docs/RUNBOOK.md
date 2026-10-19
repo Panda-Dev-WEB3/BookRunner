@@ -447,9 +447,13 @@ can redo it during the timelock delay from the published quote.
   quote one side of the oracle on a book with cached pre-fix terms (8/25, 12/30, 10/25). Roll both from the same
   commit, agent first or in the same restart. Live quotes are judged against the attested oracle price (fresh
   on-chain price or verified signed print), never the agent's reported reference; `RISK_QUOTE_DRIFT_BPS` (default 5,
-  0..10, capped at half the mandate's min quote width) is the print drift allowed on top of `maxSkewBps`. With no
-  fresh attested price a live quote is `unverified` and the book is held `reduce_only` (status `quoteUnverified`):
-  restore the oracle feed or the signed prints; nothing to lift by hand.
+  0..10, capped at half the mandate's min quote width) is the print drift allowed on top of `maxSkewBps`. "Fresh"
+  for the quote check is `RISK_QUOTE_PRICE_MAX_AGE_MS` (default 15 000, 2 000..60 000, checked at startup), not
+  the 300 s `maxPriceAge` used for valuation; a held (market-closed) print counts. Without such a price (signed-feed
+  outage in pull mode, Redis-only, missing) no quote is checked and the book is held `reduce_only` (status
+  `quoteUnverified`) whatever the agent quotes, never killed on SKEW; the hold lifts after
+  `RISK_QUOTE_HOLD_RELEASE_TICKS` (default 2, 1..10) consecutive ticks with a fresh attested price. Restore the
+  oracle feed or the signed prints; nothing to lift by hand.
 - **Mark reconciliation break** (Day-30 kill criterion): freeze new charters until clean; compare the
   mark's `pnl_json` venue section against the venue statement for the period.
 - **Wind-down**: `MarketCharter.retire(bookId)` → agents flatten → keeper recalls IF + MM → final

@@ -2,6 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import { HEDGE_BAND_GRACE_SECONDS, usd, wad } from "@bookrunner/shared";
 import { evaluate } from "../src/domain/evaluate";
+import { loadRiskEnv, settingsFromEnv } from "../src/config";
 import { effectiveDriftBps } from "../src/domain/quote";
 import type { BookObservation, HedgeBandState } from "../src/types";
 import { MANDATE, T0, chainObs, observation, quoteAt } from "./fakes";
@@ -156,29 +157,108 @@ describe("quote skew / width on a live quote", () => {
     expect(ev.snapshot.breaches).toEqual(["SKEW"]);
   });
 
-  test("audit M-3: no fresh attested price -> the live quote is unverified and the book is held reduce-only", () => {
-    const relaxed = { ...MANDATE, noNewRiskOffHours: false }; // isolate the hold from the off-hours rule
-    const centred = quoteAround(190, 0, 10);
-    const stale = { priceWad: wad(190), publishedAt: T0 - 3600, held: false, stale: true, source: "chain" as const };
-    const redis = { priceWad: wad(190), publishedAt: T0, held: false, stale: false, source: "redis" as const };
-    for (const oracle of [stale, redis, { ...stale, priceWad: 0n, source: "none" as const }]) {
-      const ev = run({ mandate: relaxed, oracle, quote: centred });
-      expect(ev.quote?.used).toBe(false);
-      expect(ev.quote?.reference).toBe("none");
-      expect(ev.quoteUnverified).toBe(true);
-      expect(ev.snapshot.breaches).toEqual([]);
-      expect(ev.snapshot.state).toBe("reduce_only");
-      // without a live quote there is nothing to verify: no hold from this rule
-      const idle = run({ mandate: relaxed, oracle });
-      expect(idle.quoteUnverified).toBe(false);
-      expect(idle.snapshot.state).toBe("ok");
+  const relaxed = { ...MANDATE, noNewRiskOffHours: false }; // isolate the hold from the off-hours rule
+  const stale = { priceWad: wad(190), publishedAt: T0 - 3600, held: false, stale: true, source: "chain" as const };
+  const redis = { priceWad: wad(190), publishedAt: T0, held: false, stale: false, source: "redis" as const };
+  const none = { priceWad: 0n, publishedAt: 0, held: false, stale: true, source: "none" as const };
+  const signed = { priceWad: wad(190), publishedAt: T0, held: false, stale: false, source: "signed" as const };
+
+  test("audit M-3: no fresh attested price -> no quote check and the book is held reduce-only, quote or not", () => {
+    for (const oracle of [stale, redis, none]) {
+      for (const quote of [quoteAround(190, 0, 10), null]) {
+        const ev = run({ mandate: relaxed, oracle, quote });
+        expect(ev.quote?.used ?? false).toBe(false);
+        expect(ev.quoteUnverified).toBe(true);
+        expect(ev.snapshot.breaches).toEqual([]);
+        expect(ev.snapshot.state).toBe("reduce_only");
+      }
     }
     // a fresh verified signed print checks the quote
-    const signed = { priceWad: wad(190), publishedAt: T0, held: false, stale: false, source: "signed" as const };
-    const ok = run({ mandate: relaxed, oracle: signed, quote: centred });
+    const ok = run({ mandate: relaxed, oracle: signed, quote: quoteAround(190, 0, 10) });
     expect(ok.quote?.used).toBe(true);
     expect(ok.quoteUnverified).toBe(false);
     expect(ok.snapshot.state).toBe("ok");
+  });
+
+  test("audit M-3: the hold does not flap when the agent obeys it, and lifts after 2 fresh ticks", () => {
+    // tick by tick: an attested-price outage of 4 ticks; the agent quotes two-sided, then obeys reduce_only with a
+    // one-sided quote; the price comes back on tick 5
+    const twoSided = quoteAround(190, 0, 10);
+    const oneSided = { ...twoSided, sides: { bid: false, ask: true } };
+    const steps = [
+      { oracle: redis, quote: twoSided, want: "reduce_only" },
+      { oracle: redis, quote: oneSided, want: "reduce_only" },
+      { oracle: stale, quote: oneSided, want: "reduce_only" },
+      { oracle: redis, quote: null, want: "reduce_only" },
+      { oracle: signed, quote: oneSided, want: "reduce_only" }, // first fresh tick: still held
+      { oracle: signed, quote: twoSided, want: "ok" }, // second consecutive fresh tick: lifted
+      { oracle: signed, quote: twoSided, want: "ok" },
+    ] as const;
+    let hold = { freshTicks: null as number | null };
+    for (const [i, st] of steps.entries()) {
+      const ev = evaluate(observation({ mandate: relaxed, oracle: st.oracle, quote: st.quote }), IN_BAND, OPTS, hold);
+      expect([i, ev.snapshot.state]).toEqual([i, st.want]);
+      expect(ev.quoteUnverified).toBe(st.want === "reduce_only");
+      hold = ev.quoteHold;
+    }
+    // a single fresh tick between outages does not reopen the book
+    let h = evaluate(observation({ mandate: relaxed, oracle: redis }), IN_BAND, OPTS).quoteHold;
+    h = evaluate(observation({ mandate: relaxed, oracle: signed }), IN_BAND, OPTS, h).quoteHold;
+    const again = evaluate(observation({ mandate: relaxed, oracle: redis }), IN_BAND, OPTS, h);
+    expect(again.snapshot.state).toBe("reduce_only");
+    expect(again.quoteHold.freshTicks).toBe(0);
+  });
+
+  test("audit M-3: a minutes-old (not stale) attested price holds instead of killing on SKEW", () => {
+    // pull mode, signed-feed outage: the stored chain price is 240 s old (within maxPriceAge 300 s, so not stale);
+    // the agent quotes at its max skew 3.5 bps around a live print 5 bps higher
+    const old = { priceWad: wad(190), publishedAt: T0 - 240, held: false, stale: false, source: "chain" as const };
+    const q = quoteAround(190 * (1 + 5 / 1e4), 3.5, 8.5);
+    const ev = run({ mandate: m84, oracle: old, quote: q });
+    expect(ev.quote?.used).toBe(false);
+    expect(ev.quote?.reference).toBe("none");
+    expect(ev.snapshot.breaches).toEqual([]);
+    expect(ev.snapshot.state).toBe("reduce_only");
+    expect(ev.quoteUnverified).toBe(true);
+    // 14 s old is still fresh for the check (default bound 15 s); 16 s is not
+    const at = (ageSec: number) =>
+      run({ mandate: m84, oracle: { ...old, publishedAt: T0 - ageSec }, quote: quoteAround(190, 0, 8.5) });
+    expect(at(14).quote?.used).toBe(true);
+    expect(at(14).snapshot.state).toBe("ok");
+    expect(at(16).quote?.used).toBe(false);
+    expect(at(16).snapshot.state).toBe("reduce_only");
+    // the bound is a setting
+    const wide = evaluate(observation({ mandate: m84, oracle: { ...old, publishedAt: T0 - 16 }, quote: quoteAround(190, 0, 8.5) }), IN_BAND, {
+      ...OPTS,
+      quotePriceMaxAgeMs: 30_000,
+    });
+    expect(wide.quote?.used).toBe(true);
+  });
+
+  test("audit M-3: a held (market-closed) attested print is fresh for the quote check", () => {
+    const held = { ...signed, held: true };
+    const ev = run({ mandate: relaxed, oracle: held, quote: quoteAround(190, 0, 10) });
+    expect(ev.quote?.used).toBe(true);
+    expect(ev.quoteUnverified).toBe(false);
+  });
+
+  test("audit M-3: skew utilisation is measured against maxSkew + the drift allowance (never > 100% while ok)", () => {
+    // 8 / 4 terms, allowance 4: a quote 7 bps off the attested price (within 8) is ok at 87.5%
+    const ev = run({ mandate: m84, quote: quoteAround(190 * (1 + 4 / 1e4), 3, 8.5) });
+    expect(ev.snapshot.state).toBe("ok");
+    expect(ev.snapshot.skewUtil).toBeLessThanOrEqual(1);
+    expect(ev.snapshot.skewUtil).toBeCloseTo(7 / 8, 2);
+  });
+
+  test("audit M-3: RISK_QUOTE_PRICE_MAX_AGE_MS / RISK_QUOTE_HOLD_RELEASE_TICKS are validated at startup", () => {
+    expect(loadRiskEnv({}).RISK_QUOTE_PRICE_MAX_AGE_MS).toBe(15_000);
+    expect(loadRiskEnv({}).RISK_QUOTE_HOLD_RELEASE_TICKS).toBe(2);
+    expect(loadRiskEnv({}).RISK_QUOTE_DRIFT_BPS).toBe(5);
+    expect(() => loadRiskEnv({ RISK_QUOTE_PRICE_MAX_AGE_MS: "1000" })).toThrow(/RISK_QUOTE_PRICE_MAX_AGE_MS/);
+    expect(() => loadRiskEnv({ RISK_QUOTE_PRICE_MAX_AGE_MS: "300000" })).toThrow(/RISK_QUOTE_PRICE_MAX_AGE_MS/);
+    expect(() => loadRiskEnv({ RISK_QUOTE_HOLD_RELEASE_TICKS: "0" })).toThrow(/RISK_QUOTE_HOLD_RELEASE_TICKS/);
+    expect(() => loadRiskEnv({ RISK_QUOTE_DRIFT_BPS: "11" })).toThrow(/RISK_QUOTE_DRIFT_BPS/);
+    expect(settingsFromEnv(loadRiskEnv({ RISK_QUOTE_PRICE_MAX_AGE_MS: "20000" })).quotePriceMaxAgeMs).toBe(20_000);
   });
 });
 

@@ -102,14 +102,21 @@ export class BookMonitor {
     this.prices = feeds ? await this.soft("signedPrices", () => feeds.prices(), NO_PRICES) : NO_PRICES;
     const chainObs = await this.d.chain.observe(this.ref, this.prices.size ? this.prices : undefined); // RPC failure -> tick fails -> loop backs off
     const obs = await this.assemble(chainObs, nowMs);
-    const ev = evaluate(obs, this.state.band, {
-      quoteMaxAgeMs: s.quoteMaxAgeMs,
-      quoteDriftBps: s.quoteDriftBps,
-      bandMaxGapSec: Math.max(60, Math.ceil((10 * s.intervalMs) / 1000)),
-    });
+    const ev = evaluate(
+      obs,
+      this.state.band,
+      {
+        quoteMaxAgeMs: s.quoteMaxAgeMs,
+        quoteDriftBps: s.quoteDriftBps,
+        quotePriceMaxAgeMs: s.quotePriceMaxAgeMs,
+        quoteHoldReleaseTicks: s.quoteHoldReleaseTicks,
+        bandMaxGapSec: Math.max(60, Math.ceil((10 * s.intervalMs) / 1000)),
+      },
+      this.state.quoteHold,
+    );
     const { next, effects } = decide({
       bookId: this.ref.bookId,
-      state: { ...this.state, band: ev.band },
+      state: { ...this.state, band: ev.band, quoteHold: ev.quoteHold },
       snapshot: ev.snapshot,
       killedOnChain: obs.killed,
       nowSec,

@@ -132,6 +132,8 @@ export const settings = (over: Partial<RiskSettings> = {}): RiskSettings => ({
   breachConfirmTicks: 2,
   quoteMaxAgeMs: 15_000,
   quoteDriftBps: 5,
+  quotePriceMaxAgeMs: 15_000,
+  quoteHoldReleaseTicks: 2,
   killMode: "enforce",
   flattenMode: "net",
   flattenSlippageBps: 100,

@@ -159,7 +159,7 @@ export function allowedSides(
 
 export interface LimitsSnapshot {
   inventoryUtil: number;
-  skewUtil: number; // |last quote skew| / maxSkewBps
+  skewUtil: number; // |last quote skew| / (maxSkewBps + quoteDriftBps): 1 = the breach boundary
   hedgeRatioBps: number | null;
   drawdownBps: number;
   offHours: boolean;
@@ -187,7 +187,9 @@ export function classifyLimits(args: {
   const m = args.mandate;
   const util = inventoryUtil(m, args.netExposureUsd);
   const q = args.lastQuote ? checkQuote(m, args.lastQuote, args.quoteDriftBps ?? 0) : undefined;
-  const skewUtil = q && m.maxSkewBps > 0 ? Math.abs(q.skewBps) / m.maxSkewBps : 0;
+  // utilisation against the limit actually applied (maxSkew + drift allowance), so it never reads > 100% on an ok book
+  const skewLimit = m.maxSkewBps + Math.max(0, args.quoteDriftBps ?? 0);
+  const skewUtil = q && skewLimit > 0 ? Math.abs(q.skewBps) / skewLimit : 0;
   const ratio = hedgeRatioBps(m, args.netExposureUsd, args.deskHedgeUsd);
   const breaches: string[] = [];
   if (util > 1) breaches.push("INVENTORY");

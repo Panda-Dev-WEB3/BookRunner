@@ -1,3 +1,4 @@
+import type { QuoteHoldState } from "./domain/quote";
 import type { BookComponents, BookState, LimitState, LimitsSnapshot, Mandate, VenueId } from "@bookrunner/shared";
 import type { Hex } from "viem";
 
@@ -194,6 +195,8 @@ export interface MonitorState {
   kill: KillJournal | null;
   /** Identifier (kill tx hash or reason marker) of the last on-chain kill whose follow-up is recorded. */
   handledKill: string | null;
+  /** Audit M-3 fail-safe hold (no fresh attested price): null freshTicks = not held. */
+  quoteHold?: QuoteHoldState;
 }
 
 export const initialMonitorState = (): MonitorState => ({
@@ -204,6 +207,7 @@ export const initialMonitorState = (): MonitorState => ({
   episode: null,
   kill: null,
   handledKill: null,
+  quoteHold: { freshTicks: null },
 });
 
 export interface RiskMeta {
