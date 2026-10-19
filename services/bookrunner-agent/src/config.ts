@@ -64,10 +64,16 @@ export const agentEnvShape = {
   AGENT_QUOTE_RECEIPT_MS: num(5_000),
 
   // pull oracle (docs/LOW_GAS.md §1): desk actions carry the freshest signed prices
-  /** auto: executeWithPrices when the deployed desk has it; on: always; off: plain execute (stored prices). */
+  /**
+   * auto: executeWithPrices when the deployed desk has it; on: always; off: plain execute (stored prices). With off,
+   * a key Hedge / Flatten works only while someone else landed a price within config.maxTradePriceAge (15 s): the
+   * desk refuses older ones (StaleTradePrice, audit 2026-10 "old prints").
+   */
   AGENT_PULL_PRICES: z.enum(["auto", "on", "off"]).default("auto"),
   /** Signed prices older than this are not carried (the desk then runs on the stored price). */
   AGENT_PRICE_DATA_MAX_AGE_SECONDS: num(60),
+  /** Swaps carry only prints younger than config.maxTradePriceAge minus this margin (time to inclusion). */
+  AGENT_SWAP_PRICE_MARGIN_SECONDS: num(3),
   /**
    * SetQuote / inventory moves carry no prices while the stored book price is in-hours and younger than
    * this (someone else already landed it; well below config.maxPriceAge = 300 s). 0 = always carry.

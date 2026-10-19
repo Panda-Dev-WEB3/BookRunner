@@ -9,6 +9,7 @@ import {
   PullPrices,
   bundleUpdates,
   deskPriceData,
+  swapPriceMaxAgeSec,
   deskWant,
   freshestBundle,
   freshestOracleLatest,
@@ -220,6 +221,23 @@ describe("desk action price data", () => {
       maxAgeSec: 60,
     });
     expect(await old.forAction(DESK_ACTION.SetQuote)).toBeNull();
+  });
+
+  test("audit 2026-10 old prints: swaps never carry a print older than the desk's trade bound (maxTradePriceAge - margin)", async () => {
+    const b = await bundle([upd(RHX5, 315, 100), upd(NVDA, 190, 100), upd(TSLA, 440, 100)]);
+    const at = (sec: number) => new PullPrices({ sources: [{ name: "redis", get: async () => b }], domain: DOMAIN, memoMs: 0, now: () => sec * 1000 });
+    const opts = { bookPriceId: RHX5, componentPriceIds: async () => [NVDA, TSLA] as const, maxAgeSec: 60, swapMaxAgeSec: 12 };
+    // prints 20 s old: within the general 60 s bound, past the swap bound
+    const late = deskPriceData(at(120), opts);
+    expect(await late.forAction(DESK_ACTION.Hedge)).toBeNull();
+    expect(await late.forAction(DESK_ACTION.Flatten)).toBeNull();
+    expect(await late.forAction(DESK_ACTION.SetQuote)).not.toBeNull(); // non-swap actions keep the general bound
+    // 12 s old: carried
+    const fresh = deskPriceData(at(112), opts);
+    expect(decodePriceData((await fresh.forAction(DESK_ACTION.Hedge))!).updates).toHaveLength(3);
+    expect(swapPriceMaxAgeSec(15, 3, 60)).toBe(12);
+    expect(swapPriceMaxAgeSec(15, 3, 10)).toBe(10); // the env bound when tighter
+    expect(swapPriceMaxAgeSec(2, 3, 60)).toBe(1); // never 0
   });
 
   test("skip empty work: book-price-only actions carry nothing while the stored price is fresh and in-hours", async () => {
