@@ -330,14 +330,17 @@ contract MandateMockPoolEngine {
         broken = v;
     }
 
-    function state(uint256) external view returns (IPoolEngine.MarketState memory s) {
+    /// @dev The engine answers for the adapter mock's market id (1) only, so a wrong market id read fails.
+    function state(uint256 marketId) external view returns (IPoolEngine.MarketState memory s) {
         require(!broken, "engine broken");
+        require(marketId == 1, "unknown market");
         s.spreadBps = spreadBps;
         s.skewBps = skewBps;
     }
 
-    function config(uint256) external view returns (IPoolEngine.MarketConfig memory c) {
+    function config(uint256 marketId) external view returns (IPoolEngine.MarketConfig memory c) {
         require(!broken, "engine broken");
+        require(marketId == 1, "unknown market");
         c.maxNetExposureUsd = maxNetExposureUsd;
     }
 }

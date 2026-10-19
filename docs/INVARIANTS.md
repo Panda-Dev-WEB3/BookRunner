@@ -196,6 +196,7 @@ Every test file under `contracts/test`, with the invariants above it covers. Hel
 | `book/BookInvariant.t.sol` | **invariant** (7) | CAP-1..CAP-7 |
 | `book/BookReviewFixes.t.sol` | review regressions | CAP-8, CAP-10, CAP-11 |
 | `book/Tranche.t.sol` | unit + fuzz | CAP-1, CAP-4, CAP-5 |
+| `book/TrancheMutationKills.t.sol` | mutation-testing kills (docs/MUTATION-2026-10.md) | CAP-1, CAP-4, CAP-5, CAP-10 |
 | `book/UnderwritingVault.t.sol` | unit | CAP-12 |
 | `book/UpgradeBookScript.t.sol` | script rehearsal | CAP-13 |
 | `book/Waterfall.t.sol` | fuzz | CAP-2, CAP-4, CAP-8, CAP-10, CAP-11 |
@@ -248,6 +249,7 @@ Every test file under `contracts/test`, with the invariants above it covers. Hel
 | `mandate/MMMandate.t.sol` | unit | MAN-1..MAN-4, MAN-8, MAN-10, MAN-14 |
 | `mandate/MandateFuzz.t.sol` | parity fuzz | MAN-3, off-chain parity |
 | `mandate/MandateInvariant.t.sol` | **invariant** (6) | MAN-1..MAN-6 |
+| `mandate/MandateMutationKills.t.sol` | mutation-testing kills (docs/MUTATION-2026-10.md) | MAN-1, MAN-4, MAN-8, MAN-10 |
 | `mandate/MandateRedTeam.t.sol` | red team | MAN-1, MAN-4, MAN-7..MAN-10, off-chain parity |
 | `mandate/MandateReviewRegressions.t.sol` | review regressions | MAN-8, MAN-11, XC-3 |
 | `mandate/StockTokenRegistry.t.sol` | unit + fuzz | MAN-9 |
