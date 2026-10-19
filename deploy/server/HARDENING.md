@@ -181,8 +181,26 @@ Added in this change (on top of the sandbox in the table at the top):
 8.1 → 7.1. Not set, on purpose: `MemoryDenyWriteExecute` (bun's JIT), `ProcSubset=pid` (bun / libuv may read
 `/proc/meminfo`, `/proc/stat`), `ProtectHome` on the infra unit (the Docker CLI may create `/root/.docker`).
 
-**Operator steps.** None beyond the usual `sudo /usr/local/lib/bookrunner-deploy/update.sh`: it installs the
-changed units, reloads systemd, reloads the infra unit and restarts the stack. Check after it:
+**Operator steps.** The usual `sudo /usr/local/lib/bookrunner-deploy/update.sh` installs the changed units,
+reloads systemd, reloads the infra unit and restarts the stack. Before it, two checks:
+
+1. **App tree owner.** `update.sh` pulls, installs and builds as `bookrunner`; on a host where `/opt/bookrunner/app`
+   is owned by root those steps fail. Check, and fix only if needed:
+   ```bash
+   stat -c '%U %n' /opt/bookrunner/app /opt/bookrunner/app/.git /opt/bookrunner/app/node_modules   # expect: bookrunner
+   sudo chown -R bookrunner:bookrunner /opt/bookrunner/app   # only if the line above shows root
+   ```
+2. **Spooled mark rows.** Until this update the mark spool sat in the unit's `PrivateTmp`, which the restart empties.
+   Rows only exist there after a Postgres write failure (`dev.log`: "marks row spooled to disk", cleared by "spooled
+   marks rows written to Postgres"). Move any into the new spool directory first; the new mark service flushes them
+   at its next successful tick:
+   ```bash
+   sudo sh -c 'ls -1 /tmp/systemd-private-*-bookrunner.service-*/tmp/bookrunner-mark-spool/ 2>/dev/null'   # empty = nothing to do
+   sudo install -d -o bookrunner -g bookrunner -m 0750 /opt/bookrunner/app/.data/testnet/mark-spool
+   sudo sh -c 'cp -p /tmp/systemd-private-*-bookrunner.service-*/tmp/bookrunner-mark-spool/mark-*.json /opt/bookrunner/app/.data/testnet/mark-spool/ 2>/dev/null; chown bookrunner:bookrunner /opt/bookrunner/app/.data/testnet/mark-spool/*.json 2>/dev/null; true'
+   ```
+
+Check after the update:
 
 ```bash
 systemctl is-active bookrunner bookrunner-infra            # active / active
@@ -191,11 +209,21 @@ sudo journalctl -u bookrunner-infra -n 20 --no-pager       # compose "up -d --wa
 systemd-analyze security bookrunner | tail -1              # ~1.5
 ```
 
-Rollback of the sandbox only (keeps everything else): `sudo systemctl edit bookrunner` with an empty
-`SystemCallFilter=` and `InaccessiblePaths=` (or `sudo systemctl edit bookrunner-infra` with `ProtectSystem=no`),
-then `sudo systemctl daemon-reload && sudo systemctl restart bookrunner`. Before this change a mark row spooled
-during a Postgres outage sat in the unit's `PrivateTmp` and was lost at the next restart; do not run the update while
-`dev.log` shows mark rows waiting in the spool (they are flushed at the mark service's next successful tick).
+**Rollback of the new sandbox directives only** (everything else stays). A drop-in overrides the installed unit;
+`update.sh` never removes drop-ins, so the rollback stays until the file is deleted:
+
+```bash
+sudo install -d /etc/systemd/system/bookrunner.service.d
+printf '[Service]\nSystemCallFilter=\nInaccessiblePaths=\nRemoveIPC=no\n' | sudo tee /etc/systemd/system/bookrunner.service.d/rollback.conf
+sudo systemctl daemon-reload && sudo systemctl restart bookrunner
+# infra unit (Docker CLI sandbox):
+sudo install -d /etc/systemd/system/bookrunner-infra.service.d
+printf '[Service]\nProtectSystem=no\nPrivateTmp=no\nRestrictAddressFamilies=\n' | sudo tee /etc/systemd/system/bookrunner-infra.service.d/rollback.conf
+sudo systemctl daemon-reload && sudo systemctl reload bookrunner-infra
+# once fixed: sudo rm /etc/systemd/system/bookrunner*.service.d/rollback.conf && sudo systemctl daemon-reload
+```
+
+An empty `SystemCallFilter=` / `InaccessiblePaths=` / `RestrictAddressFamilies=` resets the list (systemd semantics).
 
 ### Mainnet target (plan, not built)
 

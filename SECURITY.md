@@ -47,7 +47,11 @@ a way to exceed the stated bound is in scope.
   The auditor's PoC made $49.70 risk-free on $50k at a 40 bp move. Bounds:
   - every engine trade (opens, increases, reductions and closes) needs a live price no older than
     `min(maxPriceAge, 60 s, maxTradePriceAge)`, and `BookrunnerConfig` refuses `maxTradePriceAge` above
-    `MAX_TRADE_PRICE_AGE` (15 s), so governance cannot widen the window;
+    `MAX_TRADE_PRICE_AGE` (15 s), so governance cannot widen the window (a deployment made from this code: the
+    current testnet config predates the cap and keeps 15 s by operating rule). The cap equals the default, so
+    there is no on-chain headroom: the operating margin is the oracle tick (2 s) plus the chain's inclusion lag
+    (agents carry prints at most `maxTradePriceAge` - 3 s old). If the oracle cadence ever slows past it, engine
+    trades and desk key swaps stop (fail safe) while liquidations keep working up to `maxPriceAge`;
   - a print can only be relayed if it is newer than the stored one and not already stale, and a held print fills
     no trade;
   - the edge of one round trip is the price move inside that window minus the half-spread on each leg and two
