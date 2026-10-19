@@ -42,7 +42,7 @@ declare -A SUITES=(
     audit/ext2026/M1HeldMarkSettlement.t.sol audit/ext2026/LeadStuckSubscription.t.sol audit/area1/CapitalCoreAudit.t.sol book/TrancheMutationKills.t.sol"
   [BookLogic]="book/Book.t.sol book/BookReviewFixes.t.sol book/BackstopRepayment.t.sol book/BookInvariant.t.sol
     audit/ext2026/M1HeldMarkSettlement.t.sol audit/ext2026/L1FeeFlowSeniorFirst.t.sol audit/ext2026/LeadSettlePrice.t.sol
-    audit/ext2026/LeadStuckSubscription.t.sol audit/area1/CapitalCoreAudit.t.sol"
+    audit/ext2026/LeadStuckSubscription.t.sol audit/area1/CapitalCoreAudit.t.sol book/BookLogicMutationKills.t.sol"
   [MMMandate]="mandate/MMMandate.t.sol mandate/MandateRedTeam.t.sol mandate/MandateFuzz.t.sol
     mandate/MandateReviewRegressions.t.sol mandate/MandateInvariant.t.sol mandate/BookrunnerDesk.t.sol
     mandate/DeskRiskControls.t.sol audit/ext2026/M3PoolDrainSkew.t.sol mandate/MandateMutationKills.t.sol"
@@ -50,7 +50,7 @@ declare -A SUITES=(
     engine/EngineReviewRegressions.t.sol engine/PoolEnginePull.t.sol engine/PoolEngineAdapter.t.sol
     engine/PoolEngineInvariant.t.sol audit/area2/Area2EngineAudit.t.sol audit/ext2026/M3PoolDrainSkew.t.sol
     audit/ext2026/N1EngineSplit.t.sol audit/ext2026/LeadKeeperReward.t.sol audit/ext2026/LeadLossBudgetBreach.t.sol
-    audit/ext2026/LeadSettlePrice.t.sol"
+    audit/ext2026/LeadSettlePrice.t.sol engine/PoolEngineMutationKills.t.sol"
 )
 
 if [ "${1:-}" = "--list" ]; then

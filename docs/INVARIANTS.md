@@ -194,6 +194,7 @@ Every test file under `contracts/test`, with the invariants above it covers. Hel
 | `book/BackstopRepayment.t.sol` | unit | BST-1, CAP-8, CAP-6 |
 | `book/Book.t.sol` | unit | CAP-1..CAP-3, CAP-6, CAP-8, CAP-10, CAP-11, MRK-3 |
 | `book/BookInvariant.t.sol` | **invariant** (7) | CAP-1..CAP-7 |
+| `book/BookLogicMutationKills.t.sol` | mutation-testing kills (docs/MUTATION-2026-10.md) | BST-1, CAP-3 |
 | `book/BookReviewFixes.t.sol` | review regressions | CAP-8, CAP-10, CAP-11 |
 | `book/Tranche.t.sol` | unit + fuzz | CAP-1, CAP-4, CAP-5 |
 | `book/TrancheMutationKills.t.sol` | mutation-testing kills (docs/MUTATION-2026-10.md) | CAP-1, CAP-4, CAP-5, CAP-10 |
@@ -233,6 +234,7 @@ Every test file under `contracts/test`, with the invariants above it covers. Hel
 | `engine/PoolEngineAdapter.t.sol` | unit + fuzz | ENG-2, ENG-10, ENG-11 |
 | `engine/PoolEngineFuzz.t.sol` | fuzz | ENG-2, ENG-5, ENG-7, ENG-8 |
 | `engine/PoolEngineInvariant.t.sol` | **invariant** (4) | ENG-1..ENG-4 |
+| `engine/PoolEngineMutationKills.t.sol` | mutation-testing kills (docs/MUTATION-2026-10.md) | ENG-10 |
 | `engine/PoolEnginePull.t.sol` | unit | ENG-8, XC-2 |
 | `engine/PullOracleGas.t.sol` | gas evidence | XC-2 |
 | `gov/BookFactory.t.sol` | unit | CFG-4, GOV-4 |
