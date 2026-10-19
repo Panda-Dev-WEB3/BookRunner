@@ -4,9 +4,11 @@
 
 Bookrunner runs on **Robinhood Chain testnet only** (chain id 46630), with test tokens and no real funds. The
 contracts have had an internal security review (31 findings, 4 High, all fixed with regression tests in
-[`contracts/test/audit/`](contracts/test/audit)). An external audit (October 2026) reported 4 Medium and 3 Low
-findings and a set of leads; each one's fix, regression test or accepted rationale is tracked in
-[docs/AUDIT-2026-10.md](docs/AUDIT-2026-10.md). A bug bounty is planned before mainnet.
+[`contracts/test/audit/`](contracts/test/audit)). An external AI audit grade (October 2026) reported 4 Medium and 3
+Low findings and a set of leads; each one's fix, regression test or accepted rationale is tracked in
+[docs/AUDIT-2026-10.md](docs/AUDIT-2026-10.md) (nothing open), with a mutation-testing pass of the core contracts in
+[docs/MUTATION-2026-10.md](docs/MUTATION-2026-10.md). An independent human audit and a bug bounty are planned before
+mainnet.
 
 ## Reporting a vulnerability
 
@@ -76,8 +78,8 @@ it is assumed hostile (audit 2026-10 lead). What such a writer can and cannot do
   own price. A quote signed by a desk key that expired or was revoked is reported as such, not as a forgery.
 - **Risk's own persisted state.** Risk keeps its state machine (breach episode, kill journal, holds) in Redis across
   restarts. It restores only a copy signed with its own RISK key (EIP-712 over the canonical JSON, bound to the book,
-  chain and `BookrunnerConfig`); a missing copy starts fresh, an unsigned or foreign one starts fresh and is counted
-  as forged. A restored, unfinished kill resumes only when the mandate is already killed on-chain, or the journal
+  chain and `BookrunnerConfig`); a missing or unsigned copy (an older risk's) starts fresh, and one whose signature
+  fails or was made by another key starts fresh and is counted as forged. A restored, unfinished kill resumes only when the mandate is already killed on-chain, or the journal
   carries the episode's KillOrder signed by this key and the copy is at most 10 minutes old; otherwise the book is
   re-evaluated from its limits.
 - **Signed reports and marks.** Venue reports and marks are EIP-712 signed by role keys and verified on-chain.
@@ -111,6 +113,14 @@ a way to exceed the stated bound is in scope.
   orders) while the engine starts with small caps or off (owner decision); the bound above is the accepted residual.
   Desk keys are held to the same freshness rule for their own swaps (audit lead "old prints"): a key's Hedge or
   Flatten needs the token's price within `min(maxPriceAge, maxTradePriceAge)`.
+- **Engine positions across a stock split** (audit 2026-10 remediation finding N-1). PoolEngine positions are sized in
+  shares and are not rebased by the token multiplier. Bounds:
+  - the market is close-only from the split's pre-approval or staging until governance clears it;
+  - every voluntary trade reverts in the split window until the market is repriced;
+  - the per-period loss budget refuses new risk once the pool has lost its budget.
+
+  What remains is the per-share step on positions opened before the announcement. Rebasing (or settling at the
+  pre-split price) is required before the engine runs with meaningful caps; it starts with small caps or off.
 - **Redis write access** (audit 2026-10 lead, see "Off-chain trust boundaries"). A Redis writer can deny service:
   withhold prices (the agent stops quoting), delete the risk state (the agents go reduce-only after 30 s), drop or
   delay jobs, blank the status keys the alerts read (including the forged-message counts and the agents' status).
