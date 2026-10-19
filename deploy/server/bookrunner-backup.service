@@ -31,3 +31,9 @@ NoNewPrivileges=true
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
+# audit 2026-10 (HARDENING.md): no setuid binaries, kernel log, clock or realtime needed by the dump / copy
+ProtectKernelLogs=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes

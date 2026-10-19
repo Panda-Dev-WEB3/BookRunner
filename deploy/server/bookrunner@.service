@@ -64,6 +64,11 @@ LockPersonality=yes
 RestrictRealtime=yes
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+# /etc/bookrunner is not hidden here: this unit reads /etc/bookrunner/%i.env (root 0600, unreadable to the user)
+InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -/run/containerd
+SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @raw-io @reboot @swap
+SystemCallErrorNumber=EPERM
+RemoveIPC=yes
 
 [Install]
 WantedBy=multi-user.target
