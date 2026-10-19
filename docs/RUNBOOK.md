@@ -489,8 +489,22 @@ can redo it during the timelock delay from the published quote.
   `OPS_RISK_SIGNERS` to take the RPC off the kill path). A forged one is logged `FORGED kill ... ignored` and raises
   `bus_forged_message`: check who can reach Redis. Deploy risk, the agents and ops-venue together: an agent or
   ops-venue from this commit ignores an unsigned kill from an older risk (the on-chain kill still halts and revokes),
-  and risk from this commit checks only signed agent quotes. A halted agent with `killConfirmedOnChain: false` got a
-  signed kill whose on-chain step has not landed (alert `kill_stuck`): complete the kill; it resumes after a remandate.
+  and risk from this commit checks only signed agent quotes and publishes signed states (an agent from this commit
+  goes reduce-only after `AGENT_RISK_STATE_TIMEOUT_MS` without one: alert `risk_state_unverified`). A halted agent with
+  `killConfirmedOnChain: false` got a signed kill whose on-chain step has not landed (alert `kill_stuck`): complete
+  the kill; it resumes after a remandate.
+- **Desk session keys** (one per book; an agent quotes new risk only while its key is active on the mandate, so risk
+  can verify every quote it judges; without one it runs reduce-only and `agent_no_desk_key` fires, critical after
+  `ALERT_NO_DESK_KEY_CRITICAL_SECONDS` on a Live book). Devnet / testnet / testnet-live: the launch registers the
+  launch books' keys and then every other book's derived key (`bun scripts/desk-keys.ts --send`: the three launch
+  roles, else mnemonic index 1000 + bookId; a book of another sponsor is listed with the call its sponsor makes).
+  Mainnet, before the book goes Live: the operator generates the book's key (`DESK_KEY_PRIVATE_KEY_<bookId>` in the
+  env file), the agent operator calls `MMMandate.consentKey(key, true)`, the sponsor calls
+  `registerKey(key, operator, validUntil, tier >= maxInventoryUsd)`; check `isActiveKey(key)`. Rotation: register the
+  new key, set `DESK_KEY_PRIVATE_KEY_<bookId>` and restart the agent, then `revokeKey(old)` (the agent goes
+  reduce-only for the restart only). Expiry: `bun scripts/desk-keys.ts` (testnet) reports keys expiring within 30
+  days; on mainnet watch `getKey(key).validUntil` and re-register before it lapses (at expiry the agent goes
+  reduce-only and the alert fires). A committee `REVOKE_KEY` has the same effect at the next state refresh.
 - **Hold alerts** (services/alerts): `held_marks_in_session` (a held run valued in, or lasting through,
   `ALERT_HELD_MARK_SESSION_SECONDS` of open session: a price the NAV uses is held or stale, e.g. a desk token whose
   feed stopped, or the daily mark time never falls in the charter session; settlement is deferred up to 30 days; see
@@ -498,8 +512,9 @@ can redo it during the timelock delay from the published quote.
   `ALERT_QUOTE_UNVERIFIED_SECONDS` in session: no fresh attested price; restore the oracle feed / signed prints),
   `desk_stale_trade_price` (the desk refused `ALERT_STALE_TRADE_PRICE_MAX` key swaps with StaleTradePrice within
   `ALERT_STALE_TRADE_PRICE_WINDOW_SECONDS`: the agent's signed prices are not reaching the desk; hedging is stuck),
-  `bus_forged_message` (a service refused `ALERT_FORGED_MESSAGES_MAX` forged kills / quotes within
-  `ALERT_FORGED_MESSAGES_WINDOW_SECONDS`: nothing acted on them, but something can write to Redis).
+  `bus_forged_message` (a service refused `ALERT_FORGED_MESSAGES_MAX` forged kills / quotes / risk states within
+  `ALERT_FORGED_MESSAGES_WINDOW_SECONDS`: nothing acted on them, but something can write to Redis), `agent_no_desk_key`
+  and `risk_state_unverified` (above).
 
 ## Rollback and incidents (mainnet)
 
