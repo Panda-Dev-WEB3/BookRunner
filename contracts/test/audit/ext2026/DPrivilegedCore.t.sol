@@ -111,6 +111,47 @@ contract DPrivilegedCoreTest is CoreFixture {
         BkrnFeeRouter(address(feeRouter)).migrate();
     }
 
+    /// @dev Review M-6: a second migrate moves nothing; a donation that reaches the old contract later moves too.
+    function test_D_migrate_twice_andLateDonation() public {
+        _fundBackstop(1000e6);
+        Backstop next = new Backstop(address(config));
+        vm.prank(admin);
+        config.setAddress("backstop", address(next));
+        assertEq(Backstop(address(backstop)).migrate(), 1000e6);
+        assertEq(Backstop(address(backstop)).migrate(), 0, "nothing left");
+        usdc.mint(address(backstop), 5); // a late donation to the old backstop
+        assertEq(Backstop(address(backstop)).migrate(), 5);
+        assertEq(next.balance(), 1000e6 + 5);
+        assertEq(next.accountedBalance(), 1000e6 + 5);
+
+        usdc.mint(address(feeRouter), 100e6);
+        vm.prank(address(router));
+        feeRouter.notifyCarry(BOOK_ID, 100e6);
+        BkrnFeeRouter nextRouter = new BkrnFeeRouter(address(config));
+        vm.prank(admin);
+        config.setAddress("feeRouter", address(nextRouter));
+        assertEq(BkrnFeeRouter(address(feeRouter)).migrate(), 50e6);
+        assertEq(BkrnFeeRouter(address(feeRouter)).migrate(), 0);
+        assertEq(nextRouter.buybackPending(), 50e6);
+    }
+
+    /// @dev Lockers are enumerable for VerifyHandover (review M-3).
+    function test_D_stakingLockersEnumerable() public {
+        address[] memory ls = staking.lockers();
+        assertTrue(_has(ls, locker) && _has(ls, locker2));
+        vm.prank(admin);
+        staking.setLocker(locker2, false);
+        ls = staking.lockers();
+        assertTrue(_has(ls, locker) && !_has(ls, locker2));
+    }
+
+    function _has(address[] memory xs, address x) internal pure returns (bool) {
+        for (uint256 i; i < xs.length; ++i) {
+            if (xs[i] == x) return true;
+        }
+        return false;
+    }
+
     /// @dev notifyMigration only credits USDC that actually arrived and is not yet pending.
     function test_D_feeRouterNotifyMigration_onlyArrivedUsdc() public {
         BkrnFeeRouter next = new BkrnFeeRouter(address(config));

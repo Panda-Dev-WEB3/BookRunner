@@ -400,6 +400,29 @@ contract DeployMainnetTest is Test {
         assertEq(_verify(_mainnetOpts(), d), 1);
     }
 
+    /// @dev Review M-3: staking lockers and oracle signers are privileged sets too; an extra one must fail.
+    function test_verify_flags_an_extra_staking_locker() public {
+        (DeployMainnet.Deployed memory d,) = _deployAndVerify(_mainnetOpts(), "extra-locker");
+        address staking = BookrunnerConfig(d.config).staking();
+        vm.prank(d.timelock);
+        (bool ok,) = staking.call(
+            abi.encodeWithSignature("setLocker(address,bool)", makeAddr("stray locker"), true)
+        );
+        assertTrue(ok);
+        assertEq(_verify(_mainnetOpts(), d), 1);
+    }
+
+    function test_verify_flags_an_extra_oracle_signer() public {
+        (DeployMainnet.Deployed memory d,) = _deployAndVerify(_mainnetOpts(), "extra-signer");
+        AttestedOracle o = AttestedOracle(BookrunnerConfig(d.config).oracle());
+        bytes32 m = keccak256("stray measurement");
+        vm.startPrank(d.timelock);
+        o.setMeasurement(m, true);
+        o.setAttestedSigner(makeAddr("stray signer"), bytes32("AWS_NITRO"), m, keccak256("quote"));
+        vm.stopPrank();
+        assertGt(_verify(_mainnetOpts(), d), 0);
+    }
+
     function test_verify_flags_registry_admin_and_param_drift() public {
         (DeployMainnet.Deployed memory d,) = _deployAndVerify(_mainnetOpts(), "drift");
         vm.prank(d.timelock);
@@ -434,8 +457,8 @@ contract DeployMainnetTest is Test {
         StockTokenRegistry(d.stockRegistry).setMultiplierSource(stocks[2], false);
         assertEq(_verify(_mainnetOpts(), d), 1);
         vm.prank(d.timelock);
-        AttestedOracle(d.oracle).setSigner(oracleSigner, false, bytes32(0)); // signer row + measurement row
-        assertEq(_verify(_mainnetOpts(), d), 3);
+        AttestedOracle(d.oracle).setSigner(oracleSigner, false, bytes32(0)); // signer row + measurement row + exact signer set
+        assertEq(_verify(_mainnetOpts(), d), 4);
     }
 
     function test_verify_flags_oracle_min_sources_drift() public {

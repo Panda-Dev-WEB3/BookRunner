@@ -192,6 +192,58 @@ contract VerifyHandover is MainnetInput {
         tok = _exactHolders(tl, t.EXECUTOR_ROLE(), one, "timelock EXECUTOR") && tok;
         tok = _exactHolders(tl, t.CANCELLER_ROLE(), one, "timelock CANCELLER") && tok;
         _row(tok, "timelock: no role holder beyond the multisig / itself (BookrunnerTimelock enumerated)");
+
+        // review M-3: the other privileged sets. Lockers: charter, committee, and book mandates (factory components).
+        bool lok = true;
+        try BkrnStaking(cfg.staking()).lockers() returns (address[] memory ls) {
+            BookFactory f = BookFactory(cfg.factory());
+            for (uint256 i; i < ls.length; ++i) {
+                if (ls[i] != cfg.charter() && ls[i] != cfg.committee() && !f.isComponent(ls[i])) {
+                    lok = false;
+                    console2.log("    staking: unexpected locker", ls[i]);
+                }
+            }
+        } catch {
+            lok = false;
+            console2.log("    staking: lockers not enumerable");
+        }
+        _row(lok, "staking: no locker beyond charter, committee and book mandates");
+
+        address[] memory expected = new address[](oracleSigners.length);
+        for (uint256 i; i < oracleSigners.length; ++i) {
+            expected[i] = oracleSigners[i].signer;
+        }
+        bool sok = true;
+        try AttestedOracle(cfg.oracle()).signers() returns (address[] memory ss) {
+            sok = ss.length == _distinct(expected);
+            for (uint256 i; i < ss.length; ++i) {
+                if (!_contains(expected, ss[i])) {
+                    sok = false;
+                    console2.log("    oracle: unexpected signer", ss[i]);
+                }
+            }
+        } catch {
+            sok = false;
+            console2.log("    oracle: signers not enumerable");
+        }
+        _row(sok, "oracle: active signers == exactly the input's");
+    }
+
+    function _distinct(address[] memory xs) internal pure returns (uint256 n) {
+        for (uint256 i; i < xs.length; ++i) {
+            bool dup;
+            for (uint256 j; j < i; ++j) {
+                if (xs[j] == xs[i]) dup = true;
+            }
+            if (!dup) ++n;
+        }
+    }
+
+    function _contains(address[] memory xs, address x) internal pure returns (bool) {
+        for (uint256 i; i < xs.length; ++i) {
+            if (xs[i] == x) return true;
+        }
+        return false;
     }
 
     /// @dev True when `ac` enumerates `role` and its holders are exactly the distinct addresses of `expected`.
