@@ -67,11 +67,16 @@ export function parseQuote(v: unknown): QuoteObservation | null {
   const bid = num(q.bid);
   const ask = num(q.ask);
   if (ts === null || bid === null || ask === null) return null;
+  const bookId = num(q.bookId);
+  const size = num(q.size);
   return {
     ts,
     bid,
     ask,
     oracle: num(q.oracle) ?? 0,
     sides: { bid: q.sides?.bid !== false, ask: q.sides?.ask !== false },
+    ...(bookId !== null ? { bookId } : {}),
+    ...(size !== null ? { size } : {}),
+    ...(typeof q.signature === "string" ? { signature: q.signature } : {}),
   };
 }

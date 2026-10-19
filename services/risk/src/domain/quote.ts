@@ -18,7 +18,7 @@
 //    book is held reduce-only (the off-hours convention) whatever the agent quotes, until a fresh attested
 //    price has been seen on `releaseTicks` consecutive ticks (stepQuoteHold). Basing the hold on the price, not
 //    on the quote, keeps it from flapping when an obedient agent drops to one side.
-import { type QuoteProposal, quoteSkewBps, quoteWidthBps } from "@bookrunner/shared";
+import { QUOTE_PRICE_MAX_AGE_MS, type QuoteProposal, quoteSkewBps, quoteWidthBps } from "@bookrunner/shared";
 import type { OracleReading, QuoteObservation } from "../types";
 import { oraclePrice } from "./oracle";
 
@@ -28,7 +28,7 @@ export const DEFAULT_QUOTE_DRIFT_BPS = 5;
 /** Upper bound of the configurable allowance (bps). */
 export const MAX_QUOTE_DRIFT_BPS = 10;
 /** Default max age (ms) of the attested price a quote is checked against (RISK_QUOTE_PRICE_MAX_AGE_MS). */
-export const DEFAULT_QUOTE_PRICE_MAX_AGE_MS = 15_000;
+export const DEFAULT_QUOTE_PRICE_MAX_AGE_MS = QUOTE_PRICE_MAX_AGE_MS;
 /** Bounds of RISK_QUOTE_PRICE_MAX_AGE_MS (validated at startup). */
 export const MIN_QUOTE_PRICE_MAX_AGE_MS = 2_000;
 export const MAX_QUOTE_PRICE_MAX_AGE_MS = 60_000;

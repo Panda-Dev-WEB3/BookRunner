@@ -148,6 +148,22 @@ export interface QueuePort {
   enqueueVenueOp(job: VenueOpsJob, jobId: string): Promise<void>;
 }
 
+/** Result of the agent-quote authentication: only "ok" quotes are checked (audit 2026-10 lead "Redis trust"). */
+export type QuoteAuth = "ok" | "unsigned" | "forged" | "unavailable";
+
+/**
+ * Authenticated bus messages (packages/shared/src/busAuth.ts). Redis is not trusted: risk acts only on an agent quote
+ * signed by an active desk key of the book's mandate, and signs its kill orders with the RISK key.
+ */
+export interface RiskBusAuth {
+  /** Was the quote read from Redis signed by an active desk session key of `ref`'s mandate? */
+  quote(ref: BookRef, q: QuoteObservation): Promise<QuoteAuth>;
+  /** The KillMsg signed with the RISK key (EIP-712 KillOrder, nonce per book and episode). */
+  signKill(k: { bookId: number; reason: string; breaches: string[]; episodeId: string; issuedAt: number }): Promise<KillMsg>;
+  /** A forged message was refused (published for alerts bus_forged_message). */
+  forged?(kind: "quote", reason: string): void;
+}
+
 /** Live venue clients (QuotingVenue) per book; null when none is available (engine books, no keys). */
 export interface VenueProvider {
   forBook(ref: BookRef): Promise<QuotingVenue | null>;

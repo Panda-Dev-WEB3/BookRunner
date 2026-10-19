@@ -101,13 +101,17 @@ export interface NavInputs {
   highWaterWad: bigint;
 }
 
-/** Subset of QuoteMsg (KEYS.agentQuote) the risk check needs. */
+/** Subset of QuoteMsg (KEYS.agentQuote) the risk check needs, plus what its signature covers (busAuth.ts AgentQuote). */
 export interface QuoteObservation {
   ts: number; // unix ms
   bid: number;
   ask: number;
   oracle: number;
   sides: { bid: boolean; ask: boolean };
+  bookId?: number;
+  size?: number;
+  /** EIP-712 AgentQuote signature by the book's desk session key (absent: unsigned) */
+  signature?: string;
 }
 
 export interface LiveNavResult {
@@ -242,6 +246,11 @@ export interface RiskMeta {
   } | null;
   /** Audit M-3: a live quote could not be checked against a fresh attested price (book held reduce-only). */
   quoteUnverified?: boolean;
+  /**
+   * Who signed the agent's quote read from Redis (audit 2026-10 lead "Redis trust"): ok = an active desk key of the
+   * mandate; anything else = the quote is ignored (no quote check, never a breach). null = no quote / no check.
+   */
+  quoteAuth?: "ok" | "unsigned" | "forged" | "unavailable" | null;
   hedgeBand: { inBand: boolean; outOfBandSince: number | null; outOfBandSec: number; graceSec: number };
   killed: boolean;
   killReason: string | null;

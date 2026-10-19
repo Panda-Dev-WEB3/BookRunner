@@ -19,7 +19,7 @@ import { dedupe, emitDomainEvent } from "./events";
 import { runKillSequence } from "./kill/sequence";
 import { reportDeployedValueUsd } from "../../ops-venue/src/report712";
 import { pickVenueReport } from "./domain/venueReport";
-import type { BusPort, ChainPort, Clock, QueuePort, SignedFeedsPort, SignedPriceMap, StorePort, VenueProvider } from "./ports";
+import type { BusPort, ChainPort, Clock, QueuePort, RiskBusAuth, SignedFeedsPort, SignedPriceMap, StorePort, VenueProvider } from "./ports";
 import {
   type BookObservation,
   type BookRef,
@@ -48,6 +48,11 @@ export interface MonitorDeps {
   feeds?: SignedFeedsPort;
   /** Chain the signed venue reports must be signed for. */
   chainId?: number;
+  /**
+   * Authenticated bus messages (audit 2026-10 lead "Redis trust"): agent quotes are checked only when signed by an
+   * active desk key, kill orders are RISK-signed. Absent (tests of other behaviour): quotes trusted, kills unsigned.
+   */
+  auth?: RiskBusAuth;
 }
 
 const NO_PRICES: SignedPriceMap = new Map();
@@ -76,6 +81,9 @@ export class BookMonitor {
   private prices: SignedPriceMap = NO_PRICES;
   /** asOf of the signed venue report the current tick valued the venue with (null: none used) */
   private venueReportAsOf: number | null = null;
+  /** authentication of the quote read this tick (null: none read / no auth) */
+  private quoteAuth: RiskMeta["quoteAuth"] = null;
+  private lastForgedQuoteLog = Number.NEGATIVE_INFINITY;
   readonly log: Logger;
 
   constructor(
@@ -204,7 +212,24 @@ export class BookMonitor {
       const fromRedis = oracleFromRedis(msg, nowSec, c.maxPriceAgeSec);
       if (!oracle || fromRedis.publishedAt > oracle.publishedAt) oracle = fromRedis;
     }
-    const quote = await this.soft("latestQuote", () => this.d.bus.latestQuote(ref.bookId), null);
+    let quote = await this.soft("latestQuote", () => this.d.bus.latestQuote(ref.bookId), null);
+    this.quoteAuth = null;
+    const auth = this.d.auth;
+    if (quote && auth) {
+      // Redis is not trusted: an unsigned / forged quote is no quote (never a breach, never a kill)
+      const st = await auth.quote(ref, quote).catch(() => "unavailable" as const);
+      this.quoteAuth = st;
+      if (st !== "ok") {
+        if (st === "forged") {
+          auth.forged?.("quote", `book ${ref.bookId}: quote not signed by an active desk key`);
+          if (nowMs - this.lastForgedQuoteLog > 60_000) {
+            this.lastForgedQuoteLog = nowMs;
+            this.log.warn({ bookId: ref.bookId }, "FORGED agent quote in Redis ignored (not signed by an active desk key of the mandate)");
+          }
+        }
+        quote = null;
+      }
+    }
 
     return {
       bookId: ref.bookId,
@@ -309,6 +334,7 @@ export class BookMonitor {
       },
       quote: ev.quote,
       quoteUnverified: ev.quoteUnverified,
+      quoteAuth: this.quoteAuth,
       hedgeBand: {
         inBand: ev.inBand,
         outOfBandSince: ev.band.outOfBandSince,
@@ -473,6 +499,7 @@ export class BookMonitor {
         venue,
         clock: this.d.clock,
         sleep: this.d.sleep,
+        ...(this.d.auth ? { signKill: this.d.auth.signKill.bind(this.d.auth) } : {}),
       },
     );
     if (res.complete) {

@@ -9,7 +9,8 @@
 //     never cached.
 //   - verifiedOracleMsg: an OraclePriceMsg from Redis -> the same message rebuilt from its signed fields, or the reason
 //     it is refused (unsigned, wrong signer, another underlying).
-import { type Address, getAddress, type Hex, isAddress } from "viem";
+import type { Address, Hex } from "viem";
+import { ROLE_CACHE_MS, cachedAddressCheck } from "./busAuth";
 import { type PriceUpdate, recoverPriceSigner } from "./eip712";
 import type { OraclePriceMsg } from "./queues";
 
@@ -23,33 +24,15 @@ export interface PriceSignerCheck {
 }
 
 /** How long an on-chain signer answer is reused. */
-export const ORACLE_SIGNER_CACHE_MS = 60_000;
+export const ORACLE_SIGNER_CACHE_MS = ROLE_CACHE_MS;
 
 /**
  * The signer check: the pinned addresses when `pinned` is set (comma-separated), else AttestedOracle.isSigner on-chain
  * (`isSignerOnChain`, cached ORACLE_SIGNER_CACHE_MS; an RPC error propagates and is not cached).
  */
 export function oracleSignerCheck(o: { chainId: number; oracle: Address; pinned?: string | undefined; pinnedEnv?: string; isSignerOnChain: (a: Address) => Promise<boolean>; now?: () => number }): PriceSignerCheck {
-  const now = o.now ?? Date.now;
-  if (o.pinned?.trim()) {
-    const list = o.pinned.split(",").map((x) => x.trim()).filter(Boolean);
-    for (const a of list) if (!isAddress(a)) throw new Error(`${o.pinnedEnv ?? "pinned oracle signers"}: not an address: ${a}`);
-    const set = new Set(list.map((a) => getAddress(a)));
-    return { chainId: o.chainId, oracle: o.oracle, isOracleSigner: async (a) => set.has(getAddress(a)) };
-  }
-  const cache = new Map<string, { ok: boolean; at: number }>();
-  return {
-    chainId: o.chainId,
-    oracle: o.oracle,
-    isOracleSigner: async (a) => {
-      const k = a.toLowerCase();
-      const hit = cache.get(k);
-      if (hit && now() - hit.at < ORACLE_SIGNER_CACHE_MS) return hit.ok;
-      const ok = await o.isSignerOnChain(a); // an RPC error propagates: the caller reports it, nothing is cached
-      cache.set(k, { ok, at: now() });
-      return ok;
-    },
-  };
+  const check = cachedAddressCheck({ pinned: o.pinned, ...(o.pinnedEnv ? { pinnedEnv: o.pinnedEnv } : {}), onChain: o.isSignerOnChain, ...(o.now ? { now: o.now } : {}), ttlMs: ORACLE_SIGNER_CACHE_MS });
+  return { chainId: o.chainId, oracle: o.oracle, isOracleSigner: check };
 }
 
 /** A verified price (signer recovered and allowed) or the reason it is refused. */
@@ -87,7 +70,8 @@ export class OraclePriceVerifier {
       }
       verdict = ok ? { ok: true, signer } : { ok: false, reason: `signed by ${signer}, which is not an oracle signer` };
     }
-    if (this.verdicts.size >= this.maxCached) this.verdicts.clear();
+    // evict the oldest verdict only: a flood of forged signatures never flushes the genuine ones in one go
+    if (this.verdicts.size >= this.maxCached) this.verdicts.delete(this.verdicts.keys().next().value as string);
     this.verdicts.set(key, verdict);
     return verdict;
   }
