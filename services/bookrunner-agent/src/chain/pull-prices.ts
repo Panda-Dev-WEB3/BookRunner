@@ -296,7 +296,21 @@ export interface DeskPriceDataOptions {
    * Swaps and FundDesk always carry (their oracle-slippage and valuation checks want the latest print).
    */
   storedFreshSec?: number;
+  /**
+   * Swaps (Hedge / Flatten) only: the desk refuses a key swap whose token price is older than
+   * min(maxPriceAge, maxTradePriceAge) (StaleTradePrice, audit 2026-10 "old prints"), so a print older than this
+   * (swapPriceMaxAgeSec) is never carried for them: nothing is carried and the swap runs on the stored price,
+   * which the desk accepts only if someone landed a fresh one.
+   */
+  swapMaxAgeSec?: number;
 }
+
+/** The age bound for swap prints: the chain's maxTradePriceAge minus a margin for inclusion, capped by the env bound, >= 1 s. */
+export function swapPriceMaxAgeSec(maxTradePriceAgeSec: number, marginSec: number, envMaxAgeSec: number): number {
+  return Math.max(1, Math.min(envMaxAgeSec, maxTradePriceAgeSec - marginSec));
+}
+
+const isSwap = (kind: DeskActionKind) => kind === DESK_ACTION.Hedge || kind === DESK_ACTION.Flatten;
 
 export function deskPriceData(prices: PullPrices, o: DeskPriceDataOptions): DeskPriceData {
   return {
@@ -307,7 +321,8 @@ export function deskPriceData(prices: PullPrices, o: DeskPriceDataOptions): Desk
         if (s && !s.held && s.publishedAt > 0 && prices.nowSec() - s.publishedAt < (o.storedFreshSec ?? 0)) return null;
       }
       const comps = needsComponents(kind) ? await o.componentPriceIds() : [];
-      return prices.priceData(deskWant(kind, o.bookPriceId, comps), o.maxAgeSec);
+      const maxAge = isSwap(kind) && o.swapMaxAgeSec !== undefined ? Math.min(o.maxAgeSec, o.swapMaxAgeSec) : o.maxAgeSec;
+      return prices.priceData(deskWant(kind, o.bookPriceId, comps), maxAge);
     },
   };
 }

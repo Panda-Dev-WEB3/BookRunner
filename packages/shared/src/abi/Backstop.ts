@@ -102,6 +102,19 @@ export const backstopAbi = [
   },
   {
     "type": "function",
+    "name": "migrate",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "moved",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "notifyDeposit",
     "inputs": [
       {
@@ -223,6 +236,25 @@ export const backstopAbi = [
     "anonymous": false
   },
   {
+    "type": "event",
+    "name": "Migrated",
+    "inputs": [
+      {
+        "name": "to",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
     "type": "error",
     "name": "DepositNotReceived",
     "inputs": [
@@ -302,6 +334,11 @@ export const backstopAbi = [
         "internalType": "address"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "StillCurrent",
+    "inputs": []
   },
   {
     "type": "error",

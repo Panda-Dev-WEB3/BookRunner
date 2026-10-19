@@ -20,6 +20,8 @@ export interface JuryCharter {
   charter: Charter;
   status: CharterStatus;
   filedAt: number; // unix seconds
+  /** on-chain decision deadline, fixed at filing (unix s; audit 2026-10 D); absent: filedAt + current window */
+  deadline?: number;
 }
 
 export interface StoredVerdict {
@@ -150,7 +152,8 @@ export async function runJury(charterId: number, ports: JuryPorts, o: JuryRunOpt
   });
 
   const committee = await ports.committee().catch(() => ({ members: [] as Address[], committeeWindowSec: 0 }));
-  const deadline = committee.committeeWindowSec ? rec.filedAt + committee.committeeWindowSec : null;
+  // the on-chain deadline is fixed at filing (audit 2026-10 D); filedAt + the current window only as a fallback
+  const deadline = rec.deadline ?? (committee.committeeWindowSec ? rec.filedAt + committee.committeeWindowSec : null);
   await ports.emit({
     type: "jury.verdict_posted",
     bookId: charterId,

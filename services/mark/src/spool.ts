@@ -2,8 +2,8 @@
 // commit (the pnl JSON exists only off-chain; losing it would make the committed hash unverifiable).
 // Rows are flushed into the DB on the next successful tick.
 import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import type { MarkInput, MarkPnl } from "@bookrunner/shared";
+import { isAbsolute, join, resolve } from "node:path";
+import { type MarkInput, type MarkPnl, REPO_ROOT } from "@bookrunner/shared";
 import type { Address, Hex } from "viem";
 import type { MarkRow } from "./ports";
 
@@ -47,7 +47,13 @@ export function deserializeMarkRow(s: string): MarkRow {
 }
 
 export class MarkSpool {
-  constructor(private readonly dir: string) {}
+  /** Absolute spool directory: a relative MARK_SPOOL_DIR resolves against the repo root (like OPS_KEYS_DIR), not the
+   *  service's cwd (services/mark, read-only under the systemd sandbox; the writable state is .data/). */
+  readonly dir: string;
+
+  constructor(dir: string) {
+    this.dir = isAbsolute(dir) ? dir : resolve(REPO_ROOT, dir);
+  }
 
   write(r: MarkRow): string {
     if (!existsSync(this.dir)) mkdirSync(this.dir, { recursive: true });

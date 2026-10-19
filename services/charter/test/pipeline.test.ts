@@ -6,7 +6,7 @@ import { cidFromDigest, cidOfJson } from "../src/domain/cid";
 import { type JuryPorts, type PendingEvent, type ReceiptInput, type StoredVerdict, runJury } from "../src/jury/pipeline";
 import { nvdaCharter, ruleContextFor } from "./fixtures";
 
-function fakePorts(over: Partial<{ status: string; posted: boolean; failPostOnce: boolean }> = {}) {
+function fakePorts(over: Partial<{ status: string; posted: boolean; failPostOnce: boolean; deadline: number }> = {}) {
   const state = {
     verdicts: [] as StoredVerdict[],
     posts: [] as Array<{ id: number; digest: Hex; rec: boolean }>,
@@ -17,7 +17,8 @@ function fakePorts(over: Partial<{ status: string; posted: boolean; failPostOnce
   };
   const c = nvdaCharter();
   const ports: JuryPorts = {
-    loadCharter: async (id) => (id === 404 ? null : { charterId: id, charter: c, status: (over.status ?? "Filed") as "Filed", filedAt: 1_790_000_000 }),
+    loadCharter: async (id) =>
+      id === 404 ? null : { charterId: id, charter: c, status: (over.status ?? "Filed") as "Filed", filedAt: 1_790_000_000, ...(over.deadline ? { deadline: over.deadline } : {}) },
     onChainVerdict: async () => ({ posted: over.posted ?? false, digest: `0x${"0".repeat(64)}`, recommendApprove: false }),
     ruleContext: async (ch) => {
       state.ruleContextCalls++;
@@ -69,6 +70,13 @@ describe("runJury", () => {
     expect(state.receipts[0]!.payload).toMatchObject({ type: "jury_verdict", charterId: 7, cid: out.cid, recommendApprove: true });
     expect(state.events.map((e) => e.type)).toEqual(["jury.verdict_posted", "committee.review_requested"]);
     expect(state.events[1]!.payload).toMatchObject({ approvalsRequired: 2, juryCid: out.cid, deadline: new Date((1_790_000_000 + 172_800) * 1000).toISOString() });
+  });
+
+  test("audit 2026-10 D: the review deadline is the on-chain one fixed at filing, not filedAt + the current window", async () => {
+    const { ports, state } = fakePorts({ deadline: 1_790_000_000 + 3 * 86_400 });
+    const out = await runJury(7, ports, opts);
+    expect(out.status).toBe("posted");
+    expect(state.events[1]!.payload).toMatchObject({ deadline: new Date((1_790_000_000 + 3 * 86_400) * 1000).toISOString() });
   });
 
   test("crash between store and post: the retry re-posts the SAME digest without re-running the jury", async () => {

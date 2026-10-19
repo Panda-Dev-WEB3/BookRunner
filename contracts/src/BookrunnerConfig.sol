@@ -2,6 +2,8 @@
 pragma solidity 0.8.30;
 
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
+import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
 import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 import {BRTypes} from "./interfaces/BRTypes.sol";
 
@@ -11,8 +13,9 @@ import {BRTypes} from "./interfaces/BRTypes.sol";
 ///         ASCII short strings equal to their getter name (e.g. `bytes32("usdc")`, `bytes32("carryBps")`),
 ///         so deploy scripts can set everything through `setAddress(es)` / `setParam(s)`.
 /// @dev Non-upgradeable. Role ids are `keccak256("<NAME>")`; all roles are administered by
-///      `DEFAULT_ADMIN_ROLE`.
-contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
+///      `DEFAULT_ADMIN_ROLE`. Role holders are enumerable (`getRoleMember(Count)`, AccessControlEnumerable) so
+///      the handover check (script/VerifyHandover.s.sol) can prove no extra holder exists (audit 2026-10 D).
+contract BookrunnerConfig is AccessControlEnumerable, IBookrunnerConfig {
     // ---------------------------------------------------------------------------------------------
     // Roles
     // ---------------------------------------------------------------------------------------------
@@ -74,6 +77,9 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
 
     /// @notice Lower bound of `committeeWindow` (charter review + committee action expiry).
     uint256 public constant MIN_COMMITTEE_WINDOW = 1 days;
+    /// @notice Upper bound of `maxTradePriceAge` (audit 2026-10 L-2): the pull-oracle latency window an engine trade
+    ///         or a desk key swap can use is at most 15 s, whatever governance sets.
+    uint256 public constant MAX_TRADE_PRICE_AGE = 15;
 
     /// @notice Decimals the settlement token (`usdc`: USDC on devnet/testnet, USDG on Robinhood Chain
     ///         mainnet) must have; `setAddress("usdc", t)` reverts `BadSettlementToken` otherwise.
@@ -99,6 +105,8 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
     uint32 private _maxPriceAge;
     uint32 private _committeeWindow;
     bool private _newBooksPaused;
+    /// @dev The current pause was set (or confirmed) by the admin (the timelock): a GUARDIAN cannot lift it.
+    bool private _pausedByTimelock;
     uint32 private _maxTradePriceAge; // packed with the params above (one slot with maxPriceAge)
     uint256 private _charterFeeUsd;
     uint256 private _sponsorBondBkrn;
@@ -118,6 +126,8 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
     error TooManyTiers(uint256 count, uint256 max);
     error TiersNotAscending(uint256 index);
     error NotAdminOrGuardian(address caller);
+    /// @notice A GUARDIAN tried to lift a pause the admin (timelock) set (audit 2026-10 D).
+    error PausedByTimelock();
     error TimelockNotAdmin(address timelock);
     /// @notice `usdc` (settlement token) is not a contract returning `decimals() == 6` (`decimals` = what
     ///         it returned, 0 when the call failed / the address has no code).
@@ -190,7 +200,7 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
 
     /// @notice Sets the numeric parameter `key` (one of the `KEY_*` parameter keys).
     /// @dev Admin only. Range checks: bps <= 1e4; markInterval, maxMarkAge, maxPriceAge and
-    ///      maxTradePriceAge > 0; committeeWindow >= MIN_COMMITTEE_WINDOW (1 day); uint32 params fit
+    ///      maxTradePriceAge > 0 (maxTradePriceAge also <= MAX_TRADE_PRICE_AGE, 15 s); committeeWindow >= MIN_COMMITTEE_WINDOW (1 day); uint32 params fit
     ///      uint32. Emits `ParamSet`.
     function setParam(bytes32 key, uint256 value) external onlyRole(DEFAULT_ADMIN_ROLE) {
         _setParam(key, value);
@@ -222,13 +232,21 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
     }
 
     /// @notice Kill-criteria switch for NEW charters / books / deposits. Never affects redemptions.
-    /// @dev Callable by the admin or a GUARDIAN, in both directions.
+    /// @dev The admin (timelock) in both directions; a GUARDIAN may pause, and lift only a pause no admin set or
+    ///      confirmed (audit 2026-10 D: the guardian is an emergency brake, it cannot override governance). An
+    ///      admin call records who owns the pause (`pausedByTimelock`); a guardian re-pause does not downgrade it.
     function setNewBooksPaused(bool paused) external {
-        if (!hasRole(DEFAULT_ADMIN_ROLE, msg.sender) && !hasRole(GUARDIAN_ROLE, msg.sender)) {
-            revert NotAdminOrGuardian(msg.sender);
-        }
+        bool isAdmin = hasRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        if (!isAdmin && !hasRole(GUARDIAN_ROLE, msg.sender)) revert NotAdminOrGuardian(msg.sender);
+        if (isAdmin) _pausedByTimelock = paused;
+        else if (!paused && _pausedByTimelock) revert PausedByTimelock();
         _newBooksPaused = paused;
         emit NewBooksPaused(paused);
+    }
+
+    /// @notice True while the new-books pause was set or confirmed by the admin (timelock): only it can lift it.
+    function pausedByTimelock() external view returns (bool) {
+        return _pausedByTimelock;
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -239,7 +257,7 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
     function hasRole(bytes32 role, address account)
         public
         view
-        override(AccessControl, IBookrunnerConfig)
+        override(AccessControl, IAccessControl, IBookrunnerConfig)
         returns (bool)
     {
         return super.hasRole(role, account);
@@ -494,7 +512,7 @@ contract BookrunnerConfig is AccessControl, IBookrunnerConfig {
             if (value < MIN_COMMITTEE_WINDOW || value > type(uint32).max) revert ParamOutOfRange(key, value);
             _committeeWindow = uint32(value);
         } else if (key == KEY_MAX_TRADE_PRICE_AGE) {
-            _checkNonZeroU32(key, value);
+            if (value == 0 || value > MAX_TRADE_PRICE_AGE) revert ParamOutOfRange(key, value);
             _maxTradePriceAge = uint32(value);
         } else {
             revert UnknownKey(key);

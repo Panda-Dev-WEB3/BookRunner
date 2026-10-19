@@ -30,7 +30,7 @@ contract MarketCharterTest is GovBase {
     }
 
     function test_bondLockId_isDistinctAndDeterministic() public view {
-        assertEq(charter.bondLockId(1), keccak256(abi.encode(charter.SPONSOR_BOND_DOMAIN(), uint256(1))));
+        assertEq(charter.bondLockId(1), keccak256(abi.encode(charter.SPONSOR_BOND_DOMAIN(), address(charter), uint256(1))));
         assertTrue(charter.bondLockId(1) != charter.bondLockId(2));
     }
 

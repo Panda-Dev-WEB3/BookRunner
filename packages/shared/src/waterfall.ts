@@ -138,6 +138,47 @@ export function splitDistribution(i: SplitInput): SplitResult {
 }
 
 // ---------------------------------------------------------------------------------------------
+// 2b. Fee-flow credit (Book.creditDistribution), audit 2026-10 L-1.
+//    The residual of a distribution (the Junior amount, or everything when Junior has no supply: the
+//    router then credits it all to Senior) follows the mark gain order: Senior impairment first, then
+//    backstop debt (that part leaves the tranches and is paid to the backstop from vault idle), then
+//    Junior (Senior when Junior has no supply). Senior's hurdle share is Senior's own income.
+// ---------------------------------------------------------------------------------------------
+export interface DistributionInput {
+  senior: bigint;
+  junior: bigint;
+  juniorSupply: bigint;
+  seniorImpairment: bigint;
+  backstopDebt: bigint;
+}
+
+export interface DistributionResult {
+  seniorCredit: bigint;
+  juniorCredit: bigint;
+  seniorRestored: bigint;
+  backstopRepaid: bigint;
+  seniorImpairment: bigint;
+  backstopDebt: bigint;
+}
+
+export function applyDistribution(i: DistributionInput): DistributionResult {
+  const residual = i.juniorSupply === 0n ? i.senior + i.junior : i.junior;
+  const hurdle = i.senior + i.junior - residual;
+  const seniorRestored = minBig(residual, i.seniorImpairment);
+  const backstopRepaid = minBig(residual - seniorRestored, i.backstopDebt);
+  const rest = residual - seniorRestored - backstopRepaid;
+  const toSenior = i.juniorSupply === 0n;
+  return {
+    seniorCredit: hurdle + seniorRestored + (toSenior ? rest : 0n),
+    juniorCredit: toSenior ? 0n : rest,
+    seniorRestored,
+    backstopRepaid,
+    seniorImpairment: i.seniorImpairment - seniorRestored,
+    backstopDebt: i.backstopDebt - backstopRepaid,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
 // 3. Mark application (Book.applyMark). nav = vault.idle() - unfundedClaims + mark.deployedValueUsd
 //    Loss: Junior first, then Senior (seniorImpairment += senior loss); if Junior == 0 and Senior is
 //    impaired, the backstop covers min(seniorImpairment, backstop balance); the cover becomes backstop

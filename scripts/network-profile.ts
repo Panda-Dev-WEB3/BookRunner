@@ -35,6 +35,8 @@ export const MAINNET_FIXED: Readonly<Record<string, string>> = {
   INDEXER_CONFIRMATIONS: "2",
   OPS_KEYS_DIR: ".data/mainnet/keys",
   OPS_SAGA_FILE: ".data/mainnet/ops-venue/sagas.json",
+  // not the default tmpdir: that is the unit's PrivateTmp, emptied on every restart (HARDENING.md)
+  MARK_SPOOL_DIR: ".data/mainnet/mark-spool",
 };
 
 /**

@@ -187,7 +187,7 @@ service). A distribution with `gross == 0` is a no-op but still marks the period
 ### 2.5 Book, Tranche, UnderwritingVault, Waterfall [A-book]
 
 **Waterfall.sol** — pure library mirroring `packages/shared/src/waterfall.ts` exactly:
-`allocateWindow`, `walletAllocation`, `initialDeployment`, `splitDistribution`, `applyMarkPnl`,
+`allocateWindow`, `walletAllocation`, `initialDeployment`, `splitDistribution`, `applyDistribution`, `applyMarkPnl`,
 `sharePriceWad`, `bucketIndex`. `test/WaterfallParity.t.sol` must pass all rows of
 `test/vectors/waterfall.json` (format documented in `scripts/gen-vectors.ts`). Reason codes:
 1 NO_JUNIOR, 2 SPONSOR_SKIN, 3 IF_UNFUNDED.
@@ -246,7 +246,16 @@ Subscription --closeWindow ok--> Live --retire--> Retiring --finalizeRetirement-
   share is left). Holders who redeemed at the impaired price took their loss with them, so gain
   restoration and backstop cover (shared across books) only ever restore the remaining shares.
   Book-side only: `applyMarkPnl` and its TS mirror are unchanged.
-- `creditDistribution` (only router): `S += senior; J += junior`.
+- `creditDistribution` (only router) **[audit L-1]**: Senior's hurdle share is credited to Senior; the
+  residual (the Junior amount, or everything when Junior has no supply) follows the mark gain order:
+  Senior impairment first, then backstop debt (owed to the backstop: `backstopPayable`, netted from NAV,
+  paid from vault idle by the next `fundClaims`), then Junior (`Waterfall.applyDistribution`, mirrored by
+  `applyDistribution` in `packages/shared/src/waterfall.ts`, parity vectors `credit`). Emits
+  `DistributionCredited` with the amounts credited to each tranche and `DistributionRepaid(seniorRestored,
+  backstopRepaid)`. Design note: fee flow is book income like a mark gain, so it must not reach the
+  first-loss tranche while Senior, or the backstop that covered Senior, is still owed. The hurdle share is
+  what Senior is paid for its capital, so it is credited to Senior as before and is not used to restore
+  Senior's own principal.
 - `onCapitalFlow()` (only vault): `flowNonce++`.
 - `retire()` (only MarketCharter): Live → Retiring; cancels an open top-up round and calls
   `mandate.setRetiring()` **[ext]** — reduce-only wind-down, NOT a kill: desk keys stay active so the

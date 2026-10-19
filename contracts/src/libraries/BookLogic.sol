@@ -185,6 +185,41 @@ library BookLogic {
         fundClaims($);
     }
 
+    /// @dev Book.creditDistribution (msg.sender is the router: DELEGATECALL keeps it). Audit 2026-10 L-1: the
+    ///      residual follows the mark gain order (Waterfall.applyDistribution). A repayment earned here is netted
+    ///      from NAV (backstopPayable) and paid by the next fundClaims, exactly like one earned at a mark; the
+    ///      router's distribution does not wait for it.
+    function creditDistribution(Book.BookStorage storage $, uint256 seniorAmount, uint256 juniorAmount)
+        external
+    {
+        if (msg.sender != $.components.router) revert Book.NotRouter();
+        BRTypes.BookState st = $.state;
+        if (st == BRTypes.BookState.Subscription || st == BRTypes.BookState.Cancelled) revert Book.BadState(st);
+        Waterfall.DistributionResult memory r = Waterfall.applyDistribution(
+            Waterfall.DistributionInput({
+                senior: seniorAmount,
+                junior: juniorAmount,
+                juniorSupply: IERC20($.components.junior).totalSupply(),
+                seniorImpairment: $.seniorImpairment,
+                backstopDebt: $.backstopDebt
+            })
+        );
+        $.nav[S] += r.seniorCredit;
+        $.nav[J] += r.juniorCredit;
+        emit IBook.DistributionCredited($.bookId, r.seniorCredit, r.juniorCredit);
+        if (r.seniorRestored > 0 || r.backstopRepaid > 0) {
+            $.seniorImpairment = r.seniorImpairment;
+            $.backstopDebt = r.backstopDebt;
+            $.backstopPayable += r.backstopRepaid;
+            emit Book.DistributionRepaid($.bookId, r.seniorRestored, r.backstopRepaid);
+        }
+        if (st == BRTypes.BookState.Retired) {
+            // late fee flow raises the immediate-settlement price for the remaining holders
+            if (r.seniorCredit > 0) setRetiredPrice($, S, true);
+            if (r.juniorCredit > 0) setRetiredPrice($, J, true);
+        }
+    }
+
     /// @dev Pays unfunded claims from vault idle, Senior first, then the backstop repayment owed (A5-01).
     ///      The repayment never blocks the caller: a vault that cannot pay it (e.g. a vault clone older
     ///      than repayBackstop) leaves it owed and reserved.

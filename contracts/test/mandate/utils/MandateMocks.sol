@@ -33,6 +33,7 @@ contract MandateMockConfig {
     address public entryPoint;
     address public timelock;
     uint32 public maxPriceAge = 300;
+    uint32 public maxTradePriceAge = 15;
     uint32 public markInterval = 86_400;
 
     uint256[] internal _tierThresholds;
@@ -96,6 +97,10 @@ contract MandateMockConfig {
 
     function setMaxPriceAge(uint32 v) external {
         maxPriceAge = v;
+    }
+
+    function setMaxTradePriceAge(uint32 v) external {
+        maxTradePriceAge = v;
     }
 
     /// @dev Sorted step tiers [(threshold, bond)].

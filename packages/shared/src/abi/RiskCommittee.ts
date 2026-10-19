@@ -312,6 +312,11 @@ export const riskCommitteeAbi = [
             "name": "expiresAt",
             "type": "uint64",
             "internalType": "uint64"
+          },
+          {
+            "name": "charter",
+            "type": "address",
+            "internalType": "address"
           }
         ]
       }
@@ -937,6 +942,17 @@ export const riskCommitteeAbi = [
       },
       {
         "name": "bonded",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "CharterChanged",
+    "inputs": [
+      {
+        "name": "actionId",
         "type": "uint256",
         "internalType": "uint256"
       }

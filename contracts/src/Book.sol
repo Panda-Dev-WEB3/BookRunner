@@ -146,6 +146,10 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
     ///         true = the hold run (since `heldSince`) reached BookLogic.MAX_HELD_DEFERRAL (30 days) and no
     ///         governance settle-at-price is set, so they settled at the held valuation.
     event MarkHeld(uint256 indexed bookId, uint256 indexed markId, uint64 heldSince, bool settled);
+    /// @notice Audit 2026-10 L-1: part of a fee distribution's residual restored Senior impairment
+    ///         (`seniorRestored`, credited to Senior) and repaid backstop debt (`backstopRepaid`, owed to the
+    ///         backstop and paid from vault idle by fundClaims) before anything reached Junior.
+    event DistributionRepaid(uint256 indexed bookId, uint256 seniorRestored, uint256 backstopRepaid);
     event TopUpSettled(uint256 indexed bookId, uint256 seniorAccepted, uint256 juniorAccepted);
     event TopUpCancelled(uint256 indexed bookId);
     event BackstopCoverFailed(uint256 indexed bookId, uint256 shortfall);
@@ -367,20 +371,14 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
         BookLogic.applyMark(_s(), markId);
     }
 
-    /// @notice Only the book's RevenueRouter, after transferring senior + junior USDC to the vault.
+    /// @notice Only the book's RevenueRouter, after transferring senior + junior USDC to the vault. Senior's
+    ///         hurdle share is credited to Senior; the residual (the Junior amount, or everything when Junior
+    ///         has no supply) first restores Senior impairment, then repays backstop debt (owed to the backstop,
+    ///         netted from NAV and paid by fundClaims), and only the rest reaches Junior (audit 2026-10 L-1,
+    ///         `Waterfall.applyDistribution`). Emits DistributionCredited with the amounts credited to each
+    ///         tranche, and DistributionRepaid when part of the residual restored Senior or repaid the backstop.
     function creditDistribution(uint256 seniorAmount, uint256 juniorAmount) external {
-        BookStorage storage $ = _s();
-        if (msg.sender != $.components.router) revert NotRouter();
-        BRTypes.BookState st = $.state;
-        if (st == BRTypes.BookState.Subscription || st == BRTypes.BookState.Cancelled) revert BadState(st);
-        $.nav[S] += seniorAmount;
-        $.nav[J] += juniorAmount;
-        emit DistributionCredited($.bookId, seniorAmount, juniorAmount);
-        if (st == BRTypes.BookState.Retired) {
-            // late fee flow raises the immediate-settlement price for the remaining holders
-            if (seniorAmount > 0) BookLogic.setRetiredPrice($, S, true);
-            if (juniorAmount > 0) BookLogic.setRetiredPrice($, J, true);
-        }
+        BookLogic.creditDistribution(_s(), seniorAmount, juniorAmount);
     }
 
     /// @notice Only the book's vault: every vault <-> venue / desk capital movement bumps the nonce, so a

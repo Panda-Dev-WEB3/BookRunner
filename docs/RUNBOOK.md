@@ -76,7 +76,7 @@ only (it deploys mocks and refuses 4663). Tick every box in order; two people fo
        ```bash
        RHC_RPC_URL=<archive rpc> bash scripts/deploy-mainnet.sh broadcast
        ```
-       It deploys the TimelockController (min delay 48h, proposer = executor = canceller = multisig, no admin)
+       It deploys the timelock (`BookrunnerTimelock`: OZ TimelockController with enumerable role holders; min delay 48h, proposer = executor = canceller = multisig, no admin)
        and every component (Book linked to BookLogic, OrderlyAdapter v3 with the input's broker / token hashes),
        sets params / HedgeExecutor v3 factory + one route per Stock Token / buyback params + reference source /
        oracle measurements + attested signers + `requireAttestations()` / Stock Tokens (live `uiMultiplier`
@@ -94,6 +94,9 @@ only (it deploys mocks and refuses 4663). Tick every box in order; two people fo
        - `StockTokenRegistry.admin() == 0` (follows `config.timelock()`);
        - `expenseRecipient` / `slashRecipient` == treasury (input), never the deployer;
        - service roles + GUARDIAN as input; committee seats as input; charter + committee are staking lockers;
+       - **no extra role holder** (audit 2026-10 D): the config's DEFAULT_ADMIN (= the timelock only), GUARDIAN,
+         MARK_SIGNER, RISK, OPS_VENUE, JURY and KEEPER holders, and the timelock's admin / proposer / executor /
+         canceller holders, are enumerated on-chain and must be exactly the input's (a stray admin fails);
        - every component reads this config; `config.usdc()` is the 6-decimal settlement token; vault /
          EntryPoint as input; all 8 factory implementations set; the Book implementation is linked to a
          deployed BookLogic; the OrderlyAdapter implementation is v3 (OrderlyIFAccount IF accounts, 6-dp
@@ -458,15 +461,19 @@ can redo it during the timelock delay from the published quote.
   mark's `pnl_json` venue section against the venue statement for the period.
 - **Wind-down**: `MarketCharter.retire(bookId)` → agents flatten → keeper recalls IF + MM → final
   mark with zero deployed value → `finalizeRetirement` → every holder redeems at the final NAV.
-- **Replacing HedgeExecutor or BkrnFeeRouter** (plain, non-upgradeable contracts resolved through
+- **Replacing HedgeExecutor, BkrnFeeRouter or the Backstop** (plain, non-upgradeable contracts resolved through
   `config`): deploy the new contract, configure it (HedgeExecutor: router(s), `setV3Factory`, one
   `setRoute` per hedge asset; BkrnFeeRouter: `setBuybackRouter`, `setBuybackParams`, reference
   source), then `config.setAddress("hedgeExecutor" | "feeRouter", new)` through the timelock.
   Desks resolve `config.hedgeExecutor()` on every swap, RevenueRouters resolve `config.feeRouter()`
   on every distribution and `BkrnStaking.notifyReward` only accepts the current `config.feeRouter()`.
-  Before the fee-router repoint executes, drain the old router's `buybackPending` with
-  `executeBuyback` (its pending settlement token has no sweep and its buybacks stop working once
-  staking points at the new router). Agents / risk must run with `HEDGE_POOL_FEE` /
+  Once the fee-router repoint has executed, anyone calls `migrate()` on the old router: its whole
+  settlement-token balance (the pending buyback) moves to the new one, which adds it to its
+  `buybackPending` (audit 2026-10 D; a router deployed before that fix has no `migrate`: drain its
+  `buybackPending` with `executeBuyback` before the repoint, its buybacks stop once staking points at the
+  new router). **Replacing the Backstop** works the same way: deploy, `setMaxCoverBps`, repoint
+  `config.setAddress("backstop", new)`, then `migrate()` on the old one moves its whole balance to the new
+  one (books and the fee router resolve `config.backstop()` at every call). Agents / risk must run with `HEDGE_POOL_FEE` /
   `RISK_FLATTEN_POOL_FEE` = 0 (or the route's exact fee) against a route-aware HedgeExecutor.
 - **Route review**: `bun scripts/check-pools.ts` (read-only) before every `setRoute` proposal and
   periodically; a failing token (no pool, no liquidity, round trip beyond the bound) should be

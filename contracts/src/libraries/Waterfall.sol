@@ -183,6 +183,43 @@ library Waterfall {
         o = SplitResult({gross: i.gross, expenses: expenses, carry: carry, senior: senior, junior: junior});
     }
 
+    struct DistributionInput {
+        uint256 senior; // Senior hurdle share credited by the router
+        uint256 junior; // Junior residual credited by the router
+        uint256 juniorSupply;
+        uint256 seniorImpairment;
+        uint256 backstopDebt;
+    }
+
+    struct DistributionResult {
+        uint256 seniorCredit; // added to S
+        uint256 juniorCredit; // added to J
+        uint256 seniorRestored; // part of the residual that restored Senior impairment
+        uint256 backstopRepaid; // part of the residual owed back to the backstop (leaves the tranches)
+        uint256 seniorImpairment; // after
+        uint256 backstopDebt; // after
+    }
+
+    /// @notice Book.creditDistribution (audit 2026-10 L-1): the residual of a fee distribution follows the
+    ///         mark gain order. The residual is the Junior amount, or the whole distribution when Junior has
+    ///         no supply (the router then credits everything to Senior). It restores Senior impairment first,
+    ///         then repays backstop debt (that part leaves the tranches: seniorCredit + juniorCredit ==
+    ///         senior + junior - backstopRepaid), and only the rest is credited to Junior (Senior when Junior
+    ///         has no supply). Senior's hurdle share is Senior's own income and is credited unchanged.
+    function applyDistribution(DistributionInput memory i) internal pure returns (DistributionResult memory r) {
+        uint256 residual = i.juniorSupply == 0 ? i.senior + i.junior : i.junior;
+        uint256 hurdle = i.senior + i.junior - residual;
+        r.seniorRestored = Math.min(residual, i.seniorImpairment);
+        uint256 rest = residual - r.seniorRestored;
+        r.backstopRepaid = Math.min(rest, i.backstopDebt);
+        rest -= r.backstopRepaid;
+        r.seniorCredit = hurdle + r.seniorRestored;
+        if (i.juniorSupply == 0) r.seniorCredit += rest;
+        else r.juniorCredit = rest;
+        r.seniorImpairment = i.seniorImpairment - r.seniorRestored;
+        r.backstopDebt = i.backstopDebt - r.backstopRepaid;
+    }
+
     // -----------------------------------------------------------------------------------------
     // 3. Mark application
     // -----------------------------------------------------------------------------------------

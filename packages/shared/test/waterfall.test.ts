@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   SPONSOR_MIN_JUNIOR_BPS,
   allocateWindow,
+  applyDistribution,
   applyMarkPnl,
   bucketIndex,
   initialDeployment,
@@ -208,6 +209,48 @@ describe("applyMarkPnl", () => {
     expect(gain.backstopDebt).toBe(0n);
     expect(gain.juniorNav).toBe(usd(30_000));
     expect(gain.seniorNav + gain.juniorNav).toBe(usd(110_000) - gain.backstopRepaid);
+  });
+});
+
+describe("applyDistribution (audit 2026-10 L-1: fee flow repays Senior and the backstop before Junior)", () => {
+  test("Senior impaired and backstop owed: the Junior residual restores Senior, then repays, Junior gets the rest", () => {
+    const r = applyDistribution({ senior: usd(600), junior: usd(10_000), juniorSupply: 1n, seniorImpairment: usd(6_000), backstopDebt: usd(4_000) });
+    expect(r.seniorRestored).toBe(usd(6_000));
+    expect(r.backstopRepaid).toBe(usd(4_000));
+    expect(r.seniorCredit).toBe(usd(6_600));
+    expect(r.juniorCredit).toBe(0n);
+    expect(r.seniorImpairment).toBe(0n);
+    expect(r.backstopDebt).toBe(0n);
+  });
+
+  test("partial residual: impairment first, debt waits", () => {
+    const r = applyDistribution({ senior: 0n, junior: usd(2_500), juniorSupply: 1n, seniorImpairment: usd(6_000), backstopDebt: usd(4_000) });
+    expect(r.seniorRestored).toBe(usd(2_500));
+    expect(r.backstopRepaid).toBe(0n);
+    expect(r.seniorImpairment).toBe(usd(3_500));
+    expect(r.backstopDebt).toBe(usd(4_000));
+  });
+
+  test("healthy book: credited as split", () => {
+    const r = applyDistribution({ senior: usd(600), junior: usd(300), juniorSupply: 1n, seniorImpairment: 0n, backstopDebt: 0n });
+    expect([r.seniorCredit, r.juniorCredit, r.seniorRestored, r.backstopRepaid]).toEqual([usd(600), usd(300), 0n, 0n]);
+  });
+
+  test("no Junior supply: the whole distribution is residual", () => {
+    const r = applyDistribution({ senior: 1000n, junior: 0n, juniorSupply: 0n, seniorImpairment: 300n, backstopDebt: 500n });
+    expect([r.seniorRestored, r.backstopRepaid, r.seniorCredit, r.juniorCredit]).toEqual([300n, 500n, 500n, 0n]);
+  });
+
+  test("conservation: seniorCredit + juniorCredit + backstopRepaid == senior + junior", () => {
+    for (const [s, j, imp, debt, js] of [
+      [0n, 0n, 0n, 0n, 1n],
+      [5n, 7n, 3n, 100n, 1n],
+      [usd(1), usd(2), usd(5), usd(5), 0n],
+      [123n, 456n, 0n, 789n, 1n],
+    ] as const) {
+      const r = applyDistribution({ senior: s, junior: j, juniorSupply: js, seniorImpairment: imp, backstopDebt: debt });
+      expect(r.seniorCredit + r.juniorCredit + r.backstopRepaid).toBe(s + j);
+    }
   });
 });
 

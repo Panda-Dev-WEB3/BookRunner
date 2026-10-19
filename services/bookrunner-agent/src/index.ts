@@ -37,8 +37,9 @@ import { PriceFeed, oracleMsgFromChain, parseOracleMsg } from "./agent/price-fee
 import { BookChain } from "./chain/book-chain";
 import { DeskClient } from "./chain/desk-client";
 import { ViemEngineChain } from "./chain/engine-chain";
-import { EXECUTE_WITH_PRICES_SIG, supportsFunction } from "./chain/lowgas-abi";
-import { PullPrices, deskPriceData, freshestOracleLatest, httpBundleSource, redisBundleSource, resolvePullMode } from "./chain/pull-prices";
+import { bookrunnerConfigAbi } from "@bookrunner/shared/abi";
+import { DEFAULT_MAX_TRADE_PRICE_AGE_SEC, EXECUTE_WITH_PRICES_SIG, supportsFunction } from "./chain/lowgas-abi";
+import { PullPrices, deskPriceData, freshestOracleLatest, httpBundleSource, redisBundleSource, resolvePullMode, swapPriceMaxAgeSec } from "./chain/pull-prices";
 import { type AgentEnv, engineVenueConfigFrom, hedgeConfigFrom, loadAgentEnv, quotingConfigFrom, sizingConfigFrom, volConfigFrom } from "./config";
 import { type UniverseComponent, buildHedgeUniverse, parseAllowPairs } from "./domain/hedge-universe";
 import { RuleBasedSizing } from "./domain/sizing";
@@ -174,6 +175,13 @@ async function runOnce(
     });
     return componentIds;
   };
+  // the desk refuses key swaps on a price older than config.maxTradePriceAge (audit 2026-10 "old prints"): never carry one
+  const tradeAgeSec = pull
+    ? await ctx.pub
+        .readContract({ address: ctx.deployment.contracts.config, abi: bookrunnerConfigAbi, functionName: "maxTradePriceAge" })
+        .then(Number)
+        .catch(() => DEFAULT_MAX_TRADE_PRICE_AGE_SEC)
+    : DEFAULT_MAX_TRADE_PRICE_AGE_SEC;
   const deskPrices = pull
     ? deskPriceData(pullPrices, {
         bookPriceId: ctx.priceIdHex,
@@ -181,6 +189,7 @@ async function runOnce(
         maxAgeSec: env.AGENT_PRICE_DATA_MAX_AGE_SECONDS,
         stored: (id) => ctx.chain.oracleLatest(id),
         storedFreshSec: env.AGENT_PRICE_DATA_SKIP_IF_STORED_SECONDS,
+        swapMaxAgeSec: swapPriceMaxAgeSec(tradeAgeSec, env.AGENT_SWAP_PRICE_MARGIN_SECONDS, env.AGENT_PRICE_DATA_MAX_AGE_SECONDS),
       })
     : null;
   log.info({ pull, mode: env.AGENT_PULL_PRICES, oracleUrl: env.ORACLE_URL ?? null }, pull ? "desk actions carry signed prices (executeWithPrices)" : "desk actions use stored prices (execute)");

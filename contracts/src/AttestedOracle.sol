@@ -3,6 +3,7 @@ pragma solidity 0.8.30;
 
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 
 import {IAttestedOracle} from "./interfaces/IAttestedOracle.sol";
 import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
@@ -23,6 +24,8 @@ import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 /// @dev    Non-upgradeable (ARCHITECTURE §2.0). EIP-712 domain ("Bookrunner AttestedOracle", "1"); the type
 ///         string MUST stay byte-identical to `packages/shared/src/eip712.ts` (`priceTypes`).
 contract AttestedOracle is IAttestedOracle, EIP712 {
+    using EnumerableSet for EnumerableSet.AddressSet;
+
     /// @inheritdoc IAttestedOracle
     bytes32 public constant PRICE_TYPEHASH = keccak256(
         "Price(bytes32 underlying,uint256 priceWad,uint64 publishedAt,bool held,uint32 sourceCount,bytes32 sourcesHash)"
@@ -65,6 +68,8 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
     bool public attestationRequired;
 
     mapping(bytes32 underlying => PriceData) internal _prices;
+    /// @dev Active signers, enumerable for the handover check (audit 2026-10 D; isSigner stays the hot-path read).
+    EnumerableSet.AddressSet internal _signers;
     /// @inheritdoc IAttestedOracle
     mapping(bytes32 underlying => uint64) public override lastLiveAt;
 
@@ -112,6 +117,7 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
         emit MinSourcesSet(DEFAULT_MIN_SOURCES);
         if (initialSigner != address(0)) {
             isSigner[initialSigner] = true;
+            _signers.add(initialSigner);
             attestationOf[initialSigner] = initialAttestation;
             emit SignerSet(initialSigner, true, initialAttestation);
         }
@@ -140,6 +146,11 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
                 )
             )
         );
+    }
+
+    /// @notice Every active signer: script/VerifyHandover.s.sol requires exactly the input's (audit 2026-10 D).
+    function signers() external view returns (address[] memory) {
+        return _signers.values();
     }
 
     /// @notice EIP-712 domain separator of this oracle (convenience for off-chain signers).
@@ -242,6 +253,8 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
         if (signer == address(0)) revert ZeroAddress();
         if (active && attestationRequired) revert AttestationRequired();
         isSigner[signer] = active;
+        if (active) _signers.add(signer);
+        else _signers.remove(signer);
         attestationOf[signer] = attestation;
         if (!active) measurementOf[signer] = bytes32(0);
         emit SignerSet(signer, active, attestation);
@@ -264,6 +277,7 @@ contract AttestedOracle is IAttestedOracle, EIP712 {
         if (!measurementAllowed[measurement]) revert MeasurementNotAllowed(measurement);
         bytes32 digest = attestationDigest(signer, platform, measurement, quoteHash);
         isSigner[signer] = true;
+        _signers.add(signer);
         attestationOf[signer] = digest;
         measurementOf[signer] = measurement;
         emit SignerAttested(signer, platform, measurement, quoteHash, digest);

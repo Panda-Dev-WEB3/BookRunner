@@ -37,6 +37,36 @@ are listed in [docs/BOUNTY_SCOPE.md](docs/BOUNTY_SCOPE.md). In short:
 Reports about the off-chain services (`services/`), the web apps (`apps/`) or the testnet host are welcome too
 and are handled the same way.
 
+## Accepted risks
+
+Known behaviours we accept, with the bound that holds on-chain. Reports that only restate them are out of scope;
+a way to exceed the stated bound is in scope.
+
+- **Pull-oracle latency arbitrage on the in-house engine** (audit 2026-10 L-2). The engine is a pull oracle: a
+  trader can open at the stored price and, in the same transaction, relay a newer signed print and close on it.
+  The auditor's PoC made $49.70 risk-free on $50k at a 40 bp move. Bounds:
+  - every engine trade (opens, increases, reductions and closes) needs a live price no older than
+    `min(maxPriceAge, 60 s, maxTradePriceAge)`, and `BookrunnerConfig` refuses `maxTradePriceAge` above
+    `MAX_TRADE_PRICE_AGE` (15 s), so governance cannot widen the window (a deployment made from this code: the
+    current testnet config predates the cap and keeps 15 s by operating rule). The cap equals the default, so
+    there is no on-chain headroom: the operating margin is the oracle tick (2 s) plus the chain's inclusion lag
+    (agents carry prints at most `maxTradePriceAge` - 3 s old). If the oracle cadence ever slows past it, engine
+    trades and desk key swaps stop (fail safe) while liquidations keep working up to `maxPriceAge`;
+  - a print can only be relayed if it is newer than the stored one and not already stale, and a held print fills
+    no trade;
+  - the edge of one round trip is the price move inside that window minus the half-spread on each leg and two
+    taker fees (`test_L2_poc_roundTripEdgeIsMoveMinusSpreadAndFees`): the mandate's minimum quote width and the
+    charter's taker fee are the per-trade cost;
+  - every quote straddles the oracle (audit M-3), and the per-period pool loss budget (`lossBudgetBps` of the pool,
+    from the mandate's drawdown kill) caps what the pool can lose to any channel, this one included, per mark
+    interval; the drawdown kill at the mark is the backstop.
+
+  The complete fix is two-step orders (an order is filled at a price published after it was placed). It was not
+  taken for the launch because it changes every engine trade path (engine, agent, trader UI and a keeper that fills
+  orders) while the engine starts with small caps or off (owner decision); the bound above is the accepted residual.
+  Desk keys are held to the same freshness rule for their own swaps (audit lead "old prints"): a key's Hedge or
+  Flatten needs the token's price within `min(maxPriceAge, maxTradePriceAge)`.
+
 ## What to include
 
 - The affected component (contract, function, service or URL) and the commit hash you tested against.

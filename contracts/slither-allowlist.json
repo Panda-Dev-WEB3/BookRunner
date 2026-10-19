@@ -208,12 +208,32 @@
     },
     {
       "check": "unused-return",
+      "target": "AttestedOracle.constructor",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "AttestedOracle.setAttestedSigner",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "AttestedOracle.setSigner",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
       "target": "BkrnFeeRouter.executeBuyback",
       "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
     },
     {
       "check": "unused-return",
       "target": "BkrnFeeRouter.referenceBkrnPerUsdc",
+      "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "unused-return",
+      "target": "BkrnStaking.setLocker",
       "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
     },
     {

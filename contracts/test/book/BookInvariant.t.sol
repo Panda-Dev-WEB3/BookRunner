@@ -222,7 +222,21 @@ contract BookInvariantTest is StdInvariant, BookFixture {
         handler.mark(-5000, 0);
         assertGt(handler.backstopCovers(), 0, "backstop covers");
 
-        // fee flow + top-up round
+        // fee flow + top-up round. Audit L-1: a fee residual restores Senior and repays the backstop before Junior,
+        // so fee flow first clears what the losses left owed; only then does Junior get a non-zero price again.
+        (uint256 debt,) = book.backstopDebt();
+        assertGt(debt + book.seniorImpairment(), 0, "the losses left Senior / the backstop owed");
+        for (uint256 i = 0; i < 40 && debt + book.seniorImpairment() > 0; i++) {
+            (, uint256 j0) = book.trancheNav();
+            handler.credit(0, 5000e6);
+            (, uint256 j1) = book.trancheNav();
+            (debt,) = book.backstopDebt();
+            if (debt + book.seniorImpairment() > 0) {
+                assertEq(j1, j0, "Junior gets nothing while Senior or the backstop is owed");
+            }
+        }
+        assertEq(debt, 0, "backstop repaid from fee flow");
+        assertEq(book.seniorImpairment(), 0, "Senior restored from fee flow");
         handler.credit(3000e6, 3000e6);
         handler.openTopUp(300, 50_000e6, 50_000e6);
         handler.depositTopUp(3, 1, 10_000e6); // dave junior
