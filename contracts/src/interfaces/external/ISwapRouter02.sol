@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: BUSL-1.1
-pragma solidity 0.8.30;
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
 
 /// @title ISwapRouter02 — Uniswap v3 SwapRouter02 (IV3SwapRouter) subset.
 /// @notice RHC mainnet SwapRouter02 `0xcaf681a66d020601342297493863e78c959e5cb2` (docs/VERIFY.md U1; re-check

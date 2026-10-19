@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: BUSL-1.1
-pragma solidity 0.8.30;
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
 
 /// @title IPoolEngine — in-house pool-vs-trader perp engine (Synthetix V3 lineage, simplified).
 /// @notice One market per in-house book. The book's MM inventory is the pool (counterparty to traders);

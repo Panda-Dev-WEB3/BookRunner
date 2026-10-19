@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: BUSL-1.1
-pragma solidity 0.8.30;
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
 
 /// @title ITranche — Senior / Junior tranche of one book. ERC-20 shares (6 decimals) with an
 ///        ERC-7540-style asynchronous flow on top of ERC-4626 views:

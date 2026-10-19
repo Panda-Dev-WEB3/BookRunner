@@ -11,6 +11,11 @@ Licensor:             Panda-Dev-WEB3 (BookRunner)
 
 Licensed Work:        BookRunner
                       The Licensed Work is (c) 2026 Panda-Dev-WEB3 (BookRunner)
+                      Not part of the Licensed Work: the files under
+                      contracts/src/interfaces/ and the file
+                      contracts/src/libraries/UniswapV3Twap.sol, which are
+                      licensed under the MIT License (see LICENSE-MIT and
+                      each file's SPDX-License-Identifier header).
 
 Additional Use Grant: None
 

@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: BUSL-1.1
-pragma solidity 0.8.30;
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
 
 /// @title IStockTokenRegistry — canonical Stock Token registry + multiplier-aware valuer.
 /// @notice A Stock Token's `multiplier` (WAD) = shares of the underlying equity represented by 1 whole

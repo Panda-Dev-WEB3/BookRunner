@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: BUSL-1.1
-pragma solidity 0.8.30;
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
 
 /// @title IHedgeExecutor — executes long-spot hedge legs in canonical Stock Tokens.
 /// @notice Uniswap v3 SwapRouter02 path implemented (direct pool or a two-pool hop route, set per Stock

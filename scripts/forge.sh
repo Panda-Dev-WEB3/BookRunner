@@ -14,7 +14,8 @@ ROOT="$(cd "$HERE/.." && pwd)"
 TOOL="${FOUNDRY_TOOL:-forge}"
 # Pinned by digest (supply chain: this container sees deploy keys). Tag: ghcr.io/foundry-rs/foundry:v1.8.1 (forge 1.8.1,
 # also :latest on 2026-08-28). To bump: docker buildx imagetools inspect ghcr.io/foundry-rs/foundry:<tag>, run the
-# full suite, then update this digest, docker-compose.yml (anvil) and .github/workflows/ci.yml together.
+# full suite, then update this digest and its copies (docker-compose.yml anvil, the gen-fixtures.ts comment) together:
+# CI reads the digest from this line, and scripts/image-pins.test.ts fails while any copy differs.
 IMAGE="${FOUNDRY_IMAGE:-ghcr.io/foundry-rs/foundry@sha256:0c00cb0bda1ab1b91c9a6bf60f4c76c09c1a8870824b6d4718afbabacf6f9a17}"
 
 # Convert MSYS path (/d/foo) to a Docker Desktop path (D:/foo) when on Windows Git Bash.
