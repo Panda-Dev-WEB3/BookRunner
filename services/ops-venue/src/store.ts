@@ -3,7 +3,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { chainCursor, type Db, events, receipts, settlements, venueAccounts } from "@bookrunner/db";
-import { CHANNELS, type DomainEventPayloads, type DomainEventType, dbUsd, payloadHash, REPO_ROOT, type ReceiptKind } from "@bookrunner/shared";
+import { CHANNELS, busJson, type DomainEventPayloads, type DomainEventType, dbUsd, payloadHash, REPO_ROOT, type ReceiptKind } from "@bookrunner/shared";
 import { and, eq, sql } from "drizzle-orm";
 import type { FeeSaga } from "./domain/fees";
 import type { WithdrawSaga } from "./domain/withdraw";
@@ -96,7 +96,7 @@ export class PgOpsStore implements OpsStore {
       .returning({ id: events.id, createdAt: events.createdAt });
     const row = rows[0];
     if (!row) return false;
-    await this.pub.publish(CHANNELS.domainEvents, JSON.stringify({ id: row.id, type, createdAt: row.createdAt.toISOString(), data }));
+    await this.pub.publish(CHANNELS.domainEvents, busJson({ id: row.id, type, createdAt: row.createdAt.toISOString(), data }));
     return true;
   }
 
@@ -133,6 +133,10 @@ export interface SagaState {
   lastAsOf: Record<string, string>;
   /** last reported venue value per adapter + consecutive suspicious readings (drop guard) */
   reportGuard: Record<string, { value: string; at: number; suspect: number }>;
+  /** builder IF mode: Orderly withdrawal ids adopted by a saga, per IF account id (never pruned: the unadopted scan) */
+  ifAdopted?: Record<string, string[]>;
+  /** builder IF mode: per adapter, equity found on the builder IF account before the book's IF deposit (refused) */
+  ifPriorEquity?: Record<string, { usd: string; at: number }>;
 }
 
 const emptySagaState = (): SagaState => ({ withdrawals: {}, fees: {}, lastAsOf: {}, reportGuard: {} });

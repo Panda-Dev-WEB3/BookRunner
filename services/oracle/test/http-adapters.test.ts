@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { SESSIONS_24X7, checkCopy, encodeSessions, priceId } from "@bookrunner/shared";
-import { LiveOrderlyPriceClient, MockOrderlyPriceClient, NotConfiguredError, builderPriceClient } from "../src/adapters/venue";
+import { MockOrderlyPriceClient, builderPriceClient } from "../src/adapters/venue";
 import { loadOracleConfig } from "../src/config";
 import { buildUniverse } from "../src/domain/universe";
 import { ATTESTATION_NOTE, MAX_SAFE_PUSH_DEVIATION_BPS, createApp, serveOptions } from "../src/http";
@@ -153,10 +153,9 @@ describe("venue builder price clients", () => {
     await expect(c.setBuilderPrice({ symbol: "S", price: 1, held: false, ts: 1 })).rejects.toThrow("HTTP 503");
   });
 
-  test("live client is a typed stub that refuses with NotConfiguredError", async () => {
-    const c = builderPriceClient("live", "https://api.example");
-    expect(c).toBeInstanceOf(LiveOrderlyPriceClient);
-    await expect(c.setBuilderPrice({ symbol: "S", price: 1, held: false, ts: 1 })).rejects.toBeInstanceOf(NotConfiguredError);
+  test("live mode has no oracle-side client: ops-venue pushes the venue feed to Orderly", () => {
+    expect(builderPriceClient("live", "https://api.example")).toBeNull();
+    expect(builderPriceClient("mock", "http://127.0.0.1:4420")).toBeInstanceOf(MockOrderlyPriceClient);
   });
 });
 

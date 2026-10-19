@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { KEYS } from "@bookrunner/shared";
 import { createTRPCClient, createTRPCUntypedClient, httpBatchLink, httpLink } from "@trpc/client";
 import superjson from "superjson";
 import { MAX_TRPC_BATCH, createApp } from "../src/app";
@@ -25,6 +26,31 @@ describe("http app", () => {
     // no reconnaissance surface for anonymous callers: no full procedure list, no uptime
     expect(body.procedures).toBeUndefined();
     expect(body.uptimeSec).toBeUndefined();
+  });
+
+  test("GET /health carries ops-venue's Orderly market state when it is in Redis (VERIFY O20)", async () => {
+    const { w, app } = setup();
+    const none = (await (await app.request("/health")).json()) as { orderlyListing?: unknown };
+    expect(none.orderlyListing).toBeUndefined();
+    const mk = (symbol: string, bookIds: number[], phase: string, venueStatus: string | null, openForRisk: boolean, failures = 0) => ({ symbol, bookIds, phase, venueStatus, openForRisk, everListed: phase !== "awaiting", since: 1000, checkedAt: 2000, failures, error: failures ? "HTTP 502" : null });
+    await w.deps.kv.set(
+      KEYS.venueSymbolIssues,
+      JSON.stringify({
+        v: 1,
+        ts: 1,
+        mode: "live",
+        books: [],
+        listingMode: "manual",
+        markets: [mk("PERP_NVDA_USDC_bookrunner", [3], "awaiting", null, false, 2), mk("PERP_TSLA_USDC_bookrunner", [4], "listed", "REDUCE_ONLY", false), mk("PERP_AAPL_USDC_bookrunner", [5], "listed", "ACTIVE", true), { symbol: 9 }],
+        delistWaits: [{ bookId: 6, symbol: "PERP_AMD_USDC_bookrunner", since: 500 }, { bookId: "x" }],
+      }),
+      600,
+    );
+    const body = (await (await app.request("/health")).json()) as { orderlyListing?: { markets: unknown[]; notOpen: number[]; delistWaits: unknown[] } };
+    expect(body.orderlyListing).toMatchObject({ mode: "live", listingMode: "manual", notOpen: [3, 4], delistWaits: [{ bookId: 6, symbol: "PERP_AMD_USDC_bookrunner", since: 500 }] });
+    expect(body.orderlyListing?.markets[0]).toEqual({ symbol: "PERP_NVDA_USDC_bookrunner", bookIds: [3], phase: "awaiting", venueStatus: null, openForRisk: false, since: 1000, failures: 2 });
+    // check errors stay in ops-venue's logs / alerts, not on the public endpoint
+    expect(JSON.stringify(body)).not.toContain("HTTP 502");
   });
 
   test("GET /health?verbose lists every procedure and the uptime for the admin token only", async () => {

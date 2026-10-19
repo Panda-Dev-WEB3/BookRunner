@@ -72,6 +72,29 @@ describe("collect", () => {
     [KEYS.venueReport(3), JSON.stringify({ asOf: NOW / 1000 - 30 })],
     [SUPERVISOR_STATUS_KEY, JSON.stringify(supervisor())],
     [BACKUP_STATUS_KEY, JSON.stringify({ ts: NOW, ok: true })],
+    [
+      KEYS.venueSymbolIssues,
+      JSON.stringify({
+        v: 1,
+        ts: NOW,
+        mode: "live",
+        books: [{ bookId: 3, charterSymbol: "NVDA-PERP", error: "no market" }],
+        listingMode: "manual",
+        markets: [{ symbol: "PERP_NVDA_USDC_bookrunner", bookIds: [3], phase: "awaiting", venueStatus: null, openForRisk: false, everListed: false, since: NOW - 60_000, checkedAt: NOW, failures: 0, error: null }, { symbol: 7 }],
+        delistWaits: [{ bookId: 3, symbol: "PERP_NVDA_USDC_bookrunner", since: NOW - 1_000 }, { bookId: "x" }],
+      }),
+    ],
+    [
+      KEYS.builderFeedStatus,
+      JSON.stringify({
+        v: 1,
+        ts: NOW,
+        intervalMs: 1000,
+        maxAgeMs: 10_000,
+        socket: { state: "ready", lastError: null, host: "ws-oracle.orderly.org" },
+        symbols: [{ symbol: "PERP_NVDA_USDC_bookrunner", base: "NVDA", bookIds: [3], state: "stale", lastPushAt: NOW - 40_000, price: 190, failingSince: NOW - 35_000, error: "x" }],
+      }),
+    ],
   ]);
   const kv = { get: async (k: string) => kvData.get(k) ?? null, mget: async (ks: string[]) => ks.map((k) => kvData.get(k) ?? null) };
   const chain: ChainPort = {
@@ -89,6 +112,16 @@ describe("collect", () => {
       [3, "orderly", NOW / 1000 - 600, "ok", NOW / 1000 - 30],
       [4, "pool_engine", null, null, null],
     ]);
+    expect(s.books!.map((b) => b.venueSymbolError)).toEqual(["no market", null]);
+    expect(s.venueOps).toEqual({ ts: NOW, mode: "live", builderPush: false, listingMode: "manual" });
+    expect(s.books!.map((b) => b.venueMarket?.phase ?? null)).toEqual(["awaiting", null]);
+    expect(s.books![0]!.venueMarket).toMatchObject({ symbol: "PERP_NVDA_USDC_bookrunner", since: NOW - 60_000, failures: 0 });
+    expect(s.books!.map((b) => b.delistWaitSince)).toEqual([NOW - 1_000, null]);
+    expect(s.builderFeed).toEqual({
+      ts: NOW,
+      socket: { state: "ready", lastError: null },
+      symbols: [{ symbol: "PERP_NVDA_USDC_bookrunner", bookIds: [3], state: "stale", lastPushAt: NOW - 40_000, failingSince: NOW - 35_000, error: "x", preListing: false }],
+    });
     expect(s.kills).toEqual([{ id: 9, bookId: 3, ts: NOW - 1000, reason: "DD", breaches: ["DRAWDOWN"] }]);
     expect(s.supervisor?.procs[0]!.name).toBe("mark");
     expect(s.backup?.ok).toBe(true);

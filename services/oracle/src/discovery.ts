@@ -1,7 +1,7 @@
 // Universe discovery: deployment.stockTokens + books (deployment and DB), charters read from chain
 // (IBook.getCharter) with DB (charters.struct_json) fallback, index definitions from
 // StockTokenRegistry.getIndex, and config fallbacks when the chain cannot be read.
-import { type Deployment, indexUnderlying, isTokenUnderlying, priceId as priceIdOf, underlyingToToken } from "@bookrunner/shared";
+import { type Deployment, type VenueSymbolConfig, indexUnderlying, isTokenUnderlying, priceId as priceIdOf, underlyingToToken } from "@bookrunner/shared";
 import type { Address, Hex } from "viem";
 import type { IndexComponent } from "./domain/types";
 import { type BookInfo, type BuiltUniverse, buildUniverse, priceIdLabel } from "./domain/universe";
@@ -37,6 +37,8 @@ export interface DiscoveryConfig {
   tickers: string[];
   indexes: Record<string, Record<string, number>>;
   defaultSessions: Hex;
+  /** ORDERLY_MODE + ORDERLY_BROKER_ID: Orderly books' builder-price targets as venue symbols (absent = mock) */
+  venueSymbols?: VenueSymbolConfig;
 }
 
 export interface DiscoveryResult extends BuiltUniverse {
@@ -185,7 +187,7 @@ export async function discoverUniverse(p: {
     }
   }
 
-  const built = buildUniverse({ equities, indexes: [...indexes.values()], books, defaultSessions: cfg.defaultSessions });
+  const built = buildUniverse({ equities, indexes: [...indexes.values()], books, defaultSessions: cfg.defaultSessions, ...(cfg.venueSymbols ? { venueSymbols: cfg.venueSymbols } : {}) });
   const source = !chain || (chainReads > 0 && chainFailures === chainReads) ? "config" : chainFailures > 0 ? "partial" : "chain";
   return { entries: built.entries, warnings: [...warnings, ...built.warnings], source };
 }

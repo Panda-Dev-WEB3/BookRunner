@@ -3,10 +3,13 @@
 // markInterval) and the API's /health. Each source fails independently: a failed source becomes an
 // infra / rpc / api condition instead of blinding the other rules.
 import { KEYS } from "@bookrunner/shared/queues";
+import { parseVenueMarkets, type VenueMarketMsg } from "@bookrunner/shared/venueMarket";
 import { SUPERVISOR_STATUS_KEY, parseSupervisorStatus } from "@bookrunner/shared/supervisor";
 import type {
   BackupSnap,
   BookSnap,
+  BuilderFeedSnap,
+  VenueOpsSnap,
   IndexerCursorSnap,
   KillEventSnap,
   OracleConfirmSnap,
@@ -122,6 +125,145 @@ export function parseRisk(raw: string | null): RiskSnap | null {
         }
       : null,
   };
+}
+
+/** KEYS.venueSymbolIssues JSON (VenueSymbolIssuesMsg, ops-venue) -> bookId -> error; malformed -> empty. */
+export function parseVenueSymbolIssues(raw: string | null): Map<number, string> {
+  const out = new Map<number, string>();
+  if (!raw) return out;
+  try {
+    const o = JSON.parse(raw) as { books?: unknown };
+    for (const b of Array.isArray(o.books) ? o.books : []) {
+      const id = num((b as { bookId?: unknown })?.bookId);
+      const err = (b as { error?: unknown })?.error;
+      if (id !== null && typeof err === "string") out.set(id, err);
+    }
+  } catch {
+    // ignore: an unreadable status is not an alert of its own
+  }
+  return out;
+}
+
+/** KEYS.venueSymbolIssues JSON markets -> bookId -> market (shared parseVenueMarkets: malformed entries dropped). */
+export function parseMarketsByBook(raw: string | null): Map<number, VenueMarketMsg> {
+  const out = new Map<number, VenueMarketMsg>();
+  for (const m of parseVenueMarkets(raw)) for (const id of m.bookIds) out.set(id, m);
+  return out;
+}
+
+/** KEYS.venueSymbolIssues JSON delistWaits -> bookId -> since (unix ms); malformed entries dropped. */
+export function parseDelistWaits(raw: string | null): Map<number, number> {
+  const out = new Map<number, number>();
+  if (!raw) return out;
+  try {
+    const o = JSON.parse(raw) as { delistWaits?: unknown };
+    for (const x of Array.isArray(o.delistWaits) ? (o.delistWaits as Array<Record<string, unknown> | null>) : []) {
+      const id = num(x?.bookId);
+      const since = num(x?.since);
+      if (id !== null && since !== null) out.set(id, since);
+    }
+  } catch {
+    // ignore: an unreadable status is not an alert of its own
+  }
+  return out;
+}
+
+/** KEYS.venueSymbolIssues JSON ifAccounts / ifOperatorWaits -> per book (ORDERLY_IF_MODE, VERIFY O10); malformed entries dropped. */
+export function parseIfAccounts(raw: string | null): {
+  issues: Map<number, NonNullable<BookSnap["ifAccountIssue"]>>;
+  waits: Map<number, NonNullable<BookSnap["ifOperatorWaits"]>>;
+  unadopted: Map<number, NonNullable<BookSnap["ifUnadopted"]>>;
+  drops: Map<number, NonNullable<BookSnap["ifEquityDrop"]>>;
+  failed: Map<number, NonNullable<BookSnap["failedWithdrawals"]>>;
+} {
+  const issues = new Map<number, NonNullable<BookSnap["ifAccountIssue"]>>();
+  const waits = new Map<number, NonNullable<BookSnap["ifOperatorWaits"]>>();
+  const unadopted = new Map<number, NonNullable<BookSnap["ifUnadopted"]>>();
+  const drops = new Map<number, NonNullable<BookSnap["ifEquityDrop"]>>();
+  const failed = new Map<number, NonNullable<BookSnap["failedWithdrawals"]>>();
+  if (!raw) return { issues, waits, unadopted, drops, failed };
+  try {
+    const o = JSON.parse(raw) as { ifAccounts?: unknown; ifOperatorWaits?: unknown; ifUnadopted?: unknown; ifEquityDrops?: unknown; failedWithdrawals?: unknown };
+    const s = (v: unknown) => (typeof v === "string" ? v : "");
+    const ISSUES = new Set(["mismatch", "key_pending", "prior_equity", "reassign"]);
+    for (const x of Array.isArray(o.ifAccounts) ? (o.ifAccounts as Array<Record<string, unknown> | null>) : []) {
+      const id = num(x?.bookId);
+      if (id === null || !ISSUES.has(x?.issue as string) || typeof x?.detail !== "string") continue;
+      const issue = { issue: x.issue as NonNullable<BookSnap["ifAccountIssue"]>["issue"], detail: x.detail, accountId: s(x.accountId), since: num(x.since) };
+      // one per book: a mismatch / prior equity outranks a pending key or a re-assign notice
+      const cur = issues.get(id);
+      const rank = (i: string) => (i === "mismatch" || i === "prior_equity" ? 2 : 1);
+      if (!cur || rank(issue.issue) > rank(cur.issue)) issues.set(id, issue);
+    }
+    for (const x of Array.isArray(o.ifOperatorWaits) ? (o.ifOperatorWaits as Array<Record<string, unknown> | null>) : []) {
+      const id = num(x?.bookId);
+      const since = num(x?.since);
+      if (id === null || since === null || (x?.step !== "withdraw" && x?.step !== "payout" && x?.step !== "return")) continue;
+      waits.set(id, [...(waits.get(id) ?? []), { nonce: s(x.nonce), step: x.step, amount: s(x.amount), owner: s(x.owner), adapter: s(x.adapter), since, writtenOffAt: num(x.writtenOffAt) }]);
+    }
+    for (const x of Array.isArray(o.ifUnadopted) ? (o.ifUnadopted as Array<Record<string, unknown> | null>) : []) {
+      const id = num(x?.bookId);
+      if (id === null || typeof x?.id !== "string") continue;
+      unadopted.set(id, [...(unadopted.get(id) ?? []), { id: x.id, amount: s(x.amount), status: s(x.status), createdAt: num(x.createdAt) }]);
+    }
+    for (const x of Array.isArray(o.failedWithdrawals) ? (o.failedWithdrawals as Array<Record<string, unknown> | null>) : []) {
+      const id = num(x?.bookId);
+      const account = num(x?.account);
+      const at = num(x?.at);
+      if (id === null || account === null || at === null) continue;
+      failed.set(id, [...(failed.get(id) ?? []), { nonce: s(x?.nonce), account, amount: s(x?.amount), error: s(x?.error), at }]);
+    }
+    for (const x of Array.isArray(o.ifEquityDrops) ? (o.ifEquityDrops as Array<Record<string, unknown> | null>) : []) {
+      const id = num(x?.bookId);
+      const at = num(x?.at);
+      if (id === null || at === null) continue;
+      drops.set(id, { expectedUsd: s(x?.expectedUsd), venueUsd: s(x?.venueUsd), at });
+    }
+  } catch {
+    // ignore: an unreadable status is not an alert of its own
+  }
+  return { issues, waits, unadopted, drops, failed };
+}
+
+/** KEYS.venueSymbolIssues JSON -> ops-venue mode + builder push flag + listing mode; malformed / absent -> null. */
+export function parseVenueOps(raw: string | null): VenueOpsSnap | null {
+  if (!raw) return null;
+  try {
+    const o = JSON.parse(raw) as Record<string, unknown>;
+    const ts = num(o.ts);
+    if (ts === null || (o.mode !== "live" && o.mode !== "mock")) return null;
+    return { ts, mode: o.mode, builderPush: o.builderPush === true, listingMode: o.listingMode === "manual" ? "manual" : "api" };
+  } catch {
+    return null;
+  }
+}
+
+/** KEYS.builderFeedStatus JSON (BuilderFeedStatusMsg, ops-venue); malformed -> null. */
+export function parseBuilderFeed(raw: string | null): BuilderFeedSnap | null {
+  if (!raw) return null;
+  try {
+    const o = JSON.parse(raw) as Record<string, unknown>;
+    const ts = num(o.ts);
+    if (ts === null || !Array.isArray(o.symbols)) return null;
+    const sock = (o.socket ?? {}) as Record<string, unknown>;
+    return {
+      ts,
+      socket: { state: String(sock.state ?? "?"), lastError: typeof sock.lastError === "string" ? sock.lastError : null },
+      symbols: o.symbols
+        .filter((x): x is Record<string, unknown> => !!x && typeof (x as { symbol?: unknown }).symbol === "string")
+        .map((x) => ({
+          symbol: x.symbol as string,
+          bookIds: Array.isArray(x.bookIds) ? x.bookIds.map(Number).filter(Number.isFinite) : [],
+          state: String(x.state ?? "?"),
+          lastPushAt: num(x.lastPushAt),
+          failingSince: num(x.failingSince),
+          error: typeof x.error === "string" ? x.error : null,
+          preListing: x.preListing === true,
+        })),
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** KEYS.venueReport JSON (VenueReportMsg): asOf in unix seconds. */
@@ -287,14 +429,28 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
   let backup: Snapshot["backup"];
   let riskRaw: Array<string | null> = [];
   let venueRaw: Array<string | null> = [];
+  let symbolIssues = new Map<number, string>();
+  let markets = new Map<number, VenueMarketMsg>();
+  let delistWaits = new Map<number, number>();
+  let ifAccounts: ReturnType<typeof parseIfAccounts> = { issues: new Map(), waits: new Map(), unadopted: new Map(), drops: new Map(), failed: new Map() };
+  let builderFeed: Snapshot["builderFeed"];
+  let venueOps: Snapshot["venueOps"];
   try {
     const ids = bookRows.map((b) => b.id);
-    const [sup, bk, risk, venue] = await Promise.all([
+    const [sup, bk, risk, venue, issues, feed] = await Promise.all([
       d.kv.get(SUPERVISOR_STATUS_KEY),
       d.kv.get(BACKUP_STATUS_KEY),
       ids.length ? d.kv.mget(ids.map((id) => KEYS.riskState(id))) : Promise.resolve([]),
       ids.length ? d.kv.mget(ids.map((id) => KEYS.venueReport(id))) : Promise.resolve([]),
+      d.kv.get(KEYS.venueSymbolIssues),
+      d.kv.get(KEYS.builderFeedStatus),
     ]);
+    symbolIssues = parseVenueSymbolIssues(issues);
+    markets = parseMarketsByBook(issues);
+    delistWaits = parseDelistWaits(issues);
+    ifAccounts = parseIfAccounts(issues);
+    builderFeed = parseBuilderFeed(feed);
+    venueOps = parseVenueOps(issues);
     supervisor = parseSupervisorStatus(sup);
     backup = parseBackup(bk);
     riskRaw = risk;
@@ -315,6 +471,14 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
       liveSince: b.subscriptionEnds ? Math.floor(new Date(b.subscriptionEnds).getTime() / 1000) : null,
       risk: parseRisk(riskRaw[i] ?? null),
       venueReportAsOf: parseVenueAsOf(venueRaw[i] ?? null),
+      venueSymbolError: symbolIssues.get(Number(b.id)) ?? null,
+      venueMarket: markets.get(Number(b.id)) ?? null,
+      delistWaitSince: delistWaits.get(Number(b.id)) ?? null,
+      ifAccountIssue: ifAccounts.issues.get(Number(b.id)) ?? null,
+      ifOperatorWaits: ifAccounts.waits.get(Number(b.id)) ?? [],
+      ifUnadopted: ifAccounts.unadopted.get(Number(b.id)) ?? [],
+      ifEquityDrop: ifAccounts.drops.get(Number(b.id)) ?? null,
+      failedWithdrawals: ifAccounts.failed.get(Number(b.id)) ?? [],
     }));
   }
 
@@ -393,6 +557,8 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
     api,
     oracle,
     backup,
+    builderFeed,
+    venueOps,
     infraErrors,
   };
   return { snapshot, memory: { rpcSamples, buybackSamples, markIntervalSec } };

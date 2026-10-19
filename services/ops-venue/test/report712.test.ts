@@ -3,7 +3,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { ACCOUNT, devAccount } from "@bookrunner/shared";
+import { ACCOUNT, BUS_NS, devAccount } from "@bookrunner/shared";
 import { type Address, encodeAbiParameters, getAddress, type Hex, keccak256, parseAbiParameters, stringToHex, toFunctionSelector, zeroAddress } from "viem";
 import { codeHasSelector, REPORT_SIGNED_SELECTOR, selectorPush } from "../src/chain";
 import { loadOpsEnv } from "../src/config";
@@ -73,8 +73,8 @@ describe("VenueReport typed data", () => {
   });
 
   test("Redis keys", () => {
-    expect(venueReportKey(3)).toBe("bkrn:venue:report:3");
-    expect(venueReportRecentKey(3)).toBe("bkrn:venue:report:3:recent");
+    expect(venueReportKey(3)).toBe(`bkrn:${BUS_NS}:venue:report:3`);
+    expect(venueReportRecentKey(3)).toBe(`bkrn:${BUS_NS}:venue:report:3:recent`);
   });
 });
 
@@ -263,6 +263,14 @@ describe("Reporter, OPS_REPORT_MODE=signed", () => {
     expect(t.chain.count("report")).toBe(0);
   });
 
+  test("sweep_fees job refused for an admin-owned builder account (G6): nothing earmarked on-chain", async () => {
+    const t = await setupReporting("signed");
+    t.ctx.settings.builderAdminOwned = true;
+    const deps = { ctx: t.ctx, registry: t.svc.registry, provisioner: t.svc.provisioner, reporter: t.svc.reporter, withdrawals: t.svc.withdrawals, fees: t.svc.fees, revoker: t.svc.revoker };
+    await expect(handleVenueOpsJob({ kind: "sweep_fees", bookId: 1, period: 1 }, deps)).rejects.toThrow("builder account is admin-owned");
+    expect(t.chain.count("sweepFees")).toBe(0);
+  });
+
   test("onchain mode is unchanged (report tx, nothing published)", async () => {
     const t = await setupReporting("onchain");
     expect(await t.svc.reporter.report(t.book())).toMatch(/^0x/);
@@ -289,10 +297,10 @@ describe("RedisReportPublisher", () => {
     const json = toSignedVenueReportJson(await signed());
     await new RedisReportPublisher(redis, 4).publish(json);
     expect(ops.map((o) => [o[0], o[1]])).toEqual([
-      ["set", "bkrn:venue:report:1"],
-      ["lpush", "bkrn:venue:report:1:recent"],
-      ["ltrim", "bkrn:venue:report:1:recent"],
-      ["publish", "bkrn:venue:report:1"],
+      ["set", `bkrn:${BUS_NS}:venue:report:1`],
+      ["lpush", `bkrn:${BUS_NS}:venue:report:1:recent`],
+      ["ltrim", `bkrn:${BUS_NS}:venue:report:1:recent`],
+      ["publish", `bkrn:${BUS_NS}:venue:report:1`],
     ]);
     expect(ops[2]!.slice(2)).toEqual([0, 3]);
     expect(JSON.parse(String(ops[0]![2]))).toEqual(json);
@@ -340,7 +348,7 @@ describe("config", () => {
 
   test("the testnet dev profile runs the low-gas modes (signed reports, pull oracle) and keeps its mark interval", () => {
     const src = readFileSync(resolve(import.meta.dir, "../../../scripts/dev.ts"), "utf8");
-    const profile = src.slice(src.indexOf('if (network === "testnet")'), src.indexOf("loadEnvFile(\".env\", false)"));
+    const profile = src.slice(src.indexOf("if (testnetLike) {"), src.indexOf("loadEnvFile(\".env\", false)"));
     expect(profile).toContain('OPS_REPORT_MODE: "signed"');
     expect(profile).toContain('ORACLE_PUSH_MODE: "pull"');
     expect(profile).toContain('MARK_INTERVAL_SECONDS: "3600"');

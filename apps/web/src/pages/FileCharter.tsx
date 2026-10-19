@@ -22,6 +22,7 @@ import {
   stepOf,
   suggestSymbol,
 } from "../lib/charterForm";
+import { config } from "../lib/config";
 import { TRANCHE_COPY } from "../lib/copy";
 import { bpsPct, fmtBps, fmtDuration, fmtNum, fmtUsd } from "../lib/format";
 import { useSettlementSymbol } from "../wallet/settlementSymbol";
@@ -95,7 +96,7 @@ export function FileCharterPage() {
   // audit M-1: the network's mark interval (every book reports it) is the minimum Junior notice
   const books = trpc.book.list.useQuery(undefined, { staleTime: 60_000 });
   const markIntervalSeconds = books.data?.find((b) => b.markSchedule?.intervalSeconds)?.markSchedule.intervalSeconds ?? null;
-  const issues = useMemo(() => formIssues(form, { markIntervalSeconds }), [form, markIntervalSeconds]);
+  const issues = useMemo(() => formIssues(form, { markIntervalSeconds, chainId: config.chainId }), [form, markIntervalSeconds]);
   const errors = issues.filter((i) => i.severity === "error");
 
   useEffect(() => {

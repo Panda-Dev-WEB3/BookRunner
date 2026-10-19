@@ -1,5 +1,6 @@
 // "File a charter" form model: human-unit form state -> charter.file draft input, with client-side
 // hints that mirror MarketCharter.validate (the API and the chain stay authoritative).
+import { parseVenueSymbol } from "@bookrunner/shared/venueSymbol";
 import type { CharterDraftInput } from "./api-types";
 import { getSettlementSymbol } from "./settlementToken";
 
@@ -123,8 +124,14 @@ export interface FieldIssue {
 const USD_RE = /^\d+(\.\d{1,6})?$/;
 const INT_RE = /^-?\d+$/;
 const THIRTY_DAYS = 30 * 86_400;
-// Orderly: IF must be strictly above 25,000 per symbol (VERIFY O10) -> inclusive minimum 25,001
+// Orderly: IF must be strictly above 25,000 per symbol on mainnet, 100 on testnet (VERIFY O10) -> inclusive minimum 25,001 /
+// 101 (the deploy scripts' venueMinIf per network; the chain value applies)
 export const VENUE_MIN_IF_USD: Record<CharterForm["venue"], number> = { orderly: 25_001, pool_engine: 10_000 };
+const TESTNET_CHAIN_ID = 46630;
+export const TESTNET_VENUE_MIN_IF_USD: Record<CharterForm["venue"], number> = { orderly: 101, pool_engine: 10_000 };
+
+/** Client-side venue minimum for the build's chain (Robinhood Chain testnet 101 on Orderly; else the mainnet / devnet figure). */
+export const venueMinIfUsd = (venue: CharterForm["venue"], chainId?: number): number => (chainId === TESTNET_CHAIN_ID ? TESTNET_VENUE_MIN_IF_USD : VENUE_MIN_IF_USD)[venue];
 
 export function stepOf(field: string): StepId {
   if (field.startsWith("mandate")) return "mandate";
@@ -158,9 +165,10 @@ export function suggestSymbol(ticker: string, venue: CharterForm["venue"]): stri
 /**
  * Client-side hints for every field (errors block "Review"; warnings do not). `markIntervalSeconds`: the
  * network's mark interval (the books' markSchedule) — MarketCharter.validate rejects a Junior notice below it
- * (audit M-1); unknown: at least 1 second (the interval is never 0).
+ * (audit M-1); unknown: at least 1 second (the interval is never 0). `chainId`: picks the network's Orderly IF
+ * minimum (VERIFY O10).
  */
-export function formIssues(f: CharterForm, ctx: { markIntervalSeconds?: number | null } = {}): FieldIssue[] {
+export function formIssues(f: CharterForm, ctx: { markIntervalSeconds?: number | null; chainId?: number } = {}): FieldIssue[] {
   const out: FieldIssue[] = [];
   const add = (field: string, message: string, severity: FieldIssue["severity"] = "error") => out.push({ field, step: stepOf(field), message, severity });
   const usdField = (field: string, v: string, label: string, positive = false) => {
@@ -174,6 +182,7 @@ export function formIssues(f: CharterForm, ctx: { markIntervalSeconds?: number |
   const sym = f.symbol.trim();
   if (!sym) add("symbol", "Venue symbol is required");
   else if (new TextEncoder().encode(sym).length > 32) add("symbol", "Venue symbol must fit in 32 bytes");
+  else if (f.venue === "orderly" && parseVenueSymbol(sym) === null) add("symbol", "Orderly venue symbol must look like PERP_NVDA_USDC");
   if (f.venue === "pool_engine") {
     const t = int(f.takerFeeBps);
     if (!Number.isInteger(t) || t < 0) add("takerFeeBps", "Taker fee: whole bps");
@@ -184,8 +193,9 @@ export function formIssues(f: CharterForm, ctx: { markIntervalSeconds?: number |
 
   usdField("ifSizeUsd", f.ifSizeUsd, "Insurance fund size", true);
   usdField("mmInventoryUsd", f.mmInventoryUsd, "MM inventory");
-  if (USD_RE.test(f.ifSizeUsd.trim()) && Number(f.ifSizeUsd) < VENUE_MIN_IF_USD[f.venue]) {
-    add("ifSizeUsd", `Below the venue minimum of ${VENUE_MIN_IF_USD[f.venue].toLocaleString("en-US")} ${getSettlementSymbol()} (devnet default; the chain value applies)`);
+  const minIf = venueMinIfUsd(f.venue, ctx.chainId);
+  if (USD_RE.test(f.ifSizeUsd.trim()) && Number(f.ifSizeUsd) < minIf) {
+    add("ifSizeUsd", `Below the venue minimum of ${minIf.toLocaleString("en-US")} ${getSettlementSymbol()} (network default; the chain value applies)`);
   }
 
   const m = f.mandate;

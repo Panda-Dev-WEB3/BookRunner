@@ -6,8 +6,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import type { Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { ADMIN_KEY_OPT_IN, type DevRole, MAINNET_CHAIN_ID, assertDistinctRoleKeys, assertNoMnemonicOnMainnet, roleAccount } from "../packages/shared/src/devkeys";
+import { ADMIN_KEY_OPT_IN, DEV_MNEMONIC, type DevRole, MAINNET_CHAIN_ID, assertDistinctRoleKeys, assertNoMnemonicOnMainnet, devAccount, roleAccount } from "../packages/shared/src/devkeys";
 import { KMS_ENV_FOR_ROLE, SERVICE_ROLES, roleSignerSource } from "../packages/shared/src/signer";
+import { busNames } from "../packages/shared/src/queues";
 
 export type Env = Record<string, string | undefined>;
 
@@ -285,6 +286,10 @@ export function mainnetProfile(inherited: Env, root: string, only: readonly stri
     errors.push("DEPLOYER_PRIVATE_KEY / BKRN_TESTNET_FUNDER_PK must not be in the mainnet service environment");
   }
   if (inherited.BKRN_ALLOW_ADMIN_KEY) errors.push("BKRN_ALLOW_ADMIN_KEY must not be set on mainnet");
+  // builder IF mode is a fallback (IF custody with one operator key, docs/VERIFY.md O10): only with the owner's sign-off
+  if (inherited.ORDERLY_IF_MODE === "builder" && inherited.ORDERLY_IF_MODE_BUILDER_ACK !== "1") {
+    errors.push("ORDERLY_IF_MODE=builder is not for mainnet without the owner's explicit sign-off (it moves the insurance fund into one operator key): set ORDERLY_IF_MODE_BUILDER_ACK=1 only after that sign-off");
+  }
 
   const depFile = resolve(root, MAINNET_FIXED.DEPLOYMENT_FILE!);
   if (!existsSync(depFile)) {
@@ -349,4 +354,230 @@ export function watchedRoleAddresses(env: Env, roles: readonly DevRole[]): { pai
     }
   }
   return { pairs, kmsRoles };
+}
+
+// ============================================================================ testnet: live Orderly rehearsal
+// scripts/dev.ts --network testnet-live (VERIFY O22, RUNBOOK "Testnet rehearsal on real Orderly"): the Orderly books
+// trade on Orderly's REAL testnet (vault 0x2A5b…E24d, testnet USDG) while Stock Tokens and prices stay mock / synthetic.
+// A truly SEPARATE stack that runs ALONGSIDE the public testnet stack on the same host (systemd bookrunner@testnet-live
+// next to bookrunner.service): its own role mnemonic (BKRN_TESTNET_LIVE_MNEMONIC: every role key, the deployer and the
+// gas funder differ from the public stack's, so no key ever signs in two places), its own deployment record, database,
+// Redis INSTANCE (redis-live, 127.0.0.1:63791) and bus namespace (testnet-live: channels, keys, queues), state directory
+// and loopback ports. Env: .env.testnet-live (mode 600, optional) over the process env (the
+// unit's /etc/bookrunner/testnet-live.env); the public stack's .env.testnet is only READ, to refuse a shared key. No
+// mock-orderly (nothing to serve), no trader-sim (it mints mock USDC), no web dev server. Builder admin key (G6):
+// ops-venue uses ORDERLY_BUILDER_KEY_SECRET, the key the admin wallet registered; its automated fee sweep is off.
+
+/** Orderly RH testnet externals (VERIFY O2 / O3; re-read on-chain by scripts/orderly-readiness.ts). */
+export const TESTNET_ORDERLY = {
+  vault: "0x2A5b650A894409372DDeE241EDAC92d4152bE24d",
+  usdg: "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+  brokerId: "bookrunner",
+  /** the broker admin wallet 0x9c1B…e8b9's Orderly account (builder admin account, G6) */
+  adminAccountId: "0xaa04410b18eb0856e02832221f24b2cd37fde7c6f6f8eec83fe95a2f62702e5c",
+} as const;
+
+/** The live stack's role mnemonic (env name); dev.ts hands it to the signing children as BKRN_TESTNET_MNEMONIC. */
+export const LIVE_MNEMONIC_ENV = "BKRN_TESTNET_LIVE_MNEMONIC";
+/** Network names of the two testnet variants (dev.ts --network, supervisor status, systemd instance). */
+export const TESTNET_VARIANTS = ["testnet", "testnet-live"] as const;
+export type TestnetVariant = (typeof TESTNET_VARIANTS)[number];
+
+/** Defaults of the live variant; a key set in .env.testnet-live overrides it (except TESTNET_LIVE_PINNED). */
+export const TESTNET_LIVE_DEFAULTS: Readonly<Record<string, string>> = {
+  ORDERLY_BASE_URL: "https://testnet-api.orderly.org",
+  ORDERLY_BROKER_ID: TESTNET_ORDERLY.brokerId, // venue symbols PERP_<T>_USDC_bookrunner (packages/shared venueSymbol)
+  ORDERLY_TOKEN: "USDG",
+  ORDERLY_LEDGER_ADDRESS: "0x1826B75e2ef249173FC735149AE4B8e9ea10abff", // testnet Ledger: Withdraw EIP-712 domain
+  ORDERLY_BUILDER_ACCOUNT_ID: TESTNET_ORDERLY.adminAccountId,
+  ORDERLY_LISTING_MODE: "manual", // the admin lists the markets in Orderly One (G4)
+  ORDERLY_IF_MODE: "contract", // per-book OrderlyIFAccount (G5); builder = fallback with ORDERLY_IF_BUILDER_ACCOUNTS
+};
+
+/**
+ * The documented overrides of the live profile when it runs from the unit's env (no .env.testnet-live: the server's
+ * root-owned /etc/bookrunner/testnet-live.env): only these keys of the process env count as explicit, never every key
+ * (a stray app-tree .env auto-loaded by bun must not override the profile).
+ */
+export const TESTNET_LIVE_UNIT_OVERRIDES: ReadonlySet<string> = new Set([...Object.keys(TESTNET_LIVE_DEFAULTS), "OPS_FEE_SWEEP_AUTO", "MARK_INTERVAL_SECONDS"]);
+
+/** Explicit keys of the live profile from a process env (the unit's env file): the documented overrides present. */
+export function liveUnitExplicitKeys(processEnv: Env): Set<string> {
+  return new Set([...TESTNET_LIVE_UNIT_OVERRIDES].filter((k) => processEnv[k] !== undefined && processEnv[k] !== ""));
+}
+
+/** Loopback ports of the live stack (the public testnet stack keeps 4400 / 4410 / 4420 / 4430). */
+export const TESTNET_LIVE_PORTS = { api: 4500, oracle: 4510, charter: 4530 } as const;
+
+/** Pinned by the live variant whatever its env says (separate record / state / ports; G6 fee sweep). */
+export const TESTNET_LIVE_PINNED: Readonly<Record<string, string>> = {
+  ORDERLY_MODE: "live",
+  OPS_FEE_SWEEP_AUTO: "false",
+  DEPLOYMENT_FILE: "contracts/deployments/46630.live.json",
+  OPS_KEYS_DIR: ".data/testnet-live/keys",
+  OPS_SAGA_FILE: ".data/testnet-live/ops-venue/sagas.json",
+  // committed-mark rows waiting for Postgres (audit 2026-10, HARDENING.md): its own spool under the unit's writable
+  // .data, never the public stack's .data/testnet/mark-spool (those rows belong to the other DB) nor PrivateTmp
+  MARK_SPOOL_DIR: ".data/testnet-live/mark-spool",
+  API_PORT: String(TESTNET_LIVE_PORTS.api),
+  ORACLE_PORT: String(TESTNET_LIVE_PORTS.oracle),
+  CHARTER_PORT: String(TESTNET_LIVE_PORTS.charter),
+  // alerts probes these (never the public stack's API / oracle)
+  ALERT_API_URL: `http://127.0.0.1:${TESTNET_LIVE_PORTS.api}`,
+  ALERT_ORACLE_URL: `http://127.0.0.1:${TESTNET_LIVE_PORTS.oracle}`,
+  // alerts mail says which stack; the daily backup (both stacks in one set) is recorded in the public stack's Redis db
+  ALERT_LABEL: "BookRunner testnet-live (Orderly rehearsal)",
+  ALERT_BACKUP_EXPECTED: "0",
+};
+
+/** Processes the live variant never starts. */
+export const TESTNET_LIVE_EXCLUDED = new Set(["mock-orderly", "trader-sim", "web"]);
+
+/**
+ * Redis of each testnet variant: the public stack on the infra Redis (127.0.0.1:63790, db 1, REDIS_PASSWORD), the live
+ * stack on its OWN Redis instance (deploy/server/docker-compose.yml redis-live, 127.0.0.1:63791, db 0,
+ * REDIS_LIVE_PASSWORD). Pub/sub channels are global to a Redis server, so a db index alone would not isolate them.
+ */
+export const TESTNET_REDIS: Record<TestnetVariant, { port: number; db: number; passwordEnv: string }> = {
+  testnet: { port: 63790, db: 1, passwordEnv: "REDIS_PASSWORD" },
+  "testnet-live": { port: 63791, db: 0, passwordEnv: "REDIS_LIVE_PASSWORD" },
+};
+
+/** Bus namespace of each testnet variant (packages/shared queues.ts busNamespace: channels, keys, queues). */
+export const TESTNET_BUS_NS: Record<TestnetVariant, string> = { testnet: "testnet", "testnet-live": "testnet-live" };
+
+/** The REDIS_URL a testnet variant uses (from its password env; none = no auth, the local default). */
+export function variantRedisUrl(env: Env, v: TestnetVariant): string {
+  const r = TESTNET_REDIS[v];
+  const pw = env[r.passwordEnv];
+  return `redis://${pw ? `:${encodeURIComponent(pw)}@` : ""}127.0.0.1:${r.port}/${r.db}`;
+}
+
+/** host:port of a redis URL (for the "same Redis" refusal); null when unparseable. */
+export function redisHostPort(url: string | undefined): string | null {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    return `${u.hostname === "localhost" ? "127.0.0.1" : u.hostname}:${u.port || "6379"}`;
+  } catch {
+    return null;
+  }
+}
+
+/** True when an env (the public testnet profile's) asks for live Orderly: refused there, use --network testnet-live. */
+export function testnetOrderlyLive(env: Env): boolean {
+  return env.ORDERLY_MODE === "live";
+}
+
+/** Explicit role keys that must never be shared between the two stacks. */
+const EXPLICIT_KEY_ENV = /(_PRIVATE_KEY|^DESK_KEY_PRIVATE_KEY_\d+|^BKRN_TESTNET_FUNDER_PK)$/;
+
+const deployerOf = (mnemonic: string): string => devAccount("deployer", mnemonic).address;
+
+/**
+ * Live-Orderly testnet variant. `inherited` = process env + .env.testnet-live; `explicit` = keys .env.testnet-live set
+ * (they override the defaults); `publicEnv` = the public stack's .env.testnet as read (never applied), null when absent;
+ * `root` resolves the deployment record. Never throws: every problem is collected. Never puts a mnemonic in a message.
+ */
+export function testnetLiveProfile(inherited: Env, explicit: ReadonlySet<string>, root: string, only: readonly string[] = [], publicEnv: Env | null = null): ProfileResult {
+  const errors: string[] = [];
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(TESTNET_LIVE_DEFAULTS)) env[k] = explicit.has(k) && inherited[k] ? (inherited[k] as string) : v;
+  Object.assign(env, TESTNET_LIVE_PINNED);
+  const pg = encodeURIComponent(inherited.POSTGRES_PASSWORD || "bookrunner");
+  env.DATABASE_URL = `postgres://bookrunner:${pg}@127.0.0.1:54400/bookrunner_testnet_live`;
+  // its own Redis instance (REDIS_LIVE_URL overrides, e.g. a local test Redis) and its own bus namespace
+  env.REDIS_URL = inherited.REDIS_LIVE_URL?.trim() || variantRedisUrl(inherited, "testnet-live");
+  env.BKRN_BUS_NS = TESTNET_BUS_NS["testnet-live"];
+  const publicRedis = [redisHostPort(variantRedisUrl(inherited, "testnet")), redisHostPort(publicEnv?.REDIS_URL)].filter((x): x is string => !!x);
+  const mineRedis = redisHostPort(env.REDIS_URL);
+  if (!mineRedis) errors.push("the live stack's REDIS_URL is not a redis:// URL");
+  else if (publicRedis.includes(mineRedis)) errors.push(`the live stack's Redis (${mineRedis}) is the public testnet stack's Redis: it needs its own instance (redis-live, 127.0.0.1:63791)`);
+  if (inherited.REDIS_PASSWORD && !inherited.REDIS_LIVE_PASSWORD && !inherited.REDIS_LIVE_URL) {
+    errors.push("REDIS_LIVE_PASSWORD is not set (the infra Redis has a password, the live Redis instance must have its own: .env.infra, install.sh)");
+  }
+  // services that call each other over HTTP follow the live ports (only when configured at all)
+  if (inherited.CHARTER_URL) env.CHARTER_URL = `http://127.0.0.1:${TESTNET_LIVE_PORTS.charter}`;
+  if (inherited.ORACLE_URL) env.ORACLE_URL = `http://127.0.0.1:${TESTNET_LIVE_PORTS.oracle}`;
+
+  // ---- keys: a dedicated mnemonic, never the public stack's
+  const live = inherited[LIVE_MNEMONIC_ENV]?.trim();
+  const pub = (publicEnv?.BKRN_TESTNET_MNEMONIC ?? "").trim();
+  if (!live) {
+    errors.push(`${LIVE_MNEMONIC_ENV} is not set: the live stack needs its own role mnemonic (never the public testnet stack's BKRN_TESTNET_MNEMONIC)`);
+  } else if (live === DEV_MNEMONIC) {
+    errors.push(`${LIVE_MNEMONIC_ENV} is the public anvil mnemonic`);
+  } else {
+    try {
+      const mine = deployerOf(live);
+      if (pub && deployerOf(pub) === mine) errors.push(`${LIVE_MNEMONIC_ENV} derives the same deployer (${mine}) as the public testnet stack's BKRN_TESTNET_MNEMONIC: generate a new mnemonic`);
+      env.BKRN_TESTNET_MNEMONIC = live; // the role mnemonic every signing child derives from (childenv allow-lists it)
+    } catch {
+      errors.push(`${LIVE_MNEMONIC_ENV} is not a valid BIP-39 mnemonic`);
+    }
+  }
+  if (publicEnv) {
+    for (const [k, v] of Object.entries(inherited)) {
+      if (!EXPLICIT_KEY_ENV.test(k) || !v?.trim()) continue;
+      if (Object.values(publicEnv).some((pv) => pv?.trim() === v.trim())) errors.push(`${k} is also a key of the public testnet stack (.env.testnet): every key of the live stack must be its own`);
+    }
+  }
+
+  const base = env.ORDERLY_BASE_URL ?? "";
+  if (isLocal(base) || !base.startsWith("https://")) errors.push(`ORDERLY_BASE_URL must be Orderly's testnet API (https, not the mock): ${base}`);
+  if (!inherited.ORDERLY_BUILDER_KEY_SECRET?.trim()) {
+    errors.push("ORDERLY_BUILDER_KEY_SECRET is not set: the base58 secret of the Orderly key the admin wallet registered for the builder admin account (RUNBOOK \"builder admin key\")");
+  }
+  if (!inherited.ORACLE_SEED?.trim()) errors.push("ORACLE_SEED is not set: the oracle refuses synthetic prices on a public chain without a secret seed");
+  if (explicit.has("OPS_FEE_SWEEP_AUTO") && inherited.OPS_FEE_SWEEP_AUTO !== "false") {
+    errors.push("OPS_FEE_SWEEP_AUTO must stay false on the live testnet profile: the builder fee withdrawal needs the admin wallet's signature (G6 / VERIFY O21)");
+  }
+  for (const p of only) if (TESTNET_LIVE_EXCLUDED.has(p)) errors.push(`${p} does not run on the live-Orderly testnet stack`);
+
+  const file = TESTNET_LIVE_PINNED.DEPLOYMENT_FILE!;
+  const depFile = resolve(root, file);
+  if (!existsSync(depFile)) {
+    errors.push(`${file} not found: deploy the rehearsal stack first (ORDERLY_VENUE=live bash scripts/deploy-testnet.sh)`);
+  } else {
+    try {
+      const dep = JSON.parse(readFileSync(depFile, "utf8")) as { chainId?: number; contracts?: { usdc?: string; orderlyVault?: string }; orderly?: { venue?: string; vault?: string; brokerId?: string; settlementToken?: string } };
+      const same = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
+      if (dep.chainId !== 46630) errors.push(`${file} is for chain ${dep.chainId}, not 46630`);
+      if (dep.orderly?.venue !== "live") errors.push(`${file} is not a live-venue deployment (orderly.venue = ${dep.orderly?.venue ?? "absent"}): its books sit on the mock vault`);
+      if (!same(dep.contracts?.orderlyVault, TESTNET_ORDERLY.vault)) errors.push(`${file}: orderlyVault ${dep.contracts?.orderlyVault} is not Orderly's testnet vault ${TESTNET_ORDERLY.vault}`);
+      if (!same(dep.contracts?.usdc, TESTNET_ORDERLY.usdg)) errors.push(`${file}: settlement token ${dep.contracts?.usdc} is not testnet USDG ${TESTNET_ORDERLY.usdg}`);
+      if (dep.orderly?.brokerId && dep.orderly.brokerId !== env.ORDERLY_BROKER_ID) errors.push(`${file}: adapters hashed broker ${dep.orderly.brokerId}, ORDERLY_BROKER_ID is ${env.ORDERLY_BROKER_ID}`);
+    } catch {
+      errors.push(`${file} is not valid JSON`);
+    }
+  }
+  return { env, errors };
+}
+
+/** Deployer (role index 0) address a testnet variant signs with, for the supervisor status; null when not derivable. */
+export function variantDeployer(env: Env): string | null {
+  const m = env.BKRN_TESTNET_MNEMONIC?.trim();
+  if (!m) return null;
+  try {
+    return deployerOf(m);
+  } catch {
+    return null;
+  }
+}
+
+/** The OTHER testnet variant's Redis URL and supervisor status key (its own instance and bus namespace). */
+export function otherVariant(env: Env, mine: TestnetVariant): { variant: TestnetVariant; redisUrl: string; statusKey: string } {
+  const other: TestnetVariant = mine === "testnet" ? "testnet-live" : "testnet";
+  return { variant: other, redisUrl: variantRedisUrl(env, other), statusKey: busNames(TESTNET_BUS_NS[other]).KEYS.supervisorStatus };
+}
+
+/**
+ * Supervisor guard (belt and braces next to the separate mnemonics): refuse to start when the other variant's supervisor
+ * status is fresh and reports the SAME deployer address (the same keys would sign in two stacks). Pure.
+ */
+export function supervisorConflict(other: { ts?: number; network?: string; deployer?: string | null } | null, myDeployer: string | null, now: number, ttlMs: number): string | null {
+  if (!other || !myDeployer || !other.deployer || typeof other.ts !== "number") return null;
+  if (now - other.ts > ttlMs) return null;
+  if (other.deployer.toLowerCase() !== myDeployer.toLowerCase()) return null;
+  return `the ${other.network ?? "other"} stack is running (supervisor status ${Math.round((now - other.ts) / 1000)} s old) with the same deployer ${myDeployer}: the same keys must never sign in two stacks`;
 }

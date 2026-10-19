@@ -1,7 +1,8 @@
 // QUEUES.venueOps job dispatch (BullMQ). Payload: VenueOpsJob (packages/shared/src/queues.ts).
 import type { VenueOpsJob } from "@bookrunner/shared";
+import { ifAboveRequirement } from "../domain/ifAccount";
 import type { BookRegistry } from "./books";
-import type { OpsContext } from "./context";
+import { type OpsContext, tradable } from "./context";
 import type { FeeSweeper } from "./fees";
 import type { Provisioner } from "./provision";
 import type { Reporter } from "./reporter";
@@ -32,13 +33,36 @@ export async function handleVenueOpsJob(job: VenueOpsJob, d: JobDeps): Promise<R
   switch (job.kind) {
     case "create_symbol":
       await d.provisioner.ensure(book, true);
-      return { bookId: book.bookId, symbol: book.symbol };
+      // listed: the book has an Orderly market symbol; listing: what /v1/public/info shows for it (manual mode: Orderly One)
+      return {
+        bookId: book.bookId,
+        symbol: book.symbol,
+        listed: tradable(book),
+        listingMode: d.ctx.settings.listingMode ?? "api",
+        ...(book.listing ? { listing: book.listing.phase, venueStatus: book.listing.venueStatus, openForRisk: book.listing.openForRisk, ...(book.listing.error ? { listingError: book.listing.error } : {}) } : {}),
+        ...(book.venueSymbolError ? { error: book.venueSymbolError } : {}),
+      };
     case "fund_if": {
-      // IF capital is deposited on-chain by the vault (closeWindow -> deployToVenue(IF)); verify it landed.
-      const r = await d.ctx.builder.insuranceFund(book.symbol);
-      const ok = r.balanceUsd >= book.ifTargetUsd;
-      d.ctx.log[ok ? "info" : "warn"]({ bookId: book.bookId, balanceUsd: r.balanceUsd.toString(), targetUsd: book.ifTargetUsd.toString() }, "insurance fund check");
-      return { balanceUsd: r.balanceUsd.toString(), targetUsd: book.ifTargetUsd.toString(), funded: ok };
+      if (!tradable(book)) {
+        // no symbol, so no per-symbol IF row: report the IF account's own equity instead
+        const acct = await d.ctx.readAccount(book.accounts.if, book.symbol, await d.ctx.keys.opsKey(book.bookId, "if"));
+        return { balanceUsd: acct.equityUsd.toString(), targetUsd: book.ifTargetUsd.toString(), funded: acct.equityUsd >= book.ifTargetUsd, listed: false };
+      }
+      // IF capital is deposited on-chain by the vault (closeWindow -> deployToVenue(IF)); verify it landed, at or above the
+      // charter target and strictly above Orderly's per-market requirement (one market per book IF account, VERIFY O10)
+      // live: the book's IF ACCOUNT equity (its ops key; one market per IF account). Orderly's public
+      // /v1/public/insurancefund is Orderly's own insurance fund, not a builder market's (VERIFY O17). mock: the
+      // mock venue's per-symbol IF row.
+      const r =
+        d.ctx.settings.mode === "live"
+          ? { balanceUsd: (await d.ctx.readAccount(book.accounts.if, book.symbol, await d.ctx.keys.opsKey(book.bookId, "if"))).equityUsd }
+          : await d.ctx.builder.insuranceFund(book.symbol);
+      const req = d.ctx.settings.ifRequirementUsd ?? null;
+      const above = req === null ? null : ifAboveRequirement(r.balanceUsd, req);
+      const ok = r.balanceUsd >= book.ifTargetUsd && above !== false && !book.ifAccountError;
+      const ifInfo = { ifMode: d.ctx.settings.ifMode ?? "contract", ifAccountId: book.accounts.if, ...(book.ifAccountError ? { ifAccountError: book.ifAccountError } : {}) };
+      d.ctx.log[ok ? "info" : "warn"]({ bookId: book.bookId, balanceUsd: r.balanceUsd.toString(), targetUsd: book.ifTargetUsd.toString(), requirementUsd: req?.toString() ?? null, ...ifInfo }, "insurance fund check");
+      return { balanceUsd: r.balanceUsd.toString(), targetUsd: book.ifTargetUsd.toString(), funded: ok, ...(req !== null ? { requirementUsd: req.toString(), aboveRequirement: above } : {}), ...ifInfo };
     }
     case "deposit_mm": {
       const acct = await d.ctx.readAccount(book.accounts.mm, book.symbol, await d.ctx.keys.opsKey(book.bookId, "mm"));
@@ -56,6 +80,8 @@ export async function handleVenueOpsJob(job: VenueOpsJob, d: JobDeps): Promise<R
     }
     case "sweep_fees": {
       if (job.period === undefined) throw new Error("sweep_fees needs period");
+      // the saga would earmark on-chain, then fail at the builder withdrawal only the admin wallet can sign (VERIFY O21)
+      if (d.ctx.settings.builderAdminOwned) throw new Error("sweep_fees refused: the builder account is admin-owned (G6), its fee withdrawal needs the admin wallet; settle builder fees manually");
       const s = await d.fees.sweep(book.bookId, job.period);
       return { stage: s.stage, amount: s.amount, ...(s.sweepTx ? { tx: s.sweepTx } : {}) };
     }

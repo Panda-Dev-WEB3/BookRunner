@@ -110,6 +110,7 @@ const service = new OracleService({
     pushDeviationBps: cfg.ORACLE_PUSH_DEVIATION_BPS,
     sessionsMode: cfg.SESSIONS_MODE,
     venuePrices: cfg.ORACLE_VENUE_PRICES,
+    tickMs: cfg.ORACLE_TICK_MS,
     pushMode: cfg.ORACLE_PUSH_MODE,
     bundleMaxAgeMs: cfg.ORACLE_BUNDLE_MAX_AGE_MS,
     production,

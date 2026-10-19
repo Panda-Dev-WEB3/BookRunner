@@ -3,7 +3,7 @@
 // ONE transaction -> publish the domain events that were newly inserted.
 // A range that keeps failing (INDEXER_POISON_ATTEMPTS) is re-applied log by log in savepoints;
 // failing logs are logged and skipped so one bad log cannot stall the indexer.
-import { CHANNELS, type Deployment, type Logger } from "@bookrunner/shared";
+import { CHANNELS, type Deployment, type Logger, busJson } from "@bookrunner/shared";
 import type { IndexerChain } from "./chain";
 import { CURSORS } from "./config";
 import { type DecodeSkip, type DecodedLog, decodeLog, orderLogs } from "./decode";
@@ -164,7 +164,7 @@ export class Indexer {
     if (!this.d.publisher) return;
     for (const e of events) {
       try {
-        await this.d.publisher.publish(CHANNELS.domainEvents, JSON.stringify(e));
+        await this.d.publisher.publish(CHANNELS.domainEvents, busJson(e));
       } catch (err) {
         this.d.logger.warn({ err: (err as Error).message, eventId: e.id }, "domain event publish failed (row persisted)");
       }

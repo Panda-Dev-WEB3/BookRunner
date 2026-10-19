@@ -7,13 +7,14 @@
 //   venueReport     = abi.encode(uint256 insuranceUsd, int256 marginUsd, int256 netExposureUsd, uint64 asOf, bytes sig)
 //                     (the commitAndApply argument; OrderlyAdapter.reportSigned takes the same fields)
 //
-// Redis: latest report JSON at `bkrn:venue:report:<bookId>` (also PUBLISHed on that channel name), the
-// last VENUE_REPORT_RECENT_MAX reports newest-first in the list `bkrn:venue:report:<bookId>:recent` (a mark
+// Redis: latest report JSON at `bkrn:<ns>:venue:report:<bookId>` (also PUBLISHed on that channel name), the
+// last VENUE_REPORT_RECENT_MAX reports newest-first in the list `bkrn:<ns>:venue:report:<bookId>:recent` (a mark
 // snapshot taken a few blocks behind head picks the newest report not after its block).
 //
 // On-chain acceptance (same rules as OrderlyAdapter.report): signer holds OPS_VENUE; no withdrawal is
 // Requested (pendingWithdrawUsd == 0); asOf <= block.timestamp; asOf > lastReportAsOf (valuationAt);
 // asOf > lastFlowAt (strictly: a same-second snapshot may predate the flow); values within 128-bit ranges.
+import { KEYS } from "@bookrunner/shared/queues";
 import {
   type Address,
   type Hex,
@@ -37,9 +38,9 @@ export const VENUE_REPORT_TYPE = "VenueReport(uint256 insuranceUsd,int256 margin
 export const REPORT_TYPEHASH: Hex = keccak256(stringToHex(VENUE_REPORT_TYPE));
 
 /** Latest signed report JSON per book (SET; also PUBLISHed on the same name). */
-export const venueReportKey = (bookId: number | bigint) => `bkrn:venue:report:${bookId}`;
+export const venueReportKey = (bookId: number | bigint) => KEYS.venueReport(bookId);
 /** Recent signed reports per book, newest first (LPUSH + LTRIM). */
-export const venueReportRecentKey = (bookId: number | bigint) => `bkrn:venue:report:${bookId}:recent`;
+export const venueReportRecentKey = (bookId: number | bigint) => KEYS.venueReportRecent(bookId);
 export const VENUE_REPORT_RECENT_MAX = 32;
 
 export const venueReportDomain = (chainId: number, adapter: Address) =>

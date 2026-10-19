@@ -2,7 +2,7 @@
 // NOTHING), then publish {id, type, createdAt, data} on CHANNELS.domainEvents. The api turns these
 // into webhooks. A conflicting insert means the event already exists: nothing is re-published.
 import { type Db, events } from "@bookrunner/db";
-import { CHANNELS, type DomainEvent, type DomainEventPayloads, type DomainEventType, type Logger } from "@bookrunner/shared";
+import { CHANNELS, busJson, type DomainEvent, type DomainEventPayloads, type DomainEventType, type Logger } from "@bookrunner/shared";
 
 export interface Publisher {
   publish(channel: string, message: string): Promise<unknown>;
@@ -33,7 +33,7 @@ export class PgRedisEventSink implements DomainEventSink {
     const msg: DomainEvent<T> = { id: row.id, type, createdAt: row.createdAt.toISOString(), data };
     if (this.redis) {
       try {
-        await this.redis.publish(CHANNELS.domainEvents, JSON.stringify(msg));
+        await this.redis.publish(CHANNELS.domainEvents, busJson(msg));
       } catch (err) {
         this.log.warn({ err, type, id: row.id }, "domain event persisted but redis publish failed");
       }

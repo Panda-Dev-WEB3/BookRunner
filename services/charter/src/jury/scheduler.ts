@@ -4,7 +4,7 @@
 //   3. chain poll: MarketCharter.count() scan (works even when the indexer is not running).
 // jobId = jury-<id> dedupes while a job is waiting/active; finished jobs are removed so a later
 // re-enqueue (e.g. after a devnet reset) is possible.
-import { CHANNELS, type JuryJob, type Logger, QUEUES } from "@bookrunner/shared";
+import { CHANNELS, type JuryJob, type Logger, QUEUES, busDropper } from "@bookrunner/shared";
 import { type Job, Queue, Worker } from "bullmq";
 import { Redis } from "ioredis";
 import type { CharterChain } from "../adapters/chain";
@@ -69,7 +69,9 @@ export class JuryScheduler {
 
     this.sub = new Redis(this.o.redisUrl, { maxRetriesPerRequest: null, lazyConnect: false });
     this.sub.on("error", (err) => this.o.logger.warn({ err: err.message }, "redis subscriber error"));
-    this.sub.on("message", (_channel: string, message: string) => {
+    const foreign = busDropper((msg, meta) => this.o.logger.warn(meta, msg));
+    this.sub.on("message", (channel: string, message: string) => {
+      if (foreign(channel, message)) return; // another stack's event (bus namespace)
       const id = filedCharterIdFrom(message);
       if (id !== null) void this.enqueue(id, "charter.filed event");
     });

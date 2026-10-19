@@ -16,6 +16,8 @@ import {BookFactory} from "../src/BookFactory.sol";
 ///         created after the upgrade get an OrderlyIFAccount at initialize. With MIGRATE_ORDERLY_ACCOUNTS=true the
 ///         script also calls `migrateToOrderlyAccounts()` on upgraded adapters that hold nothing venue-side (the
 ///         others are skipped and logged); restart ops-venue and mock-orderly afterwards (they cache account ids).
+///         v4 (IF account mode, docs/VERIFY.md O10): appends `ifAccountOwner` in a new slot; upgraded proxies stay in
+///         contract mode until the timelock calls `setIfAccountOwner(eoa)` (builder-held IF account).
 ///   PRIVATE_KEY=... (or DEV_MNEMONIC) DEPLOY_OUT=deployments/46630.json \
 ///     bash scripts/forge.sh script script/UpgradeOrderlyAdapters.s.sol:UpgradeOrderlyAdapters --rpc-url $RPC --broadcast
 contract UpgradeOrderlyAdapters is Script {

@@ -2,6 +2,8 @@
 //   WithdrawRequested -> [on-chain status still Requested] -> Orderly withdraw request (delegate signer)
 //   -> adapter.confirmWithdraw (BEFORE any USDC can reach the adapter) -> payout (mock:
 //   MockOrderlyVault.operatorWithdraw; live: Orderly pays, VERIFY) -> sweepToVault.
+// Builder IF mode (ORDERLY_IF_MODE=builder, IF account of an operator EOA): the operator withdraws on Orderly and returns
+// the payout to the adapter; ops-venue recognises the withdrawal, confirms it on-chain, waits for the USDG and sweeps.
 // Saga state persists in the saga store and every step is idempotent / resumable: the adapter's
 // on-chain request status gates each step (old or replayed requests are never executed again), and every
 // tx is recorded before its receipt is awaited and inspected on retry instead of being re-sent (txonce.ts).
@@ -12,11 +14,25 @@ import { isTerminal, matchPriorWithdrawal, newWithdrawSaga, nextStep, retryDelay
 import { OrderlyHttpError } from "../orderly/http";
 import { errMsg } from "../util";
 import type { BookRegistry } from "./books";
-import type { OpsContext, TrackedBook } from "./context";
+import { type OpsContext, type TrackedBook, tradable } from "./context";
 import { sendOnce } from "./txonce";
+
+/** Manual listing mode: re-try period of an IF withdrawal waiting for the admin to delist the market in Orderly One. */
+export const DELIST_WAIT_MS = 60_000;
+/** Manual listing mode: past this wait (OPS_DELIST_WAIT_MAX_MS) the venue error counts as a failed attempt again. */
+export const DELIST_WAIT_MAX_MS = 24 * 3_600_000;
+
+/** Builder IF mode: default OPS_IF_RETURN_WRITE_OFF_MS (an unreturned operator payout leaves NAV after this). */
+export const DEFAULT_IF_RETURN_WRITE_OFF_MS = 24 * 3_600_000;
+/** Builder IF mode: default OPS_IF_UNADOPTED_GRACE_MS (an unadopted IF withdrawal younger than this is not reported yet). */
+export const DEFAULT_IF_UNADOPTED_GRACE_MS = 10 * 60_000;
 
 export class WithdrawProcessor {
   private readonly nextAttemptAt = new Map<string, number>();
+  /** builder IF mode: per book, withdrawals no saga adopted; last scan time */
+  private readonly unadopted = new Map<number, Array<{ id: string; amount: string; status: string; createdAt: number | null; receiver: string | null }>>();
+  private readonly scannedAt = new Map<number, number>();
+  private readonly operatorErrLogged = new Map<string, string>();
 
   constructor(
     private readonly ctx: OpsContext,
@@ -51,7 +67,8 @@ export class WithdrawProcessor {
     } catch (err) {
       this.ctx.log.warn({ bookId: book.bookId, nonce: l.nonce.toString(), err: errMsg(err) }, "withdraw status read failed; the request step re-checks it");
     }
-    const s = newWithdrawSaga({ bookId: book.bookId, adapter: l.adapter, account: l.account, accountId: l.account === ACCOUNT.IF ? book.accounts.if : book.accounts.mm, owner: l.account === ACCOUNT.IF ? book.owners.if : book.owners.mm, amount: l.amount, nonce: l.nonce, txHash: l.txHash }, this.ctx.now());
+    const operatorIf = l.account === ACCOUNT.IF && book.ifBinding === "builder";
+    const s = newWithdrawSaga({ bookId: book.bookId, adapter: l.adapter, account: l.account, accountId: l.account === ACCOUNT.IF ? book.accounts.if : book.accounts.mm, owner: l.account === ACCOUNT.IF ? book.owners.if : book.owners.mm, amount: l.amount, nonce: l.nonce, txHash: l.txHash, operatorIf, block: l.block }, this.ctx.now());
     if (this.all()[s.key]) return this.all()[s.key] ?? null; // recorded meanwhile
     this.all()[s.key] = s;
     this.ctx.sagas.save();
@@ -59,11 +76,36 @@ export class WithdrawProcessor {
     return s;
   }
 
+  /** Manual listing mode: pending IF withdrawals waiting for the admin's delisting (published for alerts). */
+  delistWaits(): Array<{ bookId: number; symbol: string; since: number }> {
+    return this.pending()
+      .filter((s) => s.stage === "detected" && s.delistWaitSince !== undefined)
+      .map((s) => ({ bookId: s.bookId, symbol: this.registry.get(s.bookId)?.symbol ?? "", since: s.delistWaitSince as number }));
+  }
+
+  /** Builder IF mode: IF withdrawals waiting for the operator (withdraw on Orderly / return to the adapter), for alerts. */
+  ifOperatorWaits(): Array<{ bookId: number; nonce: string; step: "withdraw" | "payout" | "return"; amount: string; owner: string; adapter: string; since: number; writtenOffAt?: number }> {
+    const out: ReturnType<WithdrawProcessor["ifOperatorWaits"]> = [];
+    for (const s of this.pending()) {
+      if (!s.operatorIf) continue;
+      const base = { bookId: s.bookId, nonce: s.nonce, amount: s.amount, owner: sagaReceiver(s), adapter: s.adapter };
+      if (s.stage === "detected" && s.operatorWaitSince !== undefined) out.push({ ...base, step: "withdraw", since: s.operatorWaitSince });
+      else if (s.stage === "confirmed") {
+        // until the funds are back on the adapter or written off (and after a write-off, until they come back)
+        const wo = s.writtenOffAt !== undefined ? { writtenOffAt: s.writtenOffAt } : {};
+        if (s.returnWaitSince !== undefined) out.push({ ...base, step: "return", since: s.returnWaitSince, ...wo });
+        else out.push({ ...base, step: "payout", since: s.confirmedAtMs ?? s.updatedAt, ...wo });
+      }
+    }
+    return out;
+  }
+
   pending(): WithdrawSaga[] {
     return Object.values(this.all()).filter((s) => !isTerminal(s));
   }
 
   async processAll(): Promise<void> {
+    await this.scanBuilderIfWithdrawals().catch((err) => this.ctx.log.warn({ err: errMsg(err) }, "builder IF withdrawal scan failed"));
     const now = this.ctx.now();
     for (const s of this.pending()) {
       if ((this.nextAttemptAt.get(s.key) ?? 0) > now) continue;
@@ -143,10 +185,33 @@ export class WithdrawProcessor {
         const st = await chain.withdrawStatus(s.adapter, nonce);
         if (st.status !== WITHDRAW_STATUS.Requested) return { type: "skipped", reason: `on-chain request is ${withdrawStatusName(st.status)}` };
         const book = this.registry.get(s.bookId);
+        if (s.operatorIf) return this.operatorRequest(key, st.requestedAt);
         try {
-          return { type: "venue_requested", withdrawId: await this.venueRequest(s, st.requestedAt) };
+          const withdrawId = await this.venueRequest(s, st.requestedAt);
+          if (s.delistWaitSince !== undefined) log.info({ bookId: s.bookId, symbol: book?.symbol, waitedMs: this.ctx.now() - s.delistWaitSince }, "delisting in Orderly One done: the insurance-fund withdrawal went through");
+          return { type: "venue_requested", withdrawId };
         } catch (err) {
-          if (book && s.account === ACCOUNT.IF && isInsufficient(err) && book.state === "Retiring" && (await this.mmFlat(book))) {
+          if (book && tradable(book) && s.account === ACCOUNT.IF && isInsufficient(err) && book.state === "Retiring" && (await this.mmFlat(book))) {
+            if ((settings.listingMode ?? "api") === "manual") {
+              // no confirmed delisting endpoint (VERIFY O20): the admin delists in Orderly One. Waiting on a person is
+              // not a failed attempt (the saga would run out of attempts): re-try the venue request every minute, up to
+              // the ceiling; past it the error counts again (the saga can fail: a real shortfall is not hidden forever).
+              const now = this.ctx.now();
+              const since = s.delistWaitSince ?? now;
+              const maxMs = settings.delistWaitMaxMs ?? DELIST_WAIT_MAX_MS;
+              if (s.delistWaitSince === undefined) {
+                this.patch(key, { delistWaitSince: since });
+                log.warn({ bookId: s.bookId, symbol: book.symbol, err: errMsg(err) }, "retiring book: the insurance fund is locked by the listed market — delist it in Orderly One (manual listing mode); the IF withdrawal re-tries every minute");
+              } else {
+                log.debug({ bookId: s.bookId, symbol: book.symbol, err: errMsg(err), waitingMs: now - since }, "IF withdrawal still waiting for the delisting in Orderly One");
+              }
+              if (now - since < maxMs) {
+                this.nextAttemptAt.set(key, now + DELIST_WAIT_MS);
+                return null;
+              }
+              log.error({ bookId: s.bookId, symbol: book.symbol, err: errMsg(err), waitingMs: now - since }, "IF withdrawal waited past the delisting ceiling: counting the venue error as a failed attempt (check the market in Orderly One and the IF balance)");
+              throw err;
+            }
             log.info({ bookId: s.bookId, symbol: book.symbol }, "retiring book: delisting symbol to release the insurance fund");
             await builder.setSymbolStatus(book.symbol, "DELISTED");
             return { type: "venue_requested", withdrawId: await this.venueRequest(s, st.requestedAt) };
@@ -172,9 +237,12 @@ export class WithdrawProcessor {
         return { type: "confirmed", ...(r.hash ? { confirmTx: r.hash } : {}) };
       }
       case "pay": {
+        if (s.operatorIf) return this.operatorPay(key);
         const wid = s.withdrawId as string;
         const rec = await builder.withdrawal(s.accountId, wid);
-        if (rec?.status === "COMPLETED") return { type: "venue_paid", ...(rec.txHash ? { payTx: rec.txHash as Hex } : s.payTx ? { payTx: s.payTx } : {}) };
+        if (rec?.status === "COMPLETED") {
+          return { type: "venue_paid", ...(rec.txHash ? { payTx: rec.txHash as Hex } : s.payTx ? { payTx: s.payTx } : {}) };
+        }
         if (rec?.status === "FAILED") {
           if (s.payTx || s.txs?.pay) return { type: "error", error: `venue withdrawal ${wid} FAILED after the mock payout was sent — manual reconcile`, fatal: true };
           // confirmed on-chain, failed on the venue (funds credited back): Confirmed -> Failed
@@ -190,7 +258,7 @@ export class WithdrawProcessor {
         if (st.status === WITHDRAW_STATUS.Requested) {
           // saga persisted by the old pay-before-confirm order: never sweep an unconfirmed payout
           if (!(await this.once(key, "confirm", (o) => chain.confirmWithdraw(s.adapter, nonce, o)))) return null;
-        } else if (st.status !== WITHDRAW_STATUS.Confirmed) {
+        } else if (st.status !== WITHDRAW_STATUS.Confirmed && !(s.operatorIf && st.status === WITHDRAW_STATUS.WrittenOff)) {
           return { type: "error", error: `on-chain request is ${withdrawStatusName(st.status)}; not sweeping`, fatal: true };
         }
         try {
@@ -230,6 +298,200 @@ export class WithdrawProcessor {
     }
     await builder.mockCompleteWithdraw(s.withdrawId as string, s.payTx as string);
     return { type: "venue_paid", ...(s.payTx ? { payTx: s.payTx } : {}) };
+  }
+
+  /**
+   * Builder IF mode, request step: ops-venue cannot sign for the operator's EOA, so it waits for the operator's own Orderly
+   * withdrawal of exactly this amount from the IF account (to the EOA, created after the on-chain request, not claimed by
+   * another saga) and adopts it. Waiting (or an unreadable history, e.g. the IF key not registered yet) burns no attempt.
+   */
+  private async operatorRequest(key: string, requestedAtSec: bigint): Promise<WithdrawEvent | null> {
+    const { builder, log } = this.ctx;
+    const s = this.get(key);
+    const now = this.ctx.now();
+    const claimed = new Set(
+      Object.values(this.all())
+        .filter((x) => x.key !== s.key && x.withdrawId)
+        .map((x) => x.withdrawId as string),
+    );
+    let prior: ReturnType<typeof matchPriorWithdrawal> = null;
+    let readError: string | null = null;
+    try {
+      prior = matchPriorWithdrawal(await builder.withdrawals(s.accountId), { ref: `wr-${s.nonce}`, amount: BigInt(s.amount), receiver: sagaReceiver(s), sinceMs: Number(requestedAtSec) * 1000, claimed });
+    } catch (err) {
+      readError = errMsg(err);
+    }
+    if (prior) {
+      const st = this.ctx.sagas.get();
+      const acc = s.accountId.toLowerCase();
+      st.ifAdopted ??= {};
+      st.ifAdopted[acc] = [...new Set([...(st.ifAdopted[acc] ?? []), String(prior.id)])];
+      this.ctx.sagas.save();
+      log.info({ bookId: s.bookId, nonce: s.nonce, withdrawId: String(prior.id), status: prior.status, waitedMs: s.operatorWaitSince !== undefined ? now - s.operatorWaitSince : 0 }, "builder IF account: the operator's Orderly withdrawal found — adopting it");
+      return { type: "venue_requested", withdrawId: String(prior.id) };
+    }
+    if (s.operatorWaitSince === undefined) {
+      this.patch(key, { operatorWaitSince: now });
+      log.warn(
+        { bookId: s.bookId, nonce: s.nonce, amount: s.amount, accountId: s.accountId, owner: sagaReceiver(s), adapter: s.adapter, ...(readError ? { err: readError } : {}) },
+        "builder IF account: the operator must withdraw this amount from the IF account on Orderly (paid to its wallet) and then transfer it to the adapter; ops-venue re-checks every minute",
+      );
+    } else {
+      log.debug({ bookId: s.bookId, nonce: s.nonce, waitingMs: now - s.operatorWaitSince, ...(readError ? { err: readError } : {}) }, "builder IF withdrawal still waiting for the operator");
+    }
+    this.nextAttemptAt.set(key, now + (this.ctx.settings.ifOperatorRecheckMs ?? DELIST_WAIT_MS));
+    return null;
+  }
+
+  /**
+   * Builder IF mode, pay step (stage confirmed). The operator controls the Orderly account (and so whether ops-venue can
+   * read it), so nothing here depends on an Orderly read:
+   *   1. the write-off deadline runs from the ON-CHAIN confirmation (withdrawRequest.confirmedAt) + OPS_IF_RETURN_WRITE_OFF_MS;
+   *   2. the return is the operator's settlement-token Transfer(EOA -> adapter) logs (scanReturns), read from the chain;
+   *   3. only then Orderly's record: COMPLETED marks "paid to the EOA" (returnWaitSince: the alert's return step and the
+   *      point after which reports are no longer held), FAILED releases the request (failWithdraw, or nothing after a
+   *      write-off: the funds are venue-side again and the next report counts them).
+   * Any error in this stage (Orderly down, the operator removed ops-venue's read key, a missing row, an RPC blip, a
+   * reverting write-off) waits and retries: it never burns an attempt, so the saga never fails with funds in transit;
+   * it stays published (ifOperatorWaits) until the funds are back on the adapter or written off.
+   */
+  private async operatorPay(key: string): Promise<WithdrawEvent | null> {
+    const { chain, builder, log, settings } = this.ctx;
+    const recheck = settings.ifOperatorRecheckMs ?? DELIST_WAIT_MS;
+    let s = this.get(key);
+    const nonce = BigInt(s.nonce);
+    const now = this.ctx.now();
+    try {
+      const st = await chain.withdrawStatus(s.adapter, nonce);
+      const limit = settings.ifReturnWriteOffMs ?? DEFAULT_IF_RETURN_WRITE_OFF_MS;
+      const confirmedMs = st.confirmedAt !== undefined && st.confirmedAt > 0n ? Number(st.confirmedAt) * 1000 : (s.confirmedAtMs ?? now);
+      if (st.status === WITHDRAW_STATUS.WrittenOff && s.writtenOffAt === undefined) s = this.patch(key, { writtenOffAt: now });
+      if (st.status === WITHDRAW_STATUS.Confirmed && s.writtenOffAt === undefined && now - confirmedMs >= limit && !(await this.scanReturns(key))) {
+        // NAV must not keep counting money the operator holds: Confirmed -> WrittenOff on the adapter (in-transit cleared)
+        const w = await this.once(key, "writeoff", (o) => chain.writeOffOperatorPayout(s.adapter, nonce, o));
+        if (!w) {
+          this.nextAttemptAt.set(key, now + recheck);
+          return null;
+        }
+        s = this.patch(key, { writtenOffAt: now });
+        log.error({ bookId: s.bookId, nonce: s.nonce, amount: s.amount, owner: sagaReceiver(s), sinceConfirmationMs: now - confirmedMs }, "builder IF payout not back on the adapter in time: WRITTEN OFF from NAV (adapter.writeOffOperatorPayout); a later return is swept to the vault as a gain");
+      }
+      if (await this.scanReturns(key)) {
+        log.info({ bookId: s.bookId, nonce: s.nonce, transfers: this.get(key).returns?.map((r) => r.id), writtenOff: s.writtenOffAt !== undefined }, "builder IF account: the operator returned the payout to the adapter");
+        return { type: "venue_paid" };
+      }
+      const rec = await builder.withdrawal(s.accountId, s.withdrawId as string);
+      if (rec?.status === "FAILED") {
+        if (st.status === WITHDRAW_STATUS.WrittenOff) return { type: "cancelled", reason: `venue withdrawal ${s.withdrawId} FAILED after the write-off: the funds are venue-side again (counted by the next report)` };
+        const c = await this.once(key, "cancel", (o) => chain.failWithdraw(s.adapter, nonce, o));
+        if (!c) {
+          this.nextAttemptAt.set(key, now + recheck);
+          return null;
+        }
+        return { type: "cancelled", reason: `venue withdrawal ${s.withdrawId} FAILED after confirmation`, ...(c.hash ? { cancelTx: c.hash } : {}) };
+      }
+      if (rec?.status === "COMPLETED" && s.returnWaitSince === undefined) {
+        this.patch(key, { returnWaitSince: now });
+        log.warn({ bookId: s.bookId, nonce: s.nonce, amount: s.amount, owner: sagaReceiver(s), adapter: s.adapter }, "builder IF account: Orderly paid the IF withdrawal to the operator's wallet — the operator must transfer it (the full amount, one transfer) to the adapter; ops-venue re-checks every minute");
+      }
+    } catch (err) {
+      // waiting on the operator's account / the chain: never a failed attempt
+      const first = this.operatorErrLogged.get(key) !== errMsg(err);
+      this.operatorErrLogged.set(key, errMsg(err));
+      log[first ? "warn" : "debug"]({ bookId: s.bookId, nonce: s.nonce, err: errMsg(err) }, "builder IF payout check failed (no attempt burnt; the write-off deadline runs from the on-chain confirmation)");
+    }
+    this.nextAttemptAt.set(key, now + recheck);
+    return null;
+  }
+
+  /**
+   * Builder IF mode: has the operator returned THIS payout? Settlement-token Transfer(EOA -> adapter) logs after the
+   * on-chain request, claimed by no other saga, adding up to at least the requested amount (one transfer per withdrawal;
+   * the operator tops up Orderly's withdrawal fee). Never the adapter-wide balance (fee earmarks, MM payouts,
+   * unattributed USDC). Scans incrementally (returnScannedTo) and records the claimed transfers (returns).
+   */
+  private async scanReturns(key: string): Promise<boolean> {
+    const { chain, settings } = this.ctx;
+    let s = this.get(key);
+    const amount = BigInt(s.amount);
+    const owner = sagaReceiver(s);
+    const already = (s.returns ?? []).reduce((x, r) => x + BigInt(r.amount), 0n);
+    if (already >= amount) return true;
+    const head = await chain.blockNumber();
+    const from = s.returnScannedTo !== undefined ? BigInt(s.returnScannedTo) + 1n : BigInt(s.requestBlock ?? chain.startBlock.toString());
+    if (from > head) return false;
+    const claimed = new Set(
+      Object.values(this.all())
+        .filter((x) => x.key !== s.key)
+        .flatMap((x) => (x.returns ?? []).map((r) => r.id)),
+    );
+    const step = settings.logMaxRange > 0n ? settings.logMaxRange : 2_000n;
+    const returns = [...(s.returns ?? [])];
+    let got = already;
+    let scanned = from - 1n;
+    for (let lo = from; lo <= head && got < amount; lo += step) {
+      const hi = lo + step - 1n < head ? lo + step - 1n : head;
+      for (const t of await chain.tokenTransfers(owner, s.adapter, lo, hi)) {
+        const id = `${t.txHash.toLowerCase()}:${t.logIndex}`;
+        if (got >= amount || claimed.has(id) || returns.some((r) => r.id === id)) continue;
+        returns.push({ id, amount: t.amount.toString() });
+        got += t.amount;
+      }
+      scanned = hi;
+    }
+    s = this.patch(key, { returns, returnScannedTo: scanned.toString() });
+    return got >= amount;
+  }
+
+  /** Withdraw sagas that FAILED (terminal; kept until pruned), for alerts: critical for IF (venue_withdraw_failed). */
+  failedSagas(): Array<{ bookId: number; nonce: string; account: number; amount: string; error: string; at: number; operatorIf: boolean }> {
+    return Object.values(this.all())
+      .filter((s) => s.stage === "failed")
+      .map((s) => ({ bookId: s.bookId, nonce: s.nonce, account: s.account, amount: s.amount, error: s.lastError ?? "", at: s.updatedAt, operatorIf: s.operatorIf === true }));
+  }
+
+  /**
+   * Builder IF mode, every OPS_IF_OPERATOR_RECHECK_MS per book: withdrawals from the builder IF account that no saga
+   * adopted (the EOA owns its Orderly account outright and can withdraw without any on-chain request). Older than the
+   * grace (a pending saga adopts the operator's withdrawal within a minute) and not acknowledged (OPS_IF_WITHDRAW_ACK):
+   * published for alerts (venue_if_unadopted_withdrawal, critical). Every adoption is recorded in the saga store's
+   * ifAdopted ledger, which pruning never drops.
+   */
+  async scanBuilderIfWithdrawals(): Promise<void> {
+    const { builder, log, settings } = this.ctx;
+    const now = this.ctx.now();
+    const st = this.ctx.sagas.get();
+    for (const book of this.registry.list()) {
+      if (book.ifBinding !== "builder" || book.state === "Cancelled" || book.state === "Retired") {
+        this.unadopted.delete(book.bookId);
+        continue;
+      }
+      if (now - (this.scannedAt.get(book.bookId) ?? 0) < (settings.ifOperatorRecheckMs ?? DELIST_WAIT_MS)) continue;
+      this.scannedAt.set(book.bookId, now);
+      let rows: Awaited<ReturnType<typeof builder.withdrawals>>;
+      try {
+        rows = await builder.withdrawals(book.accounts.if);
+      } catch (err) {
+        log.debug({ bookId: book.bookId, err: errMsg(err) }, "builder IF withdrawal history unreadable (IF key not registered?)");
+        continue;
+      }
+      const acc = book.accounts.if.toLowerCase();
+      const adopted = new Set([...(st.ifAdopted?.[acc] ?? []), ...Object.values(this.all()).filter((x) => x.accountId.toLowerCase() === acc && x.withdrawId).map((x) => x.withdrawId as string)]);
+      const ack = settings.ifWithdrawAck ?? new Set<string>();
+      const grace = settings.ifUnadoptedGraceMs ?? DEFAULT_IF_UNADOPTED_GRACE_MS;
+      const found = rows
+        .filter((r) => r.status !== "FAILED" && !adopted.has(String(r.id)) && !ack.has(String(r.id)) && !(typeof r.createdAt === "number" && now - r.createdAt < grace))
+        .map((r) => ({ id: String(r.id), amount: r.amountUsd.toString(), status: r.status, createdAt: r.createdAt ?? null, receiver: r.receiver ?? null }));
+      const before = new Set((this.unadopted.get(book.bookId) ?? []).map((r) => r.id));
+      for (const r of found) if (!before.has(r.id)) log.error({ bookId: book.bookId, accountId: book.accounts.if, withdrawId: r.id, amount: r.amount, status: r.status, receiver: r.receiver }, "builder IF account: a withdrawal NO on-chain request asked for (the operator's key moved IF capital) — investigate; acknowledge with OPS_IF_WITHDRAW_ACK once reviewed");
+      if (found.length) this.unadopted.set(book.bookId, found);
+      else this.unadopted.delete(book.bookId);
+    }
+  }
+
+  /** Builder IF mode: unadopted withdrawals per book (published for alerts). */
+  ifUnadopted(): Array<{ bookId: number; accountId: string; id: string; amount: string; status: string; createdAt: number | null }> {
+    return [...this.unadopted.entries()].flatMap(([bookId, rows]) => rows.map((r) => ({ bookId, accountId: this.registry.get(bookId)?.accounts.if ?? "", id: r.id, amount: r.amount, status: r.status, createdAt: r.createdAt })));
   }
 
   /** POST the venue withdrawal unless an earlier attempt already created it (see matchPriorWithdrawal). */

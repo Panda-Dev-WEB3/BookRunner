@@ -15,6 +15,9 @@ export const baseEnvSchema = z.object({
   SESSIONS_MODE: z.enum(["charter", "24x7"]).default("24x7"),
   ORDERLY_MODE: z.enum(["mock", "live"]).default("mock"),
   ORDERLY_BASE_URL: z.string().default("http://127.0.0.1:4420"),
+  // builder broker id (VERIFY O7); with ORDERLY_MODE=live, books trade their builder market PERP_<T>_USDC_<broker>
+  // (venueSymbol.ts) — read by ops-venue, the agents and risk alike
+  ORDERLY_BROKER_ID: z.string().default("bookrunner"),
 });
 
 export type BaseEnv = z.infer<typeof baseEnvSchema>;

@@ -122,6 +122,21 @@ const shape = {
 
   ALERT_MARK_GRACE_SECONDS: z.coerce.number().int().min(0).optional(),
   ALERT_RISK_STALE_SECONDS: int(300),
+  /** a live Orderly builder market whose price ops-venue has not pushed this long in session (Orderly: >= 1/s) alerts (critical) */
+  ALERT_BUILDER_PUSH_FAIL_SECONDS: int(30),
+  /** venue_listing_pending: a Live book whose Orderly market is not listed pages critical after this long Live (warning before) */
+  ALERT_LISTING_LIVE_GRACE_SECONDS: int(1800),
+  /** venue_listing_check: consecutive failed listing checks of a market before a warning */
+  ALERT_LISTING_CHECK_FAILURES: int(5),
+  /** venue_delist_pending: an IF withdrawal waiting this long for the admin's delisting pages critical (warning before) */
+  ALERT_DELIST_WAIT_CRITICAL_SECONDS: int(21_600),
+  /** venue_if_operator_pending: a builder-IF withdrawal waiting this long for the operator pages critical (warning before) */
+  ALERT_IF_OPERATOR_WAIT_CRITICAL_SECONDS: int(21_600),
+  /**
+   * The agents' AGENT_VENUE_POST_ONLY_QUOTE (same stack env): POST_ONLY markets are quoted maker-only (true) or
+   * reduce-only (false). Unset: the agent's default, true with ops-venue in live mode (venue_market_restricted text).
+   */
+  AGENT_VENUE_POST_ONLY_QUOTE: z.stringbool().optional(),
   ALERT_RISK_WARN: bool(false),
   ALERT_VENUE_REPORT_MAX_AGE_SECONDS: z.coerce.number().int().min(1).optional(),
   ALERT_RESTART_WINDOW_SECONDS: int(900),
@@ -169,6 +184,18 @@ export interface RuleConfig {
   riskStaleSec: number;
   riskWarn: boolean;
   venueReportMaxAgeSec: number;
+  /** builder_price_push: failing span (s) of a live builder price push in session */
+  builderPushFailSec: number;
+  /** venue_listing_pending: grace (s) of a Live book on an unlisted market before critical */
+  listingLiveGraceSec: number;
+  /** venue_listing_check: consecutive failed checks before a warning */
+  listingCheckFailures: number;
+  /** venue_delist_pending: wait (s) before critical */
+  delistWaitCriticalSec: number;
+  /** venue_if_operator_pending: wait (s) before critical */
+  ifOperatorWaitCriticalSec: number;
+  /** the agents' AGENT_VENUE_POST_ONLY_QUOTE when set (undefined: the agent default, true with ops-venue live) */
+  venuePostOnlyQuote?: boolean;
   restartWindowSec: number;
   restartMax: number;
   exitWindowSec: number;
@@ -279,6 +306,12 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       riskStaleSec: e.ALERT_RISK_STALE_SECONDS,
       riskWarn: e.ALERT_RISK_WARN,
       venueReportMaxAgeSec: e.ALERT_VENUE_REPORT_MAX_AGE_SECONDS ?? nd.venueReportMaxAgeSec,
+      builderPushFailSec: e.ALERT_BUILDER_PUSH_FAIL_SECONDS,
+      listingLiveGraceSec: e.ALERT_LISTING_LIVE_GRACE_SECONDS,
+      listingCheckFailures: e.ALERT_LISTING_CHECK_FAILURES,
+      delistWaitCriticalSec: e.ALERT_DELIST_WAIT_CRITICAL_SECONDS,
+      ifOperatorWaitCriticalSec: e.ALERT_IF_OPERATOR_WAIT_CRITICAL_SECONDS,
+      ...(e.AGENT_VENUE_POST_ONLY_QUOTE !== undefined ? { venuePostOnlyQuote: e.AGENT_VENUE_POST_ONLY_QUOTE } : {}),
       restartWindowSec: e.ALERT_RESTART_WINDOW_SECONDS,
       restartMax: e.ALERT_RESTART_MAX,
       exitWindowSec: e.ALERT_EXIT_WINDOW_SECONDS,

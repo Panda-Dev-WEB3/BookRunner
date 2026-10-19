@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_FORM, apiFieldToForm, formIssues, formToDraft, issuesFor, splitDuration, stepOf, suggestSymbol } from "../src/lib/charterForm";
+import { DEFAULT_FORM, apiFieldToForm, formIssues, formToDraft, issuesFor, splitDuration, stepOf, suggestSymbol, venueMinIfUsd } from "../src/lib/charterForm";
 
 const SPONSOR = "0x14dC79964da2C08b23698B3D3cc7Ca32193d9955";
 
@@ -47,6 +47,24 @@ describe("charter form", () => {
     expect(skew("5", "8")).toHaveLength(1);
     expect(skew("4", "8")).toEqual([]);
     expect(skew("4", "9")).toEqual([]);
+  });
+
+  test("Orderly books need an Orderly perp symbol; in-house symbols are free-form", () => {
+    const symbolIssues = (symbol: string, venue: "orderly" | "pool_engine" = "orderly") =>
+      formIssues({ ...DEFAULT_FORM, sponsor: SPONSOR, symbol, venue, ifSizeUsd: "30000" }).filter((i) => i.field === "symbol");
+    expect(symbolIssues("PERP_NVDA_USDC")).toEqual([]);
+    expect(symbolIssues("PERP_NVDA_USDC_bookrunner")).toEqual([]);
+    expect(symbolIssues("NVDA-PERP")[0]?.message).toMatch(/PERP_NVDA_USDC/);
+    expect(symbolIssues("NVDA-PERP", "pool_engine")).toEqual([]);
+  });
+
+  test("Orderly IF minimum per network: 101 on Robinhood testnet (> 100 USDG), 25,001 elsewhere (VERIFY O10)", () => {
+    const ifIssue = (ifSizeUsd: string, chainId?: number) => formIssues({ ...DEFAULT_FORM, sponsor: SPONSOR, ifSizeUsd }, chainId === undefined ? {} : { chainId }).find((i) => i.field === "ifSizeUsd");
+    expect([venueMinIfUsd("orderly"), venueMinIfUsd("orderly", 46630), venueMinIfUsd("orderly", 4663), venueMinIfUsd("pool_engine", 46630)]).toEqual([25_001, 101, 25_001, 10_000]);
+    expect(ifIssue("101", 46630)).toBeUndefined();
+    expect(ifIssue("100", 46630)?.message).toContain("minimum of 101");
+    expect(ifIssue("25000")?.message).toContain("minimum of 25,001");
+    expect(ifIssue("25000", 4663)?.severity).toBe("error");
   });
 
   test("in-house engine fees are capped at 100 bps", () => {

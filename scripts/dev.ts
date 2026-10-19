@@ -4,6 +4,10 @@
 //   bun scripts/dev.ts api web         # only some
 //   bun scripts/dev.ts --no-sim        # without trader-sim
 //   bun scripts/dev.ts --network testnet   # Robinhood Chain testnet profile (.env.testnet)
+//   bun scripts/dev.ts --network testnet-live   # live-Orderly rehearsal stack NEXT TO the public testnet: real Orderly
+//                                          # testnet, own mnemonic (BKRN_TESTNET_LIVE_MNEMONIC), 46630.live.json, DB, own Redis (63791) + bus ns,
+//                                          # .data/testnet-live, ports 4500/4510/4530; no mock-orderly / trader-sim / web
+//                                          # (.env.testnet-live; scripts/network-profile.ts testnetLiveProfile; bookrunner@testnet-live)
 //   bun scripts/dev.ts --network mainnet   # Robinhood Chain MAINNET (4663): scripts/network-profile.ts
 //   bun scripts/dev.ts --no-web            # without the vite dev server (a server serves the built web app)
 //
@@ -27,16 +31,33 @@ import { ADMIN_KEY_OPT_IN, type DevRole, hasDerivedKeys, roleAccount } from "../
 import { redactUrl } from "../packages/shared/src/redact";
 import {
   SUPERVISOR_PUBLISH_MS,
-  SUPERVISOR_STATUS_KEY,
   SUPERVISOR_TTL_MS,
   type SupervisedProc,
   newProc,
+  parseSupervisorStatus,
   recordExit,
   recordStart,
   supervisorStatus,
 } from "../packages/shared/src/supervisor";
 import { roleSigner } from "../packages/shared/src/signer";
-import { MAINNET_EXCLUDED, deskKeyEnvFor, mainnetProfile, watchedRoleAddresses } from "./network-profile";
+import { busNames, busNamespace } from "../packages/shared/src/queues";
+import { describeMigration, migrateBus } from "./bus-migrate";
+import { parseEnvText } from "./env-file";
+import {
+  LIVE_MNEMONIC_ENV,
+  MAINNET_EXCLUDED,
+  TESTNET_LIVE_EXCLUDED,
+  type TestnetVariant,
+  deskKeyEnvFor,
+  liveUnitExplicitKeys,
+  mainnetProfile,
+  otherVariant,
+  supervisorConflict,
+  testnetLiveProfile,
+  testnetOrderlyLive,
+  variantDeployer,
+  watchedRoleAddresses,
+} from "./network-profile";
 
 const ROOT = resolve(import.meta.dir, "..");
 const BUN = process.execPath; // the bun running this script
@@ -44,8 +65,8 @@ const args = process.argv.slice(2);
 const netIdx = args.indexOf("--network");
 const network = (netIdx >= 0 ? args[netIdx + 1] : process.env.NETWORK) ?? "devnet";
 if (netIdx >= 0) args.splice(netIdx, 2);
-if (!["devnet", "testnet", "mainnet"].includes(network)) {
-  console.error(`[dev] unknown network "${network}" (devnet | testnet | mainnet)`);
+if (!["devnet", "testnet", "testnet-live", "mainnet"].includes(network)) {
+  console.error(`[dev] unknown network "${network}" (devnet | testnet | testnet-live | mainnet)`);
   process.exit(1);
 }
 const mainnet = network === "mainnet";
@@ -54,27 +75,50 @@ const noSim = mainnet || args.includes("--no-sim");
 const noWeb = mainnet || args.includes("--no-web");
 
 const env: Record<string, string> = { ...(process.env as Record<string, string>) };
-/** Loads KEY=VALUE lines; returns the keys it defined (null when the file is missing). */
-function loadEnvFile(file: string, override: boolean): Set<string> | null {
+/** --network testnet-live: the live-Orderly rehearsal stack next to the public testnet (scripts/network-profile.ts testnetLiveProfile) */
+const liveVenue = network === "testnet-live";
+const testnetLike = network === "testnet" || liveVenue;
+/** Reads KEY=VALUE lines without applying them (null when the file is missing). */
+function readEnvFile(file: string): Array<[string, string]> | null {
   const path = resolve(ROOT, file);
   if (!existsSync(path)) return null;
+  // THE env-file rule (scripts/env-file.ts): a key defined twice refuses the file (no first-vs-last ambiguity)
+  const f = parseEnvText(readFileSync(path, "utf8"));
+  if (f.duplicates.length) {
+    console.error(`[dev] refusing: ${file} defines ${f.duplicates.join(", ")} more than once (keep exactly one line per key)`);
+    process.exit(1);
+  }
+  return Object.entries(f.values);
+}
+/** Loads KEY=VALUE lines; returns the keys it defined (null when the file is missing). */
+function loadEnvFile(file: string, override: boolean): Set<string> | null {
+  const lines = readEnvFile(file);
+  if (!lines) return null;
   const keys = new Set<string>();
-  for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
-    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
-    if (m && !line.trim().startsWith("#") && (override || env[m[1]!] === undefined)) {
-      env[m[1]!] = m[2]!.replace(/^["']|["']$/g, "");
-      keys.add(m[1]!);
+  for (const [k, v] of lines) {
+    if (override || env[k] === undefined) {
+      env[k] = v;
+      keys.add(k);
     }
   }
   return keys;
 }
+/** The public testnet stack's .env.testnet as read (never applied), for the live stack's shared-key refusal. */
+function publicTestnetEnv(): Record<string, string> | null {
+  const lines = readEnvFile(".env.testnet");
+  return lines ? Object.fromEntries(lines) : null;
+}
 
-if (network === "testnet") {
+if (testnetLike) {
   // Robinhood Chain testnet profile. Secrets (BKRN_TESTNET_MNEMONIC, optional RHC_TESTNET_RPC_URL,
   // ANTHROPIC_API_KEY) live in .env.testnet (gitignored). Separate DB / Redis db / state files so the
   // devnet stack's data is never mixed with testnet data.
   // NB: bun auto-loads the repo .env (devnet values) into process.env — this profile must OVERRIDE them.
-  const testnetKeys = loadEnvFile(".env.testnet", true);
+  // testnet-live: its own env (.env.testnet-live over the process env, e.g. the unit's /etc/bookrunner/testnet-live.env);
+  // the public stack's .env.testnet is only read, to refuse a shared key, never applied
+  // live without .env.testnet-live (the server: the unit's root-owned /etc/bookrunner/testnet-live.env, parsed by systemd):
+  // only the DOCUMENTED override names the unit set count as explicit (TESTNET_LIVE_UNIT_OVERRIDES), never every key
+  const testnetKeys = liveVenue ? (loadEnvFile(".env.testnet-live", true) ?? liveUnitExplicitKeys(process.env)) : loadEnvFile(".env.testnet", true);
   if (!testnetKeys) {
     console.error("[dev] .env.testnet missing — run `bash scripts/deploy-testnet.sh` first");
     process.exit(1);
@@ -85,6 +129,7 @@ if (network === "testnet") {
   const redisAuth = env.REDIS_PASSWORD ? `:${encodeURIComponent(env.REDIS_PASSWORD)}@` : "";
   const t: Record<string, string> = {
     NETWORK: "testnet",
+    BKRN_BUS_NS: "testnet", // bus namespace of the public testnet stack (the live variant pins testnet-live)
     CHAIN_ID: "46630",
     RPC_URL: env.RHC_TESTNET_RPC_URL || "https://rpc.testnet.chain.robinhood.com",
     DEPLOYMENT_FILE: "contracts/deployments/46630.json",
@@ -104,7 +149,7 @@ if (network === "testnet") {
     ORACLE_PUSH_DEVIATION_BPS: "50",
     ORACLE_TICK_MS: "2000",
     RISK_INTERVAL_MS: "5000",
-    // signed venue reports (EIP-712, Redis bkrn:venue:report:<bookId>), relayed inside the mark's
+    // signed venue reports (EIP-712, Redis bkrn:<ns>:venue:report:<bookId>), relayed inside the mark's
     // commitAndApply tx: no report txs, so a short interval costs no gas and keeps risk + marks fresh
     OPS_REPORT_MODE: "signed",
     OPS_REPORT_INTERVAL_MS: "60000",
@@ -127,6 +172,25 @@ if (network === "testnet") {
   };
   // testnet defaults win over anything inherited; only keys set explicitly in .env.testnet override them
   for (const [k, v] of Object.entries(t)) if (!testnetKeys.has(k) || k === "CHAIN_ID" || k === "DEPLOYMENT_FILE") env[k] = v;
+  if (!liveVenue && testnetOrderlyLive(env)) {
+    // the public stack never flips to live Orderly: the rehearsal is its own stack with its own keys
+    console.error("[dev] ORDERLY_MODE=live in .env.testnet: the live-Orderly rehearsal is a separate stack, run `dev.ts --network testnet-live` (bookrunner@testnet-live) with its own .env.testnet-live");
+    process.exit(1);
+  }
+  if (liveVenue) {
+    // live-Orderly rehearsal: real Orderly testnet venue, own mnemonic / record / DB / Redis instance + bus namespace / state / ports
+    const live = testnetLiveProfile(env, testnetKeys, ROOT, only, publicTestnetEnv());
+    if (live.errors.length > 0) {
+      console.error(`[dev] refusing to start the testnet-live stack (${live.errors.length} problem(s)):`);
+      for (const e of live.errors) console.error(`[dev]   - ${e}`);
+      process.exit(1);
+    }
+    Object.assign(env, live.env);
+    delete env[LIVE_MNEMONIC_ENV]; // mapped to BKRN_TESTNET_MNEMONIC (the role mnemonic) above; never passed on twice
+    delete env.REDIS_LIVE_URL; // folded into REDIS_URL (may carry the password: children get REDIS_URL only)
+    env.MOCK_ORDERLY_SNAPSHOT_FILE = ".data/testnet-live/mock-orderly.json"; // unused (no mock venue), never the public file
+    console.log(`[dev] venue: LIVE Orderly testnet (${env.ORDERLY_BASE_URL}, broker ${env.ORDERLY_BROKER_ID}, ${env.DEPLOYMENT_FILE}); API :${env.API_PORT}; no mock-orderly / trader-sim / web`);
+  }
   if (/127\.0\.0\.1|localhost/.test(env.RPC_URL ?? "") || (env.DATABASE_URL ?? "").endsWith("/bookrunner")) {
     console.error(`[dev] refusing: testnet profile resolved to a local RPC or the devnet DB (${redactUrl(env.RPC_URL ?? "")}, ${redactUrl(env.DATABASE_URL ?? "")})`);
     process.exit(1);
@@ -172,6 +236,7 @@ const svc = (name: string, dir = `services/${name}`, script = "start"): Proc | n
 const procs: Proc[] = [];
 const add = (p: Proc | null) => {
   if (p && mainnet && MAINNET_EXCLUDED.has(p.name)) return; // simulators / mocks / testnet helpers
+  if (p && liveVenue && TESTNET_LIVE_EXCLUDED.has(p.name)) return; // no mock venue on the live-Orderly testnet profile
   if (p && (only.length === 0 || only.includes(p.name) || only.some((o) => p.name.startsWith(`${o}:`)))) procs.push(p);
 };
 
@@ -189,7 +254,7 @@ add(svc("api"));
 // read-only watcher: email / webhook alerts (marks, risk, kills, processes, gas, RPC, venue reports, API)
 add(svc("alerts"));
 // public test chains: refill the role keys' gas from the dedicated funder key (scripts/gas-keeper.ts)
-if (network === "testnet") add({ name: "gas-keeper", cwd: ROOT, cmd: [BUN, "scripts/gas-keeper.ts", "--loop"] });
+if (testnetLike) add({ name: "gas-keeper", cwd: ROOT, cmd: [BUN, "scripts/gas-keeper.ts", "--loop"] });
 
 // mock-orderly only needs ops-venue's ADDRESS (its delegate signer): derive it here, so it gets no mnemonic
 if (env.MOCK_ORDERLY_DELEGATE_SIGNERS === undefined && hasDerivedKeys(env)) {
@@ -233,6 +298,63 @@ if (procs.length === 0) {
   process.exit(1);
 }
 
+// Supervisor guard (testnet variants, belt and braces next to the separate mnemonics): refuse to start while the OTHER
+// variant's supervisor (its own Redis instance and bus namespace) reports the same deployer address: the same keys
+// never sign twice.
+const myDeployer = testnetLike ? variantDeployer(env) : null;
+/** this stack's supervisor status key: its bus namespace (env as resolved by the profile, not dev.ts's own process env) */
+const supervisorKey = busNames(busNamespace(env)).KEYS.supervisorStatus;
+if (testnetLike && myDeployer) {
+  const other = otherVariant(env, network as TestnetVariant);
+  let raw: string | null = null;
+  try {
+    const c = new RedisClient(other.redisUrl, { connectionTimeout: 5_000, enableOfflineQueue: false, autoReconnect: false });
+    await c.connect();
+    raw = (await c.send("GET", [other.statusKey])) as string | null;
+    c.close();
+  } catch (err) {
+    console.warn(`[dev] supervisor guard: the other testnet variant's status is unreadable (${(err as Error).message}); continuing`);
+  }
+  const conflict = supervisorConflict(parseSupervisorStatus(raw), myDeployer, Date.now(), SUPERVISOR_TTL_MS);
+  if (conflict) {
+    console.error(`[dev] refusing to start ${network}: ${conflict}`);
+    process.exit(1);
+  }
+}
+
+// Bus namespace migration (scripts/bus-migrate.ts), BEFORE any service starts: the shared keys and BullMQ queues of
+// code from before the per-stack namespace move to bkrn:<ns>:… / bkrn-<ns>-…, so no service ever starts on empty
+// namespaced keys (risk state + journal meta, signed venue reports, queued jobs). Idempotent (marker key), never
+// overwrites a newer value. Redis must answer: the stack does not start without it (systemd restarts dev.ts).
+{
+  const ns = busNamespace(env);
+  const url = env.REDIS_URL || "redis://127.0.0.1:63790";
+  let done = false;
+  for (let attempt = 1; attempt <= 12 && !done; attempt++) {
+    let c: RedisClient | null = null;
+    try {
+      c = new RedisClient(url, { connectionTimeout: 5_000, enableOfflineQueue: false, autoReconnect: false });
+      await c.connect();
+      const m = await migrateBus(c, ns);
+      for (const line of describeMigration(ns, m)) console.log(`[dev] ${line}`);
+      done = true; // an incomplete run (logged) starts the stack too: its marker is not written, the next start retries
+    } catch (err) {
+      console.warn(`[dev] bus namespace migration: Redis not ready (${(err as Error).message}), attempt ${attempt}/12`);
+      await new Promise((r) => setTimeout(r, 5_000));
+    } finally {
+      try {
+        c?.close();
+      } catch {
+        // already closed
+      }
+    }
+  }
+  if (!done) {
+    console.error(`[dev] refusing to start: the bus namespace migration could not run on ${redactUrl(url)}`);
+    process.exit(1);
+  }
+}
+
 const running: Subprocess[] = [];
 let shuttingDown = false;
 const restarts = new Map<string, number>(); // service -> consecutive quick restarts (backoff)
@@ -251,8 +373,8 @@ async function publishSupervisor(): Promise<void> {
       supRedis = c;
     }
     if (!supRedis.connected) await supRedis.connect();
-    const status = supervisorStatus(network, supervisorStarted, supervised.values(), Date.now());
-    await supRedis.send("SET", [SUPERVISOR_STATUS_KEY, JSON.stringify(status), "PX", String(SUPERVISOR_TTL_MS)]);
+    const status = supervisorStatus(network, supervisorStarted, supervised.values(), Date.now(), myDeployer);
+    await supRedis.send("SET", [supervisorKey, JSON.stringify(status), "PX", String(SUPERVISOR_TTL_MS)]);
   } catch {
     // Redis down or restarting: the next publish retries; alerts reports the heartbeat missing if it lasts
     try {
@@ -318,9 +440,14 @@ const agentsStarted = new Set<number>();
 let simStarted = false;
 let launchStarted = false;
 const wantAgents = only.length === 0 || only.includes("agent") || only.includes("trader-sim");
+/** Launch still to run: no books yet, or a launch that stopped part way (launch-devnet.ts writes launch.complete). */
+let launchPending = false;
 function readBooks(): Array<{ bookId: number; name: string }> | null {
   try {
-    return (JSON.parse(readFileSync(depPath, "utf8")) as { books?: Array<{ bookId: number; name: string }> }).books ?? [];
+    const d = JSON.parse(readFileSync(depPath, "utf8")) as { books?: Array<{ bookId: number; name: string }>; launch?: { complete?: boolean } };
+    const books = d.books ?? [];
+    launchPending = books.length === 0 || d.launch?.complete === false;
+    return books;
   } catch {
     return null;
   }
@@ -328,9 +455,9 @@ function readBooks(): Array<{ bookId: number; name: string }> | null {
 setInterval(() => {
   const books = readBooks();
   if (books === null) return;
-  if (books.length === 0 && !launchStarted && !noLaunch && only.length === 0) {
+  if (launchPending && !launchStarted && !noLaunch && only.length === 0) {
     launchStarted = true;
-    console.log("[dev] no books deployed yet — running scripts/launch-devnet.ts (NVDA, TSLA, RHX5)");
+    console.log(`[dev] ${books.length === 0 ? "no books deployed yet" : "launch incomplete"} — running scripts/launch-devnet.ts (resumes per book)`);
     // the one-shot launch acts as the deployer (gas distribution, committee setup): the only child that
     // may derive the protocol-admin key from the mnemonic (devkeys ADMIN_KEY_OPT_IN)
     start({ name: "launch", cwd: ROOT, cmd: [BUN, "scripts/launch-devnet.ts"], extraEnv: { [ADMIN_KEY_OPT_IN]: "1" } });
@@ -342,7 +469,7 @@ setInterval(() => {
     // a per-book desk key (DESK_KEY_PRIVATE_KEY_<bookId>) reaches that book's agent only
     start({ name: `agent:${b.name}`, cwd: agentDir, cmd: scriptCmd("services/bookrunner-agent", "start"), extraEnv: { BOOK_ID: String(b.bookId), ...deskKeyEnvFor(env, b.bookId) } });
   }
-  if (books.length > 0 && !simStarted && !noSim) {
+  if (books.length > 0 && !simStarted && !noSim && !liveVenue) {
     simStarted = true;
     start({ name: "trader-sim", cwd: agentDir, cmd: [BUN, "src/trader-sim.ts"] });
   }

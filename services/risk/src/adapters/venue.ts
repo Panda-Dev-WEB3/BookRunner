@@ -15,6 +15,7 @@ import {
   type VenueAccount,
   type VenueFill,
   type VenuePosition,
+  resolveVenueSymbol,
   usd,
 } from "@bookrunner/shared";
 import type { VenueProvider } from "../ports";
@@ -73,6 +74,11 @@ export class OrderlyRiskVenue implements QuotingVenue {
   constructor(private readonly o: OrderlyRiskVenueOptions) {
     this.fetchImpl = o.fetchImpl ?? fetch;
     this.now = o.nowMs ?? (() => Date.now());
+  }
+
+  /** Venue (Orderly) symbol this client cancels and reads. */
+  get symbol(): string {
+    return this.o.symbol;
   }
 
   async replaceQuote(_q: TwoSidedQuote): Promise<void> {
@@ -155,13 +161,10 @@ export class OrderlyRiskVenue implements QuotingVenue {
   }
 }
 
-/** Charter symbol -> Orderly symbol. VERIFY naming (devnet/mock: PERP_<TICKER>_USDC). */
-export function venueSymbol(symbol: string): string {
-  return symbol.startsWith("PERP_") ? symbol : `PERP_${symbol}_USDC`;
-}
-
 export interface OrderlyVenueProviderOptions {
   mode: "mock" | "live";
+  /** ORDERLY_BROKER_ID: live books trade their builder market PERP_<T>_USDC_<broker> (shared venueSymbol, VERIFY O19). */
+  brokerId: string;
   baseUrl: string;
   signer: OrderlySigner | null;
   timeoutMs: number;
@@ -172,6 +175,7 @@ export interface OrderlyVenueProviderOptions {
 
 export class OrderlyVenueProvider implements VenueProvider {
   private warnedNoKey = false;
+  private readonly symbolLogged = new Set<number>();
 
   constructor(private readonly o: OrderlyVenueProviderOptions) {}
 
@@ -190,10 +194,21 @@ export class OrderlyVenueProvider implements VenueProvider {
       throw err;
     }
     if (!accountId) return null;
+    const r = resolveVenueSymbol({ charterSymbol: ref.symbol, mode: this.o.mode, brokerId: this.o.brokerId });
+    const first = !this.symbolLogged.has(ref.bookId);
+    this.symbolLogged.add(ref.bookId);
+    if (r.symbol === null) {
+      // no Orderly market for this charter symbol (never listed / traded by ops-venue): the book is still monitored
+      // from the adapter / signed venue reports, there is just no venue client to cancel or read positions with
+      if (first) this.o.log.error({ bookId: ref.bookId, symbol: ref.symbol, err: r.error }, "no Orderly venue symbol for the book's charter symbol: monitoring from adapter reports only");
+      return null;
+    }
+    if (first && r.warning) this.o.log.warn({ bookId: ref.bookId, symbol: ref.symbol, warning: r.warning }, "book charter symbol breaks the Orderly charter rule");
+    const symbol = r.symbol;
     return new OrderlyRiskVenue({
       baseUrl: this.o.baseUrl,
       accountId,
-      symbol: venueSymbol(ref.symbol),
+      symbol,
       signer: this.o.signer,
       timeoutMs: this.o.timeoutMs,
     });

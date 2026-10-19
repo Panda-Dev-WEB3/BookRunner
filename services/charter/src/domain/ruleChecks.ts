@@ -3,7 +3,7 @@
 //   block — the charter should not be listed as filed (jurors must reject)
 //   warn  — a risk the committee should weigh
 //   info  — context only
-import { type Charter, ORACLE, VENUE, decodeSessions, encodeSessions, formatUsd } from "@bookrunner/shared";
+import { type Charter, ORACLE, VENUE, bytes32ToStr, decodeSessions, encodeSessions, formatUsd, orderlyCharterSymbolIssue } from "@bookrunner/shared";
 import type { Address, Hex } from "viem";
 import type { ValidationResult } from "./validate";
 
@@ -53,6 +53,8 @@ export interface RuleContext {
   liquidity: { mode: "configured" | "devnet_mock" | "unknown"; usd: bigint | null };
   newBooksPaused: boolean;
   nowSec: number;
+  /** ORDERLY_BROKER_ID: an Orderly charter may name only our own builder market (null = format check only). */
+  orderlyBrokerId?: string | null;
 }
 
 const BPS = 10_000n;
@@ -91,6 +93,15 @@ export function runRuleChecks(c: Charter, ctx: RuleContext): RuleCheck[] {
   // 1. on-chain validation parity
   if (ctx.validation.ok) add("charter_validate", "pass", "charter passes the MarketCharter validation rules");
   else add("charter_validate", "block", `charter fails validation: ${ctx.validation.reasons.join(", ")}`, { reasons: ctx.validation.reasons.join(",") });
+
+  // 1b. Orderly books: the symbol must name an Orderly market (off-chain rule, VERIFY O19), so a charter that
+  // could never trade is never finalized
+  if (c.venue === VENUE.ORDERLY) {
+    const symbol = bytes32ToStr(c.symbol);
+    const issue = orderlyCharterSymbolIssue(symbol, ctx.orderlyBrokerId);
+    if (issue) add("venue_symbol", "block", issue, { symbol });
+    else add("venue_symbol", "pass", "venue symbol names an Orderly perp market", { symbol });
+  }
 
   // 2. venue minimum insurance fund
   const ifMetrics = { insuranceFundUsd: usd(c.ifTargetUsd), venueMinimumUsd: usd(ctx.venueMinIfUsd) };

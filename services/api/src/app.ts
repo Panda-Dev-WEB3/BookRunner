@@ -1,8 +1,10 @@
-// Hono app: /health, tRPC at /trpc, REST mirror at /v1, read-only MCP at /mcp, CORS for apps/web.
+// Hono app: /health (+ ops-venue's Orderly listing status), tRPC at /trpc, REST mirror at /v1, read-only MCP at /mcp, CORS for apps/web.
+import { KEYS, parseVenueMarkets, type VenueMarketMsg, venueMarketGate } from "@bookrunner/shared";
 import { trpcServer } from "@hono/trpc-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { ApiDeps } from "./deps";
+import type { Kv } from "./kv";
 import { type StatusView, buildStatus } from "./domain/status";
 import { handleMcpRequest } from "./mcp";
 import { restRoutes } from "./rest";
@@ -62,6 +64,42 @@ export const OPTIONAL_PROCEDURES = ["book.fills", "book.hedges", "receipts.list"
 export const STATUS_CACHE_MS = 15_000;
 export const STATUS_CACHE_CONTROL = "public, max-age=30, stale-while-revalidate=60";
 
+/** /health `orderlyListing`: ops-venue's Orderly market state (KEYS.venueSymbolIssues, docs/VERIFY.md O20). */
+export interface OrderlyListingHealth {
+  mode: "mock" | "live";
+  listingMode: "api" | "manual";
+  /** per venue symbol: phase (unknown / awaiting / listed / missing), Orderly status, open for new risk, failed checks */
+  markets: Array<Omit<VenueMarketMsg, "error" | "checkedAt" | "everListed">>;
+  /** books whose market is not open for new risk (not listed, missing, restricted or POST_ONLY) */
+  notOpen: number[];
+  /** manual mode: IF withdrawals waiting for the admin's delisting in Orderly One */
+  delistWaits: Array<{ bookId: number; symbol: string; since: number }>;
+}
+
+/** ops-venue's status from Redis (absent / unreadable / slow -> null; never fails /health). Check errors stay private. */
+export async function orderlyListingHealth(kv: Kv, timeoutMs = 500): Promise<OrderlyListingHealth | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const raw = await Promise.race([kv.get(KEYS.venueSymbolIssues).catch(() => null), new Promise<null>((r) => (timer = setTimeout(() => r(null), timeoutMs)))]).finally(() => clearTimeout(timer));
+  if (!raw) return null;
+  try {
+    const o = JSON.parse(raw) as { mode?: unknown; listingMode?: unknown; delistWaits?: unknown };
+    if (o.mode !== "mock" && o.mode !== "live") return null;
+    const markets = parseVenueMarkets(o);
+    const waits = Array.isArray(o.delistWaits) ? (o.delistWaits as Array<Record<string, unknown> | null>) : [];
+    return {
+      mode: o.mode,
+      listingMode: o.listingMode === "manual" ? "manual" : "api",
+      markets: markets.map(({ symbol, bookIds, phase, venueStatus, openForRisk, since, failures }) => ({ symbol, bookIds, phase, venueStatus, openForRisk, since, failures })),
+      notOpen: markets.flatMap((m) => (venueMarketGate([m], m.bookIds[0] ?? -1) ? m.bookIds : [])).sort((a, b) => a - b),
+      delistWaits: waits
+        .filter((x): x is Record<string, unknown> => !!x && Number.isFinite(Number(x.bookId)) && typeof x.symbol === "string")
+        .map((x) => ({ bookId: Number(x.bookId), symbol: x.symbol as string, since: Number(x.since) || 0 })),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function createApp(deps: ApiDeps, opts: AppOptions) {
   const app = new Hono();
   const started = deps.now();
@@ -87,7 +125,7 @@ export function createApp(deps: ApiDeps, opts: AppOptions) {
   );
 
   app.get("/health", async (c) => {
-    const extra = deps.health ? await deps.health().catch((err) => ({ healthError: String(err) })) : {};
+    const [extra, orderlyListing] = await Promise.all([deps.health ? deps.health().catch((err) => ({ healthError: String(err) })) : {}, orderlyListingHealth(deps.kv)]);
     const token = deps.settings.adminToken;
     const verbose = c.req.query("verbose") !== undefined && !!token && bearerMatches(c.req.header("authorization"), token);
     return c.json({
@@ -97,6 +135,7 @@ export function createApp(deps: ApiDeps, opts: AppOptions) {
       deployment: deps.chain() !== null,
       capabilities,
       ...(verbose ? { uptimeSec: Math.floor((deps.now() - started) / 1000), procedures } : {}),
+      ...(orderlyListing ? { orderlyListing } : {}),
       ...extra,
     });
   });

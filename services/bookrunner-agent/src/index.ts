@@ -14,6 +14,7 @@ import {
   type OraclePriceMsg,
   type QuotingVenue,
   VENUE,
+  assertVenueSymbolConfig,
   bytes32ToStr,
   createLogger,
   deploymentPath,
@@ -40,13 +41,14 @@ import { ViemEngineChain } from "./chain/engine-chain";
 import { bookrunnerConfigAbi } from "@bookrunner/shared/abi";
 import { DEFAULT_MAX_TRADE_PRICE_AGE_SEC, EXECUTE_WITH_PRICES_SIG, supportsFunction } from "./chain/lowgas-abi";
 import { PullPrices, deskPriceData, freshestOracleLatest, httpBundleSource, redisBundleSource, resolvePullMode, swapPriceMaxAgeSec } from "./chain/pull-prices";
-import { type AgentEnv, engineVenueConfigFrom, hedgeConfigFrom, loadAgentEnv, quotingConfigFrom, sizingConfigFrom, volConfigFrom } from "./config";
+import { type AgentEnv, engineVenueConfigFrom, hedgeConfigFrom, loadAgentEnv, quotingConfigFrom, resolveVenuePostOnlyQuote, sizingConfigFrom, volConfigFrom } from "./config";
 import { type UniverseComponent, buildHedgeUniverse, parseAllowPairs } from "./domain/hedge-universe";
 import { RuleBasedSizing } from "./domain/sizing";
 import { EwmaVolatility } from "./domain/volatility";
 import { SerialLock, errMsg, sleep } from "./util";
 import { EngineVenue } from "./venues/engine";
 import { createOrderlyVenue } from "./venues/orderly";
+import { VenueSymbolError, agentVenueSymbol, idleUntilAborted } from "./venues/symbol";
 
 const DESK_ROLES = ["deskKeyNvda", "deskKeyTsla", "deskKeyIndex"] as const;
 
@@ -224,7 +226,11 @@ async function runOnce(
     log.info({ marketId: engineChain.marketId.toString() }, "venue: in-house PoolEngine (desk SetQuote)");
   } else {
     const accountId = env.ORDERLY_ACCOUNT_ID ?? (await ctx.chain.orderlyMmAccountId().catch(() => null)) ?? String(ctx.bookId);
-    venue = await createOrderlyVenue({ bookId: ctx.bookId, symbol: ctx.symbol, accountId, baseUrl: env.ORDERLY_BASE_URL, mode: env.ORDERLY_MODE, env: process.env }, log);
+    // the charter symbol stays the book's label (logs, marks, UI); Orderly is spoken to with the venue symbol
+    // (PERP_<T>_USDC_<broker> with ORDERLY_MODE=live, VERIFY O19)
+    const symbol = agentVenueSymbol(ctx.symbol, env, (warning) => log.warn({ warning }, "charter symbol breaks the Orderly charter rule"));
+    log.info({ venueSymbol: symbol }, "venue: Orderly");
+    venue = await createOrderlyVenue({ bookId: ctx.bookId, symbol, accountId, baseUrl: env.ORDERLY_BASE_URL, mode: env.ORDERLY_MODE, env: process.env }, log);
   }
 
   // Orderly books (low-gas): the on-chain venue view only advances at marks, so plan from the latest signed
@@ -320,6 +326,7 @@ async function runOnce(
       quoteTtlMs: Math.max(5_000, env.AGENT_QUOTE_INTERVAL_MS * 10),
       fillLookbackMs: 15 * 60_000,
       pullPrices: pull,
+      venueGate: { enabled: env.AGENT_VENUE_MARKET_GATE, allowPostOnly: resolveVenuePostOnlyQuote(env), holdMs: env.AGENT_VENUE_GATE_HOLD_MS },
     },
   );
   holder.agent = agent;
@@ -367,6 +374,7 @@ async function waitForResume(ctx: BookContext, env: AgentEnv, log: Logger, bus: 
 async function main(): Promise<void> {
   const env = loadAgentEnv();
   const log = createLogger("bookrunner-agent", env.LOG_LEVEL);
+  assertVenueSymbolConfig({ mode: env.ORDERLY_MODE, brokerId: env.ORDERLY_BROKER_ID }); // live: books trade PERP_<T>_USDC_<broker>
   const ctl = new AbortController();
   const holder: Holder = { agent: null };
   let forceExit: ReturnType<typeof setTimeout> | null = null;
@@ -410,6 +418,13 @@ async function main(): Promise<void> {
       try {
         result = await runOnce(ctx, env, log, bus, store, holder, ctl.signal);
       } catch (err) {
+        if (err instanceof VenueSymbolError) {
+          // deterministic (immutable charter symbol): log once and idle this book until shutdown, no retry loop.
+          // ops-venue keeps its reports / withdrawals and alerts on it (venue_symbol_unmapped).
+          log.error({ bookId: ctx.bookId, charterSymbol: ctx.symbol, err: err.message }, "no Orderly market for the charter symbol: this book does not quote; idling until shutdown");
+          await idleUntilAborted(ctl.signal);
+          break;
+        }
         log.error({ bookId: ctx.bookId, err: errMsg(err) }, "agent setup failed; retrying");
         await sleep(env.DEPLOYMENT_RETRY_MS, ctl.signal);
         continue;

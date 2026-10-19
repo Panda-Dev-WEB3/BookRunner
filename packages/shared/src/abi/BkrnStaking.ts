@@ -340,6 +340,19 @@ export const bkrnStakingAbi = [
   },
   {
     "type": "function",
+    "name": "lockers",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address[]",
+        "internalType": "address[]"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "notifyReward",
     "inputs": [
       {

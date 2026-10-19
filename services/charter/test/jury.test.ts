@@ -1,6 +1,6 @@
 // Rule checks + deterministic rule-based jury + verdict assembly.
 import { describe, expect, test } from "bun:test";
-import { MULTIPLIER_VECTOR as V, ORACLE, SESSIONS_24X7, VENUE, checkCopy, encodeSessions, usd } from "@bookrunner/shared";
+import { MULTIPLIER_VECTOR as V, ORACLE, SESSIONS_24X7, VENUE, checkCopy, encodeSessions, strToBytes32, usd } from "@bookrunner/shared";
 import { cidOfJson } from "../src/domain/cid";
 import { sanitizeCopy } from "../src/domain/copyFilter";
 import { PERSONAS, ruleJury } from "../src/domain/jurors";
@@ -32,6 +32,19 @@ describe("rule checks", () => {
     expect(edge.map((x) => x.status)).toEqual(["info"]);
     expect(edge[0]?.detail).toContain("no edge");
     expect(at(3, 8).map((x) => x.status)).toEqual(["pass"]);
+  });
+
+  test("Orderly venue symbol (VERIFY O19): blocks a charter no Orderly market can carry", () => {
+    const at = (symbol: string, venue = 0, orderlyBrokerId: string | null = "bookrunner") => {
+      const c = nvdaCharter({ symbol: strToBytes32(symbol), venue: venue as never, ...(venue === VENUE.POOL_ENGINE ? { oracle: ORACLE.ATTESTED } : {}) });
+      return statusOf(runRuleChecks(c, ruleContextFor(c, { orderlyBrokerId })), "venue_symbol");
+    };
+    expect(at("PERP_NVDA_USDC")).toEqual(["pass"]);
+    expect(at("PERP_NVDA_USDC_bookrunner")).toEqual(["pass"]);
+    expect(at("NVDA-PERP")).toEqual(["block"]);
+    expect(at("PERP_AAPL_USDC_mythos")).toEqual(["block"]);
+    expect(at("PERP_AAPL_USDC_mythos", 0, null)).toEqual(["pass"]);
+    expect(at("NVDA-PERP", 1)).toEqual([]); // in-house books: no Orderly symbol rule
   });
 
   test("float caps: capacity valued with the multiplier exactly once", () => {

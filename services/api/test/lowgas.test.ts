@@ -1,6 +1,6 @@
 // Low-gas views (docs/LOW_GAS.md): latest signed oracle bundle + age, signed venue report, mark schedule.
 import { describe, expect, test } from "bun:test";
-import { KEYS, devAccount, priceTypedData, strToBytes32 } from "@bookrunner/shared";
+import { BUS_NS, KEYS, devAccount, priceTypedData, strToBytes32 } from "@bookrunner/shared";
 import type { PriceUpdate } from "@bookrunner/shared/eip712";
 import { type Address, type Hex, encodeAbiParameters } from "viem";
 import { encodeVenueReport, signVenueReport, toSignedVenueReportJson } from "../../ops-venue/src/report712";
@@ -151,6 +151,6 @@ describe("routes", () => {
     expect(bookPriceId("PERP_NVDA_USDC")).toBe("NVDA");
     expect(bookPriceId("RHX5-PERP")).toBe("RHX5");
     expect(bookPriceId("PERP_NVDA_USDC", { oracle: { priceId: "NVDA.X" } })).toBe("NVDA.X");
-    expect(KEYS.oracleLast("NVDA")).toBe("bkrn:oracle:last:NVDA");
+    expect(KEYS.oracleLast("NVDA")).toBe(`bkrn:${BUS_NS}:oracle:last:NVDA`);
   });
 });

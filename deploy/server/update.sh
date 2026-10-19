@@ -113,7 +113,8 @@ fi
 
 # ---- systemd units (from the root-owned copy)
 units_changed=0
-for u in bookrunner.service bookrunner-infra.service bookrunner-backup.service bookrunner-backup.timer; do
+for u in bookrunner.service bookrunner@.service bookrunner-infra.service bookrunner-backup.service bookrunner-backup.timer bookrunner@testnet-live.service.d/override.conf; do
+  install -d -m 0755 "/etc/systemd/system/$(dirname "$u")"
   if ! cmp -s "$DEPLOY/$u" "/etc/systemd/system/$u"; then
     install -m 0644 "$DEPLOY/$u" "/etc/systemd/system/$u"
     units_changed=1
@@ -127,10 +128,20 @@ install -d -o root -g root -m 0700 /var/backups/bookrunner
 systemctl is-enabled --quiet bookrunner-backup.timer 2>/dev/null || { systemctl enable --now bookrunner-backup.timer >/dev/null && echo "==> enabled bookrunner-backup.timer (daily)"; }
 
 if [ "${1:-}" != "--web-only" ]; then
+  # redis-live (the rehearsal stack's own Redis) needs its own password BEFORE compose creates it (same as install.sh)
+  INFRA_ENV="$DEPLOY/.env.infra"
+  if [ -f "$INFRA_ENV" ] && ! grep -q '^REDIS_LIVE_PASSWORD=' "$INFRA_ENV"; then
+    ( umask 077; printf 'REDIS_LIVE_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> "$INFRA_ENV" )
+    chown root:root "$INFRA_ENV"; chmod 0600 "$INFRA_ENV"
+    echo "==> added REDIS_LIVE_PASSWORD to $INFRA_ENV (redis-live, 127.0.0.1:63791)"
+  fi
   echo "==> infra (applies a changed compose file; unchanged containers keep running)"
   systemctl enable --now bookrunner-infra >/dev/null
   systemctl reload bookrunner-infra
+  # dev.ts migrates the Redis keys / queues to the stack's bus namespace before it starts any service (bus-migrate.ts)
   echo "==> restart stack"
   systemctl restart bookrunner
+  # the live-Orderly rehearsal stack (if running) follows the same code
+  if systemctl is-active --quiet bookrunner@testnet-live; then echo "==> restart bookrunner@testnet-live"; systemctl restart bookrunner@testnet-live; fi
 fi
 echo "==> done ($WANT)"

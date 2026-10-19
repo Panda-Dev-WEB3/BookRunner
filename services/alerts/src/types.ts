@@ -1,5 +1,6 @@
 // What the alert rules see: one Snapshot per pass (collected from Postgres, Redis, the chain and the API by
 // collect.ts), plus the rolling samples the runner keeps between passes. Rules are pure functions of these.
+import type { VenueMarketMsg } from "@bookrunner/shared/venueMarket";
 import type { SupervisorStatus } from "@bookrunner/shared/supervisor";
 
 export type Severity = "warning" | "critical";
@@ -54,6 +55,22 @@ export interface BookSnap {
   risk: RiskSnap | null;
   /** unix s: asOf of the latest signed venue report in Redis (Orderly books), null when absent */
   venueReportAsOf: number | null;
+  /** ops-venue (KEYS.venueSymbolIssues): why the book's charter symbol has no Orderly market (not listed / traded); null = fine or unknown */
+  venueSymbolError?: string | null;
+  /** ops-venue (KEYS.venueSymbolIssues markets): the Orderly market state of the book's venue symbol; null = not checked / not an Orderly book */
+  venueMarket?: VenueMarketMsg | null;
+  /** ops-venue (KEYS.venueSymbolIssues delistWaits): unix ms since the book's IF withdrawal waits for the admin's delisting in Orderly One */
+  delistWaitSince?: number | null;
+  /** ops-venue (KEYS.venueSymbolIssues ifAccounts): the book's IF account cannot be provisioned (ORDERLY_IF_MODE, VERIFY O10) */
+  ifAccountIssue?: { issue: "mismatch" | "key_pending" | "prior_equity" | "reassign"; detail: string; accountId: string; since: number | null } | null;
+  /** ops-venue (KEYS.venueSymbolIssues ifOperatorWaits): builder IF mode, IF withdrawals waiting for the operator */
+  ifOperatorWaits?: Array<{ nonce: string; step: "withdraw" | "payout" | "return"; amount: string; owner: string; adapter: string; since: number; writtenOffAt?: number | null }>;
+  /** ops-venue (KEYS.venueSymbolIssues failedWithdrawals): withdraw sagas that FAILED (manual action) */
+  failedWithdrawals?: Array<{ nonce: string; account: number; amount: string; error: string; at: number }>;
+  /** ops-venue (KEYS.venueSymbolIssues ifUnadopted): builder IF withdrawals no on-chain request asked for */
+  ifUnadopted?: Array<{ id: string; amount: string; status: string; createdAt: number | null }>;
+  /** ops-venue (KEYS.venueSymbolIssues ifEquityDrops): builder IF equity below the adapter's insurance */
+  ifEquityDrop?: { expectedUsd: string; venueUsd: string; at: number } | null;
 }
 
 export interface KillEventSnap {
@@ -183,6 +200,38 @@ export interface BackupSnap {
   dir: string;
 }
 
+/**
+ * ops-venue's live builder price push (Redis bkrn:<ns>:ops-venue:builder-feed, BuilderFeedStatusMsg): the oracle's signed
+ * price per Orderly builder market, pushed >= 1/s to Orderly's Builder Oracle in session (docs/VERIFY.md O18).
+ */
+export interface BuilderFeedSnap {
+  /** unix ms of ops-venue's status write */
+  ts: number;
+  socket: { state: string; lastError: string | null };
+  symbols: Array<{
+    symbol: string;
+    bookIds: number[];
+    /** pushing | held | stale | no-price | invalid | disconnected | rejected | not-configured */
+    state: string;
+    lastPushAt: number | null;
+    /** unix ms: start of the failing run (null = pushing or held) */
+    failingSince: number | null;
+    error: string | null;
+    /** the market is not listed on Orderly yet (ops-venue listing check; before it: every book in Subscription): not paged */
+    preListing: boolean;
+  }>;
+}
+
+/** ops-venue status (KEYS.venueSymbolIssues, every book poll, TTL 600 s): venue mode and whether the live builder price push runs. */
+export interface VenueOpsSnap {
+  ts: number;
+  mode: "mock" | "live";
+  /** the live builder price push is enabled: its status (builderFeed) must exist */
+  builderPush: boolean;
+  /** ORDERLY_LISTING_MODE (an older ops-venue: api) */
+  listingMode: "api" | "manual";
+}
+
 export interface Snapshot {
   now: number; // unix ms
   network: string;
@@ -206,6 +255,10 @@ export interface Snapshot {
   oracle: OracleProbe | null;
   /** null: no backup recorded, undefined: Redis read failed */
   backup: BackupSnap | null | undefined;
+  /** null/absent: no live builder price push status (mock mode, or ops-venue not pushing); undefined: Redis read failed */
+  builderFeed?: BuilderFeedSnap | null;
+  /** null/absent: no ops-venue status (or an older ops-venue) */
+  venueOps?: VenueOpsSnap | null;
   /** collection failures that are themselves worth an alert (db / redis unreachable) */
   infraErrors: Array<{ source: "db" | "redis"; error: string }>;
 }

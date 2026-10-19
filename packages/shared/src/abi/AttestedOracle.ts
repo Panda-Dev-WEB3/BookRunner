@@ -674,6 +674,19 @@ export const attestedOracleAbi = [
   },
   {
     "type": "function",
+    "name": "signers",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address[]",
+        "internalType": "address[]"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "update",
     "inputs": [
       {

@@ -120,6 +120,14 @@ export class KeyStore {
     return f;
   }
 
+  /** Record a retired key (e.g. the IF ops key of a previous IF account) in the book's history. */
+  addHistory(bookId: number, k: StoredKey, reason: string, at = Date.now()) {
+    const f = this.loadBook(bookId);
+    if (!f) return;
+    f.history.push({ orderlyKey: k.orderlyKey, prefix: prefixOf(k), revokedAt: at, reason });
+    this.saveBook(f);
+  }
+
   markRegistered(bookId: number, which: "trade" | "if" | "mm", at = Date.now()) {
     const f = this.loadBook(bookId);
     if (!f) return;

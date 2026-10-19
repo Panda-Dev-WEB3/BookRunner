@@ -56,6 +56,7 @@ export async function startApi(env: ApiConfig = loadApiConfig()) {
   const deps: ApiDeps = {
     settings: {
       chainId: env.CHAIN_ID,
+      orderlyBrokerId: env.ORDERLY_BROKER_ID,
       markIntervalSeconds: env.MARK_INTERVAL_SECONDS,
       receiptsIntervalSeconds: env.RECEIPTS_INTERVAL_SECONDS,
       maxPriceAgeSeconds: env.MAX_PRICE_AGE_SECONDS,

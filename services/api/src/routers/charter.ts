@@ -96,6 +96,7 @@ export const charterRouter = router({
       markInterval: params?.markInterval,
       underlyingKnown,
       newBooksPaused: params?.newBooksPaused,
+      orderlyBrokerId: deps.settings.orderlyBrokerId ?? null,
     });
 
     const chainReason = await softChain(deps, "charter.validate", (g) => g.validateCharter(c), null);

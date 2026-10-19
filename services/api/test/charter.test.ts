@@ -205,6 +205,31 @@ describe("charter router", () => {
     expect(res.txs).toEqual([]);
   });
 
+  test("Orderly charter symbol must name an Orderly market (VERIFY O19); in-house symbols are free-form", () => {
+    const at = (symbol: string, venue: 0 | 1 = 0, orderlyBrokerId: string | null = "bookrunner") => {
+      const c = structuredClone(sampleCharter());
+      c.symbol = strToBytes32(symbol);
+      c.venue = venue;
+      if (venue === 1) c.takerFeeBps = 10;
+      return validateCharterLocal(c, { orderlyBrokerId }).filter((i) => i.code === "BAD_SYMBOL");
+    };
+    expect(at("PERP_NVDA_USDC")).toEqual([]);
+    expect(at("PERP_NVDA_USDC_bookrunner")).toEqual([]);
+    expect(at("NVDA-PERP")[0]?.message).toMatch(/not an Orderly perp symbol/);
+    expect(at("NVDA")[0]?.field).toBe("symbol");
+    expect(at("PERP_AAPL_USDC_mythos")[0]?.message).toMatch(/broker mythos/);
+    expect(at("PERP_AAPL_USDC_mythos", 0, null)).toEqual([]); // broker unknown: format only
+    expect(at("NVDA-PERP", 1)).toEqual([]);
+  });
+
+  test("file: an Orderly draft with a non-Orderly symbol returns BAD_SYMBOL and no txs", async () => {
+    const w = makeWorld();
+    const res = await w.caller.charter.file(sampleDraft({ symbol: "NVDA-PERP" }));
+    expect(res.ok).toBe(false);
+    expect(codes(res.issues)).toContain("BAD_SYMBOL");
+    expect(res.txs).toEqual([]);
+  });
+
   test("file: on-chain validate reason is surfaced", async () => {
     const w = makeWorld();
     w.chain.validateReason = strToBytes32("BAD_UNDERLYING");

@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { MAINNET_FIXED } from "./network-profile";
+import { MAINNET_FIXED, TESTNET_LIVE_PINNED } from "./network-profile";
 
 const ROOT = resolve(import.meta.dir, "..");
 const APP = "/opt/bookrunner/app";
@@ -83,6 +83,36 @@ describe("bookrunner@.service (mainnet host)", () => {
   test("sandbox directives", () => {
     for (const d of SANDBOX) expect(text.split("\n")).toContain(d);
     expect(values(text, "InaccessiblePaths")).toEqual(expect.arrayContaining(["-/run/docker.sock"]));
+  });
+});
+
+describe("bookrunner@testnet-live (the template + its drop-in: the live-Orderly rehearsal stack)", () => {
+  // a drop-in adds to the template: list-valued keys (ReadWritePaths) accumulate, the sandbox lines are inherited
+  const template = unit("bookrunner@.service");
+  const dropIn = unit("bookrunner@testnet-live.service.d/override.conf");
+  const text = [template, dropIn].join("\n");
+
+  test("every state path of the testnet-live profile is writable, its record too, nothing else of the app tree", () => {
+    const state = Object.entries(TESTNET_LIVE_PINNED).filter(([, v]) => v.startsWith(".data/"));
+    expect(state.map(([k]) => k).sort()).toEqual(["MARK_SPOOL_DIR", "OPS_KEYS_DIR", "OPS_SAGA_FILE"]);
+    for (const [k, p] of state) {
+      expect(p.startsWith(".data/testnet-live/")).toBe(true); // never the public stack's .data/testnet
+      expect(`${k} ${writable(text, `${APP}/${p}`)}`).toBe(`${k} true`);
+    }
+    expect(writable(text, `${APP}/.data/testnet-live/dev.log`)).toBe(true);
+    expect(writable(text, `${APP}/${TESTNET_LIVE_PINNED.DEPLOYMENT_FILE}`)).toBe(true);
+    expect(writable(text, `${APP}/services/mark/.data`)).toBe(false);
+    expect(writable(text, `${APP}/node_modules`)).toBe(false);
+  });
+
+  test("the drop-in keeps the template's sandbox (no directive reset, no weaker value)", () => {
+    for (const d of SANDBOX) expect(template.split("\n")).toContain(d);
+    const keys = dropIn
+      .split("\n")
+      .filter((l) => /^[A-Za-z]+=/.test(l))
+      .map((l) => l.slice(0, l.indexOf("=")));
+    expect([...new Set(keys)].sort()).toEqual(["Description", "MemoryHigh", "MemoryMax", "MemorySwapMax", "ReadWritePaths"]);
+    expect(values(dropIn, "ReadWritePaths")).toEqual(["-/opt/bookrunner/app/contracts/deployments"]);
   });
 });
 

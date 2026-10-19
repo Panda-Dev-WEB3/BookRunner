@@ -4,6 +4,7 @@ name: bookrunner
 # Images are pinned by digest (tag in the comment); bump one by `docker buildx imagetools inspect <image>:<tag>`.
 #   Postgres + Timescale  127.0.0.1:54400
 #   Redis                 127.0.0.1:63790
+#   Redis (live)          127.0.0.1:63791   (dev.ts --network testnet-live: the rehearsal stack's own Redis)
 #   Anvil (chain 31337)   127.0.0.1:8547   (devnet stand-in for Robinhood Chain 4663)
 services:
   postgres:
@@ -26,6 +27,16 @@ services:
     image: redis@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499 # 7-alpine (Redis 7.4.11)
     ports:
       - "127.0.0.1:63790:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis-live:
+    image: redis@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499 # 7-alpine (Redis 7.4.11)
+    ports:
+      - "127.0.0.1:63791:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 3s

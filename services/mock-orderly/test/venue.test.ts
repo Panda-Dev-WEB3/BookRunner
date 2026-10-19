@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { builderShareMicro, settlementPeriodOf } from "../src/fees";
 import { buyProbability, DEFAULT_FLOW, sampleArrivals } from "../src/flow";
 import { mulberry32 } from "../src/rng";
-import { MockVenue, VenueError } from "../src/venue";
+import { baseAssetOf, MockVenue, symbolOf, VenueError } from "../src/venue";
 
 const IF = `0x${"11".repeat(32)}`;
 const MM = `0x${"22".repeat(32)}`;
@@ -22,6 +22,25 @@ function setup(over: ConstructorParameters<typeof MockVenue>[0] = {}) {
 }
 
 const ctx = { accountId: MM, keyId: null };
+
+describe("builder market symbols (live naming PERP_<T>_USDC_<broker>)", () => {
+  test("canonical forms, base asset, listing and trading under the suffixed symbol", () => {
+    expect(symbolOf("nvda")).toBe("PERP_NVDA_USDC");
+    expect(symbolOf("PERP_NVDA_USDC")).toBe("PERP_NVDA_USDC");
+    expect(symbolOf("PERP_nvda_USDC_bookrunner")).toBe("PERP_NVDA_USDC_bookrunner");
+    expect(symbolOf("PERP_ETH_USDC_woofi_pro")).toBe("PERP_ETH_USDC_woofi_pro");
+    expect(baseAssetOf("PERP_NVDA_USDC_bookrunner")).toBe("NVDA");
+    expect(baseAssetOf("PERP_NVDA_USDC")).toBe("NVDA");
+    const { v } = setup();
+    const LIVE = "PERP_TSLA_USDC_bookrunner";
+    expect(v.createSymbol({ symbol: LIVE, ifAccountId: IF }).baseAsset).toBe("TSLA");
+    v.setPrice("TSLA", 250, false);
+    v.placeOrder(ctx, { symbol: LIVE, order_type: "LIMIT", side: "SELL", order_price: 250.5, order_quantity: 2, client_order_id: "t1" });
+    expect(v.externalTaker(LIVE, "BUY", 1).map((f) => f.price)).toEqual([250.5]);
+    expect(v.positionsView(MM).rows.find((r) => r.symbol === LIVE)?.position_qty).toBe(-1);
+    expect(() => v.createSymbol({ symbol: "PERP_TSLA_USDT" })).toThrow(VenueError);
+  });
+});
 
 describe("orders and fills", () => {
   test("taker flow fills only at the book's quoted prices; positions and fees follow", () => {

@@ -107,7 +107,7 @@ export class MockOrderlyHttpVenue implements QuotingVenue {
       this.seq++;
       orders.push({
         symbol: this.opts.symbol,
-        order_type: "LIMIT",
+        order_type: q.postOnly ? "POST_ONLY" : "LIMIT", // POST_ONLY: maker only (market in Orderly's launch phase)
         order_price: px,
         order_quantity: qty,
         side,

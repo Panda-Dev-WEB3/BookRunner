@@ -136,6 +136,7 @@ differs, then `systemctl daemon-reload`):
 | Installed | Where | Then |
 |---|---|---|
 | `bookrunner.service`, `bookrunner-infra.service`, `bookrunner-backup.service`, `bookrunner-backup.timer` | `/etc/systemd/system/` (0644) | daemon-reload; unless `--web-only`: `systemctl enable --now bookrunner-infra`, `systemctl reload bookrunner-infra`, `systemctl restart bookrunner` |
+| `bookrunner@.service` and the drop-in `bookrunner@testnet-live.service.d/override.conf` (the live-Orderly rehearsal stack) | `/etc/systemd/system/` (0644; the drop-in dir 0755) | daemon-reload; never enabled or started by `update.sh` / `install.sh`; unless `--web-only`, `systemctl restart bookrunner@testnet-live` only if it is already running |
 | `logrotate-bookrunner` | `/etc/logrotate.d/bookrunner` | — |
 | nginx http conf, locations snippet, site HSTS line, wildcard site (`nginx-lib.sh`) | `/etc/nginx/...` | `nginx -t`, rollback on failure, reload |
 | `/var/backups/bookrunner` | root 0700 | enables `bookrunner-backup.timer` once |
@@ -144,7 +145,13 @@ differs, then `systemctl daemon-reload`):
 It also refreshes `/usr/local/lib/bookrunner-deploy` itself (rsync from the root clone, `.env.infra` kept),
 fast-forwards `/opt/bookrunner/app` and runs `bun install --frozen-lockfile` and the two builds **as `bookrunner`**
 (outside any unit: they write `node_modules/`, `apps/*/dist` and bun's cache under `HOME=/opt/bookrunner`).
-`bookrunner@.service` is not installed by `update.sh` (mainnet host only, MAINNET.md).
+`install.sh` installs the same unit set (the drop-in included) once; `update.sh` re-installs whichever differs.
+`bookrunner@.service` carries the same sandbox as `bookrunner.service` (every directive of the table at the top and of
+"Added in this change" below), except `/etc/bookrunner` stays visible: the template's `EnvironmentFile` is
+`/etc/bookrunner/%i.env` (root 0600, unreadable to the user anyway). The testnet-live drop-in inherits that sandbox
+unchanged and only lowers the memory budget and adds `ReadWritePaths=-/opt/bookrunner/app/contracts/deployments`
+(the launch appends the chartered books to `46630.live.json`); `scripts/systemd-units.test.ts` fails if the drop-in
+sets any other key. On the mainnet host `bookrunner@mainnet` runs alone (MAINNET.md).
 
 What the running stack (`bookrunner.service`) writes, checked against the code:
 
@@ -157,6 +164,19 @@ What the running stack (`bookrunner.service`) writes, checked against the code:
 | `.data/testnet/mark-spool/` | mark: committed-mark rows waiting for Postgres | same (**new**: was the default `tmpdir()`, i.e. the unit's `PrivateTmp`, emptied on every restart; `MARK_SPOOL_DIR` now set by the testnet and mainnet profiles, resolved against the repo root) |
 | `contracts/deployments/46630.json` | `scripts/launch-devnet.ts` / `record-books.ts`, first start only | `ReadWritePaths=-/opt/bookrunner/app/contracts/deployments` |
 | `/tmp` | anything transient | `PrivateTmp=true` (private, emptied on stop) |
+
+What `bookrunner@testnet-live` writes (the template + drop-in; every state path is pinned by
+`scripts/network-profile.ts` `TESTNET_LIVE_PINNED`, so it never shares a file with the public stack):
+
+| Path | Writer | Covered by |
+|---|---|---|
+| `.data/testnet-live/dev.log` | systemd (`StandardOutput=append:`; `ExecStartPre` creates the directory) | `ReadWritePaths=/opt/bookrunner/app/.data` (template) |
+| `.data/testnet-live/keys/`, `.data/testnet-live/ops-venue/sagas.json` | ops-venue (Orderly keys of the live accounts, sagas) | same |
+| `.data/testnet-live/mark-spool/` | mark: committed-mark rows waiting for Postgres | same (pinned at the merge of the rehearsal stack: before, the live stack inherited the public `.data/testnet/mark-spool`, whose rows belong to the other database) |
+| `contracts/deployments/46630.live.json` | `scripts/launch-devnet.ts` (first start / a resumed launch) | drop-in `ReadWritePaths=-/opt/bookrunner/app/contracts/deployments` |
+
+`systemd-analyze verify` (systemd 255, ubuntu:24.04) reports no error on `bookrunner@testnet-live` (template + drop-in)
+or `bookrunner@mainnet`; `systemd-analyze security --offline` exposure 1.5 for both, as `bookrunner.service`.
 
 Not written at run time: the code tree and `node_modules` (read-only), `HOME` (`BUN_RUNTIME_TRANSPILER_CACHE_PATH=0`,
 no install at run time). Not used: the Docker socket (Postgres and Redis are reached over TCP on localhost;
