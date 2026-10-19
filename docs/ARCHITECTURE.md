@@ -197,7 +197,13 @@ service). A distribution with `gross == 0` is a no-op but still marks the period
 ```
 Subscription --closeWindow ok--> Live --retire--> Retiring --finalizeRetirement--> Retired
      \--closeWindow fail--> Cancelled (all commitments refundable 1:1 via claimCancelledRefund)
+     \--cancelStuckWindow (anyone, 7 days after subscriptionEnds, still Subscription)--> Cancelled
 ```
+
+- `cancelStuckWindow()` (Task 7, audit lead "unconfirmed deposits"): `closeWindow` deploys the IF and MM
+  inventory to the venue in the same transaction, so a venue deposit that keeps reverting would keep the book in
+  Subscription for good. `CLOSE_WINDOW_TIMEOUT` (7 days) after `subscriptionEnds`, anyone may cancel it instead:
+  every commitment is refundable 1:1. `closeWindow` itself is not gated by the timeout.
 
 - `closeWindow()` (anyone, `now >= subscriptionEnds`): reads both tranches' committed totals and the
   sponsor's Junior commitment `P` → `Waterfall.allocateWindow`. **Sponsor priority [ext]** (closes
@@ -234,8 +240,10 @@ Subscription --closeWindow ok--> Live --retire--> Retiring --finalizeRetirement-
   a reopen gap is shared by everyone who was in the book when the session closed). `heldSince` = the
   first held mark's periodEnd of the current run (0 after a non-held mark); once
   `periodEnd − heldSince ≥ MAX_HELD_DEFERRAL` (30 days, docs/AUDIT-2026-10.md D-M1-1) held marks settle
-  again at the held valuation unless governance set a settle-at-price for the book (Task 7 hook), so a long
-  hold (a suspended or delisted underlying) defers exits but never blocks them. The first settling mark
+  again at the held valuation, unless a governance settle price for the book's underlying is pending
+  (`AttestedOracle.settlePrice`, Task 7: in force within 3 days, the mark service then values the book at it and
+  signs non-held marks); that deferral ends at `MAX_SETTLE_PRICE_DEFERRAL` (60 days of hold) whatever governance
+  does. So a long hold (a suspended or delisted underlying) defers exits but never blocks them. The first settling mark
   settles at most `MAX_SETTLE_BUCKETS` (256) due buckets per tranche; the rest settle at the next mark (also
   post-hold). Each held mark emits `MarkHeld(bookId, markId, heldSince, settled)`. `requestRedeem` and
   claims are unaffected. `MarketCharter.decide` re-checks the minimum notice against the interval the book
@@ -444,7 +452,9 @@ engine (audit N-1, below).
     `LossBudgetExceeded` while `anchor - poolEquity > lossBudgetBps × anchor` (reductions, closes, liquidations
     and `forceClose` stay open); the next period re-anchors. `lossBudgetBps` = |mandate.killAtDrawdownBps| (set
     by the adapter at `initialize` and on every re-mandate; 800 until then, 1..5000). Cost: one SLOAD and a
-    config read per trade, one SSTORE per period. View `lossBudget(marketId)`.
+    config read per trade, one SSTORE per period. View `lossBudget(marketId)`; `LossBudgetBreached` once per
+    period from the first successful reduction / close / liquidation / close-out that sees the budget spent, or
+    the permissionless `pokeLossBudget(marketId)` (Task 7).
   - split gate (audit N-1): positions are per share and never rebased, so while an out-of-band multiplier
     change of the market's token (any component, for an index) is pre-approved or staged, new risk (and margin
     withdrawal with a position) reverts `SplitPending` (close-only); while the price predates the change every
@@ -465,9 +475,13 @@ engine (audit N-1, below).
     reopen gap of that size, else it is liquidated at the held close rather than leaving the gap as IF
     bad debt; traders top up or deleverage before the close, top-ups work off-hours). Liquidations
     use the latest (held) price with no `maxTradePriceAge` bound (involuntary, fee-bearing); position
-    closed at oracle, `liquidationFeeBps` split 50% liquidator / 50% IF; wind-down `forceClose`
+    closed at oracle, `liquidationFeeBps` of notional taken from the remaining margin; the liquidator always
+    earns half the nominal fee, from that margin first and from the IF (after the bad debt it covers, capped by
+    its balance) when the margin is gone, the rest of the fee goes to the IF (Task 7); wind-down `forceClose`
     (anyone, once the close-out is open) instead needs a live, fresh price like a trade (optionally
-    carried as `priceData`), so it never fills at a held price;
+    carried as `priceData`), so it never fills at a held price, except at a governance settle price in force
+    for the underlying (`AttestedOracle.settlePrice`: a delisted / permanently held market), where anyone closes
+    any position at it, fee-free, with no close-out schedule, and the market is priced at it as held (Task 7);
     bad debt paid by IF, then **ADL within that market only** (pool cash reduced by shortfall,
     `ADL` event) — never touches other markets.
   - `withdrawLiquidity` keeps `poolEquity - amount >= requiredPoolMargin` (pool must cover current

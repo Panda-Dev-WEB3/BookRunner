@@ -123,6 +123,13 @@ only (it deploys mocks and refuses 4663). Tick every box in order; two people fo
 9. [ ] Committee: each of the three members stakes `committeeBondBkrn` in BkrnStaking and calls
        `RiskCommittee.bond()` (sequence as in `scripts/launch-devnet.ts` `fundParticipants`).
 10. [ ] Agent operator stakes for its inventory tier (`config.agentTierBond`).
+    **Launch gate (audit 2026-10).** Every book is created on the deployment that carries the audit fixes; no
+    book, desk or mandate is carried over from an older deployment. Book components are clones bound at creation:
+    an older BookrunnerDesk clone keeps the unbounded RISK flatten in a split window (M-2) and the 300 s desk print
+    rule, an older MMMandate clone keeps the old `validateMandate` (M-3: 8/25-style terms), and an older
+    PoolEngineAdapter cannot re-mandate against a new engine. The Book proxy itself is upgradeable, its clones are
+    not, so recreate, never upgrade in place. Check before filing: `BookFactory` implementation slots (`DESK`,
+    `MANDATE`, `ENGINE_ADAPTER`) point at the current implementations, and VerifyHandover passes.
 11. [ ] Charter the three launch books (NVDA, TSLA on Orderly; the RHX5 index on the PoolEngine) from the studio
         treasury (sponsor): approve `charterFeeUsd` USDG to MarketCharter, stake `sponsorBondBkrn`, then
         `MarketCharter.file(charter)` per book (`ifTargetUsd >= venueMinIf`, i.e. > 25,000 USDG on Orderly;
@@ -410,11 +417,15 @@ can redo it during the timelock delay from the published quote.
   - the risk service values the token at its pre-change multiplier (on-chain `basisMultiplier`) and never sells
     it; only when that multiplier is unknown does it hold back the `DRAWDOWN` / `HEDGE_BAND` breaches;
   - the mark service refuses for up to one mark interval (warn log "split window: refusing ..."), then commits
-    held marks with the token at the multiplier of the price's basis. That multiplier comes from
-    `StockTokenRegistry.basisMultiplier` (on-chain), else the token's `UIMultiplierUpdated` events (paged), else
-    the previous mark's value is carried forward (no P&L). Only with no previous value is the token valued at 0
-    (error log "no basis multiplier and no previous mark value"): then check the token and the
-    `MARK_SPLIT_LOG_LOOKBACK_BLOCKS` range.
+    held marks with the token at the multiplier of the price's basis. For a live-mode token that multiplier comes
+    from the token's `UIMultiplierUpdated` events (paged over `MARK_SPLIT_LOG_LOOKBACK_BLOCKS`; exact), else
+    `StockTokenRegistry.basisMultiplier` (on-chain: the pre-split anchor for a token-side change, within the band of
+    the true value); for a stored-mode token it is always the on-chain value, which is exact (the registry records
+    every change). Only when neither is known is the previous mark's value carried forward (no P&L), and only with
+    no previous value either is the token valued at 0 (error log "no basis multiplier and no previous mark value"):
+    then check the token and the lookback range. The refusal is counted from the first change after the basis;
+    when the events are out of range and your re-anchor lands inside the window, it can restart once, for at most
+    one more interval (bounded).
 
   All of this is expected and clears by itself at the reprice. The Chainlink source also drops a round from
   before a split until the feed's next round. A dividend update during a hold has the same effect until the
@@ -430,7 +441,14 @@ can redo it during the timelock delay from the published quote.
   re-anchor plus the next live print, and so does every voluntary engine trade on its markets (closes and margin
   withdrawals too; liquidations still run): re-anchor promptly.
 - The RISK flatten of a token in the split window waits for the reprice even when the price is stale (for example
-  the reopen before the feed's first post-split round); expect the kill sequence to retry it.
+  the reopen before the feed's first post-split round); expect the kill sequence to retry it. It also waits
+  (`StockTokenRegistry.checkPriceBasis` reverts) in two cases without a split window proper:
+  - a change beyond the band activates on the token without a pre-approved anchor (`MultiplierOutOfBand`): until
+    your `setMultiplier` re-anchor; pre-approve splits with `setNextMultiplierAnchor` before `effectiveAt`;
+  - after an oracle cutover (a new AttestedOracle: `lastLiveAt` is 0) or for a price id never published, every
+    live-mode token's flatten waits for its first live print on the new oracle, because enabling live mode stamps
+    a change. Cut a new oracle over in session, and push a live price for every token before relying on the RISK
+    flatten.
 - Stored-multiplier mode (devnet / testnet): give engine markets a close-only period by calling
   `setNextMultiplierAnchor(token, new)` before `setMultiplier(token, new)`, and clear it afterwards.
 
@@ -446,7 +464,37 @@ can redo it during the timelock delay from the published quote.
   next `markInterval` period; reductions, closes and liquidations keep working. Read
   `PoolEngine.lossBudget(marketId)` (anchor, loss, budget, blocked). The kill path is unchanged: the drawdown
   kill at the next mark, or a RISK / committee kill if the loss is not market movement. The budget never
-  needs lifting by hand.
+  needs lifting by hand. The engine emits `LossBudgetBreached(marketId, period, loss, budget)` once per period
+  (from the first reduction, close, liquidation or close-out that sees it; anyone may call
+  `PoolEngine.pokeLossBudget(marketId)`), the risk service publishes the budget state every tick
+  (`meta.lossBudget`) and the alert `engine_loss_budget` (critical) pages until the next period re-anchors.
+- **Engine liquidations** (keeper policy): `PoolEngine.liquidate` is permissionless and pays the liquidator half
+  the nominal liquidation fee (`liquidationFeeBps` of the notional at the oracle), from the trader's remaining
+  margin first and from the market's IF when the margin is gone (capped by the IF after the bad debt it covers).
+  An underwater position therefore always carries a reward. No service of ours liquidates; until outside keepers
+  are seen on a market, run one from the operator account (`liquidate(marketId, trader, priceData)` for every
+  `isLiquidatable` position, gas from the reward).
+- **Delisted or permanently halted underlying (settle price)**. When a Stock Token's market will not trade again,
+  the oracle keeps the price held (or stale) and nothing on-chain can price the book finally: held marks defer
+  redemptions (audit M-1) for 30 days, then settle at the held price, and engine positions cannot close. Through the
+  timelock, propose a final price: `AttestedOracle.proposeSettlePrice(priceId, priceWad)`. It is refused while the
+  stored price is live and fresh (`MarketTrading`) and outside 50% of the stored price (`SettlePriceOutOfBand`; a
+  bigger write-down needs a Book upgrade, not this path). It takes effect `SETTLE_PRICE_DELAY` (3 days) after the
+  proposal; with the 48 h timelock, schedule it by day 25 of the hold so it is in force before the 30-day fallback.
+  While it is pending, books on that underlying do not fall back to the held valuation; that deferral ends 60 days
+  after the hold began whatever governance does. In force (`settlePrice(priceId)` returns `effective`):
+  - the mark service values the price id at it as a live price and signs non-held marks (warn log "valued at the
+    governance settle price"), so redemptions and top-ups settle at it;
+  - PoolEngine prices the market at it as held (no voluntary trade). Anyone calls `forceClose(marketId, trader)`
+    for every open position (no close-out schedule needed, no fee); then retire the book as usual and the adapter
+    recalls the pool and the IF.
+  A live print published after the proposal voids it (the market traded again). `cancelSettlePrice(priceId)`
+  (timelock) withdraws it at any time: the normal held-mark rules apply again.
+- **Subscription window that cannot close**: `closeWindow` reverts while the venue deposit of the IF / MM
+  inventory reverts (venue paused, adapter misconfigured), so the book stays in Subscription. Fix the venue side
+  and call `closeWindow` again. `Book.CLOSE_WINDOW_TIMEOUT` (7 days) after `subscriptionEnds`, anyone may call
+  `Book.cancelStuckWindow()`: the book is Cancelled and every commitment is refundable 1:1
+  (`Tranche.claimCancelledRefund`).
 - **Deploy the agent and the risk service together** (audit M-3). The risk service treats a quote that does not
   straddle the oracle as a SKEW breach (kill after `RISK_BREACH_CONFIRM_TICKS`); an agent from before the fix can
   quote one side of the oracle on a book with cached pre-fix terms (8/25, 12/30, 10/25). Roll both from the same
