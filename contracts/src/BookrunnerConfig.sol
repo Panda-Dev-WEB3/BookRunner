@@ -77,6 +77,9 @@ contract BookrunnerConfig is AccessControlEnumerable, IBookrunnerConfig {
 
     /// @notice Lower bound of `committeeWindow` (charter review + committee action expiry).
     uint256 public constant MIN_COMMITTEE_WINDOW = 1 days;
+    /// @notice Upper bound of `maxTradePriceAge` (audit 2026-10 L-2): the pull-oracle latency window an engine trade
+    ///         or a desk key swap can use is at most 15 s, whatever governance sets.
+    uint256 public constant MAX_TRADE_PRICE_AGE = 15;
 
     /// @notice Decimals the settlement token (`usdc`: USDC on devnet/testnet, USDG on Robinhood Chain
     ///         mainnet) must have; `setAddress("usdc", t)` reverts `BadSettlementToken` otherwise.
@@ -197,7 +200,7 @@ contract BookrunnerConfig is AccessControlEnumerable, IBookrunnerConfig {
 
     /// @notice Sets the numeric parameter `key` (one of the `KEY_*` parameter keys).
     /// @dev Admin only. Range checks: bps <= 1e4; markInterval, maxMarkAge, maxPriceAge and
-    ///      maxTradePriceAge > 0; committeeWindow >= MIN_COMMITTEE_WINDOW (1 day); uint32 params fit
+    ///      maxTradePriceAge > 0 (maxTradePriceAge also <= MAX_TRADE_PRICE_AGE, 15 s); committeeWindow >= MIN_COMMITTEE_WINDOW (1 day); uint32 params fit
     ///      uint32. Emits `ParamSet`.
     function setParam(bytes32 key, uint256 value) external onlyRole(DEFAULT_ADMIN_ROLE) {
         _setParam(key, value);
@@ -509,7 +512,7 @@ contract BookrunnerConfig is AccessControlEnumerable, IBookrunnerConfig {
             if (value < MIN_COMMITTEE_WINDOW || value > type(uint32).max) revert ParamOutOfRange(key, value);
             _committeeWindow = uint32(value);
         } else if (key == KEY_MAX_TRADE_PRICE_AGE) {
-            _checkNonZeroU32(key, value);
+            if (value == 0 || value > MAX_TRADE_PRICE_AGE) revert ParamOutOfRange(key, value);
             _maxTradePriceAge = uint32(value);
         } else {
             revert UnknownKey(key);

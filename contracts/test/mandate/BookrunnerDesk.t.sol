@@ -424,7 +424,7 @@ contract BookrunnerDeskTest is MandateBase {
         vm.warp(block.timestamp + 301);
         uint256 rest = nvda.balanceOf(address(desk));
         vm.prank(key);
-        vm.expectRevert(abi.encodeWithSelector(IAttestedOracle.StalePrice.selector, NVDA_ID, uint64(T0)));
+        vm.expectRevert(abi.encodeWithSelector(BookrunnerDesk.StaleTradePrice.selector, address(nvda), uint64(T0)));
         desk.execute(_flattenAction(address(nvda), rest, 0));
         _exec(risk, _flattenAction(address(nvda), rest, 0));
         assertEq(nvda.balanceOf(address(desk)), 0);

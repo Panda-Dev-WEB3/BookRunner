@@ -311,7 +311,7 @@ contract MandateRedTeamTest is MandateBase {
         );
         // valuation needs a fresh price: risk-adding hedges cannot be priced, so they revert
         vm.prank(key);
-        vm.expectRevert(abi.encodeWithSelector(IAttestedOracle.StalePrice.selector, NVDA_ID, uint64(T0)));
+        vm.expectRevert(abi.encodeWithSelector(BookrunnerDesk.StaleTradePrice.selector, address(nvda), uint64(T0)));
         desk.execute(_hedgeAction(address(nvda), true, 1000e6, 0));
         // RISK can always flatten
         _exec(risk, _flattenAction(address(nvda), tokens, 0));
