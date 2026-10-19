@@ -1218,6 +1218,22 @@ export const bookrunnerDeskAbi = [
   },
   {
     "type": "error",
+    "name": "StaleTradePrice",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "publishedAt",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "TooManyHeldTokens",
     "inputs": []
   },

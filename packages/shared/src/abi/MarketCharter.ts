@@ -41,7 +41,7 @@ export const marketCharterAbi = [
         "internalType": "bytes32"
       }
     ],
-    "stateMutability": "pure"
+    "stateMutability": "view"
   },
   {
     "type": "function",

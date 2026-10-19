@@ -70,7 +70,7 @@ function juryPorts(ch: CharterChain): JuryPorts {
   return {
     loadCharter: async (id) => {
       const r = await ch.charterRecord(id);
-      return r ? { charterId: id, charter: r.charter, status: r.status, filedAt: r.filedAt } : null;
+      return r ? { charterId: id, charter: r.charter, status: r.status, filedAt: r.filedAt, ...(r.deadline ? { deadline: r.deadline } : {}) } : null;
     },
     onChainVerdict: (id) => ch.juryVerdict(id),
     ruleContext: (c) => ch.ruleContext(c),
