@@ -30,7 +30,8 @@ describe("pinned images", () => {
 
   test("no floating tag of a pinned image is used (comments naming the tag stay allowed)", () => {
     const hits: string[] = [];
-    for (const { f, t } of texts) {
+    // this file names the floating tags in its own FLOATING pattern
+    for (const { f, t } of texts.filter((x) => x.f !== "scripts/image-pins.test.ts")) {
       t.split("\n").forEach((line, i) => {
         const code = line.replace(/(^|\s)#.*$/, "").replace(/\/\/.*$/, "");
         if (FLOATING.test(code) && !/\.md$/.test(f)) hits.push(`${f}:${i + 1}`);
