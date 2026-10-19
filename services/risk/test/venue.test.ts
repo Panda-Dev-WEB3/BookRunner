@@ -128,7 +128,9 @@ describe("misc adapters", () => {
       ask: 190.1,
       oracle: 190,
       sides: { bid: true, ask: false },
+      bookId: 1,
     });
+    expect(parseQuote({ bookId: 1, ts: 5, bid: 1, ask: 2, size: 3, signature: "0xab" })).toMatchObject({ bookId: 1, size: 3, signature: "0xab" });
     expect(parseQuote({ ts: "x" })).toBeNull();
     expect(parseQuote(null)).toBeNull();
   });

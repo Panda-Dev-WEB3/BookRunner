@@ -44,6 +44,9 @@ export class FakeBus implements AgentBus {
   async getJson<T>(key: string): Promise<T | null> {
     return (this.kv.get(key) as T | undefined) ?? null;
   }
+  async setJson(key: string, value: object): Promise<void> {
+    this.kv.set(key, value);
+  }
   async subscribe(channel: string, handler: (raw: string) => void): Promise<void> {
     this.subs.set(channel, [...(this.subs.get(channel) ?? []), handler]);
   }

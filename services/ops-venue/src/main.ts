@@ -4,7 +4,8 @@
 //           bkrn:<ns>:venue:report:<bookId>, no tx; onchain: adapter.report tx), builder fee sweeps per mark period
 //   queue : BullMQ QUEUES.venueOps (create_symbol, fund_if, deposit_mm, execute_withdraw, report,
 //           sweep_fees, revoke_key)
-//   redis : CHANNELS.kill(*) -> revoke the book's venue trade key
+//   redis : CHANNELS.kill(*) -> cancel the book's orders; its venue trade key is revoked once the mandate is killed
+//           on-chain (Redis is not trusted: worker/revoke.ts)
 //   listing: ORDERLY_LISTING_MODE (api in mock mode, manual in live mode by default): manual = the admin lists each
 //           market in Orderly One, ops-venue re-checks GET /v1/public/info/{symbol} with backoff (worker/listing.ts)
 //   live builder prices (ORDERLY_MODE=live, ORDERLY_SYMBOL_PRICE_SOURCE=builder): the oracle's venue feed
@@ -12,7 +13,7 @@
 //           (src/builderOracle), state -> KEYS.builderFeedStatus for alerts
 // Idles (log + retry) until contracts/deployments/<chainId>.json exists.
 import { createDb } from "@bookrunner/db";
-import { assertVenueSymbolConfig, CHANNELS, createLogger, QUEUES, roleSigner, tryLoadDeployment, type VenueOpsJob } from "@bookrunner/shared";
+import { assertVenueSymbolConfig, busJson, cachedAddressCheck, CHANNELS, createLogger, FORGED_WINDOW_SEC, ForgedLog, KEYS, KillVerifier, QUEUES, roleSigner, tryLoadDeployment, type VenueOpsJob } from "@bookrunner/shared";
 import { Worker } from "bullmq";
 import { Redis } from "ioredis";
 import type { Address } from "viem";
@@ -129,6 +130,14 @@ async function main() {
     reportPublisher: new RedisReportPublisher(redis),
     status: statusPublisher,
     everListed: new RedisEverListedStore(redis),
+    killAuth: (() => {
+      // RISK-signed kill orders only (Redis is not trusted); OPS_RISK_SIGNERS pins the RISK key (no RPC on the kill path)
+      const isRiskSigner = cachedAddressCheck({ pinned: env.OPS_RISK_SIGNERS, pinnedEnv: "OPS_RISK_SIGNERS", onChain: (a) => chain.isRiskSigner(a) });
+      const verifier = (consumeNonces: boolean) => new KillVerifier({ chainId: env.CHAIN_ID, config: dep.contracts.config, isRiskSigner, consumeNonces });
+      const forged = new ForgedLog("ops-venue", async (m) => void (await redis.set(KEYS.busForged("ops-venue"), busJson(m), "PX", FORGED_WINDOW_SEC * 1000)));
+      // the job verifier does not consume nonces: a BullMQ retry re-verifies the same signed order (idempotent revoke)
+      return { channel: verifier(true), job: verifier(false), forged };
+    })(),
   };
   if (env.ORDERLY_IF_MODE === "builder") log.warn({ books: [...parseIfBuilderAccounts(env.ORDERLY_IF_BUILDER_ACCOUNTS).keys()] }, "ORDERLY_IF_MODE=builder (FALLBACK): IF accounts are operator-EOA accounts (adapter.setIfAccountOwner), i.e. IF custody with one operator key; the operator registers ops-venue's IF keys and performs IF withdrawals (VERIFY O10)");
   const service = new OpsService(ctx, new Provisioner(ctx, builderKey));

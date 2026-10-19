@@ -5,6 +5,8 @@ export * from "./waterfall";
 export * from "./mandate";
 export * from "./sessions";
 export * from "./eip712";
+export * from "./oracleVerify";
+export * from "./busAuth";
 export * from "./merkle";
 export * from "./queues";
 export * from "./events";

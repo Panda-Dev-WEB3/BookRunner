@@ -1,5 +1,6 @@
 import type { QuoteHoldState } from "./domain/quote";
-import type { BookComponents, BookState, LimitState, LimitsSnapshot, Mandate, VenueId } from "@bookrunner/shared";
+import type { BookComponents, BookState, KillMsg, LimitState, LimitsSnapshot, Mandate, MonitorStateSig, QuoteMsg, RiskStateSig, VenueId } from "@bookrunner/shared";
+import type { QuoteAuth } from "./ports";
 import type { Hex } from "viem";
 
 /** Static facts about a book, resolved once at discovery. */
@@ -120,13 +121,21 @@ export interface NavInputs {
   highWaterWad: bigint;
 }
 
-/** Subset of QuoteMsg (KEYS.agentQuote) the risk check needs. */
+/** Subset of QuoteMsg (KEYS.agentQuote) the risk check needs, plus what its signature covers (busAuth.ts AgentQuote). */
 export interface QuoteObservation {
   ts: number; // unix ms
   bid: number;
   ask: number;
   oracle: number;
   sides: { bid: boolean; ask: boolean };
+  bookId?: number;
+  size?: number;
+  /** EIP-712 AgentQuote signature by the book's desk session key (absent: unsigned) */
+  signature?: string;
+  /** the oracle print the quote was priced on (QuoteMsg.ref) */
+  ref?: QuoteMsg["ref"];
+  /** set by risk once the quote is authenticated: the verified reference price the quote is judged against */
+  refPx?: number;
 }
 
 export interface LiveNavResult {
@@ -203,6 +212,8 @@ export interface KillJournal {
   /** Tx that set killed=true on-chain (ours or external). */
   killTx: string | null;
   runs: number;
+  /** the RISK-signed KillOrder broadcast for this episode: corroborates the journal when it is restored (N-3) */
+  killOrder?: KillMsg;
 }
 
 export interface MonitorState {
@@ -263,6 +274,11 @@ export interface RiskMeta {
   quoteUnverified?: boolean;
   /** Task 7: the engine pool's per-period loss budget (USD strings); null for Orderly books or when unreadable. */
   lossBudget?: { budgetBps: number; period: number; anchorEquityUsd: string; lossUsd: string; budgetUsd: string; blocked: boolean } | null;
+  /**
+   * Who signed the agent's quote read from Redis (audit 2026-10 lead "Redis trust"): ok = an active desk key of the
+   * mandate; anything else = the quote is ignored (no quote check, never a breach). null = no quote / no check.
+   */
+  quoteAuth?: QuoteAuth | null;
   hedgeBand: { inBand: boolean; outOfBandSince: number | null; outOfBandSec: number; graceSec: number };
   killed: boolean;
   killReason: string | null;
@@ -273,4 +289,8 @@ export interface RiskMeta {
 /** JSON at KEYS.riskState(bookId) and on CHANNELS.riskState(bookId): LimitsSnapshot + meta. */
 export interface RiskStatePayload extends LimitsSnapshot {
   meta: RiskMeta;
+  /** RISK-key signature over (book, state, tsMs) (shared busAuth.ts RiskState): the agent acts only on signed states */
+  stateSig?: RiskStateSig;
+  /** RISK-signed copy of the state machine (busAuth.ts RiskMonitorState): the only one risk restores at restart (N-3) */
+  monitorSig?: MonitorStateSig<MonitorState>;
 }

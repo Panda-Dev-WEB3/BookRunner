@@ -60,6 +60,8 @@ export const opsEnvSchema = baseEnvSchema.extend({
   OPS_BUILDER_PRICE_DEVIATION_ACCEPT_MS: z.coerce.number().int().min(0).default(120_000),
   // pinned oracle signer set for the push (comma-separated addresses); unset = AttestedOracle.isSigner on-chain
   OPS_BUILDER_ORACLE_SIGNERS: z.string().optional(),
+  /** pinned RISK_ROLE holders whose signed kill orders are accepted (comma-separated); unset = config.hasRole on-chain */
+  OPS_RISK_SIGNERS: z.string().optional(),
   OPS_BUILDER_ORACLE_RECONNECT_MS: z.coerce.number().int().min(100).default(5_000), // first retry (docs sample: 5 s), doubling
   OPS_BUILDER_ORACLE_MAX_RECONNECT_MS: z.coerce.number().int().min(100).default(60_000),
   OPS_BUILDER_ORACLE_IDLE_MS: z.coerce.number().int().min(0).default(60_000), // no server message (ping) this long: reconnect; 0 = off

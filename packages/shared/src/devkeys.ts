@@ -109,6 +109,40 @@ export function roleAccount(role: DevRole, env: Record<string, string | undefine
   throw new Error(`role ${role}: set ${envName ?? "a private key"} for chain ${chainId}` + (chainId === TESTNET_CHAIN_ID ? " (or BKRN_TESTNET_MNEMONIC)" : ""));
 }
 
+/** Mnemonic index base of the per-book desk session keys beyond the three launch roles (devnet / testnet only). */
+export const BOOK_DESK_KEY_INDEX_BASE = 1_000;
+
+/**
+ * The desk session key of book `bookId` on devnet / testnet (mnemonic index BOOK_DESK_KEY_INDEX_BASE + bookId): every
+ * book gets one (Task 7b: an agent quotes only with an active desk key). Throws where keys are not derived (mainnet:
+ * DESK_KEY_PRIVATE_KEY_<bookId> per book).
+ */
+export function bookDeskAccount(bookId: number, env: Record<string, string | undefined> = process.env): LocalAccount {
+  const chainId = Number(env.CHAIN_ID ?? 31337);
+  const index = BOOK_DESK_KEY_INDEX_BASE + bookId;
+  if (chainId === 31337) return mnemonicToAccount(env.DEV_MNEMONIC || DEV_MNEMONIC, { addressIndex: index });
+  if (chainId === TESTNET_CHAIN_ID && env.BKRN_TESTNET_MNEMONIC) {
+    if (env.BKRN_TESTNET_MNEMONIC.trim() === DEV_MNEMONIC) throw new Error("refusing the public anvil mnemonic on a public testnet");
+    return mnemonicToAccount(env.BKRN_TESTNET_MNEMONIC.trim(), { addressIndex: index });
+  }
+  throw new Error(`book ${bookId}: no derived desk key on chain ${chainId}: set DESK_KEY_PRIVATE_KEY_${bookId}`);
+}
+
+/** Desk-key roles of the launch books, by launch order (sorted book id of the deployment record's books). */
+export const LAUNCH_DESK_ROLES = ["deskKeyNvda", "deskKeyTsla", "deskKeyIndex"] as const satisfies readonly DevRole[];
+
+/**
+ * The desk session key a book's agent signs with when no DESK_KEY_PRIVATE_KEY is set (devnet / testnet): the launch
+ * role for the first three launch books, else the book's own derived key (bookDeskAccount). null where keys are not
+ * derived (mainnet: DESK_KEY_PRIVATE_KEY_<bookId>).
+ */
+export function derivedDeskAccount(launchBookIds: readonly number[], bookId: number, env: Record<string, string | undefined> = process.env): LocalAccount | null {
+  const order = [...launchBookIds].sort((a, b) => a - b).indexOf(bookId);
+  const role = order >= 0 ? LAUNCH_DESK_ROLES[order] : undefined;
+  if (role) return roleAccount(role, env);
+  return hasDerivedKeys(env) ? bookDeskAccount(bookId, env) : null;
+}
+
 /** True when roleAccount() can derive keys for this env without explicit private keys (never on mainnet). */
 export function hasDerivedKeys(env: Record<string, string | undefined> = process.env): boolean {
   const chainId = Number(env.CHAIN_ID ?? 31337);

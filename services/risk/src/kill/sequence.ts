@@ -12,7 +12,7 @@
 // steps (1)-(3) are best-effort (a failure is retried on a later run until (4) is done, then
 // recorded as "<step>:failed"); (4) and (5) are critical (a failure aborts the run, the monitor
 // resumes it next tick). (4) is skipped when the mandate is already killed.
-import { HEDGE_VENUES, type Logger, type QuotingVenue, RECEIPT_KIND, VENUE } from "@bookrunner/shared";
+import { HEDGE_VENUES, type KillMsg, type Logger, type QuotingVenue, RECEIPT_KIND, VENUE } from "@bookrunner/shared";
 import type { RiskSettings } from "../config";
 import { type FlattenOrder, planFlatten } from "../domain/flatten";
 import { jsonSafe, receiptRow, usdStr } from "../domain/records";
@@ -23,6 +23,11 @@ import type { BookRef, KillJournal, KillStep } from "../types";
 import { type Sleep, errMsg, withRetry, withTimeout } from "../util/async";
 
 export interface KillPorts {
+  /**
+   * Signs the kill order with the RISK key (busAuth.ts): agents and ops-venue act only on a signed one (audit 2026-10
+   * lead "Redis trust"). Absent: unsigned (ops-venue then revokes on the on-chain kill only).
+   */
+  signKill?: (k: { bookId: number; reason: string; breaches: string[]; episodeId: string; issuedAt: number }) => Promise<KillMsg>;
   chain: Pick<ChainPort, "isKilled" | "latestKill" | "setReduceOnly" | "deskHoldings" | "flatten" | "mandateKill" | "riskAddress">;
   store: Pick<StorePort, "insertKillEvent" | "insertReceipt" | "insertEvent" | "insertHedge">;
   bus: Pick<BusPort, "publishKill" | "publishDomainEvent">;
@@ -74,12 +79,21 @@ export async function runKillSequence(journal: KillJournal, ctx: KillContext, po
   const addTx = (h: string) => {
     if (!j.txHashes.includes(h)) j.txHashes.push(h);
   };
+  /** The kill order, RISK-signed when a signer is wired (a new issuedAt per call, one nonce per episode). */
+  const killOrder = async (): Promise<KillMsg> => {
+    const nowMs = ports.clock.nowMs();
+    if (!ports.signKill) return { bookId, ts: nowMs, reason: j.reason, breaches: j.breaches };
+    return ports.signKill({ bookId, reason: j.reason, breaches: j.breaches, episodeId: j.episodeId, issuedAt: Math.floor(nowMs / 1000) });
+  };
 
   const steps: Record<KillStep, () => Promise<void>> = {
     broadcast: async () => {
-      await retry("broadcast", () =>
-        ports.bus.publishKill(bookId, { bookId, ts: ports.clock.nowMs(), reason: j.reason, breaches: j.breaches }),
-      );
+      await retry("broadcast", async () => {
+        const order = await killOrder();
+        await ports.bus.publishKill(bookId, order);
+        // the signed order corroborates this journal if risk restarts before the kill completes (N-3)
+        if (order.signature) j.killOrder = order;
+      });
       j.actions.push("kill_broadcast");
     },
 
@@ -132,9 +146,11 @@ export async function runKillSequence(journal: KillJournal, ctx: KillContext, po
 
     revoke_venue_key: async () => {
       if (ref.venue !== VENUE.ORDERLY) return;
-      await retry("revoke_venue_key", () =>
-        ports.queue.enqueueVenueOp({ kind: "revoke_key", bookId }, `revoke_key-${bookId}-${j.episodeId}`),
-      );
+      // the job carries the RISK-signed order: ops-venue revokes at once (without one it waits for the on-chain kill)
+      await retry("revoke_venue_key", async () => {
+        const kill = await killOrder();
+        await ports.queue.enqueueVenueOp({ kind: "revoke_key", bookId, ...(kill.signature ? { kill } : {}) }, `revoke_key-${bookId}-${j.episodeId}`);
+      });
       j.actions.push("revoke_venue_key");
     },
 

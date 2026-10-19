@@ -49,6 +49,7 @@ import { hedgeAllowTree } from "../packages/shared/src/merkle";
 import { SESSIONS_24X5, encodeSessions } from "../packages/shared/src/sessions";
 import { type BookComponents, type Deployment, liveVenueDeployment } from "../packages/shared/src/types";
 import { usd } from "../packages/shared/src/units";
+import { ensureDeskKeys } from "./desk-keys";
 import { type BookProgress, type BookSize, type Commit, type Participant, commitPlan, launchBooks, launchSizes, settlementNeeds, transferPlan } from "./launch-plan";
 
 const RPC = process.env.RPC_URL ?? "http://127.0.0.1:8547";
@@ -401,7 +402,8 @@ async function closeWindows(books: Array<{ name: string; components: BookCompone
 async function main() {
   const d = loadDeployment();
   if (d.books.length > 0 && d.launch?.complete !== false) {
-    log(`already launched (${d.books.map((b) => b.name).join(", ")}) — nothing to do`);
+    log(`already launched (${d.books.map((b) => b.name).join(", ")}) — registering missing desk keys only`);
+    await ensureDeskKeys({ send: true, log: (m) => log(`desk keys: ${m}`) }).catch((err) => log(`desk keys: FAILED (${err instanceof Error ? err.message : String(err)}); run bun scripts/desk-keys.ts --send`));
     return;
   }
   // resume: books a previous run already chartered (launch.launched) are kept; a book it stopped in the middle of is
@@ -464,6 +466,8 @@ async function main() {
   await closeWindows(launched);
   saveProgress(true);
   log(`launched ${launched.length} books -> ${path}`);
+  // every book needs an active desk key to quote new risk (Task 7b): books chartered outside this launch included
+  await ensureDeskKeys({ send: true, log: (m) => log(`desk keys: ${m}`) }).catch((err) => log(`desk keys: FAILED (${err instanceof Error ? err.message : String(err)}); run bun scripts/desk-keys.ts --send`));
 }
 
 main().catch((err) => {

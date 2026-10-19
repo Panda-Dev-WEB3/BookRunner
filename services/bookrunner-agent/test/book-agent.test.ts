@@ -364,7 +364,7 @@ describe("BookAgent kill logic", () => {
     const { agent, venue, bus } = setup();
     await agent.refreshState();
     await agent.quoteTick();
-    agent.onKill(JSON.stringify({ bookId: 1, ts: 0, reason: "DRAWDOWN", breaches: ["DRAWDOWN"] }));
+    agent.onKill({ bookId: 1, ts: 0, reason: "DRAWDOWN", breaches: ["DRAWDOWN"] });
     const res = await agent.run();
     expect(res).toEqual({ halted: true, reason: "KILL_MSG:DRAWDOWN" });
     expect(venue.cancels).toBeGreaterThanOrEqual(1);
@@ -376,7 +376,7 @@ describe("BookAgent kill logic", () => {
 
   test("kill messages for other books are ignored", async () => {
     const { agent } = setup();
-    agent.onKill(JSON.stringify({ bookId: 2, ts: 0, reason: "X", breaches: [] }));
+    agent.onKill({ bookId: 2, ts: 0, reason: "X", breaches: [] });
     expect(agent.halted).toBeNull();
   });
 

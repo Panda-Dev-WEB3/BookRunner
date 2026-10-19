@@ -3,7 +3,9 @@
 //   halt        kill message / mandate.killed() / risk "killed" / book Retired|Cancelled:
 //               cancel-all, stop quoting, exit the loop (risk flattens on kill)
 //   idle        book not Live yet (Subscription): no quotes, keep watching
-//   reduce_only risk "breach" or "reduce_only" (stop new risk immediately), book Retiring, or the book's Orderly
+//   reduce_only risk "breach" or "reduce_only" (stop new risk immediately), book Retiring, no verified risk state for
+//               the agent's timeout (RISK_STATE_UNVERIFIED), no active desk session key on the mandate (NO_DESK_KEY:
+//               an agent quotes new risk only with a key, so risk can verify every quote it judges), or the book's Orderly
 //               market not open for new risk (ops-venue listing check: not listed / missing / POST_ONLY /
 //               REDUCE_ONLY / DELISTING / DELISTED, shared venueMarketGate; docs/VERIFY.md O20)
 //   quote       normal operation (the mandate's own off-hours / utilisation gating still applies)
@@ -20,6 +22,10 @@ export interface ModeInputs {
   bookState: BookState | null;
   /** the venue market gate (Orderly books): a reason to stop new risk, null = open / unknown */
   venueGate?: { reason: string } | null;
+  /** no RISK-signed state verified for the agent's timeout (Redis not trusted): reduce-only, never a halt */
+  riskUnverified?: boolean;
+  /** the desk session key is not active on the mandate (false) / unknown (undefined): false = reduce-only */
+  deskKeyActive?: boolean;
 }
 
 export interface ModeDecision {
@@ -38,6 +44,8 @@ export function resolveMode(i: ModeInputs): ModeDecision {
   if (i.bookState === "Retiring") return { mode: "reduce_only", hedgeMode: "flatten", reason: "BOOK_RETIRING" };
   if (i.riskState === "breach") return { mode: "reduce_only", hedgeMode: "reduce_only", reason: "RISK_BREACH" };
   if (i.riskState === "reduce_only") return { mode: "reduce_only", hedgeMode: "reduce_only", reason: "RISK_REDUCE_ONLY" };
+  if (i.riskUnverified) return { mode: "reduce_only", hedgeMode: "reduce_only", reason: "RISK_STATE_UNVERIFIED" };
+  if (i.deskKeyActive === false) return { mode: "reduce_only", hedgeMode: "reduce_only", reason: "NO_DESK_KEY" };
   if (i.venueGate) return { mode: "reduce_only", hedgeMode: "reduce_only", reason: i.venueGate.reason };
   return { mode: "quote", hedgeMode: "normal", reason: "OK" };
 }

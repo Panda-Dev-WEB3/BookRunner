@@ -10,6 +10,8 @@ export interface AgentBus {
   publishFill(f: FillMsg): Promise<void>;
   heartbeat(bookId: number, ttlMs: number): Promise<void>;
   getJson<T>(key: string): Promise<T | null>;
+  /** SET key (JSON stamped with the bus namespace) with a TTL */
+  setJson(key: string, value: object, ttlMs: number): Promise<void>;
   subscribe(channel: string, handler: (raw: string) => void): Promise<void>;
   close(): Promise<void>;
 }
@@ -67,6 +69,10 @@ export class RedisBus implements AgentBus {
     } catch {
       return null;
     }
+  }
+
+  async setJson(key: string, value: object, ttlMs: number): Promise<void> {
+    await this.cmd.set(key, busJson(value), "PX", Math.max(1_000, Math.floor(ttlMs)));
   }
 
   async subscribe(channel: string, handler: (raw: string) => void): Promise<void> {

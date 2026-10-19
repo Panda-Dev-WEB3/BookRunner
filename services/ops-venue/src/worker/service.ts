@@ -150,11 +150,12 @@ export class OpsService {
       msg = JSON.parse(raw) as KillMsg;
     } catch {
       this.ctx.log.warn({ raw: raw.slice(0, 200) }, "unparseable kill message");
+      this.ctx.killAuth?.forged.note("kill", "channel: unreadable kill message");
       return;
     }
     if (this.foreignKill(CHANNELS.killPattern, msg)) return; // another stack's kill: never revoke our keys for it
-    if (!this.registry.get(msg.bookId) && !this.ctx.keys.loadBook(msg.bookId)) return; // not an Orderly book
-    await this.revoker.revoke(msg.bookId, msg.reason || "RISK_KILL", "kill_channel");
+    // Redis is not trusted: only a RISK-signed kill order revokes (revoke.ts onRedisKill)
+    await this.revoker.onRedisKill(msg, "channel");
   }
 
   handleJob(job: VenueOpsJob) {

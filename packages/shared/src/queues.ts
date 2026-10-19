@@ -95,6 +95,9 @@ export function busNames(ns: string = BUS_NS) {
       riskState: (bookId: number | bigint) => `${p}:risk:state:${bookId}`, // JSON LimitsSnapshot + meta
       agentHeartbeat: (bookId: number | bigint) => `${p}:agent:hb:${bookId}`, // unix ms
       agentQuote: (bookId: number | bigint) => `${p}:agent:quote:${bookId}`, // JSON QuoteMsg (latest)
+      agentDeskRejects: (bookId: number | bigint) => `${p}:agent:desk-rejects:${bookId}`, // JSON DeskRejectsMsg (agent, TTL; alerts desk_stale_trade_price)
+      agentStatus: (bookId: number | bigint) => `${p}:agent:status:${bookId}`, // JSON AgentStatusMsg (agent, TTL; alerts agent_no_desk_key / risk_state_unverified)
+      busForged: (source: string) => `${p}:bus:forged:${source}`, // JSON BusForgedMsg (agent-<id> / ops-venue / risk, TTL; alerts bus_forged_message)
       liveNav: (bookId: number | bigint) => `${p}:nav:live:${bookId}`, // JSON LiveNav (risk/mark estimate)
       venueSymbolIssues: `${p}:ops-venue:symbol-issues`, // JSON VenueSymbolIssuesMsg (ops-venue, every book poll, TTL)
       oracleVenueFeed: `${p}:oracle:venue-feed`, // JSON OracleVenueFeedMsg (oracle, every tick, TTL; also PUBLISHed on the same name)
@@ -294,6 +297,13 @@ export interface VenueReportMsg {
   venueReport: `0x${string}`;
 }
 
+/**
+ * Max age (ms) of the oracle price a quote may be made on (agent: AGENT_PRICE_STALE_SECONDS default) and checked
+ * against (risk: RISK_QUOTE_PRICE_MAX_AGE_MS default). One constant, so the agent stops quoting on a price as old as
+ * the one risk would hold the book reduce-only for (audit M-3 hold; Task 7b review minor).
+ */
+export const QUOTE_PRICE_MAX_AGE_MS = 15_000;
+
 export interface QuoteMsg {
   bookId: number;
   ts: number; // unix ms
@@ -306,7 +316,39 @@ export interface QuoteMsg {
   skewBps: number;
   widthBps: number;
   sides: { bid: boolean; ask: boolean };
+  /** EIP-712 AgentQuote signed by the book's desk session key (busAuth.ts); risk ignores an unsigned quote */
+  signature?: `0x${string}`;
+  /**
+   * The oracle print the quote was priced on: its signed PriceUpdate fields and the oracle's signature ("0x" for the
+   * AttestedOracle fallback read from the chain). priceWad / publishedAt are covered by the agent's signature; risk
+   * verifies the print and judges the quote against it.
+   */
+  ref?: {
+    underlying: `0x${string}`;
+    priceWad: string;
+    publishedAt: number;
+    held: boolean;
+    sourceCount: number;
+    sourcesHash: `0x${string}`;
+    signature: `0x${string}`;
+  };
 }
+
+/** The agent's own status (KEYS.agentStatus, refreshed every state refresh, TTL): alerts agent_no_desk_key / risk_state_unverified. */
+export interface AgentStatusMsg {
+  v: 1;
+  bookId: number;
+  ts: number; // unix ms
+  /** the desk session key: active on the mandate, registered but expired / revoked / mandate killed (inactive), none */
+  deskKey: "active" | "inactive" | "missing";
+  /** unix ms since the desk key is not active (null: active) */
+  deskKeySince: number | null;
+  /** unix ms since no verified risk state arrived (null: verified within the agent's timeout) */
+  riskStateUnverifiedSince: number | null;
+}
+
+/** KEYS.agentStatus TTL (s): far above the refresh period, so a stopped agent's status expires. */
+export const AGENT_STATUS_TTL_SEC = 300;
 
 export interface FillMsg {
   bookId: number;
@@ -319,11 +361,31 @@ export interface FillMsg {
   maker: boolean;
 }
 
+/** The agent keeps the desk's StaleTradePrice rejections of the last hour (KEYS.agentDeskRejects, refreshed on each one). */
+export const DESK_REJECTS_WINDOW_SEC = 3_600;
+
+/**
+ * Desk key swaps (Hedge / Flatten) the desk refused with StaleTradePrice (audit 2026-10 "old prints": the traded token's
+ * price older than min(maxPriceAge, maxTradePriceAge)), written by the book's agent; services/alerts raises
+ * desk_stale_trade_price when too many land within its window.
+ */
+export interface DeskRejectsMsg {
+  v: 1;
+  bookId: number;
+  ts: number; // unix ms of the write
+  /** unix ms of each StaleTradePrice rejection within DESK_REJECTS_WINDOW_SEC, oldest first */
+  staleTradePrice: number[];
+}
+
 export interface KillMsg {
   bookId: number;
   ts: number;
   reason: string;
   breaches: string[];
+  /** EIP-712 KillOrder signed by the RISK key (busAuth.ts): unix s, episode nonce, signature. Unsigned = not acted on. */
+  issuedAt?: number;
+  nonce?: `0x${string}`;
+  signature?: `0x${string}`;
 }
 
 // ---- job payloads ----
@@ -336,6 +398,8 @@ export interface VenueOpsJob {
   amountUsd?: string;
   requestNonce?: string;
   period?: number;
+  /** revoke_key: the RISK-signed kill order (busAuth.ts); without a valid one ops-venue waits for the on-chain kill */
+  kill?: KillMsg;
 }
 export interface MarkJob {
   bookId: number;
