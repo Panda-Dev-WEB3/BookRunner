@@ -154,7 +154,8 @@ export class OpsService {
     }
     if (this.foreignKill(CHANNELS.killPattern, msg)) return; // another stack's kill: never revoke our keys for it
     if (!this.registry.get(msg.bookId) && !this.ctx.keys.loadBook(msg.bookId)) return; // not an Orderly book
-    await this.revoker.revoke(msg.bookId, msg.reason || "RISK_KILL", "kill_channel");
+    // Redis is not trusted: cancel now, revoke only once the mandate is killed on-chain (revoke.ts)
+    await this.revoker.revokeIfKilledOnChain(Number(msg.bookId), String(msg.reason || "RISK_KILL"), "kill_channel");
   }
 
   handleJob(job: VenueOpsJob) {

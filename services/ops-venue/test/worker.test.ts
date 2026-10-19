@@ -101,6 +101,7 @@ describe("kill -> venue key revocation", () => {
     t.mock.venue.credit(IF_ID, 25_000_000_000);
     const agent = new OrderlyVenue({ baseUrl: BASE, accountId: MM_ID, symbol: SYMBOL, mode: "mock", bookId: 1, keysDir: t.keys.dir, fetch: t.mock.fetch });
     await agent.replaceQuote({ bid: { px: 189, qty: 1 }, ask: { px: 191, qty: 1 } });
+    t.chain.killed = true; // the mandate is killed on-chain (a genuine kill)
     const kill = { bookId: 1, ts: Date.now(), reason: "DRAWDOWN", breaches: [] };
     await t.svc.onKillMessage(busJson(kill, BUS_NS === "testnet-live" ? "testnet" : "testnet-live"));
     expect(t.mock.venue.openOrders(MM_ID)).toHaveLength(2);
@@ -120,6 +121,7 @@ describe("kill -> venue key revocation", () => {
     await agent.replaceQuote({ bid: { px: 189, qty: 1 }, ask: { px: 191, qty: 1 } });
     expect(t.mock.venue.openOrders(MM_ID)).toHaveLength(2);
 
+    t.chain.killed = true; // the mandate is killed on-chain (a genuine kill)
     const r = await t.svc.handleJob({ kind: "revoke_key", bookId: 1 });
     expect(r.revokedNow).toBe(true);
     expect(t.mock.venue.openOrders(MM_ID)).toHaveLength(0);
@@ -135,6 +137,46 @@ describe("kill -> venue key revocation", () => {
     // provisioning must not resurrect a revoked key
     await t.svc.provisioner.ensure(t.svc.registry.list()[0] as ReturnType<typeof trackedBook>, true);
     expect((await t.store.venueAccounts(1)).find((x) => x.kind === "mm")?.status).toBe("revoked");
+  });
+
+  test("Redis is not trusted: a kill message / revoke_key job without an on-chain kill cancels the orders and keeps the key", async () => {
+    const t = await service();
+    t.mock.venue.credit(MM_ID, 75_000_000_000);
+    t.mock.venue.setPrice("NVDA", 190, false);
+    t.mock.venue.credit(IF_ID, 25_000_000_000);
+    const agent = new OrderlyVenue({ baseUrl: BASE, accountId: MM_ID, symbol: SYMBOL, mode: "mock", bookId: 1, keysDir: t.keys.dir, fetch: t.mock.fetch });
+    await agent.replaceQuote({ bid: { px: 189, qty: 1 }, ask: { px: 191, qty: 1 } });
+    expect(t.chain.killed).toBe(false);
+
+    // forged kill on the channel: a safe stop (orders pulled), never a revocation
+    await t.svc.onKillMessage(busJson({ bookId: 1, ts: Date.now(), reason: "FORGED", breaches: [] }));
+    expect(t.mock.venue.openOrders(MM_ID)).toHaveLength(0);
+    expect(t.keys.loadBook(1)?.trade?.revokedAt).toBeNull();
+    // forged revoke_key job: same
+    const r = await t.svc.handleJob({ kind: "revoke_key", bookId: 1 });
+    expect(r).toMatchObject({ revokedNow: false, deferred: "mandate not killed on-chain" });
+    // an unreadable chain defers too (never revoke on an unverified message)
+    const killedRead = t.chain.mandateKilled;
+    t.chain.mandateKilled = async () => Promise.reject(new Error("rpc down"));
+    const r2 = await t.svc.handleJob({ kind: "revoke_key", bookId: 1 });
+    expect(String(r2.deferred)).toContain("on-chain kill check failed: rpc down");
+    t.chain.mandateKilled = killedRead;
+    expect(t.keys.loadBook(1)?.trade?.revokedAt).toBeNull();
+    expect((await t.store.venueAccounts(1)).find((x) => x.kind === "mm")?.status).toBe("active");
+    expect(t.store.events.filter((e) => e.type === "agent.revoked")).toHaveLength(0);
+    expect(t.store.receipts).toHaveLength(0);
+    // the key still trades: the agent quotes again after a restart
+    await agent.replaceQuote({ bid: { px: 189, qty: 1 } });
+    expect(t.mock.venue.openOrders(MM_ID)).toHaveLength(1);
+
+    // the genuine kill lands on-chain: the mandate Kill log revokes, and the same Redis message now revokes too (idempotent)
+    t.chain.killed = true;
+    t.chain.mandateLogList.push({ kind: "Kill", mandate: MANDATE, reason: strToBytes32("DRAWDOWN"), block: 12n, txHash: "0x01" });
+    t.chain.block = 12n;
+    await t.svc.logs.poll();
+    expect(t.keys.loadBook(1)?.trade?.revokedAt).toBeTruthy();
+    await t.svc.onKillMessage(busJson({ bookId: 1, ts: Date.now(), reason: "DRAWDOWN", breaches: [] }));
+    expect(t.store.events.filter((e) => e.type === "agent.revoked")).toHaveLength(1);
   });
 
   test("mandate Kill log revokes; Remandated (mandate no longer killed) rotates a fresh trade key", async () => {

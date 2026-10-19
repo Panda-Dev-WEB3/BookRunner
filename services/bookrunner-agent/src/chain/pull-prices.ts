@@ -169,6 +169,13 @@ export interface PullPricesDeps {
   /** signed per-price messages already in hand (agent price feed); unsigned ones are ignored */
   stream?: () => ReadonlyArray<OraclePriceMsg | null>;
   domain: PriceDomain | null;
+  /**
+   * Local signature check of every candidate (agent: the shared OraclePriceVerifier, an AttestedOracle signer under
+   * `domain`). Redis is not trusted: an unchecked forged update with a later publishedAt would win the freshest
+   * selection, steer the hedge plan (freshestOracleLatest) and make every carried tx revert in AttestedOracle.update.
+   * Absent: no local check (the trader simulator; the chain still verifies what is carried).
+   */
+  verify?: (update: PriceUpdate, sig: Hex) => Promise<boolean>;
   /** per-source fetch bound */
   timeoutMs?: number;
   /** reuse one fetch for calls this close together (a hedge snapshot asks per component) */
@@ -182,6 +189,7 @@ export class PullPrices {
   private readonly now: () => number;
   private memo: { atMs: number; p: Promise<SignedUpdate[]> } | null = null;
   private lastWarn = 0;
+  private lastRejectWarn = 0;
 
   constructor(private readonly d: PullPricesDeps) {
     this.now = d.now ?? Date.now;
@@ -217,7 +225,16 @@ export class PullPrices {
       }),
     );
     const stream = (this.d.stream?.() ?? []).map((m) => msgUpdate(m)).filter((u): u is SignedUpdate => u !== null);
-    return [...fetched.flat(), ...stream];
+    const all = [...fetched.flat(), ...stream];
+    const verify = this.d.verify;
+    if (!verify) return all;
+    const ok = await Promise.all(all.map((u) => verify(u.update, u.sig).catch(() => false)));
+    const kept = all.filter((_, i) => ok[i]);
+    if (kept.length < all.length && this.now() - this.lastRejectWarn > 60_000) {
+      this.lastRejectWarn = this.now();
+      this.d.log?.warn({ rejected: all.length - kept.length, sources: [...new Set(all.filter((_, i) => !ok[i]).map((u) => u.source))] }, "signed price updates with an invalid signature / unknown signer ignored");
+    }
+    return kept;
   }
 
   async select(want: readonly Hex[], maxAgeSec: number): Promise<SignedUpdate[]> {

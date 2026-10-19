@@ -1,7 +1,7 @@
 // Wiring of the live builder price push (main.ts): gating, the pushing account / key, the WebSocket client, and the
 // two inputs of the oracle venue feed (channel + periodic key re-read). Redis is injected so tests drive it with fakes.
-import { type BuilderFeedStatusMsg, KEYS, type Logger, busDropper } from "@bookrunner/shared";
-import { type Address, getAddress, type Hex, isAddress } from "viem";
+import { type BuilderFeedStatusMsg, KEYS, type Logger, busDropper, oracleSignerCheck as sharedOracleSignerCheck } from "@bookrunner/shared";
+import type { Address, Hex } from "viem";
 import type { Ed25519Key } from "../orderly/auth";
 import type { TrackedBook } from "../worker/context";
 import { BuilderPriceFeed, builderFeedTargets, type PriceSignerCheck } from "./feed";
@@ -69,28 +69,10 @@ export interface BuilderFeedHandle {
 /**
  * The signer check of the push: the pinned OPS_BUILDER_ORACLE_SIGNERS when set (comma-separated addresses), else
  * AttestedOracle.isSigner on-chain (cached 60 s; an RPC error THROWS: "signer check unavailable", never cached as a "no").
+ * The shared check (packages/shared/src/oracleVerify.ts), also used by the agent for its quote price.
  */
 export function oracleSignerCheck(o: { chainId: number; oracle: Address; pinned?: string | undefined; isSignerOnChain: (a: Address) => Promise<boolean>; now?: () => number }): PriceSignerCheck {
-  const now = o.now ?? Date.now;
-  if (o.pinned?.trim()) {
-    const list = o.pinned.split(",").map((x) => x.trim()).filter(Boolean);
-    for (const a of list) if (!isAddress(a)) throw new Error(`OPS_BUILDER_ORACLE_SIGNERS: not an address: ${a}`);
-    const set = new Set(list.map((a) => getAddress(a)));
-    return { chainId: o.chainId, oracle: o.oracle, isOracleSigner: async (a) => set.has(getAddress(a)) };
-  }
-  const cache = new Map<string, { ok: boolean; at: number }>();
-  return {
-    chainId: o.chainId,
-    oracle: o.oracle,
-    isOracleSigner: async (a) => {
-      const k = a.toLowerCase();
-      const hit = cache.get(k);
-      if (hit && now() - hit.at < 60_000) return hit.ok;
-      const ok = await o.isSignerOnChain(a); // an RPC error propagates: the feed reports it, nothing is cached
-      cache.set(k, { ok, at: now() });
-      return ok;
-    },
-  };
+  return sharedOracleSignerCheck({ ...o, pinnedEnv: "OPS_BUILDER_ORACLE_SIGNERS" });
 }
 
 /** null when the push is off (mock mode, OPS_BUILDER_PRICE_PUSH=0, chainlink-priced listings). */

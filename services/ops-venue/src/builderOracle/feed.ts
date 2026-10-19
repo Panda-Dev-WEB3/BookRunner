@@ -15,8 +15,8 @@
 // price id from the deployment record, never from Redis) and an entry signed for another underlying is refused (a valid
 // NVDA price can never be pushed as TSLA). A signed publishedAt older than the last pushed one for the symbol is refused
 // (no replay / reorder inside the age window); re-sending the same latest signed price between ticks stays the norm.
-import { baseAssetOf, type BuilderFeedStatusMsg, type BuilderPushState, type Deployment, isTokenUnderlying, type Logger, type OracleVenueFeedMsg, type OracleVenuePrice, type PriceUpdate, recoverPriceSigner, underlyingToToken } from "@bookrunner/shared";
-import type { Address, Hex } from "viem";
+import { baseAssetOf, type BuilderFeedStatusMsg, type BuilderPushState, type Deployment, isTokenUnderlying, type Logger, type OracleVenueFeedMsg, type OracleVenuePrice, OraclePriceVerifier, type PriceSignerCheck, type PriceUpdate, underlyingToToken } from "@bookrunner/shared";
+import type { Hex } from "viem";
 import { type TrackedBook, tradable } from "../worker/context";
 import type { PublishReject } from "./socket";
 
@@ -56,14 +56,8 @@ export function expectedUnderlyingResolver(stockTokens: Deployment["stockTokens"
   return (b) => (b.underlying && isTokenUnderlying(b.underlying) ? (byToken.get(underlyingToToken(b.underlying).toLowerCase()) ?? null) : null);
 }
 
-/** Who may sign a pushed price: the oracle's EIP-712 domain and its signer set. */
-export interface PriceSignerCheck {
-  chainId: number;
-  /** the deployment's AttestedOracle (EIP-712 verifying contract) */
-  oracle: Address;
-  /** true / false = a signer or not; THROWS when the check is unavailable (RPC): never a cached "no" */
-  isOracleSigner(addr: Address): Promise<boolean>;
-}
+/** Who may sign a pushed price: the oracle's EIP-712 domain and its signer set (shared with the agent). */
+export type { PriceSignerCheck } from "@bookrunner/shared";
 
 export interface BuilderPriceFeedOptions {
   /** null = the push cannot run (no WebSocket domain / key): every target reports not-configured */
@@ -173,8 +167,8 @@ export class BuilderPriceFeed {
   /** the newest entry per symbol that FAILED verification (newer than the verified one: nothing is pushed) */
   private readonly invalid = new Map<string, { feedTs: number; error: string }>();
   private readonly invalidWarned = new Map<string, string>();
-  /** signature verdicts (signer or the reason), keyed by the signed fields + signature */
-  private readonly verdicts = new Map<string, Address | string>();
+  /** signature verdicts per signed price (shared OraclePriceVerifier: recovery + signer check, unavailable never cached) */
+  private readonly verifier: OraclePriceVerifier;
   private readonly states = new Map<string, SymbolState>();
   /** latest reject per base_ccy ("*" = not attributable) */
   private readonly rejects = new Map<string, PublishReject>();
@@ -189,6 +183,7 @@ export class BuilderPriceFeed {
 
   constructor(private readonly o: BuilderPriceFeedOptions) {
     this.now = o.now ?? Date.now;
+    this.verifier = new OraclePriceVerifier(o.verifier);
     this.maxDeviationBps = o.maxDeviationBps ?? 1_000;
     this.deviationAcceptMs = o.deviationAcceptMs ?? 120_000;
     this.intervalMs = o.intervalMs ?? 1_000;
@@ -244,29 +239,11 @@ export class BuilderPriceFeed {
       return "malformed priceWad";
     }
     const u: PriceUpdate = { underlying: p.underlying as Hex, priceWad: wad, publishedAt: BigInt(Math.trunc(p.publishedAt)), held: p.held, sourceCount: p.sourceCount, sourcesHash: p.sourcesHash as Hex };
-    const key = `${p.underlying}|${p.priceWad}|${p.publishedAt}|${p.held}|${p.sourceCount}|${p.sourcesHash}|${p.signature}`;
-    let verdict = this.verdicts.get(key);
-    if (verdict === undefined) {
-      const signer = await recoverPriceSigner(this.o.verifier.chainId, this.o.verifier.oracle, u, p.signature as Hex);
-      if (!signer) {
-        verdict = "malformed signature";
-      } else {
-        let ok: boolean;
-        try {
-          ok = await this.o.verifier.isOracleSigner(signer);
-        } catch (err) {
-          // the check could not run (RPC): not a "no", never cached; the next feed message asks again
-          return `signer check unavailable for ${signer}: ${err instanceof Error ? err.message : String(err)}`;
-        }
-        verdict = ok ? signer : `signed by ${signer}, which is not an oracle signer`;
-      }
-      if (this.verdicts.size >= 1_024) this.verdicts.clear();
-      this.verdicts.set(key, verdict);
-    }
-    if (verdict.startsWith("0x") && !verdict.includes(" ")) {
+    const verdict = await this.verifier.verify(u, p.signature as Hex);
+    if (verdict.ok) {
       return { symbol: p.symbol, underlying: p.underlying.toLowerCase() as Hex, price: Number(wad) / 1e18, held: p.held, stale: p.stale === true, publishedAtMs: Number(u.publishedAt) * 1_000 };
     }
-    return verdict;
+    return verdict.reason;
   }
 
   /** Raw JSON from Redis; malformed input is ignored. */

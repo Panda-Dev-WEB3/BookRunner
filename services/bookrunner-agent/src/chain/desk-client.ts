@@ -87,6 +87,12 @@ export class DeskClient implements DeskRunner {
     private readonly prices: DeskPriceData | null = null,
   ) {}
 
+  /**
+   * Called with the custom error name of every desk action the desk refused (decoded at simulation), e.g.
+   * StaleTradePrice (audit 2026-10 "old prints"): the agent counts those for services/alerts (desk_stale_trade_price).
+   */
+  onRejected: ((revert: string, action: string) => void) | null = null;
+
   get key(): Address {
     return this.wallet.account.address;
   }
@@ -139,6 +145,19 @@ export class DeskClient implements DeskRunner {
       if (receipt.status !== "success") throw new Error(`desk ${kind} (${label}) reverted in tx ${hash}`);
       this.log.info({ txHash: hash, action: kind, block: receipt.blockNumber.toString(), gasUsed: receipt.gasUsed.toString(), withPrices }, "desk tx confirmed");
       return { hash, receipt, withPrices };
+    }).catch((err: unknown) => {
+      this.noteRejected(err, action);
+      throw err;
     });
+  }
+
+  private noteRejected(err: unknown, action: DeskAction): void {
+    const name = revertName(err);
+    if (!name || !this.onRejected) return;
+    try {
+      this.onRejected(name, DESK_ACTION_NAME[action.kind]);
+    } catch {
+      // the counter never changes the outcome of the action
+    }
   }
 }

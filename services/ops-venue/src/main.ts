@@ -4,7 +4,8 @@
 //           bkrn:<ns>:venue:report:<bookId>, no tx; onchain: adapter.report tx), builder fee sweeps per mark period
 //   queue : BullMQ QUEUES.venueOps (create_symbol, fund_if, deposit_mm, execute_withdraw, report,
 //           sweep_fees, revoke_key)
-//   redis : CHANNELS.kill(*) -> revoke the book's venue trade key
+//   redis : CHANNELS.kill(*) -> cancel the book's orders; its venue trade key is revoked once the mandate is killed
+//           on-chain (Redis is not trusted: worker/revoke.ts)
 //   listing: ORDERLY_LISTING_MODE (api in mock mode, manual in live mode by default): manual = the admin lists each
 //           market in Orderly One, ops-venue re-checks GET /v1/public/info/{symbol} with backoff (worker/listing.ts)
 //   live builder prices (ORDERLY_MODE=live, ORDERLY_SYMBOL_PRICE_SOURCE=builder): the oracle's venue feed

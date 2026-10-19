@@ -95,6 +95,7 @@ export function busNames(ns: string = BUS_NS) {
       riskState: (bookId: number | bigint) => `${p}:risk:state:${bookId}`, // JSON LimitsSnapshot + meta
       agentHeartbeat: (bookId: number | bigint) => `${p}:agent:hb:${bookId}`, // unix ms
       agentQuote: (bookId: number | bigint) => `${p}:agent:quote:${bookId}`, // JSON QuoteMsg (latest)
+      agentDeskRejects: (bookId: number | bigint) => `${p}:agent:desk-rejects:${bookId}`, // JSON DeskRejectsMsg (agent, TTL; alerts desk_stale_trade_price)
       liveNav: (bookId: number | bigint) => `${p}:nav:live:${bookId}`, // JSON LiveNav (risk/mark estimate)
       venueSymbolIssues: `${p}:ops-venue:symbol-issues`, // JSON VenueSymbolIssuesMsg (ops-venue, every book poll, TTL)
       oracleVenueFeed: `${p}:oracle:venue-feed`, // JSON OracleVenueFeedMsg (oracle, every tick, TTL; also PUBLISHed on the same name)
@@ -317,6 +318,22 @@ export interface FillMsg {
   feeUsd: number;
   venueTradeId: string;
   maker: boolean;
+}
+
+/** The agent keeps the desk's StaleTradePrice rejections of the last hour (KEYS.agentDeskRejects, refreshed on each one). */
+export const DESK_REJECTS_WINDOW_SEC = 3_600;
+
+/**
+ * Desk key swaps (Hedge / Flatten) the desk refused with StaleTradePrice (audit 2026-10 "old prints": the traded token's
+ * price older than min(maxPriceAge, maxTradePriceAge)), written by the book's agent; services/alerts raises
+ * desk_stale_trade_price when too many land within its window.
+ */
+export interface DeskRejectsMsg {
+  v: 1;
+  bookId: number;
+  ts: number; // unix ms of the write
+  /** unix ms of each StaleTradePrice rejection within DESK_REJECTS_WINDOW_SEC, oldest first */
+  staleTradePrice: number[];
 }
 
 export interface KillMsg {

@@ -21,7 +21,8 @@ export interface JobDeps {
 
 export async function handleVenueOpsJob(job: VenueOpsJob, d: JobDeps): Promise<Record<string, unknown>> {
   if (job.kind === "revoke_key") {
-    const r = await d.revoker.revoke(job.bookId, "RISK_KILL", "job");
+    // the job arrives through Redis (BullMQ): the key is revoked only once the mandate is killed on-chain (revoke.ts)
+    const r = await d.revoker.revokeIfKilledOnChain(job.bookId, "RISK_KILL", "job");
     return { ...r };
   }
   let book = d.registry.get(job.bookId);
