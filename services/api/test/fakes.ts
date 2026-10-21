@@ -323,6 +323,7 @@ export function fakeDeployment(): Deployment {
       poolEngine: A(0xcd),
       hedgeExecutor: A(0xce),
       orderlyVault: A(0xcf),
+      insurancePool: A(0xd0),
     },
     stockTokens: {
       NVDA: { token: A(0x1001), priceId: "0x4e56444100000000000000000000000000000000000000000000000000000000", multiplierWad: "1000000000000000000" },

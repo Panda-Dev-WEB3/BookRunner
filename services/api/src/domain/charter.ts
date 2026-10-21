@@ -5,6 +5,7 @@ import { HEDGE_VENUES, bytes32ToStr, indexUnderlying, isTokenUnderlying, strToBy
 import { SESSIONS_24X5, SESSIONS_24X7, SESSIONS_NYSE_RTH, type Sessions, encodeSessions } from "@bookrunner/shared/sessions";
 import { hedgeAllowTree } from "@bookrunner/shared/merkle";
 import { orderlyCharterSymbolIssue } from "@bookrunner/shared/venueSymbol";
+import { DEFAULT_IF_FROM_POOL, MAX_PREMIUM_BPS, poolCharterReason } from "@bookrunner/shared/insurancePool";
 import { type Address, type Hex, getAddress, isAddress, toBytes, zeroHash } from "viem";
 import { z } from "zod";
 import { parseUsd, usdStr } from "../format";
@@ -80,6 +81,10 @@ export const charterDraftSchema = z.object({
   symbol: z.string().max(64),
   takerFeeBps: uint(65_535).default(0),
   makerFeeBps: uint(65_535).default(0),
+  /** 2026-10 insurance pool: the InsurancePool funds the IF at closeWindow (the window raises only the MM inventory). */
+  ifFromPool: z.boolean().default(DEFAULT_IF_FROM_POOL),
+  /** Pool premium, bps of gross fee flow; 0 = the pool's floor (fixed at filing as max(premiumBps, floor)). */
+  premiumBps: uint(65_535).default(0),
   meta: z
     .object({ name: z.string().max(80).optional(), description: z.string().max(2000).optional() })
     .optional(),
@@ -100,6 +105,8 @@ export type CharterReasonCode =
   | "BAD_UNDERLYING"
   | "BAD_SYMBOL"
   | "BAD_FEES"
+  | "BAD_PREMIUM"
+  | "NO_POOL"
   | "NEW_BOOKS_PAUSED";
 
 export interface CharterIssue {
@@ -220,6 +227,8 @@ export function draftToCharter(d: CharterDraft, ctx: DraftContext = {}): DraftCo
     symbol: symbolBytes(d.symbol, issues),
     takerFeeBps: d.takerFeeBps,
     makerFeeBps: d.makerFeeBps,
+    ifFromPool: d.ifFromPool,
+    premiumBps: d.premiumBps,
   };
   return { charter, issues, warnings };
 }
@@ -234,6 +243,8 @@ export interface ValidationContext {
   newBooksPaused?: boolean;
   /** ORDERLY_BROKER_ID: an Orderly charter may name only our own builder market (PERP_<T>_USDC_<broker>). */
   orderlyBrokerId?: string | null;
+  /** config.insurancePool() is set (NO_POOL); undefined when unknown: assumed set (the chain check decides). */
+  poolConfigured?: boolean;
 }
 
 /** Mirrors MarketCharter.validate (ARCHITECTURE §2.6); reports every failing rule, not only the first. */
@@ -288,6 +299,16 @@ export function validateCharterLocal(c: Charter, ctx: ValidationContext = {}): C
   }
   if (c.venue === VENUE.POOL_ENGINE && c.takerFeeBps > MAX_IN_HOUSE_TAKER_FEE_BPS) {
     add("BAD_FEES", "takerFeeBps", "In-house taker fee must be at most 100 bps");
+  }
+  const pool = poolCharterReason(c, ctx.poolConfigured ?? true);
+  if (pool === "BAD_PREMIUM") {
+    add(
+      "BAD_PREMIUM",
+      "premiumBps",
+      c.ifFromPool ? `Pool premium must be at most ${MAX_PREMIUM_BPS} bps of gross fee flow` : "A book-funded insurance fund pays no pool premium (premiumBps must be 0)",
+    );
+  } else if (pool === "NO_POOL") {
+    add("NO_POOL", "ifFromPool", "No insurance pool is configured on this deployment: fund the insurance fund from the tranches");
   }
   if (ctx.newBooksPaused) add("NEW_BOOKS_PAUSED", null, "New charters are paused by the guardian; filing would revert");
   return out;
@@ -353,6 +374,9 @@ export function charterFromJson(json: unknown): Charter {
     symbol: hex(o.symbol),
     takerFeeBps: num(o.takerFeeBps),
     makerFeeBps: num(o.makerFeeBps),
+    // absent in charters stored before 2026-10: a book-funded IF, no premium (the contract's reading too)
+    ifFromPool: o.ifFromPool === true || o.ifFromPool === "true",
+    premiumBps: num(o.premiumBps),
   };
 }
 
@@ -396,6 +420,10 @@ export interface CharterView {
   symbolHex: Hex;
   takerFeeBps: number;
   makerFeeBps: number;
+  /** 2026-10 insurance pool funds the IF. */
+  ifFromPool: boolean;
+  /** Pool premium (bps of gross fee flow) as filed; a draft's 0 means the pool's floor. */
+  premiumBps: number;
 }
 
 export function mandateToView(m: Mandate): MandateView {
@@ -450,6 +478,8 @@ export function charterToView(c: Charter, ctx: DraftContext = {}): CharterView {
     symbolHex: c.symbol,
     takerFeeBps: c.takerFeeBps,
     makerFeeBps: c.makerFeeBps,
+    ifFromPool: c.ifFromPool,
+    premiumBps: c.premiumBps,
   };
 }
 

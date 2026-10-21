@@ -65,6 +65,8 @@ export const CHARTER_JSON = {
   symbol: strToBytes32("PERP_NVDA_USDC"),
   takerFeeBps: 0,
   makerFeeBps: 0,
+  ifFromPool: false,
+  premiumBps: 0,
 };
 
 /** Builds the scenario; returns the fake chain with head at the last block. */

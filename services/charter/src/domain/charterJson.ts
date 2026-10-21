@@ -34,6 +34,8 @@ export interface CharterJson {
   symbol: Hex;
   takerFeeBps: number;
   makerFeeBps: number;
+  ifFromPool: boolean;
+  premiumBps: number;
 }
 
 const lower = <T extends string>(s: T): T => s.toLowerCase() as T;
@@ -70,6 +72,8 @@ export function charterToJson(c: Charter): CharterJson {
     symbol: lower(c.symbol),
     takerFeeBps: c.takerFeeBps,
     makerFeeBps: c.makerFeeBps,
+    ifFromPool: c.ifFromPool,
+    premiumBps: c.premiumBps,
   };
 }
 
@@ -106,6 +110,9 @@ const charterSchema = z.object({
   symbol: hex32,
   takerFeeBps: int,
   makerFeeBps: int,
+  // 2026-10 insurance pool; absent in charters stored before: a book-funded IF, no premium (the contract's reading)
+  ifFromPool: z.boolean().default(false),
+  premiumBps: int.default(0),
 });
 
 /** Parses struct_json (or any JSON-ish Charter, e.g. a viem read result) back into a Charter. */

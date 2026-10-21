@@ -102,6 +102,8 @@ describe("validateCharterLocal mirrors MarketCharter.validate", () => {
       ["BAD_UNDERLYING", (c) => (c.underlying = zeroHash)],
       ["BAD_SYMBOL", (c) => (c.symbol = zeroHash)],
       ["BAD_FEES", (c) => ((c.venue = 1), (c.takerFeeBps = 101))],
+      ["BAD_PREMIUM", (c) => (c.premiumBps = 5001)],
+      ["BAD_PREMIUM", (c) => ((c.ifFromPool = false), (c.premiumBps = 1200))],
     ];
     for (const [code, mutate] of cases) {
       const c = structuredClone(base);
@@ -132,6 +134,22 @@ describe("validateCharterLocal mirrors MarketCharter.validate", () => {
     e.ifTargetUsd = 10_000_000_000n;
     e.takerFeeBps = 100;
     expect(validateCharterLocal(e)).toEqual([]);
+  });
+
+  test("2026-10 insurance pool: drafts default to a pool-funded IF; NO_POOL without a configured pool", () => {
+    const c = sampleCharter();
+    expect(c.ifFromPool).toBe(true);
+    expect(c.premiumBps).toBe(0);
+    expect(validateCharterLocal(c, { poolConfigured: true })).toEqual([]);
+    expect(codes(validateCharterLocal(c, { poolConfigured: false }))).toEqual(["NO_POOL"]);
+    expect(validateCharterLocal({ ...c, ifFromPool: false }, { poolConfigured: false })).toEqual([]);
+    expect(validateCharterLocal({ ...c, premiumBps: 5000 })).toEqual([]);
+    // a charter stored before 2026-10 reads as book-funded with no premium (the contract's reading)
+    const legacy = charterToJson(c);
+    delete legacy.ifFromPool;
+    delete legacy.premiumBps;
+    expect(charterFromJson(legacy)).toMatchObject({ ifFromPool: false, premiumBps: 0 });
+    expect(charterToView(c)).toMatchObject({ ifFromPool: true, premiumBps: 0 });
   });
 
   test("registry and pause context", () => {

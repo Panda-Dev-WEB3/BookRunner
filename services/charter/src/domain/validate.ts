@@ -3,7 +3,7 @@
 // (InvalidCharter(reason)) — plus every failing reason for UI feedback.
 // VERIFY: check order and boundaries against contracts/src/MarketCharter.sol once it lands
 // (the charter API also cross-checks with an eth_call to validate() when the chain is reachable).
-import { type Charter, ORACLE, VENUE, bytes32ToStr, isTokenUnderlying, strToBytes32, underlyingToToken } from "@bookrunner/shared";
+import { type Charter, MAX_PREMIUM_BPS, ORACLE, VENUE, bytes32ToStr, isTokenUnderlying, poolCharterReason, strToBytes32, underlyingToToken } from "@bookrunner/shared";
 import { type Address, type Hex, zeroHash } from "viem";
 
 export const REASON_CODES = [
@@ -17,6 +17,8 @@ export const REASON_CODES = [
   "BAD_UNDERLYING",
   "BAD_SYMBOL",
   "BAD_FEES",
+  "BAD_PREMIUM",
+  "NO_POOL",
 ] as const;
 export type ReasonCode = (typeof REASON_CODES)[number];
 
@@ -33,6 +35,8 @@ export interface ValidationContext {
   markInterval?: number;
   isCanonicalToken(token: Address): boolean;
   isIndex(underlying: Hex): boolean;
+  /** config.insurancePool() != 0 (NO_POOL). Absent = not checked (chain unknown). */
+  poolConfigured?: boolean;
 }
 
 export interface ValidationResult {
@@ -101,6 +105,14 @@ export function validateCharter(c: Charter, ctx: ValidationContext): ValidationR
     fail("BAD_FEES", `in-house taker fee ${c.takerFeeBps} bps > ${MAX_INHOUSE_TAKER_FEE_BPS}`);
   }
 
+  // 2026-10 insurance pool (CharterRules.poolReason, checked after BAD_FEES)
+  const pool = poolCharterReason(c, ctx.poolConfigured ?? true);
+  if (pool === "BAD_PREMIUM") {
+    fail("BAD_PREMIUM", c.ifFromPool ? `premiumBps ${c.premiumBps} > ${MAX_PREMIUM_BPS}` : `premiumBps ${c.premiumBps} on a book-funded insurance fund (must be 0)`);
+  } else if (pool === "NO_POOL") {
+    fail("NO_POOL", "ifFromPool is set but no insurance pool is configured");
+  }
+
   // order reasons as the contract checks them
   reasons.sort((a, b) => REASON_CODES.indexOf(a) - REASON_CODES.indexOf(b));
   const reason = reasons[0] ?? null;
@@ -121,6 +133,7 @@ export function staticValidationContext(p: {
   canonicalTokens: Iterable<string>;
   indexIds: Iterable<string>;
   markInterval?: number;
+  poolConfigured?: boolean;
 }): ValidationContext {
   const tokens = new Set([...p.canonicalTokens].map((t) => t.toLowerCase()));
   const indexes = new Set([...p.indexIds].map((t) => t.toLowerCase()));
@@ -129,6 +142,7 @@ export function staticValidationContext(p: {
     isCanonicalToken: (t) => tokens.has(t.toLowerCase()),
     isIndex: (u) => indexes.has(u.toLowerCase()),
     ...(p.markInterval !== undefined ? { markInterval: p.markInterval } : {}),
+    ...(p.poolConfigured !== undefined ? { poolConfigured: p.poolConfigured } : {}),
   };
 }
 
