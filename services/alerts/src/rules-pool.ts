@@ -29,6 +29,10 @@
 //   one-off (no "resolved"), reported while the final mark is younger than ALERT_POOL_WRITE_OFF_NOTIFY_SECONDS (7 d).
 // - pool_book_unrepaid:<bookId> — a retired book with claim > 0 (debt still owed to the pool after its final mark)
 //   ALERT_POOL_UNREPAID_SECONDS (6 h) after that mark: WARNING.
+// - Spec mapping (review m-10): the plan's "queue older than 2 epochs" has no rule of its own: a queue that ages
+//   is one whose fills stay partial, which means free liquidity near 0 and utilisation near 100%, so pool_utilisation
+//   goes critical (and pool_epoch_overdue covers an epoch nobody processes). "Risk: IF shortfall reporting" is the
+//   indexer's book.insurance_shortfall / book.insurance_written_off events plus pool_market_debt here.
 // - pool_first_loss_low — firstLossBps below params().firstLossTargetBps (10%) while poolAssets > 0: WARNING (new
 //   allocations are refused, so pool-funded books cannot close their window); CRITICAL when the slice is 0 while
 //   claims are outstanding (depleted: the next loss is the depositors'). forSec 5 min.

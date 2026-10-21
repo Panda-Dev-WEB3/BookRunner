@@ -87,6 +87,27 @@ describe("PoolKeeperRunner", () => {
   });
 });
 
+describe("processEpoch front-run (review m-11)", () => {
+  test("a third party processed the epoch first: our tx reverts, the keeper cools down, then reads the new queue", async () => {
+    const chain = new FakePool();
+    chain.queue = [snap()];
+    let calls = 0;
+    chain.processEpoch = async () => {
+      calls++;
+      chain.queue = [snap({ procEpoch: 6, procEndsAt: END + 7 * DAY })];
+      throw new Error("execution reverted: EpochNotEnded(6)");
+    };
+    let now = 0;
+    const runner = new PoolKeeperRunner({ chain, cooldowns: new Cooldowns(() => now), cooldownMs: 1000, log });
+    expect((await runner.tick()).error).toContain("EpochNotEnded");
+    expect((await runner.tick()).plan).toBeNull(); // cooling down: no read, no tx
+    now += 1000;
+    const r = await runner.tick();
+    expect(r.plan).toMatchObject({ kind: "wait", reason: "open", epoch: 6 });
+    expect(calls).toBe(1);
+  });
+});
+
 describe("settleInsurance (retired pool-funded book, final mark not reported)", () => {
   test("only a Retired pool-funded book whose pool position is not closed", () => {
     expect(shouldSettleInsurance("Retired", { closed: false })).toBe(true);

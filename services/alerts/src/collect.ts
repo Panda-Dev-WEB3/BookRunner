@@ -693,7 +693,8 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
   let pool: Snapshot["pool"] = null;
   if (d.chain.pool) {
     try {
-      pool = await d.chain.pool(bookRows.map((b) => Number(b.id)));
+      // review m-2: only books that can hold a pool position (a window closed): never Subscription / Cancelled ones
+      pool = await d.chain.pool(bookRows.filter((b) => b.state !== "Subscription" && b.state !== "Cancelled").map((b) => Number(b.id)));
     } catch {
       pool = undefined;
     }

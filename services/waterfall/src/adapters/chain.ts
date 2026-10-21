@@ -216,8 +216,12 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain, Buyb
       this.pc.readContract({ address: ref.components.book, abi: bookAbi, functionName: "getCharter" }),
       this.pc.readContract({ address: ref.components.senior, abi: erc20Abi, functionName: "totalSupply" }),
       this.pc.readContract({ address: ref.components.junior, abi: erc20Abi, functionName: "totalSupply" }),
-      // 2026-10: the pool that funded the IF (address 0, or no getter on an older book: no premium)
-      this.pc.readContract({ address: ref.components.book, abi: bookAbi, functionName: "insurancePool" }).catch(() => zeroAddress),
+      // 2026-10: the pool that funded the IF (address 0, or no getter on an older book: no premium); a transport error
+      // fails the read (retried) instead of a false "no premium" parity break (review m-4)
+      this.pc.readContract({ address: ref.components.book, abi: bookAbi, functionName: "insurancePool" }).catch((err) => {
+        if (isOnChainRevert(err)) return zeroAddress;
+        throw err;
+      }),
     ]);
     return {
       pendingGross,
@@ -234,7 +238,10 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain, Buyb
     try {
       const [a, p] = await Promise.all([
         this.pc.readContract({ address: ref.components.router, abi: revenueRouterAbi, functionName: "previewSplit", args: [gross, expenses] }),
-        this.pc.readContract({ address: ref.components.router, abi: revenueRouterAbi, functionName: "previewPremium", args: [gross] }).catch(() => null),
+        this.pc.readContract({ address: ref.components.router, abi: revenueRouterAbi, functionName: "previewPremium", args: [gross] }).catch((err) => {
+          if (isOnChainRevert(err)) return null; // an older router: no premium
+          throw err; // previewOnChain -> null: no comparison rather than a false mismatch
+        }),
       ]);
       return { gross: a.gross, expenses: a.expenses, carry: a.carry, senior: a.senior, junior: a.junior, premium: p ? p[1] : 0n };
     } catch {
@@ -382,18 +389,26 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain, Buyb
     if (!address) return null;
     const block = await this.pc.getBlock();
     const q = { address, abi: insurancePoolAbi, blockNumber: block.number } as const;
-    const [queue, ledger, params, active] = await Promise.all([
+    const [queue, ledger, params] = await Promise.all([
       this.pc.readContract({ ...q, functionName: "queue" }),
       this.pc.readContract({ ...q, functionName: "ledger" }),
       this.pc.readContract({ ...q, functionName: "params" }),
-      this.pc.readContract({ ...q, functionName: "activeBooks" }),
     ]);
     const [procEpoch, procEndsAt, fillEpoch, pendingShares] = queue;
-    const [epoch, positions] = await Promise.all([
+    // review m-2: an idle queue or an open epoch needs nothing more; an ended one reads the stale count, and the
+    // stale books' ids only when there are some (to name them in the log)
+    const idle = pendingShares === 0n && ledger[2] === 0n;
+    const ended = BigInt(procEndsAt) <= block.timestamp;
+    const [epoch, staleCount] = await Promise.all([
       this.pc.readContract({ ...q, functionName: "epochInfo", args: [procEpoch] }),
-      Promise.all(active.map(async (id) => ({ id: Number(id), p: await this.pc.readContract({ ...q, functionName: "bookPosition", args: [id] }) }))),
+      idle || !ended ? Promise.resolve(0n) : this.pc.readContract({ ...q, functionName: "staleBooks", args: [BigInt(procEndsAt)] }),
     ]);
-    const stale = positions.filter((x) => BigInt(x.p.lastMarkAt) < BigInt(procEndsAt)).map((x) => x.id);
+    let stale: number[] = [];
+    if (staleCount > 0n) {
+      const active = await this.pc.readContract({ ...q, functionName: "activeBooks" });
+      const positions = await Promise.all(active.map(async (id) => ({ id: Number(id), p: await this.pc.readContract({ ...q, functionName: "bookPosition", args: [id] }) })));
+      stale = positions.filter((x) => BigInt(x.p.lastMarkAt) < BigInt(procEndsAt)).map((x) => x.id);
+    }
     return {
       nowSec: Number(block.timestamp),
       procEpoch: Number(procEpoch),
@@ -403,7 +418,7 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain, Buyb
       depositsPending: ledger[2],
       epochDepositAssets: epoch.depositAssets,
       epochWithdrawShares: epoch.shares,
-      staleBooks: stale.length,
+      staleBooks: Number(staleCount),
       staleBookIds: stale,
       processGrace: Number(params[6]),
     };
