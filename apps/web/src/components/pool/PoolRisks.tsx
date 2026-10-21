@@ -43,7 +43,7 @@ export function PoolLossOrder() {
           <Layer
             order="3"
             title={<Term id="firstLossSlice">First-loss slice (treasury)</Term>}
-            body="What the book cannot repay is the pool's loss. The treasury's slice takes it first."
+            body="What an exhausted book cannot cover is the pool's loss, provisional while the book is live (its later marks recover it first) and final if it retires short. The treasury's slice takes it first."
             className="border-backstop/40 bg-backstop/[0.08]"
             text="text-backstop-ink"
           />

@@ -716,8 +716,10 @@ calls `processEpoch` once the oldest epoch is processable (every active pool-fun
 grace) and `Book.settleInsurance` for a retired book whose final pool mark failed; the **mark** service signs
 `insuranceEquityUsd` from the snapshot that values the IF and nets the pool's debt from its informational NAV;
 **ops-venue** reports who funds a book's IF (`fund_if`); **alerts** page on utilisation > 90%, an epoch unprocessed 2 h
-past its end or waiting for marks in its grace, per-market debt marked down, written-off / unrepaid debt of retired
-books, and the first-loss slice below its 10%. The **charter** service and api validators mirror `BAD_PREMIUM` /
+past its end or waiting for marks in its grace, a per-market provisional loss (an exhausted live book's claim below its
+debt: recovered first by later marks, final only at retirement), written-off / unrepaid debt of retired books, and the
+first-loss slice below its 10%. The indexer, api and app label the pool's loss on a live book "provisional" and only a
+retired book's "written off". The **charter** service and api validators mirror `BAD_PREMIUM` /
 `NO_POOL`; new charters default to `ifFromPool`.
 
 Queues/channels/keys: `packages/shared/src/queues.ts`. Events: `packages/shared/src/events.ts`.

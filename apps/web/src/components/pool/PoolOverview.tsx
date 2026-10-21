@@ -65,7 +65,7 @@ export function PoolOverview(props: { data: PoolOverviewOut | undefined; error: 
           sub={d.activeBooks == null ? "Insurance funds of pool-funded books" : `Insurance funds of ${d.activeBooks} active book${d.activeBooks === 1 ? "" : "s"}`}
         />
         <Stat label="Premiums received" series="fee" value={<WithUnit value={fmtUsd(d.premiumsTotalUsd, { compact: true })} unit={sym} />} sub="All time, from books' gross fee flow" />
-        <Stat label="Losses" series="loss" value={<WithUnit value={fmtUsd(d.lossesTotalUsd, { compact: true })} unit={sym} />} sub="All time; the first-loss slice takes them first" />
+        <Stat label="Losses" series="loss" value={<WithUnit value={fmtUsd(d.lossesTotalUsd, { compact: true })} unit={sym} />} sub="Net of recoveries; provisional while a book is live, final at its retirement; the first-loss slice takes them first" />
       </StatGrid>
     </div>
   );

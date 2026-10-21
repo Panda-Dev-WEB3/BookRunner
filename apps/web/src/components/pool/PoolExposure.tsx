@@ -1,5 +1,6 @@
-// Exposure per market (underlying): what the pool lent to the books on it against the per-market cap, what it has
-// marked down, and each book's position (allocation, what it can repay, losses split first-loss / depositors).
+// Exposure per market (underlying): what the pool lent to the books on it against the per-market cap, its provisional
+// loss on exhausted live books (recovered first by later marks, final only at retirement) and what retired books left
+// written off, and each book's position (allocation, what it can repay, losses split first-loss / depositors).
 import { Link } from "react-router";
 import type { PoolExposureOut } from "../../lib/api-types";
 import { bpsPct, fmtDateTime, fmtUsd, usdRaw } from "../../lib/format";
@@ -18,12 +19,21 @@ export function PoolExposure(props: { data: PoolExposureOut | undefined; error: 
       {d.markets.map((m) => {
         const fill = capFill(m.capUsedBps);
         const tone = capTone(m.capUsedBps);
-        const shortfall = usdRaw(m.shortfallUsd) ?? 0n;
+        const provisional = usdRaw(m.provisionalLossUsd) ?? 0n;
+        const writtenOff = usdRaw(m.writtenOffUsd) ?? 0n;
         return (
           <Card
             key={m.market}
             title={m.label}
-            actions={shortfall > 0n ? <Chip tone="critical">Marked down</Chip> : <Chip tone="good">Fully repayable</Chip>}
+            actions={
+              provisional > 0n ? (
+                <Chip tone="warn">Provisional loss</Chip>
+              ) : writtenOff > 0n ? (
+                <Chip tone="critical">Written off</Chip>
+              ) : (
+                <Chip tone="good">Fully repayable</Chip>
+              )
+            }
             padding="md"
           >
             <div className="flex items-baseline justify-between gap-3 text-[12.5px]">
@@ -38,9 +48,15 @@ export function PoolExposure(props: { data: PoolExposureOut | undefined; error: 
               <span>{fill === null ? "Cap unknown while the chain is unreachable" : `${bpsPct(m.capUsedBps ?? 0, 1)} of the cap (${capPct} of the pool per market)`}</span>
               <span>{m.shareOfPoolBps === null ? "" : `${bpsPct(m.shareOfPoolBps, 1)} of the pool`}</span>
             </div>
-            {shortfall > 0n && (
+            {provisional > 0n && (
+              <p className="mt-2 text-[12px] text-warn-ink">
+                {fmtUsd(m.provisionalLossUsd)} {sym} provisional loss: at their last marks live books on this market could not cover that much of their insurance fund debt
+                with their own capital. Later marks recover it first, before any tranche gain; it becomes final only if the book retires short.
+              </p>
+            )}
+            {writtenOff > 0n && (
               <p className="mt-2 text-[12px] text-critical-ink">
-                {fmtUsd(m.shortfallUsd)} {sym} marked down: at their last marks the books on this market could not repay that much of their insurance fund.
+                {fmtUsd(m.writtenOffUsd)} {sym} written off: retired books on this market could not repay that much at their final mark.
               </p>
             )}
             <div className="mt-3">
@@ -74,6 +90,7 @@ export function PoolExposure(props: { data: PoolExposureOut | undefined; error: 
                         </Td>
                         <Td right num title={loss > 0n ? `First-loss slice ${fmtUsd(b.lossFirstLossUsd)} · depositors ${fmtUsd(b.lossDepositorsUsd)}` : undefined}>
                           {fmtUsd(loss, { compact: true })}
+                          {b.lossStatus !== "none" && <span className="ml-1 text-[11px] text-muted">{b.lossStatus === "provisional" ? "provisional" : "written off"}</span>}
                         </Td>
                         <Td right num>
                           {fmtUsd(b.premiumsUsd, { compact: true })}
