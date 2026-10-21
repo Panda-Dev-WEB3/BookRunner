@@ -19,10 +19,10 @@
 // Insurance pool (2026-10; generated after credit, same reason):
 //   premium:    [gross, charterPremiumBps, floorBps, expensesRequested, expenseCapBps, carryBps, seniorHurdleBps,
 //                seniorSupply, juniorSupply, effectivePremiumBps, premium, expenses, carry, senior, junior]
-//   poolDebt:   [debt, vaultIdle, unfundedClaims, deployedValueUsd, backstopMoney, debtAfter, writeOff, nav]
-//               (an exhausted book's debt is written down to its own capital, Backstop money excluded)
+//   poolDebt:   [debt, vaultIdle, unfundedClaims, deployedValueUsd, backstopMoney, claim, shortfall, nav]
+//               (the pool's claim is the debt capped by the book's own capital, Backstop money excluded)
 //   poolMark:   [S, J, imp, perfIndex, highWater, backstopDebt, backstopPayable, unfunded, vaultIdle, deployed,
-//                insuranceEquity, debt, juniorSupply, backstopAvailable, | debtAfter, writeOff, nav, capped(0|1),
+//                insuranceEquity, debt, juniorSupply, backstopAvailable, | claim, shortfall, nav, capped(0|1),
 //                coverCap, S', J', imp', backstopCovered, backstopDebt'] (Backstop cover never pays the insurance debt)
 //   poolWindow: [ifTarget, mmInventory, seniorCapBps, seniorCommitted, juniorCommitted, sponsorJuniorCommitted,
 //                ok, reason, seniorAllocated, juniorAllocated, ifRaised(0), mmAmount, idle] (window with ifFromPool)
@@ -44,7 +44,7 @@ import {
   initialDeployment,
   juniorWindowAllocation,
   poolBookNav,
-  poolDebtAtMark,
+  poolClaimAtMark,
   poolMarkPnl,
   splitDistribution,
   splitPoolDistribution,
@@ -164,8 +164,8 @@ for (let i = 0; i < N; i++) {
   const unfunded = rnd(2n) === 0n ? 0n : amt();
   const deployed = pick([0n, debt, debt / 2n, debt + 1n, amt()]);
   const backstopMoney = rnd(2n) === 0n ? 0n : pick([amt(), idle]);
-  const dm = poolDebtAtMark(debt, idle, deployed, backstopMoney);
-  poolDebt.push([debt, idle, unfunded, deployed, backstopMoney, dm.debt, dm.writeOff, poolBookNav(idle, unfunded, dm.debt, deployed)].map(String));
+  const dm = poolClaimAtMark(debt, idle, deployed, backstopMoney);
+  poolDebt.push([debt, idle, unfunded, deployed, backstopMoney, dm.claim, dm.shortfall, poolBookNav(idle, unfunded, dm.claim, deployed)].map(String));
 
   const ifTargetUsd = amt();
   const mmInventoryUsd = amt();
@@ -199,7 +199,7 @@ for (let i = 0; i < N; i++) {
   const st = { seniorNav: S, juniorNav: J, seniorImpairment: imp, perfIndex: WAD, highWater: WAD, backstopDebt };
   const pm = poolMarkPnl(st, { vaultIdle: idle, unfundedClaims: unfunded, backstopPayable, deployedValueUsd: deployed, insuranceEquityUsd: ifEquity, debt, juniorSupply, backstopAvailable });
   const r = pm.result;
-  poolMark.push([S, J, imp, WAD, WAD, backstopDebt, backstopPayable, unfunded, idle, deployed, ifEquity, debt, juniorSupply, backstopAvailable, pm.debt, pm.writeOff, pm.nav, pm.coverCap === null ? 0n : 1n, pm.coverCap ?? 0n, r.seniorNav, r.juniorNav, r.seniorImpairment, r.backstopCovered, r.backstopDebt].map(String));
+  poolMark.push([S, J, imp, WAD, WAD, backstopDebt, backstopPayable, unfunded, idle, deployed, ifEquity, debt, juniorSupply, backstopAvailable, pm.claim, pm.shortfall, pm.nav, pm.coverCap === null ? 0n : 1n, pm.coverCap ?? 0n, r.seniorNav, r.juniorNav, r.seniorImpairment, r.backstopCovered, r.backstopDebt].map(String));
 }
 
 // End-to-end pool-funded book (realistic magnitudes; every window succeeds: the sponsor commits all of Junior).
@@ -230,7 +230,7 @@ for (let i = 0; i < POOL_BOOK_N; i++) {
   const vaultIdle = dep.idle + s.senior + s.junior;
   const deployed = ifEquity + mmValue;
   const nav = poolBookNav(vaultIdle, 0n, ifTargetUsd, deployed);
-  const poolValue = poolDebtAtMark(ifTargetUsd, vaultIdle, deployed, 0n).debt;
+  const poolValue = poolClaimAtMark(ifTargetUsd, vaultIdle, deployed, 0n).claim;
   const m = applyMarkPnl(
     { seniorNav: w.seniorAllocated + cr.seniorCredit, juniorNav: w.juniorAllocated + cr.juniorCredit, seniorImpairment: 0n, perfIndex: WAD, highWater: WAD, backstopDebt: 0n },
     { nav, juniorSupply: w.juniorAllocated, backstopAvailable: 0n },

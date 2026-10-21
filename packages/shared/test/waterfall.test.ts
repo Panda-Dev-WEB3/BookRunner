@@ -9,7 +9,7 @@ import {
   initialDeployment,
   juniorWindowAllocation,
   poolBookNav,
-  poolDebtAtMark,
+  poolClaimAtMark,
   poolMarkPnl,
   premiumSplit,
   splitDistribution,
@@ -320,14 +320,16 @@ describe("insurance pool (2026-10): a pool-funded book", () => {
     expect(poolBookNav(0n, 0n, usd(25_000), usd(100_000))).toBe(usd(75_000));
     // bad debt (or an MM loss paid from the IF) draws 5k: deployed 95k -> nav 70k, the pool is still owed 25k
     expect(poolBookNav(0n, 0n, usd(25_000), usd(95_000))).toBe(usd(70_000));
-    expect(poolDebtAtMark(usd(25_000), 0n, usd(95_000), 0n)).toEqual({ debt: usd(25_000), writeOff: 0n });
+    expect(poolClaimAtMark(usd(25_000), 0n, usd(95_000), 0n)).toEqual({ claim: usd(25_000), shortfall: 0n });
   });
 
-  test("an exhausted book's debt is written down to its own capital, Backstop money excluded", () => {
-    // IF drawn to 0 and MM down to 10k: the book holds 10k for a 25k debt -> 15k is the pool's
-    expect(poolDebtAtMark(usd(25_000), 0n, usd(10_000), 0n)).toEqual({ debt: usd(10_000), writeOff: usd(15_000) });
+  test("the pool's claim is the debt capped by the book's own capital, Backstop money excluded", () => {
+    // IF drawn to 0 and MM down to 10k: the book holds 10k for a 25k debt -> a 15k provisional shortfall
+    expect(poolClaimAtMark(usd(25_000), 0n, usd(10_000), 0n)).toEqual({ claim: usd(10_000), shortfall: usd(15_000) });
     // 30k idle of which 20k is Backstop cover held by Senior: only 10k + 10k deployed is the book's own
-    expect(poolDebtAtMark(usd(25_000), usd(30_000), usd(10_000), usd(20_000))).toEqual({ debt: usd(20_000), writeOff: usd(5_000) });
+    expect(poolClaimAtMark(usd(25_000), usd(30_000), usd(10_000), usd(20_000))).toEqual({ claim: usd(20_000), shortfall: usd(5_000) });
+    // the MM recovers: the claim is restored first
+    expect(poolClaimAtMark(usd(25_000), 0n, usd(40_000), 0n)).toEqual({ claim: usd(25_000), shortfall: 0n });
   });
 
   const st = (S: bigint, J: bigint, imp = 0n, backstopDebt = 0n) => ({ seniorNav: S, juniorNav: J, seniorImpairment: imp, perfIndex: WAD, highWater: WAD, backstopDebt });
