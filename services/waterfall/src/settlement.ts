@@ -13,7 +13,7 @@
 // that forward (bounded, forwardWaitMs) so period P distributes P's own fees, not P-1's.
 import { type DomainEventPayloads, type Logger, REVENUE_SOURCE, type SettlementJob, VENUE } from "@bookrunner/shared";
 import type { Hex } from "viem";
-import { amountsToSplit, conserves, parityCheck, previewDistribution, splitMismatches, type SplitResult } from "./domain/split";
+import { type PremiumSplit, amountsToSplit, conserves, parityCheck, previewDistribution, splitMismatches } from "./domain/split";
 import { distributes } from "./domain/keeper";
 import type { DomainEventSink } from "./kit/events";
 import { usd6 } from "./kit/fmt";
@@ -25,7 +25,7 @@ import type { BookLookup, DistributedLog, FeeForwarding, SettlementChain, Settle
 
 export type SettlementOutcome =
   | { status: "already"; source: "db" | "chain"; txHash: string }
-  | { status: "distributed"; txHash: Hex; split: SplitResult; previewMismatches: string[]; parityMismatches: string[] }
+  | { status: "distributed"; txHash: Hex; split: PremiumSplit; previewMismatches: string[]; parityMismatches: string[] }
   | { status: "nothing_to_distribute"; reason: string }
   | { status: "skipped"; reason: string };
 
@@ -53,11 +53,12 @@ export interface SettlementDeps {
 
 export const distributionDedupeKey = (bookId: number, period: number) => `distribution.paid:${bookId}:${period}`;
 
-export function distributionPaidPayload(bookId: number, period: number, s: SplitResult, txHash: string): DomainEventPayloads["distribution.paid"] {
+export function distributionPaidPayload(bookId: number, period: number, s: PremiumSplit, txHash: string): DomainEventPayloads["distribution.paid"] {
   return {
     bookId,
     period,
     grossUsd: usd6(s.gross),
+    ...(s.premium > 0n ? { premiumUsd: usd6(s.premium) } : {}),
     expensesUsd: usd6(s.expenses),
     carryUsd: usd6(s.carry),
     seniorUsd: usd6(s.senior),
@@ -112,7 +113,8 @@ export class SettlementRunner {
     }
     const expenses = this.d.expensesFor(bookId);
     const split = { expenseCapBps: params.expenseCapBps, carryBps: params.carryBps, seniorHurdleBps: params.seniorHurdleBps, seniorSupply: params.seniorSupply, juniorSupply: params.juniorSupply };
-    const preview = previewDistribution({ ...split, gross: params.pendingGross, expensesRequested: expenses });
+    // a pool-funded book pays the pool premium first (charter.premiumBps of gross), then the ordinary split
+    const preview = previewDistribution({ ...split, gross: params.pendingGross, expensesRequested: expenses }, params.premiumBps);
     const onchainPreview = await this.d.chain.previewOnChain(ref, params.pendingGross, expenses);
     if (onchainPreview && splitMismatches(preview, onchainPreview).length) {
       log.error({ preview: fmtSplit(preview), onchain: fmtSplit(onchainPreview) }, "router.previewSplit differs from normative splitDistribution");
@@ -135,7 +137,7 @@ export class SettlementRunner {
 
     const actual = res.distributed.amounts;
     const previewMismatches = splitMismatches(preview, actual);
-    const parityMismatches = parityCheck(actual, split);
+    const parityMismatches = parityCheck(actual, split, params.premiumBps);
     if (parityMismatches.length || !conserves(actual)) {
       log.error({ actual: fmtSplit(actual), fields: parityMismatches }, "WATERFALL PARITY BREAK: on-chain Distributed amounts differ from splitDistribution");
     } else if (previewMismatches.length) {
@@ -152,7 +154,7 @@ export class SettlementRunner {
     await this.publish(d.bookId, d.period, d.amounts, d.txHash);
   }
 
-  private async publish(bookId: number, period: number, s: SplitResult, txHash: string) {
+  private async publish(bookId: number, period: number, s: PremiumSplit, txHash: string) {
     await this.d.events.publish("distribution.paid", bookId, distributionPaidPayload(bookId, period, s, txHash), distributionDedupeKey(bookId, period));
   }
 
@@ -256,8 +258,8 @@ export function forwardLanded(f: FeeForwarding): boolean {
   return f.pendingFees === 0n || venueForwarded(f) >= f.earmarked;
 }
 
-export function fmtSplit(s: SplitResult) {
-  return { gross: usd6(s.gross), expenses: usd6(s.expenses), carry: usd6(s.carry), senior: usd6(s.senior), junior: usd6(s.junior) };
+export function fmtSplit(s: PremiumSplit) {
+  return { gross: usd6(s.gross), premium: usd6(s.premium), expenses: usd6(s.expenses), carry: usd6(s.carry), senior: usd6(s.senior), junior: usd6(s.junior) };
 }
 
 export { amountsToSplit };

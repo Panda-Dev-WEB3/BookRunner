@@ -235,7 +235,7 @@ export const poolRouter = router({
         status,
         /** shares ready to collect (status ready) */
         shares: shares === null ? null : sharesStr(shares),
-        /** cancellable until the epoch ends (the app's rule; the contract refunds until processing) */
+        /** cancellable until the epoch ends (InsurancePool.cancelDeposit: EpochEnded after it) */
         cancellable: status === "queued" && endsAt !== null && nowSec < endsAt,
         requestedAt: d.requestedAt.toISOString(),
         requestTx: d.requestTx,

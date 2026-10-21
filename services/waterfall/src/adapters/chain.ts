@@ -15,7 +15,7 @@ import {
 import { type Address, BaseError, type Hex, type PublicClient, type TransactionReceipt, erc20Abi, isAddressEqual, parseAbi, parseEventLogs, zeroAddress } from "viem";
 import { type BuybackReferenceSource, referenceSourceName } from "../domain/buyback";
 import { engineWithdrawableUsd } from "../domain/recall";
-import { amountsToSplit } from "../domain/split";
+import { type PremiumSplit, amountsToSplit } from "../domain/split";
 import { type BookRef, bookStateName } from "../kit/books";
 import { scanEvents } from "../kit/logs";
 import type { TxSender } from "../kit/tx";
@@ -40,6 +40,12 @@ export interface ChainAdapterOptions {
   logLookback: bigint;
   /** Uniswap v3 QuoterV2 used to quote buybacks on a real SwapRouter02 (null = none). */
   univ3Quoter?: Address | null;
+}
+
+/** RevenueRouter.PremiumPaid amount in a distribute tx's logs (the book's router; 0 for a book-funded IF). */
+export function premiumIn(ref: BookRef, logs: TransactionReceipt["logs"]): bigint {
+  const p = parseEventLogs({ abi: revenueRouterAbi, eventName: "PremiumPaid", logs }).filter((l) => isAddressEqual(l.address, ref.components.router));
+  return p.reduce((a, l) => a + l.args.amount, 0n);
 }
 
 export class WaterfallChainAdapter implements SettlementChain, KeeperChain, BuybackChain {
@@ -101,10 +107,11 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain, Buyb
     });
     const l = logs[0];
     if (!l) return null;
+    const receipt = await this.pc.getTransactionReceipt({ hash: l.transactionHash });
     const d: DistributedLog = {
       bookId: ref.bookId,
       period,
-      amounts: amountsToSplit(l.args.amounts),
+      amounts: amountsToSplit(l.args.amounts, premiumIn(ref, receipt.logs)),
       txHash: l.transactionHash,
       logIndex: l.logIndex,
       blockNumber: l.blockNumber,
@@ -199,13 +206,15 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain, Buyb
 
   async splitParams(ref: BookRef): Promise<SplitParams> {
     const cfg = this.o.deployment.contracts.config;
-    const [pendingGross, expenseCapBps, carryBps, charter, seniorSupply, juniorSupply] = await Promise.all([
+    const [pendingGross, expenseCapBps, carryBps, charter, seniorSupply, juniorSupply, insurancePool] = await Promise.all([
       this.pc.readContract({ address: ref.components.router, abi: revenueRouterAbi, functionName: "pendingGross" }),
       this.pc.readContract({ address: cfg, abi: bookrunnerConfigAbi, functionName: "expenseCapBps" }),
       this.pc.readContract({ address: cfg, abi: bookrunnerConfigAbi, functionName: "carryBps" }),
       this.pc.readContract({ address: ref.components.book, abi: bookAbi, functionName: "getCharter" }),
       this.pc.readContract({ address: ref.components.senior, abi: erc20Abi, functionName: "totalSupply" }),
       this.pc.readContract({ address: ref.components.junior, abi: erc20Abi, functionName: "totalSupply" }),
+      // 2026-10: the pool that funded the IF (address 0, or no getter on an older book: no premium)
+      this.pc.readContract({ address: ref.components.book, abi: bookAbi, functionName: "insurancePool" }).catch(() => zeroAddress),
     ]);
     return {
       pendingGross,
@@ -214,13 +223,17 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain, Buyb
       seniorHurdleBps: BigInt(charter.seniorHurdleBps),
       seniorSupply,
       juniorSupply,
+      premiumBps: isAddressEqual(insurancePool, zeroAddress) ? 0n : BigInt(charter.premiumBps),
     };
   }
 
-  async previewOnChain(ref: BookRef, gross: bigint, expenses: bigint): Promise<SplitResult | null> {
+  async previewOnChain(ref: BookRef, gross: bigint, expenses: bigint): Promise<PremiumSplit | null> {
     try {
-      const a = await this.pc.readContract({ address: ref.components.router, abi: revenueRouterAbi, functionName: "previewSplit", args: [gross, expenses] });
-      return { gross: a.gross, expenses: a.expenses, carry: a.carry, senior: a.senior, junior: a.junior };
+      const [a, p] = await Promise.all([
+        this.pc.readContract({ address: ref.components.router, abi: revenueRouterAbi, functionName: "previewSplit", args: [gross, expenses] }),
+        this.pc.readContract({ address: ref.components.router, abi: revenueRouterAbi, functionName: "previewPremium", args: [gross] }).catch(() => null),
+      ]);
+      return { gross: a.gross, expenses: a.expenses, carry: a.carry, senior: a.senior, junior: a.junior, premium: p ? p[1] : 0n };
     } catch {
       return null;
     }
@@ -241,7 +254,7 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain, Buyb
     const d: DistributedLog = {
       bookId: ref.bookId,
       period: Number(l.args.period),
-      amounts: amountsToSplit(l.args.amounts),
+      amounts: amountsToSplit(l.args.amounts, premiumIn(ref, out.receipt.logs)),
       txHash: out.hash,
       logIndex: l.logIndex,
       blockNumber: out.receipt.blockNumber,

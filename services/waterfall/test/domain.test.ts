@@ -61,15 +61,15 @@ describe("distribution split (normative splitDistribution)", () => {
 
   test("preview equals splitDistribution and conserves", () => {
     const p = previewDistribution({ ...params, gross: usd("1000"), expensesRequested: usd("1") });
-    expect(p).toEqual(splitDistribution({ ...params, gross: usd("1000"), expensesRequested: usd("1") }));
-    expect(p).toEqual({ gross: usd("1000"), expenses: usd("1"), carry: usd("99.9"), senior: usd("539.46"), junior: usd("359.64") });
+    expect(p).toEqual({ ...splitDistribution({ ...params, gross: usd("1000"), expensesRequested: usd("1") }), premium: 0n });
+    expect(p).toEqual({ gross: usd("1000"), expenses: usd("1"), carry: usd("99.9"), senior: usd("539.46"), junior: usd("359.64"), premium: 0n });
     expect(conserves(p)).toBe(true);
   });
 
   test("expenses capped on-chain at expenseCapBps of gross", () => {
     const p = previewDistribution({ ...params, gross: usd("2"), expensesRequested: usd("1") });
     expect(p.expenses).toBe(usd("0.4"));
-    expect(previewDistribution({ ...params, gross: 0n, expensesRequested: usd("1") })).toEqual({ gross: 0n, expenses: 0n, carry: 0n, senior: 0n, junior: 0n });
+    expect(previewDistribution({ ...params, gross: 0n, expensesRequested: usd("1") })).toEqual({ gross: 0n, expenses: 0n, carry: 0n, senior: 0n, junior: 0n, premium: 0n });
   });
 
   test("event decoding and parity check", () => {
@@ -79,6 +79,22 @@ describe("distribution split (normative splitDistribution)", () => {
     expect(parityCheck(broken, params)).toEqual(["senior", "junior"]);
     expect(splitMismatches(actual, { ...actual, gross: 1n })).toEqual(["gross"]);
     expect(() => amountsToSplit([1n, 2n])).toThrow();
+  });
+
+  test("2026-10 pool-funded book: the premium comes off gross first, gross keeps the whole amount", () => {
+    const p = previewDistribution({ ...params, gross: usd("1000"), expensesRequested: usd("1") }, 1200n);
+    expect(p.premium).toBe(usd("120"));
+    expect(p.gross).toBe(usd("1000"));
+    expect(conserves(p)).toBe(true);
+    // the rest (880) is split as usual
+    const rest = previewDistribution({ ...params, gross: usd("880"), expensesRequested: usd("1") });
+    expect({ ...p, gross: rest.gross, premium: 0n }).toEqual(rest);
+    // the Distributed amounts + the PremiumPaid of the tx: parity holds at the charter's rate, breaks at another
+    const actual = amountsToSplit([p.gross, p.expenses, p.carry, p.senior, p.junior], p.premium);
+    expect(parityCheck(actual, params, 1200n)).toEqual([]);
+    expect(parityCheck(actual, params, 1500n)).toContain("premium");
+    // without the premium the five amounts do not add up to gross
+    expect(conserves({ ...actual, premium: 0n })).toBe(false);
   });
 });
 
