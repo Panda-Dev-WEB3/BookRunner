@@ -148,8 +148,13 @@ contract PoolHandler is StdUtils, Test {
         }
         uint256 p0 = _price();
         uint256 stale = pool.staleBooks(ends);
+        // the gate applies to an epoch that prices something (its deposits, its withdrawals or older unfilled ones);
+        // an empty epoch between two queued ones only advances the queue and prices nothing, marks or not
+        (uint64 e,, uint64 fillE,,) = pool.queue();
+        InsurancePool.Epoch memory ep = pool.epochInfo(e);
+        bool prices = ep.depositAssets != 0 || ep.shares != 0 || fillE < e;
         try pool.processEpoch() {
-            if (stale != 0 && block.timestamp < uint256(ends) + 1 days) processedTooEarly = true;
+            if (prices && stale != 0 && block.timestamp < uint256(ends) + 1 days) processedTooEarly = true;
             if (_price() + 1 < p0) priceMovedOnProcessing = true;
         } catch {
             if (stale == 0) exitBlocked = true; // every book marked: nothing may hold it back

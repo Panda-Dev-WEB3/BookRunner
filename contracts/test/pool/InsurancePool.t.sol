@@ -195,6 +195,40 @@ contract InsurancePoolTest is PoolFixture {
         pool.processEpoch();
     }
 
+    /// @notice Regression (CI, invariant_processingWaitsForMarks shrunk sequence): a queued deposit, then a gap of
+    ///         several epochs, then another deposit leaves empty epochs between them. An empty epoch prices nothing, so it is processed
+    ///         without marks (it only advances the queue); the next epoch that prices something is still gated.
+    function test_process_emptyEpochNeedsNoMarks_pricedEpochStillGated() public {
+        _fund();
+        _allocate(1, 2_000 * U); // an active book that never marks
+        _requestDeposit(bob, 1_000 * U);
+        vm.warp(block.timestamp + 15 days); // (CI: a 5.3-day gap with daily epochs)
+        uint256 id2 = _requestDeposit(carol, 1_000 * U);
+        uint64 e2 = pool.depositInfo(id2).epoch;
+        (uint64 e, uint64 ends,,,) = pool.queue();
+        assertGt(e2, e + 1, "empty epochs in between");
+        // the first deposit's epoch: gated, processed after the grace (stale)
+        vm.warp(uint256(ends) + 1 days);
+        pool.processEpoch();
+        // the empty epochs: nothing to price, no marks needed, nothing minted
+        while (true) {
+            (e, ends,,,) = pool.queue();
+            if (e == e2) break;
+            if (block.timestamp < ends) vm.warp(ends);
+            assertEq(pool.epochInfo(e).depositAssets, 0);
+            pool.processEpoch();
+            assertEq(pool.epochInfo(e).depositShares, 0);
+        }
+        // carol's epoch prices her deposit: gated again until a mark or the grace
+        (, ends,,,) = pool.queue();
+        if (block.timestamp < ends) vm.warp(ends);
+        vm.expectRevert(abi.encodeWithSelector(InsurancePool.BooksNotMarked.selector, e2, 1, uint256(ends) + 1 days));
+        pool.processEpoch();
+        _markValue(1, 2_000 * U);
+        pool.processEpoch();
+        assertGt(pool.claimDeposit(id2), 0);
+    }
+
     /// @notice An exit cannot dodge a loss marked after its epoch's end: processing waits for the mark.
     function test_exitCannotDodgeALossMarkedAfterTheEpochEnd() public {
         uint256 shares = _fund();
