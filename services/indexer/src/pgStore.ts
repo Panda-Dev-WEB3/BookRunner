@@ -1,6 +1,27 @@
 // Postgres implementation of IndexerStore (drizzle + postgres-js). Writes are idempotent:
 // ON CONFLICT on natural keys, guarded transitions, jsonb-append-if-absent.
-import { type Db, agentKeys, books, chainCursor, charters, committee, events, juryVerdicts, killEvents, marks, redemptions, schema, settlements, subscriptions } from "@bookrunner/db";
+import {
+  type Db,
+  agentKeys,
+  books,
+  chainCursor,
+  charters,
+  committee,
+  events,
+  juryVerdicts,
+  killEvents,
+  marks,
+  poolBooks,
+  poolDeposits,
+  poolEpochs,
+  poolFlows,
+  poolSnapshots,
+  poolWithdrawals,
+  redemptions,
+  schema,
+  settlements,
+  subscriptions,
+} from "@bookrunner/db";
 import { type BookComponents, type CharterStatus, dbUsd } from "@bookrunner/shared";
 import { and, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import type { PgDatabase } from "drizzle-orm/pg-core";
@@ -16,6 +37,12 @@ import type {
   MarkAppliedPatch,
   MarkRow,
   PendingEvent,
+  PoolBookRow,
+  PoolDepositRow,
+  PoolEpochPatch,
+  PoolFlowRow,
+  PoolSnapshotRow,
+  PoolWithdrawalRow,
   RedemptionRow,
   SettlementRow,
   SubscriptionRow,
@@ -392,6 +419,89 @@ export class PgIndexerStore implements IndexerStore {
       .update(marks)
       .set({ appliedTx: lc(txHash), ...(patch ?? {}) })
       .where(eq(marks.id, markId));
+  }
+
+  // ------------------------------------------------------------ insurance pool (2026-10)
+
+  async insertPoolDeposit(r: PoolDepositRow): Promise<boolean> {
+    const out = await this.db
+      .insert(poolDeposits)
+      .values({ ...r, owner: lc(r.owner), requestTx: lc(r.requestTx), status: "queued" })
+      .onConflictDoNothing()
+      .returning({ id: poolDeposits.id });
+    return out.length > 0;
+  }
+
+  async closePoolDeposit(p: { id: number; status: "cancelled" | "claimed"; sharesRaw?: string; at: Date; txHash: string }): Promise<void> {
+    await this.db
+      .update(poolDeposits)
+      .set({ status: p.status, closedAt: p.at, closeTx: lc(p.txHash), ...(p.sharesRaw !== undefined ? { sharesRaw: p.sharesRaw } : {}) })
+      .where(and(eq(poolDeposits.id, p.id), eq(poolDeposits.status, "queued")));
+  }
+
+  async insertPoolWithdrawal(r: PoolWithdrawalRow): Promise<boolean> {
+    const out = await this.db
+      .insert(poolWithdrawals)
+      .values({ ...r, owner: lc(r.owner), requestTx: lc(r.requestTx) })
+      .onConflictDoNothing()
+      .returning({ id: poolWithdrawals.id });
+    return out.length > 0;
+  }
+
+  async addPoolWithdrawalClaim(p: { id: number; assets: string; at: Date }): Promise<void> {
+    await this.db
+      .update(poolWithdrawals)
+      .set({ claimedAssets: sql`${poolWithdrawals.claimedAssets} + ${p.assets}::numeric`, lastClaimAt: p.at })
+      .where(eq(poolWithdrawals.id, p.id));
+  }
+
+  async upsertPoolEpoch(epoch: number, patch: PoolEpochPatch): Promise<void> {
+    const { addFilledSharesRaw, addFilledAssets, ...set } = patch;
+    const values = {
+      epoch,
+      ...set,
+      ...(addFilledSharesRaw !== undefined ? { filledSharesRaw: addFilledSharesRaw } : {}),
+      ...(addFilledAssets !== undefined ? { filledAssets: addFilledAssets } : {}),
+    };
+    const update = {
+      ...set,
+      ...(addFilledSharesRaw !== undefined ? { filledSharesRaw: sql`${poolEpochs.filledSharesRaw} + ${addFilledSharesRaw}::numeric` } : {}),
+      ...(addFilledAssets !== undefined ? { filledAssets: sql`${poolEpochs.filledAssets} + ${addFilledAssets}::numeric` } : {}),
+    };
+    if (Object.keys(update).length === 0) {
+      await this.db.insert(poolEpochs).values(values).onConflictDoNothing();
+      return;
+    }
+    await this.db.insert(poolEpochs).values(values).onConflictDoUpdate({ target: poolEpochs.epoch, set: update });
+  }
+
+  async upsertPoolBook(r: PoolBookRow): Promise<void> {
+    const { allocatedAt, ...set } = r;
+    await this.db
+      .insert(poolBooks)
+      .values({ ...r, market: lc(r.market) })
+      .onConflictDoUpdate({ target: poolBooks.bookId, set: { ...set, market: lc(r.market), updatedAt: new Date() } });
+  }
+
+  async addPoolBookPremium(bookId: number, amount: string): Promise<void> {
+    await this.db
+      .update(poolBooks)
+      .set({ premiumsUsd: sql`${poolBooks.premiumsUsd} + ${amount}::numeric` })
+      .where(eq(poolBooks.bookId, bookId));
+  }
+
+  async insertPoolFlow(r: PoolFlowRow): Promise<boolean> {
+    const out = await this.db
+      .insert(poolFlows)
+      .values({ ...r, txHash: lc(r.txHash) })
+      .onConflictDoNothing({ target: [poolFlows.txHash, poolFlows.logIndex] })
+      .returning({ id: poolFlows.id });
+    return out.length > 0;
+  }
+
+  async upsertPoolSnapshot(r: PoolSnapshotRow): Promise<void> {
+    const { blockNumber, ...set } = r;
+    await this.db.insert(poolSnapshots).values(r).onConflictDoUpdate({ target: poolSnapshots.blockNumber, set });
   }
 
   async insertEvent(e: PendingEvent): Promise<{ id: number; createdAt: Date } | null> {

@@ -34,6 +34,7 @@ export class WatchSet {
     add(c.committee, "committee");
     add(c.factory, "factory");
     add(c.markRegistry, "markRegistry");
+    add(c.insurancePool, "pool"); // 2026-10; absent in older deployment records
   }
 
   /** Returns true when the book was not known before. */

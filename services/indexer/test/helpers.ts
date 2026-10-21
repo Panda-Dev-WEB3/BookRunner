@@ -2,7 +2,7 @@
 // and a fake chain.
 import { type BookComponents, type CharterStatus, dbUsd } from "@bookrunner/shared";
 import { type Abi, type AbiEvent, type Address, type Hex, encodeAbiParameters, encodeEventTopics, keccak256, toHex } from "viem";
-import type { CharterRecordLite, IndexerChain } from "../src/chain";
+import type { CharterRecordLite, IndexerChain, PoolBookPositionLite, PoolStateLite } from "../src/chain";
 import type { RawLog } from "../src/decode";
 import type {
   AgentKeyRow,
@@ -14,6 +14,12 @@ import type {
   MarkAppliedPatch,
   MarkRow,
   PendingEvent,
+  PoolBookRow,
+  PoolDepositRow,
+  PoolEpochPatch,
+  PoolFlowRow,
+  PoolSnapshotRow,
+  PoolWithdrawalRow,
   RedemptionRow,
   SettlementRow,
   SubscriptionRow,
@@ -90,6 +96,23 @@ export class FakeChain implements IndexerChain {
   async mandateKeyOperator() {
     return "0x00000000000000000000000000000000000000f1" as Address;
   }
+  /** pool state per block (the latest at or below the block is used); poolStateCalls counts reads */
+  poolStates = new Map<number, PoolStateLite>();
+  poolPositions = new Map<number, PoolBookPositionLite>();
+  poolEpochEnds = new Map<number, number>();
+  poolStateCalls = 0;
+  async poolState(_pool: Address, at: bigint) {
+    this.poolStateCalls++;
+    let best: PoolStateLite | null = null;
+    for (const [b, s] of [...this.poolStates.entries()].sort((x, y) => x[0] - y[0])) if (b <= Number(at)) best = s;
+    return best;
+  }
+  async poolBookPosition(_pool: Address, bookId: bigint) {
+    return this.poolPositions.get(Number(bookId)) ?? null;
+  }
+  async poolEpochEnd(_pool: Address, epoch: bigint) {
+    return this.poolEpochEnds.get(Number(epoch)) ?? 0;
+  }
 }
 
 // ---------------------------------------------------------------- in-memory store
@@ -108,6 +131,12 @@ interface MemState {
   marks: Record<number, MarkRow & { appliedTx?: string } & MarkAppliedPatch>;
   events: Record<string, { id: number; type: string; bookId: number | null; payload: Record<string, unknown>; createdAt: string }>;
   nextEventId: number;
+  poolDeposits: Record<number, PoolDepositRow & { status: string; sharesRaw?: string; closedAt?: string; closeTx?: string }>;
+  poolWithdrawals: Record<number, PoolWithdrawalRow & { claimedAssets: string; lastClaimAt?: string }>;
+  poolEpochs: Record<number, Omit<PoolEpochPatch, "addFilledSharesRaw" | "addFilledAssets"> & { filledSharesRaw: string; filledAssets: string }>;
+  poolBooks: Record<number, PoolBookRow & { premiumsUsd: string }>;
+  poolFlows: Record<string, PoolFlowRow>;
+  poolSnapshots: Record<number, PoolSnapshotRow>;
 }
 
 const emptyState = (): MemState => ({
@@ -124,6 +153,12 @@ const emptyState = (): MemState => ({
   marks: {},
   events: {},
   nextEventId: 1,
+  poolDeposits: {},
+  poolWithdrawals: {},
+  poolEpochs: {},
+  poolBooks: {},
+  poolFlows: {},
+  poolSnapshots: {},
 });
 
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v, (_k, x) => (typeof x === "bigint" ? x.toString() : x)));
@@ -309,6 +344,52 @@ export class MemoryIndexerStore implements IndexerStore {
   async setMarkApplied(markId: number, tx: string, patch?: MarkAppliedPatch) {
     const m = this.s.marks[markId];
     if (m) Object.assign(m, { appliedTx: tx, ...patch });
+  }
+  // ---------------------------------------------------------------- insurance pool
+  async insertPoolDeposit(r: PoolDepositRow) {
+    if (this.s.poolDeposits[r.id]) return false;
+    this.s.poolDeposits[r.id] = { ...clone(r), owner: lc(r.owner), status: "queued" };
+    return true;
+  }
+  async closePoolDeposit(p: { id: number; status: "cancelled" | "claimed"; sharesRaw?: string; at: Date; txHash: string }) {
+    const d = this.s.poolDeposits[p.id];
+    if (!d || d.status !== "queued") return;
+    Object.assign(d, { status: p.status, closedAt: p.at.toISOString(), closeTx: p.txHash, ...(p.sharesRaw !== undefined ? { sharesRaw: p.sharesRaw } : {}) });
+  }
+  async insertPoolWithdrawal(r: PoolWithdrawalRow) {
+    if (this.s.poolWithdrawals[r.id]) return false;
+    this.s.poolWithdrawals[r.id] = { ...clone(r), owner: lc(r.owner), claimedAssets: toDb(0n) };
+    return true;
+  }
+  async addPoolWithdrawalClaim(p: { id: number; assets: string; at: Date }) {
+    const w = this.s.poolWithdrawals[p.id];
+    if (!w) return;
+    w.claimedAssets = toDb(toRaw(w.claimedAssets) + toRaw(p.assets));
+    w.lastClaimAt = p.at.toISOString();
+  }
+  async upsertPoolEpoch(epoch: number, patch: PoolEpochPatch) {
+    const { addFilledSharesRaw, addFilledAssets, ...set } = clone(patch);
+    const e = (this.s.poolEpochs[epoch] ??= { filledSharesRaw: "0", filledAssets: toDb(0n) });
+    Object.assign(e, set);
+    if (addFilledSharesRaw !== undefined) e.filledSharesRaw = (BigInt(e.filledSharesRaw) + BigInt(addFilledSharesRaw)).toString();
+    if (addFilledAssets !== undefined) e.filledAssets = toDb(toRaw(e.filledAssets) + toRaw(addFilledAssets));
+  }
+  async upsertPoolBook(r: PoolBookRow) {
+    const prev = this.s.poolBooks[r.bookId];
+    this.s.poolBooks[r.bookId] = { ...clone(r), allocatedAt: prev ? prev.allocatedAt : clone(r.allocatedAt), premiumsUsd: prev?.premiumsUsd ?? toDb(0n) };
+  }
+  async addPoolBookPremium(bookId: number, amount: string) {
+    const b = this.s.poolBooks[bookId];
+    if (b) b.premiumsUsd = toDb(toRaw(b.premiumsUsd) + toRaw(amount));
+  }
+  async insertPoolFlow(r: PoolFlowRow) {
+    const k = `${lc(r.txHash)}:${r.logIndex}`;
+    if (this.s.poolFlows[k]) return false;
+    this.s.poolFlows[k] = clone(r);
+    return true;
+  }
+  async upsertPoolSnapshot(r: PoolSnapshotRow) {
+    this.s.poolSnapshots[r.blockNumber] = clone(r);
   }
   async insertEvent(e: PendingEvent) {
     if (this.s.events[e.dedupeKey]) return null;

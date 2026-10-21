@@ -3,6 +3,7 @@
 import type { BookComponents, Deployment, DomainEventPayloads, Logger } from "@bookrunner/shared";
 import type { Address } from "viem";
 import type { IndexerChain } from "./chain";
+import { POOL_HANDLERS } from "./poolHandlers";
 import { arg, cidFromDigest, revenueSourceName, symbolStr, usdDb, wadToNumber } from "./convert";
 import type { DecodedLog } from "./decode";
 import type { IndexerStore, PendingEvent } from "./store";
@@ -382,10 +383,18 @@ const redemptionClaimed: Handler = async ({ log, ts, store }) => {
 
 // ---------------------------------------------------------------- RevenueRouter
 
-const distributed: Handler = async ({ log, ts, store }) => {
+/** RevenueRouter.PremiumPaid of the same tx and router (a pool-funded book pays the premium inside distribute). */
+function siblingPremium(ctx: HandlerCtx): bigint {
+  const p = ctx.batch.find((l) => l.txHash === ctx.log.txHash && l.address === ctx.log.address && l.eventName === "PremiumPaid");
+  return p ? arg.big(p.args, "amount") : 0n;
+}
+
+const distributed: Handler = async (ctx) => {
+  const { log, ts, store } = ctx;
   const a = arg.bigs(log.args, "amounts");
   if (a.length !== 5) throw new Error(`Distributed.amounts has ${a.length} entries`);
   const [gross, expenses, carry, senior, junior] = a as [bigint, bigint, bigint, bigint, bigint];
+  // gross stays the whole gross: premium + expenses + carry + senior + junior == gross
   await store.insertSettlement({
     bookId: arg.num(log.args, "bookId"),
     ts,
@@ -395,6 +404,7 @@ const distributed: Handler = async ({ log, ts, store }) => {
     carryUsd: usdDb(carry),
     seniorUsd: usdDb(senior),
     juniorUsd: usdDb(junior),
+    premiumUsd: usdDb(siblingPremium(ctx)),
     period: arg.num(log.args, "period"),
     txHash: log.txHash,
     logIndex: log.logIndex,
@@ -495,6 +505,7 @@ export const HANDLERS: Record<string, Handler> = {
   "mandate.KeyRegistered": keyRegistered,
   "mandate.KeyRevoked": keyRevoked,
   "mandate.Kill": mandateKill,
+  ...POOL_HANDLERS,
 };
 
 export const handlerFor = (l: DecodedLog): Handler | undefined => HANDLERS[`${l.kind}.${l.eventName}`];
