@@ -119,7 +119,8 @@
     "bufferBps": 2000,
     "firstLossTargetBps": 1000,
     "cooldown": 604800,
-    "epochLength": 604800
+    "epochLength": 604800,
+    "processGrace": 86400
   },
   "buyback": {
     "poolFee": 3000,

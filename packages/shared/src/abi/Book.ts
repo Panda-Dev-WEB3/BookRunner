@@ -636,7 +636,7 @@ export const bookAbi = [
   },
   {
     "type": "function",
-    "name": "insuranceClaim",
+    "name": "insuranceDebt",
     "inputs": [],
     "outputs": [
       {
@@ -645,17 +645,22 @@ export const bookAbi = [
         "internalType": "address"
       },
       {
-        "name": "allocation",
+        "name": "debt",
         "type": "uint256",
         "internalType": "uint256"
       },
       {
-        "name": "claim",
+        "name": "value",
         "type": "uint256",
         "internalType": "uint256"
       },
       {
         "name": "due",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
+        "name": "closed",
         "type": "bool",
         "internalType": "bool"
       }
@@ -954,6 +959,13 @@ export const bookAbi = [
   },
   {
     "type": "function",
+    "name": "settleInsurance",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "settleRetiredBacklog",
     "inputs": [],
     "outputs": [],
@@ -1029,13 +1041,6 @@ export const bookAbi = [
       }
     ],
     "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "syncInsurance",
-    "inputs": [],
-    "outputs": [],
-    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -1361,37 +1366,6 @@ export const bookAbi = [
   },
   {
     "type": "event",
-    "name": "InsuranceClaimSynced",
-    "inputs": [
-      {
-        "name": "bookId",
-        "type": "uint256",
-        "indexed": true,
-        "internalType": "uint256"
-      },
-      {
-        "name": "claimBefore",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      },
-      {
-        "name": "claimAfter",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      },
-      {
-        "name": "insuranceEquityUsd",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
     "name": "InsuranceDue",
     "inputs": [
       {
@@ -1401,7 +1375,7 @@ export const bookAbi = [
         "internalType": "uint256"
       },
       {
-        "name": "claim",
+        "name": "debt",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
@@ -1436,6 +1410,68 @@ export const bookAbi = [
   },
   {
     "type": "event",
+    "name": "InsuranceMarkFailed",
+    "inputs": [
+      {
+        "name": "bookId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "value",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "final_",
+        "type": "bool",
+        "indexed": false,
+        "internalType": "bool"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "InsuranceMarked",
+    "inputs": [
+      {
+        "name": "bookId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "debt",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "value",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "periodEnd",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "final_",
+        "type": "bool",
+        "indexed": false,
+        "internalType": "bool"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "InsuranceRepaid",
     "inputs": [
       {
@@ -1451,7 +1487,7 @@ export const bookAbi = [
         "internalType": "uint256"
       },
       {
-        "name": "claim",
+        "name": "debt",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
@@ -1471,31 +1507,6 @@ export const bookAbi = [
       },
       {
         "name": "amount",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
-    "name": "InsuranceSyncFailed",
-    "inputs": [
-      {
-        "name": "bookId",
-        "type": "uint256",
-        "indexed": true,
-        "internalType": "uint256"
-      },
-      {
-        "name": "claim",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      },
-      {
-        "name": "target",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
@@ -2070,6 +2081,11 @@ export const bookAbi = [
   {
     "type": "error",
     "name": "InsurancePoolUnset",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InsuranceTargetZero",
     "inputs": []
   },
   {

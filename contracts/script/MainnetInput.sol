@@ -101,7 +101,7 @@ abstract contract MainnetInput is Script {
 
     /// @notice InsurancePool parameters (2026-10, optional `insurancePool` input object; omitted fields = the pool's
     ///         defaults, the owner-approved design: premium floor 12%, per-market cap 30%, buffer 20%, first-loss target
-    ///         10%, cooldown 7 days, weekly epochs). Bounds as InsurancePool.setParam.
+    ///         10%, cooldown 7 days, weekly epochs, processing grace 24 h). Bounds as InsurancePool.setParam.
     struct PoolIn {
         uint256 premiumFloorBps;
         uint256 marketCapBps;
@@ -109,6 +109,7 @@ abstract contract MainnetInput is Script {
         uint256 firstLossTargetBps;
         uint256 cooldown;
         uint256 epochLength;
+        uint256 processGrace;
     }
 
     struct Buyback {
@@ -314,6 +315,7 @@ abstract contract MainnetInput is Script {
         poolIn.firstLossTargetBps = json.readUintOr(".insurancePool.firstLossTargetBps", 1000);
         poolIn.cooldown = json.readUintOr(".insurancePool.cooldown", 7 days);
         poolIn.epochLength = json.readUintOr(".insurancePool.epochLength", 7 days);
+        poolIn.processGrace = json.readUintOr(".insurancePool.processGrace", 1 days);
     }
 
     function _loadBuyback(string memory json) private {
@@ -561,6 +563,7 @@ abstract contract MainnetInput is Script {
         require(poolIn.firstLossTargetBps <= 5000, "input: insurancePool.firstLossTargetBps > 5000");
         require(poolIn.cooldown <= 30 days, "input: insurancePool.cooldown > 30 days");
         require(poolIn.epochLength >= 1 days && poolIn.epochLength <= 30 days, "input: insurancePool.epochLength");
+        require(poolIn.processGrace >= 1 hours && poolIn.processGrace <= 7 days, "input: insurancePool.processGrace");
     }
 
     /// @dev BkrnFeeRouter reference source (VERIFY U5). TWAP needs a pool of the pre-existing BKRN (a BKRN the

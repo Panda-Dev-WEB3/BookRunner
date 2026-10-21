@@ -455,6 +455,10 @@ contract DeployMainnetTest is Test {
         vm.prank(guardian);
         p.setPaused(true, false);
         assertEq(_verify(_mainnetOpts(), d), 2, "and paused");
+        // minor m-9: the proxy and implementation are checked against the deployment record
+        DeployMainnet.Deployed memory wrong = d;
+        wrong.insurancePoolImpl = makeAddr("not the implementation");
+        assertEq(_verify(_mainnetOpts(), wrong), 3, "and the recorded implementation");
     }
 
     function test_verify_flags_a_missing_service_role() public {
@@ -813,7 +817,14 @@ contract DeployMainnetTest is Test {
             "\"},\"contracts\":{\"config\":\"",
             vm.toString(d.config),
             "\",\"timelock\":\"",
-            string.concat(vm.toString(d.timelock), "\"}}")
+            string.concat(
+                vm.toString(d.timelock),
+                "\",\"insurancePool\":\"",
+                vm.toString(d.insurancePool),
+                "\",\"insurancePoolImplementation\":\"",
+                vm.toString(d.insurancePoolImpl),
+                "\"}}"
+            )
         );
         VerifyHandover v = new VerifyHandover();
         v.loadInput(_json(o));

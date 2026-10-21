@@ -7,32 +7,6 @@ export const insurancePoolAbi = [
   },
   {
     "type": "function",
-    "name": "ALLOCATE_FILL_EPOCHS",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "AUTO_FILL_EPOCHS",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "DECIMALS_OFFSET",
     "inputs": [],
     "outputs": [
@@ -40,6 +14,32 @@ export const insurancePoolAbi = [
         "name": "",
         "type": "uint8",
         "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "DUE_SCAN_EPOCHS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MAX_ACTIVE_BOOKS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -137,6 +137,19 @@ export const insurancePoolAbi = [
   },
   {
     "type": "function",
+    "name": "PARAM_PROCESS_GRACE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "UPGRADE_INTERFACE_VERSION",
     "inputs": [],
     "outputs": [
@@ -144,6 +157,19 @@ export const insurancePoolAbi = [
         "name": "",
         "type": "string",
         "internalType": "string"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "activeBooks",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256[]",
+        "internalType": "uint256[]"
       }
     ],
     "stateMutability": "view"
@@ -161,6 +187,11 @@ export const insurancePoolAbi = [
         "name": "amount",
         "type": "uint256",
         "internalType": "uint256"
+      },
+      {
+        "name": "market",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ],
     "outputs": [],
@@ -278,6 +309,11 @@ export const insurancePoolAbi = [
             "internalType": "address"
           },
           {
+            "name": "market",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
             "name": "allocation",
             "type": "uint256",
             "internalType": "uint256"
@@ -296,11 +332,34 @@ export const insurancePoolAbi = [
             "name": "lossDepositors",
             "type": "uint256",
             "internalType": "uint256"
+          },
+          {
+            "name": "lastMarkAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "active",
+            "type": "bool",
+            "internalType": "bool"
           }
         ]
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "cancelDeposit",
+    "inputs": [
+      {
+        "name": "depositId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -315,6 +374,25 @@ export const insurancePoolAbi = [
     "outputs": [
       {
         "name": "assets",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "claimDeposit",
+    "inputs": [
+      {
+        "name": "depositId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "shares",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -441,12 +519,12 @@ export const insurancePoolAbi = [
     "name": "deposit",
     "inputs": [
       {
-        "name": "assets",
+        "name": "",
         "type": "uint256",
         "internalType": "uint256"
       },
       {
-        "name": "receiver",
+        "name": "",
         "type": "address",
         "internalType": "address"
       }
@@ -458,7 +536,7 @@ export const insurancePoolAbi = [
         "internalType": "uint256"
       }
     ],
-    "stateMutability": "nonpayable"
+    "stateMutability": "pure"
   },
   {
     "type": "function",
@@ -472,6 +550,79 @@ export const insurancePoolAbi = [
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "depositInfo",
+    "inputs": [
+      {
+        "name": "depositId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct InsurancePool.DepositRequest",
+        "components": [
+          {
+            "name": "owner",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "epoch",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "done",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "assets",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "depositSharesUnclaimed",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "epochEnd",
+    "inputs": [
+      {
+        "name": "epoch",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -503,6 +654,26 @@ export const insurancePoolAbi = [
             "name": "assets",
             "type": "uint256",
             "internalType": "uint256"
+          },
+          {
+            "name": "depositAssets",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "depositShares",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "endsAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "processed",
+            "type": "bool",
+            "internalType": "bool"
           }
         ]
       }
@@ -577,6 +748,11 @@ export const insurancePoolAbi = [
         "internalType": "uint256"
       },
       {
+        "name": "depositsPending",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
         "name": "premiumsTotal",
         "type": "uint256",
         "internalType": "uint256"
@@ -591,12 +767,64 @@ export const insurancePoolAbi = [
   },
   {
     "type": "function",
+    "name": "markBook",
+    "inputs": [
+      {
+        "name": "bookId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "value",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "periodEnd",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "final_",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "marketAllocated",
+    "inputs": [
+      {
+        "name": "market",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "maxAllocation",
     "inputs": [
       {
         "name": "bookId",
         "type": "uint256",
         "internalType": "uint256"
+      },
+      {
+        "name": "market",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ],
     "outputs": [
@@ -625,7 +853,7 @@ export const insurancePoolAbi = [
         "internalType": "uint256"
       }
     ],
-    "stateMutability": "view"
+    "stateMutability": "pure"
   },
   {
     "type": "function",
@@ -644,7 +872,7 @@ export const insurancePoolAbi = [
         "internalType": "uint256"
       }
     ],
-    "stateMutability": "view"
+    "stateMutability": "pure"
   },
   {
     "type": "function",
@@ -689,12 +917,12 @@ export const insurancePoolAbi = [
     "name": "mint",
     "inputs": [
       {
-        "name": "shares",
+        "name": "",
         "type": "uint256",
         "internalType": "uint256"
       },
       {
-        "name": "receiver",
+        "name": "",
         "type": "address",
         "internalType": "address"
       }
@@ -706,7 +934,7 @@ export const insurancePoolAbi = [
         "internalType": "uint256"
       }
     ],
-    "stateMutability": "nonpayable"
+    "stateMutability": "pure"
   },
   {
     "type": "function",
@@ -771,6 +999,16 @@ export const insurancePoolAbi = [
       },
       {
         "name": "epochLength",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
+        "name": "processGrace",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
+        "name": "pendingEpochLength",
         "type": "uint32",
         "internalType": "uint32"
       }
@@ -899,15 +1137,15 @@ export const insurancePoolAbi = [
   },
   {
     "type": "function",
-    "name": "processQueue",
-    "inputs": [
+    "name": "processEpoch",
+    "inputs": [],
+    "outputs": [
       {
-        "name": "maxEpochs",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "e",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ],
-    "outputs": [],
     "stateMutability": "nonpayable"
   },
   {
@@ -929,12 +1167,17 @@ export const insurancePoolAbi = [
     "inputs": [],
     "outputs": [
       {
-        "name": "epoch",
+        "name": "procEpoch",
         "type": "uint64",
         "internalType": "uint64"
       },
       {
-        "name": "endsAt",
+        "name": "procEndsAt",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "fillEpoch",
         "type": "uint64",
         "internalType": "uint64"
       },
@@ -1000,42 +1243,6 @@ export const insurancePoolAbi = [
   },
   {
     "type": "function",
-    "name": "reportLoss",
-    "inputs": [
-      {
-        "name": "bookId",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "amount",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "reportRecovery",
-    "inputs": [
-      {
-        "name": "bookId",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "amount",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
     "name": "requestCount",
     "inputs": [],
     "outputs": [
@@ -1046,6 +1253,25 @@ export const insurancePoolAbi = [
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "requestDeposit",
+    "inputs": [
+      {
+        "name": "assets",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "depositId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -1142,6 +1368,25 @@ export const insurancePoolAbi = [
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "staleBooks",
+    "inputs": [
+      {
+        "name": "epochEnd_",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -1336,13 +1581,13 @@ export const insurancePoolAbi = [
         "internalType": "address"
       },
       {
-        "name": "amount",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
+        "name": "market",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
       },
       {
-        "name": "poolAssets",
+        "name": "amount",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
@@ -1371,6 +1616,37 @@ export const insurancePoolAbi = [
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "BookMarked",
+    "inputs": [
+      {
+        "name": "bookId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "value",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "periodEnd",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "final_",
+        "type": "bool",
+        "indexed": false,
+        "internalType": "bool"
       }
     ],
     "anonymous": false
@@ -1433,18 +1709,80 @@ export const insurancePoolAbi = [
   },
   {
     "type": "event",
-    "name": "EpochClosed",
+    "name": "DepositCancelled",
     "inputs": [
+      {
+        "name": "depositId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "owner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "assets",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "DepositClaimed",
+    "inputs": [
+      {
+        "name": "depositId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "owner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "shares",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "DepositRequested",
+    "inputs": [
+      {
+        "name": "depositId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "owner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "assets",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
       {
         "name": "epoch",
         "type": "uint64",
         "indexed": true,
-        "internalType": "uint64"
-      },
-      {
-        "name": "nextEpochEndsAt",
-        "type": "uint64",
-        "indexed": false,
         "internalType": "uint64"
       }
     ],
@@ -1477,6 +1815,75 @@ export const insurancePoolAbi = [
         "type": "bool",
         "indexed": false,
         "internalType": "bool"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "EpochLengthApplied",
+    "inputs": [
+      {
+        "name": "epochLength",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "nextEpochEndsAt",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "EpochProcessed",
+    "inputs": [
+      {
+        "name": "epoch",
+        "type": "uint64",
+        "indexed": true,
+        "internalType": "uint64"
+      },
+      {
+        "name": "depositAssets",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "depositShares",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "stale",
+        "type": "bool",
+        "indexed": false,
+        "internalType": "bool"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "EpochProcessedStale",
+    "inputs": [
+      {
+        "name": "epoch",
+        "type": "uint64",
+        "indexed": true,
+        "internalType": "uint64"
+      },
+      {
+        "name": "staleBooks",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
       }
     ],
     "anonymous": false
@@ -1692,7 +2099,7 @@ export const insurancePoolAbi = [
         "internalType": "uint256"
       },
       {
-        "name": "claim",
+        "name": "allocation",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
@@ -1834,6 +2241,38 @@ export const insurancePoolAbi = [
     "inputs": [
       {
         "name": "bookId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "BooksNotMarked",
+    "inputs": [
+      {
+        "name": "epoch",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "staleBooks",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "graceEndsAt",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "DepositDone",
+    "inputs": [
+      {
+        "name": "depositId",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -2037,15 +2476,26 @@ export const insurancePoolAbi = [
   },
   {
     "type": "error",
-    "name": "ExceedsClaim",
+    "name": "EpochAlreadyProcessed",
     "inputs": [
       {
-        "name": "amount",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "epoch",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "EpochNotEnded",
+    "inputs": [
+      {
+        "name": "epoch",
+        "type": "uint64",
+        "internalType": "uint64"
       },
       {
-        "name": "claim",
+        "name": "endsAt",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -2053,7 +2503,18 @@ export const insurancePoolAbi = [
   },
   {
     "type": "error",
-    "name": "ExceedsLosses",
+    "name": "EpochNotProcessed",
+    "inputs": [
+      {
+        "name": "epoch",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ExceedsAllocation",
     "inputs": [
       {
         "name": "amount",
@@ -2061,7 +2522,7 @@ export const insurancePoolAbi = [
         "internalType": "uint256"
       },
       {
-        "name": "losses",
+        "name": "allocation",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -2077,7 +2538,7 @@ export const insurancePoolAbi = [
     "name": "FirstLossBelowTarget",
     "inputs": [
       {
-        "name": "remaining",
+        "name": "firstLoss",
         "type": "uint256",
         "internalType": "uint256"
       },
@@ -2169,6 +2630,17 @@ export const insurancePoolAbi = [
   },
   {
     "type": "error",
+    "name": "NotOwner",
+    "inputs": [
+      {
+        "name": "caller",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "NotTimelock",
     "inputs": []
   },
@@ -2217,30 +2689,8 @@ export const insurancePoolAbi = [
   },
   {
     "type": "error",
-    "name": "QueueBehind",
-    "inputs": [
-      {
-        "name": "epoch",
-        "type": "uint64",
-        "internalType": "uint64"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "QueuedWithdrawalsOnly",
+    "name": "QueuedOnly",
     "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "ReceiverNotCaller",
-    "inputs": [
-      {
-        "name": "receiver",
-        "type": "address",
-        "internalType": "address"
-      }
-    ]
   },
   {
     "type": "error",
@@ -2273,6 +2723,11 @@ export const insurancePoolAbi = [
         "internalType": "uint256"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "TooManyBooks",
+    "inputs": []
   },
   {
     "type": "error",
@@ -2311,6 +2766,11 @@ export const insurancePoolAbi = [
         "internalType": "uint256"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "WithdrawalsDue",
+    "inputs": []
   },
   {
     "type": "error",

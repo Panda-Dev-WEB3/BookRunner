@@ -228,7 +228,9 @@ contract DeployMainnet is MainnetInput {
         p.setParam(p.PARAM_BUFFER_BPS(), poolIn.bufferBps);
         p.setParam(p.PARAM_FIRST_LOSS_TARGET_BPS(), poolIn.firstLossTargetBps);
         p.setParam(p.PARAM_COOLDOWN(), poolIn.cooldown);
-        p.setParam(p.PARAM_EPOCH_LENGTH(), poolIn.epochLength);
+        p.setParam(p.PARAM_PROCESS_GRACE(), poolIn.processGrace);
+        // a new length is pending until the (empty) queue next rolls; only set it when it differs
+        if (poolIn.epochLength != 7 days) p.setParam(p.PARAM_EPOCH_LENGTH(), poolIn.epochLength);
     }
 
     function _setParams() internal {
