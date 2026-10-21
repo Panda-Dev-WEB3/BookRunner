@@ -599,6 +599,23 @@ timelock (48h); the multisig can `cancel` any scheduled operation during the del
 | Services host lost | Disable the KMS keys if the host may be compromised. | Rebuild from MAINNET.md (keys stay in KMS; restore env file, `4663.json`, DB dump). Never run two stacks with the same keys at once. |
 | Wind-down of the protocol | Pause new business. | Retire each book (Operations "Wind-down"); everything else stays timelock-governed. |
 
+## Fresh deployment of the public testnet (bookrunner.tech)
+
+Needed when the contracts change in a way that cannot be upgraded (e.g. the 2026-10 audit fixes: testnet v4, 2026-10-21).
+Everything old is archived, never deleted: the record as `contracts/deployments/46630.<stamp>.json`, the state, a
+database dump and a Redis snapshot under `.data/testnet.<stamp>/`, the database renamed `bookrunner_testnet_<stamp>`.
+
+```bash
+sudo bash /usr/local/lib/bookrunner-deploy/backup.sh
+sudo systemctl stop bookrunner
+sudo bash /usr/local/lib/bookrunner-deploy/update.sh --web-only     # new code, units, web; no restart
+sudo bash /usr/local/lib/bookrunner-deploy/public-redeploy.sh       # archive, new DB, forge (as bookrunner), verify
+sudo bash /usr/local/lib/bookrunner-deploy/update.sh                # restart: the first start launches the books
+```
+
+`public-redeploy.sh --from-forge` resumes after a failed forge step. The launch resumes on its own after a transient
+RPC error (`sudo systemctl restart bookrunner`). Check: `/status.json` overall ok, a mark per book, agents quoting.
+
 ## Testnet rehearsal on real Orderly (Robinhood Chain testnet 46630)
 
 Goal: a testnet BookRunner whose Orderly-venue books (NVDA, TSLA) are bound to Orderly's REAL testnet vault and settle

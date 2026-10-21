@@ -187,7 +187,7 @@ forge_run() {
 echo "==> forge build (pinned image, uid bookrunner, app tree read-only)"
 forge_run build >/dev/null
 echo "==> Deploy.s.sol -> testnet (RPC via ETH_RPC_URL)"
-forge_run script script/Deploy.s.sol:Deploy --broadcast --slow -q
+forge_run script script/Deploy.s.sol:Deploy --rpc-url "$ETH_RPC_URL" --broadcast --slow -q  # forge script ignores ETH_RPC_URL alone (simulates locally)
 unset DEV_MNEMONIC
 
 # ---- 6. broadcast sender == the plan's deployer, startBlock, on-chain verification, ABIs (stack user)
