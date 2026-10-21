@@ -15,13 +15,17 @@ Junior -> Senior -> Backstop.
 
 **Design change after review (2026-10-21, Task 1 fix round 1; the owner to be informed):**
 - *Senior debt (review I-1).* The pool's IF is a SENIOR DEBT of the book, netted from NAV. Every IF draw (traders' bad
-  debt and MM losses paid from the IF alike) is the book's loss first, Junior -> Senior -> Backstop; the pool loses only
+  debt and MM losses paid from the IF alike) is the book's loss first, Junior -> Senior (never the Backstop, N-1); the pool loses only
   what an exhausted book cannot repay (reported at marks as min(debt, idle + deployed), written off at retirement). An IF
   refill reduces the shortfall first. This replaces "the pool pays traders' bad debt drawn from an IF" above.
 - *Epoch pricing (review I-2).* Deposits are queued like withdrawals and priced at epoch processing, which waits for
   every active pool-funded book's mark after the epoch end (grace 24 h, timelocked, so exits are never blocked). Pool
   value changes only through marks, repayments, retirements and premiums; the permissionless live IF sync is gone.
 - *One snapshot (review I-3).* The debt is netted at the same signed snapshot that values the IF.
+- *Backstop (owner ruling N-1, fix round 2).* Backstop money never goes to the pool: Junior and Senior absorb the
+  insurance debt, the Backstop covers only Senior's other losses (cap from the signed IF equity in the mark), Backstop
+  cash is never netted against the debt, and an exhausted book's debt is written down to its own capital (the pool's
+  loss, the tail risk the premium pays for). A deposit request can be cancelled only before its epoch ends.
 - *Minors.* The cap is per market (underlying). Allocations need the first-loss slice at its target. The premium floor
   is fixed into the charter at filing. An epoch-length change waits for an idle queue.
 
