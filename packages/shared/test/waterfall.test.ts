@@ -7,9 +7,9 @@ import {
   bucketIndex,
   effectivePremiumBps,
   initialDeployment,
-  insuranceClaim,
   juniorWindowAllocation,
   poolBookNav,
+  poolRecoverable,
   premiumSplit,
   splitDistribution,
   splitPoolDistribution,
@@ -314,16 +314,19 @@ describe("insurance pool (2026-10): a pool-funded book", () => {
     expect(o.premium + o.expenses + o.carry + o.senior + o.junior).toBe(o.gross);
   });
 
-  test("the pool's claim follows the IF down to its equity and never above the allocation", () => {
-    expect(insuranceClaim(usd(25_000), usd(25_000))).toBe(usd(25_000));
-    expect(insuranceClaim(usd(25_000), usd(20_000))).toBe(usd(20_000));
-    expect(insuranceClaim(usd(25_000), usd(26_000))).toBe(usd(25_000));
-  });
-
-  test("NAV nets the claim: the IF is never Senior / Junior value, bad debt drawn from it costs them nothing", () => {
+  test("NAV nets the senior debt: the IF is never Senior / Junior value, an IF draw is a book loss first", () => {
     // venue: IF 25k + MM 75k; vault idle 0. Book-funded: nav 100k. Pool-funded: nav 75k (the MM only).
     expect(poolBookNav(0n, 0n, usd(25_000), usd(100_000))).toBe(usd(75_000));
-    // traders' bad debt draws 5k from the IF: deployed 95k, claim 20k -> nav still 75k
-    expect(poolBookNav(0n, 0n, insuranceClaim(usd(25_000), usd(20_000)), usd(95_000))).toBe(usd(75_000));
+    // bad debt (or an MM loss paid from the IF) draws 5k: deployed 95k -> nav 70k, the pool is still owed 25k
+    expect(poolBookNav(0n, 0n, usd(25_000), usd(95_000))).toBe(usd(70_000));
+    expect(poolRecoverable(usd(25_000), 0n, usd(95_000))).toBe(usd(25_000));
+  });
+
+  test("the pool loses only what an exhausted book cannot repay", () => {
+    // IF drawn to 0 and MM down to 10k: the book holds 10k for a 25k debt
+    expect(poolBookNav(0n, 0n, usd(25_000), usd(10_000))).toBe(0n);
+    expect(poolRecoverable(usd(25_000), 0n, usd(10_000))).toBe(usd(10_000));
+    // idle counts too
+    expect(poolRecoverable(usd(25_000), usd(20_000), usd(10_000))).toBe(usd(25_000));
   });
 });

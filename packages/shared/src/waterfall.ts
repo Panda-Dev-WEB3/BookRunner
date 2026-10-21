@@ -322,7 +322,9 @@ export function markedNav(vaultIdle: bigint, unfundedClaims: bigint, deployedVal
 
 // ---------------------------------------------------------------------------------------------
 // 5. Insurance pool (2026-10, docs/ARCHITECTURE.md §2.10): a pool-funded book (charter.ifFromPool).
-//    Waterfall.sol section 5 mirrors these; vectors "premium", "claim" and "poolBook".
+//    Waterfall.sol section 5 mirrors these; vectors "premium", "poolDebt", "poolWindow" and "poolBook".
+//    The book owes the pool its allocation as a SENIOR DEBT netted from NAV: whatever draws the IF is the book's loss
+//    first (Junior -> Senior -> backstop); the pool's claim is what the book can repay (poolRecoverable).
 // ---------------------------------------------------------------------------------------------
 
 /** IF target the window raises from the tranches: 0 when the InsurancePool funds the IF. */
@@ -330,7 +332,8 @@ export function windowIfTarget(ifTargetUsd: bigint, ifFromPool: boolean): bigint
   return ifFromPool ? 0n : ifTargetUsd;
 }
 
-/** Premium rate of a pool-funded book: the charter's rate, never below the pool's floor, at most BPS. */
+/** Premium rate a pool-funded charter is filed at (MarketCharter.file): the sponsor's rate, never below the pool's
+ *  floor of that moment, at most BPS. The book then pays charter.premiumBps (a later floor change never re-prices it). */
 export function effectivePremiumBps(charterPremiumBps: bigint, floorBps: bigint): bigint {
   const bps = charterPremiumBps > floorBps ? charterPremiumBps : floorBps;
   return bps > BPS ? BPS : bps;
@@ -356,15 +359,19 @@ export function splitPoolDistribution(i: SplitInput, premiumBps: bigint): PoolSp
   return { ...splitDistribution({ ...i, gross: rest }), gross: i.gross, premium };
 }
 
-/** What a pool-funded book owes the pool for its IF: the allocation marked down to the IF equity. */
-export function insuranceClaim(allocation: bigint, insuranceEquityUsd: bigint): bigint {
-  return insuranceEquityUsd < allocation ? insuranceEquityUsd : allocation;
+/**
+ * What a pool-funded book can repay the pool at a mark (Book -> pool.markBook): the debt, capped by vault idle + the
+ * mark's deployed value. Below the debt only once the book is exhausted; that shortfall is the pool's loss.
+ */
+export function poolRecoverable(debt: bigint, vaultIdle: bigint, deployedValueUsd: bigint): bigint {
+  const assets = vaultIdle + deployedValueUsd;
+  return assets < debt ? assets : debt;
 }
 
 /**
- * NAV of a pool-funded book at applyMark: the pool's claim is netted like any other liability, so the IF (counted
- * in the mark's deployedValueUsd) is never Senior / Junior value: markedNav(idle, unfundedClaims + poolClaim, deployed).
+ * NAV of a pool-funded book at applyMark: the pool's debt is netted like any other liability, at the same snapshot as
+ * the IF in deployedValueUsd: markedNav(idle, unfundedClaims + debt, deployed). An IF draw lowers it (a book loss).
  */
-export function poolBookNav(vaultIdle: bigint, unfundedClaims: bigint, poolClaim: bigint, deployedValueUsd: bigint): bigint {
-  return markedNav(vaultIdle, unfundedClaims + poolClaim, deployedValueUsd);
+export function poolBookNav(vaultIdle: bigint, unfundedClaims: bigint, poolDebt: bigint, deployedValueUsd: bigint): bigint {
+  return markedNav(vaultIdle, unfundedClaims + poolDebt, deployedValueUsd);
 }
