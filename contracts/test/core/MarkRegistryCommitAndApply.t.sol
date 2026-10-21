@@ -161,7 +161,8 @@ contract MarkRegistryCommitAndApplyTest is CoreFixture {
             inventoryRoot: keccak256("inv"),
             pnlJsonHash: keccak256("pnl"),
             receiptsRoot: keccak256("receipts"),
-            held: false
+            held: false,
+            insuranceEquityUsd: 0
         });
     }
 

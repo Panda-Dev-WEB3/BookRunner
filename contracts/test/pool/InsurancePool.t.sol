@@ -84,7 +84,7 @@ contract InsurancePoolTest is PoolFixture {
         _checkLedger();
     }
 
-    function test_deposit_cancelBeforeProcessing_only() public {
+    function test_deposit_cancelOnlyBeforeTheEpochEnd() public {
         uint256 id = _requestDeposit(alice, 1000 * U);
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(InsurancePool.NotOwner.selector, bob));
@@ -93,6 +93,12 @@ contract InsurancePoolTest is PoolFixture {
         pool.cancelDeposit(id);
         assertEq(usdc.balanceOf(alice), 1000 * U);
         uint256 id2 = _requestDeposit(alice, 500 * U);
+        // once the epoch has ended (its price may be known) it can no longer be cancelled, even before processing
+        uint256 ends = pool.epochEnd(0);
+        vm.warp(ends);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(InsurancePool.EpochEnded.selector, 0, ends));
+        pool.cancelDeposit(id2);
         _process();
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(InsurancePool.EpochAlreadyProcessed.selector, 0));

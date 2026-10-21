@@ -140,7 +140,7 @@ contract MockMarkRegistry is IMarkRegistry {
 
     function MARK_TYPEHASH() external pure returns (bytes32) {
         return keccak256(
-            "Mark(uint256 bookId,uint64 periodEnd,uint256 navUsd,uint256 deployedValueUsd,uint64 flowNonce,bytes32 inventoryRoot,bytes32 pnlJsonHash,bytes32 receiptsRoot,bool held)"
+            "Mark(uint256 bookId,uint64 periodEnd,uint256 navUsd,uint256 deployedValueUsd,uint64 flowNonce,bytes32 inventoryRoot,bytes32 pnlJsonHash,bytes32 receiptsRoot,bool held,uint256 insuranceEquityUsd)"
         );
     }
 

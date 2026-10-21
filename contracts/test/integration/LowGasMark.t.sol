@@ -350,7 +350,8 @@ abstract contract LowGasMarkBase is Test {
             inventoryRoot: keccak256("inventory"),
             pnlJsonHash: keccak256("pnl.json"),
             receiptsRoot: keccak256("receipts"),
-            held: false
+            held: false,
+            insuranceEquityUsd: 0
         });
     }
 

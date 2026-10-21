@@ -75,7 +75,7 @@ contract PoolHandler is StdUtils, Test {
         if (depositIds.length == 0) return;
         uint256 id = depositIds[seed % depositIds.length];
         InsurancePool.DepositRequest memory d = pool.depositInfo(id);
-        if (d.done || pool.epochInfo(d.epoch).processed) return;
+        if (d.done || pool.epochInfo(d.epoch).processed || block.timestamp >= pool.epochEnd(d.epoch)) return;
         vm.prank(d.owner);
         pool.cancelDeposit(id);
         ghostIn -= d.assets;

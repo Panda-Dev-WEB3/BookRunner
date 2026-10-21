@@ -116,8 +116,7 @@ contract Book is
         /// @dev the book's senior debt to the pool (the allocation, less repayments and the final write-off). Netted
         ///      from NAV always; cash-reserved and repaid first from vault idle once `poolDue`.
         uint256 poolDebt;
-        /// @dev what the book can repay at its last applied mark, min(debt, vault idle + deployed), as reported to the
-        ///      pool (pool.markBook): below the debt only once the book is exhausted
+        /// @dev the debt as last reported to the pool (pool.markBook)
         uint256 poolValue;
         /// @dev the IF recall started (or retirement): the debt is reserved cash and repaid before tranche claims
         bool poolDue;
@@ -194,8 +193,8 @@ contract Book is
     event RetiredBacklogSettled(uint256 indexed bookId, uint256 seniorOwed, uint256 juniorOwed);
     /// @notice The InsurancePool funded this book's IF (`amount` to the vault, deployed to the venue IF account).
     event InsuranceFunded(uint256 indexed bookId, address indexed pool, uint256 amount);
-    /// @notice Reported to the pool at a mark (`final_`: the retirement mark): `value` = min(debt, idle + deployed),
-    ///         what the book can repay; below `debt` only once the book is exhausted.
+    /// @notice Reported to the pool at a mark (`final_`: the retirement mark): the debt (`value` == `debt`, what the
+    ///         book can still repay; written down only when the book was exhausted, InsuranceWrittenOff).
     event InsuranceMarked(uint256 indexed bookId, uint256 debt, uint256 value, uint64 periodEnd, bool final_);
     /// @notice The pool refused a mark report (the book is unaffected; the next mark, or settleInsurance, retries).
     event InsuranceMarkFailed(uint256 indexed bookId, uint256 value, bool final_);
@@ -205,7 +204,8 @@ contract Book is
     event InsuranceRepaid(uint256 indexed bookId, uint256 amount, uint256 debt);
     /// @notice The vault could not repay the pool; the amount stays owed and reserved.
     event InsuranceRepayFailed(uint256 indexed bookId, uint256 amount);
-    /// @notice At retirement the vault held less than the debt: the rest is written off (the pool's loss).
+    /// @notice The book was exhausted (its own capital, Backstop money excluded, below the debt): the debt is written
+    ///         down by `amount`, the pool's loss (owner ruling N-1).
     event InsuranceWrittenOff(uint256 indexed bookId, uint256 amount);
 
     constructor() {

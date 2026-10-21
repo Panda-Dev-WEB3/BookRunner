@@ -339,7 +339,8 @@ contract BookHandler is Test {
             inventoryRoot: 0,
             pnlJsonHash: 0,
             receiptsRoot: 0,
-            held: held
+            held: held,
+            insuranceEquityUsd: 0
         });
         uint256 id = env.registry.commit(m, "");
         (uint256 debtBefore,) = env.book.backstopDebt();

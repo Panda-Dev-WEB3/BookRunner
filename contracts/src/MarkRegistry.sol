@@ -38,7 +38,7 @@ interface IAttestedOracleUpdate {
 contract MarkRegistry is IMarkRegistryAtomic, EIP712 {
     /// @inheritdoc IMarkRegistry
     bytes32 public constant MARK_TYPEHASH = keccak256(
-        "Mark(uint256 bookId,uint64 periodEnd,uint256 navUsd,uint256 deployedValueUsd,uint64 flowNonce,bytes32 inventoryRoot,bytes32 pnlJsonHash,bytes32 receiptsRoot,bool held)"
+        "Mark(uint256 bookId,uint64 periodEnd,uint256 navUsd,uint256 deployedValueUsd,uint64 flowNonce,bytes32 inventoryRoot,bytes32 pnlJsonHash,bytes32 receiptsRoot,bool held,uint256 insuranceEquityUsd)"
     );
 
     bytes32 private constant MARK_SIGNER_ROLE = keccak256("MARK_SIGNER");
@@ -98,7 +98,8 @@ contract MarkRegistry is IMarkRegistryAtomic, EIP712 {
                     m.inventoryRoot,
                     m.pnlJsonHash,
                     m.receiptsRoot,
-                    m.held
+                    m.held,
+                    m.insuranceEquityUsd
                 )
             )
         );

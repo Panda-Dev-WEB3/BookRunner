@@ -166,6 +166,7 @@ contract InsurancePool is
     error DepositDone(uint256 depositId);
     error EpochNotProcessed(uint64 epoch);
     error EpochAlreadyProcessed(uint64 epoch);
+    error EpochEnded(uint64 epoch, uint256 endedAt);
     error EpochNotEnded(uint64 epoch, uint256 endsAt);
     error BooksNotMarked(uint64 epoch, uint256 staleBooks, uint256 graceEndsAt);
     error UnknownParam(bytes32 key);
@@ -225,6 +226,9 @@ contract InsurancePool is
         if (d.owner != msg.sender) revert NotOwner(msg.sender);
         if (d.done) revert DepositDone(depositId);
         if ($.epochs[d.epoch].processed) revert EpochAlreadyProcessed(d.epoch);
+        // only while its epoch is open: once the epoch has ended its price may be known (review round 2)
+        uint256 ends = _projectedEnd($, d.epoch);
+        if (block.timestamp >= ends) revert EpochEnded(d.epoch, ends);
         d.done = true;
         uint256 a = d.assets;
         $.epochs[d.epoch].depositAssets -= a;

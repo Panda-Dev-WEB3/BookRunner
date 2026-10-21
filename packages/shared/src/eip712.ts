@@ -17,7 +17,9 @@ export const markTypes = {
     { name: "inventoryRoot", type: "bytes32" },
     { name: "pnlJsonHash", type: "bytes32" },
     { name: "receiptsRoot", type: "bytes32" },
-    { name: "held", type: "bool" }, // audit M-1: MARK_TYPEHASH "...,bytes32 receiptsRoot,bool held)"
+    { name: "held", type: "bool" }, // audit M-1
+    // 2026-10 insurance pool: the IF equity inside deployedValueUsd (MARK_TYPEHASH "...,bool held,uint256 insuranceEquityUsd)")
+    { name: "insuranceEquityUsd", type: "uint256" },
   ],
 } as const;
 

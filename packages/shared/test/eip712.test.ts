@@ -136,7 +136,7 @@ describe("signed venue reports", () => {
 // ---- signed marks (MarkRegistry.sol MARK_TYPEHASH; audit M-1 added the signed `held` flag) ----
 
 /** == MARK_STRUCT_HASH_VECTOR in contracts/test/core/MarkRegistry.t.sol (test_markStructHash_parityVector). */
-const MARK_STRUCT_HASH_VECTOR = "0x5ed67b6c5b3d7f71865d814669c6d89b6876b79c379bbad9b3a70759f4cc6de3";
+const MARK_STRUCT_HASH_VECTOR = "0xf0973c16daebdd63754469fc19c8668b1a8c26e8eb5f9d494f03ae105108d834";
 
 describe("mark struct hash parity", () => {
   const word = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as Hex;
@@ -150,11 +150,12 @@ describe("mark struct hash parity", () => {
     pnlJsonHash: word(0x22),
     receiptsRoot: word(0x33),
     held: true,
+    insuranceEquityUsd: 25_000_000_000n,
   };
 
   test("type string matches MarkRegistry.MARK_TYPEHASH", () => {
     const expected = keccak256(
-      toHex("Mark(uint256 bookId,uint64 periodEnd,uint256 navUsd,uint256 deployedValueUsd,uint64 flowNonce,bytes32 inventoryRoot,bytes32 pnlJsonHash,bytes32 receiptsRoot,bool held)"),
+      toHex("Mark(uint256 bookId,uint64 periodEnd,uint256 navUsd,uint256 deployedValueUsd,uint64 flowNonce,bytes32 inventoryRoot,bytes32 pnlJsonHash,bytes32 receiptsRoot,bool held,uint256 insuranceEquityUsd)"),
     );
     const encoded = encodeAbiParameters([{ type: "bytes32" }, ...markTypes.Mark.map((f) => ({ type: f.type }))], [
       expected,
@@ -167,6 +168,7 @@ describe("mark struct hash parity", () => {
       mark.pnlJsonHash,
       mark.receiptsRoot,
       mark.held,
+      mark.insuranceEquityUsd,
     ]);
     expect(hashStruct({ data: mark, primaryType: "Mark", types: markTypes })).toBe(keccak256(encoded));
   });

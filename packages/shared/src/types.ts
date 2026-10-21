@@ -90,6 +90,11 @@ export interface MarkInput {
    * settlement to the first non-held mark (audit M-1). Signed: part of the EIP-712 Mark.
    */
   held: boolean;
+  /**
+   * 2026-10 insurance pool: the IF equity (adapter.insuranceEquityUsd at the valuation) included in deployedValueUsd.
+   * Book.applyMark reads it only for a pool-funded book, to keep Backstop cover off the insurance debt. Signed.
+   */
+  insuranceEquityUsd: bigint;
 }
 
 /** Off-chain mark statement; keccak256(canonicalJson(pnl)) == MarkInput.pnlJsonHash. */

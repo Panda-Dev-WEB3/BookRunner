@@ -46,7 +46,7 @@ interface IInsurancePool {
     /// @notice Queues `assets` (pulled now) for the open epoch; shares are minted when the epoch is processed, at that
     ///         price. Not while deposits are paused.
     function requestDeposit(uint256 assets) external returns (uint256 depositId);
-    /// @notice The owner, before the deposit's epoch is processed: refunds it.
+    /// @notice The owner, before the deposit's epoch ends: refunds it.
     function cancelDeposit(uint256 depositId) external;
     /// @notice Anyone, once the deposit's epoch is processed: transfers the owner's shares (starting their cooldown).
     function claimDeposit(uint256 depositId) external returns (uint256 shares);

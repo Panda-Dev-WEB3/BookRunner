@@ -322,9 +322,10 @@ export function markedNav(vaultIdle: bigint, unfundedClaims: bigint, deployedVal
 
 // ---------------------------------------------------------------------------------------------
 // 5. Insurance pool (2026-10, docs/ARCHITECTURE.md §2.10): a pool-funded book (charter.ifFromPool).
-//    Waterfall.sol section 5 mirrors these; vectors "premium", "poolDebt", "poolWindow" and "poolBook".
-//    The book owes the pool its allocation as a SENIOR DEBT netted from NAV: whatever draws the IF is the book's loss
-//    first (Junior -> Senior -> backstop); the pool's claim is what the book can repay (poolRecoverable).
+//    Waterfall.sol section 5 mirrors these; vectors "premium", "poolDebt", "poolMark", "poolWindow" and "poolBook".
+//    The book owes the pool its allocation as a SENIOR DEBT netted from NAV: whatever draws the IF is absorbed by
+//    Junior then Senior; the Backstop never covers that debt nor funds the pool (owner ruling N-1): an exhausted book's
+//    debt is written down to its own capital (Backstop money excluded), the shortfall being the pool's loss.
 // ---------------------------------------------------------------------------------------------
 
 /** IF target the window raises from the tranches: 0 when the InsurancePool funds the IF. */
@@ -360,12 +361,51 @@ export function splitPoolDistribution(i: SplitInput, premiumBps: bigint): PoolSp
 }
 
 /**
- * What a pool-funded book can repay the pool at a mark (Book -> pool.markBook): the debt, capped by vault idle + the
- * mark's deployed value. Below the debt only once the book is exhausted; that shortfall is the pool's loss.
+ * The insurance debt at a mark (Book._writeDownInsurance): the book's own capital is vault idle + deployed value minus
+ * the Backstop money in it (cover still held by Senior + a repayment owed to the Backstop); a debt above it is written
+ * down to it, the shortfall being the pool's loss.
  */
-export function poolRecoverable(debt: bigint, vaultIdle: bigint, deployedValueUsd: bigint): bigint {
+export function poolDebtAtMark(debt: bigint, vaultIdle: bigint, deployedValueUsd: bigint, backstopMoney: bigint) {
   const assets = vaultIdle + deployedValueUsd;
-  return assets < debt ? assets : debt;
+  const own = assets > backstopMoney ? assets - backstopMoney : 0n;
+  return own >= debt ? { debt, writeOff: 0n } : { debt: own, writeOff: debt - own };
+}
+
+/**
+ * The NAV that caps Backstop cover of a pool-funded book: the mark NAV with the IF draw (debt - IF equity, the IF
+ * equity capped at the deployed value) added back. `liabilities` includes the debt.
+ */
+export function poolCoverNav(vaultIdle: bigint, liabilities: bigint, deployedValueUsd: bigint, debt: bigint, insuranceEquityUsd: bigint): bigint {
+  const ifEquity = insuranceEquityUsd < deployedValueUsd ? insuranceEquityUsd : deployedValueUsd;
+  const draw = debt > ifEquity ? debt - ifEquity : 0n;
+  return markedNav(vaultIdle, liabilities, deployedValueUsd + draw);
+}
+
+export interface PoolMarkInputs {
+  vaultIdle: bigint;
+  unfundedClaims: bigint; // tranche claims settled, not funded
+  backstopPayable: bigint;
+  deployedValueUsd: bigint;
+  insuranceEquityUsd: bigint; // signed in the mark
+  debt: bigint; // the book's insurance debt before the mark
+  juniorSupply: bigint;
+  backstopAvailable: bigint;
+}
+
+/**
+ * Book.applyMark P&L of a pool-funded book (owner ruling N-1): write-down of an exhausted book's debt, NAV net of the
+ * debt, and applyMarkPnl with Backstop cover capped at what it would cover at poolCoverNav (no IF draw: no cap).
+ */
+export function poolMarkPnl(s: MarkState, i: PoolMarkInputs) {
+  const backstopMoney = minBig(s.backstopDebt ?? 0n, s.seniorNav) + i.backstopPayable;
+  const d = poolDebtAtMark(i.debt, i.vaultIdle, i.deployedValueUsd, backstopMoney);
+  const liabilities = i.unfundedClaims + i.backstopPayable + d.debt;
+  const nav = markedNav(i.vaultIdle, liabilities, i.deployedValueUsd);
+  const navH = poolCoverNav(i.vaultIdle, liabilities, i.deployedValueUsd, d.debt, i.insuranceEquityUsd);
+  const coverCap = navH === nav ? null : applyMarkPnl(s, { nav: navH, juniorSupply: i.juniorSupply, backstopAvailable: i.backstopAvailable }).backstopCovered;
+  const available = coverCap === null ? i.backstopAvailable : minBig(i.backstopAvailable, coverCap);
+  const result = applyMarkPnl(s, { nav, juniorSupply: i.juniorSupply, backstopAvailable: available });
+  return { debt: d.debt, writeOff: d.writeOff, nav, coverCap, result };
 }
 
 /**
