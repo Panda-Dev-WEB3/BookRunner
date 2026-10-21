@@ -76,10 +76,12 @@ describe("pool-funded NAV (informational)", () => {
   test("the debt is netted until due; once due it is already in unfundedClaims", () => {
     const base = snapshot();
     const plain = composeNav(base);
-    const owing = composeNav({ ...base, insuranceDebt: { debt: usd("25000"), due: false } });
+    const owing = composeNav({ ...base, insuranceDebt: { debt: usd("25000"), claim: usd("25000"), due: false } });
     expect(plain.navUsd - owing.navUsd).toBe(usd("25000"));
     expect(owing.deployedValueUsd).toBe(plain.deployedValueUsd);
-    expect(poolDebtNetted({ insuranceDebt: { debt: usd("25000"), due: true } })).toBe(0n);
+    // an exhausted book: the claim (debt capped by its own capital) is netted, the shortfall is provisional
+    expect(poolDebtNetted({ insuranceDebt: { debt: usd("25000"), claim: usd("20000"), due: false } })).toBe(usd("20000"));
+    expect(poolDebtNetted({ insuranceDebt: { debt: usd("25000"), claim: usd("25000"), due: true } })).toBe(0n);
     expect(poolDebtNetted({ insuranceDebt: null })).toBe(0n);
   });
 });

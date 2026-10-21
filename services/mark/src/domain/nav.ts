@@ -40,12 +40,14 @@ export interface NavComposition {
 }
 
 /**
- * The insurance pool's debt netted from NAV beyond unfundedClaims (2026-10, Book.navLiabilities): the whole debt of a
- * pool-funded book while it is not due yet (once due, Book.liabilities() -> unfundedClaims carries it already).
+ * The insurance pool's claim netted from NAV beyond unfundedClaims (2026-10, Book.navLiabilities): the pool's claim at
+ * the book's last mark (the debt capped by the book's own capital, Backstop money excluded; below the debt only while the
+ * book is exhausted, a provisional shortfall) while it is not due yet; once due, Book.liabilities() -> unfundedClaims
+ * carries it already. Informational: the book re-values the claim at the mark's own snapshot.
  */
 export function poolDebtNetted(s: Pick<MarkSnapshot, "insuranceDebt">): bigint {
   const d = s.insuranceDebt;
-  return d && !d.due ? d.debt : 0n;
+  return d && !d.due ? d.claim : 0n;
 }
 
 /**

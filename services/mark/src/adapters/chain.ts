@@ -276,7 +276,8 @@ export class MarkChainAdapter implements MarkChain {
       this.pc.readContract({ address: mandate, abi: mMMandateAbi, functionName: "killed", ...b }),
       // 2026-10 insurance pool: (pool, debt, value, due, closed); a book-funded IF (pool 0) or an older book: none
       this.pc.readContract({ address: book, abi: bookAbi, functionName: "insuranceDebt", ...b }).then(
-        (d) => (isAddressEqual(d[0], zeroAddress) ? null : { debt: d[1], due: d[3] }),
+        // the pool's claim (`value`: the debt capped by the book's own capital, review round 3) is what NAV nets
+        (d) => (isAddressEqual(d[0], zeroAddress) ? null : { debt: d[1], claim: d[2], due: d[3] }),
         () => null,
       ),
     ]);
