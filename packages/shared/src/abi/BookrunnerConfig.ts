@@ -247,6 +247,19 @@ export const bookrunnerConfigAbi = [
   },
   {
     "type": "function",
+    "name": "KEY_INSURANCE_POOL",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "KEY_MARK_INTERVAL",
     "inputs": [],
     "outputs": [
@@ -851,6 +864,19 @@ export const bookrunnerConfigAbi = [
   {
     "type": "function",
     "name": "hedgeExecutor",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "insurancePool",
     "inputs": [],
     "outputs": [
       {

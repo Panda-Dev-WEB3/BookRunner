@@ -58,6 +58,10 @@ export interface Charter {
   symbol: Hex;
   takerFeeBps: number;
   makerFeeBps: number;
+  /** 2026-10 insurance pool: the InsurancePool funds the IF at closeWindow (the window raises only mmInventoryUsd). */
+  ifFromPool: boolean;
+  /** Pool premium, bps of gross fee flow; effective = max(premiumBps, pool floor) (waterfall.ts effectivePremiumBps). */
+  premiumBps: number;
 }
 
 export interface BookComponents {
@@ -131,6 +135,7 @@ export interface Deployment {
     orderlyVault: Address; // MockOrderlyVault on devnet; VERIFY on RHC
     entryPoint?: Address;
     swapRouter?: Address; // MockSwapRouter on devnet; VERIFY on RHC
+    insurancePool?: Address; // 2026-10 InsurancePool proxy (absent in older records)
   };
   stockTokens: Record<string, { token: Address; priceId: Hex; multiplierWad: string }>;
   books: Array<{ bookId: number; name: string; symbol: string; venue: VenueId; components: BookComponents }>;

@@ -18,6 +18,7 @@ const CONTRACTS: Record<string, string[]> = {
   MarkRegistry: ["MarkRegistry", "IMarkRegistry"],
   RevenueRouter: ["RevenueRouter", "IRevenueRouter"],
   Book: ["Book", "IBook"],
+  InsurancePool: ["InsurancePool", "IInsurancePool"],
   Tranche: ["Tranche", "SeniorTranche", "ITranche"],
   UnderwritingVault: ["UnderwritingVault", "IUnderwritingVault"],
   MarketCharter: ["MarketCharter", "IMarketCharter"],
