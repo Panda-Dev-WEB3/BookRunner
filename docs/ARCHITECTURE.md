@@ -699,6 +699,20 @@ guarded by `process.env.BKRN_IT === "1"`.
 | `indexer` | — | Chain → DB: watches all protocol events from `deployment.startBlock` with a `chain_cursor` (reorg-safe with N confirmations on mainnet, 0 on devnet): charters, books, subscriptions, redemptions, marks, settlements, desk keys, kills, committee votes. Emits internal domain events. |
 | `api` | 4400 | Hono + tRPC v11 (`/trpc`) + REST mirror (`/v1/...`) + webhooks + read-only MCP (`/mcp`, Streamable HTTP). Procedures (Backend §5): `charter.file/get/list/decide`, `book.list/get/nav/limits/marks/fills/hedges`, `tranche.subscribe/redeem(notice)`, `agent.register/revoke(bookId, key)`, `risk.state(bookId)`, `settlements.list`, `receipts.list/root/proof` (activity feeds `book.fills/hedges` and `receipts.list`: newest first, `limit` 1..200 default 50, `cursor` = previous `nextCursor`). Mutations that are on-chain return **prepared transactions** (`{to, data, value, chainId}`) for the user's wallet; `charter.decide` = committee vote tx. Webhooks: subscriptions CRUD + HMAC-signed delivery with retries (events: charter.decided, limit.breached, kill.executed, mark.committed, distribution.paid). MCP tools: `book_nav`, `book_limits`, `charters` (read-only). |
 
+Insurance pool (2026-10, §2.10) in the services: the **indexer** writes `pool_deposits`, `pool_withdrawals`,
+`pool_epochs`, `pool_books`, `pool_flows` and one `pool_snapshots` row per block with pool events (share price
+history), and records each distribution's `PremiumPaid` in `settlements.premium_usd`; the **api** serves `pool.overview`
+(queue phase: open / awaiting_marks / processable), `pool.position`, `pool.epochs`, `pool.history`, `pool.exposure` and
+prepared `pool.deposit` / `cancelDeposit` (before the epoch end) / `claimDeposit` / `withdraw` / `claim`; the
+**waterfall** previews and checks the premium (premium + expenses + carry + Senior + Junior == gross), and its keeper
+calls `processEpoch` once the oldest epoch is processable (every active pool-funded book marked after its end, or the
+grace) and `Book.settleInsurance` for a retired book whose final pool mark failed; the **mark** service signs
+`insuranceEquityUsd` from the snapshot that values the IF and nets the pool's debt from its informational NAV;
+**ops-venue** reports who funds a book's IF (`fund_if`); **alerts** page on utilisation > 90%, an epoch unprocessed 2 h
+past its end or waiting for marks in its grace, per-market debt marked down, written-off / unrepaid debt of retired
+books, and the first-loss slice below its 10%. The **charter** service and api validators mirror `BAD_PREMIUM` /
+`NO_POOL`; new charters default to `ifFromPool`.
+
 Queues/channels/keys: `packages/shared/src/queues.ts`. Events: `packages/shared/src/events.ts`.
 Data model: `packages/db/src/schema.ts` (tables of Backend §4 plus extensions).
 
@@ -708,7 +722,9 @@ Vite + React 19 + TanStack Query + tRPC client + Tailwind 4 + viem/wagmi (inject
 "dev wallet" picker using anvil keys for demo). Pages: Books (table: book, venue, state, NAV,
 Senior/Junior NAV per share, limits state), Book detail (NAV + tranche chart from marks, waterfall
 of the last distribution, live quote + inventory, limit gauges, fills/hedges, marks with receipts
-roots and "verify proof", one invest panel to deposit, withdraw and collect), Charters (file form with mandate
+roots and "verify proof", one invest panel to deposit, withdraw and collect), Insurance Pool (`/pool`: queued deposit /
+withdraw / cancel / collect, queue and epoch status, observed share price and premium history, exposure per market,
+first-loss slice, loss order), Charters (file form with mandate
 editor, status, jury verdict, committee votes), Committee (vote), Risk (all books' limit states,
 kill log), Docs/legal footer ("Bookrunner is software; not a fund, adviser, broker or venue operator
 of record"; "Not available to US persons"). Copy rules: §6.
@@ -731,6 +747,11 @@ Three studio-sponsored books (sponsor = anvil #7, committee #8–#10, agent oper
 | NVDA | Stock Token NVDA (mult 1.0) | Orderly (mock) `PERP_NVDA_USDC` | 25,000 | 75,000 | 50k / 25 / 8 / 5000–12000 / −800 |
 | TSLA | Stock Token TSLA (mult 1.0) | Orderly (mock) `PERP_TSLA_USDC` | 25,000 | 75,000 | 50k / 30 / 12 / 5000–12000 / −800 |
 | RHX5 | index of NVDA, TSLA, AAPL, MSFT, AMZN (20% each) | in-house PoolEngine `RHX5-PERP` | 25,000 | 100,000 | 75k / 25 / 10 / 4000–12000 / −800 |
+
+Insurance pool (2026-10): with `contracts.insurancePool` in the record the launch charters the books with `ifFromPool`
+(the window raises only the MM inventory), sets demo pool parameters as the deployer-timelock (1-day epochs, 1 h cooldown
+and grace), seeds the treasury's first-loss slice to fund every IF at window close (`scripts/launch-plan.ts`
+`poolSeedUsd`) and, on the mock venue, queues two allocators' deposits for the first epoch.
 
 Senior cap 7000, Senior share of fee flow 6000, window 10 min, junior notice 15 min (devnet),
 per-wallet cap 250k. Demo prices (WAD, devnet only): NVDA 190, TSLA 440, AAPL 255, MSFT 520,
