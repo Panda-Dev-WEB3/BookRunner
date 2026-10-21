@@ -78,9 +78,11 @@ Sponsor ──file(charter, fee, bond)──► MarketCharter ──► RiskComm
 BookFactory.create ──► Book{ Senior, Junior, UnderwritingVault, MMMandate, RevenueRouter, BookrunnerDesk, VenueAdapter }
   ├─ Orderly path:   OrderlyAdapter → Orderly Vault (IF + MM accounts; trade-only keys)   ◄── bookrunner agent (REST)
   └─ In-house path:  PoolEngineAdapter → PoolEngine market (AttestedOracle, off-hours regime) ◄── agent (desk SetQuote)
-Fee flow: venue/engine → RevenueRouter.distribute → expenses → 10% carry → BkrnFeeRouter(50% buyback / 50% Backstop)
-          → Senior share → Junior residual → UnderwritingVault (credited to S/J)
+Fee flow: venue/engine → RevenueRouter.distribute → [pool-funded book: premium → InsurancePool] → expenses → 10% carry
+          → BkrnFeeRouter(50% buyback / 50% Backstop) → Senior share → Junior residual → UnderwritingVault (credited to S/J)
 Marks:    mark service → MarkRegistry.commit(EIP-712) → Book.applyMark → losses J→S→Backstop, redemptions settle
+IF:       InsurancePool (ERC-4626, depositors + treasury first-loss slice) ──allocate at closeWindow──► book vault → venue IF
+          traders' bad debt drawn from the IF → Book.syncInsurance → pool.reportLoss (slice first, then share price)
 ```
 
 Per book, **bookId == charterId**.
@@ -99,6 +101,7 @@ Per book, **bookId == charterId**.
 | **A-mandate** | `MMMandate.sol`, `BookrunnerDesk.sol`, `HedgeExecutor.sol`, `StockTokenRegistry.sol` |
 | **A-engine** | `AttestedOracle.sol`, `PoolEngine.sol`, `PoolEngineAdapter.sol` (UUPS) |
 | **A-orderly** | `OrderlyAdapter.sol` (UUPS), `mocks/MockOrderlyVault.sol` |
+| **A-pool** (2026-10) | `InsurancePool.sol` (UUPS), `interfaces/IInsurancePool.sol`, `test/pool/*` |
 | **integrator** | `script/*`, `test/integration/*`, `test/invariant/*`, interface changes |
 
 Rules: implement exactly the frozen interfaces in `src/interfaces/` (add functions in your
@@ -107,7 +110,7 @@ report and the integrator reconciles). For tests, mock siblings you don't own wi
 in-test contracts (`test/utils/` files prefixed with your cluster, e.g. `test/utils/BookMocks.sol`).
 
 Upgradeability: **non-upgradeable** except `Book` (ERC1967 proxy, UUPS, `_authorizeUpgrade` only
-`config.timelock()`) and venue adapters (same). Clones (EIP-1167) for Tranche ×2, Vault, Mandate,
+`config.timelock()`), venue adapters (same) and the `InsurancePool` (same). Clones (EIP-1167) for Tranche ×2, Vault, Mandate,
 Router, Desk. All initializers use OZ `Initializable` and are locked on the implementation
 (`_disableInitializers()` in constructor).
 
@@ -118,6 +121,8 @@ are `keccak256("MARK_SIGNER")` etc. Setters (admin only) for every address/param
 `AddressSet`/`ParamSet`. `timelock()` returns the recorded address only while it holds
 `DEFAULT_ADMIN_ROLE` (else `address(0)`, fail-closed), and `setAddress("timelock", t)` requires `t`
 to hold it, so every timelock-gated power follows the admin role across the handover. `setNewBooksPaused(bool)` callable by admin or GUARDIAN.
+`insurancePool` key (2026-10, getter `insurancePool()`, not in the frozen `IBookrunnerConfig`): the InsurancePool that
+funds the IF of `ifFromPool` books (§2.10); a repoint only affects books closing their window afterwards.
 Settlement token: the `usdc` key (name kept for ABI stability) is the protocol settlement token —
 mock USDC on devnet/testnet, **USDG on Robinhood Chain** (VERIFY O3/S1). `setAddress("usdc", t)`
 reverts `BadSettlementToken(t, decimals)` unless `t` is a contract whose `decimals()` returns
@@ -183,6 +188,12 @@ split per `splitDistribution` in `packages/shared/src/waterfall.ts` using `confi
 `book.creditDistribution(senior, junior)`; emits `Distributed(bookId, period, [gross, expenses,
 carry, senior, junior])`. Each `period` may be distributed once (idempotency for the waterfall
 service). A distribution with `gross == 0` is a no-op but still marks the period.
+**[2026-10 insurance pool]** A pool-funded book (`book.insurancePool() != 0`) first pays the pool its premium:
+`premiumBps = max(charter.premiumBps, pool.premiumFloorBps())` (floor 1200 = 12%, `Waterfall.effectivePremiumBps`),
+`premium = gross × premiumBps / 1e4` (`premiumSplit`), pulled by `pool.notifyPremium`; the rest is split as above
+(expenses capped on the rest). `Distributed` keeps `gross` = the whole gross, `PremiumPaid(bookId, period, pool,
+amount, bps)` carries the premium (premium + expenses + carry + senior + junior == gross). `previewPremium(gross)`,
+`premiumTotal()`. TS mirror `splitPoolDistribution` (vectors `premium`, `poolBook`).
 
 ### 2.5 Book, Tranche, UnderwritingVault, Waterfall [A-book]
 
@@ -219,6 +230,22 @@ Subscription --closeWindow ok--> Live --retire--> Retiring --finalizeRetirement-
   `J = juniorAllocated`; tranches `settleWindow(allocated, vault)` move allocated USDC to the vault
   (refunds stay in tranche escrow for `claimAllocation`); `initialDeployment` → `vault.deployToVenue(IF)`
   then `vault.deployToVenue(MM)`; state Live; perfIndex = highWater = 1e18.
+- **Pool-funded IF [2026-10, `charter.ifFromPool`]** (§2.10). `closeWindow` passes `ifTargetUsd = 0` to
+  `allocateWindow` / `initialDeployment` (`Waterfall.windowIfTarget`): the tranches raise only `mmInventoryUsd`; the
+  InsurancePool (`config.insurancePool()`, recorded as `book.insurancePool()`) sends `charter.ifTargetUsd` to the vault
+  (`pool.allocate`, reverts — and so does `closeWindow` — when the pool cannot fund it now: retried, or
+  `cancelStuckWindow` after the timeout), deployed to the venue IF account. The pool's **claim** (`insuranceClaim()`:
+  allocation, claim, due) is netted from NAV like a liability (`navLiabilities = unfunded + backstopPayable + claim`),
+  so the IF (still counted in the mark's `deployedValueUsd`, the mark service is unchanged) is never Senior / Junior
+  value. Before each mark (and permissionlessly, `syncInsurance()`) the claim follows the IF equity
+  (`adapter.insuranceEquityUsd()`: Orderly = the reported IF balance, PoolEngine = the engine's insurance), capped by
+  the allocation (`Waterfall.insuranceClaim`): a fall is reported to the pool (`reportLoss`), a refill restores it
+  (`reportRecovery`); the IF surplus above the allocation is book value. An IF recall (vault, only once not Live)
+  first calls `book.onInsuranceRecall()`: last sync, then the claim is **due** — part of `unfundedClaims()` (cash
+  reserved) and repaid from vault idle by `fundClaims` **before** tranche claims (`vault.repayInsurancePool`, never
+  blocking). `finalizeRetirement` makes it due if no recall did, repays it and writes off (`reportLoss`) what vault
+  idle cannot cover. A book with `ifFromPool == false` (and every book stored before: the two new charter fields share
+  the slot of the fee fields, so they read false / 0) works exactly as before.
 - `applyMark(markId)` (anyone): mark must be for this book, not applied, newer than the last applied,
   and `mark.flowNonce == flowNonce`. `nav = Waterfall.markedNavNet(vault.idle(), unfundedClaims,
   deployedValueUsd)`. Run `applyMarkPnl` with `backstopAvailable = backstop.balance()`; if
@@ -311,7 +338,10 @@ Subscription --closeWindow ok--> Live --retire--> Retiring --finalizeRetirement-
 **UnderwritingVault** (`IUnderwritingVault`): `deployToVenue(account, amount)` only book or desk;
 approves adapter and calls `adapter.depositToVenue`; `recall` (book/desk/KEEPER/RISK) calls
 `adapter.requestWithdraw`; `fundDesk` only desk; `payTo` only book (targets: its tranches only).
-Every deploy/recall/fundDesk and desk `ReturnToVault` calls `book.onCapitalFlow()`.
+Every deploy/recall/fundDesk and desk `ReturnToVault` calls `book.onCapitalFlow()`. **[2026-10]** Pool-funded IF
+(`book.insurancePool() != 0`): only the book deploys to the IF account (desk: `PoolFundedInsurance`), nobody recalls
+it while the book is Live, a recall first calls `book.onInsuranceRecall()`; `repayInsurancePool(amount)` (only book)
+lets the pool pull a due claim.
 
 ### 2.6 MarketCharter, RiskCommittee, BookFactory [A-gov]
 
@@ -323,7 +353,10 @@ Every deploy/recall/fundDesk and desk `ReturnToVault` calls `book.onCapitalFlow(
   audit M-1: a Junior request always bears at least one full mark period of P&L), `BAD_MANDATE` (maxInventory == 0, minQuoteWidth == 0, band min > max,
   killAtDrawdownBps >= 0 or < -5000, maxSkewBps <= 0, maxSkewBps > minQuoteWidthBps / 2: audit M-3, a quote at the
   minimum width and the maximum skew must still straddle the oracle), `BAD_UNDERLYING` (not canonical token, not
-  registered index), `BAD_SYMBOL` (zero), `BAD_FEES` (in-house taker fee > 100 bps).
+  registered index), `BAD_SYMBOL` (zero), `BAD_FEES` (in-house taker fee > 100 bps), then (2026-10,
+  `CharterRules.poolReason`, TS `poolCharterReason`) `BAD_PREMIUM` (`premiumBps > 5000`, or a premium on a
+  book-funded IF) and `NO_POOL` (`ifFromPool` with `config.insurancePool()` unset). The venue IF minimum applies to a
+  pool-funded IF too. New charters default to `ifFromPool = true` (`DEFAULT_IF_FROM_POOL`, packages/shared).
 - `decide(id, ok, juryCid)` only committee. Approve → fee forwarded to `expenseRecipient`
   (committee review + oracle setup), `factory.create(id, charter)`, record book, status Approved.
   Reject → fee refunded to sponsor, bond unlocked. `expire` after `committeeWindow`.
@@ -529,7 +562,45 @@ engine (audit N-1, below).
   paying a withdrawal; `creditFees(accountId, amount)` for simulated builder fee settlement (USDC
   minted by the mock USDC or pre-funded). Emits events the mock-orderly REST server reads.
 
-### 2.10 Red-team checks (Backend §2.9) — required tests
+### 2.10 InsurancePool [A-pool] (2026-10, NEW: focused re-audit before mainnet)
+
+One protocol-wide pool (owner-approved design 2026-10-20), `IInsurancePool`, UUPS behind an ERC1967 proxy (upgrades and
+parameters only `config.timelock()`), ERC-7201 storage, ERC-4626 over `config.usdc()` (shares `ib<symbol>`, 12
+decimals: virtual offset 6). Its depositors fund the IF of every pool-funded book and earn the premium; sponsors raise
+only the MM inventory.
+
+- **Value.** `poolAssets` T = free liquidity (tracked cash − cash reserved for filled withdrawals) + Σ book claims.
+  T = first-loss slice FL (treasury, own accounting, no shares; `depositFirstLoss` anyone, `withdrawFirstLoss`
+  timelock, keeping FL ≥ `firstLossTargetBps` (10%) of T) + depositors' assets D = `totalAssets()`. Premium p: FL +=
+  p·FL/T (same rate; all of it when no depositor shares exist). Loss: FL first, then D. Recovery (IF refilled, up to
+  the allocation): that book's depositor loss first, then FL. Cash is tracked, never `balanceOf` (donations change
+  nothing). Allocations / repayments move cash ↔ claims without changing T; deposits and fills happen at the share
+  price (rounding in the pool's favour).
+- **Books.** `allocate(bookId, amount)` only `factory.bookOf(bookId)` (its `closeWindow`), once per book, refused while
+  allocations are paused or a due epoch is unfilled, within `marketCapBps` (30%) of T and the free liquidity above
+  `bufferBps` (20%) of T; the book, vault and router are recorded and authenticate `reportLoss` / `reportRecovery`
+  (book), `repay` (vault, pulls) and `notifyPremium` (router, pulls). Per book: allocation − claim == lossFirstLoss +
+  lossDepositors.
+- **Exits.** `deposit` / `mint` only to the caller's own account (starts their cooldown, 7 days); shares cannot be
+  transferred out of an account in cooldown, nor into the pool. `requestWithdraw(shares)` is never refused: it
+  escrows the shares into the first epoch (weekly, `epochLength`) ending after now and after the cooldown. Ended
+  epochs are filled oldest first from free liquidity at the share price of that moment (partially when cash is short;
+  the rest stays escrowed, still exposed to premiums and losses, until cash returns): losses reported before a fill hit
+  it. `claim(requestId)` (anyone, pays the owner) pays the filled part pro-rata; `processQueue(n)` fills. ERC-4626
+  `withdraw` / `redeem` revert (`maxWithdraw` 0). An idle queue jumps to the current epoch in one step.
+- **Pauses.** GUARDIAN (or timelock) may pause new deposits and new allocations; only the timelock lifts a pause.
+  Exits and book hooks are never paused.
+- **Parameters** (timelock, bounded): `premiumFloorBps` 1200 (≤ 5000), `marketCapBps` 3000 (100..10000), `bufferBps`
+  2000 (≤ 9000), `firstLossTargetBps` 1000 (≤ 5000), `cooldown` 7 days (≤ 30 days), `epochLength` 7 days (1..30 days,
+  from the next epoch).
+- **Accepted (re-audit focus).** The pool covers whatever draws a pool-funded IF below its allocation: traders' bad
+  debt, and also, on a venue that pays winners from the IF once the MM's own capital is exhausted (PoolEngine
+  `_settle`, Orderly liquidation of the MM account), MM losses beyond the MM capital; bounded by the allocation and the
+  per-market cap. Losses on the IF after its recall started are the book's (the claim is due). The IF surplus above the
+  allocation (liquidation fees) is book value. Premium is charged on every distribution of a pool-funded book, also
+  after the IF was returned.
+
+### 2.11 Red-team checks (Backend §2.9) — required tests
 
 Waterfall ordering under partial losses (fuzz) · redemption always honoured (invariant: no
 permission revert — handler tries requestRedeem/claim under pause, kill, Retiring, Retired,
@@ -569,7 +640,11 @@ NAV + backstop cover after every applyMark, modulo credited flows); mandate boun
    honoured → `mark.committed` / `distribution.paid` webhooks.
 6. **Wind-down**: `retire(bookId)` → `mandate.setRetiring()` (keys stay, reduce-only) → agent stops
    quoting, flattens hedges and returns desk USDC (`ReturnToVault`) → keeper recalls IF + MM
-   (venue rules) → final mark with `deployedValueUsd == 0` → `finalizeRetirement` → full redemption.
+   (venue rules; a pool-funded IF: the claim becomes due and `fundClaims` repays the pool first) → final mark with
+   `deployedValueUsd == 0` → `finalizeRetirement` → full redemption.
+7. **Insurance pool** (2026-10): depositors `deposit` → `closeWindow` of a pool-funded book draws its IF (`allocate`)
+   → premiums at each `distribute` → bad debt synced at marks / `syncInsurance` → `requestWithdraw` → weekly epoch
+   end → `processQueue` / `claim` → retirement repays the IF claim.
 
 ---
 

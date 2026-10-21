@@ -35,6 +35,7 @@ Paths are relative to `contracts/test/`.
 | CAP-13 | A book upgrade keeps every piece of state, and incompatible clones / registries / layouts are refused before broadcast. | — | `book/UpgradeBookScript.t.sol`; `audit/ext2026/DUpgradeBookCompat.t.sol` |
 | CAP-14 | A book stuck in Subscription (its `closeWindow` venue deposit keeps reverting) never traps commitments: `CLOSE_WINDOW_TIMEOUT` (7 days) after `subscriptionEnds` anyone may cancel it and every commitment is refundable 1:1; `closeWindow` itself is never gated by the timeout (audit lead "unconfirmed deposits"). | — | `audit/ext2026/LeadStuckSubscription.t.sol` `test_lead_stuckWindow_poc_cancelledAfterTimeoutAndRefunded`, `test_lead_stuckWindow_notBeforeTimeout`, `test_lead_stuckWindow_onlyInSubscription`, `test_lead_stuckWindow_closeWindowStillWorksLate` |
 | CAP-15 | Held-mark settlement stays live under a governance settle price: past `MAX_HELD_DEFERRAL` (30 days) a held mark is deferred while a settle price for the book's underlying (or an index component) is pending or in force, never past `MAX_SETTLE_PRICE_DEFERRAL` (60 days of hold); a missing, old or failing oracle falls back to the 30-day rule (audit lead "settle path", M-1 hook). | — | `audit/ext2026/LeadSettlePrice.t.sol` `test_lead_settle_book_pendingDefersTheThirtyDayFallback`, `test_lead_settle_book_effectiveHeldMarksStillDeferred`, `test_lead_settle_book_effectiveCappedAtSixtyDays`, `test_lead_settle_book_pendingCappedAtSixtyDays`, `test_lead_settle_book_voidedProposalFallsBack`, `test_lead_settle_book_oldOrMissingOracle_fallback`, `test_lead_settle_indexBook_componentSettlePriceDefers` |
+| CAP-16 | A pool-funded book (`charter.ifFromPool`, 2026-10) raises only its MM inventory; the InsurancePool's claim on the IF is netted from NAV, so the IF is never Senior / Junior value and traders' bad debt drawn from it (claim = min(allocation, IF equity)) never moves S / J; MM losses stay Junior -> Senior -> backstop; identity S + J + unfunded claims + (claim not yet due) == vault idle + deployed; a due claim is repaid before tranche claims, a failed repayment never blocks marks, retirement or exits; a book funded the old way is unchanged. | — | `pool/PoolBook.t.sol` (all); `pool/PoolBookParity.t.sol` `test_parity_poolBook` |
 
 ## Pool engine (in-house venue)
 
@@ -131,6 +132,19 @@ Paths are relative to `contracts/test/`.
 | DEP-1 | Mainnet deployment hands every role to the timelock / multisig and VerifyHandover flags any missing or extra holder. | — | `deploy/DeployMainnet.t.sol`; `audit/area4/Area4DeployHandover.t.sol` |
 | DEP-2 | Venue deployments: the live venue binds only to an allowed token and broker; `venueMinIf[Orderly]` stays above Orderly's per-market IF requirement. | — | `deploy/DeployLiveVenue.t.sol`; `deploy/DeployVenueMinIf.t.sol` |
 
+## Insurance pool (2026-10, new: focused re-audit before mainnet)
+
+| ID | Invariant | Invariant suite | Key fuzz / unit tests |
+|---|---|---|---|
+| POOL-1 | Value conservation: deposits + first-loss deposits + premiums - net reported losses - claimed == pool assets + cash reserved for filled withdrawals; pool assets == free liquidity + book claims; depositors' assets + first-loss slice == pool assets; accounted cash <= balance (a donation changes nothing). | `pool/InsurancePoolInvariant.t.sol` `invariant_valueConserved`, `invariant_ledger` | `pool/InsurancePool.t.sol` `test_inflationAttack_donationIgnored`, `test_repay_onlyVault_reducesClaimAndAllocation`, every test's `_checkLedger` |
+| POOL-2 | No market over its cap: an allocation never exceeds `marketCapBps` (30%) of the pool when made, never takes the buffer (20%), one allocation per book, only from the factory's book. | `pool/InsurancePoolInvariant.t.sol` `invariant_noMarketOverItsCap` | `pool/InsurancePool.t.sol` `test_allocate_*` |
+| POOL-3 | Exits never blocked: `requestWithdraw` is never refused (pauses, cooldown, allocations, market state), it lands in an epoch ending after now and after the cooldown; a filled request is always claimable in full; only deposits and allocations can be paused. | `pool/InsurancePoolInvariant.t.sol` `invariant_exitsNeverBlocked` | `pool/InsurancePool.t.sol` `testFuzz_exitsNeverBlocked`, `testFuzz_requestNeverLandsInAnEndedEpoch`, `test_deposit_pausedByGuardian_exitsNot`, `test_idleQueue_catchesUpInOneStep` |
+| POOL-4 | First-loss absorbs first: a loss reaches the depositors' share price only once the treasury slice is exhausted; a recovery restores that book's depositor loss first, then the slice; premiums pay both at the same rate. | `pool/InsurancePoolInvariant.t.sol` `invariant_firstLossAbsorbsFirst` | `pool/InsurancePool.t.sol` `test_loss_firstLossAbsorbsFirst`, `test_recovery_restoresDepositorsFirst_thenSlice`, `test_premium_*` |
+| POOL-5 | The share price never moves on a deposit or a withdrawal fill (rounding only in the pool's favour); allocations and repayments never move it. | `pool/InsurancePoolInvariant.t.sol` `invariant_priceStableOnDepositAndWithdraw` | `pool/InsurancePool.t.sol` `testFuzz_priceStableOnDepositAndFill`, `test_fill_priceUnchanged_claimProRata` |
+| POOL-6 | Queue accounting: escrowed shares == the unfilled part of every epoch; losses reported before a fill hit the queued withdrawal; partial fills pay every request of the epoch pro-rata. | `pool/InsurancePoolInvariant.t.sol` `invariant_escrowMatchesQueue` | `pool/InsurancePool.t.sol` `test_lossBeforeFill_hitsQueuedWithdrawal`, `test_partialFill_thenRestFilledOnRepay_twoRequestsProRata` |
+| POOL-7 | Per book: allocation - claim == losses absorbed (slice + depositors); claim <= allocation; the claims add up to the pool's total. | `pool/InsurancePoolInvariant.t.sol` `invariant_ledger` | `pool/PoolBook.t.sol` `test_refill_restoresClaim_surplusIsTheBooks`, `test_retirement_returnsIfToPoolFirst` |
+| POOL-8 | Governance: parameters and upgrades only by the timelock, within bounds; the guardian only adds pauses. | — | `pool/InsurancePool.t.sol` `test_params_boundsAndAuth`, `test_pause_guardianOnlyAdds_timelockLifts`, `test_upgrade_onlyTimelock`; `deploy/DeployMainnet.t.sol` `test_insurancePool_deployed_wired_and_verified` |
+
 ## Cross-contract
 
 | ID | Invariant | Tests |
@@ -146,6 +160,8 @@ The services re-implement some on-chain rules. Shared vectors keep them identica
 | Rule | Solidity side | TypeScript side |
 |---|---|---|
 | Waterfall (window, split, mark, credit) | `book/WaterfallParity.t.sol`, `core/RevenueRouterParity.t.sol` (vectors `contracts/test/vectors/waterfall.json`) | `packages/shared/test/waterfall.test.ts` |
+| Pool-funded book (premium, claim, poolWindow; poolBook end to end through Book + InsurancePool + RevenueRouter) | `book/WaterfallParity.t.sol` `test_parity_premium`, `test_parity_claim`, `test_parity_poolWindow`; `pool/PoolBookParity.t.sol` | `packages/shared/src/waterfall.ts` §5, `packages/shared/test/waterfall.test.ts` |
+| Charter pool rules (BAD_PREMIUM / NO_POOL) | `gov/MarketCharter.t.sol` `test_validate_insurancePool` | `packages/shared/src/insurancePool.ts`, `packages/shared/test/insurance-pool.test.ts` |
 | Mandate checks | `mandate/MandateFuzz.t.sol` (literal port) | `packages/shared/src/mandate.ts` |
 | EIP-712 Mark / Price / VenueReport | `core/MarkRegistry.t.sol` `test_markStructHash_parityVector`, `engine/AttestedOracle.t.sol` `test_typehash_matchesSharedEip712`, `orderly/OrderlyReportSigned.t.sol` `test_typehash_matchesLowGasSpec` | `packages/shared/test/eip712.test.ts` |
 | Multiplier applied once | `mandate/StockTokenRegistryLiveMultiplier.t.sol` `test_vector_*` | `packages/shared/test/stock-tokens.test.ts` |
@@ -201,7 +217,7 @@ Every test file under `contracts/test`, with the invariants above it covers. Hel
 | `book/UnderwritingVault.t.sol` | unit | CAP-12 |
 | `book/UpgradeBookScript.t.sol` | script rehearsal | CAP-13 |
 | `book/Waterfall.t.sol` | fuzz | CAP-2, CAP-4, CAP-8, CAP-10, CAP-11 |
-| `book/WaterfallParity.t.sol` | parity vectors | off-chain parity |
+| `book/WaterfallParity.t.sol` | parity vectors | off-chain parity, CAP-16 |
 | `core/Backstop.t.sol` | unit + fuzz | BST-1 |
 | `core/BkrnFeeRouter.t.sol` | unit + fuzz | FEE-3, FEE-4 |
 | `core/BkrnFeeRouterTwap.t.sol` | unit | FEE-4 |
@@ -221,7 +237,7 @@ Every test file under `contracts/test`, with the invariants above it covers. Hel
 | `core/TimelockAdminCoupling.t.sol` | review regressions | CFG-1 |
 | `core/UniswapV3Twap.t.sol` | vectors | FEE-4 |
 | `deploy/DeployLiveVenue.t.sol` | deploy script | DEP-2 |
-| `deploy/DeployMainnet.t.sol` | deploy script + VerifyHandover | DEP-1 |
+| `deploy/DeployMainnet.t.sol` | deploy script + VerifyHandover | DEP-1, POOL-8 |
 | `deploy/DeployVenueMinIf.t.sol` | deploy script | DEP-2 |
 | `engine/AttestedOracle.t.sol` | unit + fuzz | ORC-1, ORC-2, off-chain parity |
 | `engine/AttestedOracleAttestation.t.sol` | unit | ORC-3 |
@@ -264,5 +280,9 @@ Every test file under `contracts/test`, with the invariants above it covers. Hel
 | `orderly/OrderlyLiveVault.t.sol` | unit | ORL-7, DEP-2 |
 | `orderly/OrderlyReportSigned.t.sol` | unit + fuzz | ORL-6, off-chain parity |
 | `orderly/OrderlyWithdrawProtocol.t.sol` | review regressions | ORL-3, ORL-6 |
+| `pool/InsurancePool.t.sol` | unit + fuzz | POOL-1..POOL-6, POOL-8 |
+| `pool/InsurancePoolInvariant.t.sol` | **invariant** (7) | POOL-1..POOL-7 |
+| `pool/PoolBook.t.sol` | integration (Book + pool + router) | CAP-16, POOL-7 |
+| `pool/PoolBookParity.t.sol` | parity vectors | CAP-16, off-chain parity |
 
 New suites must add a row here and name the invariant they check (a new ID when it is a new property).
