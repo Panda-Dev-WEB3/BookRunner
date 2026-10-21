@@ -251,6 +251,50 @@ export interface VenueOpsSnap {
   listingMode: "api" | "manual";
 }
 
+/** One book's position in the InsurancePool (bookPosition(bookId)); USD figures are settlement-token dollars (6dp / 1e6). */
+export interface PoolBookSnap {
+  bookId: number;
+  /** bytes32 underlying (lowercase hex): the per-market cap's key */
+  market: string;
+  /** debt principal outstanding (reduced by repayments) */
+  allocationUsd: number;
+  /** the pool's valuation of the debt at the book's last mark (<= allocation) */
+  claimUsd: number;
+  lossFirstLossUsd: number;
+  lossDepositorsUsd: number;
+  /** unix s: periodEnd of the book's last mark reported to the pool (allocation time at first) */
+  lastMarkAt: number;
+  /** counted in the epoch freshness gate until the book's final mark */
+  active: boolean;
+}
+
+/** The protocol-wide InsurancePool (docs/ARCHITECTURE.md §2.10), read once per pass. */
+export interface PoolSnap {
+  address: string;
+  poolAssetsUsd: number;
+  freeLiquidityUsd: number;
+  claimsUsd: number;
+  firstLossUsd: number;
+  utilisationBps: number;
+  firstLossBps: number;
+  firstLossTargetBps: number;
+  epochLengthSec: number;
+  processGraceSec: number;
+  /** queue(): oldest unprocessed epoch, its end (unix s), oldest epoch with unfilled withdrawals, escrowed shares (whole shares) */
+  procEpoch: number;
+  procEndsAt: number;
+  fillEpoch: number;
+  pendingShares: number;
+  depositsPendingUsd: number;
+  /** epochInfo(procEpoch) content; null = the read failed */
+  epoch: { withdrawShares: number; depositUsd: number; processed: boolean } | null;
+  /** staleBooks(procEndsAt): active books whose last mark predates the epoch end; null = the read failed */
+  staleBooks: number | null;
+  activeBookIds: number[];
+  /** positions of activeBooks() plus every book of the snapshot (zero-address positions skipped; failed reads dropped) */
+  books: PoolBookSnap[];
+}
+
 export interface Snapshot {
   now: number; // unix ms
   network: string;
@@ -280,6 +324,11 @@ export interface Snapshot {
   venueOps?: VenueOpsSnap | null;
   /** forged bus messages each service refused (KEYS.busForged: agent-<bookId>, ops-venue, risk) */
   busForged?: Array<{ source: string; events: Array<{ at: number; kind: string; reason: string }> }>;
+  /**
+   * the InsurancePool: null = the deployment has no insurancePool (older deployments) or no pool port; undefined = a
+   * core read failed this pass (the rpc rule reports RPC trouble). Either way the pool rules raise nothing.
+   */
+  pool?: PoolSnap | null;
   /** collection failures that are themselves worth an alert (db / redis unreachable) */
   infraErrors: Array<{ source: "db" | "redis"; error: string }>;
 }
