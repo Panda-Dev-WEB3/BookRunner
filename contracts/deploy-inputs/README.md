@@ -69,6 +69,8 @@ Numbers above 2^53 are decimal strings (`"100000000000000000000000"`); small one
 | `buyback.bkrnPriceId` | string | optional oracle price id of BKRN ("" = governance price) | — |
 | `buyback.referenceSource` | `fixed` \| `twap` \| `attested` | `BkrnFeeRouter.setReferenceSource` (default: `attested` with a `bkrnPriceId`, else `fixed`); `attested` needs `bkrnPriceId` (verify: source == input; `referenceBkrnPerUsdc()` reads for fixed / twap) | VERIFY U5 |
 | `buyback.twap` | `{pool, window, maxTickDeviation}` | `twap` only, and only with a pre-existing `bkrn.token` (a BKRN deployed here has no pool yet: start `fixed`, switch through the timelock): pool = the BKRN/USDG v3 pool (code; observation cardinality must cover the window), window 600..172800 s, deviation 1..2000 ticks (`setTwapParams`) | VERIFY U5 |
+| `insurancePool.premiumFloorBps` / `marketCapBps` / `bufferBps` / `firstLossTargetBps` | uint (bps) | optional (2026-10 InsurancePool; omitted = the defaults 1200 / 3000 / 2000 / 1000, the owner-approved design); bounds <= 5000 / 100..10000 / <= 9000 / <= 5000 (`InsurancePool.setParam`; verify: params == input) | — |
+| `insurancePool.cooldown` / `epochLength` | uint (s) | optional (default 604800 / 604800); cooldown <= 30 days, epoch 1..30 days | — |
 
 ## Pending inputs (owners)
 

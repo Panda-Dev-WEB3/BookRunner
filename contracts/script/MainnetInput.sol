@@ -99,6 +99,18 @@ abstract contract MainnetInput is Script {
         uint256 oracleMinSources;
     }
 
+    /// @notice InsurancePool parameters (2026-10, optional `insurancePool` input object; omitted fields = the pool's
+    ///         defaults, the owner-approved design: premium floor 12%, per-market cap 30%, buffer 20%, first-loss target
+    ///         10%, cooldown 7 days, weekly epochs). Bounds as InsurancePool.setParam.
+    struct PoolIn {
+        uint256 premiumFloorBps;
+        uint256 marketCapBps;
+        uint256 bufferBps;
+        uint256 firstLossTargetBps;
+        uint256 cooldown;
+        uint256 epochLength;
+    }
+
     struct Buyback {
         uint256 poolFee;
         uint256 refBkrnPerUsdcWad;
@@ -163,6 +175,7 @@ abstract contract MainnetInput is Script {
     BkrnIn internal bkrnIn;
     Params internal prm;
     Buyback internal bb;
+    PoolIn internal poolIn;
     address[3] internal committeeMembers;
     address[] internal markSigners;
     address[] internal riskHolders;
@@ -232,6 +245,7 @@ abstract contract MainnetInput is Script {
         _loadBkrn(json);
         _loadParams(json);
         _loadBuyback(json);
+        _loadPool(json);
         _loadRoles(json);
         _loadOracle(json);
         _loadStocks(json);
@@ -291,6 +305,15 @@ abstract contract MainnetInput is Script {
         uint256[] memory bo = json.readUintArray(".params.tiers.bonds");
         for (uint256 i; i < th.length; ++i) tierThresholds.push(th[i]);
         for (uint256 i; i < bo.length; ++i) tierBonds.push(bo[i]);
+    }
+
+    function _loadPool(string memory json) private {
+        poolIn.premiumFloorBps = json.readUintOr(".insurancePool.premiumFloorBps", 1200);
+        poolIn.marketCapBps = json.readUintOr(".insurancePool.marketCapBps", 3000);
+        poolIn.bufferBps = json.readUintOr(".insurancePool.bufferBps", 2000);
+        poolIn.firstLossTargetBps = json.readUintOr(".insurancePool.firstLossTargetBps", 1000);
+        poolIn.cooldown = json.readUintOr(".insurancePool.cooldown", 7 days);
+        poolIn.epochLength = json.readUintOr(".insurancePool.epochLength", 7 days);
     }
 
     function _loadBuyback(string memory json) private {
@@ -531,6 +554,13 @@ abstract contract MainnetInput is Script {
         require(bb.refBkrnPerUsdcWad > 0 && bb.maxPerCall > 0, "input: buyback ref price / maxPerCall");
         require(bb.maxSlippageBps <= 2000, "input: buyback.maxSlippageBps > 2000");
         require(multiplierBandBps <= MAX_MULTIPLIER_BAND_BPS, "input: stockRegistry.multiplierBandBps > 5000");
+        // InsurancePool.setParam bounds (the deploy sets them while the deployer is still the timelock)
+        require(poolIn.premiumFloorBps <= 5000, "input: insurancePool.premiumFloorBps > 5000");
+        require(poolIn.marketCapBps >= 100 && poolIn.marketCapBps <= 10_000, "input: insurancePool.marketCapBps");
+        require(poolIn.bufferBps <= 9000, "input: insurancePool.bufferBps > 9000");
+        require(poolIn.firstLossTargetBps <= 5000, "input: insurancePool.firstLossTargetBps > 5000");
+        require(poolIn.cooldown <= 30 days, "input: insurancePool.cooldown > 30 days");
+        require(poolIn.epochLength >= 1 days && poolIn.epochLength <= 30 days, "input: insurancePool.epochLength");
     }
 
     /// @dev BkrnFeeRouter reference source (VERIFY U5). TWAP needs a pool of the pre-existing BKRN (a BKRN the

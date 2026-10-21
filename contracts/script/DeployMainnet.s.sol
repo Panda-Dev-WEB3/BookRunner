@@ -27,6 +27,8 @@ import {AttestedOracle} from "../src/AttestedOracle.sol";
 import {PoolEngine} from "../src/PoolEngine.sol";
 import {PoolEngineAdapter} from "../src/PoolEngineAdapter.sol";
 import {OrderlyAdapter} from "../src/OrderlyAdapter.sol";
+import {InsurancePool} from "../src/InsurancePool.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {BRTypes} from "../src/interfaces/BRTypes.sol";
 import {IStockTokenRegistry} from "../src/interfaces/IStockTokenRegistry.sol";
 
@@ -70,6 +72,8 @@ contract DeployMainnet is MainnetInput {
         address charter;
         address committee;
         address factory;
+        address insurancePool; // ERC1967 proxy (2026-10)
+        address insurancePoolImpl;
         bool bkrnDeployed;
         uint256 startBlock;
     }
@@ -184,6 +188,7 @@ contract DeployMainnet is MainnetInput {
         config.setAddress("charter", d.charter);
         config.setAddress("committee", d.committee);
         config.setAddress("factory", d.factory);
+        _deployInsurancePool();
 
         BkrnStaking staking = BkrnStaking(d.staking);
         staking.setLocker(d.charter, true);
@@ -205,6 +210,25 @@ contract DeployMainnet is MainnetInput {
         if (feeRouter.referenceSource() != bb.referenceSource) feeRouter.setReferenceSource(bb.referenceSource);
 
         Backstop(d.backstop).setMaxCoverBps(uint16(prm.backstopMaxCoverBps));
+    }
+
+    /// @dev InsurancePool (2026-10; new, needs the focused re-audit before mainnet): UUPS proxy bound to this config,
+    ///      registered as config.insurancePool(); parameters from the input (set while the deployer is still the
+    ///      timelock: InsurancePool.setParam is config.timelock() only). The treasury seeds the first-loss slice after
+    ///      the deployment (RUNBOOK).
+    function _deployInsurancePool() internal {
+        d.insurancePoolImpl = address(new InsurancePool());
+        d.insurancePool = address(
+            new ERC1967Proxy(d.insurancePoolImpl, abi.encodeCall(InsurancePool.initialize, (d.config)))
+        );
+        BookrunnerConfig(d.config).setAddress("insurancePool", d.insurancePool);
+        InsurancePool p = InsurancePool(d.insurancePool);
+        p.setParam(p.PARAM_PREMIUM_FLOOR_BPS(), poolIn.premiumFloorBps);
+        p.setParam(p.PARAM_MARKET_CAP_BPS(), poolIn.marketCapBps);
+        p.setParam(p.PARAM_BUFFER_BPS(), poolIn.bufferBps);
+        p.setParam(p.PARAM_FIRST_LOSS_TARGET_BPS(), poolIn.firstLossTargetBps);
+        p.setParam(p.PARAM_COOLDOWN(), poolIn.cooldown);
+        p.setParam(p.PARAM_EPOCH_LENGTH(), poolIn.epochLength);
     }
 
     function _setParams() internal {
@@ -370,6 +394,8 @@ contract DeployMainnet is MainnetInput {
         vm.serializeAddress(c, "factory", d.factory);
         vm.serializeAddress(c, "poolEngine", d.poolEngine);
         vm.serializeAddress(c, "hedgeExecutor", d.hedgeExecutor);
+        vm.serializeAddress(c, "insurancePool", d.insurancePool);
+        vm.serializeAddress(c, "insurancePoolImplementation", d.insurancePoolImpl);
         vm.serializeAddress(c, "bookImplementation", d.bookImpl);
         vm.serializeAddress(c, "bookLogic", d.bookLogic);
         vm.serializeAddress(c, "uniswapV3Factory", ext.univ3Factory);
