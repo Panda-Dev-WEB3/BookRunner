@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { COMMIT_SHARES, LIVE_SIZES, MOCK_SIZES, commitPlan, launchBooks, launchSizes, settlementNeeds, transferPlan } from "./launch-plan";
+import { COMMIT_SHARES, LIVE_SIZES, MOCK_SIZES, commitPlan, launchBooks, launchSizes, poolSeedUsd, raiseOf, settlementNeeds, transferPlan } from "./launch-plan";
 
 const testnetMin = (v: 0 | 1) => (v === 0 ? 101 : 10_000);
 
@@ -60,5 +60,27 @@ describe("launch plan (mock venue vs live Orderly rehearsal, VERIFY O17)", () =>
     const plan = transferPlan(needs, { sponsor: 176_000_000n, a0: 100_000_000n, a1: 0n, a2: 500_000_000n });
     expect(plan.transfers).toEqual([["a0", 550_000_000n], ["a1", 520_000_000n]]);
     expect(plan.total).toBe(1_070_000_000n);
+  });
+});
+
+describe("insurance pool launch (2026-10)", () => {
+  const books = (ifFromPool: boolean) => (["NVDA", "TSLA", "RHX5"] as const).map((name) => ({ name, ...MOCK_SIZES[name], ifFromPool }));
+
+  test("a pool-funded book's window raises only the MM inventory; settlement needs follow", () => {
+    expect(raiseOf({ ifUsd: 30_000, mmUsd: 75_000, ifFromPool: true })).toBe(75_000);
+    expect(raiseOf({ ifUsd: 30_000, mmUsd: 75_000 })).toBe(105_000);
+    const pooled = settlementNeeds([{ name: "NVDA", ifUsd: 150, mmUsd: 500, maxInventoryUsd: 250, ifFromPool: true }], 0);
+    expect(pooled.a0).toBe(Math.round(500 * COMMIT_SHARES.a0Senior));
+  });
+
+  test("the first-loss seed funds every IF at window close: per-market cap 30% and the 80% above the buffer, +10%", () => {
+    // mock: 3 x 30,000 -> max(30,000 / 0.3, 90,000 / 0.8) = 112,500, +10% = 123,750
+    expect(poolSeedUsd(books(true))).toBe(123_750);
+    const seed = poolSeedUsd(books(true));
+    for (const b of books(true)) expect(b.ifUsd).toBeLessThanOrEqual(seed * 0.3);
+    expect(books(true).reduce((a, b) => a + b.ifUsd, 0)).toBeLessThanOrEqual(seed * 0.8);
+    // live rehearsal: two Orderly books at IF 150 -> max(500, 375) * 1.1
+    expect(poolSeedUsd([{ name: "NVDA", ...LIVE_SIZES, ifFromPool: true }, { name: "TSLA", ...LIVE_SIZES, ifFromPool: true }])).toBe(550);
+    expect(poolSeedUsd(books(false))).toBe(0);
   });
 });

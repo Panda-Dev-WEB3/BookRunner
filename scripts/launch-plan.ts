@@ -47,7 +47,43 @@ export interface BookSize {
   ifUsd: number;
   mmUsd: number;
   maxInventoryUsd: number;
+  /** 2026-10: the InsurancePool funds the IF (charter.ifFromPool): the window raises only the MM inventory */
+  ifFromPool?: boolean;
 }
+
+/** Whole USD the subscription window raises: the MM inventory, plus the IF when the tranches fund it. */
+export const raiseOf = (s: Pick<BookSize, "ifUsd" | "mmUsd" | "ifFromPool">): number => (s.ifFromPool ? s.mmUsd : s.ifUsd + s.mmUsd);
+
+// ---------------------------------------------------------------- insurance pool (2026-10, ARCHITECTURE §2.10)
+
+/** InsurancePool defaults the seed is sized against (per-market cap, free-liquidity buffer). */
+export const POOL_DEFAULTS = { marketCapBps: 3000, bufferBps: 2000 } as const;
+
+/**
+ * First-loss slice (whole USD) the treasury seeds so every pool-funded book's IF can be allocated at its closeWindow.
+ * Queued deposits only count once their epoch is processed (after its end), so at launch the slice alone is the pool:
+ * each IF must fit the per-market cap (30% of the pool; one market per launch book) and all of them the free
+ * liquidity above the buffer (80%); `marginBps` of headroom on top. The slice is then 100% of the pool (>= its 10%).
+ */
+export function poolSeedUsd(sizes: BookSize[], o: { marketCapBps?: number; bufferBps?: number; marginBps?: number } = {}): number {
+  const pooled = sizes.filter((s) => s.ifFromPool);
+  if (pooled.length === 0) return 0;
+  // integer bps arithmetic (whole USD): no float rounding in the seed
+  const capBps = o.marketCapBps ?? POOL_DEFAULTS.marketCapBps;
+  const freeBps = 10_000 - (o.bufferBps ?? POOL_DEFAULTS.bufferBps);
+  const perMarket = Math.ceil((Math.max(...pooled.map((s) => s.ifUsd)) * 10_000) / capBps);
+  const total = Math.ceil((pooled.reduce((a, s) => a + s.ifUsd, 0) * 10_000) / freeBps);
+  return Math.ceil((Math.max(perMarket, total) * (10_000 + (o.marginBps ?? 1000))) / 10_000);
+}
+
+/** Test depositors' queued deposits (whole USD) on the mock venue; none on the live venue (real USDG). */
+export const POOL_TEST_DEPOSITS: ReadonlyArray<{ who: "a0" | "a1"; usd: number }> = [
+  { who: "a0", usd: 60_000 },
+  { who: "a1", usd: 40_000 },
+];
+
+/** Devnet / testnet pool parameters set by the launch (the deployer is config.timelock() there): faster demos. */
+export const POOL_DEMO_PARAMS = { epochLength: 86_400, cooldown: 3_600, processGrace: 3_600 } as const;
 
 type Env = Record<string, string | undefined>;
 
@@ -102,7 +138,7 @@ export function settlementNeeds(sizes: BookSize[], charterFeeUsd: number, progre
   for (const s of sizes) {
     const pr = progress[s.name];
     if (!pr?.feePaid) out.sponsor += charterFeeUsd;
-    for (const c of commitPlan(s.ifUsd + s.mmUsd)) if (!pr?.done.has(c.who)) out[c.who] += c.usd;
+    for (const c of commitPlan(raiseOf(s))) if (!pr?.done.has(c.who)) out[c.who] += c.usd;
   }
   return out;
 }

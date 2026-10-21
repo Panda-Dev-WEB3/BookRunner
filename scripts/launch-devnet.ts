@@ -15,6 +15,12 @@
 // real Orderly testnet vault + real testnet USDG): only NVDA and TSLA by default, at rehearsal sizes, and the deployer
 // TRANSFERS the settlement token to the sponsor / allocators (no mint; refused up front if it holds too little); no
 // trader or user-wallet funding. Sizes / books: scripts/launch-plan.ts (LAUNCH_BOOKS, LAUNCH_IF_USD, LAUNCH_MM_USD, ...).
+// Insurance pool (2026-10, deployment record contracts.insurancePool): the books are chartered with ifFromPool on (the
+// pool funds each IF at closeWindow, the window raises only the MM inventory; LAUNCH_IF_FROM_POOL=0 turns it off); the
+// deployer (config.timelock() on devnet / testnet) sets demo pool parameters (1-day epochs, 1 h cooldown and grace;
+// LAUNCH_POOL_PARAMS=0 keeps the defaults), the treasury (deployer) seeds the first-loss slice large enough to fund every
+// IF at window close (queued deposits count only once their epoch is processed), and on the mock venue two test
+// allocators queue deposits for the first epoch.
 import { readFileSync, writeFileSync } from "node:fs";
 import {
   type Abi,
@@ -35,6 +41,7 @@ import {
   bkrnTokenAbi,
   bookAbi,
   bookFactoryAbi,
+  insurancePoolAbi,
   marketCharterAbi,
   mMMandateAbi,
   mockERC20Abi,
@@ -50,7 +57,21 @@ import { SESSIONS_24X5, encodeSessions } from "../packages/shared/src/sessions";
 import { type BookComponents, type Deployment, liveVenueDeployment } from "../packages/shared/src/types";
 import { usd } from "../packages/shared/src/units";
 import { ensureDeskKeys } from "./desk-keys";
-import { type BookProgress, type BookSize, type Commit, type Participant, commitPlan, launchBooks, launchSizes, settlementNeeds, transferPlan } from "./launch-plan";
+import {
+  type BookProgress,
+  type BookSize,
+  type Commit,
+  POOL_DEMO_PARAMS,
+  POOL_TEST_DEPOSITS,
+  type Participant,
+  commitPlan,
+  launchBooks,
+  launchSizes,
+  poolSeedUsd,
+  raiseOf,
+  settlementNeeds,
+  transferPlan,
+} from "./launch-plan";
 
 const RPC = process.env.RPC_URL ?? "http://127.0.0.1:8547";
 const WINDOW = Number(process.env.LAUNCH_WINDOW_SECONDS ?? 120);
@@ -113,7 +134,12 @@ interface LaunchSpec {
   hedgeRatioMaxBps: number;
   deskKey: LocalAccount;
   takerFeeBps: number;
+  /** 2026-10: the InsurancePool funds the IF (window raises only the MM inventory) */
+  ifFromPool: boolean;
 }
+
+/** Whole USD the window raises for a spec (scripts/launch-plan.ts raiseOf). */
+const raiseFor = (s: LaunchSpec) => raiseOf({ ifUsd: Number(s.ifUsd / 1_000_000n), mmUsd: Number(s.mmUsd / 1_000_000n), ifFromPool: s.ifFromPool });
 
 function buildCharter(s: LaunchSpec, markInterval: bigint) {
   const allow = hedgeAllowTree(s.hedgeTokens.map((t) => ({ asset: tokenUnderlying(t), venue: HEDGE_VENUES.UNIV3 })));
@@ -144,6 +170,8 @@ function buildCharter(s: LaunchSpec, markInterval: bigint) {
     symbol: strToBytes32(s.symbol),
     takerFeeBps: s.takerFeeBps,
     makerFeeBps: 0,
+    ifFromPool: s.ifFromPool,
+    premiumBps: 0, // the pool's floor (12%), fixed into the charter at filing
   };
 }
 
@@ -211,7 +239,7 @@ async function launchProgress(d: Deployment, specs: LaunchSpec[]): Promise<Recor
     const comps = await read<BookComponents>(c.factory, bookFactoryAbi as Abi, "componentsOf", [prior.id]);
     if (comps.book && !BYTES32_ZERO.test(comps.book)) {
       const open = (await read<number>(comps.book, bookAbi as Abi, "state")) === 0;
-      for (const k of commitPlan(Number((s.ifUsd + s.mmUsd) / 1_000_000n))) {
+      for (const k of commitPlan(raiseFor(s))) {
         const tranche = k.tranche === "junior" ? comps.junior : comps.senior;
         // a closed window takes no commitment any more; an open one skips the commits already made (launchBook)
         if (!open || (await read<bigint>(tranche, trancheAbi as Abi, "balanceOf", [who[k.who].address])) > 0n) done.add(k.who);
@@ -359,7 +387,7 @@ async function launchBook(d: Deployment, s: LaunchSpec) {
 
   // subscriptions (scripts/launch-plan.ts commitPlan: the same amounts the up-front funding check used); a commit
   // already made (tranche shares held) is not repeated
-  const raise = Number((s.ifUsd + s.mmUsd) / 1_000_000n);
+  const raise = raiseFor(s);
   if ((await read<number>(comps.book, bookAbi as Abi, "state")) === 0) {
     const who: Record<Commit["who"], LocalAccount> = { sponsor: acct.sponsor, a0: acct.a0, a1: acct.a1, a2: acct.a2 };
     for (const k of commitPlan(raise)) {
@@ -381,6 +409,69 @@ async function launchBook(d: Deployment, s: LaunchSpec) {
   }
   log(`${s.name}: desk key ${s.deskKey.address} registered`);
   return { bookId: Number(id), name: s.name, symbol: s.symbol, venue: s.venue, components: comps };
+}
+
+// ---------------------------------------------------------------- insurance pool (2026-10)
+/** InsurancePool PARAM_* keys: bytes32 short strings ("epochLength"). */
+const POOL_PARAM = (name: string) => strToBytes32(name);
+
+/**
+ * Demo parameters (deployer = config.timelock() on devnet / testnet), then the treasury's first-loss slice: topped up
+ * to poolSeedUsd(sizes) so every pool-funded IF can be allocated at window close (idempotent).
+ */
+async function setupPool(d: Deployment, sizes: BookSize[], live: boolean) {
+  const pool = d.contracts.insurancePool as Address;
+  const c = d.contracts;
+  const timelock = await read<Address>(c.config, [{ type: "function", name: "timelock", inputs: [], outputs: [{ type: "address" }], stateMutability: "view" }], "timelock");
+  if (process.env.LAUNCH_POOL_PARAMS !== "0" && timelock.toLowerCase() === acct.deployer.address.toLowerCase()) {
+    const p = await read<readonly [number, number, number, number, number, number, number, number]>(pool, insurancePoolAbi as Abi, "params");
+    const want: Array<[string, number, number]> = [
+      ["cooldown", Number(p[4]), POOL_DEMO_PARAMS.cooldown],
+      ["processGrace", Number(p[6]), POOL_DEMO_PARAMS.processGrace],
+      // applied once the queue is idle (it is at launch): never moves a queued request
+      ["epochLength", Number(p[7]) || Number(p[5]), POOL_DEMO_PARAMS.epochLength],
+    ];
+    for (const [key, have, value] of want) {
+      if (have === value) continue;
+      await send(acct.deployer, pool, insurancePoolAbi as Abi, "setParam", [POOL_PARAM(key), BigInt(value)]);
+      log(`pool: ${key} ${have}s -> ${value}s`);
+    }
+  }
+  const seed = usd(poolSeedUsd(sizes));
+  const have = await read<bigint>(pool, insurancePoolAbi as Abi, "firstLossAssets");
+  if (seed === 0n || have >= seed) {
+    log(`pool ${pool}: first-loss slice ${Number(have) / 1e6} (needs ${Number(seed) / 1e6})`);
+    return;
+  }
+  const missing = seed - have;
+  const bal = await read<bigint>(c.usdc, mockERC20Abi as Abi, "balanceOf", [acct.deployer.address]);
+  if (bal < missing) {
+    if (live) throw new Error(`treasury (deployer ${acct.deployer.address}) holds ${Number(bal) / 1e6} of the settlement token, the pool's first-loss slice needs ${Number(missing) / 1e6} more`);
+    await send(acct.deployer, c.usdc, mockERC20Abi as Abi, "mint", [acct.deployer.address, missing - bal]);
+  }
+  await send(acct.deployer, c.usdc, mockERC20Abi as Abi, "approve", [pool, missing]);
+  await send(acct.deployer, pool, insurancePoolAbi as Abi, "depositFirstLoss", [missing]);
+  log(`pool ${pool}: treasury seeded the first-loss slice +${Number(missing) / 1e6} (now ${Number(seed) / 1e6}: funds every IF at window close)`);
+}
+
+/** Mock venue: test allocators queue deposits for the open epoch (once per allocator; idempotent). */
+async function poolTestDeposits(d: Deployment) {
+  const pool = d.contracts.insurancePool as Address;
+  const who = { a0: acct.a0, a1: acct.a1 } as const;
+  // the pool has no deposit counter view: walk depositInfo(1..) until an unused id (bounded; a launch makes two)
+  const owners = new Set<string>();
+  for (let i = 1n; i <= 1_000n; i++) {
+    const info = await read<{ owner: Address }>(pool, insurancePoolAbi as Abi, "depositInfo", [i]);
+    if (/^0x0{40}$/i.test(info.owner)) break;
+    owners.add(info.owner.toLowerCase());
+  }
+  for (const dep of POOL_TEST_DEPOSITS) {
+    const a = who[dep.who];
+    if (owners.has(a.address.toLowerCase())) continue;
+    await send(a, d.contracts.usdc, mockERC20Abi as Abi, "approve", [pool, usd(dep.usd)]);
+    await send(a, pool, insurancePoolAbi as Abi, "requestDeposit", [usd(dep.usd)]);
+    log(`pool: ${dep.who} queued ${dep.usd.toLocaleString()} for the open epoch (shares at its processing)`);
+  }
 }
 
 async function closeWindows(books: Array<{ name: string; components: BookComponents }>) {
@@ -419,10 +510,13 @@ async function main() {
   const live = liveVenueDeployment(d);
   const minIfOf = async (venue: 0 | 1) => Number(await configUint(d.contracts, "venueMinIfUsd", [venue], [{ name: "venue", type: "uint8" }])) / 1e6;
   const minIf = { 0: await minIfOf(0), 1: await minIfOf(1) };
-  const sizes = launchSizes(live, launchBooks(live), (v) => minIf[v]);
-  const sized = (s: Omit<LaunchSpec, "ifUsd" | "mmUsd" | "maxInventoryUsd">): LaunchSpec | null => {
+  // 2026-10: books are chartered with a pool-funded IF when the deployment has an InsurancePool
+  const poolAddr = d.contracts.insurancePool;
+  const ifFromPool = !!poolAddr && !/^0x0{40}$/i.test(poolAddr) && process.env.LAUNCH_IF_FROM_POOL !== "0";
+  const sizes = launchSizes(live, launchBooks(live), (v) => minIf[v]).map((z) => ({ ...z, ifFromPool }));
+  const sized = (s: Omit<LaunchSpec, "ifUsd" | "mmUsd" | "maxInventoryUsd" | "ifFromPool">): LaunchSpec | null => {
     const z = sizes.find((x) => x.name === s.name);
-    return z ? { ...s, ifUsd: usd(z.ifUsd), mmUsd: usd(z.mmUsd), maxInventoryUsd: usd(z.maxInventoryUsd) } : null;
+    return z ? { ...s, ifUsd: usd(z.ifUsd), mmUsd: usd(z.mmUsd), maxInventoryUsd: usd(z.maxInventoryUsd), ifFromPool } : null;
   };
   // audit M-3: maxSkewBps <= minQuoteWidthBps / 2 (MarketCharter.validate)
   const specs: LaunchSpec[] = [
@@ -447,6 +541,8 @@ async function main() {
   await fundGas();
   // a book a previous run left half done is funded only for what is still missing (never twice)
   await fundParticipants(d, sizes.filter((z) => todo.some((s) => s.name === z.name)), await launchProgress(d, todo));
+  // the pool must be able to fund every pool-funded IF at window close (all launch books, resumed ones included)
+  if (ifFromPool) await setupPool(d, sizes, live);
   const path = deploymentPath();
   const saveProgress = (complete: boolean) => {
     const fresh = JSON.parse(readFileSync(path, "utf8")) as Deployment;
@@ -463,6 +559,7 @@ async function main() {
     launched.push(await launchBook(d, s));
     saveProgress(false); // a failure after this point resumes with the next book
   }
+  if (ifFromPool && !live) await poolTestDeposits(d);
   await closeWindows(launched);
   saveProgress(true);
   log(`launched ${launched.length} books -> ${path}`);
