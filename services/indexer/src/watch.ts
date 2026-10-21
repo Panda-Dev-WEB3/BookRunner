@@ -57,6 +57,12 @@ export class WatchSet {
     return this.comps.get(bookId);
   }
 
+  /** The InsurancePool of the deployment, when it has one. */
+  poolAddress(): Address | null {
+    for (const [a, e] of this.protocol) if (e.kind === "pool") return a;
+    return null;
+  }
+
   protocolAddresses(): Address[] {
     return [...this.protocol.keys()];
   }

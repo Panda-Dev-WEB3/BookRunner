@@ -2,22 +2,26 @@
 // epoch processing and fills, the per-book position (re-read at the event's block), value flows and one state
 // snapshot per block (share price history). Writes are idempotent: natural ids, guarded transitions, and the
 // additive totals (claims, fills, premiums) move only when their pool_flows row is new.
-import type { Address } from "viem";
+// Review I-3: a failed enrichment read never drops data. The event rows are written; the snapshot of that block is
+// written with the previous good values and `stale`, the book position keeps its last good values marked `stale`, an
+// epoch keeps a null end; backfillPool (runner, every pass) re-reads all of them until they succeed.
+import type { Address, Hex } from "viem";
+import type { IndexerChain, PoolStateLite } from "./chain";
 import { arg, usdDb } from "./convert";
 import type { DecodedLog } from "./decode";
 import type { Handler, HandlerCtx } from "./handlers";
-import type { PoolFlowKind } from "./store";
+import type { IndexerStore, PoolFlowKind, PoolSnapshotRow } from "./store";
 
 const pool = (l: DecodedLog) => l.address as Address;
 const isZeroAddr = (a: string) => /^0x0{40}$/i.test(a);
 
-/** pool_snapshots row at the log's block (one read per block, cached by the chain). */
-async function snapshot({ log, ts, store, chain }: HandlerCtx): Promise<void> {
-  const s = await chain.poolState(pool(log), log.blockNumber);
-  if (!s) return;
-  await store.upsertPoolSnapshot({
-    blockNumber: Number(log.blockNumber),
+const errText = (e: unknown) => (e instanceof Error ? e.message : String(e)).split("\n")[0];
+
+function snapshotRow(blockNumber: number, ts: Date, s: PoolStateLite): PoolSnapshotRow {
+  return {
+    blockNumber,
     ts,
+    stale: false,
     poolAssets: usdDb(s.poolAssets),
     depositorAssets: usdDb(s.depositorAssets),
     totalSupplyRaw: s.totalSupply.toString(),
@@ -30,14 +34,32 @@ async function snapshot({ log, ts, store, chain }: HandlerCtx): Promise<void> {
     lossesTotal: usdDb(s.lossesTotal),
     depositsPending: usdDb(s.depositsPending),
     pendingSharesRaw: s.pendingShares.toString(),
-  });
+  };
 }
 
-/** pool_books row from IInsurancePool.bookPosition at the log's block. */
-async function position(ctx: HandlerCtx, bookId: number, allocatedAt?: Date): Promise<void> {
-  const { log, ts, store, chain } = ctx;
-  const p = await chain.poolBookPosition(pool(log), BigInt(bookId), log.blockNumber);
-  if (!p || isZeroAddr(p.book)) return;
+/** pool_snapshots row at the log's block (one read per block); a failed read writes a stale carry-forward row. */
+async function snapshot({ log, ts, store, chain, logger }: HandlerCtx): Promise<void> {
+  const block = Number(log.blockNumber);
+  try {
+    await store.upsertPoolSnapshot(snapshotRow(block, ts, await chain.poolState(pool(log), log.blockNumber)));
+  } catch (err) {
+    const prev = await store.poolSnapshotAtOrBefore(block);
+    if (prev && prev.blockNumber === block && !prev.stale) return; // a good row of this block already exists
+    logger.warn({ block, err: errText(err) }, "pool state unreadable at this block: stale row kept, backfilled later");
+    const zero = usdDb(0n);
+    await store.upsertPoolSnapshot(
+      prev
+        ? { ...prev, blockNumber: block, ts, stale: true }
+        : { blockNumber: block, ts, stale: true, poolAssets: zero, depositorAssets: zero, totalSupplyRaw: "0", sharePrice: usdDb(1_000_000n), firstLoss: zero, freeLiquidity: zero, claims: zero, utilisationBps: 0, premiumsTotal: zero, lossesTotal: zero, depositsPending: zero, pendingSharesRaw: "0" },
+    );
+  }
+}
+
+/** Upserts the position read at `at`; false when the pool has none for the book. */
+async function writePosition(store: IndexerStore, chain: IndexerChain, poolAddr: Address, bookId: number, at: bigint, allocatedAt: Date): Promise<boolean> {
+  const p = await chain.poolBookPosition(poolAddr, BigInt(bookId), at);
+  if (isZeroAddr(p.book)) return false;
+  const prev = await store.getPoolBook(bookId);
   await store.upsertPoolBook({
     bookId,
     market: p.market.toLowerCase(),
@@ -47,8 +69,68 @@ async function position(ctx: HandlerCtx, bookId: number, allocatedAt?: Date): Pr
     lossDepositors: usdDb(p.lossDepositors),
     lastMarkAt: p.lastMarkAt > 0 ? new Date(p.lastMarkAt * 1000) : null,
     active: p.active,
-    allocatedAt: allocatedAt ?? ts,
+    allocatedAt: prev?.allocatedAt ?? allocatedAt,
+    stale: false,
   });
+  return true;
+}
+
+/**
+ * pool_books row from IInsurancePool.bookPosition at the log's block. A failed read keeps the last good row flagged
+ * stale (or, on the Allocated event, writes the event's own figures, stale) for the backfill.
+ */
+async function position(ctx: HandlerCtx, bookId: number, allocated?: { amount: bigint; market: Hex }): Promise<void> {
+  const { log, ts, store, chain, logger } = ctx;
+  try {
+    await writePosition(store, chain, pool(log), bookId, log.blockNumber, ts);
+  } catch (err) {
+    logger.warn({ bookId, block: Number(log.blockNumber), err: errText(err) }, "pool book position unreadable: last good row kept (stale), backfilled later");
+    if (allocated && !(await store.getPoolBook(bookId))) {
+      const a = usdDb(allocated.amount);
+      await store.upsertPoolBook({ bookId, market: allocated.market.toLowerCase(), allocation: a, claim: a, lossFirstLoss: usdDb(0n), lossDepositors: usdDb(0n), lastMarkAt: ts, active: true, allocatedAt: ts, stale: true });
+    } else {
+      await store.markPoolBookStale(bookId);
+    }
+  }
+}
+
+/**
+ * Review I-3 backfill, once per indexer pass (outside the range transaction): re-reads stale snapshot blocks (at their
+ * own block), stale book positions (at `head`, the newest indexed block) and processed epochs without an end. Every
+ * failure is logged and retried on the next pass; nothing here throws.
+ */
+export async function backfillPool(d: { store: IndexerStore; chain: IndexerChain; pool: Address; head: bigint; logger: HandlerCtx["logger"]; limit?: number }): Promise<{ snapshots: number; books: number; epochs: number }> {
+  const out = { snapshots: 0, books: 0, epochs: 0 };
+  const limit = d.limit ?? 50;
+  for (const block of await d.store.stalePoolSnapshots(limit)) {
+    try {
+      const prev = await d.store.poolSnapshotAtOrBefore(block);
+      const s = await d.chain.poolState(d.pool, BigInt(block));
+      await d.store.upsertPoolSnapshot(snapshotRow(block, prev?.ts ?? new Date((await d.chain.blockTimestamp(BigInt(block))) * 1000), s));
+      out.snapshots++;
+    } catch (err) {
+      d.logger.debug({ block, err: errText(err) }, "pool snapshot backfill failed (retrying next pass)");
+    }
+  }
+  for (const bookId of await d.store.stalePoolBooks()) {
+    try {
+      if (await writePosition(d.store, d.chain, d.pool, bookId, d.head, new Date())) out.books++;
+    } catch (err) {
+      d.logger.debug({ bookId, err: errText(err) }, "pool book backfill failed (retrying next pass)");
+    }
+  }
+  for (const epoch of await d.store.poolEpochsWithoutEnd(limit)) {
+    try {
+      const endsAt = await d.chain.poolEpochEnd(d.pool, BigInt(epoch), d.head);
+      if (endsAt > 0) {
+        await d.store.upsertPoolEpoch(epoch, { endsAt: new Date(endsAt * 1000) });
+        out.epochs++;
+      }
+    } catch (err) {
+      d.logger.debug({ epoch, err: errText(err) }, "pool epoch end backfill failed (retrying next pass)");
+    }
+  }
+  return out;
 }
 
 function flow(ctx: HandlerCtx, kind: PoolFlowKind, bookId: number | null, amount: bigint, firstLossPart = 0n): Promise<boolean> {
@@ -123,7 +205,8 @@ const claimed: Handler = async (ctx) => {
 const epochProcessed: Handler = async (ctx) => {
   const { log, ts, store, chain, emit } = ctx;
   const epoch = arg.num(log.args, "epoch");
-  const endsAt = await chain.poolEpochEnd(pool(log), BigInt(epoch), log.blockNumber);
+  // a failed read leaves the end null: the backfill re-reads it
+  const endsAt = await chain.poolEpochEnd(pool(log), BigInt(epoch), log.blockNumber).catch(() => 0);
   const stale = arg.bool(log.args, "stale");
   const depositAssets = usdDb(arg.big(log.args, "depositAssets"));
   await store.upsertPoolEpoch(epoch, {
@@ -164,7 +247,7 @@ const epochFilled: Handler = async (ctx) => {
 const allocated: Handler = async (ctx) => {
   const bookId = arg.num(ctx.log.args, "bookId");
   await flow(ctx, "allocated", bookId, arg.big(ctx.log.args, "amount"));
-  await position(ctx, bookId, ctx.ts);
+  await position(ctx, bookId, { amount: arg.big(ctx.log.args, "amount"), market: arg.hex(ctx.log.args, "market") });
   await snapshot(ctx);
 };
 
@@ -176,14 +259,15 @@ const bookMarked: Handler = async (ctx) => {
 // The pool's loss on a book is PROVISIONAL while the book is active (its claim is restored first by later marks, review
 // round 3) and final only with the book's final mark (finalizeRetirement): the event says which.
 const lossReported: Handler = async (ctx) => {
-  const { log, emit, chain } = ctx;
+  const { log, emit } = ctx;
   const bookId = arg.num(log.args, "bookId");
   const amount = arg.big(log.args, "amount");
   const fl = arg.big(log.args, "firstLossAbsorbed");
   await flow(ctx, "loss", bookId, amount, fl);
   await position(ctx, bookId);
   await snapshot(ctx);
-  const p = await chain.poolBookPosition(pool(log), BigInt(bookId), log.blockNumber);
+  // the book's position after this event (read above; the last good / stale row when the read failed)
+  const p = await ctx.store.getPoolBook(bookId);
   await emit({
     type: "pool.loss_reported",
     bookId,

@@ -91,7 +91,10 @@ function world() {
   L(insurancePoolAbi, POOL, "LossReported", { bookId: 1n, amount: U(2_000), firstLossAbsorbed: U(2_000), depositorsAbsorbed: 0n, claim: U(23_000) }, 9, 1, 114);
   // the book's side of the same mark: a provisional shortfall; at retirement (block 10) the final write-off
   L(bookAbi, ADDR.book, "InsuranceShortfall", { bookId: 1n, shortfall: U(2_000) }, 9, 2, 114);
-  L(bookAbi, ADDR.book, "InsuranceWrittenOff", { bookId: 1n, amount: U(1_500) }, 10, 0, 115);
+  // the next mark is still short by the same amount: no second event
+  L(bookAbi, ADDR.book, "InsuranceShortfall", { bookId: 1n, shortfall: U(2_000) }, 9, 3, 116);
+  L(bookAbi, ADDR.book, "InsuranceShortfall", { bookId: 1n, shortfall: U(1_500) }, 10, 0, 115);
+  L(bookAbi, ADDR.book, "InsuranceWrittenOff", { bookId: 1n, amount: U(1_500) }, 10, 1, 115);
   chain.head = 10n;
   return { chain, store, make };
 }
@@ -128,7 +131,10 @@ describe("insurance pool indexing", () => {
     expect(s.poolSnapshots[4]).toMatchObject({ claims: D(25000), utilisationBps: 2500, sharePrice: D(1), totalSupplyRaw: S(90_000).toString() });
     // the book is still active: the pool's loss is provisional (recovered first by later marks, final at retirement)
     expect(Object.values(s.events).find((e) => e.type === "pool.loss_reported" && e.bookId === 1)?.payload).toMatchObject({ provisional: true, amountUsd: D(2000) });
-    expect(Object.values(s.events).find((e) => e.type === "book.insurance_shortfall")?.payload).toMatchObject({ bookId: 1, shortfallUsd: D(2000), provisional: true });
+    const shortfalls = Object.values(s.events).filter((e) => e.type === "book.insurance_shortfall").map((e) => e.payload);
+    expect(shortfalls).toHaveLength(2);
+    expect(shortfalls[0]).toMatchObject({ bookId: 1, shortfallUsd: D(2000), provisional: true });
+    expect(shortfalls[1]).toMatchObject({ bookId: 1, shortfallUsd: D(1500), provisional: false }); // retirement tx
     expect(Object.values(s.events).find((e) => e.type === "book.insurance_written_off")?.payload).toMatchObject({ bookId: 1, amountUsd: D(1500), provisional: false });
     expect(Object.values(s.events).filter((e) => e.type === "pool.epoch_processed")).toHaveLength(2);
     expect(chain.poolStateCalls).toBeGreaterThan(0);
@@ -148,6 +154,29 @@ describe("insurance pool indexing", () => {
     expect(after.poolBooks).toEqual(was.poolBooks);
     expect(after.poolFlows).toEqual(was.poolFlows);
     expect(after.poolDeposits).toEqual(was.poolDeposits);
+  });
+
+  test("review I-3: failed pool reads keep the event rows, write stale rows, and the next pass backfills them", async () => {
+    const { chain, store, make } = world();
+    chain.poolDown = true;
+    const ix = make();
+    await drain(ix);
+    const s = store.s;
+    // the events themselves are all recorded
+    expect(s.poolDeposits[1]?.status).toBe("claimed");
+    expect(s.poolWithdrawals[1]?.claimedAssets).toBe(D(9000));
+    // positions: the Allocated event's own figures, stale; snapshots: one stale row per block, never dropped
+    expect(s.poolBooks[1]).toMatchObject({ allocation: D(25000), claim: D(25000), active: true, stale: true });
+    expect(Object.keys(s.poolSnapshots).length).toBeGreaterThan(0);
+    expect(Object.values(s.poolSnapshots).every((r) => r.stale)).toBe(true);
+    expect(s.poolEpochs[0]?.endsAt ?? null).toBeNull();
+    // the read failure was not cached: the RPC comes back, the next pass re-reads everything
+    chain.poolDown = false;
+    await ix.step();
+    expect(s.poolBooks[1]).toMatchObject({ allocation: D(25000), stale: false });
+    expect(Object.values(s.poolSnapshots).some((r) => r.stale)).toBe(false);
+    expect(s.poolSnapshots[4]).toMatchObject({ claims: D(25000), utilisationBps: 2500 });
+    expect(new Date(String(s.poolEpochs[0]?.endsAt)).getTime()).toBe(END0 * 1000);
   });
 
   test("a deployment without a pool watches no pool address", () => {

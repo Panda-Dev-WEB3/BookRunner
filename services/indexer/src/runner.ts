@@ -8,6 +8,7 @@ import type { IndexerChain } from "./chain";
 import { CURSORS } from "./config";
 import { type DecodeSkip, type DecodedLog, decodeLog, orderLogs } from "./decode";
 import { type HandlerCtx, booksCreatedIn, handlerFor } from "./handlers";
+import { backfillPool } from "./poolHandlers";
 import { type Range, planRange } from "./range";
 import type { IndexerStore, PendingEvent } from "./store";
 import type { WatchSet } from "./watch";
@@ -61,7 +62,10 @@ export class Indexer {
     const head = await chain.headBlock();
     const cursors = { protocol: await store.getCursor(CURSORS.protocol), books: await store.getCursor(CURSORS.books) };
     const range = planRange(cursors, config.startBlock, head, config.confirmations, config.batchBlocks);
-    if (!range) return { status: "idle", head };
+    if (!range) {
+      await this.backfill(BigInt(cursors.protocol ?? 0));
+      return { status: "idle", head };
+    }
 
     const { logs, skips } = await this.fetch(range);
     this.reportSkips(skips);
@@ -72,6 +76,7 @@ export class Indexer {
       const r = await this.apply(range, logs, isolated);
       this.failure = { key: "", count: 0 };
       await this.publish(r.events);
+      await this.backfill(range.to);
       return { status: "indexed", from: range.from, to: range.to, logs: logs.length, applied: r.applied, skipped: skips.length + r.skipped, events: r.events, isolated };
     } catch (err) {
       this.failure = this.failure.key === key ? { key, count: this.failure.count + 1 } : { key, count: 1 };
@@ -158,6 +163,18 @@ export class Indexer {
       await tx.setCursor(CURSORS.books, Math.max(to, Number(range.done.books)));
     });
     return { applied, skipped, events: published };
+  }
+
+  /** Review I-3: re-reads pool rows a failed read left stale (best effort, every pass; never throws). */
+  private async backfill(head: bigint): Promise<void> {
+    const pool = this.d.watch.poolAddress();
+    if (!pool || head <= 0n) return;
+    try {
+      const r = await backfillPool({ store: this.d.store, chain: this.d.chain, pool, head, logger: this.d.logger });
+      if (r.snapshots || r.books || r.epochs) this.d.logger.info(r, "pool rows backfilled");
+    } catch (err) {
+      this.d.logger.warn({ err: (err as Error).message }, "pool backfill failed (retrying next pass)");
+    }
   }
 
   private async publish(events: PublishedEvent[]): Promise<void> {

@@ -23,7 +23,7 @@ import {
   subscriptions,
 } from "@bookrunner/db";
 import { type BookComponents, type CharterStatus, dbUsd } from "@bookrunner/shared";
-import { and, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, lte, sql } from "drizzle-orm";
 import type { PgDatabase } from "drizzle-orm/pg-core";
 import type { PostgresJsQueryResultHKT } from "drizzle-orm/postgres-js";
 import type { Address } from "viem";
@@ -502,6 +502,40 @@ export class PgIndexerStore implements IndexerStore {
   async upsertPoolSnapshot(r: PoolSnapshotRow): Promise<void> {
     const { blockNumber, ...set } = r;
     await this.db.insert(poolSnapshots).values(r).onConflictDoUpdate({ target: poolSnapshots.blockNumber, set });
+  }
+
+  async poolSnapshotAtOrBefore(block: number): Promise<PoolSnapshotRow | null> {
+    const [r] = await this.db.select().from(poolSnapshots).where(lte(poolSnapshots.blockNumber, block)).orderBy(desc(poolSnapshots.blockNumber)).limit(1);
+    return r ?? null;
+  }
+
+  async getPoolBook(bookId: number): Promise<PoolBookRow | null> {
+    const [r] = await this.db.select().from(poolBooks).where(eq(poolBooks.bookId, bookId)).limit(1);
+    return r ?? null;
+  }
+
+  async markPoolBookStale(bookId: number): Promise<void> {
+    await this.db.update(poolBooks).set({ stale: true, updatedAt: new Date() }).where(eq(poolBooks.bookId, bookId));
+  }
+
+  async stalePoolSnapshots(limit: number): Promise<number[]> {
+    const rows = await this.db.select({ b: poolSnapshots.blockNumber }).from(poolSnapshots).where(eq(poolSnapshots.stale, true)).orderBy(asc(poolSnapshots.blockNumber)).limit(limit);
+    return rows.map((r) => r.b);
+  }
+
+  async stalePoolBooks(): Promise<number[]> {
+    const rows = await this.db.select({ id: poolBooks.bookId }).from(poolBooks).where(eq(poolBooks.stale, true));
+    return rows.map((r) => r.id);
+  }
+
+  async poolEpochsWithoutEnd(limit: number): Promise<number[]> {
+    const rows = await this.db
+      .select({ e: poolEpochs.epoch })
+      .from(poolEpochs)
+      .where(and(isNotNull(poolEpochs.processedAt), isNull(poolEpochs.endsAt)))
+      .orderBy(asc(poolEpochs.epoch))
+      .limit(limit);
+    return rows.map((r) => r.e);
   }
 
   async insertEvent(e: PendingEvent): Promise<{ id: number; createdAt: Date } | null> {

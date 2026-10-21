@@ -15,6 +15,13 @@
       "when": 1792600473165,
       "tag": "0001_insurance_pool",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792604053087,
+      "tag": "0002_insurance_pool_stale",
+      "breakpoints": true
     }
   ]
 }

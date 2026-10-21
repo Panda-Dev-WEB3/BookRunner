@@ -454,6 +454,8 @@ export const poolBooks = pgTable(
     premiumsUsd: usd("premiums_usd").notNull().default("0"),
     lastMarkAt: ts("last_mark_at"),
     active: boolean("active").notNull(),
+    /** the last read of the position failed: these are the last good values; the indexer re-reads it (review I-3) */
+    stale: boolean("stale").notNull().default(false),
     allocatedAt: ts("allocated_at").notNull(),
     updatedAt: ts("updated_at").notNull().defaultNow(),
   },
@@ -477,8 +479,13 @@ export const poolFlows = pgTable(
   (t) => [uniqueIndex("pool_flows_tx_log").on(t.txHash, t.logIndex), index("pool_flows_kind_ts").on(t.kind, t.ts)],
 );
 
-/** Pool state after each block with pool events (share price history; views read at that block). */
-export const poolSnapshots = pgTable("pool_snapshots", {
+/**
+ * Pool state after each block with pool events (share price history; views read at that block). `stale`: the read at
+ * that block failed, the row carries the previous good values until the indexer's backfill re-reads it (review I-3).
+ */
+export const poolSnapshots = pgTable(
+  "pool_snapshots",
+  {
   blockNumber: bigint("block_number", { mode: "number" }).primaryKey(),
   ts: ts("ts").notNull(),
   poolAssets: usd("pool_assets").notNull(), // T = free liquidity + claims (first-loss slice included)
@@ -494,7 +501,10 @@ export const poolSnapshots = pgTable("pool_snapshots", {
   lossesTotal: usd("losses_total").notNull(),
   depositsPending: usd("deposits_pending").notNull(),
   pendingSharesRaw: raw("pending_shares_raw").notNull(),
-});
+  stale: boolean("stale").notNull().default(false),
+  },
+  (t) => [index("pool_snapshots_ts").on(t.ts)],
+);
 
 export const killEvents = pgTable("kill_events", {
   id: bigserial("id", { mode: "number" }).primaryKey(),

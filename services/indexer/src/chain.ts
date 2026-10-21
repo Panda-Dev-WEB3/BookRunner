@@ -55,18 +55,22 @@ export interface IndexerChain {
   mark(markId: bigint, at: bigint): Promise<{ flowNonce: bigint; committedAt: number } | null>;
   commitSignature(txHash: Hex): Promise<Hex | null>;
   mandateKeyOperator(mandate: Address, key: Address, at: bigint): Promise<Address | null>;
-  /** InsurancePool state at `at` (null when unreadable). */
-  poolState(pool: Address, at: bigint): Promise<PoolStateLite | null>;
-  poolBookPosition(pool: Address, bookId: bigint, at: bigint): Promise<PoolBookPositionLite | null>;
-  /** InsurancePool.epochInfo(epoch).endsAt (unix s; 0 when unknown). */
+  /**
+   * InsurancePool state read at exactly block `at` (one block for every view: never mixed with head). Throws when
+   * unreadable (review I-3: callers keep the last good row marked stale and backfill; a failure is never cached).
+   */
+  poolState(pool: Address, at: bigint): Promise<PoolStateLite>;
+  /** IInsurancePool.bookPosition at `at`; throws when unreadable. */
+  poolBookPosition(pool: Address, bookId: bigint, at: bigint): Promise<PoolBookPositionLite>;
+  /** InsurancePool.epochEnd(epoch) (unix s) at `at`; throws when unreadable. */
   poolEpochEnd(pool: Address, epoch: bigint, at: bigint): Promise<number>;
 }
 
 export class ViemIndexerChain implements IndexerChain {
   readonly pub: PublicClient;
   private readonly ts = new Map<bigint, number>();
-  /** pool state per (pool, block): every pool event of a block shares one read */
-  private readonly poolStates = new Map<string, Promise<PoolStateLite | null>>();
+  /** pool state per (pool, block): every pool event of a block shares one SUCCESSFUL read (failures are not kept) */
+  private readonly poolStates = new Map<string, Promise<PoolStateLite>>();
 
   constructor(
     chainId: number,
@@ -166,30 +170,33 @@ export class ViemIndexerChain implements IndexerChain {
     }
   }
 
-  poolState(pool: Address, at: bigint): Promise<PoolStateLite | null> {
+  poolState(pool: Address, at: bigint): Promise<PoolStateLite> {
     const k = `${pool.toLowerCase()}:${at}`;
     const hit = this.poolStates.get(k);
     if (hit) return hit;
-    const p = this.readPoolState(pool, at).catch(() => null);
+    const p = this.readPoolState(pool, at);
     if (this.poolStates.size > 500) this.poolStates.clear();
     this.poolStates.set(k, p);
+    // a rejected read is dropped from the cache: the next pass (or the backfill) reads again
+    p.catch(() => this.poolStates.delete(k));
     return p;
   }
 
   private async readPoolState(address: Address, at: bigint): Promise<PoolStateLite> {
     const q = { address, abi: insurancePoolAbi } as const;
     const pub = this.pub;
+    // every view at the SAME block, no fallback to head (one snapshot row must not mix blocks; review I-3)
     const [poolAssets, depositorAssets, totalSupply, sharePrice, firstLoss, freeLiquidity, claims, utilisation, ledger, queue] = await Promise.all([
-      this.at((blockNumber) => pub.readContract({ ...q, functionName: "poolAssets", blockNumber }), at),
-      this.at((blockNumber) => pub.readContract({ ...q, functionName: "totalAssets", blockNumber }), at),
-      this.at((blockNumber) => pub.readContract({ ...q, functionName: "totalSupply", blockNumber }), at),
-      this.at((blockNumber) => pub.readContract({ ...q, functionName: "convertToAssets", args: [POOL_SHARE_UNIT], blockNumber }), at),
-      this.at((blockNumber) => pub.readContract({ ...q, functionName: "firstLossAssets", blockNumber }), at),
-      this.at((blockNumber) => pub.readContract({ ...q, functionName: "freeLiquidity", blockNumber }), at),
-      this.at((blockNumber) => pub.readContract({ ...q, functionName: "claimsTotal", blockNumber }), at),
-      this.at((blockNumber) => pub.readContract({ ...q, functionName: "utilisationBps", blockNumber }), at),
-      this.at((blockNumber) => pub.readContract({ ...q, functionName: "ledger", blockNumber }), at),
-      this.at((blockNumber) => pub.readContract({ ...q, functionName: "queue", blockNumber }), at),
+      pub.readContract({ ...q, functionName: "poolAssets", blockNumber: at }),
+      pub.readContract({ ...q, functionName: "totalAssets", blockNumber: at }),
+      pub.readContract({ ...q, functionName: "totalSupply", blockNumber: at }),
+      pub.readContract({ ...q, functionName: "convertToAssets", args: [POOL_SHARE_UNIT], blockNumber: at }),
+      pub.readContract({ ...q, functionName: "firstLossAssets", blockNumber: at }),
+      pub.readContract({ ...q, functionName: "freeLiquidity", blockNumber: at }),
+      pub.readContract({ ...q, functionName: "claimsTotal", blockNumber: at }),
+      pub.readContract({ ...q, functionName: "utilisationBps", blockNumber: at }),
+      pub.readContract({ ...q, functionName: "ledger", blockNumber: at }),
+      pub.readContract({ ...q, functionName: "queue", blockNumber: at }),
     ]);
     return {
       poolAssets,
@@ -207,31 +214,22 @@ export class ViemIndexerChain implements IndexerChain {
     };
   }
 
-  async poolBookPosition(address: Address, bookId: bigint, at: bigint): Promise<PoolBookPositionLite | null> {
-    try {
-      const p = await this.at((blockNumber) => this.pub.readContract({ address, abi: insurancePoolAbi, functionName: "bookPosition", args: [bookId], blockNumber }), at);
-      return {
-        book: p.book,
-        market: p.market,
-        allocation: p.allocation,
-        claim: p.claim,
-        lossFirstLoss: p.lossFirstLoss,
-        lossDepositors: p.lossDepositors,
-        lastMarkAt: Number(p.lastMarkAt),
-        active: p.active,
-      };
-    } catch {
-      return null;
-    }
+  async poolBookPosition(address: Address, bookId: bigint, at: bigint): Promise<PoolBookPositionLite> {
+    const p = await this.pub.readContract({ address, abi: insurancePoolAbi, functionName: "bookPosition", args: [bookId], blockNumber: at });
+    return {
+      book: p.book,
+      market: p.market,
+      allocation: p.allocation,
+      claim: p.claim,
+      lossFirstLoss: p.lossFirstLoss,
+      lossDepositors: p.lossDepositors,
+      lastMarkAt: Number(p.lastMarkAt),
+      active: p.active,
+    };
   }
 
   async poolEpochEnd(address: Address, epoch: bigint, at: bigint): Promise<number> {
-    try {
-      const e = await this.at((blockNumber) => this.pub.readContract({ address, abi: insurancePoolAbi, functionName: "epochEnd", args: [epoch], blockNumber }), at);
-      return Number(e);
-    } catch {
-      return 0;
-    }
+    return Number(await this.pub.readContract({ address, abi: insurancePoolAbi, functionName: "epochEnd", args: [epoch], blockNumber: at }));
   }
 
   async mandateKeyOperator(mandate: Address, key: Address, at: bigint): Promise<Address | null> {

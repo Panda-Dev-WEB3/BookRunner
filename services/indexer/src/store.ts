@@ -179,6 +179,8 @@ export interface PoolBookRow {
   lastMarkAt: Date | null;
   active: boolean;
   allocatedAt: Date;
+  /** true: the read failed, the values are the last good ones (or the Allocated event's) until the backfill re-reads */
+  stale?: boolean;
 }
 
 export type PoolFlowKind =
@@ -217,6 +219,8 @@ export interface PoolSnapshotRow {
   lossesTotal: string;
   depositsPending: string;
   pendingSharesRaw: string;
+  /** true: the read at this block failed, the values are the previous good row's until the backfill re-reads it */
+  stale?: boolean;
 }
 
 export interface VoteEntry {
@@ -284,6 +288,15 @@ export interface IndexerStore {
   /** Idempotent per (tx, logIndex); true when inserted. */
   insertPoolFlow(r: PoolFlowRow): Promise<boolean>;
   upsertPoolSnapshot(r: PoolSnapshotRow): Promise<void>;
+  /** Newest snapshot at or before `block` (the last good values a stale row carries). */
+  poolSnapshotAtOrBefore(block: number): Promise<PoolSnapshotRow | null>;
+  getPoolBook(bookId: number): Promise<PoolBookRow | null>;
+  /** Keeps the last good values, flags the row for the backfill (no-op when the book has no row). */
+  markPoolBookStale(bookId: number): Promise<void>;
+  /** Backfill work (review I-3): stale snapshot blocks (oldest first), stale books, processed epochs without an end. */
+  stalePoolSnapshots(limit: number): Promise<number[]>;
+  stalePoolBooks(): Promise<number[]>;
+  poolEpochsWithoutEnd(limit: number): Promise<number[]>;
 
   /** Domain-event protocol insert; null when the dedupe key already exists. */
   insertEvent(e: PendingEvent): Promise<{ id: number; createdAt: Date } | null>;

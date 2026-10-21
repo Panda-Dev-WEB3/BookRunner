@@ -255,13 +255,17 @@ const lossAbsorbed: Handler = async ({ log, emit }) => {
 
 // 2026-10 insurance pool (review round 3): an exhausted book's shortfall against its pool debt is PROVISIONAL (later
 // marks restore the pool's claim first) and final only at retirement (InsuranceWrittenOff).
-const insuranceShortfall: Handler = async ({ log, emit }) => {
+// review m-3: emitted at every mark while the book is exhausted, so one event per (book, shortfall amount); in the
+// retirement tx (InsuranceWrittenOff alongside) the shortfall is final, not provisional.
+const insuranceShortfall: Handler = async ({ log, emit, batch }) => {
   const bookId = requireBook(log);
+  const shortfall = arg.big(log.args, "shortfall");
+  const final = batch.some((l) => l.txHash === log.txHash && l.kind === "book" && l.bookId === bookId && l.eventName === "InsuranceWrittenOff");
   await emit({
     type: "book.insurance_shortfall",
     bookId,
-    dedupeKey: `book.insurance_shortfall:${log.txHash}:${log.logIndex}`,
-    payload: { bookId, shortfallUsd: usdDb(arg.big(log.args, "shortfall")), provisional: true, txHash: log.txHash },
+    dedupeKey: `book.insurance_shortfall:${bookId}:${shortfall}:${final ? "final" : "provisional"}`,
+    payload: { bookId, shortfallUsd: usdDb(shortfall), provisional: !final, txHash: log.txHash },
   });
 };
 
@@ -272,6 +276,18 @@ const insuranceWrittenOff: Handler = async ({ log, emit }) => {
     bookId,
     dedupeKey: `book.insurance_written_off:${log.txHash}:${log.logIndex}`,
     payload: { bookId, amountUsd: usdDb(arg.big(log.args, "amount")), provisional: false, txHash: log.txHash },
+  });
+};
+
+// review I-2: the pool refused the book's mark report (markBook swallowed); a final one keeps the book in the pool's
+// epoch gate until Book.settleInsurance succeeds (the keeper retries it; alerts: pool_final_mark_stuck)
+const insuranceMarkFailed: Handler = async ({ log, emit }) => {
+  const bookId = requireBook(log);
+  await emit({
+    type: "book.insurance_mark_failed",
+    bookId,
+    dedupeKey: `book.insurance_mark_failed:${log.txHash}:${log.logIndex}`,
+    payload: { bookId, valueUsd: usdDb(arg.big(log.args, "value")), final: arg.bool(log.args, "final_"), txHash: log.txHash },
   });
 };
 
@@ -510,6 +526,7 @@ export const HANDLERS: Record<string, Handler> = {
   "book.LossAbsorbed": lossAbsorbed,
   "book.Retiring": retiring,
   "book.InsuranceShortfall": insuranceShortfall,
+  "book.InsuranceMarkFailed": insuranceMarkFailed,
   "book.InsuranceWrittenOff": insuranceWrittenOff,
   "book.Retired": retired,
   "book.Killed": killed,

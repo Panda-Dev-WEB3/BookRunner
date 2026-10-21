@@ -101,16 +101,22 @@ export class FakeChain implements IndexerChain {
   poolPositions = new Map<number, PoolBookPositionLite>();
   poolEpochEnds = new Map<number, number>();
   poolStateCalls = 0;
+  /** pool reads fail while set (an RPC outage) */
+  poolDown = false;
   async poolState(_pool: Address, at: bigint) {
     this.poolStateCalls++;
+    if (this.poolDown) throw new Error("HTTP request failed: pool state");
     let best: PoolStateLite | null = null;
     for (const [b, s] of [...this.poolStates.entries()].sort((x, y) => x[0] - y[0])) if (b <= Number(at)) best = s;
+    if (!best) throw new Error(`no pool state at ${at}`);
     return best;
   }
-  async poolBookPosition(_pool: Address, bookId: bigint) {
-    return this.poolPositions.get(Number(bookId)) ?? null;
+  async poolBookPosition(_pool: Address, bookId: bigint): Promise<PoolBookPositionLite> {
+    if (this.poolDown) throw new Error("HTTP request failed: bookPosition");
+    return this.poolPositions.get(Number(bookId)) ?? { book: "0x0000000000000000000000000000000000000000", market: "0x00", allocation: 0n, claim: 0n, lossFirstLoss: 0n, lossDepositors: 0n, lastMarkAt: 0, active: false };
   }
   async poolEpochEnd(_pool: Address, epoch: bigint) {
+    if (this.poolDown) throw new Error("HTTP request failed: epochEnd");
     return this.poolEpochEnds.get(Number(epoch)) ?? 0;
   }
 }
@@ -376,7 +382,7 @@ export class MemoryIndexerStore implements IndexerStore {
   }
   async upsertPoolBook(r: PoolBookRow) {
     const prev = this.s.poolBooks[r.bookId];
-    this.s.poolBooks[r.bookId] = { ...clone(r), allocatedAt: prev ? prev.allocatedAt : clone(r.allocatedAt), premiumsUsd: prev?.premiumsUsd ?? toDb(0n) };
+    this.s.poolBooks[r.bookId] = { ...clone(r), stale: r.stale ?? false, allocatedAt: prev ? prev.allocatedAt : clone(r.allocatedAt), premiumsUsd: prev?.premiumsUsd ?? toDb(0n) };
   }
   async addPoolBookPremium(bookId: number, amount: string) {
     const b = this.s.poolBooks[bookId];
@@ -389,7 +395,30 @@ export class MemoryIndexerStore implements IndexerStore {
     return true;
   }
   async upsertPoolSnapshot(r: PoolSnapshotRow) {
-    this.s.poolSnapshots[r.blockNumber] = clone(r);
+    this.s.poolSnapshots[r.blockNumber] = { ...clone(r), stale: r.stale ?? false };
+  }
+  async poolSnapshotAtOrBefore(block: number) {
+    const k = Object.keys(this.s.poolSnapshots).map(Number).filter((b) => b <= block).sort((a, b) => b - a)[0];
+    if (k === undefined) return null;
+    const r = this.s.poolSnapshots[k]!;
+    return { ...r, ts: new Date(r.ts as unknown as string) };
+  }
+  async getPoolBook(bookId: number) {
+    const r = this.s.poolBooks[bookId];
+    return r ? { ...r, allocatedAt: new Date(r.allocatedAt as unknown as string), lastMarkAt: r.lastMarkAt ? new Date(r.lastMarkAt as unknown as string) : null } : null;
+  }
+  async markPoolBookStale(bookId: number) {
+    const r = this.s.poolBooks[bookId];
+    if (r) r.stale = true;
+  }
+  async stalePoolSnapshots(limit: number) {
+    return Object.values(this.s.poolSnapshots).filter((r) => r.stale).map((r) => r.blockNumber).sort((a, b) => a - b).slice(0, limit);
+  }
+  async stalePoolBooks() {
+    return Object.values(this.s.poolBooks).filter((r) => r.stale).map((r) => r.bookId);
+  }
+  async poolEpochsWithoutEnd(limit: number) {
+    return Object.entries(this.s.poolEpochs).filter(([, e]) => e.processedAt && !e.endsAt).map(([k]) => Number(k)).slice(0, limit);
   }
   async insertEvent(e: PendingEvent) {
     if (this.s.events[e.dedupeKey]) return null;
