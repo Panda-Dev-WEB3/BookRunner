@@ -204,8 +204,13 @@ describe("pool router: reads", () => {
     const x = await w.caller.pool.exposure();
     expect(x.marketCapBps).toBe(3000);
     expect(x.capUsd).toBe("300000.000000");
-    expect(x.markets[0]).toMatchObject({ label: "NVDA", allocatedUsd: "250000.000000", shortfallUsd: "2000.000000", capUsedBps: 8333, shareOfPoolBps: 2500 });
-    expect(x.markets[0]!.books[0]).toMatchObject({ bookId: 1, symbol: "PERP_NVDA_USDC", premiumsUsd: "12.000000" });
+    expect(x.markets[0]).toMatchObject({ label: "NVDA", allocatedUsd: "250000.000000", provisionalLossUsd: "2000.000000", writtenOffUsd: "0.000000", capUsedBps: 8333, shareOfPoolBps: 2500 });
+    expect(x.markets[0]!.books[0]).toMatchObject({ bookId: 1, symbol: "PERP_NVDA_USDC", premiumsUsd: "12.000000", lossUsd: "2000.000000", lossStatus: "provisional" });
+    // the book retires (final mark): what it could not repay is written off for good
+    w.data.poolBookRows[0]!.active = false;
+    const y = await w.caller.pool.exposure();
+    expect(y.markets[0]).toMatchObject({ allocatedUsd: "0.000000", provisionalLossUsd: "0.000000", writtenOffUsd: "2000.000000" });
+    expect(y.markets[0]!.books[0]).toMatchObject({ lossStatus: "written_off" });
   });
 });
 

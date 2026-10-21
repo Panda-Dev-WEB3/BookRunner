@@ -156,16 +156,18 @@ function exposureView(deps: ApiDeps, rows: PoolBookRow[], books: Array<{ id: num
   const markets = [...byMarket.entries()].map(([market, rs]) => {
     const active = rs.filter((r) => r.active);
     const allocated = active.reduce((a, r) => a + dbUsd.fromDb(r.allocation), 0n);
-    const shortfall = rs.reduce((a, r) => {
-      const d = dbUsd.fromDb(r.allocation) - dbUsd.fromDb(r.claim);
-      return a + (d > 0n ? d : 0n);
-    }, 0n);
+    // review round 3: while a book is active the pool's loss on it is PROVISIONAL (later marks restore the claim
+    // first); it is final (written off) only with the book's final mark at retirement (the position turns inactive)
+    const provisional = active.reduce((a, r) => a + lossOf(r), 0n);
+    const writtenOff = rs.filter((r) => !r.active).reduce((a, r) => a + lossOf(r), 0n);
     return {
       market,
       label: marketLabel(deps, market, books),
       allocatedUsd: usdStr(allocated),
-      /** allocation the pool has marked down (the book could not repay it at its last mark) */
-      shortfallUsd: usdStr(shortfall),
+      /** active books: the claim marked below the debt (the book exhausted at its last mark); recovered first, not final */
+      provisionalLossUsd: usdStr(provisional),
+      /** retired books: what their final mark could not repay, the pool's loss for good */
+      writtenOffUsd: usdStr(writtenOff),
       capUsd: cap === null ? null : usdStr(cap),
       capUsedBps: cap === null || cap === 0n ? null : Number((allocated * BPS) / cap),
       shareOfPoolBps: poolAssets === null || poolAssets === 0n ? null : Number((allocated * BPS) / poolAssets),
@@ -180,6 +182,9 @@ function exposureView(deps: ApiDeps, rows: PoolBookRow[], books: Array<{ id: num
           claimUsd: usdOf(r.claim),
           lossFirstLossUsd: usdOf(r.lossFirstLoss),
           lossDepositorsUsd: usdOf(r.lossDepositors),
+          /** allocation - claim: provisional while active, written off once retired */
+          lossUsd: usdStr(lossOf(r)),
+          lossStatus: lossOf(r) === 0n ? ("none" as const) : r.active ? ("provisional" as const) : ("written_off" as const),
           premiumsUsd: usdOf(r.premiumsUsd),
           lastMarkAt: iso(r.lastMarkAt),
         };
@@ -188,6 +193,12 @@ function exposureView(deps: ApiDeps, rows: PoolBookRow[], books: Array<{ id: num
   });
   markets.sort((a, b) => (dbUsd.fromDb(b.allocatedUsd) > dbUsd.fromDb(a.allocatedUsd) ? 1 : -1));
   return { markets, marketCapBps, capUsd: cap === null ? null : usdStr(cap) };
+}
+
+/** The pool's loss on a book position: allocation - claim (0 when fully repayable). */
+function lossOf(r: PoolBookRow): bigint {
+  const d = dbUsd.fromDb(r.allocation) - dbUsd.fromDb(r.claim);
+  return d > 0n ? d : 0n;
 }
 
 const depositIdInput = intLike(1);
