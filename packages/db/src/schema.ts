@@ -304,6 +304,8 @@ export const settlements = pgTable(
     seniorUsd: usd("senior_usd").notNull().default("0"),
     juniorUsd: usd("junior_usd").notNull().default("0"),
     // extensions
+    /** 2026-10 insurance pool: premium paid to the pool before the split (pool-funded books; RevenueRouter.PremiumPaid). */
+    premiumUsd: usd("premium_usd").notNull().default("0"),
     period: bigint("period", { mode: "number" }),
     txHash: text("tx_hash").notNull(),
     logIndex: integer("log_index").notNull(),
@@ -383,6 +385,115 @@ export const chainCursor = pgTable("chain_cursor", {
   name: text("name").primaryKey(),
   blockNumber: bigint("block_number", { mode: "number" }).notNull(),
   updatedAt: ts("updated_at").notNull().defaultNow(),
+});
+
+// ---------------------------------------------------------------- insurance pool (2026-10, ARCHITECTURE §2.10)
+// Written by the indexer from InsurancePool events (+ views read at the event's block). Pool shares have 12 decimals
+// (virtual offset 6): share quantities are raw numeric(78,0); assets are USD numeric(38,6) like everywhere else.
+
+/** requestDeposit -> cancelDeposit | claimDeposit (shares minted at the epoch's processing, claimed per request). */
+export const poolDeposits = pgTable(
+  "pool_deposits",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey(), // depositId
+    owner: text("owner").notNull(),
+    assets: usd("assets").notNull(),
+    epoch: bigint("epoch", { mode: "number" }).notNull(),
+    status: text("status").notNull(), // queued | cancelled | claimed (processed: see pool_epochs)
+    sharesRaw: raw("shares_raw"), // set at claimDeposit
+    requestedAt: ts("requested_at").notNull(),
+    requestTx: text("request_tx").notNull(),
+    closedAt: ts("closed_at"),
+    closeTx: text("close_tx"),
+  },
+  (t) => [index("pool_deposits_owner").on(t.owner), index("pool_deposits_epoch").on(t.epoch)],
+);
+
+/** requestWithdraw (shares escrowed for an epoch) -> claim (assets paid pro-rata as the epoch fills). */
+export const poolWithdrawals = pgTable(
+  "pool_withdrawals",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey(), // requestId
+    owner: text("owner").notNull(),
+    sharesRaw: raw("shares_raw").notNull(),
+    epoch: bigint("epoch", { mode: "number" }).notNull(),
+    epochEndsAt: ts("epoch_ends_at").notNull(), // projected at request time
+    requestedAt: ts("requested_at").notNull(),
+    requestTx: text("request_tx").notNull(),
+    claimedAssets: usd("claimed_assets").notNull().default("0"),
+    lastClaimAt: ts("last_claim_at"),
+  },
+  (t) => [index("pool_withdrawals_owner").on(t.owner), index("pool_withdrawals_epoch").on(t.epoch)],
+);
+
+/** One row per processed epoch (EpochProcessed / EpochProcessedStale / EpochFilled). */
+export const poolEpochs = pgTable("pool_epochs", {
+  epoch: bigint("epoch", { mode: "number" }).primaryKey(),
+  endsAt: ts("ends_at"),
+  processedAt: ts("processed_at"),
+  processTx: text("process_tx"),
+  depositAssets: usd("deposit_assets").notNull().default("0"),
+  depositSharesRaw: raw("deposit_shares_raw").notNull().default("0"),
+  stale: boolean("stale").notNull().default(false),
+  staleBooks: integer("stale_books").notNull().default(0),
+  filledSharesRaw: raw("filled_shares_raw").notNull().default("0"),
+  filledAssets: usd("filled_assets").notNull().default("0"),
+  complete: boolean("complete").notNull().default(false),
+});
+
+/** The pool's position per pool-funded book (IInsurancePool.bookPosition, read after each of its events). */
+export const poolBooks = pgTable(
+  "pool_books",
+  {
+    bookId: bigint("book_id", { mode: "number" }).primaryKey(),
+    market: text("market").notNull(), // bytes32 underlying (per-market cap)
+    allocation: usd("allocation").notNull(), // debt principal outstanding
+    claim: usd("claim").notNull(), // what the book can repay at its last mark
+    lossFirstLoss: usd("loss_first_loss").notNull().default("0"),
+    lossDepositors: usd("loss_depositors").notNull().default("0"),
+    premiumsUsd: usd("premiums_usd").notNull().default("0"),
+    lastMarkAt: ts("last_mark_at"),
+    active: boolean("active").notNull(),
+    allocatedAt: ts("allocated_at").notNull(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [index("pool_books_market").on(t.market)],
+);
+
+/** Value flows of the pool: allocated | repaid | premium | loss | recovery | first_loss_deposit | first_loss_withdraw. */
+export const poolFlows = pgTable(
+  "pool_flows",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    ts: ts("ts").notNull(),
+    kind: text("kind").notNull(),
+    bookId: bigint("book_id", { mode: "number" }),
+    amount: usd("amount").notNull(),
+    /** premium: the first-loss slice's share; loss / recovery: the part absorbed / restored by the slice */
+    firstLossPart: usd("first_loss_part").notNull().default("0"),
+    txHash: text("tx_hash").notNull(),
+    logIndex: integer("log_index").notNull(),
+  },
+  (t) => [uniqueIndex("pool_flows_tx_log").on(t.txHash, t.logIndex), index("pool_flows_kind_ts").on(t.kind, t.ts)],
+);
+
+/** Pool state after each block with pool events (share price history; views read at that block). */
+export const poolSnapshots = pgTable("pool_snapshots", {
+  blockNumber: bigint("block_number", { mode: "number" }).primaryKey(),
+  ts: ts("ts").notNull(),
+  poolAssets: usd("pool_assets").notNull(), // T = free liquidity + claims (first-loss slice included)
+  depositorAssets: usd("depositor_assets").notNull(), // D = totalAssets() (prices the shares)
+  totalSupplyRaw: raw("total_supply_raw").notNull(),
+  /** convertToAssets(1 share = 1e12 raw): USD per whole share */
+  sharePrice: usd("share_price").notNull(),
+  firstLoss: usd("first_loss").notNull(),
+  freeLiquidity: usd("free_liquidity").notNull(),
+  claims: usd("claims").notNull(),
+  utilisationBps: integer("utilisation_bps").notNull(),
+  premiumsTotal: usd("premiums_total").notNull(),
+  lossesTotal: usd("losses_total").notNull(),
+  depositsPending: usd("deposits_pending").notNull(),
+  pendingSharesRaw: raw("pending_shares_raw").notNull(),
 });
 
 export const killEvents = pgTable("kill_events", {

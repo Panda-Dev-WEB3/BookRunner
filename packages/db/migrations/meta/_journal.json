@@ -8,6 +8,13 @@
       "when": 1790894467408,
       "tag": "0000_thankful_famine",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1792600473165,
+      "tag": "0001_insurance_pool",
+      "breakpoints": true
     }
   ]
 }
