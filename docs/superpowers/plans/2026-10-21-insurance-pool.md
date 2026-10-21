@@ -13,6 +13,18 @@ pool; no BKRN boost at launch; exits never blocked (only queued); losses hit the
 are paid. The pool pays only traders' bad debt drawn from an IF (up to that market's allocation); MM trading losses stay
 Junior -> Senior -> Backstop.
 
+**Design change after review (2026-10-21, Task 1 fix round 1; the owner to be informed):**
+- *Senior debt (review I-1).* The pool's IF is a SENIOR DEBT of the book, netted from NAV. Every IF draw (traders' bad
+  debt and MM losses paid from the IF alike) is the book's loss first, Junior -> Senior -> Backstop; the pool loses only
+  what an exhausted book cannot repay (reported at marks as min(debt, idle + deployed), written off at retirement). An IF
+  refill reduces the shortfall first. This replaces "the pool pays traders' bad debt drawn from an IF" above.
+- *Epoch pricing (review I-2).* Deposits are queued like withdrawals and priced at epoch processing, which waits for
+  every active pool-funded book's mark after the epoch end (grace 24 h, timelocked, so exits are never blocked). Pool
+  value changes only through marks, repayments, retirements and premiums; the permissionless live IF sync is gone.
+- *One snapshot (review I-3).* The debt is netted at the same signed snapshot that values the IF.
+- *Minors.* The cap is per market (underlying). Allocations need the first-loss slice at its target. The premium floor
+  is fixed into the charter at filing. An epoch-length change waits for an idle queue.
+
 **Architecture today (read first):** `Book.closeWindow` deploys the IF and MM capital from the tranches through
 `UnderwritingVault` -> adapter `depositToVenue(IF|MM)`; `MMMandate.ifTargetUsd` / charter `ifTargetUsd` (>=
 `config.venueMinIfUsd(venue)`: Orderly 25,001 USDC, PoolEngine 10,000); adapters report `insuranceEquityUsd()` which is
