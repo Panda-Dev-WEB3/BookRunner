@@ -153,6 +153,8 @@ export interface ReadModel {
   poolWithdrawals(owner: string): Promise<PoolWithdrawalRow[]>;
   /** Processed epochs, newest first. */
   poolEpochs(q: { limit: number; beforeEpoch?: number }): Promise<PoolEpochRow[]>;
+  /** The processed epochs among `epochs` (any order). */
+  poolEpochsIn(epochs: number[]): Promise<PoolEpochRow[]>;
   poolBooks(): Promise<PoolBookRow[]>;
   /** Snapshots with from <= ts <= to, ascending, at most `limit` (the newest kept when more). */
   poolSnapshots(from: Date, to: Date, limit: number): Promise<PoolSnapshotRow[]>;

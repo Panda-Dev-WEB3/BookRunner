@@ -363,6 +363,11 @@ export class DrizzleReadModel implements ReadModel {
       .limit(q.limit);
   }
 
+  async poolEpochsIn(epochs: number[]) {
+    if (epochs.length === 0) return [];
+    return this.db.select().from(poolEpochs).where(inArray(poolEpochs.epoch, epochs));
+  }
+
   poolBooks() {
     return this.db.select().from(poolBooks).orderBy(asc(poolBooks.bookId));
   }

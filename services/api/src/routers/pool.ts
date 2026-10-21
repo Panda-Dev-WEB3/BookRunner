@@ -36,6 +36,14 @@ import { fail, hardChain, publicProcedure, requireChain, router, softChain } fro
 import { intLike, limitInput, stockTokens, walletInput } from "./common";
 
 const BPS = 10_000n;
+
+/** 604800 -> "7 d", 3600 -> "1 h", 90 -> "90 s" (review m-5: a 1 h demo cooldown is not "0 d"). */
+export function durText(sec: number): string {
+  if (sec >= 86_400 && sec % 86_400 === 0) return `${sec / 86_400} d`;
+  if (sec >= 3_600 && sec % 3_600 === 0) return `${sec / 3_600} h`;
+  if (sec >= 60 && sec % 60 === 0) return `${sec / 60} min`;
+  return `${sec} s`;
+}
 const isoSec = (s: number) => new Date(s * 1000).toISOString();
 const usdOf = (v: string | null | undefined) => dbUsdStr(v) ?? "0.000000";
 
@@ -79,7 +87,8 @@ function liveOverview(s: PoolChainState) {
     firstLossUsd: usdStr(s.firstLoss),
     firstLossBps: s.firstLossBps,
     freeLiquidityUsd: usdStr(s.freeLiquidity),
-    allocatedUsd: usdStr(s.claims),
+    /** the books' claims at their last marks (what they can repay), not the allocation (review m-8) */
+    repayableUsd: usdStr(s.claims),
     utilisationBps: s.utilisationBps,
     sharePriceUsd: usdStr(s.sharePrice),
     totalShares: sharesStr(s.totalSupply),
@@ -117,7 +126,7 @@ function snapshotOverview(r: PoolSnapshotRow | null) {
     firstLossUsd: usdOf(r?.firstLoss),
     firstLossBps: r && dbUsd.fromDb(r.poolAssets) > 0n ? Number((dbUsd.fromDb(r.firstLoss) * BPS) / dbUsd.fromDb(r.poolAssets)) : 0,
     freeLiquidityUsd: usdOf(r?.freeLiquidity),
-    allocatedUsd: usdOf(r?.claims),
+    repayableUsd: usdOf(r?.claims),
     utilisationBps: r?.utilisationBps ?? 0,
     sharePriceUsd: usdOf(r?.sharePrice ?? "1"),
     totalShares: sharesStr(BigInt(r?.totalSupplyRaw ?? "0")),
@@ -187,6 +196,8 @@ function exposureView(deps: ApiDeps, rows: PoolBookRow[], books: Array<{ id: num
           lossStatus: lossOf(r) === 0n ? ("none" as const) : r.active ? ("provisional" as const) : ("written_off" as const),
           premiumsUsd: usdOf(r.premiumsUsd),
           lastMarkAt: iso(r.lastMarkAt),
+          /** the last read failed: last good values until the indexer re-reads */
+          stale: r.stale,
         };
       }),
     };
@@ -200,6 +211,9 @@ function lossOf(r: PoolBookRow): bigint {
   const d = dbUsd.fromDb(r.allocation) - dbUsd.fromDb(r.claim);
   return d > 0n ? d : 0n;
 }
+
+/** At most this many open deposits / unsettled withdrawals are read live per position call (review m-2). */
+const LIVE_READS = 50;
 
 const depositIdInput = intLike(1);
 const requestIdInput = intLike(1);
@@ -216,16 +230,34 @@ export const poolRouter = router({
   /** A wallet's shares, value, cooldown, deposit requests and withdrawal requests. */
   position: publicProcedure.input(z.object({ wallet: walletInput })).query(async ({ ctx: { deps }, input }) => {
     const [deps_, wds] = await Promise.all([deps.data.poolDeposits(input.wallet), deps.data.poolWithdrawals(input.wallet)]);
-    const epochs = [...new Set([...deps_.map((d) => d.epoch), ...wds.map((w) => w.epoch)])];
-    const open = deps_.filter((d) => d.status === "queued").map((d) => d.id);
-    const unclaimed = wds.map((w) => w.id);
+    // review m-2 (public, uncached endpoint): live reads only for what can still change, at most LIVE_READS of each.
+    // A withdrawal whose epoch filled completely and that claimed all it was entitled to (indexed) is settled.
+    const dbEpochs = new Map((await deps.data.poolEpochsIn([...new Set(wds.map((w) => w.epoch))])).map((e) => [e.epoch, e]));
+    const settled = (r: (typeof wds)[number]) => {
+      const e = dbEpochs.get(r.epoch);
+      if (!e?.complete || BigInt(e.filledSharesRaw) === 0n) return false;
+      const entitled = (BigInt(r.sharesRaw) * dbUsd.fromDb(e.filledAssets)) / BigInt(e.filledSharesRaw);
+      return dbUsd.fromDb(r.claimedAssets) >= entitled;
+    };
+    const open = deps_.filter((d) => d.status === "queued").slice(0, LIVE_READS);
+    const unclaimed = wds.filter((r) => !settled(r)).slice(0, LIVE_READS);
+    const epochs = [...new Set([...open.map((d) => d.epoch), ...unclaimed.map((r) => r.epoch)])];
     const [state, w] = await Promise.all([
       softChain(deps, "pool.state", (g) => g.poolState(), null),
-      softChain(deps, "pool.wallet", (g) => g.poolWallet(input.wallet, { requestIds: unclaimed, depositIds: open, epochs }), null),
+      softChain(deps, "pool.wallet", (g) => g.poolWallet(input.wallet, { requestIds: unclaimed.map((r) => r.id), depositIds: open.map((d) => d.id), epochs }), null),
     ]);
     const nowSec = state?.nowSec ?? Math.floor(deps.now() / 1000);
     const q = state ? effectiveQueue(state, nowSec) : null;
-    const epochOf = (e: number): ChainEpoch | null => w?.epochs.get(e) ?? null;
+    // live epoch when read; else a completely filled indexed epoch (settled requests are not read live)
+    const epochOf = (e: number): ChainEpoch | null => {
+      const live = w?.epochs.get(e);
+      if (live) return live;
+      const x = dbEpochs.get(e);
+      if (!x?.complete) return null;
+      const filled = BigInt(x.filledSharesRaw);
+      const endsAt = x.endsAt ? Math.floor(x.endsAt.getTime() / 1000) : 0;
+      return { shares: filled, filledShares: filled, assets: dbUsd.fromDb(x.filledAssets), depositAssets: dbUsd.fromDb(x.depositAssets), depositShares: BigInt(x.depositSharesRaw), endsAt, processed: true };
+    };
     const endOf = (e: number, fallback: Date | null) => {
       const ep = epochOf(e);
       if (ep?.processed) return ep.endsAt;
@@ -321,8 +353,10 @@ export const poolRouter = router({
       poolAssetsUsd: usdOf(s.poolAssets),
       depositorAssetsUsd: usdOf(s.depositorAssets),
       firstLossUsd: usdOf(s.firstLoss),
-      allocatedUsd: usdOf(s.claims),
+      repayableUsd: usdOf(s.claims),
       utilisationBps: s.utilisationBps,
+      /** the indexer could not read this block yet: the previous point's values (backfilled later) */
+      stale: s.stale,
     }));
     // observed change of the share price over the window (from the last point before it when there is one)
     const start = before[0] ?? snaps[0];
@@ -363,9 +397,9 @@ export const poolRouter = router({
     const warnings: string[] = [];
     if (w.usdcBalance < amount) warnings.push(`Wallet USDC balance ${usdStr(w.usdcBalance)} is below the amount`);
     warnings.push(
-      `Shares are minted at the share price of epoch ${epoch}'s processing: after its end (${isoSec(endsAt)}), once every pool-funded book has marked after it, or ${Math.round(s.params.processGrace / 3600)} h after the end at the latest`,
+      `Shares are minted at the share price of epoch ${epoch}'s processing: after its end (${isoSec(endsAt)}), once every pool-funded book has marked after it, or ${durText(s.params.processGrace)} after the end at the latest`,
     );
-    warnings.push(`Collected shares stay in this wallet for the cooldown (${Math.round(s.params.cooldown / 86_400)} d from the epoch's end); a withdrawal request then queues to the first epoch after it`);
+    warnings.push(`Collected shares stay in this wallet for the cooldown (${durText(s.params.cooldown)} from the epoch's end); a withdrawal request then queues to the first epoch after it`);
     return { txs, warnings, epoch, epochEndsAt: isoSec(endsAt) };
   }),
 

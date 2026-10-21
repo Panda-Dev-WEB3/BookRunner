@@ -236,6 +236,9 @@ export class FakeReadModel implements ReadModel {
   async poolEpochs(q: { limit: number; beforeEpoch?: number }) {
     return desc(this.poolEpochRows, (e) => e.epoch).filter((e) => q.beforeEpoch === undefined || e.epoch < q.beforeEpoch).slice(0, q.limit);
   }
+  async poolEpochsIn(epochs: number[]) {
+    return this.poolEpochRows.filter((e) => epochs.includes(e.epoch));
+  }
   async poolBooks() {
     return [...this.poolBookRows].sort((a, b) => a.bookId - b.bookId);
   }

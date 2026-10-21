@@ -7,6 +7,7 @@ import { insurancePoolAbi } from "@bookrunner/shared/abi";
 import { TRPCError } from "@trpc/server";
 import { decodeFunctionData, getAddress } from "viem";
 import type { PoolChainState } from "../src/chain/gateway";
+import { durText } from "../src/routers/pool";
 import { effectiveQueue, openEpochFor, parseShares, queueStatus, withdrawalStatus } from "../src/domain/pool";
 import { A } from "./fakes";
 import { ALICE, NOW, type World, makeWorld, seedBook } from "./fixtures";
@@ -94,6 +95,13 @@ describe("pool domain", () => {
     expect(withdrawalStatus(S(10), 0n, null).status).toBe("queued");
   });
 
+  test("durations in words (m-5)", () => {
+    expect(durText(604_800)).toBe("7 d");
+    expect(durText(3_600)).toBe("1 h");
+    expect(durText(5_400)).toBe("90 min");
+    expect(durText(45)).toBe("45 s");
+  });
+
   test("shares parse with up to 12 decimals", () => {
     expect(parseShares("1.5")).toBe(1_500_000_000_000n);
     expect(parseShares("0")).toBeNull();
@@ -136,6 +144,7 @@ describe("pool router: reads", () => {
       lossesTotal: "0",
       depositsPending: "0",
       pendingSharesRaw: "0",
+      stale: false,
     });
     expect(await w.caller.pool.overview()).toMatchObject({ available: true, live: false, poolAssetsUsd: "500000.000000", firstLossBps: 1000, queue: null });
 
@@ -160,6 +169,19 @@ describe("pool router: reads", () => {
     expect(p.deposits.find((d) => d.depositId === 1)).toMatchObject({ status: "ready", shares: "1000.0", cancellable: false });
     expect(p.deposits.find((d) => d.depositId === 2)).toMatchObject({ status: "queued", cancellable: true, epochEndsAt: new Date(END * 1000).toISOString() });
     expect(p.withdrawals[0]).toMatchObject({ requestId: 7, status: "filling", filledUsd: "50.000000", claimableUsd: "50.000000", filledShares: "50.0" });
+
+    // review m-2: a withdrawal of a completely filled epoch that claimed everything is settled: not read live
+    w.data.poolWithdrawalRows.push({ id: 8, owner, sharesRaw: S(10).toString(), epoch: 1, epochEndsAt: new Date((END - 2 * WEEK) * 1000), requestedAt: new Date(NOW - 20 * DAY * 1000), requestTx: "0x08", claimedAssets: "10", lastClaimAt: new Date(NOW - 10 * DAY * 1000) });
+    w.data.poolEpochRows.push({ epoch: 1, endsAt: new Date((END - 2 * WEEK) * 1000), processedAt: new Date(0), processTx: "0x1", depositAssets: "0", depositSharesRaw: "0", stale: false, staleBooks: 0, filledSharesRaw: S(10).toString(), filledAssets: "10", complete: true });
+    const asked: number[][] = [];
+    const orig = w.chain.poolWallet.bind(w.chain);
+    w.chain.poolWallet = async (wallet, q) => {
+      asked.push(q.requestIds);
+      return orig(wallet, q);
+    };
+    const p2 = await w.caller.pool.position({ wallet: ALICE });
+    expect(asked[0]).toEqual([7]);
+    expect(p2.withdrawals.find((x) => x.requestId === 8)).toMatchObject({ status: "claimed", filledUsd: "10.000000", claimableUsd: "0.000000" });
   });
 
   test("epochs, history (observed share price change) and per-market exposure", async () => {
@@ -190,6 +212,7 @@ describe("pool router: reads", () => {
       lossesTotal: "0",
       depositsPending: "0",
       pendingSharesRaw: "0",
+      stale: false,
     });
     w.data.poolSnapshotRows.push(snap(1, 40 * DAY * 1000, "1"), snap(2, 10 * DAY * 1000, "1.002"), snap(3, 1000, "1.004"));
     w.data.poolFlowDayRows.push({ day: new Date(NOW - 2 * DAY * 1000), premiumUsd: "12", lossUsd: "0", recoveryUsd: "0" });
@@ -199,7 +222,7 @@ describe("pool router: reads", () => {
     expect(h.flows[0]).toMatchObject({ premiumUsd: "12.000000" });
 
     w.data.poolBookRows.push(
-      { bookId: 1, market: NVDA.toLowerCase(), allocation: "250000", claim: "248000", lossFirstLoss: "2000", lossDepositors: "0", premiumsUsd: "12", lastMarkAt: new Date(NOW), active: true, allocatedAt: new Date(NOW), updatedAt: new Date(NOW) },
+      { bookId: 1, market: NVDA.toLowerCase(), allocation: "250000", claim: "248000", lossFirstLoss: "2000", lossDepositors: "0", premiumsUsd: "12", lastMarkAt: new Date(NOW), active: true, stale: false, allocatedAt: new Date(NOW), updatedAt: new Date(NOW) },
     );
     const x = await w.caller.pool.exposure();
     expect(x.marketCapBps).toBe(3000);
