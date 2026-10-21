@@ -1,8 +1,12 @@
 // docs/LOW_GAS.md entry points the mark keeper uses beyond the generated ABIs (packages/shared/src/abi).
-import { parseAbi, toFunctionSelector } from "viem";
+import { markRegistryAbi } from "@bookrunner/shared/abi";
+import { getAbiItem, parseAbi, toFunctionSelector } from "viem";
 
-/** MarkRegistry.commitAndApply selector (bytecode feature detection on registries that strip revert data). */
-export const COMMIT_AND_APPLY_SELECTOR = toFunctionSelector("commitAndApply((uint256,uint64,uint256,uint256,uint64,bytes32,bytes32,bytes32,bool),bytes,bytes,bytes)");
+/**
+ * MarkRegistry.commitAndApply selector (bytecode feature detection on registries that strip revert data). Derived from
+ * the generated ABI, so a MarkInput change (2026-10: insuranceEquityUsd) moves it with the contract.
+ */
+export const COMMIT_AND_APPLY_SELECTOR = toFunctionSelector(getAbiItem({ abi: markRegistryAbi, name: "commitAndApply" }));
 
 /**
  * AttestedOracle.update(priceData) declared `view` here ONLY so it can sit in an eth_call aggregate (deployless

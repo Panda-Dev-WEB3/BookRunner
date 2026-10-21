@@ -283,7 +283,7 @@ describe("spool serialisation", () => {
       markId: 3,
       bookId: 1,
       periodEnd: P,
-      input: { bookId: 1n, periodEnd: BigInt(P), navUsd: 5n, deployedValueUsd: 4n, flowNonce: 2n, inventoryRoot: "0x01", pnlJsonHash: "0x02", receiptsRoot: "0x03", held: false },
+      input: { bookId: 1n, periodEnd: BigInt(P), navUsd: 5n, deployedValueUsd: 4n, flowNonce: 2n, inventoryRoot: "0x01", pnlJsonHash: "0x02", receiptsRoot: "0x03", held: false, insuranceEquityUsd: 0n },
       pnl: { bookId: "1" } as MarkRow["pnl"],
       signer: "0x0000000000000000000000000000000000000001",
       signature: "0x04",

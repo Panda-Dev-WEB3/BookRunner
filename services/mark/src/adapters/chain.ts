@@ -22,7 +22,7 @@ import {
   underwritingVaultAbi,
 } from "@bookrunner/shared/abi";
 import { type BookRef, type TxSender, bookStateName, codeHasSelector, describeRevert, scanEvents } from "@bookrunner/waterfall";
-import { type Abi, type Address, type Hex, type PublicClient, encodeFunctionData, erc20Abi, isAddressEqual, parseEventLogs, zeroHash } from "viem";
+import { type Abi, type Address, type Hex, type PublicClient, encodeFunctionData, erc20Abi, isAddressEqual, parseEventLogs, zeroAddress, zeroHash } from "viem";
 import type { AdapterReportState } from "../../../ops-venue/src/report712";
 import { priceIsStale } from "../domain/held";
 import { deskPriceChoice, underlyingAtSettle } from "../domain/settle";
@@ -44,6 +44,7 @@ const EMPTY_MARK: MarkInput = {
   pnlJsonHash: zeroHash,
   receiptsRoot: zeroHash,
   held: false,
+  insuranceEquityUsd: 0n,
 };
 const ERRORS_ABI = [...markRegistryAbi, ...bookAbi, ...attestedOracleAbi, ...orderlyAdapterAbi] as Abi;
 
@@ -265,7 +266,7 @@ export class MarkChainAdapter implements MarkChain {
     // signed prices are exogenous: value at the newest one (an idle chain's head may lag the wall clock)
     const refTs = valuationRefTs(blockTs, this.now());
     const used = new Map<string, SignedPrice>();
-    const [vaultIdle, vaultIdleView, seniorSupply, juniorSupply, backstopBalance, mandateTerms, killed] = await Promise.all([
+    const [vaultIdle, vaultIdleView, seniorSupply, juniorSupply, backstopBalance, mandateTerms, killed, insuranceDebt] = await Promise.all([
       this.pc.readContract({ address: usdc, abi: erc20Abi, functionName: "balanceOf", args: [vault], ...b }),
       this.pc.readContract({ address: vault, abi: underwritingVaultAbi, functionName: "idle", ...b }).catch(() => null),
       this.pc.readContract({ address: senior, abi: erc20Abi, functionName: "totalSupply", ...b }),
@@ -273,6 +274,11 @@ export class MarkChainAdapter implements MarkChain {
       this.pc.readContract({ address: this.c.backstop, abi: backstopAbi, functionName: "balance", ...b }),
       this.pc.readContract({ address: mandate, abi: mMMandateAbi, functionName: "getMandate", ...b }),
       this.pc.readContract({ address: mandate, abi: mMMandateAbi, functionName: "killed", ...b }),
+      // 2026-10 insurance pool: (pool, debt, value, due, closed); a book-funded IF (pool 0) or an older book: none
+      this.pc.readContract({ address: book, abi: bookAbi, functionName: "insuranceDebt", ...b }).then(
+        (d) => (isAddressEqual(d[0], zeroAddress) ? null : { debt: d[1], due: d[3] }),
+        () => null,
+      ),
     ]);
     let [insuranceUsd, marginUsd, netExposureUsd, inTransitUsd, deployedValueUsd, valuationAt] = await Promise.all([
       this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "insuranceEquityUsd", ...b }),
@@ -401,6 +407,7 @@ export class MarkChainAdapter implements MarkChain {
         lastMarkPeriodEnd: Number(lastMarkPeriodEnd),
       },
       backstopBalance,
+      insuranceDebt,
       mandate: m,
       killed,
       underlyingPrice,

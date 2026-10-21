@@ -25,6 +25,7 @@ export function deserializeMarkRow(s: string): MarkRow {
     pnlJsonHash: o.input.pnlJsonHash as Hex,
     receiptsRoot: o.input.receiptsRoot as Hex,
     held: o.input.held === true, // spooled before audit M-1: not held
+    insuranceEquityUsd: big(o.input.insuranceEquityUsd ?? 0), // spooled before 2026-10: 0
   };
   return {
     markId: Number(o.markId),
