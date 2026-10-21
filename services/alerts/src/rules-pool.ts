@@ -19,8 +19,10 @@
 //     overdue alone, warning past the threshold, critical after the grace. The oldest epoch empty (requests only in later
 //     epochs): overdue stays a warning (processing it only advances the queue).
 // - pool_market_debt:<market> — per market (bytes32 underlying, labelled with a snapshot book's ticker, else the hex):
-//   debt the pool has marked down on its ACTIVE books (sum of allocation - claim > 0): WARNING; CRITICAL when it reaches
-//   ALERT_POOL_MARKET_DEBT_CRITICAL_BPS (500) of pool assets. It recovers if the books' marks rise again. Written-off
+//   PROVISIONAL loss of the pool on its ACTIVE books (sum of allocation - claim > 0: an exhausted book's own capital, Backstop
+//   money excluded, below its debt): WARNING; CRITICAL when it reaches ALERT_POOL_MARKET_DEBT_CRITICAL_BPS (500) of pool
+//   assets. Not final (review round 3): later marks restore the claim first, before any tranche gain; it becomes final
+//   only at the book's retirement (finalizeRetirement's final mark). Written-off
 //   debt of retired books on the market is quoted in the summary, but does not keep the condition firing (it never
 //   resolves on-chain): it pages once as pool_debt_written_off instead.
 // - pool_debt_written_off:<bookId> — a retired (inactive) book's allocation - claim > 0: the loss is final. CRITICAL,
@@ -141,7 +143,7 @@ export function poolEpochOverdue(s: Snapshot, c: RuleConfig): Condition[] {
 }
 
 // ------------------------------------------------------------------ book debt
-/** Per market: marked-down debt of its active books; retired books' write-offs and unrepaid claims per book. */
+/** Per market: the provisional loss on its active books; retired books' write-offs (final) and unrepaid claims per book. */
 export function poolMarketDebt(s: Snapshot, c: RuleConfig): Condition[] {
   const p = s.pool;
   if (!p) return [];
@@ -166,7 +168,7 @@ export function poolMarketDebt(s: Snapshot, c: RuleConfig): Condition[] {
       key: `pool_market_debt:${market}`,
       rule: "pool_market_debt",
       severity: critical ? "critical" : "warning",
-      summary: `insurance pool market ${label}: ${usd(shortfall)} of IF debt marked down on ${active.length} active book(s) (${detail}), ${p.poolAssetsUsd > 0 ? `${pct((shortfall * 10_000) / p.poolAssetsUsd)} of pool assets` : "pool assets 0"} (critical at ${pct(c.poolMarketDebtCriticalBps)}); absorbed by the first-loss slice ${usd(flLoss)}, depositors ${usd(depLoss)}; it recovers only if the books' marks rise again${writtenOff > EPS ? `; ${usd(writtenOff)} already written off on retired books of this market` : ""}`,
+      summary: `insurance pool market ${label}: provisional loss of ${usd(shortfall)} of IF debt on ${active.length} active exhausted book(s) (${detail}), ${p.poolAssetsUsd > 0 ? `${pct((shortfall * 10_000) / p.poolAssetsUsd)} of pool assets` : "pool assets 0"} (critical at ${pct(c.poolMarketDebtCriticalBps)}); absorbed for now by the first-loss slice ${usd(flLoss)}, depositors ${usd(depLoss)}; later marks recover it first, final only at retirement${writtenOff > EPS ? `; ${usd(writtenOff)} written off for good on retired books of this market` : ""}`,
     });
   }
 

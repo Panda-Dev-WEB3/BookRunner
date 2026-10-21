@@ -129,7 +129,8 @@ describe("pool_market_debt / pool_debt_written_off / pool_book_unrepaid", () => 
     const p = pool({ books: [poolBook({ claimUsd: 25_000, lossFirstLossUsd: 5_000 }), poolBook({ bookId: 5, allocationUsd: 20_000, claimUsd: 19_000, lossFirstLossUsd: 1_000 })] });
     const w = run(p);
     expect(ks(w)).toEqual([[`pool_market_debt:${NVDA_MKT}`, "warning"]]);
-    expect(w[0]!.summary).toContain("market NVDA: $6,000.00 of IF debt marked down on 2 active book(s)");
+    expect(w[0]!.summary).toContain("market NVDA: provisional loss of $6,000.00 of IF debt on 2 active exhausted book(s)");
+    expect(w[0]!.summary).toContain("final only at retirement");
     expect(w[0]!.summary).toContain("book 3 NVDA $5,000.00 of $30,000.00");
     expect(w[0]!.summary).toContain("book 5 $1,000.00"); // not in the books snapshot: id only
     expect(w[0]!.summary).toContain("first-loss slice $6,000.00");
@@ -155,7 +156,7 @@ describe("pool_market_debt / pool_debt_written_off / pool_book_unrepaid", () => 
     // with active debt on the same market, the write-off is quoted in the market alert
     const m = run(pool({ books: [{ ...retired, lastMarkAt: NOW_S - 700_000 }, poolBook({ bookId: 4, claimUsd: 29_000 })] }));
     expect(ks(m)).toEqual([[`pool_market_debt:${NVDA_MKT}`, "warning"]]);
-    expect(m[0]!.summary).toContain("$12,000.00 already written off on retired books");
+    expect(m[0]!.summary).toContain("$12,000.00 written off for good on retired books");
   });
 
   test("a retired book still owing its claim: warning 6 h after its final mark", () => {
