@@ -33,8 +33,8 @@ describe("report computation (pure)", () => {
   });
 });
 
-async function service() {
-  const t = await makeCtx();
+async function service(o: { now?: () => number } = {}) {
+  const t = await makeCtx(o.now ? { now: o.now } : undefined);
   t.chain.books = [trackedBook()];
   const svc = new OpsService(t.ctx, new Provisioner(t.ctx, await loadOrCreateBuilderKey(t.keys, BUILDER_ID, undefined, 86_400_000, keyFromSecret)));
   await svc.syncBooks();
@@ -64,7 +64,8 @@ describe("provisioning", () => {
   });
 
   test("periodic report posts IF/MM equity and net exposure", async () => {
-    const t = await service();
+    // a fixed clock: with the wall clock the two reports could straddle a second and both be posted (flaky)
+    const t = await service({ now: () => 1_800_000_000_000 });
     t.mock.venue.credit(IF_ID, 25_000_000_000);
     t.mock.venue.credit(MM_ID, 75_000_000_000);
     t.mock.venue.setPrice("NVDA", 190, false);
