@@ -148,7 +148,7 @@ describe.skipIf(!ENABLED)("on-chain: RevenueRouter distribution + MarkRegistry c
     expect(out.status).toBe("distributed");
     if (out.status !== "distributed") return;
     const expected = splitDistribution({ gross: usd("1000"), expensesRequested: usd("1"), expenseCapBps: 2000n, carryBps: 1000n, seniorHurdleBps: 6000n, seniorSupply: usd("70000"), juniorSupply: usd("30000") });
-    expect(out.split).toEqual(expected);
+    expect(out.split).toEqual({ ...expected, premium: 0n }); // a book-funded IF pays no pool premium
     expect(out.parityMismatches).toEqual([]);
     expect(await pc.readContract({ address: c.usdc, abi: erc20Abi, functionName: "balanceOf", args: [vault] })).toBe(expected.senior + expected.junior);
     expect(await pc.readContract({ address: c.usdc, abi: erc20Abi, functionName: "balanceOf", args: [expenseRecipient] })).toBe(expected.expenses);
