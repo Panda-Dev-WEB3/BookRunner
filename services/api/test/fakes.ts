@@ -9,6 +9,8 @@ import type {
   CharterChainRecord,
   CommitteeState,
   MandateChainState,
+  PoolChainState,
+  PoolWalletState,
   ProtocolParams,
   TrancheWalletState,
 } from "../src/chain/gateway";
@@ -30,6 +32,12 @@ import type {
   NewWebhookSubscription,
   OraclePriceRow,
   Page,
+  PoolBookRow,
+  PoolDepositRow,
+  PoolEpochRow,
+  PoolFlowDay,
+  PoolSnapshotRow,
+  PoolWithdrawalRow,
   ReadModel,
   ReceiptLinkField,
   ReceiptRootRow,
@@ -74,6 +82,12 @@ export class FakeReadModel implements ReadModel {
   subscriptions: SubscriptionCommit[] = [];
   events: EventRow[] = [];
   oraclePrices: OraclePriceRow[] = [];
+  poolDepositRows: PoolDepositRow[] = [];
+  poolWithdrawalRows: PoolWithdrawalRow[] = [];
+  poolEpochRows: PoolEpochRow[] = [];
+  poolBookRows: PoolBookRow[] = [];
+  poolSnapshotRows: PoolSnapshotRow[] = [];
+  poolFlowDayRows: PoolFlowDay[] = [];
   failPing = false;
   /** Makes receiptLinks throw (feeds must still be served, without receipt ids). */
   failReceiptLinks = false;
@@ -212,6 +226,30 @@ export class FakeReadModel implements ReadModel {
       if (!ids || ids.includes(p.priceId)) byId.set(p.priceId, p);
     }
     return [...byId.values()];
+  }
+  async poolDeposits(owner: string) {
+    return desc(this.poolDepositRows.filter((d) => d.owner === owner.toLowerCase()), (d) => d.id);
+  }
+  async poolWithdrawals(owner: string) {
+    return desc(this.poolWithdrawalRows.filter((d) => d.owner === owner.toLowerCase()), (d) => d.id);
+  }
+  async poolEpochs(q: { limit: number; beforeEpoch?: number }) {
+    return desc(this.poolEpochRows, (e) => e.epoch).filter((e) => q.beforeEpoch === undefined || e.epoch < q.beforeEpoch).slice(0, q.limit);
+  }
+  async poolBooks() {
+    return [...this.poolBookRows].sort((a, b) => a.bookId - b.bookId);
+  }
+  async poolSnapshots(from: Date, to: Date, limit: number) {
+    return this.poolSnapshotRows
+      .filter((s) => s.ts >= from && s.ts <= to)
+      .sort((a, b) => a.blockNumber - b.blockNumber)
+      .slice(-limit);
+  }
+  async latestPoolSnapshot() {
+    return [...this.poolSnapshotRows].sort((a, b) => b.blockNumber - a.blockNumber)[0] ?? null;
+  }
+  async poolFlowDays(from: Date) {
+    return this.poolFlowDayRows.filter((d) => d.day >= new Date(Math.floor(from.getTime() / 86_400_000) * 86_400_000));
   }
 }
 
@@ -445,6 +483,29 @@ export class FakeChain implements ChainGateway {
   async operatorConsent(mandate: Address, operator: Address, key: Address) {
     this.guard();
     return this.consents.has(`${mandate}|${operator}|${key}`.toLowerCase());
+  }
+  /** InsurancePool (null: the deployment has none) */
+  pool: PoolChainState | null = null;
+  poolWallets = new Map<string, Omit<PoolWalletState, "claimable" | "deposits" | "epochs">>();
+  poolClaimable = new Map<number, bigint>();
+  poolDepositInfo = new Map<number, { owner: Address; epoch: number; done: boolean; assets: bigint }>();
+  poolEpochInfo = new Map<number, { shares: bigint; filledShares: bigint; assets: bigint; depositAssets: bigint; depositShares: bigint; endsAt: number; processed: boolean }>();
+  async poolState() {
+    this.guard();
+    return this.pool;
+  }
+  async poolWallet(wallet: Address, q: { requestIds: number[]; depositIds: number[]; epochs: number[] }) {
+    this.guard();
+    if (!this.pool) return null;
+    const base = this.poolWallets.get(wallet.toLowerCase()) ?? { shares: 0n, value: 0n, cooldownEnds: this.pool.params.cooldown, usdcBalance: 0n, usdcAllowance: 0n };
+    const zeroEpoch = { shares: 0n, filledShares: 0n, assets: 0n, depositAssets: 0n, depositShares: 0n, endsAt: 0, processed: false };
+    const zeroDeposit = { owner: "0x0000000000000000000000000000000000000000" as Address, epoch: 0, done: false, assets: 0n };
+    return {
+      ...base,
+      claimable: new Map(q.requestIds.map((id) => [id, this.poolClaimable.get(id) ?? 0n] as const)),
+      deposits: new Map(q.depositIds.map((id) => [id, this.poolDepositInfo.get(id) ?? zeroDeposit] as const)),
+      epochs: new Map(q.epochs.map((e) => [e, this.poolEpochInfo.get(e) ?? zeroEpoch] as const)),
+    };
   }
   setWallet(tranche: Address, wallet: Address, w: Partial<TrancheWalletState>) {
     this.wallets.set(`${tranche.toLowerCase()}|${wallet.toLowerCase()}`, { ...emptyWallet(), ...w });

@@ -58,7 +58,7 @@ export function pathAllowed(pathname: string, route: string | undefined): boolea
  * them this build serves as `capabilities`, so the web never probes one that is absent. The full
  * procedure list (and uptime) is only in `/health?verbose` with the admin bearer token.
  */
-export const OPTIONAL_PROCEDURES = ["book.fills", "book.hedges", "receipts.list"] as const;
+export const OPTIONAL_PROCEDURES = ["book.fills", "book.hedges", "receipts.list", "pool.overview"] as const;
 
 /** /status is computed at most this often per process (nginx micro-caches it too); public, so cheap. */
 export const STATUS_CACHE_MS = 15_000;
