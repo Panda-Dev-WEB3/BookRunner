@@ -253,6 +253,28 @@ const lossAbsorbed: Handler = async ({ log, emit }) => {
   });
 };
 
+// 2026-10 insurance pool (review round 3): an exhausted book's shortfall against its pool debt is PROVISIONAL (later
+// marks restore the pool's claim first) and final only at retirement (InsuranceWrittenOff).
+const insuranceShortfall: Handler = async ({ log, emit }) => {
+  const bookId = requireBook(log);
+  await emit({
+    type: "book.insurance_shortfall",
+    bookId,
+    dedupeKey: `book.insurance_shortfall:${log.txHash}:${log.logIndex}`,
+    payload: { bookId, shortfallUsd: usdDb(arg.big(log.args, "shortfall")), provisional: true, txHash: log.txHash },
+  });
+};
+
+const insuranceWrittenOff: Handler = async ({ log, emit }) => {
+  const bookId = requireBook(log);
+  await emit({
+    type: "book.insurance_written_off",
+    bookId,
+    dedupeKey: `book.insurance_written_off:${log.txHash}:${log.logIndex}`,
+    payload: { bookId, amountUsd: usdDb(arg.big(log.args, "amount")), provisional: false, txHash: log.txHash },
+  });
+};
+
 const retiring: Handler = async ({ log, store, emit }) => {
   const bookId = requireBook(log);
   await store.updateBook(bookId, { state: "Retiring" });
@@ -487,6 +509,8 @@ export const HANDLERS: Record<string, Handler> = {
   "book.MarkApplied": bookMarkApplied,
   "book.LossAbsorbed": lossAbsorbed,
   "book.Retiring": retiring,
+  "book.InsuranceShortfall": insuranceShortfall,
+  "book.InsuranceWrittenOff": insuranceWrittenOff,
   "book.Retired": retired,
   "book.Killed": killed,
   "book.SponsorBelowSkin": sponsorBelowSkin,

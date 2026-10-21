@@ -2,7 +2,7 @@
 // pool_snapshots, the premium of a pool-funded book's distribution, and idempotent re-application.
 import { describe, expect, test } from "bun:test";
 import { createLogger, dbUsd } from "@bookrunner/shared";
-import { insurancePoolAbi, revenueRouterAbi } from "@bookrunner/shared/abi";
+import { bookAbi, insurancePoolAbi, revenueRouterAbi } from "@bookrunner/shared/abi";
 import type { Abi, Address, Hex } from "viem";
 import type { PoolStateLite } from "../src/chain";
 import { CURSORS } from "../src/config";
@@ -89,7 +89,10 @@ function world() {
   // block 9: the book is exhausted: the pool marks 2,000 down (slice first)
   L(insurancePoolAbi, POOL, "BookMarked", { bookId: 1n, value: U(23_000), periodEnd: BigInt(END0 + WEEK), final_: false }, 9, 0, 114);
   L(insurancePoolAbi, POOL, "LossReported", { bookId: 1n, amount: U(2_000), firstLossAbsorbed: U(2_000), depositorsAbsorbed: 0n, claim: U(23_000) }, 9, 1, 114);
-  chain.head = 9n;
+  // the book's side of the same mark: a provisional shortfall; at retirement (block 10) the final write-off
+  L(bookAbi, ADDR.book, "InsuranceShortfall", { bookId: 1n, shortfall: U(2_000) }, 9, 2, 114);
+  L(bookAbi, ADDR.book, "InsuranceWrittenOff", { bookId: 1n, amount: U(1_500) }, 10, 0, 115);
+  chain.head = 10n;
   return { chain, store, make };
 }
 
@@ -123,7 +126,10 @@ describe("insurance pool indexing", () => {
     expect(Object.values(s.poolFlows).find((f) => f.kind === "loss")).toMatchObject({ bookId: 1, amount: D(2000), firstLossPart: D(2000) });
 
     expect(s.poolSnapshots[4]).toMatchObject({ claims: D(25000), utilisationBps: 2500, sharePrice: D(1), totalSupplyRaw: S(90_000).toString() });
-    expect(Object.values(s.events).some((e) => e.type === "pool.loss_reported" && e.bookId === 1)).toBe(true);
+    // the book is still active: the pool's loss is provisional (recovered first by later marks, final at retirement)
+    expect(Object.values(s.events).find((e) => e.type === "pool.loss_reported" && e.bookId === 1)?.payload).toMatchObject({ provisional: true, amountUsd: D(2000) });
+    expect(Object.values(s.events).find((e) => e.type === "book.insurance_shortfall")?.payload).toMatchObject({ bookId: 1, shortfallUsd: D(2000), provisional: true });
+    expect(Object.values(s.events).find((e) => e.type === "book.insurance_written_off")?.payload).toMatchObject({ bookId: 1, amountUsd: D(1500), provisional: false });
     expect(Object.values(s.events).filter((e) => e.type === "pool.epoch_processed")).toHaveLength(2);
     expect(chain.poolStateCalls).toBeGreaterThan(0);
   });

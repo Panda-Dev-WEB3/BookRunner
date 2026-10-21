@@ -173,14 +173,17 @@ const bookMarked: Handler = async (ctx) => {
   await snapshot(ctx);
 };
 
+// The pool's loss on a book is PROVISIONAL while the book is active (its claim is restored first by later marks, review
+// round 3) and final only with the book's final mark (finalizeRetirement): the event says which.
 const lossReported: Handler = async (ctx) => {
-  const { log, emit } = ctx;
+  const { log, emit, chain } = ctx;
   const bookId = arg.num(log.args, "bookId");
   const amount = arg.big(log.args, "amount");
   const fl = arg.big(log.args, "firstLossAbsorbed");
   await flow(ctx, "loss", bookId, amount, fl);
   await position(ctx, bookId);
   await snapshot(ctx);
+  const p = await chain.poolBookPosition(pool(log), BigInt(bookId), log.blockNumber);
   await emit({
     type: "pool.loss_reported",
     bookId,
@@ -191,6 +194,7 @@ const lossReported: Handler = async (ctx) => {
       firstLossAbsorbedUsd: usdDb(fl),
       depositorsAbsorbedUsd: usdDb(arg.big(log.args, "depositorsAbsorbed")),
       claimUsd: usdDb(arg.big(log.args, "claim")),
+      provisional: p ? p.active : true,
       txHash: log.txHash,
     },
   });
