@@ -15,7 +15,7 @@ export const GLOSSARY_GROUPS: readonly GlossaryGroup[] = [
     title: "Books and tranches",
     ids: ["book", "charter", "sponsor", "riskCommittee", "allocator", "tranche", "senior", "junior", "subscriptionWindow", "topUpRound", "redemptionNotice"],
   },
-  { id: "money", title: "Money and the waterfall", ids: ["feeFlow", "waterfall", "hurdle", "carry", "nav", "sharePrice", "backstop", "insuranceFund"] },
+  { id: "money", title: "Money and the waterfall", ids: ["feeFlow", "waterfall", "hurdle", "carry", "nav", "sharePrice", "backstop", "insuranceFund", "insurancePool", "firstLossSlice", "poolEpoch"] },
   { id: "proof", title: "Marks and proof", ids: ["mark", "merkleReceipt", "pullOracle"] },
   { id: "trading", title: "Trading and risk", ids: ["perp", "marketMaker", "bookrunnerAgent", "mandate", "hedgeBand", "killSwitch", "drawdown", "stockToken"] },
   { id: "token", title: "The token", ids: ["bkrn", "staking"] },

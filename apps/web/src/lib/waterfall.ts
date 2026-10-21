@@ -14,10 +14,12 @@ export interface DistributionIn {
   carryUsd: string;
   seniorUsd: string;
   juniorUsd: string;
+  /** 2026-10: insurance pool premium, paid first on pool-funded books (gross = premium + expenses + carry + Senior + Junior) */
+  premiumUsd?: string | null;
   txHash?: string;
 }
 
-export type StepKey = "gross" | "expenses" | "carry" | "senior" | "junior";
+export type StepKey = "gross" | "premium" | "expenses" | "carry" | "senior" | "junior";
 
 export interface WaterfallStep {
   key: StepKey;
@@ -32,7 +34,7 @@ export interface WaterfallStep {
 export interface WaterfallModel {
   gross: bigint;
   steps: WaterfallStep[];
-  /** gross - (expenses + carry + senior + junior): rounding dust that stays in the book */
+  /** gross - (premium + expenses + carry + senior + junior): rounding dust that stays in the book */
   dust: bigint;
   conserved: boolean;
   /** Senior's part of what reached the tranches, in bps */
@@ -41,6 +43,7 @@ export interface WaterfallModel {
 
 const NOTES: Record<StepKey, string> = {
   gross: "Fee flow settled into the book's router over the period",
+  premium: "Insurance pool premium on a pool-funded book, paid before everything else",
   expenses: "Oracle, keeper and venue operating costs, capped on-chain",
   carry: "Protocol carry on net fee flow: half to BKRN buybacks, half to the backstop pool",
   senior: "Senior's fixed share of what reached the tranches",
@@ -49,6 +52,7 @@ const NOTES: Record<StepKey, string> = {
 
 const LABELS: Record<StepKey, string> = {
   gross: "Gross fee flow",
+  premium: "Pool premium",
   expenses: "Expenses",
   carry: "Protocol carry",
   senior: "Senior share",
@@ -61,10 +65,13 @@ export function distributionModel(d: DistributionIn): WaterfallModel | null {
   const carry = usdRaw(d.carryUsd) ?? 0n;
   const senior = usdRaw(d.seniorUsd) ?? 0n;
   const junior = usdRaw(d.juniorUsd) ?? 0n;
+  const premium = usdRaw(d.premiumUsd) ?? 0n;
   if (gross === null) return null;
   let level = gross;
   const steps: WaterfallStep[] = [{ key: "gross", label: LABELS.gross, note: NOTES.gross, amount: gross, from: 0n, to: gross }];
   for (const [key, amount] of [
+    // shown only for pool-funded books (a book funding its own insurance fund pays no premium)
+    ...(premium > 0n ? [["premium", premium] as [StepKey, bigint]] : []),
     ["expenses", expenses],
     ["carry", carry],
     ["senior", senior],

@@ -462,6 +462,8 @@ export interface TermsView {
   oracle: string;
   sessions: string;
   ifTargetUsd: number | null;
+  /** 2026-10: the insurance pool lends the insurance fund (null: no charter indexed) */
+  ifFromPool: boolean | null;
   mmInventoryUsd: number | null;
   seniorHurdleBps: number | null;
   seniorCapBps: number | null;
@@ -481,6 +483,7 @@ export function termsView(d: BookDetail): TermsView {
     oracle: c ? (c.oracle === "attested" ? "Attested multi-source" : c.oracle === "chainlink" ? "Chainlink" : "Unknown") : "-",
     sessions: c ? (c.sessionsPreset ? (SESSIONS[c.sessionsPreset] ?? c.sessionsPreset) : "Custom calendar") : "-",
     ifTargetUsd: toNum(c?.ifTargetUsd),
+    ifFromPool: c ? c.ifFromPool === true : null,
     mmInventoryUsd: toNum(c?.mmInventoryUsd),
     seniorHurdleBps: c?.seniorHurdleBps ?? null,
     seniorCapBps: c?.seniorCapBps ?? null,

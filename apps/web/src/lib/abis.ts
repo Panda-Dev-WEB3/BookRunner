@@ -18,6 +18,12 @@ export const CONFIG_ADDRESSES_ABI = [
   addressGetter("factory"),
 ] as const;
 
+/**
+ * BookrunnerConfig.insurancePool() (2026-10): the protocol-wide insurance pool. Read on its own: a deployment from
+ * before the pool has no such getter (the call reverts) and an unset pool is the zero address.
+ */
+export const CONFIG_POOL_ABI = [addressGetter("insurancePool")] as const;
+
 /** Book.config(): the BookrunnerConfig the book reads its siblings from. */
 export const BOOK_CONFIG_ABI = [addressGetter("config")] as const;
 
