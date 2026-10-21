@@ -213,7 +213,34 @@ export function poolFirstLossLow(s: Snapshot, _c: RuleConfig): Condition[] {
   ];
 }
 
+// ------------------------------------------------------------------ final pool mark (review I-2)
+/**
+ * pool_final_mark_stuck:<bookId> — the book is Retired (DB) but its pool position is still active: the retirement mark
+ * did not reach the pool (Book InsuranceMarkFailed; markBook refused). The keeper retries Book.settleInsurance with
+ * backoff; meanwhile the book keeps the pool's epochs waiting for the grace. WARNING after ALERT_POOL_FINAL_MARK_STUCK_SECONDS
+ * (1800), CRITICAL once it has lasted a whole processGrace.
+ */
+export function poolFinalMarkStuck(s: Snapshot, c: RuleConfig): Condition[] {
+  const p = s.pool;
+  if (!p) return [];
+  const books = bookMap(s);
+  const out: Condition[] = [];
+  for (const b of p.books) {
+    const db = books.get(b.bookId);
+    if (!b.active || db?.state !== "Retired") continue;
+    out.push({
+      key: `pool_final_mark_stuck:${b.bookId}`,
+      rule: "pool_final_mark_stuck",
+      severity: "warning",
+      forSec: c.poolFinalMarkStuckSec,
+      summary: `${bookLabel(books, b.bookId)} is retired but its insurance pool position is still open: the final mark did not reach the pool (InsuranceMarkFailed). The keeper retries Book.settleInsurance with backoff; until then the pool's epochs wait for the grace (${dur(p.processGraceSec)}) and its claim of ${usd(b.claimUsd)} stays provisional`,
+    });
+  }
+  return out;
+}
+
 export const POOL_RULES = {
+  pool_final_mark_stuck: poolFinalMarkStuck,
   pool_utilisation: poolUtilisation,
   pool_epoch_in_grace: poolEpochInGrace,
   pool_epoch_overdue: poolEpochOverdue,

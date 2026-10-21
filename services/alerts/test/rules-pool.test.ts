@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { type ChainPort, type DbPort, type PoolRead, collect, emptyMemory, readPool } from "../src/collect";
 import { loadConfig } from "../src/config";
 import { evaluate } from "../src/rules";
-import { POOL_RULES, poolEpochInGrace, poolEpochOverdue, poolFirstLossLow, poolMarketDebt, poolUtilisation } from "../src/rules-pool";
+import { POOL_RULES, poolEpochInGrace, poolEpochOverdue, poolFinalMarkStuck, poolFirstLossLow, poolMarketDebt, poolUtilisation } from "../src/rules-pool";
 import type { Condition, PoolSnap } from "../src/types";
 import { NOW, NOW_S, NVDA_MKT, TSLA_MKT, book, pool, poolBook, rules, snap } from "./fixtures";
 
@@ -21,6 +21,18 @@ describe("absent / unreadable pool", () => {
       const { pool: _drop, ...rest } = snap();
       expect(poolKeys(evaluate(rest as ReturnType<typeof snap>, rules()))).toEqual([]);
     }
+  });
+});
+
+describe("pool_final_mark_stuck (review I-2)", () => {
+  test("a Retired book whose pool position is still active: warning with anti-flap; closed or live: quiet", () => {
+    const retired = snap({ books: [book({ bookId: 3, state: "Retired" })], pool: pool({ books: [poolBook({ active: true })] }) });
+    const c = poolFinalMarkStuck(retired, rules());
+    expect(ks(c)).toEqual([["pool_final_mark_stuck:3", "warning"]]);
+    expect(c[0]!.forSec).toBe(1800);
+    expect(c[0]!.summary).toContain("settleInsurance");
+    expect(poolFinalMarkStuck(snap({ books: [book({ bookId: 3, state: "Retired" })], pool: pool({ books: [poolBook({ active: false })] }) }), rules())).toEqual([]);
+    expect(poolFinalMarkStuck(snap({ books: [book({ bookId: 3, state: "Live" })], pool: pool({ books: [poolBook({ active: true })] }) }), rules())).toEqual([]);
   });
 });
 

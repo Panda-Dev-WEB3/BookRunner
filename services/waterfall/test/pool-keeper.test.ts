@@ -4,7 +4,7 @@
 import { describe, expect, test } from "bun:test";
 import { createLogger, usd } from "@bookrunner/shared";
 import type { Hex } from "viem";
-import { Cooldowns, KeeperRunner, type PoolKeeperChain, type PoolQueueSnapshot, PoolKeeperRunner, planEpoch, shouldSettleInsurance } from "../src/index";
+import { Cooldowns, KeeperRunner, type PoolKeeperChain, type PoolQueueSnapshot, PoolKeeperRunner, planEpoch, settleBackoffMs, shouldSettleInsurance } from "../src/index";
 import { FakeKeeperChain, bookRef, fakeHash } from "./fakes";
 
 const log = createLogger("pool-keeper-test", "silent");
@@ -93,6 +93,36 @@ describe("settleInsurance (retired pool-funded book, final mark not reported)", 
     expect(shouldSettleInsurance("Retired", { closed: true })).toBe(false);
     expect(shouldSettleInsurance("Retired", null)).toBe(false);
     expect(shouldSettleInsurance("Retiring", { closed: false })).toBe(false);
+  });
+
+  test("review I-2: a confirmed settleInsurance that does not close the position is not resent within the backoff", async () => {
+    const chain = new FakeKeeperChain();
+    chain.snap.state = "Retired";
+    chain.snap.insurance = { debt: usd("25000"), due: true, closed: false };
+    let now = 0;
+    const runner = new KeeperRunner({ chain, cooldowns: new Cooldowns(() => now), cfg: { bufferBps: 0n, minRecallUsd: usd("1"), flatThresholdUsd: usd("1"), recallAllWhenRetiring: true, cooldownMs: 1000 }, log });
+    const count = () => chain.sent.filter((x) => x === "settleInsurance").length;
+    await runner.tick(bookRef(1));
+    expect(count()).toBe(1);
+    await runner.tick(bookRef(1)); // tx confirmed, position still open: held
+    expect(count()).toBe(1);
+    now += 1000;
+    await runner.tick(bookRef(1)); // first backoff (1 s) over: second attempt
+    expect(count()).toBe(2);
+    now += 1000;
+    await runner.tick(bookRef(1)); // now 2 s
+    expect(count()).toBe(2);
+    now += 1000;
+    await runner.tick(bookRef(1));
+    expect(count()).toBe(3);
+    // closed: nothing more, and the backoff resets
+    chain.snap.insurance = { debt: 0n, due: true, closed: true };
+    now += 60_000;
+    await runner.tick(bookRef(1));
+    expect(count()).toBe(3);
+    expect(settleBackoffMs(1000, 0)).toBe(1000);
+    expect(settleBackoffMs(1000, 3)).toBe(8000);
+    expect(settleBackoffMs(30_000, 30)).toBe(6 * 3_600_000);
   });
 
   test("the book keeper sends it", async () => {
