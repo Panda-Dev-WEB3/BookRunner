@@ -22,7 +22,8 @@ import {
   underwritingVaultAbi,
 } from "@bookrunner/shared/abi";
 import { type BookRef, type TxSender, bookStateName, codeHasSelector, describeRevert, scanEvents } from "@bookrunner/waterfall";
-import { type Abi, type Address, type Hex, type PublicClient, encodeFunctionData, erc20Abi, isAddressEqual, parseEventLogs, zeroAddress, zeroHash } from "viem";
+import { type Abi, type Address, type Hex, type PublicClient, encodeFunctionData, erc20Abi, getAbiItem, isAddressEqual, parseEventLogs, toFunctionSelector, zeroAddress, zeroHash } from "viem";
+import { RetryableMarkError } from "../errors";
 import type { AdapterReportState } from "../../../ops-venue/src/report712";
 import { priceIsStale } from "../domain/held";
 import { deskPriceChoice, underlyingAtSettle } from "../domain/settle";
@@ -34,6 +35,26 @@ import { COMMIT_AND_APPLY_SELECTOR } from "./lowgasAbi";
 import { readAfterPriceUpdate, unbatchedClient } from "./priceSim";
 
 const TICKER_RE = /^[A-Z0-9._-]{1,27}$/;
+const INSURANCE_DEBT_SELECTOR = toFunctionSelector(getAbiItem({ abi: bookAbi, name: "insuranceDebt" }));
+
+/**
+ * Book.insuranceDebt() for the NAV the mark signs (2026-10): null for a book-funded IF (pool 0) or a book whose bytecode
+ * has no such view (deployed before the insurance pool). Any other failure (a transient RPC error, a revert) refuses the
+ * mark (RetryableMarkError, retried with backoff): the pool's claim is never silently treated as 0 (review I-1).
+ */
+export async function readInsuranceDebt(
+  read: () => Promise<readonly [Address, bigint, bigint, boolean, boolean]>,
+  hasView: () => Promise<boolean>,
+): Promise<{ debt: bigint; claim: bigint; due: boolean } | null> {
+  try {
+    const d = await read();
+    // the pool's claim (`value`: the debt capped by the book's own capital, review round 3) is what NAV nets
+    return isAddressEqual(d[0], zeroAddress) ? null : { debt: d[1], claim: d[2], due: d[3] };
+  } catch (err) {
+    if ((await hasView().catch(() => true)) === false) return null;
+    throw new RetryableMarkError(`Book.insuranceDebt() unreadable (${describeRevert(err).message}): mark refused, retried later`);
+  }
+}
 const EMPTY_MARK: MarkInput = {
   bookId: 0n,
   periodEnd: 0n,
@@ -274,11 +295,10 @@ export class MarkChainAdapter implements MarkChain {
       this.pc.readContract({ address: this.c.backstop, abi: backstopAbi, functionName: "balance", ...b }),
       this.pc.readContract({ address: mandate, abi: mMMandateAbi, functionName: "getMandate", ...b }),
       this.pc.readContract({ address: mandate, abi: mMMandateAbi, functionName: "killed", ...b }),
-      // 2026-10 insurance pool: (pool, debt, value, due, closed); a book-funded IF (pool 0) or an older book: none
-      this.pc.readContract({ address: book, abi: bookAbi, functionName: "insuranceDebt", ...b }).then(
-        // the pool's claim (`value`: the debt capped by the book's own capital, review round 3) is what NAV nets
-        (d) => (isAddressEqual(d[0], zeroAddress) ? null : { debt: d[1], claim: d[2], due: d[3] }),
-        () => null,
+      // 2026-10 insurance pool: (pool, debt, value, due, closed); a failed read refuses the mark (review I-1)
+      readInsuranceDebt(
+        () => this.pc.readContract({ address: book, abi: bookAbi, functionName: "insuranceDebt", ...b }),
+        () => codeHasSelector(this.pc, book, INSURANCE_DEBT_SELECTOR),
       ),
     ]);
     let [insuranceUsd, marginUsd, netExposureUsd, inTransitUsd, deployedValueUsd, valuationAt] = await Promise.all([

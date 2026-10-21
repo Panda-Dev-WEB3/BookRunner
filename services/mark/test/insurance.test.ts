@@ -4,9 +4,10 @@
 import { describe, expect, test } from "bun:test";
 import { type MarkInput, devAccount, markTypes, usd } from "@bookrunner/shared";
 import { type Hex, hashStruct, toFunctionSelector } from "viem";
+import { readInsuranceDebt } from "../src/adapters/chain";
 import { COMMIT_AND_APPLY_SELECTOR } from "../src/adapters/lowgasAbi";
 import { composeNav, markInsuranceEquityUsd, poolDebtNetted } from "../src/domain/nav";
-import { LocalMarkSigner, MarkPipeline } from "../src/index";
+import { LocalMarkSigner, MarkPipeline, RetryableMarkError } from "../src/index";
 import { createLogger } from "@bookrunner/shared";
 import { MemoryEventSink } from "@bookrunner/waterfall";
 import { FakeMarkChain, FakeMarkStore, FakeReceipts, P, ref, snapshot } from "./fixtures";
@@ -83,5 +84,48 @@ describe("pool-funded NAV (informational)", () => {
     expect(poolDebtNetted({ insuranceDebt: { debt: usd("25000"), claim: usd("20000"), due: false } })).toBe(usd("20000"));
     expect(poolDebtNetted({ insuranceDebt: { debt: usd("25000"), claim: usd("25000"), due: true } })).toBe(0n);
     expect(poolDebtNetted({ insuranceDebt: null })).toBe(0n);
+  });
+});
+
+describe("review I-1: a failed Book.insuranceDebt() read refuses the mark", () => {
+  const POOL = "0x00000000000000000000000000000000000000d0" as const;
+  const ZERO = "0x0000000000000000000000000000000000000000" as const;
+
+  test("the read: pool-funded -> the claim; book-funded -> null; no such view (old book) -> null; any other failure -> refused", async () => {
+    expect(await readInsuranceDebt(async () => [POOL, usd("25000"), usd("20000"), false, false], async () => true)).toEqual({ debt: usd("25000"), claim: usd("20000"), due: false });
+    expect(await readInsuranceDebt(async () => [ZERO, 0n, 0n, false, false], async () => true)).toBeNull();
+    const fail = async (): Promise<never> => {
+      throw new Error("HTTP request failed: timeout");
+    };
+    expect(await readInsuranceDebt(fail, async () => false)).toBeNull();
+    await expect(readInsuranceDebt(fail, async () => true)).rejects.toBeInstanceOf(RetryableMarkError);
+    // the bytecode probe itself failing: assume the view exists (refuse rather than sign without the claim)
+    await expect(readInsuranceDebt(fail, async () => Promise.reject(new Error("rpc down")))).rejects.toBeInstanceOf(RetryableMarkError);
+  });
+
+  test("the pipeline: a refused snapshot signs and commits nothing", async () => {
+    const chain = new FakeMarkChain();
+    chain.snapshot = async () => {
+      throw new RetryableMarkError("Book.insuranceDebt() unreadable");
+    };
+    const store = new FakeMarkStore();
+    const signer = new LocalMarkSigner(devAccount("markSigner"), 31337, REGISTRY);
+    const pipeline = new MarkPipeline({
+      books: { get: async (id) => (id === 1 ? ref(1) : undefined) },
+      chain,
+      store,
+      receipts: new FakeReceipts(),
+      signer,
+      events: new MemoryEventSink(),
+      log: createLogger("mark-insurance-test", "silent"),
+      maxRetries: 3,
+      confirmations: 0n,
+      receiptsWaitMs: 20,
+      dbRetries: 2,
+      dbRetryBaseMs: 1,
+    });
+    await expect(pipeline.run({ bookId: 1, periodEnd: P })).rejects.toBeInstanceOf(RetryableMarkError);
+    expect(chain.commitCalls).toBe(0);
+    expect(store.rows.size).toBe(0);
   });
 });
