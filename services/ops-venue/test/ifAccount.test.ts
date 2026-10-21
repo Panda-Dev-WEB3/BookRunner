@@ -102,6 +102,25 @@ describe("min-IF: Orderly's requirement is strictly greater (VERIFY O10)", () =>
     expect(r.requirementUsd).toBeUndefined();
   });
 
+  test("fund_if of a pool-funded book (2026-10): same IF account and check, reports the pool's debt", async () => {
+    const t = await makeCtx();
+    t.chain.books = [{ ...trackedBook(), ifFromPool: true }];
+    t.chain.insurance.set(trackedBook().book.toLowerCase(), { debt: 25_000_000_000n, due: false, closed: false });
+    const svc = new OpsService(t.ctx, await provisioner(t));
+    await svc.syncBooks();
+    t.mock.venue.credit(IF_ID, 25_000_000_000);
+    expect(await svc.handleJob({ kind: "fund_if", bookId: 1 })).toMatchObject({ funded: true, fundedBy: "pool", poolDebtUsd: "25000000000", poolDebtDue: false, ifAccountId: IF_ID });
+    // a book-funded IF says so and carries no debt
+    const u = await makeCtx();
+    u.chain.books = [trackedBook()];
+    const svc2 = new OpsService(u.ctx, await provisioner(u));
+    await svc2.syncBooks();
+    u.mock.venue.credit(IF_ID, 25_000_000_000);
+    const r = (await svc2.handleJob({ kind: "fund_if", bookId: 1 })) as Record<string, unknown>;
+    expect(r.fundedBy).toBe("tranches");
+    expect(r.poolDebtUsd).toBeUndefined();
+  });
+
   test("fund_if in live mode reads the IF ACCOUNT's equity (never the public insurancefund endpoint)", async () => {
     const t = await makeCtx();
     t.chain.books = [trackedBook()];

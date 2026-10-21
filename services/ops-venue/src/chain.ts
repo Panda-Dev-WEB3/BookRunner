@@ -60,6 +60,12 @@ export interface OrderlyBook {
   underlying: Hex;
   ifTargetUsd: bigint;
   mmInventoryUsd: bigint;
+  /**
+   * 2026-10 insurance pool (charter.ifFromPool): the InsurancePool funds the IF at closeWindow (a senior debt of the
+   * book); the vault still deploys it to the same IF account, nobody recalls it while the book is Live, and its
+   * recall in wind-down makes the debt due (fundClaims repays the pool first). Absent / false: the tranches fund it.
+   */
+  ifFromPool?: boolean;
 }
 
 export type AdapterLog =
@@ -158,6 +164,8 @@ export interface ChainPort {
   /** Tx hash of the latest Orderly Vault `AccountDelegate(delegateContract, brokerHash, signer)` (null if none). */
   delegateTx(delegateContract: Address, signer: Address): Promise<Hex | null>;
   mandateKilled(mandate: Address): Promise<boolean>;
+  /** Book.insuranceDebt() of a pool-funded book (null: book-funded IF, or a book without the view). */
+  insuranceDebt?(book: Address): Promise<{ debt: bigint; due: boolean; closed: boolean } | null>;
   maxFeeSweepPerPeriod(adapter: Address): Promise<bigint>;
   markInterval(): Promise<number>;
   usdcBalance(who: Address): Promise<bigint>;
@@ -295,7 +303,17 @@ export class ViemChain implements ChainPort {
       underlying: charter.underlying,
       ifTargetUsd: charter.ifTargetUsd,
       mmInventoryUsd: charter.mmInventoryUsd,
+      ifFromPool: charter.ifFromPool,
     };
+  }
+
+  async insuranceDebt(book: Address): Promise<{ debt: bigint; due: boolean; closed: boolean } | null> {
+    try {
+      const d = await this.pc.readContract({ address: book, abi: bookAbi, functionName: "insuranceDebt" });
+      return /^0x0{40}$/i.test(d[0]) ? null : { debt: d[1], due: d[3], closed: d[4] };
+    } catch {
+      return null;
+    }
   }
 
   async bookState(book: Address): Promise<BookState> {

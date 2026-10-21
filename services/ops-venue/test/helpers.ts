@@ -246,6 +246,11 @@ export class FakeChain implements ChainPort {
   async loadOrderlyBook(id: number) {
     return this.books.find((b) => b.bookId === id) ?? null;
   }
+  /** Book.insuranceDebt() per book address (lowercase); absent = book-funded IF */
+  insurance = new Map<string, { debt: bigint; due: boolean; closed: boolean }>();
+  async insuranceDebt(book: Address) {
+    return this.insurance.get(book.toLowerCase()) ?? null;
+  }
   async bookState(book: Address) {
     return this.states.get(book.toLowerCase()) ?? "Live";
   }
