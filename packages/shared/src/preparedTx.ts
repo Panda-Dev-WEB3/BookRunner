@@ -11,6 +11,7 @@
 import { type Abi, type AbiFunction, type Hex, decodeFunctionData, erc20Abi, getAddress, isAddress, maxUint256 } from "viem";
 import { bkrnStakingAbi } from "./abi/BkrnStaking";
 import { bookAbi } from "./abi/Book";
+import { insurancePoolAbi } from "./abi/InsurancePool";
 import { marketCharterAbi } from "./abi/MarketCharter";
 import { mMMandateAbi } from "./abi/MMMandate";
 import { riskCommitteeAbi } from "./abi/RiskCommittee";
@@ -66,6 +67,8 @@ const ALLOWED: Array<[Abi, readonly string[]]> = [
   [riskCommitteeAbi as Abi, ["vote"]],
   [mMMandateAbi as Abi, ["registerKey", "consentKey", "revokeKey"]],
   [bookAbi as Abi, ["openTopUp"]],
+  // 2026-10 insurance pool: queued entry / exit (no ERC-4626 deposit / withdraw / redeem: they revert anyway)
+  [insurancePoolAbi as Abi, ["requestDeposit", "cancelDeposit", "claimDeposit", "requestWithdraw", "claim"]],
   [MOCK_MINT_ABI as Abi, ["mint"]],
 ];
 
@@ -83,7 +86,7 @@ const KNOWN_ABI: Abi = (() => {
 })();
 
 /** The amount a step moves out of the signer's wallet through an approval (null: none). */
-const pulledAmount = (fn: string, args: readonly unknown[]): bigint | null => (fn === "deposit" || fn === "stake" ? (args[0] as bigint) : null);
+const pulledAmount = (fn: string, args: readonly unknown[]): bigint | null => (fn === "deposit" || fn === "stake" || fn === "requestDeposit" ? (args[0] as bigint) : null);
 
 const lower = (a: string) => a.toLowerCase();
 
@@ -170,6 +173,27 @@ export function verifyPreparedTxs(txs: readonly PreparedTxInput[], check: Prepar
         mustBeAccount(receiver, "redeemed USDC");
         mustBeAccount(owner, "redemption claim (owner)");
         summary = `${name(to)}.claimRedemption(receiver ${name(receiver)})`;
+        break;
+      }
+      case "requestDeposit": {
+        // the pool pulls exactly `assets` from the signer; shares are minted to the signer at the epoch's processing
+        const [assets] = args as [bigint];
+        if (check.amount !== undefined && assets !== check.amount) throw new PreparedTxError(`Step ${n} queues ${assets}, not the ${check.amount} you entered.`);
+        summary = `${name(to)}.requestDeposit(${fmtAmount(assets, decimals.get(lower(to)) ?? 6)} USDC, for your account at the epoch's share price)`;
+        break;
+      }
+      case "requestWithdraw": {
+        // escrows the signer's own shares; the claim pays the request's owner (the signer)
+        const [shares] = args as [bigint];
+        if (check.amount !== undefined && shares !== check.amount) throw new PreparedTxError(`Step ${n} queues ${shares} shares, not the ${check.amount} you entered.`);
+        summary = `${name(to)}.requestWithdraw(${fmtAmount(shares, 12)} shares)`;
+        break;
+      }
+      case "cancelDeposit":
+      case "claimDeposit":
+      case "claim": {
+        // pay / refund the request's recorded owner only (no receiver argument to redirect)
+        summary = `${name(to)}.${fn}(#${String(args[0])})`;
         break;
       }
       case "mint": {
