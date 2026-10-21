@@ -319,3 +319,52 @@ export function markedNav(vaultIdle: bigint, unfundedClaims: bigint, deployedVal
   const gross = vaultIdle + deployedValueUsd;
   return gross > unfundedClaims ? gross - unfundedClaims : 0n;
 }
+
+// ---------------------------------------------------------------------------------------------
+// 5. Insurance pool (2026-10, docs/ARCHITECTURE.md §2.10): a pool-funded book (charter.ifFromPool).
+//    Waterfall.sol section 5 mirrors these; vectors "premium", "claim" and "poolBook".
+// ---------------------------------------------------------------------------------------------
+
+/** IF target the window raises from the tranches: 0 when the InsurancePool funds the IF. */
+export function windowIfTarget(ifTargetUsd: bigint, ifFromPool: boolean): bigint {
+  return ifFromPool ? 0n : ifTargetUsd;
+}
+
+/** Premium rate of a pool-funded book: the charter's rate, never below the pool's floor, at most BPS. */
+export function effectivePremiumBps(charterPremiumBps: bigint, floorBps: bigint): bigint {
+  const bps = charterPremiumBps > floorBps ? charterPremiumBps : floorBps;
+  return bps > BPS ? BPS : bps;
+}
+
+/** The pool's premium comes off gross first; `rest` is then split by splitDistribution. premium + rest == gross. */
+export function premiumSplit(gross: bigint, premiumBps: bigint) {
+  const premium = (gross * premiumBps) / BPS;
+  return { premium, rest: gross - premium };
+}
+
+export interface PoolSplitResult extends SplitResult {
+  premium: bigint;
+}
+
+/**
+ * RevenueRouter.distribute of a pool-funded book: premium first (premiumBps of gross), then the ordinary split
+ * of the rest (expenses capped on the rest -> carry -> Senior -> Junior). `gross` stays the whole gross:
+ * premium + expenses + carry + senior + junior == gross.
+ */
+export function splitPoolDistribution(i: SplitInput, premiumBps: bigint): PoolSplitResult {
+  const { premium, rest } = premiumSplit(i.gross, premiumBps);
+  return { ...splitDistribution({ ...i, gross: rest }), gross: i.gross, premium };
+}
+
+/** What a pool-funded book owes the pool for its IF: the allocation marked down to the IF equity. */
+export function insuranceClaim(allocation: bigint, insuranceEquityUsd: bigint): bigint {
+  return insuranceEquityUsd < allocation ? insuranceEquityUsd : allocation;
+}
+
+/**
+ * NAV of a pool-funded book at applyMark: the pool's claim is netted like any other liability, so the IF (counted
+ * in the mark's deployedValueUsd) is never Senior / Junior value: markedNav(idle, unfundedClaims + poolClaim, deployed).
+ */
+export function poolBookNav(vaultIdle: bigint, unfundedClaims: bigint, poolClaim: bigint, deployedValueUsd: bigint): bigint {
+  return markedNav(vaultIdle, unfundedClaims + poolClaim, deployedValueUsd);
+}

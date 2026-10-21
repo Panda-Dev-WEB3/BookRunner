@@ -2,6 +2,7 @@ export * from "./units";
 export * from "./bytes32";
 export * from "./types";
 export * from "./waterfall";
+export * from "./insurancePool";
 export * from "./mandate";
 export * from "./sessions";
 export * from "./eip712";
