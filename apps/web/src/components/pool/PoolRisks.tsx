@@ -8,7 +8,7 @@ import { SERIES } from "../../lib/palette";
 import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { cx } from "../cx";
 import { Card, ProgressBar, Term } from "../ui";
-import { DEFAULT_COOLDOWN_SEC, DEFAULT_FIRST_LOSS_LEVEL_BPS, DEFAULT_MARKET_CAP_BPS, DEFAULT_PREMIUM_FLOOR_BPS, POOL_RISK_LINES, firstLossView } from "./poolLogic";
+import { DEFAULT_COOLDOWN_SEC, DEFAULT_FIRST_LOSS_LEVEL_BPS, DEFAULT_MARKET_CAP_BPS, DEFAULT_PREMIUM_FLOOR_BPS, POOL_RISK_LINES, epochEvery, firstLossView } from "./poolLogic";
 
 function Layer(props: { order: string; title: ReactNode; body: string; className: string; text: string }) {
   return (
@@ -108,7 +108,7 @@ export function PoolRisks({ overview }: { overview: PoolOverviewOut | undefined 
     },
     {
       title: "Exits wait for the epoch",
-      body: `Withdrawals are queued to the weekly epoch and priced when it is processed. Deposits start a cooldown of ${cooldown}. If free cash is short, a request fills partly and the rest stays queued, and exposed, until the next processing.`,
+      body: `Withdrawals are queued to the next epoch (one ends ${epochEvery(p?.epochLengthSeconds)}) and priced when it is processed. Deposits start a cooldown of ${cooldown}. If free cash is short, a request fills partly and the rest stays queued, and exposed, until the next processing.`,
     },
     {
       title: "Most of the pool can be lent out",

@@ -3,7 +3,7 @@
 // follow InsurancePool.sol and the API's pool router (docs/ARCHITECTURE.md §2.10). DOM-free: test/pool.test.ts.
 import { type AmountIssue, amountIssue, formatAmountDisplay, formatAmountInput, parseAmount } from "../../lib/amount";
 import type { PoolDepositItem, PoolPositionOut, PoolWithdrawalItem } from "../../lib/api-types";
-import { DASH, bpsPct, fmtWhen, isoToSec, toNum, usdRaw } from "../../lib/format";
+import { DASH, bpsPct, fmtDuration, fmtWhen, isoToSec, toNum, usdRaw } from "../../lib/format";
 import type { Tone } from "../../lib/limits";
 
 /** Pool shares have 12 decimals (settlement token 6 + a virtual offset of 6). */
@@ -16,11 +16,14 @@ export const DEFAULT_COOLDOWN_SEC = 7 * 86_400;
 export const DEFAULT_EPOCH_SEC = 7 * 86_400;
 export const DEFAULT_GRACE_SEC = 86_400;
 
+/** "every 7 days" / "every 1 day": the live epoch length in words (review m-5: never a hard-coded "weekly"). */
+export const epochEvery = (sec: number | null | undefined): string => `every ${fmtDuration(sec ?? DEFAULT_EPOCH_SEC)}`;
+
 /** The plain-language risk box (owner's text, in the copy rules' words). */
 export const POOL_RISK_LINES: readonly string[] = [
   "Each book's Junior and Senior take its losses before the pool: whatever draws a pool-funded insurance fund is first that book's loss.",
   "The pool loses only what a book cannot repay once its Junior and Senior are used up, and the treasury's first-loss slice takes that loss before depositors.",
-  "Exits are queued to the weekly epoch and never refused, but a loss marked before your epoch is processed is shared.",
+  "Exits are queued to the next epoch and never refused, but a loss marked before your epoch is processed is shared.",
 ];
 
 // ------------------------------------------------------------------ shares

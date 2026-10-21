@@ -40,7 +40,7 @@ export function PoolOverview(props: { data: PoolOverviewOut | undefined; error: 
       )}
       <StatGrid cols={4}>
         <Stat size="lg" label="Pool value" term="insurancePool" value={<WithUnit value={fmtUsd(d.poolAssetsUsd, { compact: true })} unit={sym} />} title={fmtUsd(d.poolAssetsUsd, { dp: 6 })} sub="Free cash plus what books can repay at their last marks" />
-        <Stat size="lg" label="Share price" term="sharePrice" value={fmtSharePrice(d.sharePriceUsd)} sub={`${sym} per pool share, set at each epoch's processing`} />
+        <Stat size="lg" label="Share price" term="sharePrice" value={fmtSharePrice(d.sharePriceUsd)} sub={`${sym} per pool share; moves with book marks, repayments and premiums (entries and exits are priced at epoch processing)`} />
         <Stat
           size="lg"
           label="First-loss slice"
@@ -59,9 +59,9 @@ export function PoolOverview(props: { data: PoolOverviewOut | undefined; error: 
         <Stat size="lg" label="Utilisation" value={bpsPct(d.utilisationBps, 1)} sub="Share of the pool lent to books" />
         <Stat label="Free liquidity" value={<WithUnit value={fmtUsd(d.freeLiquidityUsd, { compact: true })} unit={sym} />} sub="Cash that can fill withdrawals" />
         <Stat
-          label="Allocated to books"
+          label="Repayable by books"
           term="insuranceFund"
-          value={<WithUnit value={fmtUsd(d.allocatedUsd, { compact: true })} unit={sym} />}
+          value={<WithUnit value={fmtUsd(d.repayableUsd, { compact: true })} unit={sym} />}
           sub={d.activeBooks == null ? "Insurance funds of pool-funded books" : `Insurance funds of ${d.activeBooks} active book${d.activeBooks === 1 ? "" : "s"}`}
         />
         <Stat label="Premiums received" series="fee" value={<WithUnit value={fmtUsd(d.premiumsTotalUsd, { compact: true })} unit={sym} />} sub="All time, from books' gross fee flow" />

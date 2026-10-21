@@ -11,7 +11,7 @@ import { type HistoryWindow, PoolHistory } from "../components/pool/PoolHistory"
 import { PoolOverview } from "../components/pool/PoolOverview";
 import { PoolPosition } from "../components/pool/PoolPosition";
 import { EpochHistory, EpochStatus } from "../components/pool/PoolQueue";
-import { DEFAULT_PREMIUM_FLOOR_BPS } from "../components/pool/poolLogic";
+import { DEFAULT_PREMIUM_FLOOR_BPS, epochEvery } from "../components/pool/poolLogic";
 import { usePoolEpochs, usePoolExposure, usePoolHistory, usePoolOverview, usePoolPosition } from "../components/pool/usePool";
 import { SetupChecklist } from "../components/SetupChecklist";
 import { Callout, Card, EmptyState, Hash, Section, Term } from "../components/ui";
@@ -96,7 +96,7 @@ export function PoolPage() {
         lead={
           <>
             Depositors fund the <Term id="insuranceFund">insurance fund</Term> of every pool-funded book and receive a premium from its gross <Term id="feeFlow">fee flow</Term>. Each book owes that
-            insurance fund to the pool as a senior debt: its Junior and Senior take losses first. Entry and exit are queued to weekly <Term id="poolEpoch">epochs</Term>.
+            insurance fund to the pool as a senior debt: its Junior and Senior take losses first. Entry and exit are queued to <Term id="poolEpoch">epochs</Term> that end {epochEvery(overview.data?.params?.epochLengthSeconds)}.
           </>
         }
         actions={
@@ -153,7 +153,7 @@ export function PoolPage() {
             className="scroll-mt-20"
             eyebrow="Queue"
             title="Epochs"
-            lead="Every deposit and withdrawal joins a weekly epoch and is priced when that epoch is processed: after every pool-funded book has marked past the epoch end, or after the grace period at most, so exits are never blocked. A stale epoch was processed after the grace with some books not yet marked."
+            lead={`Every deposit and withdrawal joins an epoch (one ends ${epochEvery(overview.data?.params?.epochLengthSeconds)}) and is priced when that epoch is processed: after every pool-funded book has marked past the epoch end, or after the grace period at most, so exits are never blocked. A stale epoch was processed after the grace with some books not yet marked.`}
           >
             <EpochHistory data={epochs.data} error={epochsError} onRetry={() => void epochs.refetch()} />
           </Section>

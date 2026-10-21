@@ -3,7 +3,7 @@
 // BookrunnerConfig a book points at (Book.config()). VITE_USDC_ADDRESS, when set, overrides USDC.
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useSyncExternalStore } from "react";
-import { type Address, getAddress, zeroAddress } from "viem";
+import { type Address, BaseError, ContractFunctionRevertedError, ContractFunctionZeroDataError, getAddress, zeroAddress } from "viem";
 import { trpc } from "../api/trpc";
 import { BOOK_CONFIG_ABI, CONFIG_ADDRESSES_ABI, CONFIG_POOL_ABI } from "../lib/abis";
 import type { BookListItem } from "../lib/api-types";
@@ -128,13 +128,16 @@ export function useInsurancePoolAddress(): { data: Address | null | undefined; i
     queryKey: ["insurance-pool-address", appChain.id, cfg],
     enabled: cfg !== null,
     staleTime: Number.POSITIVE_INFINITY,
-    retry: 1,
+    retry: 3,
     queryFn: async (): Promise<Address | null> => {
       try {
         const a = await publicClient.readContract({ address: cfg as Address, abi: CONFIG_POOL_ABI, functionName: "insurancePool" });
         return a && getAddress(a) !== zeroAddress ? getAddress(a) : null;
-      } catch {
-        return null;
+      } catch (err) {
+        // review m-7: only an on-chain answer (an older config without the getter reverts) means "no pool"; a transport
+        // error is retried (never cached as "none on this deployment")
+        if (err instanceof BaseError && err.walk((e) => e instanceof ContractFunctionRevertedError || e instanceof ContractFunctionZeroDataError)) return null;
+        throw err;
       }
     },
   });
