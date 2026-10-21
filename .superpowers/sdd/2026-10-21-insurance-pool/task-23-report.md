@@ -126,3 +126,87 @@ TDD: the tests were written alongside the code, not red-first.
 5. **API gaps when the chain is unreachable** (noted by the web subagent): `exposure` has no cap, and the overview snapshot has no params or queue.
 6. **Fresh database migration.** Migration 0001 must be applied: `bun run db:migrate`.
 7. **Line endings.** The Python patch helpers briefly wrote CRLF. Git normalised them on commit, and the working tree was cleaned afterwards.
+
+---
+
+## Fix round 1 (review task-23-review.md)
+
+**Status: DONE_WITH_CONCERNS.** Commits `42d2986..8383fc0` (8):
+
+| SHA | Fixes |
+|---|---|
+| 42d2986 | I-1 (mark) |
+| cf7cfd4 | I-2 (keeper, alerts) |
+| 9cbeb17 | I-3 and m-3 (indexer, migration 0002) |
+| 0524586 | I-4, I-5, m-1 (launch, RUNBOOK, ARCHITECTURE §7) |
+| 5fedf06 | api: m-2, m-5, m-8 |
+| 4e5b8df | web: m-5, m-7, m-8 |
+| 8383fc0 | m-2, m-4, m-10, m-11 (waterfall, charter, alerts) |
+
+### Important
+
+- **I-1 (mark).**
+  - `readInsuranceDebt` returns null only for a book-funded IF (pool 0), or for a book whose bytecode lacks `insuranceDebt` (`codeHasSelector`).
+  - Any other failure throws `RetryableMarkError`, so the mark is refused and retried, and nothing is signed. If the probe itself fails, the mark is refused too.
+  - Tests in `services/mark/test/insurance.test.ts`: the reader cases, and a refused snapshot that commits and stores nothing.
+- **I-2 (keeper).**
+  - After each confirmed `settleInsurance` that leaves the position open, the keeper backs off with `settleBackoffMs`: it doubles from the action cooldown, capped at 6 h.
+  - It warns on each retry, and the backoff resets once the position closes.
+  - The indexer now records `book.InsuranceMarkFailed` as the domain event `book.insurance_mark_failed`.
+  - New alert `pool_final_mark_stuck:<bookId>` (warning): the book is Retired in the DB but its pool position is still active. It waits `ALERT_POOL_FINAL_MARK_STUCK_SECONDS`, default 1800.
+  - Tests: no resend within the backoff, the backoff sequence, the reset, and the rule.
+- **I-3 (indexer).**
+  - Pool reads now happen at exactly the event's block. Nothing falls back to head, and a rejected read is never cached.
+  - `poolBookPosition` and `poolEpochEnd` throw on failure.
+  - When a read fails, the event rows are still written, and:
+    - that block gets a stale carry-forward snapshot (`pool_snapshots.stale`, carrying the previous good values);
+    - the position keeps its last good values with `pool_books.stale`, or uses the Allocated event's own figures;
+    - the epoch end stays null.
+  - `backfillPool` re-reads all of them on every runner pass, both indexed and idle. No share-price point is lost.
+  - Migration `0002_insurance_pool_stale`: the two stale flags, plus the `pool_snapshots_ts` index (m-9).
+  - Test: with the pool reads down, everything is recorded and stale; with the reads back, the next pass leaves nothing stale and the values are correct.
+- **I-4 (launch).**
+  - Contract rule: `setParam("epochLength")` only sets a pending length. The pool applies it on the first request or processing made while the queue is idle and its oldest epoch has ended. The first epoch ends on the weekly grid that `initialize` set.
+  - So neither "set it before the first deposit" nor "process the first epoch at launch" can take effect earlier.
+  - The launch now queues the test deposits only once the 1-day length is in force, or once the first epoch has ended with an idle queue. That deposit then applies the pending length itself and lands in a 1-day epoch.
+  - Otherwise the launch logs the weekly end and defers the deposits. Re-running the idempotent launch after that time queues them; the "already launched" path does this too.
+  - ARCHITECTURE §7 now says the first epoch ends on the weekly grid, and that earlier deposits, including from the app, wait for that end.
+  - Correction to my first report: "1-day epochs" applies only from the second epoch on.
+  - Tests: `testDepositTiming`.
+- **I-5.** RUNBOOK step 13b now has the reviewer's text: the first-loss seed of about 91,671 USDG, the `maxAllocation` check, slice withdrawal rules, and no demo parameters on mainnet. I added one ordering paragraph:
+  - Open deposits at least one full epoch before the books' `subscriptionEnds`. Processing waits for no book mark while no pool-funded book is active.
+  - The processed deposits then count, and the seed only has to keep the slice at 10% plus the cap and buffer headroom.
+  - Without that lead time, seed the full amount.
+
+### Minor items done
+
+| Item | Change |
+|---|---|
+| m-1 | The seed's per-market term is summed per underlying (`BookSize.market`), with a test. |
+| m-2 | The keeper reads `staleBooks` only for an ended epoch with work, and positions only when some book is stale. Alerts read positions only for books past their window. `pool.position` reads at most 50 open deposits and 50 unsettled withdrawals live; a filled and claimed request is settled from the index, with a test. |
+| m-3 | `book.insurance_shortfall` is emitted once per (book, amount), and is `provisional: false` in the retirement tx. |
+| m-4 | waterfall `insurancePool` / `previewPremium` and charter `config.insurancePool` default only on an on-chain revert; a transport error fails the read. |
+| m-5 | Web wording follows `params.epochLengthSeconds`. The share-price line is corrected. The api's durations are in words (`durText`), with a test. |
+| m-7 | The web caches "no pool" only on an on-chain answer; transport errors are retried. |
+| m-8 | `allocatedUsd` renamed to `repayableUsd` in overview / history, labelled "Repayable by books". |
+| m-9 | `ts` index, in migration 0002. |
+| m-10 | Spec mapping is noted in `rules-pool.ts`: utilisation goes critical when a queue ages, and the shortfall events stand in for "risk" reporting. |
+| m-11 | Tests added for I-1, I-2, I-3, and the `processEpoch` front-run. |
+
+### Deferred (for the re-audit or a later round)
+
+- **m-6.** IF in transit is excluded from the signed IF equity, and a negative IF report is signed as 0. Both make the Backstop cover cap looser. Fixing this needs the adapter to split in-transit IF from in-transit MM.
+- **m-11 (part).** No PoolEngine test checks that the signed IF equals `engineAtSignedPrice`'s `insuranceUsd`; it needs an engine fake.
+- **Not verified from the diff** (from the review):
+  - the mark sender's gas headroom for the try/catch `markBook`;
+  - `update.sh` running `db:migrate` (migrations 0001 and 0002) before the new indexer starts.
+- **Read growth.** Alerts still read every retired book's position. Pruning needs a "fully settled" cutoff.
+
+### Checks (at 8383fc0)
+
+| Check | Result |
+|---|---|
+| Typecheck, all 17 workspaces | 0 errors |
+| Repo-wide `bun test` | 2282 pass, 82 skip, 0 fail |
+| check-copy | passed (164 files) |
+| licence-headers and image-pins | 10 pass |
