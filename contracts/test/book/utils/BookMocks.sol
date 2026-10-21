@@ -66,6 +66,21 @@ contract MockBookConfig is IBookrunnerConfig {
         usdc = a;
     }
 
+    /// @notice BookrunnerConfig.insurancePool() (2026-10 insurance pool; not in IBookrunnerConfig).
+    address public insurancePool;
+
+    function setInsurancePool(address a) external {
+        insurancePool = a;
+    }
+
+    function setFeeRouter(address a) external {
+        feeRouter = a;
+    }
+
+    function setExpenseRecipient(address a) external {
+        expenseRecipient = a;
+    }
+
     function setBackstop(address a) external {
         backstop = a;
     }
