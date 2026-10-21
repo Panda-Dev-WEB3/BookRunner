@@ -13,6 +13,11 @@ import type {
   limits,
   marks,
   oraclePrices,
+  poolBooks,
+  poolDeposits,
+  poolEpochs,
+  poolSnapshots,
+  poolWithdrawals,
   receiptRoots,
   receipts,
   redemptions,
@@ -39,6 +44,19 @@ export type KillEventRow = typeof killEvents.$inferSelect;
 export type OraclePriceRow = typeof oraclePrices.$inferSelect;
 export type WebhookSubscriptionRow = typeof webhookSubscriptions.$inferSelect;
 export type WebhookDeliveryRow = typeof webhookDeliveries.$inferSelect;
+export type PoolDepositRow = typeof poolDeposits.$inferSelect;
+export type PoolWithdrawalRow = typeof poolWithdrawals.$inferSelect;
+export type PoolEpochRow = typeof poolEpochs.$inferSelect;
+export type PoolBookRow = typeof poolBooks.$inferSelect;
+export type PoolSnapshotRow = typeof poolSnapshots.$inferSelect;
+
+/** Pool value flows summed per UTC day (pool_flows). */
+export interface PoolFlowDay {
+  day: Date;
+  premiumUsd: string;
+  lossUsd: string;
+  recoveryUsd: string;
+}
 
 export interface Page {
   limit: number;
@@ -127,6 +145,22 @@ export interface ReadModel {
   // events / oracle
   recentEvents(q: { type?: string; bookId?: number } & Page): Promise<EventRow[]>;
   latestOraclePrices(priceIds?: string[]): Promise<OraclePriceRow[]>;
+
+  // insurance pool (2026-10)
+  /** A wallet's deposit requests, newest first (at most 200). */
+  poolDeposits(owner: string): Promise<PoolDepositRow[]>;
+  /** A wallet's withdrawal requests, newest first (at most 200). */
+  poolWithdrawals(owner: string): Promise<PoolWithdrawalRow[]>;
+  /** Processed epochs, newest first. */
+  poolEpochs(q: { limit: number; beforeEpoch?: number }): Promise<PoolEpochRow[]>;
+  /** The processed epochs among `epochs` (any order). */
+  poolEpochsIn(epochs: number[]): Promise<PoolEpochRow[]>;
+  poolBooks(): Promise<PoolBookRow[]>;
+  /** Snapshots with from <= ts <= to, ascending, at most `limit` (the newest kept when more). */
+  poolSnapshots(from: Date, to: Date, limit: number): Promise<PoolSnapshotRow[]>;
+  latestPoolSnapshot(): Promise<PoolSnapshotRow | null>;
+  /** Premiums, losses and recoveries per UTC day since `from`, ascending. */
+  poolFlowDays(from: Date): Promise<PoolFlowDay[]>;
 }
 
 export interface NewWebhookSubscription {

@@ -22,7 +22,7 @@ import {
   riskCommitteeAbi,
   stockTokenRegistryAbi,
 } from "@bookrunner/shared/abi";
-import { type Address, type Hex, type PublicClient, erc20Abi, zeroAddress } from "viem";
+import { type Address, BaseError, ContractFunctionRevertedError, ContractFunctionZeroDataError, type Hex, type PublicClient, erc20Abi, zeroAddress } from "viem";
 import { charterFromJson } from "../domain/charterJson";
 import { type SponsorState, charterArg } from "../domain/prepare";
 import type { PriceFacts, RuleContext, StockTokenFacts, UnderlyingFacts } from "../domain/ruleChecks";
@@ -67,9 +67,15 @@ export class CharterChain {
   // ------------------------------------------------------------ validation inputs
 
   async validationContextFor(ch: Charter): Promise<ValidationContext> {
-    const [venueMin, markInterval] = await Promise.all([
+    const [venueMin, markInterval, pool] = await Promise.all([
       this.pub.readContract({ address: this.c.config, abi: bookrunnerConfigAbi, functionName: "venueMinIfUsd", args: [ch.venue] }),
       this.pub.readContract({ address: this.c.config, abi: bookrunnerConfigAbi, functionName: "markInterval" }),
+      // config.insurancePool() (2026-10); an older config without the getter (an on-chain revert) has no pool; a
+      // transport error fails the context (validated with defaults, flagged) instead of a false NO_POOL (review m-4)
+      this.pub.readContract({ address: this.c.config, abi: bookrunnerConfigAbi, functionName: "insurancePool" }).catch((err) => {
+        if (err instanceof BaseError && err.walk((e) => e instanceof ContractFunctionRevertedError || e instanceof ContractFunctionZeroDataError)) return zeroAddress;
+        throw err;
+      }),
     ]);
     let canonical: string[] = [];
     let indexes: string[] = [];
@@ -83,7 +89,13 @@ export class CharterChain {
       const ok = await this.pub.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "isIndex", args: [ch.underlying] });
       if (ok) indexes = [ch.underlying];
     }
-    return staticValidationContext({ venueMinIfUsd: { [ch.venue]: venueMin }, canonicalTokens: canonical, indexIds: indexes, markInterval: Number(markInterval) });
+    return staticValidationContext({
+      venueMinIfUsd: { [ch.venue]: venueMin },
+      canonicalTokens: canonical,
+      indexIds: indexes,
+      markInterval: Number(markInterval),
+      poolConfigured: pool !== zeroAddress,
+    });
   }
 
   /** eth_call MarketCharter.validate(c) — parity cross-check with the TS mirror. */

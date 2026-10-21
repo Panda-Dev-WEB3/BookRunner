@@ -4,6 +4,7 @@
 import { formatEther } from "viem";
 import type { RuleConfig } from "./config";
 import { HOLD_RULES } from "./rules-holds";
+import { POOL_RULES } from "./rules-pool";
 import type { BookSnap, Condition, OracleConfirmSnap, OracleProbe, OracleSourceSnap, Sample, Snapshot } from "./types";
 
 /** States in which a book is marked every period (Book.sol: Live and Retiring). */
@@ -845,6 +846,7 @@ export const RULES = {
   rpc,
   indexer_lag: indexerLag,
   buyback,
+  ...POOL_RULES,
   api_health: apiHealth,
   oracle,
   backup,

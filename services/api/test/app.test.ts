@@ -22,7 +22,7 @@ describe("http app", () => {
     const body = (await res.json()) as { procedures?: string[]; capabilities?: string[]; uptimeSec?: number };
     expect(body).toMatchObject({ ok: true, service: "api", chainId: 31337, deployment: true });
     // the optional procedures this build serves, so the web skips absent ones (no 404 probes)
-    expect(body.capabilities).toEqual(["book.fills", "book.hedges", "receipts.list"]);
+    expect(body.capabilities).toEqual(["book.fills", "book.hedges", "receipts.list", "pool.overview"]);
     // no reconnaissance surface for anonymous callers: no full procedure list, no uptime
     expect(body.procedures).toBeUndefined();
     expect(body.uptimeSec).toBeUndefined();

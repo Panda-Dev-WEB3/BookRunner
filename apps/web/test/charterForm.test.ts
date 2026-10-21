@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_FORM, apiFieldToForm, formIssues, formToDraft, issuesFor, splitDuration, stepOf, suggestSymbol, venueMinIfUsd } from "../src/lib/charterForm";
+import { checkCopy } from "@bookrunner/shared/copy";
+import { MAX_PREMIUM_BPS } from "@bookrunner/shared/insurancePool";
+import { DEFAULT_FORM, FIELD_HELP, apiFieldToForm, formIssues, formToDraft, issuesFor, premiumText, splitDuration, stepOf, suggestSymbol, venueMinIfUsd, windowRaiseUsd } from "../src/lib/charterForm";
 
 const SPONSOR = "0x14dC79964da2C08b23698B3D3cc7Ca32193d9955";
 
@@ -91,6 +93,46 @@ describe("charter form", () => {
     expect(formToDraft({ ...DEFAULT_FORM, underlyingKind: "index", underlying: "RHX5" }).underlying).toEqual({ index: "RHX5" });
   });
 
+  test("2026-10 insurance pool: new charters default to a pool-funded IF at the pool's floor", () => {
+    expect(DEFAULT_FORM.ifFromPool).toBe(true);
+    expect(DEFAULT_FORM.premiumBps).toBe("0");
+    expect(formToDraft({ ...DEFAULT_FORM, sponsor: SPONSOR })).toMatchObject({ ifFromPool: true, premiumBps: 0 });
+    expect(formToDraft({ ...DEFAULT_FORM, sponsor: SPONSOR, premiumBps: "1500" })).toMatchObject({ ifFromPool: true, premiumBps: 1500 });
+    // a book-funded IF pays no pool premium: the draft always sends 0
+    expect(formToDraft({ ...DEFAULT_FORM, sponsor: SPONSOR, ifFromPool: false, premiumBps: "0" })).toMatchObject({ ifFromPool: false, premiumBps: 0 });
+  });
+
+  test("pool premium rules mirror CharterRules.poolReason (BAD_PREMIUM / NO_POOL)", () => {
+    const premium = (premiumBps: string, ifFromPool = true) => issuesFor(formIssues({ ...DEFAULT_FORM, sponsor: SPONSOR, ifFromPool, premiumBps }), "premiumBps");
+    expect(premium("0")).toEqual([]);
+    expect(premium(String(MAX_PREMIUM_BPS))).toEqual([]);
+    expect(premium(String(MAX_PREMIUM_BPS + 1))[0]?.message).toContain("at most 5000 bps");
+    expect(premium("x")).toHaveLength(1);
+    expect(premium("0", false)).toEqual([]);
+    expect(premium("1200", false)[0]?.message).toContain("pays no pool premium");
+    expect(premium("1200", false)[0]?.step).toBe("capital");
+    const noPool = (poolConfigured: boolean | null, ifFromPool = true) => issuesFor(formIssues({ ...DEFAULT_FORM, sponsor: SPONSOR, ifFromPool }, { poolConfigured }), "ifFromPool");
+    expect(noPool(false)[0]?.message).toContain("No insurance pool");
+    expect(noPool(false, false)).toEqual([]);
+    expect(noPool(null)).toEqual([]); // unknown: the API and the chain decide
+    expect(noPool(true)).toEqual([]);
+  });
+
+  test("with the pool the window raises only the MM inventory; the IF still meets the venue minimum", () => {
+    expect(windowRaiseUsd(DEFAULT_FORM)).toBe(75_000);
+    expect(windowRaiseUsd({ ...DEFAULT_FORM, ifFromPool: false })).toBe(105_000);
+    expect(windowRaiseUsd({ ...DEFAULT_FORM, mmInventoryUsd: "x" })).toBe(0);
+    expect(formIssues({ ...DEFAULT_FORM, sponsor: SPONSOR, ifFromPool: true, ifSizeUsd: "1000" }).find((i) => i.field === "ifSizeUsd")?.message).toContain("venue minimum");
+  });
+
+  test("premium text and help pass the copy rules", () => {
+    expect(premiumText(0)).toBe("12% (the pool's floor)");
+    expect(premiumText(500)).toBe("12% (the pool's floor applies)");
+    expect(premiumText(1550)).toBe("15.50%");
+    expect(premiumText(0, 1500)).toBe("15% (the pool's floor)");
+    for (const k of ["ifFromPool", "premiumBps", "ifSizeUsd"]) expect(checkCopy(FIELD_HELP[k] ?? "")).toEqual([]);
+  });
+
   test("helpers", () => {
     expect(suggestSymbol("nvda", "orderly")).toBe("PERP_NVDA_USDC");
     expect(suggestSymbol("RHX5", "pool_engine")).toBe("RHX5-PERP");
@@ -99,6 +141,8 @@ describe("charter form", () => {
     expect(splitDuration(61)).toEqual({ value: 61, unit: "s" });
     expect(stepOf("mandate.maxSkewBps")).toBe("mandate");
     expect(stepOf("ifSizeUsd")).toBe("capital");
+    expect(stepOf("ifFromPool")).toBe("capital");
+    expect(stepOf("premiumBps")).toBe("capital");
     expect(stepOf("juniorNoticeSeconds")).toBe("tranches");
     expect(apiFieldToForm("ifTargetUsd")).toBe("ifSizeUsd");
     expect(apiFieldToForm(null)).toBe("review");

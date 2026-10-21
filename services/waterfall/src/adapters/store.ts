@@ -29,6 +29,7 @@ export function distributionRow(d: DistributedLog) {
     carryUsd: dbUsd.toDb(d.amounts.carry),
     seniorUsd: dbUsd.toDb(d.amounts.senior),
     juniorUsd: dbUsd.toDb(d.amounts.junior),
+    premiumUsd: dbUsd.toDb(d.amounts.premium),
     period: d.period,
     txHash: d.txHash,
     logIndex: d.logIndex,
@@ -53,6 +54,7 @@ export class PgSettlementStore implements SettlementStore {
         carry: dbUsd.fromDb(row.carryUsd),
         senior: dbUsd.fromDb(row.seniorUsd),
         junior: dbUsd.fromDb(row.juniorUsd),
+        premium: dbUsd.fromDb(row.premiumUsd),
       },
     };
   }

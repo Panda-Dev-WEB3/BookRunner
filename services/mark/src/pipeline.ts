@@ -18,7 +18,7 @@ import { type SignedVenueReport, encodeVenueReport, reportIncludable } from "../
 import { markHeld } from "./domain/held";
 import { RetryableMarkError } from "./errors";
 import { buildInventory } from "./domain/inventory";
-import { RETIRE_TOKEN_DUST_USD, composeNav, navCrossChecks, type NavComposition, writeOffRetiringDust } from "./domain/nav";
+import { RETIRE_TOKEN_DUST_USD, composeNav, markInsuranceEquityUsd, navCrossChecks, type NavComposition, writeOffRetiringDust } from "./domain/nav";
 import { buildMarkPnl, pnlJsonHash } from "./domain/pnl";
 import { previewTranches, type TranchePreview } from "./domain/preview";
 import { type SignedPrice, encodePriceData, newestByUnderlying } from "./domain/prices";
@@ -307,6 +307,8 @@ export class MarkPipeline {
       pnlJsonHash: pnlJsonHash(pnl),
       receiptsRoot: receipts.root,
       held: hold.held,
+      // 2026-10: the IF equity inside this snapshot's deployedValueUsd (signed; Backstop cover stays off pool debt)
+      insuranceEquityUsd: markInsuranceEquityUsd(snapshot),
     };
     const prices = snapshot.signedPrices ?? [];
     const tx: MarkTxPlan = {

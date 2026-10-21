@@ -141,6 +141,22 @@ only (it deploys mocks and refuses 4663). Tick every box in order; two people fo
         address>)`; pre-fund the adapter with ETH for Orderly deposit fees (VERIFY O5). Desk key per book: the
         operator `consentKey`, the sponsor `registerKey`; put `DESK_KEY_PRIVATE_KEY_<bookId>` in the env file and
         restart `bookrunner@mainnet`.
+13b. [ ] Insurance pool first-loss seed (before any window closes). The treasury multisig approves and calls
+        `InsurancePool.depositFirstLoss(seed)`, with `seed = scripts/launch-plan.ts poolSeedUsd(launch sizes)` (≈ 91,671
+        USDG for NVDA / TSLA at 25,001 and RHX5 at 10,000). Queued deposits count only after their epoch is processed,
+        so at launch the slice alone funds every pool-funded IF. Each IF must fit 30% of the pool (`marketCapBps`; the
+        books on one underlying share it), and all of them together must fit the free cash above the 20% buffer.
+        Check `maxAllocation(bookId, market) >= ifTargetUsd` per book before `subscriptionEnds`, otherwise
+        `closeWindow` reverts (retry after a top-up). Premiums go wholly to the slice until depositor shares exist.
+        Withdrawing from the slice is timelock-only (48 h), from free cash, never while withdrawals are due, and never
+        below 10% of the pool. Once depositors exceed about 9× the slice, new allocations stop until the treasury tops
+        it up (alert `pool_first_loss_low`). Do NOT apply the devnet demo parameters (`epochLength` / `cooldown` /
+        `processGrace`): mainnet keeps 7 d / 7 d / 24 h.
+        Ordering when depositors' money should count at launch: open deposits (`requestDeposit`) at least one full
+        epoch before the books' `subscriptionEnds`, so that epoch ends and is processed first (`processEpoch` waits for
+        no book mark while no pool-funded book is active yet); the processed deposits then count towards the pool, and
+        the seed only has to keep the slice at 10% of it plus the cap / buffer headroom (recompute with the processed
+        total). Without that lead time, seed the full ≈ 91.7k above.
 14. [ ] Subscription windows open at launch; the keeper (waterfall service) closes them at
         `subscriptionEnds`; ops-venue deploys IF + MM to the venue.
 15. [ ] First marks: daily (`markInterval` 86400, MARK_INTERVAL_SECONDS 86400). The first mark lands after the

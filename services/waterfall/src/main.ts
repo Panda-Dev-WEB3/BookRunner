@@ -21,6 +21,7 @@ import { RedeemLogIndex, UnionCandidates } from "./adapters/redemptions";
 import { DbRedeemCandidates, PgSettlementStore } from "./adapters/store";
 import { BullVenueOps } from "./adapters/venue-ops";
 import { BuybackRunner } from "./buyback";
+import { PoolKeeperRunner } from "./poolKeeper";
 import { loadWaterfallConfig } from "./config";
 import { GasMeter, expensesRequested } from "./domain/expenses";
 import { Cooldowns, distributes } from "./domain/keeper";
@@ -142,6 +143,8 @@ export async function main() {
     log,
   });
 
+  const poolKeeper = new PoolKeeperRunner({ chain, cooldowns: new Cooldowns(), cooldownMs: cfg.WATERFALL_ACTION_COOLDOWN_SECONDS * 1000, log });
+
   const enqueued = new Map<number, number>();
   let intervalWarned = false;
   const loop = startLoop({
@@ -177,6 +180,7 @@ export async function main() {
       }
       // protocol-level keeper duty (never throws: failures are logged and retried after the cooldown)
       if (cfg.WATERFALL_KEEPER_ENABLED && cfg.WATERFALL_BUYBACK_ENABLED && !signal.aborted) await buyback.tick();
+      if (cfg.WATERFALL_KEEPER_ENABLED && cfg.WATERFALL_POOL_EPOCH_ENABLED && !signal.aborted) await poolKeeper.tick();
     },
   });
   cleanups.push(() => loop.stop());

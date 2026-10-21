@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { COMMIT_SHARES, LIVE_SIZES, MOCK_SIZES, commitPlan, launchBooks, launchSizes, settlementNeeds, transferPlan } from "./launch-plan";
+import { COMMIT_SHARES, LIVE_SIZES, MOCK_SIZES, commitPlan, launchBooks, launchSizes, poolSeedUsd, raiseOf, settlementNeeds, testDepositTiming, transferPlan } from "./launch-plan";
 
 const testnetMin = (v: 0 | 1) => (v === 0 ? 101 : 10_000);
 
@@ -61,4 +61,49 @@ describe("launch plan (mock venue vs live Orderly rehearsal, VERIFY O17)", () =>
     expect(plan.transfers).toEqual([["a0", 550_000_000n], ["a1", 520_000_000n]]);
     expect(plan.total).toBe(1_070_000_000n);
   });
+});
+
+describe("insurance pool launch (2026-10)", () => {
+  const books = (ifFromPool: boolean) => (["NVDA", "TSLA", "RHX5"] as const).map((name) => ({ name, ...MOCK_SIZES[name], ifFromPool }));
+
+  test("a pool-funded book's window raises only the MM inventory; settlement needs follow", () => {
+    expect(raiseOf({ ifUsd: 30_000, mmUsd: 75_000, ifFromPool: true })).toBe(75_000);
+    expect(raiseOf({ ifUsd: 30_000, mmUsd: 75_000 })).toBe(105_000);
+    const pooled = settlementNeeds([{ name: "NVDA", ifUsd: 150, mmUsd: 500, maxInventoryUsd: 250, ifFromPool: true }], 0);
+    expect(pooled.a0).toBe(Math.round(500 * COMMIT_SHARES.a0Senior));
+  });
+
+  test("the first-loss seed funds every IF at window close: per-market cap 30% and the 80% above the buffer, +10%", () => {
+    // mock: 3 x 30,000 -> max(30,000 / 0.3, 90,000 / 0.8) = 112,500, +10% = 123,750
+    expect(poolSeedUsd(books(true))).toBe(123_750);
+    const seed = poolSeedUsd(books(true));
+    for (const b of books(true)) expect(b.ifUsd).toBeLessThanOrEqual(seed * 0.3);
+    expect(books(true).reduce((a, b) => a + b.ifUsd, 0)).toBeLessThanOrEqual(seed * 0.8);
+    // live rehearsal: two Orderly books at IF 150 -> max(500, 375) * 1.1
+    expect(poolSeedUsd([{ name: "NVDA", ...LIVE_SIZES, ifFromPool: true }, { name: "TSLA", ...LIVE_SIZES, ifFromPool: true }])).toBe(550);
+    expect(poolSeedUsd(books(false))).toBe(0);
+  });
+});
+
+describe("test deposit timing (review I-4: the pending 1-day epoch applies only once the weekly first epoch ended idle)", () => {
+  const base = { nowSec: 1_000, epochLength: 604_800, pendingEpochLength: 86_400, procEndsAt: 5_000, queueIdle: true, demoEpochLength: 86_400 };
+  test("before the first epoch ends: deferred to its end", () => {
+    expect(testDepositTiming(base)).toEqual({ deposit: false, after: 5_000 });
+    expect(testDepositTiming({ ...base, queueIdle: false, nowSec: 6_000 })).toEqual({ deposit: false, after: 5_000 });
+  });
+  test("ended with an idle queue (the deposit applies the 1-day length), or the length is already in force", () => {
+    expect(testDepositTiming({ ...base, nowSec: 5_000 })).toEqual({ deposit: true });
+    expect(testDepositTiming({ ...base, epochLength: 86_400, pendingEpochLength: 0 })).toEqual({ deposit: true });
+    // demo parameters off (LAUNCH_POOL_PARAMS=0): the default weekly grid is intended
+    expect(testDepositTiming({ ...base, pendingEpochLength: 0 })).toEqual({ deposit: true });
+  });
+});
+
+test("review m-1: two pool-funded books on one underlying share its 30% cap", () => {
+  const two = [
+    { name: "NVDA" as const, ifUsd: 30_000, mmUsd: 1, maxInventoryUsd: 1, ifFromPool: true, market: "NVDA" },
+    { name: "TSLA" as const, ifUsd: 30_000, mmUsd: 1, maxInventoryUsd: 1, ifFromPool: true, market: "NVDA" },
+  ];
+  // max(60,000 / 0.3, 60,000 / 0.8) = 200,000, +10%
+  expect(poolSeedUsd(two)).toBe(220_000);
 });

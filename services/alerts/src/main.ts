@@ -4,14 +4,14 @@
 //   bun src/main.ts --test     # send one test message through every configured channel, then exit
 // Reads only: Postgres, Redis, the chain (no key, no transaction), the API's and the oracle's /health. Holds no
 // signing key.
-import { bkrnFeeRouterAbi, bookrunnerConfigAbi } from "@bookrunner/shared/abi";
+import { bkrnFeeRouterAbi, bookrunnerConfigAbi, insurancePoolAbi } from "@bookrunner/shared/abi";
 import { tryLoadDeployment } from "@bookrunner/shared/deployments";
 import { createLogger } from "@bookrunner/shared/logger";
 import { redactUrl } from "@bookrunner/shared/redact";
 import { Redis } from "ioredis";
 import postgres from "postgres";
 import { http, createPublicClient } from "viem";
-import { type ChainPort, type DbPort, collect } from "./collect";
+import { type ChainPort, type DbPort, collect, readPool } from "./collect";
 import { loadConfig } from "./config";
 import { createDeliverer, pingHeartbeat } from "./deliver";
 import { renderBatch } from "./format";
@@ -78,6 +78,15 @@ const chain: ChainPort = {
     const dep = tryLoadDeployment(cfg.deploymentFile);
     if (!dep?.contracts.config) return null;
     return Number(await client.readContract({ address: dep.contracts.config, abi: bookrunnerConfigAbi, functionName: "markInterval" }));
+  },
+  pool: async (bookIds) => {
+    const dep = tryLoadDeployment(cfg.deploymentFile);
+    const address = dep?.contracts.insurancePool;
+    if (!address) return null; // older deployments: no InsurancePool
+    // view calls only; the function name / args are the pool's views (readPool), typed loosely here
+    const read = (functionName: string, args?: readonly unknown[]) =>
+      client.readContract({ address, abi: insurancePoolAbi, functionName, ...(args ? { args } : {}) } as unknown as Parameters<typeof client.readContract>[0]);
+    return readPool(read, address, bookIds);
   },
 };
 

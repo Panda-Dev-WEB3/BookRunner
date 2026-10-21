@@ -187,6 +187,7 @@ export function bookDetail(ctx: ViewCtx): string {
         ["Oracle", esc(terms.oracle)],
         ["Trading sessions", esc(terms.sessions)],
         ["Insurance-fund size", usd(terms.ifTargetUsd)],
+        ["Insurance fund from", terms.ifFromPool === null ? "-" : terms.ifFromPool ? "The insurance pool" : "The tranches"],
         ["Market-making inventory", usd(terms.mmInventoryUsd)],
         ["Senior capital cap", bpsPct(terms.seniorCapBps)],
         ["Per-wallet cap per round", terms.perWalletCapUsd ? usd(terms.perWalletCapUsd) : "None"],

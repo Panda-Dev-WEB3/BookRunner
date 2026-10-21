@@ -2,7 +2,7 @@
 // unfunded and the vault has idle cash, recall-before-mark when queued redemptions exceed idle,
 // finalizeRetirement when the last applied mark carried zero deployed value.
 import type { Logger } from "@bookrunner/shared";
-import { type Cooldowns, canFinalizeRetirement, shouldCloseWindow, shouldFundClaims } from "./domain/keeper";
+import { type Cooldowns, canFinalizeRetirement, settleBackoffMs, shouldCloseWindow, shouldFundClaims, shouldSettleInsurance } from "./domain/keeper";
 import { type RecallPlan, planRecall } from "./domain/recall";
 import { usd6 } from "./kit/fmt";
 import { nextMarkPeriodEnd, settlesUpToIndex } from "./kit/period";
@@ -32,9 +32,13 @@ export type KeeperAction =
   | { kind: "closeWindow"; tx?: string; error?: string }
   | { kind: "fundClaims"; tx?: string; error?: string }
   | { kind: "recall"; account: number; amount: bigint; reason: string; tx?: string; error?: string }
-  | { kind: "finalizeRetirement"; tx?: string; error?: string };
+  | { kind: "finalizeRetirement"; tx?: string; error?: string }
+  | { kind: "settleInsurance"; tx?: string; error?: string };
 
 export class KeeperRunner {
+  /** settleInsurance txs sent per book that have not closed the pool position yet (backoff, review I-2) */
+  private readonly settleSent = new Map<number, number>();
+
   constructor(private readonly d: KeeperDeps) {}
 
   async tick(ref: BookRef): Promise<{ snapshot: KeeperSnapshot; plan: RecallPlan | null; actions: KeeperAction[] }> {
@@ -106,6 +110,22 @@ export class KeeperRunner {
 
     if (canFinalizeRetirement(s.state, s.lastMark)) {
       actions.push(await this.act(ref, "finalizeRetirement", () => this.d.chain.finalizeRetirement(ref), { kind: "finalizeRetirement" }));
+    }
+    if (shouldSettleInsurance(s.state, s.insurance)) {
+      const key = `${ref.bookId}:settleInsurance`;
+      const sent = this.settleSent.get(ref.bookId) ?? 0;
+      if (sent > 0 && this.d.cooldowns.ready(key)) {
+        log.warn({ attempts: sent }, "insurance pool final mark still not reported after settleInsurance (InsuranceMarkFailed: the pool refused markBook); retrying with backoff");
+      }
+      const a = await this.act(ref, "settleInsurance", () => this.d.chain.settleInsurance(ref), { kind: "settleInsurance" });
+      if (a.tx) {
+        // a confirmed tx is not progress (the book swallows a refused markBook): back off until the position closes
+        this.settleSent.set(ref.bookId, sent + 1);
+        this.d.cooldowns.hold(key, settleBackoffMs(this.d.cfg.cooldownMs, sent));
+      }
+      actions.push(a);
+    } else {
+      this.settleSent.delete(ref.bookId);
     }
     return { snapshot: s, plan, actions };
   }

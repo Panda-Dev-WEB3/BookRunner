@@ -30,7 +30,8 @@ export interface DomainEventPayloads {
   "limit.breached": { bookId: number; breaches: string[]; snapshot: Record<string, unknown> };
   "kill.executed": { bookId: number; reason: string; actions: string[]; txHashes: string[] };
   "mark.committed": { bookId: number; markId: number; periodEnd: number; navUsd: string; seniorNav: string; juniorNav: string; receiptsRoot: string; txHash: string };
-  "distribution.paid": { bookId: number; period: number; grossUsd: string; expensesUsd: string; carryUsd: string; seniorUsd: string; juniorUsd: string; txHash: string };
+  /** premiumUsd (2026-10): the insurance pool premium paid before the split (pool-funded books only; gross includes it) */
+  "distribution.paid": { bookId: number; period: number; grossUsd: string; premiumUsd?: string; expensesUsd: string; carryUsd: string; seniorUsd: string; juniorUsd: string; txHash: string };
   "charter.filed": { charterId: number; sponsor: string; symbol: string };
   "book.created": { bookId: number; book: string };
   "book.window_closed": { bookId: number; seniorAllocated: string; juniorAllocated: string };

@@ -11,6 +11,7 @@ import {IBook} from "./interfaces/IBook.sol";
 import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 import {ITranche} from "./interfaces/ITranche.sol";
 import {IUnderwritingVault} from "./interfaces/IUnderwritingVault.sol";
+import {IBookInsurance} from "./interfaces/IInsurancePool.sol";
 import {Waterfall} from "./libraries/Waterfall.sol";
 import {BookLogic} from "./libraries/BookLogic.sol";
 import {IBookTrancheHooks, ITrancheBookHooks} from "./Tranche.sol";
@@ -28,9 +29,14 @@ interface IVaultBackstopRepay {
 /// @title Book — one book per approved charter (bookId == charterId). ERC1967 proxy, UUPS logic,
 ///        upgrades only via config.timelock(). Owns the waterfall accounting (S = Senior NAV,
 ///        J = Junior NAV) and the lifecycle Subscription -> Live -> Retiring -> Retired (or Cancelled).
-/// @notice Accounting identity: S + J == vault idle + deployed - unfundedClaims at every applied mark,
-///         where unfundedClaims are settled redemption assets not yet moved from the vault to tranche
-///         escrow plus a backstop repayment not yet paid. Between marks S/J move only by credited fee
+/// @notice Accounting identity (book not exhausted): S + J == vault idle + deployed - unfundedClaims - (pool debt not
+///         yet due) at every applied mark, where unfundedClaims are settled redemption assets not yet moved from the
+///         vault to tranche escrow plus a backstop repayment not yet paid plus, once due, the InsurancePool's debt. A
+///         pool-funded book
+///         (charter.ifFromPool, 2026-10) raises only its MM inventory from the tranches; the pool funds the IF and the
+///         book owes it back as a senior debt netted from NAV: the IF is never Senior / Junior value and whatever draws
+///         it (traders' bad debt, MM losses) is the book's loss first (Junior -> Senior -> backstop). The pool loses only
+///         what an exhausted book cannot repay, as the book reports at its marks (pool.markBook). Between marks S/J move only by credited fee
 ///         flow and (Retired) redemptions, each matched one-for-one by vault cash. Per-tranche values are indexed by kind
 ///         (BRTypes.SENIOR = 0, BRTypes.JUNIOR = 1).
 /// @dev The heavy state transitions (closeWindow, applyMark, fundClaims, finalizeRetirement,
@@ -38,7 +44,14 @@ interface IVaultBackstopRepay {
 ///      `BookLogic` (EIP-170 headroom) and run by DELEGATECALL in this proxy's context, behind this
 ///      contract's `nonReentrant` entry points. Deploying a Book implementation therefore needs BookLogic
 ///      deployed and linked (forge links automatically in tests / scripts; see script/UpgradeBook.s.sol).
-contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, ReentrancyGuardTransient {
+contract Book is
+    IBook,
+    IBookTrancheHooks,
+    IBookInsurance,
+    Initializable,
+    UUPSUpgradeable,
+    ReentrancyGuardTransient
+{
     uint256 internal constant WAD = 1e18;
     uint256 internal constant BPS = 10_000;
     uint8 internal constant S = BRTypes.SENIOR;
@@ -97,6 +110,19 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
         /// @dev periodEnd of the first held mark of the current run of held marks (0 = last mark not held).
         ///      Held marks defer settlement until periodEnd >= heldSince + BookLogic.MAX_HELD_DEFERRAL (M-1).
         uint64 heldSince;
+        // ---- appended 2026-10: insurance pool (charter.ifFromPool; docs/ARCHITECTURE.md §2.10) ----
+        /// @dev the pool that funded the IF at closeWindow (address(0): the tranches funded it, the old way)
+        address insurancePool;
+        /// @dev the book's senior debt to the pool (the allocation, less repayments and the final write-off). Netted
+        ///      from NAV always; cash-reserved and repaid first from vault idle once `poolDue`.
+        uint256 poolDebt;
+        /// @dev the pool's claim at the last mark: the debt capped by the book's own capital (Backstop money excluded);
+        ///      netted from NAV, reported to the pool (pool.markBook); the shortfall is provisional until retirement
+        uint256 poolValue;
+        /// @dev the IF recall started (or retirement): the debt is reserved cash and repaid before tranche claims
+        bool poolDue;
+        /// @dev the final mark reached the pool (finalizeRetirement / settleInsurance)
+        bool poolClosed;
     }
 
     // keccak256(abi.encode(uint256(keccak256("bookrunner.storage.Book")) - 1)) & ~bytes32(uint256(0xff))
@@ -127,6 +153,8 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
     error BadTopUp();
     error NewBooksPaused();
     error WindowNotStuck(uint64 cancellableAt);
+    error InsurancePoolUnset();
+    error InsuranceTargetZero();
     /// @dev OZ SafeCast's error (same signature/selector), raised by Waterfall.applyMarkPnl inside the
     ///      linked BookLogic library and bubbled through Book. Declared here so Book's ABI still lists it
     ///      (an external library's errors are not part of the linking contract's ABI).
@@ -164,6 +192,26 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
     event RetiredPriceSet(uint256 indexed bookId, uint8 indexed kind, uint256 priceWad, uint64 epoch);
     event RetiredRedemption(uint256 indexed bookId, uint8 indexed kind, uint256 assetsOwed);
     event RetiredBacklogSettled(uint256 indexed bookId, uint256 seniorOwed, uint256 juniorOwed);
+    /// @notice The InsurancePool funded this book's IF (`amount` to the vault, deployed to the venue IF account).
+    event InsuranceFunded(uint256 indexed bookId, address indexed pool, uint256 amount);
+    /// @notice Reported to the pool at a mark (`final_`: the retirement mark): `value` = the pool's claim, the debt capped
+    ///         by the book's own capital (Backstop money excluded); below `debt` only while the book is exhausted
+    ///         (provisional, restored first by later marks).
+    event InsuranceMarked(uint256 indexed bookId, uint256 debt, uint256 value, uint64 periodEnd, bool final_);
+    /// @notice The pool refused a mark report (the book is unaffected; the next mark, or settleInsurance, retries).
+    event InsuranceMarkFailed(uint256 indexed bookId, uint256 value, bool final_);
+    /// @notice The IF recall started (or retirement): the debt is due, reserved and repaid from vault idle (fundClaims).
+    event InsuranceDue(uint256 indexed bookId, uint256 debt);
+    /// @notice `amount` of the debt repaid from vault idle (`debt` left).
+    event InsuranceRepaid(uint256 indexed bookId, uint256 amount, uint256 debt);
+    /// @notice The vault could not repay the pool; the amount stays owed and reserved.
+    event InsuranceRepayFailed(uint256 indexed bookId, uint256 amount);
+    /// @notice The book is exhausted at this mark: its own capital (Backstop money excluded) is `shortfall` below its
+    ///         debt. A provisional pool loss, restored first by later marks, final only at retirement (review N2-2).
+    event InsuranceShortfall(uint256 indexed bookId, uint256 shortfall);
+    /// @notice At retirement the book's own capital (Backstop money excluded) was below its debt: `amount` is written
+    ///         off for good, the pool's loss (owner rulings N-1, N2-2).
+    event InsuranceWrittenOff(uint256 indexed bookId, uint256 amount);
 
     constructor() {
         _disableInitializers();
@@ -196,7 +244,9 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
                 || c.mandate == address(0) || c.router == address(0) || c.desk == address(0)
                 || c.adapter == address(0)
         ) revert ZeroAddress();
-        if (charter_.seniorCapBps > BPS || charter_.seniorHurdleBps > BPS) revert BadCharter();
+        if (charter_.seniorCapBps > BPS || charter_.seniorHurdleBps > BPS || charter_.premiumBps > BPS) {
+            revert BadCharter();
+        }
         uint32 interval = IBookrunnerConfig(config_).markInterval();
         if (interval == 0) revert BadConfig();
 
@@ -304,8 +354,9 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
     }
 
     /// @notice Vault cash owed out of the book and netted from its NAV: settled redemption assets owed to
-    ///         tranche escrows but not yet funded, plus the backstop repayment not yet paid (the vault
-    ///         reserves all of it from deployment).
+    ///         tranche escrows but not yet funded, plus the backstop repayment not yet paid, plus the InsurancePool's
+    ///         debt once due (IF recall started) (the vault reserves all of it from deployment). A pool debt not yet
+    ///         due is netted from NAV too but backed by the venue IF, not reserved: see insuranceDebt().
     function unfundedClaims() external view returns (uint256) {
         return BookLogic.liabilities(_s());
     }
@@ -317,6 +368,19 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
         return ($.backstopDebt, $.backstopPayable);
     }
 
+    /// @notice Insurance pool position of a pool-funded book (`pool` == address(0): the tranches funded the IF).
+    ///         `debt` is netted from NAV (once `due` it is also part of unfundedClaims()); `value` is what the book could
+    ///         repay at its last mark (the pool's valuation); `closed` once the retirement mark reached the pool.
+    function insuranceDebt() external view returns (address pool, uint256 debt, uint256 value, bool due, bool closed) {
+        BookStorage storage $ = _s();
+        return ($.insurancePool, $.poolDebt, $.poolValue, $.poolDue, $.poolClosed);
+    }
+
+    /// @notice The InsurancePool that funded this book's IF at closeWindow (address(0) for a book-funded IF).
+    function insurancePool() external view returns (address) {
+        return _s().insurancePool;
+    }
+
     function unfundedOf(uint8 kind) external view returns (uint256) {
         return _s().unfunded[_kind(kind)];
     }
@@ -325,7 +389,7 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
     function markedNavPreview(uint256 deployedValueUsd) external view returns (uint256) {
         BookStorage storage $ = _s();
         return Waterfall.markedNavNet(
-            IUnderwritingVault($.components.vault).idle(), BookLogic.liabilities($), deployedValueUsd
+            IUnderwritingVault($.components.vault).idle(), BookLogic.navLiabilities($), deployedValueUsd
         );
     }
 
@@ -361,7 +425,9 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
     /// @notice Anyone, once `subscriptionEnds` has passed. Allocates pro-rata (senior cap), checks the
     ///         sponsor holds >= 10% of Junior and the IF is fundable; on failure the book is Cancelled and
     ///         every commitment is refundable 1:1. On success capital moves to the vault and the IF + MM
-    ///         inventory are deployed through the vault -> adapter.
+    ///         inventory are deployed through the vault -> adapter. [2026-10 insurance pool] With charter.ifFromPool
+    ///         the tranches raise only the MM inventory and the InsurancePool funds the IF (pool.allocate; reverts while
+    ///         the pool cannot fund it, see cancelStuckWindow).
     function closeWindow() external nonReentrant {
         BookLogic.closeWindow(_s());
     }
@@ -395,6 +461,18 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
         BookLogic.creditDistribution(_s(), seniorAmount, juniorAmount);
     }
 
+    /// @notice Anyone, Retired pool-funded book: repays the debt from vault idle and retries the retirement mark to the
+    ///         pool if it failed at finalizeRetirement (write-off of what idle cannot cover). No-op otherwise.
+    function settleInsurance() external nonReentrant {
+        BookLogic.settleInsurance(_s());
+    }
+
+    /// @notice Only the book's vault, before it recalls a pool-funded IF (never while Live): the debt becomes due
+    ///         (cash-reserved, repaid from vault idle by fundClaims before tranche claims).
+    function onInsuranceRecall() external nonReentrant {
+        BookLogic.onInsuranceRecall(_s());
+    }
+
     /// @notice Only the book's vault: every vault <-> venue / desk capital movement bumps the nonce, so a
     ///         mark valued against an older nonce can never be applied.
     function onCapitalFlow() external {
@@ -405,7 +483,8 @@ contract Book is IBook, IBookTrancheHooks, Initializable, UUPSUpgradeable, Reent
     }
 
     /// @notice Anyone: moves vault idle USDC to tranche escrows for settled-but-unfunded claims
-    ///         (Senior claims first), then to the backstop for a repayment owed to it.
+    ///         (Senior claims first), then to the backstop for a repayment owed to it. [2026-10] A due InsurancePool
+    ///         debt is repaid first.
     function fundClaims() external nonReentrant returns (uint256 funded) {
         return BookLogic.fundClaims(_s());
     }

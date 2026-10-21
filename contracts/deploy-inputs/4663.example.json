@@ -113,6 +113,15 @@
     "stakingRewardsDuration": 604800,
     "oracleMinSources": 1
   },
+  "insurancePool": {
+    "premiumFloorBps": 1200,
+    "marketCapBps": 3000,
+    "bufferBps": 2000,
+    "firstLossTargetBps": 1000,
+    "cooldown": 604800,
+    "epochLength": 604800,
+    "processGrace": 86400
+  },
   "buyback": {
     "poolFee": 3000,
     "refBkrnPerUsdcWad": "20000000000000000000",

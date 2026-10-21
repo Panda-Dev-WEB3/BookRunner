@@ -17,6 +17,7 @@ import {AttestedOracle} from "../src/AttestedOracle.sol";
 import {RiskCommittee} from "../src/RiskCommittee.sol";
 import {OrderlyAdapter} from "../src/OrderlyAdapter.sol";
 import {PoolEngineAdapter} from "../src/PoolEngineAdapter.sol";
+import {InsurancePool} from "../src/InsurancePool.sol";
 import {BRTypes} from "../src/interfaces/BRTypes.sol";
 import {IStockTokenRegistry} from "../src/interfaces/IStockTokenRegistry.sol";
 
@@ -89,6 +90,7 @@ contract VerifyHandover is MainnetInput {
         _checkComponents();
         _checkImplementations();
         _checkParams();
+        _checkInsurancePool(deploymentJson);
         _checkEconomics();
         _checkOracleAndMarkets();
         _checkHedgeRoutes();
@@ -372,6 +374,43 @@ contract VerifyHandover is MainnetInput {
             same = th[i] == tierThresholds[i] && bo[i] == tierBonds[i];
         }
         _row(same, "agent bond tiers == input");
+    }
+
+    /// @dev 2026-10 InsurancePool: registered, an ERC1967 proxy on a deployed implementation, bound to this config
+    ///      and the settlement token, parameters as input, not paused (upgrades and parameters follow config.timelock()).
+    function _checkInsurancePool(string memory j) internal {
+        address p = cfg.insurancePool();
+        _row(p.code.length > 0, "config.insurancePool() set (with code)");
+        if (p.code.length == 0) return;
+        _row(j.readAddressOr(".contracts.insurancePool", address(0)) == p, "insurance pool == deployment record");
+        InsurancePool ip = InsurancePool(p);
+        address impl = address(
+            uint160(uint256(vm.load(p, 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc)))
+        );
+        _row(
+            impl.code.length > 0 && impl == j.readAddressOr(".contracts.insurancePoolImplementation", address(0)),
+            "insurance pool: ERC1967 proxy on the recorded implementation"
+        );
+        _row(ip.config() == address(cfg), "insurance pool reads this config");
+        _row(ip.asset() == ext.settlementToken, "insurance pool asset == settlement token (input)");
+        (
+            uint16 floor,
+            uint16 cap,
+            uint16 buffer,
+            uint16 flTarget,
+            uint32 cooldown,
+            uint32 len,
+            uint32 grace,
+            uint32 pendingLen
+        ) = ip.params();
+        _row(
+            floor == poolIn.premiumFloorBps && cap == poolIn.marketCapBps && buffer == poolIn.bufferBps
+                && flTarget == poolIn.firstLossTargetBps && cooldown == poolIn.cooldown
+                && (pendingLen != 0 ? pendingLen : len) == poolIn.epochLength && grace == poolIn.processGrace,
+            "insurance pool params == input"
+        );
+        (bool dp, bool ap) = ip.paused();
+        _row(!dp && !ap, "insurance pool not paused (launch-ready)");
     }
 
     function _checkEconomics() internal {

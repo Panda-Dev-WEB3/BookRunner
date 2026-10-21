@@ -61,7 +61,15 @@ export async function handleVenueOpsJob(job: VenueOpsJob, d: JobDeps): Promise<R
       const req = d.ctx.settings.ifRequirementUsd ?? null;
       const above = req === null ? null : ifAboveRequirement(r.balanceUsd, req);
       const ok = r.balanceUsd >= book.ifTargetUsd && above !== false && !book.ifAccountError;
-      const ifInfo = { ifMode: d.ctx.settings.ifMode ?? "contract", ifAccountId: book.accounts.if, ...(book.ifAccountError ? { ifAccountError: book.ifAccountError } : {}) };
+      // 2026-10 insurance pool: who funded the IF; a pool-funded IF is the pool's allocation, owed back as a senior debt
+      const pool = book.ifFromPool ? ((await d.ctx.chain.insuranceDebt?.(book.book).catch(() => null)) ?? null) : null;
+      const ifInfo = {
+        ifMode: d.ctx.settings.ifMode ?? "contract",
+        ifAccountId: book.accounts.if,
+        fundedBy: book.ifFromPool ? ("pool" as const) : ("tranches" as const),
+        ...(pool ? { poolDebtUsd: pool.debt.toString(), poolDebtDue: pool.due } : {}),
+        ...(book.ifAccountError ? { ifAccountError: book.ifAccountError } : {}),
+      };
       d.ctx.log[ok ? "info" : "warn"]({ bookId: book.bookId, balanceUsd: r.balanceUsd.toString(), targetUsd: book.ifTargetUsd.toString(), requirementUsd: req?.toString() ?? null, ...ifInfo }, "insurance fund check");
       return { balanceUsd: r.balanceUsd.toString(), targetUsd: book.ifTargetUsd.toString(), funded: ok, ...(req !== null ? { requirementUsd: req.toString(), aboveRequirement: above } : {}), ...ifInfo };
     }

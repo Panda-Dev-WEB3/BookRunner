@@ -69,6 +69,8 @@ export function charterForPrompt(c: Charter) {
     perWalletCapUsd: c.perWalletCapUsd === 0n ? "none" : formatUsd(c.perWalletCapUsd),
     takerFeeBps: c.takerFeeBps,
     makerFeeBps: c.makerFeeBps,
+    insuranceFundFundedBy: c.ifFromPool ? "insurance pool (senior debt of the book)" : "tranches",
+    poolPremiumBpsOfGrossFeeFlow: c.ifFromPool ? c.premiumBps : 0,
   };
 }
 

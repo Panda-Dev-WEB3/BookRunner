@@ -8,6 +8,8 @@ import {BkrnToken} from "../src/BkrnToken.sol";
 import {BkrnStaking} from "../src/BkrnStaking.sol";
 import {BkrnFeeRouter} from "../src/BkrnFeeRouter.sol";
 import {Backstop} from "../src/Backstop.sol";
+import {InsurancePool} from "../src/InsurancePool.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {MarkRegistry} from "../src/MarkRegistry.sol";
 import {RevenueRouter} from "../src/RevenueRouter.sol";
 import {Book} from "../src/Book.sol";
@@ -125,6 +127,7 @@ contract Deploy is Script {
     MarketCharter internal charter;
     RiskCommittee internal committee;
     BookFactory internal factory;
+    InsurancePool internal insurancePool;
 
     string[] internal tickers;
     mapping(string => MockERC20) internal stockToken;
@@ -322,6 +325,16 @@ contract Deploy is Script {
         config.setAddress("charter", address(charter));
         config.setAddress("committee", address(committee));
         config.setAddress("factory", address(factory));
+        // 2026-10 InsurancePool (UUPS proxy, default parameters): funds the IF of `ifFromPool` books. Seeding the
+        // first-loss slice and test deposits are launch steps (scripts/launch-devnet.ts), not part of the deploy.
+        insurancePool = InsurancePool(
+            address(
+                new ERC1967Proxy(
+                    address(new InsurancePool()), abi.encodeCall(InsurancePool.initialize, (address(config)))
+                )
+            )
+        );
+        config.setAddress("insurancePool", address(insurancePool));
 
         staking.setLocker(address(charter), true);
         staking.setLocker(address(committee), true);
@@ -445,6 +458,7 @@ contract Deploy is Script {
         vm.serializeAddress(c, "factory", address(factory));
         vm.serializeAddress(c, "poolEngine", address(poolEngine));
         vm.serializeAddress(c, "hedgeExecutor", address(hedgeExecutor));
+        vm.serializeAddress(c, "insurancePool", address(insurancePool));
         vm.serializeAddress(c, "orderlyVault", orderlyVault);
         address ep = 0x0000000071727De22E5E9d8BAf0edAc6f37da032;
         if (ep.code.length > 0) vm.serializeAddress(c, "entryPoint", ep);

@@ -247,6 +247,19 @@ export const underwritingVaultAbi = [
   },
   {
     "type": "function",
+    "name": "repayInsurancePool",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "returnFromDesk",
     "inputs": [
       {
@@ -464,6 +477,11 @@ export const underwritingVaultAbi = [
         "internalType": "address"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "PoolFundedInsurance",
+    "inputs": []
   },
   {
     "type": "error",

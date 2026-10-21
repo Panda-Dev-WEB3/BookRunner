@@ -28,7 +28,7 @@ describe.skipIf(!IT)("waterfall stores (postgres)", () => {
     const d = {
       bookId: BOOK,
       period: P,
-      amounts: { gross: usd("1000"), expenses: usd("1"), carry: usd("99.9"), senior: usd("539.46"), junior: usd("359.64") },
+      amounts: { gross: usd("1000"), expenses: usd("1"), carry: usd("99.9"), senior: usd("539.46"), junior: usd("359.64"), premium: 0n },
       txHash: `0x${"ab".repeat(32)}` as const,
       logIndex: 2,
       blockNumber: 5n,
@@ -46,7 +46,7 @@ describe.skipIf(!IT)("waterfall stores (postgres)", () => {
   test("domain events: persisted once per dedupe key, published on the domain channel", async () => {
     const published: Array<[string, string]> = [];
     const sink = new PgRedisEventSink(db, { publish: async (c, m) => published.push([c, m]) }, log);
-    const payload = distributionPaidPayload(BOOK, P, { gross: 1n, expenses: 0n, carry: 0n, senior: 1n, junior: 0n }, "0x01");
+    const payload = distributionPaidPayload(BOOK, P, { gross: 1n, expenses: 0n, carry: 0n, senior: 1n, junior: 0n, premium: 0n }, "0x01");
     const a = await sink.publish("distribution.paid", BOOK, payload, distributionDedupeKey(BOOK, P));
     const b = await sink.publish("distribution.paid", BOOK, payload, distributionDedupeKey(BOOK, P));
     expect(a.inserted).toBe(true);

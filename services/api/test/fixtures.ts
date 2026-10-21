@@ -179,6 +179,7 @@ export function seedBook(w: World, opts: { state?: string; subscriptionEndsIn?: 
     bookId: 1,
     ts: at(-300),
     source: "distribution",
+    premiumUsd: "0",
     grossUsd: "100.000000",
     expensesUsd: "1.000000",
     carryUsd: "9.900000",

@@ -18,13 +18,17 @@ import {
   formIssues,
   formToDraft,
   issuesFor,
+  premiumText,
   splitDuration,
   stepOf,
   suggestSymbol,
+  windowRaiseUsd,
 } from "../lib/charterForm";
 import { config } from "../lib/config";
 import { TRANCHE_COPY } from "../lib/copy";
 import { bpsPct, fmtBps, fmtDuration, fmtNum, fmtUsd } from "../lib/format";
+import { usePoolOverview } from "../components/pool/usePool";
+import { useInsurancePoolAddress } from "../wallet/contracts";
 import { useSettlementSymbol } from "../wallet/settlementSymbol";
 import { TxRunner } from "../wallet/TxRunner";
 import { WalletButton } from "../wallet/WalletButton";
@@ -96,7 +100,11 @@ export function FileCharterPage() {
   // audit M-1: the network's mark interval (every book reports it) is the minimum Junior notice
   const books = trpc.book.list.useQuery(undefined, { staleTime: 60_000 });
   const markIntervalSeconds = books.data?.find((b) => b.markSchedule?.intervalSeconds)?.markSchedule.intervalSeconds ?? null;
-  const issues = useMemo(() => formIssues(form, { markIntervalSeconds, chainId: config.chainId }), [form, markIntervalSeconds]);
+  // 2026-10 insurance pool: the chain's pool (NO_POOL hint) and its premium floor (read at filing)
+  const pool = useInsurancePoolAddress();
+  const poolConfigured = pool.data === undefined ? null : pool.data !== null;
+  const premiumFloorBps = usePoolOverview().data?.params?.premiumFloorBps ?? undefined;
+  const issues = useMemo(() => formIssues(form, { markIntervalSeconds, chainId: config.chainId, poolConfigured }), [form, markIntervalSeconds, poolConfigured]);
   const errors = issues.filter((i) => i.severity === "error");
 
   useEffect(() => {
@@ -126,7 +134,7 @@ export function FileCharterPage() {
   const idx = STEPS.findIndex((s) => s.id === step);
   const go = (d: number) => setStep(STEPS[Math.min(STEPS.length - 1, Math.max(0, idx + d))]?.id ?? "market");
 
-  const raise = Number(form.ifSizeUsd || 0) + Number(form.mmInventoryUsd || 0);
+  const raise = windowRaiseUsd(form);
   const seniorMax = (raise * Number(form.seniorCapBps || 0)) / 10_000;
 
   let body: ReactNode = null;
@@ -242,17 +250,38 @@ export function FileCharterPage() {
   } else if (step === "capital") {
     body = (
       <div className="grid gap-4 md:grid-cols-2">
+        <Field label="Insurance fund funded by" help={FIELD_HELP.ifFromPool} error={err("ifFromPool")} className="md:col-span-2">
+          <Segmented
+            value={form.ifFromPool ? "pool" : "tranches"}
+            onChange={(v) => {
+              setForm((f) => ({ ...f, ifFromPool: v === "pool", premiumBps: v === "pool" ? f.premiumBps : "0" }));
+              file.reset();
+            }}
+            ariaLabel="Insurance fund funded by"
+            options={[
+              { value: "pool", label: "The insurance pool" },
+              { value: "tranches", label: "The tranches" },
+            ]}
+          />
+        </Field>
         <Field label={`IF size (${sym})`} help={FIELD_HELP.ifSizeUsd} error={err("ifSizeUsd")} htmlFor="f-if">
           <input id="f-if" className="field num" inputMode="decimal" value={form.ifSizeUsd} aria-invalid={!!err("ifSizeUsd")} onChange={(e) => set("ifSizeUsd", e.currentTarget.value.replace(/[^\d.]/g, ""))} />
         </Field>
         <Field label={`MM inventory (${sym})`} help={FIELD_HELP.mmInventoryUsd} error={err("mmInventoryUsd")} htmlFor="f-mm">
           <input id="f-mm" className="field num" inputMode="decimal" value={form.mmInventoryUsd} aria-invalid={!!err("mmInventoryUsd")} onChange={(e) => set("mmInventoryUsd", e.currentTarget.value.replace(/[^\d.]/g, ""))} />
         </Field>
+        {form.ifFromPool && (
+          <Field label="Pool premium (bps of gross fee flow)" help={`${FIELD_HELP.premiumBps}: ${premiumText(Number(form.premiumBps) || 0, premiumFloorBps)}`} error={err("premiumBps")} htmlFor="f-premium">
+            <input id="f-premium" className="field num" inputMode="numeric" value={form.premiumBps} aria-invalid={!!err("premiumBps")} onChange={(e) => set("premiumBps", e.currentTarget.value.replace(/[^\d]/g, ""))} />
+          </Field>
+        )}
         <div className="rounded-card border border-line bg-surface-2 p-3 md:col-span-2">
           <KV
             rows={[
-              ["Maximum raise (IF + MM)", fmtUsd(String(raise), { symbol: true })],
-              ["Deployment order at close", "IF first, then MM inventory; any remainder stays idle in the vault"],
+              [form.ifFromPool ? "Maximum raise (MM inventory only)" : "Maximum raise (IF + MM)", fmtUsd(String(raise), { symbol: true })],
+              form.ifFromPool
+                ? ["Insurance fund at close", "Lent by the insurance pool (within its per-market cap and free cash); the book owes it back as a senior debt"]
+                : ["Deployment order at close", "IF first, then MM inventory; any remainder stays idle in the vault"],
               ["Senior at most (cap)", fmtUsd(String(seniorMax), { symbol: true })],
             ]}
           />
@@ -405,6 +434,7 @@ export function FileCharterPage() {
               ["Venue · symbol", `${form.venue === "orderly" ? "Orderly-listed" : "In-house engine"} · ${form.symbol}`],
               ["Oracle · sessions", `${form.oracle} · ${SESSION_PRESETS.find((p) => p.id === form.sessions)?.label}`],
               ["IF size · MM inventory", `${fmtUsd(d.ifTargetUsd as string, { compact: true, symbol: true })} · ${fmtUsd(d.mmInventoryUsd as string, { compact: true, symbol: true })}`],
+              ["IF funded by · pool premium", d.ifFromPool ? `Insurance pool · ${premiumText(d.premiumBps ?? 0, premiumFloorBps)}` : "The tranches · none"],
               ["Senior cap · Senior share", `${bpsPct(d.seniorCapBps)} · ${bpsPct(d.seniorHurdleBps)}`],
               ["Window · Junior notice", `${fmtDuration(d.subscriptionWindowSeconds)} · ${fmtDuration(d.juniorNoticeSeconds)}`],
             ]}

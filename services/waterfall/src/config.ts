@@ -35,6 +35,8 @@ export const waterfallEnvShape = {
   /** Keeper: BkrnFeeRouter.executeBuyback once buybackPending reaches the threshold (carry -> BKRN stakers). */
   WATERFALL_BUYBACK_ENABLED: zBool(true),
   WATERFALL_BUYBACK_THRESHOLD_USD: zUsd("10.00"),
+  /** Keeper (2026-10 insurance pool): InsurancePool.processEpoch once the oldest epoch is processable. */
+  WATERFALL_POOL_EPOCH_ENABLED: zBool(true),
   /** Slippage tolerance below the buyback router's quote for minBkrnOut. */
   WATERFALL_BUYBACK_SLIPPAGE_BPS: z.coerce.number().int().min(0).max(9_999).default(100),
   /** Uniswap v3 fee tier passed ONLY to a legacy (pre-A5-02) BkrnFeeRouter; the current router pins it on-chain. */

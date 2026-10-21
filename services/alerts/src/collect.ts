@@ -1,6 +1,6 @@
 // Snapshot collection: Postgres (books, newest marks, kill journal, indexer cursors), Redis (risk state,
 // signed venue reports, supervisor heartbeat), the chain (head, role key balances, buybackPending,
-// markInterval) and the API's /health. Each source fails independently: a failed source becomes an
+// markInterval, the InsurancePool) and the API's /health. Each source fails independently: a failed source becomes an
 // infra / rpc / api condition instead of blinding the other rules.
 import { KEYS } from "@bookrunner/shared/queues";
 import { SESSIONS_24X7, type Sessions, effectiveSessions } from "@bookrunner/shared/sessions";
@@ -18,6 +18,8 @@ import type {
   OracleProbe,
   OracleSourceRole,
   OracleSourceSnap,
+  PoolBookSnap,
+  PoolSnap,
   RiskSnap,
   Sample,
   Snapshot,
@@ -63,6 +65,83 @@ export interface ChainPort {
   buybackPending(): Promise<bigint | null>;
   /** BookrunnerConfig.markInterval; null when unknown */
   markInterval(): Promise<number | null>;
+  /**
+   * The InsurancePool (readPool), with the positions of `bookIds` plus its active books; null when the deployment has
+   * no insurancePool. Absent port = no pool.
+   */
+  pool?(bookIds: number[]): Promise<PoolSnap | null>;
+}
+
+/** One InsurancePool view call (main.ts: viem readContract with insurancePoolAbi). */
+export type PoolRead = (functionName: string, args?: readonly unknown[]) => Promise<unknown>;
+
+/** settlement-token units (6dp) -> dollars; Number is exact below 2^53 units (~9e9 USD) */
+const usd6 = (v: unknown) => Number(BigInt(v as bigint)) / 1e6;
+const SHARE_UNIT = 1e12; // pool shares: 6 decimals + DECIMALS_OFFSET 6
+const ZERO_ADDRESS = /^0x0{40}$/i;
+
+/**
+ * Reads the InsurancePool views in parallel. The core views (value, queue, params, activeBooks) must all succeed or
+ * this throws (collect turns it into pool = undefined); epochInfo, staleBooks and each bookPosition fail on their own
+ * (null / dropped), so one bad read never blinds the rest. Reads per call: 10 + 2 + one per book id.
+ */
+export async function readPool(read: PoolRead, address: string, bookIds: number[]): Promise<PoolSnap> {
+  const [assets, free, claims, fl, util, flBps, params, queue, ledger, active] = await Promise.all([
+    read("poolAssets"),
+    read("freeLiquidity"),
+    read("claimsTotal"),
+    read("firstLossAssets"),
+    read("utilisationBps"),
+    read("firstLossBps"),
+    read("params"),
+    read("queue"),
+    read("ledger"),
+    read("activeBooks"),
+  ]);
+  const p = params as readonly [number, number, number, number, number, number, number, number];
+  const q = queue as readonly [bigint, bigint, bigint, bigint, bigint];
+  const l = ledger as readonly [bigint, bigint, bigint, bigint, bigint];
+  const activeBookIds = (active as readonly bigint[]).map(Number);
+  const ids = [...new Set([...bookIds.filter((x) => Number.isSafeInteger(x) && x >= 0), ...activeBookIds])].sort((a, b) => a - b);
+  const [epochR, staleR, ...posR] = await Promise.allSettled([read("epochInfo", [q[0]]), read("staleBooks", [q[1]]), ...ids.map((id) => read("bookPosition", [BigInt(id)]))]);
+  const ep = epochR!.status === "fulfilled" ? (epochR.value as { shares: bigint; depositAssets: bigint; processed: boolean }) : null;
+  const books: PoolBookSnap[] = [];
+  posR.forEach((r, i) => {
+    if (r.status !== "fulfilled") return;
+    const x = r.value as { book: string; market: string; allocation: bigint; claim: bigint; lossFirstLoss: bigint; lossDepositors: bigint; lastMarkAt: bigint | number; active: boolean };
+    if (!x || typeof x.book !== "string" || ZERO_ADDRESS.test(x.book)) return;
+    books.push({
+      bookId: ids[i]!,
+      market: String(x.market).toLowerCase(),
+      allocationUsd: usd6(x.allocation),
+      claimUsd: usd6(x.claim),
+      lossFirstLossUsd: usd6(x.lossFirstLoss),
+      lossDepositorsUsd: usd6(x.lossDepositors),
+      lastMarkAt: Number(x.lastMarkAt),
+      active: x.active === true,
+    });
+  });
+  return {
+    address,
+    poolAssetsUsd: usd6(assets),
+    freeLiquidityUsd: usd6(free),
+    claimsUsd: usd6(claims),
+    firstLossUsd: usd6(fl),
+    utilisationBps: Number(util),
+    firstLossBps: Number(flBps),
+    firstLossTargetBps: Number(p[3]),
+    epochLengthSec: Number(p[5]),
+    processGraceSec: Number(p[6]),
+    procEpoch: Number(q[0]),
+    procEndsAt: Number(q[1]),
+    fillEpoch: Number(q[2]),
+    pendingShares: Number(q[3]) / SHARE_UNIT,
+    depositsPendingUsd: usd6(l[2]),
+    epoch: ep ? { withdrawShares: Number(BigInt(ep.shares)) / SHARE_UNIT, depositUsd: usd6(ep.depositAssets), processed: ep.processed === true } : null,
+    staleBooks: staleR!.status === "fulfilled" ? Number(staleR.value) : null,
+    activeBookIds,
+    books,
+  };
 }
 
 export interface CollectDeps {
@@ -610,6 +689,16 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
   } catch {
     // keep the last known value
   }
+  // InsurancePool: null = none in the deployment; undefined = a core read failed (rpc problems are the rpc rule's business)
+  let pool: Snapshot["pool"] = null;
+  if (d.chain.pool) {
+    try {
+      // review m-2: only books that can hold a pool position (a window closed): never Subscription / Cancelled ones
+      pool = await d.chain.pool(bookRows.filter((b) => b.state !== "Subscription" && b.state !== "Cancelled").map((b) => Number(b.id)));
+    } catch {
+      pool = undefined;
+    }
+  }
 
   // ---- API
   let api: Snapshot["api"];
@@ -657,6 +746,7 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
     builderFeed,
     venueOps,
     busForged,
+    pool,
     infraErrors,
   };
   return { snapshot, memory: { rpcSamples, buybackSamples, markIntervalSec } };

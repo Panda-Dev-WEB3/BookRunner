@@ -90,6 +90,11 @@ export const markRegistryAbi = [
             "name": "held",
             "type": "bool",
             "internalType": "bool"
+          },
+          {
+            "name": "insuranceEquityUsd",
+            "type": "uint256",
+            "internalType": "uint256"
           }
         ]
       },
@@ -161,6 +166,11 @@ export const markRegistryAbi = [
             "name": "held",
             "type": "bool",
             "internalType": "bool"
+          },
+          {
+            "name": "insuranceEquityUsd",
+            "type": "uint256",
+            "internalType": "uint256"
           }
         ]
       },
@@ -310,6 +320,11 @@ export const markRegistryAbi = [
                 "name": "held",
                 "type": "bool",
                 "internalType": "bool"
+              },
+              {
+                "name": "insuranceEquityUsd",
+                "type": "uint256",
+                "internalType": "uint256"
               }
             ]
           },
@@ -386,6 +401,11 @@ export const markRegistryAbi = [
             "name": "held",
             "type": "bool",
             "internalType": "bool"
+          },
+          {
+            "name": "insuranceEquityUsd",
+            "type": "uint256",
+            "internalType": "uint256"
           }
         ]
       }

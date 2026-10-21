@@ -47,6 +47,8 @@ export function nvdaCharter(overrides: Partial<Charter> = {}): Charter {
     symbol: strToBytes32("PERP_NVDA_USDC"),
     takerFeeBps: 0,
     makerFeeBps: 0,
+    ifFromPool: true,
+    premiumBps: 0,
     ...overrides,
   };
 }

@@ -375,4 +375,60 @@ library Waterfall {
         uint256 assets = vaultIdle + deployedValueUsd;
         return assets > unfundedClaims ? assets - unfundedClaims : 0;
     }
+
+    // -----------------------------------------------------------------------------------------
+    // 5. Insurance pool (appended 2026-10, docs/ARCHITECTURE.md §2.10): a pool-funded book
+    // -----------------------------------------------------------------------------------------
+
+    /// @notice IF target the window raises from the tranches: 0 when the InsurancePool funds the IF (`ifFromPool`),
+    ///         so the sponsor raises only the MM inventory (allocateWindow's max raise and IF_UNFUNDED check, and
+    ///         initialDeployment, then see no IF).
+    function windowIfTarget(uint256 ifTargetUsd, bool ifFromPool) internal pure returns (uint256) {
+        return ifFromPool ? 0 : ifTargetUsd;
+    }
+
+    /// @notice Premium rate a pool-funded book pays: the charter's rate, never below the pool's floor, at most BPS.
+    function effectivePremiumBps(uint256 charterPremiumBps, uint256 floorBps) internal pure returns (uint256) {
+        uint256 bps = charterPremiumBps > floorBps ? charterPremiumBps : floorBps;
+        return bps > BPS ? BPS : bps;
+    }
+
+    /// @notice The pool's premium comes off the gross fee flow first; `rest` is then split by splitDistribution
+    ///         (expenses -> carry -> Senior -> Junior). premium + rest == gross.
+    function premiumSplit(uint256 gross, uint256 premiumBps) internal pure returns (uint256 premium, uint256 rest) {
+        premium = (gross * premiumBps) / BPS;
+        rest = gross - premium;
+    }
+
+    /// @notice The pool's claim on a book at a mark (owner rulings N-1, N2-2): the debt, capped by the book's own
+    ///         capital, i.e. vault idle + deployed value minus the Backstop money in it (`backstopMoney`: cover still held
+    ///         by Senior + a repayment owed to the Backstop). Below the debt only while the book is exhausted: that
+    ///         shortfall is a provisional pool loss, restored first by later marks, final only at retirement. Backstop
+    ///         money is never part of it.
+    function poolClaimAtMark(uint256 debt, uint256 vaultIdle, uint256 deployedValueUsd, uint256 backstopMoney)
+        internal
+        pure
+        returns (uint256 claim, uint256 shortfall)
+    {
+        uint256 assets = vaultIdle + deployedValueUsd;
+        uint256 own = assets > backstopMoney ? assets - backstopMoney : 0;
+        if (own >= debt) return (debt, 0);
+        return (own, debt - own);
+    }
+
+    /// @notice The NAV that caps Backstop cover for a pool-funded book (owner ruling N-1: the Backstop never covers the
+    ///         insurance debt): the mark NAV with the IF draw (debt - IF equity; the IF equity capped at the deployed
+    ///         value) added back, i.e. the NAV the losses OTHER than the insurance debt leave. `liabilities` includes the
+    ///         claim netted (`debt` here is that claim). Cover at a mark is at most what applyMarkPnl covers at this NAV.
+    function poolCoverNav(
+        uint256 vaultIdle,
+        uint256 liabilities,
+        uint256 deployedValueUsd,
+        uint256 debt,
+        uint256 insuranceEquityUsd
+    ) internal pure returns (uint256) {
+        uint256 ifEquity = insuranceEquityUsd < deployedValueUsd ? insuranceEquityUsd : deployedValueUsd;
+        uint256 draw = debt > ifEquity ? debt - ifEquity : 0;
+        return markedNavNet(vaultIdle, liabilities, deployedValueUsd + draw);
+    }
 }

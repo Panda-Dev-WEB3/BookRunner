@@ -54,6 +54,8 @@ export const settlementsRouter = router({
         carryUsd: dbUsdStr(s.carryUsd) ?? "0.000000",
         seniorUsd: dbUsdStr(s.seniorUsd) ?? "0.000000",
         juniorUsd: dbUsdStr(s.juniorUsd) ?? "0.000000",
+        /** 2026-10: insurance pool premium paid before the split (pool-funded books; gross = premium + the rest) */
+        premiumUsd: dbUsdStr(s.premiumUsd) ?? "0.000000",
         txHash: s.txHash,
         logIndex: s.logIndex,
       }));

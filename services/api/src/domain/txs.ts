@@ -2,8 +2,8 @@
 // returned to the user's wallet as {to, data, value: "0", chainId, description}.
 import type { Charter } from "@bookrunner/shared/types";
 import { strToBytes32 } from "@bookrunner/shared/bytes32";
-import { bkrnStakingAbi, marketCharterAbi, mMMandateAbi, riskCommitteeAbi, trancheAbi } from "@bookrunner/shared/abi";
-import { type Address, type Hex, encodeFunctionData, erc20Abi, getAddress } from "viem";
+import { bkrnStakingAbi, insurancePoolAbi, marketCharterAbi, mMMandateAbi, riskCommitteeAbi, trancheAbi } from "@bookrunner/shared/abi";
+import { type Address, type Hex, encodeFunctionData, erc20Abi, formatUnits, getAddress } from "viem";
 import { bkrnStr, usdStr } from "../format";
 
 export interface PreparedTx {
@@ -164,5 +164,53 @@ export function revokeKeyTx(chainId: number, mandate: Address, key: Address, rea
     mandate,
     encodeFunctionData({ abi: mMMandateAbi, functionName: "revokeKey", args: [getAddress(key), strToBytes32(reason)] }),
     `Revoke desk key ${getAddress(key)} (${reason}); effective in the same block`,
+  );
+}
+
+// ------------------------------------------------------------------ insurance pool (2026-10, ARCHITECTURE §2.10)
+const poolShares = (raw: bigint) => formatUnits(raw, 12).replace(/\.?0+$/, "") || "0";
+
+export function poolRequestDepositTx(chainId: number, pool: Address, amountUsd: bigint, epoch: number, endsAtSec: number): PreparedTx {
+  return tx(
+    chainId,
+    pool,
+    encodeFunctionData({ abi: insurancePoolAbi, functionName: "requestDeposit", args: [amountUsd] }),
+    `Queue ${trimUsd(amountUsd)} USDC into the insurance pool for epoch ${epoch} (priced when the epoch is processed, after ${isoMinute(endsAtSec)})`,
+  );
+}
+
+export function poolCancelDepositTx(chainId: number, pool: Address, depositId: number, amountUsd: bigint): PreparedTx {
+  return tx(
+    chainId,
+    pool,
+    encodeFunctionData({ abi: insurancePoolAbi, functionName: "cancelDeposit", args: [BigInt(depositId)] }),
+    `Cancel insurance pool deposit #${depositId} (refunds ${trimUsd(amountUsd)} USDC)`,
+  );
+}
+
+export function poolClaimDepositTx(chainId: number, pool: Address, depositId: number, shares: bigint): PreparedTx {
+  return tx(
+    chainId,
+    pool,
+    encodeFunctionData({ abi: insurancePoolAbi, functionName: "claimDeposit", args: [BigInt(depositId)] }),
+    `Collect ${poolShares(shares)} insurance pool shares of deposit #${depositId} (starts the cooldown)`,
+  );
+}
+
+export function poolRequestWithdrawTx(chainId: number, pool: Address, shares: bigint, epoch: number, endsAtSec: number): PreparedTx {
+  return tx(
+    chainId,
+    pool,
+    encodeFunctionData({ abi: insurancePoolAbi, functionName: "requestWithdraw", args: [shares] }),
+    `Queue ${poolShares(shares)} insurance pool shares for withdrawal in epoch ${epoch} (priced when the epoch is processed, after ${isoMinute(endsAtSec)})`,
+  );
+}
+
+export function poolClaimTx(chainId: number, pool: Address, requestId: number, assetsUsd: bigint): PreparedTx {
+  return tx(
+    chainId,
+    pool,
+    encodeFunctionData({ abi: insurancePoolAbi, functionName: "claim", args: [BigInt(requestId)] }),
+    `Collect ${trimUsd(assetsUsd)} USDC of insurance pool withdrawal #${requestId}`,
   );
 }

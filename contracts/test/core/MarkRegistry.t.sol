@@ -13,7 +13,7 @@ contract MarkRegistryTest is CoreFixture {
     uint32 internal constant MAX_AGE = 3600;
     /// @dev == MARK_STRUCT_HASH_VECTOR in packages/shared/test/eip712.test.ts (viem hashStruct).
     bytes32 internal constant MARK_STRUCT_HASH_VECTOR =
-        0x5ed67b6c5b3d7f71865d814669c6d89b6876b79c379bbad9b3a70759f4cc6de3;
+        0xf0973c16daebdd63754469fc19c8668b1a8c26e8eb5f9d494f03ae105108d834;
 
     function setUp() public override {
         super.setUp();
@@ -39,7 +39,8 @@ contract MarkRegistryTest is CoreFixture {
             inventoryRoot: keccak256("inv"),
             pnlJsonHash: keccak256("pnl"),
             receiptsRoot: keccak256("receipts"),
-            held: false
+            held: false,
+            insuranceEquityUsd: 0
         });
     }
 
@@ -58,7 +59,7 @@ contract MarkRegistryTest is CoreFixture {
         assertEq(
             registry.MARK_TYPEHASH(),
             keccak256(
-                "Mark(uint256 bookId,uint64 periodEnd,uint256 navUsd,uint256 deployedValueUsd,uint64 flowNonce,bytes32 inventoryRoot,bytes32 pnlJsonHash,bytes32 receiptsRoot,bool held)"
+                "Mark(uint256 bookId,uint64 periodEnd,uint256 navUsd,uint256 deployedValueUsd,uint64 flowNonce,bytes32 inventoryRoot,bytes32 pnlJsonHash,bytes32 receiptsRoot,bool held,uint256 insuranceEquityUsd)"
             )
         );
     }
@@ -95,7 +96,8 @@ contract MarkRegistryTest is CoreFixture {
                 m.inventoryRoot,
                 m.pnlJsonHash,
                 m.receiptsRoot,
-                m.held
+                m.held,
+                m.insuranceEquityUsd
             )
         );
         assertEq(
@@ -126,7 +128,8 @@ contract MarkRegistryTest is CoreFixture {
             inventoryRoot: bytes32(uint256(0x11)),
             pnlJsonHash: bytes32(uint256(0x22)),
             receiptsRoot: bytes32(uint256(0x33)),
-            held: true
+            held: true,
+            insuranceEquityUsd: 25_000e6
         });
         bytes32 structHash = keccak256(
             abi.encode(
@@ -139,7 +142,8 @@ contract MarkRegistryTest is CoreFixture {
                 m.inventoryRoot,
                 m.pnlJsonHash,
                 m.receiptsRoot,
-                m.held
+                m.held,
+                m.insuranceEquityUsd
             )
         );
         assertEq(structHash, MARK_STRUCT_HASH_VECTOR);

@@ -3,6 +3,7 @@
 // codes so the intake API gives the same answer MarketCharter.validate would.
 import {
   type Charter,
+  DEFAULT_IF_FROM_POOL,
   HEDGE_VENUES,
   ORACLE,
   SESSIONS_24X5,
@@ -150,6 +151,10 @@ export const charterDraftSchema = z.object({
   symbol: symbolField,
   takerFeeBps: uint(U16).default(0),
   makerFeeBps: uint(U16).default(0),
+  /** 2026-10 insurance pool: the InsurancePool funds the IF at closeWindow (default on new charters). */
+  ifFromPool: z.boolean().default(DEFAULT_IF_FROM_POOL),
+  /** Pool premium, bps of gross fee flow; 0 = the pool's floor (MarketCharter.file fixes max(premiumBps, floor)). */
+  premiumBps: uint(U16).default(0),
   meta: z
     .object({ name: z.string().max(120).optional(), description: z.string().max(4000).optional() })
     .optional(),
@@ -248,6 +253,8 @@ export function parseCharterDraft(body: unknown, tickers: TickerBook = {}): Draf
     symbol: d.symbol,
     takerFeeBps: d.takerFeeBps,
     makerFeeBps: d.makerFeeBps,
+    ifFromPool: d.ifFromPool,
+    premiumBps: d.premiumBps,
   };
   return { charter, meta: d.meta, hedgeAllow, warnings };
 }

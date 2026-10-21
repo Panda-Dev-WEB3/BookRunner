@@ -8,6 +8,7 @@ import {
   bkrnStakingAbi,
   bookAbi,
   bookrunnerConfigAbi,
+  insurancePoolAbi,
   marketCharterAbi,
   mMMandateAbi,
   riskCommitteeAbi,
@@ -23,9 +24,14 @@ import type {
   CharterChainRecord,
   CommitteeState,
   MandateChainState,
+  PoolChainState,
+  PoolWalletState,
   ProtocolParams,
   TrancheWalletState,
 } from "./gateway";
+
+/** One whole pool share (12 decimals: settlement token 6 + the pool's virtual offset 6). */
+export const POOL_SHARE_UNIT = 10n ** 12n;
 
 /** Value of a read that may revert (e.g. a view not valid in the current book state). */
 async function orDefault<T>(p: Promise<T>, fallback: T): Promise<{ ok: boolean; v: T }> {
@@ -258,5 +264,109 @@ export class ViemChainGateway implements ChainGateway {
       };
       return { mandate: out, killed, killReason, activeKeys: keys.map((k) => getAddress(k)) };
     });
+  }
+
+  // ------------------------------------------------------------------ insurance pool (2026-10)
+  private get pool(): Address | null {
+    const p = this.c.insurancePool;
+    return p && p !== zeroAddress ? p : null;
+  }
+
+  async poolState(): Promise<PoolChainState | null> {
+    const address = this.pool;
+    if (!address) return null;
+    return cached(this.kv, this.key("pool"), this.ttlSeconds, async () => {
+      const abi = insurancePoolAbi;
+      const r = this.client;
+      const block = await r.getBlock();
+      const blockNumber = block.number;
+      const q = { address, abi, blockNumber } as const;
+      const [poolAssets, depositorAssets, totalSupply, sharePrice, firstLoss, firstLossBps, freeLiquidity, claims, utilisation, ledger, params, paused, queue, active] = await Promise.all([
+        r.readContract({ ...q, functionName: "poolAssets" }),
+        r.readContract({ ...q, functionName: "totalAssets" }),
+        r.readContract({ ...q, functionName: "totalSupply" }),
+        r.readContract({ ...q, functionName: "convertToAssets", args: [POOL_SHARE_UNIT] }),
+        r.readContract({ ...q, functionName: "firstLossAssets" }),
+        r.readContract({ ...q, functionName: "firstLossBps" }),
+        r.readContract({ ...q, functionName: "freeLiquidity" }),
+        r.readContract({ ...q, functionName: "claimsTotal" }),
+        r.readContract({ ...q, functionName: "utilisationBps" }),
+        r.readContract({ ...q, functionName: "ledger" }),
+        r.readContract({ ...q, functionName: "params" }),
+        r.readContract({ ...q, functionName: "paused" }),
+        r.readContract({ ...q, functionName: "queue" }),
+        r.readContract({ ...q, functionName: "activeBooks" }),
+      ]);
+      const [epoch, stale] = await Promise.all([
+        r.readContract({ ...q, functionName: "epochInfo", args: [queue[0]] }),
+        r.readContract({ ...q, functionName: "staleBooks", args: [BigInt(queue[1])] }),
+      ]);
+      return {
+        address,
+        nowSec: Number(block.timestamp),
+        poolAssets,
+        depositorAssets,
+        totalSupply,
+        sharePrice,
+        firstLoss,
+        firstLossBps: Number(firstLossBps),
+        freeLiquidity,
+        claims,
+        utilisationBps: Number(utilisation),
+        premiumsTotal: ledger[3],
+        lossesTotal: ledger[4],
+        depositsPending: ledger[2],
+        params: {
+          premiumFloorBps: Number(params[0]),
+          marketCapBps: Number(params[1]),
+          bufferBps: Number(params[2]),
+          firstLossTargetBps: Number(params[3]),
+          cooldown: Number(params[4]),
+          epochLength: Number(params[5]),
+          processGrace: Number(params[6]),
+          pendingEpochLength: Number(params[7]),
+        },
+        paused: { deposits: paused[0], allocations: paused[1] },
+        queue: { procEpoch: Number(queue[0]), procEndsAt: Number(queue[1]), fillEpoch: Number(queue[2]), pendingShares: queue[3], reserved: queue[4] },
+        openEpoch: { depositAssets: epoch.depositAssets, withdrawShares: epoch.shares },
+        staleBooks: Number(stale),
+        activeBooks: active.map(Number),
+      };
+    });
+  }
+
+  async poolWallet(wallet: Address, ids: { requestIds: number[]; depositIds: number[]; epochs: number[] }): Promise<PoolWalletState | null> {
+    const address = this.pool;
+    if (!address) return null;
+    const abi = insurancePoolAbi;
+    const r = this.client;
+    const uniq = (xs: number[]) => [...new Set(xs.filter((x) => Number.isSafeInteger(x) && x >= 0))];
+    const [shares, cooldownEnds, usdcBalance, usdcAllowance] = await Promise.all([
+      r.readContract({ address, abi, functionName: "balanceOf", args: [wallet] }),
+      r.readContract({ address, abi, functionName: "cooldownEnds", args: [wallet] }),
+      r.readContract({ address: this.c.usdc, abi: erc20Abi, functionName: "balanceOf", args: [wallet] }),
+      r.readContract({ address: this.c.usdc, abi: erc20Abi, functionName: "allowance", args: [wallet, address] }),
+    ]);
+    const [value, claimable, deposits, epochs] = await Promise.all([
+      shares === 0n ? Promise.resolve(0n) : r.readContract({ address, abi, functionName: "convertToAssets", args: [shares] }),
+      Promise.all(uniq(ids.requestIds).map(async (id) => [id, await r.readContract({ address, abi, functionName: "claimable", args: [BigInt(id)] })] as const)),
+      Promise.all(uniq(ids.depositIds).map(async (id) => [id, await r.readContract({ address, abi, functionName: "depositInfo", args: [BigInt(id)] })] as const)),
+      Promise.all(uniq(ids.epochs).map(async (e) => [e, await r.readContract({ address, abi, functionName: "epochInfo", args: [BigInt(e)] })] as const)),
+    ]);
+    return {
+      shares,
+      value,
+      cooldownEnds: Number(cooldownEnds),
+      usdcBalance,
+      usdcAllowance,
+      claimable: new Map(claimable),
+      deposits: new Map(deposits.map(([id, d]) => [id, { owner: getAddress(d.owner), epoch: Number(d.epoch), done: d.done, assets: d.assets }])),
+      epochs: new Map(
+        epochs.map(([e, x]) => [
+          e,
+          { shares: x.shares, filledShares: x.filledShares, assets: x.assets, depositAssets: x.depositAssets, depositShares: x.depositShares, endsAt: Number(x.endsAt), processed: x.processed },
+        ]),
+      ),
+    };
   }
 }

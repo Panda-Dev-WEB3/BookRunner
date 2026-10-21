@@ -60,7 +60,8 @@ contract CoreFlowTest is CoreFixture {
             inventoryRoot: bytes32(uint256(1)),
             pnlJsonHash: bytes32(uint256(2)),
             receiptsRoot: bytes32(uint256(3)),
-            held: false
+            held: false,
+            insuranceEquityUsd: 0
         });
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(markSignerPk, registry.hashMark(m));
         uint256 id = registry.commit(m, abi.encodePacked(r, s, v));

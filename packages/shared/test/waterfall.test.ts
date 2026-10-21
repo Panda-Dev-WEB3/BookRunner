@@ -5,10 +5,17 @@ import {
   applyDistribution,
   applyMarkPnl,
   bucketIndex,
+  effectivePremiumBps,
   initialDeployment,
   juniorWindowAllocation,
+  poolBookNav,
+  poolClaimAtMark,
+  poolMarkPnl,
+  premiumSplit,
   splitDistribution,
+  splitPoolDistribution,
   walletAllocation,
+  windowIfTarget,
 } from "../src/waterfall";
 import { WAD, usd } from "../src/units";
 
@@ -283,5 +290,70 @@ describe("hedge band enforceability (spot is long-only)", () => {
   });
   test("long exposure with a perp hedge venue: band enforced", () => {
     expect(hedgeBandEnforced(m, usd(20_000), 0n, true)).toBe(true);
+  });
+});
+
+describe("insurance pool (2026-10): a pool-funded book", () => {
+  test("the window raises only the MM inventory", () => {
+    const ifTargetUsd = windowIfTarget(usd(25_000), true);
+    expect(ifTargetUsd).toBe(0n);
+    expect(windowIfTarget(usd(25_000), false)).toBe(usd(25_000));
+    const r = allocateWindow({ ifTargetUsd, mmInventoryUsd: usd(75_000), seniorCapBps: 7000n, seniorCommitted: usd(70_000), juniorCommitted: usd(30_000), sponsorJuniorCommitted: usd(10_000) });
+    // max raise 75k: Senior 52.5k (70%), Junior 22.5k; nothing left for an IF
+    expect(r).toEqual({ ok: true, seniorAllocated: usd(52_500), juniorAllocated: usd(22_500), sponsorJuniorAllocated: usd(10_000) });
+    expect(initialDeployment(usd(75_000), ifTargetUsd, usd(75_000))).toEqual({ ifAmount: 0n, mmAmount: usd(75_000), idle: 0n });
+  });
+
+  test("premium: max(charter, floor), capped at 100%, paid before expenses and carry", () => {
+    expect(effectivePremiumBps(0n, 1200n)).toBe(1200n);
+    expect(effectivePremiumBps(2000n, 1200n)).toBe(2000n);
+    expect(effectivePremiumBps(20_000n, 0n)).toBe(10_000n);
+    expect(premiumSplit(usd(1_000), 1200n)).toEqual({ premium: usd(120), rest: usd(880) });
+    const o = splitPoolDistribution({ gross: usd(1_000), expensesRequested: usd(500), expenseCapBps: 2000n, carryBps: 1000n, seniorHurdleBps: 6000n, seniorSupply: 1n, juniorSupply: 1n }, 1200n);
+    // rest 880: expenses capped at 20% of 880 = 176, carry 10% of 704 = 70.4, Senior 60% of 633.6, Junior the rest
+    expect(o).toEqual({ gross: usd(1_000), premium: usd(120), expenses: usd(176), carry: 70_400_000n, senior: 380_160_000n, junior: 253_440_000n });
+    expect(o.premium + o.expenses + o.carry + o.senior + o.junior).toBe(o.gross);
+  });
+
+  test("NAV nets the senior debt: the IF is never Senior / Junior value, an IF draw is a book loss first", () => {
+    // venue: IF 25k + MM 75k; vault idle 0. Book-funded: nav 100k. Pool-funded: nav 75k (the MM only).
+    expect(poolBookNav(0n, 0n, usd(25_000), usd(100_000))).toBe(usd(75_000));
+    // bad debt (or an MM loss paid from the IF) draws 5k: deployed 95k -> nav 70k, the pool is still owed 25k
+    expect(poolBookNav(0n, 0n, usd(25_000), usd(95_000))).toBe(usd(70_000));
+    expect(poolClaimAtMark(usd(25_000), 0n, usd(95_000), 0n)).toEqual({ claim: usd(25_000), shortfall: 0n });
+  });
+
+  test("the pool's claim is the debt capped by the book's own capital, Backstop money excluded", () => {
+    // IF drawn to 0 and MM down to 10k: the book holds 10k for a 25k debt -> a 15k provisional shortfall
+    expect(poolClaimAtMark(usd(25_000), 0n, usd(10_000), 0n)).toEqual({ claim: usd(10_000), shortfall: usd(15_000) });
+    // 30k idle of which 20k is Backstop cover held by Senior: only 10k + 10k deployed is the book's own
+    expect(poolClaimAtMark(usd(25_000), usd(30_000), usd(10_000), usd(20_000))).toEqual({ claim: usd(20_000), shortfall: usd(5_000) });
+    // the MM recovers: the claim is restored first
+    expect(poolClaimAtMark(usd(25_000), 0n, usd(40_000), 0n)).toEqual({ claim: usd(25_000), shortfall: 0n });
+  });
+
+  const st = (S: bigint, J: bigint, imp = 0n, backstopDebt = 0n) => ({ seniorNav: S, juniorNav: J, seniorImpairment: imp, perfIndex: WAD, highWater: WAD, backstopDebt });
+  const inp = (deployed: bigint, ifEquity: bigint, idle = 0n, debt = usd(25_000)) => ({ vaultIdle: idle, unfundedClaims: 0n, backstopPayable: 0n, deployedValueUsd: deployed, insuranceEquityUsd: ifEquity, debt, juniorSupply: 1n, backstopAvailable: usd(1_000_000) });
+
+  test("the Backstop never covers the insurance debt (owner ruling N-1)", () => {
+    // traders' bad debt drew the whole IF: Junior 22.5k gone, Senior impaired 2.5k: no cover
+    const m = poolMarkPnl(st(usd(52_500), usd(22_500)), inp(usd(75_000), 0n));
+    expect(m.result.backstopCovered).toBe(0n);
+    expect(m.result.seniorImpairment).toBe(usd(2_500));
+    // the next mark: still no cover
+    const m2 = poolMarkPnl(st(m.result.seniorNav, m.result.juniorNav, m.result.seniorImpairment), inp(usd(75_000), 0n));
+    expect(m2.result.backstopCovered).toBe(0n);
+  });
+
+  test("an MM loss is covered as before, the insurance debt is not", () => {
+    // MM lost 60k (15k left) and bad debt drew 10k of the IF (15k left): nav 5k
+    const m = poolMarkPnl(st(usd(52_500), usd(22_500)), inp(usd(30_000), usd(15_000)));
+    expect(m.nav).toBe(usd(5_000));
+    expect(m.result.backstopCovered).toBe(usd(37_500)); // the Senior part of the 60k MM loss
+    expect(m.result.seniorImpairment).toBe(usd(10_000)); // the IF draw stays Senior's
+    // MM loss within its capital, IF intact: the whole Senior loss is covered
+    const m3 = poolMarkPnl(st(usd(52_500), usd(22_500)), inp(usd(25_000), usd(25_000)));
+    expect(m3.coverCap).toBeNull();
+    expect(m3.result.backstopCovered).toBe(usd(52_500));
   });
 });

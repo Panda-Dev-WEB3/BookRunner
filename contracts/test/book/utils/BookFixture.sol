@@ -193,6 +193,14 @@ abstract contract BookFixture is Test {
         internal
         returns (uint256 id)
     {
+        id = _commitMark(periodEnd, deployed, nonce, held, 0);
+    }
+
+    /// @dev `insuranceEquity`: the IF equity inside `deployed` (signed; read for pool-funded books, 2026-10).
+    function _commitMark(uint64 periodEnd, uint256 deployed, uint64 nonce, bool held, uint256 insuranceEquity)
+        internal
+        returns (uint256 id)
+    {
         BRTypes.MarkInput memory m = BRTypes.MarkInput({
             bookId: BOOK_ID,
             periodEnd: periodEnd,
@@ -202,7 +210,8 @@ abstract contract BookFixture is Test {
             inventoryRoot: bytes32(0),
             pnlJsonHash: bytes32(0),
             receiptsRoot: bytes32(0),
-            held: held
+            held: held,
+            insuranceEquityUsd: insuranceEquity
         });
         id = registry.commit(m, "");
     }

@@ -1,15 +1,17 @@
 // Ports between the waterfall's orchestration (settlement.ts, keeper.ts) and its adapters
 // (adapters/chain.ts, adapters/store.ts, adapters/venue-ops.ts). Tests use in-memory fakes.
-import type { BookState, SplitResult } from "@bookrunner/shared";
+import type { BookState } from "@bookrunner/shared";
 import type { Hex } from "viem";
 import type { BuybackReferenceSource } from "./domain/buyback";
 import type { LastMarkInfo } from "./domain/keeper";
+import type { PremiumSplit } from "./domain/split";
 import type { BookRef } from "./kit/books";
 
 export interface DistributedLog {
   bookId: number;
   period: number;
-  amounts: SplitResult;
+  /** Distributed amounts + the PremiumPaid amount of the same tx (0 for a book-funded IF) */
+  amounts: PremiumSplit;
   txHash: Hex;
   logIndex: number;
   blockNumber: bigint;
@@ -32,6 +34,8 @@ export interface SplitParams {
   seniorHurdleBps: bigint;
   seniorSupply: bigint;
   juniorSupply: bigint;
+  /** 2026-10 insurance pool: charter.premiumBps of a pool-funded book, 0 otherwise */
+  premiumBps: bigint;
 }
 
 /**
@@ -63,14 +67,14 @@ export interface SettlementChain {
   /** Engine fees accrued and not yet claimed (PoolEngine.state(marketId).feesAccruedUsd); null if unreadable. */
   engineFeesAccrued(ref: BookRef): Promise<bigint | null>;
   splitParams(ref: BookRef): Promise<SplitParams>;
-  /** router.previewSplit (null if the call fails). */
-  previewOnChain(ref: BookRef, gross: bigint, expenses: bigint): Promise<SplitResult | null>;
+  /** router.previewSplit + previewPremium (null if the call fails). */
+  previewOnChain(ref: BookRef, gross: bigint, expenses: bigint): Promise<PremiumSplit | null>;
   distribute(ref: BookRef, period: number, expenses: bigint): Promise<{ hash: Hex; distributed: DistributedLog }>;
 }
 
 export interface StoredDistribution {
   txHash: string;
-  amounts: SplitResult;
+  amounts: PremiumSplit;
 }
 
 export interface SettlementStore {
@@ -106,6 +110,8 @@ export interface KeeperSnapshot {
   sharePriceWad: { senior: bigint; junior: bigint };
   lastMarkPeriodEnd: number;
   lastMark: LastMarkInfo | null;
+  /** 2026-10 insurance pool: Book.insuranceDebt() of a pool-funded book (null: book-funded IF / older book). */
+  insurance?: { debt: bigint; due: boolean; closed: boolean } | null;
 }
 
 export interface KeeperChain {
@@ -116,6 +122,8 @@ export interface KeeperChain {
   fundClaims(ref: BookRef): Promise<Hex>;
   recall(ref: BookRef, account: number, amount: bigint): Promise<Hex>;
   finalizeRetirement(ref: BookRef): Promise<Hex>;
+  /** Book.settleInsurance (Retired pool-funded book whose final pool mark failed): repays and re-reports. */
+  settleInsurance(ref: BookRef): Promise<Hex>;
 }
 
 /** Protocol-level BkrnFeeRouter reads + the KEEPER buyback write. */

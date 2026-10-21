@@ -39,14 +39,35 @@ export interface NavComposition {
   navUsd: bigint;
 }
 
-export function composeNav(s: Pick<MarkSnapshot, "vaultIdle" | "unfundedClaims" | "venue" | "desk">): NavComposition {
+/**
+ * The insurance pool's claim netted from NAV beyond unfundedClaims (2026-10, Book.navLiabilities): the pool's claim at
+ * the book's last mark (the debt capped by the book's own capital, Backstop money excluded; below the debt only while the
+ * book is exhausted, a provisional shortfall) while it is not due yet; once due, Book.liabilities() -> unfundedClaims
+ * carries it already. Informational: the book re-values the claim at the mark's own snapshot.
+ */
+export function poolDebtNetted(s: Pick<MarkSnapshot, "insuranceDebt">): bigint {
+  const d = s.insuranceDebt;
+  return d && !d.due ? d.claim : 0n;
+}
+
+/**
+ * The IF equity the mark signs (MarkInput.insuranceEquityUsd, 2026-10): the venue IF figure of the SAME snapshot whose
+ * deployedValueUsd the mark carries (after the signed venue report overlay), so the book can keep Backstop cover off
+ * the insurance debt.
+ */
+export function markInsuranceEquityUsd(s: Pick<MarkSnapshot, "venue">): bigint {
+  return s.venue.insuranceUsd > 0n ? s.venue.insuranceUsd : 0n;
+}
+
+export function composeNav(s: Pick<MarkSnapshot, "vaultIdle" | "unfundedClaims" | "venue" | "desk" | "insuranceDebt">): NavComposition {
   const desk = deskValueUsd(s.desk);
   const deployedValueUsd = s.venue.deployedValueUsd + desk;
   return {
     deskValueUsd: desk,
     deskHedgeValueUsd: deskHedgeValueUsd(s.desk),
     deployedValueUsd,
-    navUsd: markedNav(s.vaultIdle, s.unfundedClaims, deployedValueUsd),
+    // informational (the book computes its own): a pool-funded book's NAV is net of the pool's debt
+    navUsd: markedNav(s.vaultIdle, s.unfundedClaims + poolDebtNetted(s), deployedValueUsd),
   };
 }
 

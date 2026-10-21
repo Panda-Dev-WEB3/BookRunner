@@ -52,6 +52,8 @@ export function charterArg(c: Charter) {
     symbol: c.symbol,
     takerFeeBps: c.takerFeeBps,
     makerFeeBps: c.makerFeeBps,
+    ifFromPool: c.ifFromPool,
+    premiumBps: c.premiumBps,
   } as const;
 }
 

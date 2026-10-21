@@ -4,6 +4,7 @@
 import {
   bookAbi,
   bookFactoryAbi,
+  insurancePoolAbi,
   mMMandateAbi,
   markRegistryAbi,
   marketCharterAbi,
@@ -13,7 +14,7 @@ import {
 } from "@bookrunner/shared/abi";
 import { type Abi, type Address, type Hex, decodeEventLog, toEventSelector } from "viem";
 
-export type ContractKind = "charter" | "committee" | "factory" | "markRegistry" | "book" | "senior" | "junior" | "router" | "mandate";
+export type ContractKind = "charter" | "committee" | "factory" | "markRegistry" | "pool" | "book" | "senior" | "junior" | "router" | "mandate";
 export type ContractGroup = "protocol" | "books";
 
 export const KIND_ABI: Record<ContractKind, Abi> = {
@@ -21,6 +22,7 @@ export const KIND_ABI: Record<ContractKind, Abi> = {
   committee: riskCommitteeAbi,
   factory: bookFactoryAbi,
   markRegistry: markRegistryAbi,
+  pool: insurancePoolAbi,
   book: bookAbi,
   senior: trancheAbi,
   junior: trancheAbi,
@@ -29,7 +31,7 @@ export const KIND_ABI: Record<ContractKind, Abi> = {
 };
 
 export const groupOf = (k: ContractKind): ContractGroup =>
-  k === "charter" || k === "committee" || k === "factory" || k === "markRegistry" ? "protocol" : "books";
+  k === "charter" || k === "committee" || k === "factory" || k === "markRegistry" || k === "pool" ? "protocol" : "books";
 
 /** Raw log as returned by eth_getLogs (subset of viem's Log). */
 export interface RawLog {

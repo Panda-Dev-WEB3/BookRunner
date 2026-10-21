@@ -8,6 +8,7 @@ import {TimelockController} from "@openzeppelin/contracts/governance/TimelockCon
 import {DeployMainnet} from "../../script/DeployMainnet.s.sol";
 import {VerifyHandover} from "../../script/VerifyHandover.s.sol";
 import {BookrunnerConfig} from "../../src/BookrunnerConfig.sol";
+import {InsurancePool} from "../../src/InsurancePool.sol";
 import {BookFactory} from "../../src/BookFactory.sol";
 import {StockTokenRegistry} from "../../src/StockTokenRegistry.sol";
 import {BkrnToken} from "../../src/BkrnToken.sol";
@@ -433,6 +434,33 @@ contract DeployMainnetTest is Test {
         assertEq(_verify(_mainnetOpts(), d), 2);
     }
 
+    /// @notice 2026-10 InsurancePool: deployed behind its proxy, registered in the config, bound to the config and the
+    ///         settlement token with the input's parameters; VerifyHandover flags a drift and a pause.
+    function test_insurancePool_deployed_wired_and_verified() public {
+        (DeployMainnet.Deployed memory d, uint256 failures) = _deployAndVerify(_mainnetOpts(), "pool");
+        assertEq(failures, 0);
+        InsurancePool p = InsurancePool(d.insurancePool);
+        assertEq(BookrunnerConfig(d.config).insurancePool(), d.insurancePool);
+        assertEq(p.config(), d.config);
+        assertEq(p.asset(), address(usdg));
+        assertEq(p.symbol(), "ibUSDG");
+        assertEq(p.premiumFloorBps(), 1200);
+        // governed by the timelock only
+        vm.prank(deployer);
+        vm.expectRevert(InsurancePool.NotTimelock.selector);
+        p.setParam("bufferBps", 1000);
+        vm.prank(d.timelock);
+        p.setParam("bufferBps", 1000);
+        assertEq(_verify(_mainnetOpts(), d), 1, "params drift");
+        vm.prank(guardian);
+        p.setPaused(true, false);
+        assertEq(_verify(_mainnetOpts(), d), 2, "and paused");
+        // minor m-9: the proxy and implementation are checked against the deployment record
+        DeployMainnet.Deployed memory wrong = d;
+        wrong.insurancePoolImpl = makeAddr("not the implementation");
+        assertEq(_verify(_mainnetOpts(), wrong), 3, "and the recorded implementation");
+    }
+
     function test_verify_flags_a_missing_service_role() public {
         (DeployMainnet.Deployed memory d,) = _deployAndVerify(_mainnetOpts(), "missing-role");
         Opts memory o = _mainnetOpts();
@@ -789,7 +817,14 @@ contract DeployMainnetTest is Test {
             "\"},\"contracts\":{\"config\":\"",
             vm.toString(d.config),
             "\",\"timelock\":\"",
-            string.concat(vm.toString(d.timelock), "\"}}")
+            string.concat(
+                vm.toString(d.timelock),
+                "\",\"insurancePool\":\"",
+                vm.toString(d.insurancePool),
+                "\",\"insurancePoolImplementation\":\"",
+                vm.toString(d.insurancePoolImpl),
+                "\"}}"
+            )
         );
         VerifyHandover v = new VerifyHandover();
         v.loadInput(_json(o));

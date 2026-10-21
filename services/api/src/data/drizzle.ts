@@ -14,6 +14,11 @@ import {
   limits,
   marks,
   oraclePrices,
+  poolBooks,
+  poolDeposits,
+  poolEpochs,
+  poolSnapshots,
+  poolWithdrawals,
   receiptRoots,
   receipts,
   redemptions,
@@ -31,6 +36,7 @@ import type {
   NewWebhookSubscription,
   OraclePriceRow,
   Page,
+  PoolFlowDay,
   ReadModel,
   ReceiptLinkField,
   WebhookStore,
@@ -337,6 +343,61 @@ export class DrizzleReadModel implements ReadModel {
       .from(oraclePrices)
       .where(and(...conds))
       .orderBy(oraclePrices.priceId, desc(oraclePrices.ts));
+  }
+
+  // ------------------------------------------------------------------ insurance pool (2026-10)
+  poolDeposits(owner: string) {
+    return this.db.select().from(poolDeposits).where(eq(poolDeposits.owner, lower(owner))).orderBy(desc(poolDeposits.id)).limit(200);
+  }
+
+  poolWithdrawals(owner: string) {
+    return this.db.select().from(poolWithdrawals).where(eq(poolWithdrawals.owner, lower(owner))).orderBy(desc(poolWithdrawals.id)).limit(200);
+  }
+
+  poolEpochs(q: { limit: number; beforeEpoch?: number }) {
+    return this.db
+      .select()
+      .from(poolEpochs)
+      .where(q.beforeEpoch !== undefined ? lt(poolEpochs.epoch, q.beforeEpoch) : undefined)
+      .orderBy(desc(poolEpochs.epoch))
+      .limit(q.limit);
+  }
+
+  async poolEpochsIn(epochs: number[]) {
+    if (epochs.length === 0) return [];
+    return this.db.select().from(poolEpochs).where(inArray(poolEpochs.epoch, epochs));
+  }
+
+  poolBooks() {
+    return this.db.select().from(poolBooks).orderBy(asc(poolBooks.bookId));
+  }
+
+  async poolSnapshots(from: Date, to: Date, limit: number) {
+    const rows = await this.db
+      .select()
+      .from(poolSnapshots)
+      .where(and(gte(poolSnapshots.ts, from), lte(poolSnapshots.ts, to)))
+      .orderBy(desc(poolSnapshots.blockNumber))
+      .limit(limit);
+    return rows.reverse();
+  }
+
+  async latestPoolSnapshot() {
+    const [row] = await this.db.select().from(poolSnapshots).orderBy(desc(poolSnapshots.blockNumber)).limit(1);
+    return row ?? null;
+  }
+
+  async poolFlowDays(from: Date): Promise<PoolFlowDay[]> {
+    const rows = await this.db.execute<{ day: string; premium: string; loss: string; recovery: string }>(sql`
+      select to_char(date_trunc('day', ts at time zone 'UTC'), 'YYYY-MM-DD') as day,
+             coalesce(sum(amount) filter (where kind = 'premium'), 0)::text as premium,
+             coalesce(sum(amount) filter (where kind = 'loss'), 0)::text as loss,
+             coalesce(sum(amount) filter (where kind = 'recovery'), 0)::text as recovery
+        from pool_flows
+       where ts >= ${from.toISOString()}::timestamptz and kind in ('premium', 'loss', 'recovery')
+       group by 1
+       order by 1`);
+    return [...rows].map((r) => ({ day: new Date(`${r.day}T00:00:00Z`), premiumUsd: r.premium, lossUsd: r.loss, recoveryUsd: r.recovery }));
   }
 }
 

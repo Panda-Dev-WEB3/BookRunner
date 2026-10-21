@@ -28,6 +28,16 @@ describe("distributionModel", () => {
     expect(junior).toMatchObject({ from: 0n, to: 1_710_000n });
   });
 
+  test("pool-funded books: the premium is paid first (gross = premium + expenses + carry + Senior + Junior)", () => {
+    const m = distributionModel({ ...dist("6.900000", "1.000000", "0.475000", "2.565000", "1.710000"), premiumUsd: "1.150000" });
+    expect(m?.steps.map((s) => s.key)).toEqual(["gross", "premium", "expenses", "carry", "senior", "junior"]);
+    expect(m?.steps[1]).toMatchObject({ label: "Pool premium", amount: 1_150_000n, from: 5_750_000n, to: 6_900_000n });
+    expect(m?.dust).toBe(0n);
+    // no premium (a book funding its own insurance fund, or an older API): no premium step
+    expect(distributionModel({ ...dist("5.750000", "1.000000", "0.475000", "2.565000", "1.710000"), premiumUsd: "0.000000" })?.steps.map((s) => s.key)).not.toContain("premium");
+    expect(distributionModel(dist("5.750000", "1.000000", "0.475000", "2.565000", "1.710000"))?.steps).toHaveLength(5);
+  });
+
   test("dust stays in the book; over-allocation is flagged", () => {
     expect(distributionModel(dist("1.000003", "0", "0.100000", "0.540000", "0.360000"))?.dust).toBe(3n);
     expect(distributionModel(dist("1", "0", "0", "1", "1"))?.conserved).toBe(false);

@@ -83,6 +83,11 @@ export interface MarkSnapshot {
     lastMarkPeriodEnd: number;
   };
   backstopBalance: bigint;
+  /**
+   * 2026-10 insurance pool: Book.insuranceDebt() of a pool-funded book (null: book-funded IF, or a book without the
+   * view). The debt is netted from NAV; once `due` it is already part of unfundedClaims (Book.liabilities()).
+   */
+  insuranceDebt?: { debt: bigint; claim: bigint; due: boolean } | null;
   mandate: Mandate;
   killed: boolean;
   /**

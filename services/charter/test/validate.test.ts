@@ -46,6 +46,8 @@ describe("validateCharter (MarketCharter.validate mirror)", () => {
       nvdaCharter({ venue: VENUE.POOL_ENGINE, ifTargetUsd: usd("25000"), takerFeeBps: 101 }),
       "BAD_FEES",
     ],
+    ["pool premium > 50%", nvdaCharter({ premiumBps: 5001 }), "BAD_PREMIUM"],
+    ["premium on a book-funded IF", nvdaCharter({ ifFromPool: false, premiumBps: 1200 }), "BAD_PREMIUM"],
   ];
 
   for (const [name, c, reason] of cases) {
@@ -57,6 +59,17 @@ describe("validateCharter (MarketCharter.validate mirror)", () => {
       expect(r.reasons).toEqual([reason]);
     });
   }
+
+  test("2026-10 insurance pool: NO_POOL when ifFromPool and no pool is configured (absent = not checked)", () => {
+    expect(validateCharter(nvdaCharter(), { ...devValidationContext, poolConfigured: false }).reason).toBe("NO_POOL");
+    expect(validateCharter(nvdaCharter(), { ...devValidationContext, poolConfigured: true }).ok).toBe(true);
+    expect(validateCharter(nvdaCharter({ ifFromPool: false }), { ...devValidationContext, poolConfigured: false }).ok).toBe(true);
+    expect(v(nvdaCharter({ premiumBps: 5000 })).ok).toBe(true);
+    // BAD_FEES is checked before the pool rules (MarketCharter order)
+    const both = v(nvdaCharter({ venue: VENUE.POOL_ENGINE, takerFeeBps: 101, premiumBps: 6000 }));
+    expect(both.reason).toBe("BAD_FEES");
+    expect(both.reasons).toEqual(["BAD_FEES", "BAD_PREMIUM"]);
+  });
 
   test("audit M-1: Junior notice of at least one mark interval (when the interval is known)", () => {
     const ctx = { ...devValidationContext, markInterval: 3600 };

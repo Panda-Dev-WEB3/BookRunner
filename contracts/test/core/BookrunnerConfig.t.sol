@@ -106,7 +106,7 @@ contract BookrunnerConfigTest is Test {
 
     // ---------------------------------------------------------------- addresses
 
-    function _addressKeys() internal pure returns (bytes32[18] memory k) {
+    function _addressKeys() internal pure returns (bytes32[19] memory k) {
         k = [
             bytes32("usdc"),
             "bkrn",
@@ -125,7 +125,8 @@ contract BookrunnerConfigTest is Test {
             "entryPoint",
             "timelock",
             "expenseRecipient",
-            "slashRecipient"
+            "slashRecipient",
+            "insurancePool"
         ];
     }
 
@@ -148,11 +149,12 @@ contract BookrunnerConfigTest is Test {
         if (key == "timelock") return config.timelock();
         if (key == "expenseRecipient") return config.expenseRecipient();
         if (key == "slashRecipient") return config.slashRecipient();
+        if (key == "insurancePool") return config.insurancePool();
         revert("bad key");
     }
 
     function test_setAddress_everyKey() public {
-        bytes32[18] memory keys = _addressKeys();
+        bytes32[19] memory keys = _addressKeys();
         for (uint256 i; i < keys.length; ++i) {
             address value = address(uint160(0x1000 + i));
             // the settlement token must be a 6-decimals ERC20
@@ -177,6 +179,7 @@ contract BookrunnerConfigTest is Test {
         assertEq(config.KEY_USDC(), bytes32("usdc"));
         assertEq(config.KEY_FEE_ROUTER(), bytes32("feeRouter"));
         assertEq(config.KEY_SLASH_RECIPIENT(), bytes32("slashRecipient"));
+        assertEq(config.KEY_INSURANCE_POOL(), bytes32("insurancePool"));
         assertEq(config.KEY_MARK_INTERVAL(), bytes32("markInterval"));
     }
 

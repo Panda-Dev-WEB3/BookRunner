@@ -151,6 +151,13 @@ contract GovMockConfig is IBookrunnerConfig {
         venueMinIfUsd[venue] = v;
     }
 
+    /// @notice BookrunnerConfig.insurancePool() (2026-10; MarketCharter NO_POOL rule).
+    address public insurancePool;
+
+    function setInsurancePool(address a) external {
+        insurancePool = a;
+    }
+
     function setNewBooksPaused(bool p) external {
         newBooksPaused = p;
     }

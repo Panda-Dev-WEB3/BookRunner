@@ -12,6 +12,8 @@ import {IBkrnStaking} from "./interfaces/IBkrnStaking.sol";
 import {IStockTokenRegistry} from "./interfaces/IStockTokenRegistry.sol";
 import {IBookFactory} from "./interfaces/IBookFactory.sol";
 import {IBook} from "./interfaces/IBook.sol";
+import {IBookrunnerConfigPool, IInsurancePool} from "./interfaces/IInsurancePool.sol";
+import {Waterfall} from "./libraries/Waterfall.sol";
 
 /// @title CharterRules — charter / mandate validation rules (ARCHITECTURE.md §2.6).
 /// @notice Shared by MarketCharter.validate and RiskCommittee REMANDATE proposals so a re-mandate can
@@ -28,6 +30,10 @@ library CharterRules {
     bytes32 internal constant BAD_UNDERLYING = "BAD_UNDERLYING";
     bytes32 internal constant BAD_SYMBOL = "BAD_SYMBOL";
     bytes32 internal constant BAD_FEES = "BAD_FEES";
+    /// @dev 2026-10 insurance pool: premiumBps > MAX_PREMIUM_BPS, or a premium on a book-funded IF.
+    bytes32 internal constant BAD_PREMIUM = "BAD_PREMIUM";
+    /// @dev 2026-10 insurance pool: `ifFromPool` while config.insurancePool() is unset.
+    bytes32 internal constant NO_POOL = "NO_POOL";
 
     // ---- bounds ----
     uint256 internal constant BPS = 1e4;
@@ -36,6 +42,19 @@ library CharterRules {
     uint256 internal constant MAX_JUNIOR_NOTICE = 30 days;
     int16 internal constant MIN_KILL_DRAWDOWN_BPS = -5000; // kill must trigger at or above -50%
     uint256 internal constant MAX_ENGINE_TAKER_FEE_BPS = 100; // in-house venue taker fee cap (1%)
+    /// @dev == InsurancePool.MAX_PREMIUM_BPS: a charter's pool premium is at most 50% of gross fee flow (the pool's
+    ///      floor applies when the charter asks for less).
+    uint256 internal constant MAX_PREMIUM_BPS = 5000;
+
+    /// @notice BAD_PREMIUM / NO_POOL rules of the 2026-10 insurance pool (0 when valid): a pool-funded IF needs a
+    ///         configured pool and premiumBps <= MAX_PREMIUM_BPS (0 = the pool's floor); a book-funded IF pays no
+    ///         premium (premiumBps == 0).
+    function poolReason(bool ifFromPool, uint16 premiumBps, address pool) internal pure returns (bytes32) {
+        if (!ifFromPool) return premiumBps == 0 ? bytes32(0) : BAD_PREMIUM;
+        if (premiumBps > MAX_PREMIUM_BPS) return BAD_PREMIUM;
+        if (pool == address(0)) return NO_POOL;
+        return bytes32(0);
+    }
 
     /// @notice BAD_MANDATE when: maxInventoryUsd == 0, minQuoteWidthBps == 0, hedge band min > max,
     ///         killAtDrawdownBps >= 0 or < -5000, maxSkewBps <= 0, or maxSkewBps > minQuoteWidthBps / 2 (audit
@@ -141,6 +160,15 @@ contract MarketCharter is IMarketCharter, ReentrancyGuardTransient {
         id = ++_count;
         CharterRecord storage r = _records[id];
         r.charter = c;
+        // [2026-10 insurance pool] the premium is fixed at filing: max(the sponsor's rate, the pool floor now), so a
+        // later floor change applies only to charters filed after it
+        if (c.ifFromPool) {
+            r.charter.premiumBps = uint16(
+                Waterfall.effectivePremiumBps(
+                    c.premiumBps, IInsurancePool(_insurancePool()).premiumFloorBps()
+                )
+            );
+        }
         r.status = BRTypes.CharterStatus.Filed;
         r.filedAt = uint64(block.timestamp);
         _deadline[id] = uint64(block.timestamp + cfg.committeeWindow());
@@ -160,7 +188,8 @@ contract MarketCharter is IMarketCharter, ReentrancyGuardTransient {
     /// @inheritdoc IMarketCharter
     /// @dev Reasons are checked in this order (first failure wins): BAD_VENUE, IF_BELOW_VENUE_MIN,
     ///      BAD_ORACLE, BAD_BPS, BAD_WINDOW, BAD_NOTICE, BAD_MANDATE, BAD_UNDERLYING, BAD_SYMBOL,
-    ///      BAD_FEES. BAD_VENUE precedes the IF minimum because the minimum is looked up per venue.
+    ///      BAD_FEES, BAD_PREMIUM / NO_POOL (2026-10 insurance pool, CharterRules.poolReason). BAD_VENUE precedes
+    ///      the IF minimum because the minimum is looked up per venue; the minimum applies to a pool-funded IF too.
     ///      BAD_UNDERLYING: token underlyings (upper 12 bytes zero) must be canonical in
     ///      `config.stockRegistry()`; anything else must be a registered index id.
     function validate(BRTypes.Charter calldata c) external view returns (bytes32 reason) {
@@ -393,7 +422,14 @@ contract MarketCharter is IMarketCharter, ReentrancyGuardTransient {
         if (c.venue == BRTypes.VENUE_POOL_ENGINE && c.takerFeeBps > CharterRules.MAX_ENGINE_TAKER_FEE_BPS) {
             return CharterRules.BAD_FEES;
         }
-        return bytes32(0);
+        return CharterRules.poolReason(c.ifFromPool, c.premiumBps, _insurancePool());
+    }
+
+    /// @dev config.insurancePool() (BookrunnerConfig extension); address(0) when unset or not exposed.
+    function _insurancePool() private view returns (address pool) {
+        try IBookrunnerConfigPool(address(config)).insurancePool() returns (address p) {
+            pool = p;
+        } catch {}
     }
 
     function _underlyingOk(bytes32 underlying) private view returns (bool) {

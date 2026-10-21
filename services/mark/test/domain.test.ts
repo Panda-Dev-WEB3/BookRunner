@@ -175,7 +175,7 @@ describe("EIP-712 mark signature", () => {
   test("signature recovers to the mark signer; digest matches shared typed data", async () => {
     const signer = devAccount("markSigner");
     const registry = "0x5FbDB2315678afecb367f032d93F642f64180aa3" as const;
-    const input = { bookId: 1n, periodEnd: BigInt(P), navUsd: usd("110600"), deployedValueUsd: usd("108600"), flowNonce: 7n, inventoryRoot: `0x${"11".repeat(32)}`, pnlJsonHash: `0x${"22".repeat(32)}`, receiptsRoot: `0x${"33".repeat(32)}`, held: false } as const;
+    const input = { bookId: 1n, periodEnd: BigInt(P), navUsd: usd("110600"), deployedValueUsd: usd("108600"), flowNonce: 7n, inventoryRoot: `0x${"11".repeat(32)}`, pnlJsonHash: `0x${"22".repeat(32)}`, receiptsRoot: `0x${"33".repeat(32)}`, held: false, insuranceEquityUsd: usd("25000") } as const;
     const sig = await signMark(signer, 31337, registry, input);
     expect((await recoverMarkSigner(31337, registry, input, sig)).toLowerCase()).toBe(signer.address.toLowerCase());
     expect(markDigest(31337, registry, input)).toBe(hashTypedData(markTypedData(31337, registry, input)));

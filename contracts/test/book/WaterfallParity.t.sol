@@ -17,6 +17,12 @@ import {Waterfall} from "../../src/libraries/Waterfall.sol";
 ///   wallet: [commit, isSponsor(0|1), totalCommitted, sponsorCommitted, totalAllocated, shares, refund]
 ///   credit: [senior, junior, juniorSupply, seniorImpairment, backstopDebt, seniorCredit, juniorCredit,
 ///            seniorRestored, backstopRepaid, seniorImpairment', backstopDebt'] (audit L-1)
+///   insurance pool (2026-10): premium [gross, charterPremiumBps, floorBps, expensesRequested, expenseCapBps, carryBps,
+///            seniorHurdleBps, seniorSupply, juniorSupply, effectivePremiumBps, premium, expenses, carry, senior, junior];
+///            poolDebt [debt, vaultIdle, unfundedClaims, deployed, backstopMoney, claim, shortfall, nav]; poolMark
+///            (scripts/gen-vectors.ts: Backstop cover never pays the insurance debt); poolWindow
+///            [ifTarget, mm, seniorCapBps, seniorCommitted, juniorCommitted, sponsorJuniorCommitted, ok, reason,
+///            seniorAllocated, juniorAllocated, ifRaised, mmAmount, idle]. poolBook rows: test/pool/PoolBookParity.t.sol.
 contract WaterfallParityTest is Test {
     string internal json;
     uint256 internal count;
@@ -156,6 +162,122 @@ contract WaterfallParityTest is Test {
             assertEq(
                 r.seniorCredit + r.juniorCredit + r.backstopRepaid, v[0] + v[1], string.concat(tag, " conservation")
             );
+        }
+    }
+
+    // ---- insurance pool (2026-10) ----
+
+    function test_parity_premium() public view {
+        for (uint256 i = 0; i < count; i++) {
+            uint256[] memory v = _row("premium", i);
+            assertEq(v.length, 15, "premium row width");
+            string memory tag = string.concat("premium[", vm.toString(i), "]");
+            uint256 bps = Waterfall.effectivePremiumBps(v[1], v[2]);
+            assertEq(bps, v[9], string.concat(tag, " effectivePremiumBps"));
+            (uint256 premium, uint256 rest) = Waterfall.premiumSplit(v[0], bps);
+            assertEq(premium, v[10], string.concat(tag, " premium"));
+            Waterfall.SplitResult memory o = Waterfall.splitDistribution(
+                Waterfall.SplitInput({
+                    gross: rest,
+                    expensesRequested: v[3],
+                    expenseCapBps: v[4],
+                    carryBps: v[5],
+                    seniorHurdleBps: v[6],
+                    seniorSupply: v[7],
+                    juniorSupply: v[8]
+                })
+            );
+            assertEq(o.expenses, v[11], string.concat(tag, " expenses"));
+            assertEq(o.carry, v[12], string.concat(tag, " carry"));
+            assertEq(o.senior, v[13], string.concat(tag, " senior"));
+            assertEq(o.junior, v[14], string.concat(tag, " junior"));
+            assertEq(premium + o.expenses + o.carry + o.senior + o.junior, v[0], string.concat(tag, " conservation"));
+        }
+    }
+
+    function test_parity_poolDebt() public view {
+        for (uint256 i = 0; i < count; i++) {
+            uint256[] memory v = _row("poolDebt", i);
+            assertEq(v.length, 8, "poolDebt row width");
+            string memory tag = string.concat("poolDebt[", vm.toString(i), "]");
+            (uint256 debt, uint256 writeOff) = Waterfall.poolClaimAtMark(v[0], v[1], v[3], v[4]);
+            assertEq(debt, v[5], string.concat(tag, " claim"));
+            assertEq(writeOff, v[6], string.concat(tag, " shortfall"));
+            assertEq(debt + writeOff, v[0], string.concat(tag, " debt conserved"));
+            // Book.applyMark: markedNavNet(idle, unfunded + debt, deployed)
+            assertEq(Waterfall.markedNavNet(v[1], v[2] + debt, v[3]), v[7], string.concat(tag, " nav"));
+        }
+    }
+
+    /// @notice Owner ruling N-1: a pool-funded book's mark (write-down, NAV, Backstop cover capped off the insurance
+    ///         debt) exactly as BookLogic._applyPnl composes it.
+    function test_parity_poolMark() public view {
+        for (uint256 i = 0; i < count; i++) {
+            uint256[] memory v = _row("poolMark", i);
+            assertEq(v.length, 24, "poolMark row width");
+            _poolMarkRow(v, string.concat("poolMark[", vm.toString(i), "]"));
+        }
+    }
+
+    function _poolMarkRow(uint256[] memory v, string memory tag) internal pure {
+        Waterfall.MarkState memory ms = Waterfall.MarkState({
+            seniorNav: v[0], juniorNav: v[1], seniorImpairment: v[2], perfIndex: v[3], highWater: v[4], backstopDebt: v[5]
+        });
+        uint256 backstopMoney = (v[5] < v[0] ? v[5] : v[0]) + v[6];
+        (uint256 debt, uint256 writeOff) = Waterfall.poolClaimAtMark(v[11], v[8], v[9], backstopMoney);
+        assertEq(debt, v[14], string.concat(tag, " claim"));
+        assertEq(writeOff, v[15], string.concat(tag, " shortfall"));
+        uint256 liabilities = v[7] + v[6] + debt;
+        uint256 nav = Waterfall.markedNavNet(v[8], liabilities, v[9]);
+        assertEq(nav, v[16], string.concat(tag, " nav"));
+        uint256 navH = Waterfall.poolCoverNav(v[8], liabilities, v[9], debt, v[10]);
+        uint256 available = v[13];
+        if (navH != nav) {
+            uint256 cap = Waterfall.applyMarkPnl(
+                ms, Waterfall.MarkInputs({nav: navH, juniorSupply: v[12], backstopAvailable: v[13]})
+            ).backstopCovered;
+            assertEq(v[17], 1, string.concat(tag, " capped"));
+            assertEq(cap, v[18], string.concat(tag, " coverCap"));
+            if (cap < available) available = cap;
+        } else {
+            assertEq(v[17], 0, string.concat(tag, " not capped"));
+        }
+        Waterfall.MarkResult memory r =
+            Waterfall.applyMarkPnl(ms, Waterfall.MarkInputs({nav: nav, juniorSupply: v[12], backstopAvailable: available}));
+        assertEq(r.seniorNav, v[19], string.concat(tag, " S'"));
+        assertEq(r.juniorNav, v[20], string.concat(tag, " J'"));
+        assertEq(r.seniorImpairment, v[21], string.concat(tag, " impairment'"));
+        assertEq(r.backstopCovered, v[22], string.concat(tag, " backstopCovered"));
+        assertEq(r.backstopDebt, v[23], string.concat(tag, " backstopDebt'"));
+    }
+
+    function test_parity_poolWindow() public view {
+        for (uint256 i = 0; i < count; i++) {
+            uint256[] memory v = _row("poolWindow", i);
+            assertEq(v.length, 13, "poolWindow row width");
+            string memory tag = string.concat("poolWindow[", vm.toString(i), "]");
+            uint256 raised = Waterfall.windowIfTarget(v[0], true);
+            assertEq(raised, 0, string.concat(tag, " nothing raised for the IF"));
+            Waterfall.WindowResult memory r = Waterfall.allocateWindow(
+                Waterfall.WindowInput({
+                    ifTargetUsd: raised,
+                    mmInventoryUsd: v[1],
+                    seniorCapBps: v[2],
+                    seniorCommitted: v[3],
+                    juniorCommitted: v[4],
+                    sponsorJuniorCommitted: v[5]
+                })
+            );
+            assertEq(r.ok ? 1 : 0, v[6], string.concat(tag, " ok"));
+            assertEq(uint256(r.reason), v[7], string.concat(tag, " reason"));
+            assertTrue(r.reason != Waterfall.REASON_IF_UNFUNDED, string.concat(tag, " never IF_UNFUNDED"));
+            assertEq(r.seniorAllocated, v[8], string.concat(tag, " seniorAllocated"));
+            assertEq(r.juniorAllocated, v[9], string.concat(tag, " juniorAllocated"));
+            (uint256 ifAmount, uint256 mmAmount, uint256 idle) =
+                Waterfall.initialDeployment(r.seniorAllocated + r.juniorAllocated, raised, v[1]);
+            assertEq(ifAmount, v[10], string.concat(tag, " ifRaised"));
+            assertEq(mmAmount, v[11], string.concat(tag, " mmAmount"));
+            assertEq(idle, v[12], string.concat(tag, " idle"));
         }
     }
 }

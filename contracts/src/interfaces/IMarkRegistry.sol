@@ -5,7 +5,7 @@ import {BRTypes} from "./BRTypes.sol";
 
 /// @title IMarkRegistry — daily signed, receipt-rooted marks.
 /// @notice EIP-712 domain: name "Bookrunner MarkRegistry", version "1".
-///         MARK_TYPEHASH = keccak256("Mark(uint256 bookId,uint64 periodEnd,uint256 navUsd,uint256 deployedValueUsd,uint64 flowNonce,bytes32 inventoryRoot,bytes32 pnlJsonHash,bytes32 receiptsRoot,bool held)")
+///         MARK_TYPEHASH = keccak256("Mark(uint256 bookId,uint64 periodEnd,uint256 navUsd,uint256 deployedValueUsd,uint64 flowNonce,bytes32 inventoryRoot,bytes32 pnlJsonHash,bytes32 receiptsRoot,bool held,uint256 insuranceEquityUsd)")
 ///         Anyone may submit; the signature must recover to a MARK_SIGNER.
 ///         periodEnd must be a multiple of config.markInterval(), strictly greater than the book's
 ///         previous committed periodEnd, <= block.timestamp, and >= block.timestamp - maxMarkAge.

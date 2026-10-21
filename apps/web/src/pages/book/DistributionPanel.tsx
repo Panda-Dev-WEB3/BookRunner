@@ -1,11 +1,13 @@
+import { Link } from "react-router";
 import { POLL, trpc } from "../../api/trpc";
 import { EmptyState, Hash, Panel, QueryView, Table, Td, Th, ValueKind, cx } from "../../components/ui";
 import { FEE_FLOW_LINE } from "../../lib/copy";
-import { bpsPct, fmtDateTime, fmtUsd } from "../../lib/format";
+import { bpsPct, fmtDateTime, fmtUsd, usdRaw } from "../../lib/format";
 import { type StepKey, distributionModel, frac, pickLastDistribution } from "../../lib/waterfall";
 
 const BAR: Record<StepKey, string> = {
   gross: "bg-ink/80",
+  premium: "bg-accent",
   expenses: "bg-muted",
   carry: "bg-backstop hatch",
   senior: "bg-senior",
@@ -19,12 +21,13 @@ export function DistributionPanel({ bookId }: { bookId: number }) {
       <QueryView
         q={q}
         empty={(d) => !pickLastDistribution(d.items)}
-        emptyView={<EmptyState compact title="No distribution yet" body="The router distributes fee flow once per mark period: expenses, then protocol carry, then the Senior share, then the Junior residual." />}
+        emptyView={<EmptyState compact title="No distribution yet" body="The router distributes fee flow once per mark period: the insurance pool premium on pool-funded books, then expenses, then protocol carry, then the Senior share, then the Junior residual." />}
       >
         {(d) => {
           const last = pickLastDistribution(d.items);
           const model = last ? distributionModel(last) : null;
           if (!last || !model) return null;
+          const anyPremium = d.items.some((s) => (usdRaw(s.premiumUsd) ?? 0n) > 0n);
           return (
             <>
               <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2 text-[11.5px] text-ink-2">
@@ -76,7 +79,19 @@ export function DistributionPanel({ bookId }: { bookId: number }) {
                 </div>
                 <div className="col-span-2 sm:col-span-1">{model.conserved ? "Conserved: every unit is accounted for." : "Parts exceed gross: check the settlement row."}</div>
               </div>
-              <p className="mt-2 text-[11px] text-muted">{FEE_FLOW_LINE}</p>
+              <p className="mt-2 text-[11px] text-muted">
+                {FEE_FLOW_LINE}
+                {model.steps.some((s) => s.key === "premium") && (
+                  <>
+                    {" "}
+                    This book's insurance fund comes from the{" "}
+                    <Link className="link" to="/pool">
+                      insurance pool
+                    </Link>
+                    , which receives its premium first.
+                  </>
+                )}
+              </p>
               {d.items.length > 1 && (
                 <details className="mt-3">
                   <summary className="cursor-pointer text-[12px] text-ink-2">All settlements ({d.items.length})</summary>
@@ -87,6 +102,7 @@ export function DistributionPanel({ bookId }: { bookId: number }) {
                           <Th>Time</Th>
                           <Th>Source</Th>
                           <Th right>Gross</Th>
+                          {anyPremium && <Th right>Premium</Th>}
                           <Th right>Expenses</Th>
                           <Th right>Carry</Th>
                           <Th right>Senior</Th>
@@ -103,6 +119,11 @@ export function DistributionPanel({ bookId }: { bookId: number }) {
                             <Td right num>
                               {fmtUsd(s.grossUsd)}
                             </Td>
+                            {anyPremium && (
+                              <Td right num>
+                                {fmtUsd(s.premiumUsd)}
+                              </Td>
+                            )}
                             <Td right num>
                               {fmtUsd(s.expensesUsd)}
                             </Td>

@@ -109,6 +109,16 @@ export function runRuleChecks(c: Charter, ctx: RuleContext): RuleCheck[] {
   else if (c.ifTargetUsd * 10n < ctx.venueMinIfUsd * 11n) add("venue_min_if", "info", "insurance fund is within 10% of the venue minimum", ifMetrics);
   else add("venue_min_if", "pass", "insurance fund meets the venue minimum", ifMetrics);
 
+  // 2b. insurance pool (2026-10): who funds the IF and the premium the book pays from its gross fee flow
+  if (c.ifFromPool) {
+    add("insurance_pool", "info", "the insurance pool funds the insurance fund as a senior debt of the book; the window raises only the MM inventory", {
+      premiumBps: String(c.premiumBps),
+      premiumRule: "max(charter premium, pool floor at filing)",
+    });
+  } else {
+    add("insurance_pool", "pass", "the tranches fund the insurance fund (no pool premium)");
+  }
+
   // 3. oracle plan
   if (c.venue === VENUE.POOL_ENGINE && c.oracle !== ORACLE.ATTESTED) {
     add("oracle_plan", "block", "the in-house engine prices only from the attested oracle; charter names another oracle kind");

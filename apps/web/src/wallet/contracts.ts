@@ -3,9 +3,9 @@
 // BookrunnerConfig a book points at (Book.config()). VITE_USDC_ADDRESS, when set, overrides USDC.
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useSyncExternalStore } from "react";
-import { type Address, getAddress } from "viem";
+import { type Address, BaseError, ContractFunctionRevertedError, ContractFunctionZeroDataError, getAddress, zeroAddress } from "viem";
 import { trpc } from "../api/trpc";
-import { BOOK_CONFIG_ABI, CONFIG_ADDRESSES_ABI } from "../lib/abis";
+import { BOOK_CONFIG_ABI, CONFIG_ADDRESSES_ABI, CONFIG_POOL_ABI } from "../lib/abis";
 import type { BookListItem } from "../lib/api-types";
 import { config } from "../lib/config";
 import { getSettlementSymbol, subscribeSettlementSymbol } from "../lib/settlementToken";
@@ -114,4 +114,32 @@ export function useAppContracts(): AppContractsResult {
       void q.refetch();
     },
   };
+}
+
+/**
+ * The insurance pool from the CHAIN (BookrunnerConfig.insurancePool()), never from an API response: the prepared-tx
+ * check allows pool calls only to this address. data: undefined while unknown, null when this deployment has none
+ * (getter missing on an older config, or the zero address).
+ */
+export function useInsurancePoolAddress(): { data: Address | null | undefined; isLoading: boolean } {
+  const app = useAppContracts();
+  const cfg = app.data?.config ?? null;
+  const q = useQuery({
+    queryKey: ["insurance-pool-address", appChain.id, cfg],
+    enabled: cfg !== null,
+    staleTime: Number.POSITIVE_INFINITY,
+    retry: 3,
+    queryFn: async (): Promise<Address | null> => {
+      try {
+        const a = await publicClient.readContract({ address: cfg as Address, abi: CONFIG_POOL_ABI, functionName: "insurancePool" });
+        return a && getAddress(a) !== zeroAddress ? getAddress(a) : null;
+      } catch (err) {
+        // review m-7: only an on-chain answer (an older config without the getter reverts) means "no pool"; a transport
+        // error is retried (never cached as "none on this deployment")
+        if (err instanceof BaseError && err.walk((e) => e instanceof ContractFunctionRevertedError || e instanceof ContractFunctionZeroDataError)) return null;
+        throw err;
+      }
+    },
+  });
+  return { data: q.data, isLoading: app.isLoading || (cfg !== null && q.isLoading) };
 }

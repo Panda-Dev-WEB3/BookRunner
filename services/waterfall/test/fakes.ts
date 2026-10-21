@@ -1,4 +1,5 @@
-import { type BookState, type SplitResult, VENUE, splitDistribution } from "@bookrunner/shared";
+import { type BookState, VENUE } from "@bookrunner/shared";
+import { type PremiumSplit, previewDistribution } from "../src/domain/split";
 import type { Hex } from "viem";
 import type { BuybackReferenceSource } from "../src/domain/buyback";
 import type { BookRef } from "../src/kit/books";
@@ -38,10 +39,10 @@ export class FakeSettlementChain implements SettlementChain {
   state: BookState = "Live";
   distributed = new Map<string, DistributedLog>();
   swept = new Set<string>();
-  params: SplitParams = { pendingGross: 1_000_000_000n, expenseCapBps: 2000n, carryBps: 1000n, seniorHurdleBps: 6000n, seniorSupply: 70_000_000_000n, juniorSupply: 30_000_000_000n };
+  params: SplitParams = { pendingGross: 1_000_000_000n, expenseCapBps: 2000n, carryBps: 1000n, seniorHurdleBps: 6000n, seniorSupply: 70_000_000_000n, juniorSupply: 30_000_000_000n, premiumBps: 0n };
   calls: string[] = [];
   /** Simulate a router that diverges from the normative split (parity break). */
-  tamper?: (s: SplitResult) => SplitResult;
+  tamper?: (s: PremiumSplit) => PremiumSplit;
   /** Make distribute() revert; optionally record the period as distributed first (race). */
   failDistribute?: "revert" | "race";
   /** Fee flow arriving at the router during the sweep. */
@@ -111,25 +112,25 @@ export class FakeSettlementChain implements SettlementChain {
     return { ...this.params };
   }
   async previewOnChain(_ref: BookRef, gross: bigint, expenses: bigint) {
-    return splitDistribution({ ...this.params, gross, expensesRequested: expenses });
+    return previewDistribution({ ...this.params, gross, expensesRequested: expenses }, this.params.premiumBps);
   }
   async distribute(ref: BookRef, period: number, expenses: bigint) {
     this.calls.push("distribute");
     const k = `${ref.bookId}:${period}`;
     if (this.failDistribute === "race") {
-      this.distributed.set(k, this.log(ref, period, splitDistribution({ ...this.params, gross: this.params.pendingGross, expensesRequested: expenses })));
+      this.distributed.set(k, this.log(ref, period, previewDistribution({ ...this.params, gross: this.params.pendingGross, expensesRequested: expenses }, this.params.premiumBps)));
       throw new Error("execution reverted: AlreadyDistributed");
     }
     if (this.failDistribute === "revert") throw new Error("execution reverted");
     if (this.distributed.has(k)) throw new Error("execution reverted: already distributed");
-    let amounts = splitDistribution({ ...this.params, gross: this.params.pendingGross, expensesRequested: expenses });
+    let amounts = previewDistribution({ ...this.params, gross: this.params.pendingGross, expensesRequested: expenses }, this.params.premiumBps);
     if (this.tamper) amounts = this.tamper(amounts);
     const d = this.log(ref, period, amounts);
     this.distributed.set(k, d);
     this.params.pendingGross = 0n;
     return { hash: d.txHash, distributed: d };
   }
-  private log(ref: BookRef, period: number, amounts: SplitResult): DistributedLog {
+  private log(ref: BookRef, period: number, amounts: PremiumSplit): DistributedLog {
     return { bookId: ref.bookId, period, amounts, txHash: fakeHash(), logIndex: 3, blockNumber: 10n, ts: new Date(period * 1000 + 5000) };
   }
 }
@@ -253,5 +254,8 @@ export class FakeKeeperChain implements KeeperChain {
   }
   async finalizeRetirement() {
     return this.tx("finalizeRetirement");
+  }
+  async settleInsurance() {
+    return this.tx("settleInsurance");
   }
 }

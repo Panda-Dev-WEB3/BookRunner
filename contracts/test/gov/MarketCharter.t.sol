@@ -377,6 +377,44 @@ contract MarketCharterTest is GovBase {
         assertEq(_reason(c), bytes32(0));
     }
 
+    /// @notice 2026-10 insurance pool: BAD_PREMIUM (premium above 50%, or a premium on a book-funded IF) and NO_POOL
+    ///         (a pool-funded IF with no pool configured); the venue IF minimum applies to a pool-funded IF too.
+    function test_validate_insurancePool() public {
+        BRTypes.Charter memory c = _charter();
+        c.premiumBps = 1;
+        assertEq(_reason(c), bytes32("BAD_PREMIUM"), "premium on a book-funded IF");
+        c.premiumBps = 0;
+        c.ifFromPool = true;
+        assertEq(_reason(c), bytes32("NO_POOL"));
+        cfg.setInsurancePool(makeAddr("pool"));
+        assertEq(_reason(c), bytes32(0), "0 = the pool's floor");
+        c.premiumBps = 5000;
+        assertEq(_reason(c), bytes32(0));
+        c.premiumBps = 5001;
+        assertEq(_reason(c), bytes32("BAD_PREMIUM"));
+        c.premiumBps = 2000;
+        c.ifTargetUsd = 1;
+        assertEq(_reason(c), bytes32("IF_BELOW_VENUE_MIN"), "the venue minimum still applies");
+    }
+
+    /// @notice Minor m-4: a pool-funded charter's premium is fixed at filing to max(sponsor, the pool floor then), so a
+    ///         later floor change applies only to charters filed after it.
+    function test_file_fixesThePremiumAtTheFloorOfFiling() public {
+        PoolFloorStub stub = new PoolFloorStub();
+        cfg.setInsurancePool(address(stub));
+        BRTypes.Charter memory c = _charter();
+        c.ifFromPool = true;
+        uint256 id = _file(c);
+        assertEq(charter.get(id).charter.premiumBps, 1200, "0 = the floor of filing");
+        stub.setFloor(2500);
+        c.premiumBps = 2000;
+        uint256 id2 = _file(c);
+        assertEq(charter.get(id2).charter.premiumBps, 2500, "below the new floor: the floor");
+        assertEq(charter.get(id).charter.premiumBps, 1200, "an earlier filing keeps its rate");
+        c.premiumBps = 3000;
+        assertEq(charter.get(_file(c)).charter.premiumBps, 3000, "above the floor: the sponsor's rate");
+    }
+
     function testFuzz_validate_windowAndNotice(uint32 window, uint64 notice) public view {
         BRTypes.Charter memory c = _charter();
         c.subscriptionWindow = window;
@@ -812,5 +850,14 @@ contract MarketCharterTest is GovBase {
         vm.prank(address(committee));
         vm.expectRevert(abi.encodeWithSelector(MarketCharter.SponsorNotAbandoned.selector, id));
         charter.slashSponsor(id, "ABANDONED");
+    }
+}
+
+/// @dev InsurancePool.premiumFloorBps stand-in.
+contract PoolFloorStub {
+    uint16 public premiumFloorBps = 1200;
+
+    function setFloor(uint16 v) external {
+        premiumFloorBps = v;
     }
 }

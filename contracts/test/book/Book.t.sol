@@ -362,7 +362,8 @@ contract BookTest is BookFixture {
             inventoryRoot: 0,
             pnlJsonHash: 0,
             receiptsRoot: 0,
-            held: false
+            held: false,
+            insuranceEquityUsd: 0
         });
         uint256 otherId = registry.commit(other, "");
         vm.expectRevert(abi.encodeWithSelector(Book.MarkForOtherBook.selector, otherId, BOOK_ID + 1));

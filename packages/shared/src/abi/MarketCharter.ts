@@ -327,6 +327,16 @@ export const marketCharterAbi = [
             "name": "makerFeeBps",
             "type": "uint16",
             "internalType": "uint16"
+          },
+          {
+            "name": "ifFromPool",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "premiumBps",
+            "type": "uint16",
+            "internalType": "uint16"
           }
         ]
       }
@@ -485,6 +495,16 @@ export const marketCharterAbi = [
               },
               {
                 "name": "makerFeeBps",
+                "type": "uint16",
+                "internalType": "uint16"
+              },
+              {
+                "name": "ifFromPool",
+                "type": "bool",
+                "internalType": "bool"
+              },
+              {
+                "name": "premiumBps",
                 "type": "uint16",
                 "internalType": "uint16"
               }
@@ -726,6 +746,16 @@ export const marketCharterAbi = [
           },
           {
             "name": "makerFeeBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "ifFromPool",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "premiumBps",
             "type": "uint16",
             "internalType": "uint16"
           }

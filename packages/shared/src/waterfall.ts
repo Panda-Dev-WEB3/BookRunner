@@ -319,3 +319,100 @@ export function markedNav(vaultIdle: bigint, unfundedClaims: bigint, deployedVal
   const gross = vaultIdle + deployedValueUsd;
   return gross > unfundedClaims ? gross - unfundedClaims : 0n;
 }
+
+// ---------------------------------------------------------------------------------------------
+// 5. Insurance pool (2026-10, docs/ARCHITECTURE.md §2.10): a pool-funded book (charter.ifFromPool).
+//    Waterfall.sol section 5 mirrors these; vectors "premium", "poolDebt", "poolMark", "poolWindow" and "poolBook".
+//    The book owes the pool its allocation as a SENIOR DEBT netted from NAV: whatever draws the IF is absorbed by
+//    Junior then Senior; the Backstop never covers that debt nor funds the pool (owner ruling N-1): the pool's claim is
+//    the debt capped by the book's own capital (Backstop money excluded); a shortfall is provisional (N2-2) until
+//    retirement.
+// ---------------------------------------------------------------------------------------------
+
+/** IF target the window raises from the tranches: 0 when the InsurancePool funds the IF. */
+export function windowIfTarget(ifTargetUsd: bigint, ifFromPool: boolean): bigint {
+  return ifFromPool ? 0n : ifTargetUsd;
+}
+
+/** Premium rate a pool-funded charter is filed at (MarketCharter.file): the sponsor's rate, never below the pool's
+ *  floor of that moment, at most BPS. The book then pays charter.premiumBps (a later floor change never re-prices it). */
+export function effectivePremiumBps(charterPremiumBps: bigint, floorBps: bigint): bigint {
+  const bps = charterPremiumBps > floorBps ? charterPremiumBps : floorBps;
+  return bps > BPS ? BPS : bps;
+}
+
+/** The pool's premium comes off gross first; `rest` is then split by splitDistribution. premium + rest == gross. */
+export function premiumSplit(gross: bigint, premiumBps: bigint) {
+  const premium = (gross * premiumBps) / BPS;
+  return { premium, rest: gross - premium };
+}
+
+export interface PoolSplitResult extends SplitResult {
+  premium: bigint;
+}
+
+/**
+ * RevenueRouter.distribute of a pool-funded book: premium first (premiumBps of gross), then the ordinary split
+ * of the rest (expenses capped on the rest -> carry -> Senior -> Junior). `gross` stays the whole gross:
+ * premium + expenses + carry + senior + junior == gross.
+ */
+export function splitPoolDistribution(i: SplitInput, premiumBps: bigint): PoolSplitResult {
+  const { premium, rest } = premiumSplit(i.gross, premiumBps);
+  return { ...splitDistribution({ ...i, gross: rest }), gross: i.gross, premium };
+}
+
+/**
+ * The pool's claim on a book at a mark (Book._valueInsurance; owner rulings N-1, N2-2): the debt, capped by the book's own
+ * capital (vault idle + deployed value minus the Backstop money in it: cover still held by Senior + a repayment owed to
+ * the Backstop). A shortfall is provisional: later marks restore it first; it is written off only at retirement.
+ */
+export function poolClaimAtMark(debt: bigint, vaultIdle: bigint, deployedValueUsd: bigint, backstopMoney: bigint) {
+  const assets = vaultIdle + deployedValueUsd;
+  const own = assets > backstopMoney ? assets - backstopMoney : 0n;
+  return own >= debt ? { claim: debt, shortfall: 0n } : { claim: own, shortfall: debt - own };
+}
+
+/**
+ * The NAV that caps Backstop cover of a pool-funded book: the mark NAV with the IF draw (debt - IF equity, the IF
+ * equity capped at the deployed value) added back. `liabilities` includes the debt.
+ */
+export function poolCoverNav(vaultIdle: bigint, liabilities: bigint, deployedValueUsd: bigint, debt: bigint, insuranceEquityUsd: bigint): bigint {
+  const ifEquity = insuranceEquityUsd < deployedValueUsd ? insuranceEquityUsd : deployedValueUsd;
+  const draw = debt > ifEquity ? debt - ifEquity : 0n;
+  return markedNav(vaultIdle, liabilities, deployedValueUsd + draw);
+}
+
+export interface PoolMarkInputs {
+  vaultIdle: bigint;
+  unfundedClaims: bigint; // tranche claims settled, not funded
+  backstopPayable: bigint;
+  deployedValueUsd: bigint;
+  insuranceEquityUsd: bigint; // signed in the mark
+  debt: bigint; // the book's insurance debt (nominal)
+  juniorSupply: bigint;
+  backstopAvailable: bigint;
+}
+
+/**
+ * Book.applyMark P&L of a pool-funded book (owner rulings N-1, N2-2): the pool's claim (debt capped by own capital), NAV
+ * net of it, and applyMarkPnl with Backstop cover capped at what it would cover at poolCoverNav (no IF draw: no cap).
+ */
+export function poolMarkPnl(s: MarkState, i: PoolMarkInputs) {
+  const backstopMoney = minBig(s.backstopDebt ?? 0n, s.seniorNav) + i.backstopPayable;
+  const d = poolClaimAtMark(i.debt, i.vaultIdle, i.deployedValueUsd, backstopMoney);
+  const liabilities = i.unfundedClaims + i.backstopPayable + d.claim;
+  const nav = markedNav(i.vaultIdle, liabilities, i.deployedValueUsd);
+  const navH = poolCoverNav(i.vaultIdle, liabilities, i.deployedValueUsd, d.claim, i.insuranceEquityUsd);
+  const coverCap = navH === nav ? null : applyMarkPnl(s, { nav: navH, juniorSupply: i.juniorSupply, backstopAvailable: i.backstopAvailable }).backstopCovered;
+  const available = coverCap === null ? i.backstopAvailable : minBig(i.backstopAvailable, coverCap);
+  const result = applyMarkPnl(s, { nav, juniorSupply: i.juniorSupply, backstopAvailable: available });
+  return { claim: d.claim, shortfall: d.shortfall, nav, coverCap, result };
+}
+
+/**
+ * NAV of a pool-funded book at applyMark: the pool's debt is netted like any other liability, at the same snapshot as
+ * the IF in deployedValueUsd: markedNav(idle, unfundedClaims + debt, deployed). An IF draw lowers it (a book loss).
+ */
+export function poolBookNav(vaultIdle: bigint, unfundedClaims: bigint, poolDebt: bigint, deployedValueUsd: bigint): bigint {
+  return markedNav(vaultIdle, unfundedClaims + poolDebt, deployedValueUsd);
+}

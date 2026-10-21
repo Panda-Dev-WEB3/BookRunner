@@ -55,6 +55,8 @@ contract BookrunnerConfig is AccessControlEnumerable, IBookrunnerConfig {
     bytes32 public constant KEY_TIMELOCK = "timelock";
     bytes32 public constant KEY_EXPENSE_RECIPIENT = "expenseRecipient";
     bytes32 public constant KEY_SLASH_RECIPIENT = "slashRecipient";
+    /// @notice Protocol InsurancePool (funds the IF of `ifFromPool` books; docs/ARCHITECTURE.md §2.10). Appended 2026-10.
+    bytes32 public constant KEY_INSURANCE_POOL = "insurancePool";
 
     // ---------------------------------------------------------------------------------------------
     // Parameter keys
@@ -365,6 +367,15 @@ contract BookrunnerConfig is AccessControlEnumerable, IBookrunnerConfig {
         return _addresses[KEY_SLASH_RECIPIENT];
     }
 
+    /// @notice The protocol InsurancePool (zero until set): the pool that funds the insurance fund of every book
+    ///         whose charter sets `ifFromPool` (Book.closeWindow reads it). A repoint only affects books that close
+    ///         their window afterwards; a funded book keeps the pool it drew from (Book.insurancePool()).
+    /// @dev Not part of IBookrunnerConfig (keeps existing config stand-ins compiling); consumers read it through
+    ///      `IBookrunnerConfigPool` (interfaces/IInsurancePool.sol).
+    function insurancePool() external view returns (address) {
+        return _addresses[KEY_INSURANCE_POOL];
+    }
+
     // ---------------------------------------------------------------------------------------------
     // Views — parameters
     // ---------------------------------------------------------------------------------------------
@@ -462,7 +473,7 @@ contract BookrunnerConfig is AccessControlEnumerable, IBookrunnerConfig {
             || key == KEY_STOCK_REGISTRY || key == KEY_CHARTER || key == KEY_COMMITTEE || key == KEY_FACTORY
             || key == KEY_POOL_ENGINE || key == KEY_ORDERLY_VAULT || key == KEY_HEDGE_EXECUTOR
             || key == KEY_ENTRY_POINT || key == KEY_TIMELOCK || key == KEY_EXPENSE_RECIPIENT
-            || key == KEY_SLASH_RECIPIENT;
+            || key == KEY_SLASH_RECIPIENT || key == KEY_INSURANCE_POOL;
     }
 
     // ---------------------------------------------------------------------------------------------

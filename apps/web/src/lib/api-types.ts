@@ -49,3 +49,15 @@ export type SignedPriceOut = NonNullable<BookDetail["signedPrice"]>;
 export type VenueReportOut = NonNullable<BookDetail["venueReport"]>;
 export type EventItem = Outputs["events"]["recent"]["items"][number];
 export type PreparedTx = SubscribeOut["txs"][number];
+// 2026-10 insurance pool (pool.* router; pool.overview is optional: an older API may not serve it)
+export type PoolOverviewOut = Outputs["pool"]["overview"];
+export type PoolQueueOut = NonNullable<PoolOverviewOut["queue"]>;
+export type PoolParamsOut = NonNullable<PoolOverviewOut["params"]>;
+export type PoolPositionOut = Outputs["pool"]["position"];
+export type PoolDepositItem = PoolPositionOut["deposits"][number];
+export type PoolWithdrawalItem = PoolPositionOut["withdrawals"][number];
+export type PoolEpochsOut = Outputs["pool"]["epochs"];
+export type PoolEpochItem = PoolEpochsOut["items"][number];
+export type PoolHistoryOut = Outputs["pool"]["history"];
+export type PoolExposureOut = Outputs["pool"]["exposure"];
+export type PoolMarketItem = PoolExposureOut["markets"][number];

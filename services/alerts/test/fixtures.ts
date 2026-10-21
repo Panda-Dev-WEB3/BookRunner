@@ -1,6 +1,6 @@
 import type { SupervisorStatus } from "@bookrunner/shared/supervisor";
 import { type RuleConfig, loadConfig } from "../src/config";
-import type { BookSnap, OracleConfirmSnap, OracleProbe, OracleSourceSnap, Snapshot } from "../src/types";
+import type { BookSnap, OracleConfirmSnap, OracleProbe, OracleSourceSnap, PoolBookSnap, PoolSnap, Snapshot } from "../src/types";
 
 export const NOW = Date.UTC(2026, 9, 10, 12, 0, 0); // 2026-10-10T12:00:00Z
 export const NOW_S = NOW / 1000;
@@ -64,6 +64,40 @@ export function confirmOracle(over: Partial<OracleProbe> = {}): OracleProbe {
   };
 }
 
+/** bytes32("NVDA") / bytes32("TSLA"): the markets of the pool fixtures */
+export const NVDA_MKT = `0x${Buffer.from("NVDA").toString("hex").padEnd(64, "0")}`;
+export const TSLA_MKT = `0x${Buffer.from("TSLA").toString("hex").padEnd(64, "0")}`;
+
+export function poolBook(over: Partial<PoolBookSnap> = {}): PoolBookSnap {
+  return { bookId: 3, market: NVDA_MKT, allocationUsd: 30_000, claimUsd: 30_000, lossFirstLossUsd: 0, lossDepositorsUsd: 0, lastMarkAt: NOW_S - 600, active: true, ...over };
+}
+
+/** A healthy InsurancePool: 30% utilised, slice above target, the open epoch ends in 3 days, nothing queued. */
+export function pool(over: Partial<PoolSnap> = {}): PoolSnap {
+  return {
+    address: "0x00000000000000000000000000000000000000bb",
+    poolAssetsUsd: 1_000_000,
+    freeLiquidityUsd: 700_000,
+    claimsUsd: 300_000,
+    firstLossUsd: 120_000,
+    utilisationBps: 3000,
+    firstLossBps: 1200,
+    firstLossTargetBps: 1000,
+    epochLengthSec: 604_800,
+    processGraceSec: 86_400,
+    procEpoch: 5,
+    procEndsAt: NOW_S + 3 * 86_400,
+    fillEpoch: 5,
+    pendingShares: 0,
+    depositsPendingUsd: 0,
+    epoch: { withdrawShares: 0, depositUsd: 0, processed: false },
+    staleBooks: 0,
+    activeBookIds: [3],
+    books: [poolBook()],
+    ...over,
+  };
+}
+
 /** A healthy snapshot: every rule returns nothing. */
 export function snap(over: Partial<Snapshot> = {}): Snapshot {
   return {
@@ -98,6 +132,7 @@ export function snap(over: Partial<Snapshot> = {}): Snapshot {
       unpublished: [],
     },
     backup: { ts: NOW - 3_600_000, ok: true, error: "", offsite: "ok", bytes: 1_000_000, dir: "/var/backups/bookrunner/daily/x" },
+    pool: pool(),
     infraErrors: [],
     ...over,
   };

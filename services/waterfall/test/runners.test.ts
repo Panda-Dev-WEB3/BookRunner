@@ -63,6 +63,19 @@ describe("SettlementRunner", () => {
     expect(events.events).toHaveLength(1); // dedupe
   });
 
+  test("2026-10 pool-funded book: premium first, parity holds, the event carries the premium", async () => {
+    const { chain, store, events, runner } = setup();
+    chain.params.premiumBps = 1200n;
+    const out = await runner.run({ bookId: 1, period: P });
+    expect(out.status).toBe("distributed");
+    if (out.status !== "distributed") return;
+    expect(out.split.premium).toBe(usd("120"));
+    expect(out.parityMismatches).toEqual([]);
+    expect(out.previewMismatches).toEqual([]);
+    expect(store.rows.get(`1:${P}`)?.amounts.premium).toBe(usd("120"));
+    expect(events.events[0]?.data).toMatchObject({ grossUsd: "1000.000000", premiumUsd: "120.000000" });
+  });
+
   test("recovers a distribution that exists on-chain but not in the DB", async () => {
     const { ref, chain, store, events, runner } = setup();
     await chain.distribute(ref, P, usd("1"));

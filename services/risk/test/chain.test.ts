@@ -89,6 +89,8 @@ const charter = {
   symbol: strToBytes32("PERP_NVDA_USDC"),
   takerFeeBps: 5,
   makerFeeBps: 0,
+  ifFromPool: false,
+  premiumBps: 0,
 };
 
 const RESULTS: Record<string, unknown> = {

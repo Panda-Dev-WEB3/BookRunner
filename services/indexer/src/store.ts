@@ -85,6 +85,8 @@ export interface SettlementRow {
   carryUsd: string;
   seniorUsd: string;
   juniorUsd: string;
+  /** 2026-10 insurance pool: premium paid to the pool (RevenueRouter.PremiumPaid of the same tx); "0" otherwise */
+  premiumUsd?: string;
   period: number | null;
   txHash: string;
   logIndex: number;
@@ -130,6 +132,95 @@ export interface MarkAppliedPatch {
   seniorPrice?: number;
   juniorPrice?: number;
   pnlUsd?: string;
+}
+
+// ---------------------------------------------------------------- insurance pool (2026-10)
+
+export interface PoolDepositRow {
+  id: number;
+  owner: string;
+  assets: string;
+  epoch: number;
+  requestedAt: Date;
+  requestTx: string;
+}
+
+export interface PoolWithdrawalRow {
+  id: number;
+  owner: string;
+  sharesRaw: string;
+  epoch: number;
+  epochEndsAt: Date;
+  requestedAt: Date;
+  requestTx: string;
+}
+
+/** Fields set on the epoch row (absent = unchanged); `addFilled*` are added (guarded by the epoch_fill flow row). */
+export interface PoolEpochPatch {
+  endsAt?: Date | null;
+  processedAt?: Date;
+  processTx?: string;
+  depositAssets?: string;
+  depositSharesRaw?: string;
+  stale?: boolean;
+  staleBooks?: number;
+  addFilledSharesRaw?: string;
+  addFilledAssets?: string;
+  complete?: boolean;
+}
+
+export interface PoolBookRow {
+  bookId: number;
+  market: string;
+  allocation: string;
+  claim: string;
+  lossFirstLoss: string;
+  lossDepositors: string;
+  lastMarkAt: Date | null;
+  active: boolean;
+  allocatedAt: Date;
+  /** true: the read failed, the values are the last good ones (or the Allocated event's) until the backfill re-reads */
+  stale?: boolean;
+}
+
+export type PoolFlowKind =
+  | "allocated"
+  | "repaid"
+  | "premium"
+  | "loss"
+  | "recovery"
+  | "first_loss_deposit"
+  | "first_loss_withdraw"
+  | "withdraw_claim"
+  | "epoch_fill";
+
+export interface PoolFlowRow {
+  ts: Date;
+  kind: PoolFlowKind;
+  bookId: number | null;
+  amount: string;
+  firstLossPart: string;
+  txHash: string;
+  logIndex: number;
+}
+
+export interface PoolSnapshotRow {
+  blockNumber: number;
+  ts: Date;
+  poolAssets: string;
+  depositorAssets: string;
+  totalSupplyRaw: string;
+  sharePrice: string;
+  firstLoss: string;
+  freeLiquidity: string;
+  claims: string;
+  utilisationBps: number;
+  premiumsTotal: string;
+  lossesTotal: string;
+  depositsPending: string;
+  pendingSharesRaw: string;
+  /** true: the read at this block failed, the values are the previous good row's until the backfill re-reads it */
+  stale?: boolean;
 }
 
 export interface VoteEntry {
@@ -182,6 +273,30 @@ export interface IndexerStore {
   insertKillIfAbsent(r: KillRow): Promise<boolean>;
   insertMarkIfAbsent(r: MarkRow): Promise<boolean>;
   setMarkApplied(markId: number, txHash: string, patch?: MarkAppliedPatch): Promise<void>;
+
+  // insurance pool (2026-10)
+  insertPoolDeposit(r: PoolDepositRow): Promise<boolean>;
+  /** cancelDeposit / claimDeposit: status transition from queued only. */
+  closePoolDeposit(p: { id: number; status: "cancelled" | "claimed"; sharesRaw?: string; at: Date; txHash: string }): Promise<void>;
+  insertPoolWithdrawal(r: PoolWithdrawalRow): Promise<boolean>;
+  /** Adds `assets` to the request's claimed total (call only when the withdraw_claim flow row was new). */
+  addPoolWithdrawalClaim(p: { id: number; assets: string; at: Date }): Promise<void>;
+  upsertPoolEpoch(epoch: number, patch: PoolEpochPatch): Promise<void>;
+  upsertPoolBook(r: PoolBookRow): Promise<void>;
+  /** Adds a premium to pool_books.premiums_usd (call only when the premium flow row was new). */
+  addPoolBookPremium(bookId: number, amount: string): Promise<void>;
+  /** Idempotent per (tx, logIndex); true when inserted. */
+  insertPoolFlow(r: PoolFlowRow): Promise<boolean>;
+  upsertPoolSnapshot(r: PoolSnapshotRow): Promise<void>;
+  /** Newest snapshot at or before `block` (the last good values a stale row carries). */
+  poolSnapshotAtOrBefore(block: number): Promise<PoolSnapshotRow | null>;
+  getPoolBook(bookId: number): Promise<PoolBookRow | null>;
+  /** Keeps the last good values, flags the row for the backfill (no-op when the book has no row). */
+  markPoolBookStale(bookId: number): Promise<void>;
+  /** Backfill work (review I-3): stale snapshot blocks (oldest first), stale books, processed epochs without an end. */
+  stalePoolSnapshots(limit: number): Promise<number[]>;
+  stalePoolBooks(): Promise<number[]>;
+  poolEpochsWithoutEnd(limit: number): Promise<number[]>;
 
   /** Domain-event protocol insert; null when the dedupe key already exists. */
   insertEvent(e: PendingEvent): Promise<{ id: number; createdAt: Date } | null>;

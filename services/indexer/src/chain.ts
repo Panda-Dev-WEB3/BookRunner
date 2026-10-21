@@ -1,7 +1,7 @@
 // Chain port of the indexer + viem implementation. Enrichment reads are made at the log's block
 // (consistent replays) and fall back to the latest state when the node has pruned that state.
 import { publicClientFor } from "@bookrunner/shared";
-import { bookAbi, mMMandateAbi, markRegistryAbi, marketCharterAbi } from "@bookrunner/shared/abi";
+import { bookAbi, insurancePoolAbi, mMMandateAbi, markRegistryAbi, marketCharterAbi } from "@bookrunner/shared/abi";
 import { type Address, type Hex, type PublicClient, decodeFunctionData } from "viem";
 import { charterStructToJson } from "./convert";
 import type { RawLog } from "./decode";
@@ -11,6 +11,38 @@ export interface CharterRecordLite {
   filedAt: number;
   decidedAt: number;
 }
+
+/** InsurancePool views at a block (pool_snapshots). Amounts USDC 6dp, shares raw (12 dp). */
+export interface PoolStateLite {
+  poolAssets: bigint;
+  depositorAssets: bigint;
+  totalSupply: bigint;
+  /** convertToAssets(1e12): USDC (6dp) per whole share */
+  sharePrice: bigint;
+  firstLoss: bigint;
+  freeLiquidity: bigint;
+  claims: bigint;
+  utilisationBps: number;
+  premiumsTotal: bigint;
+  lossesTotal: bigint;
+  depositsPending: bigint;
+  pendingShares: bigint;
+}
+
+/** IInsurancePool.BookPosition */
+export interface PoolBookPositionLite {
+  book: Address;
+  market: Hex;
+  allocation: bigint;
+  claim: bigint;
+  lossFirstLoss: bigint;
+  lossDepositors: bigint;
+  lastMarkAt: number;
+  active: boolean;
+}
+
+/** One whole pool share (12 decimals: settlement token 6 + virtual offset 6). */
+export const POOL_SHARE_UNIT = 10n ** 12n;
 
 export interface IndexerChain {
   headBlock(): Promise<bigint>;
@@ -23,11 +55,22 @@ export interface IndexerChain {
   mark(markId: bigint, at: bigint): Promise<{ flowNonce: bigint; committedAt: number } | null>;
   commitSignature(txHash: Hex): Promise<Hex | null>;
   mandateKeyOperator(mandate: Address, key: Address, at: bigint): Promise<Address | null>;
+  /**
+   * InsurancePool state read at exactly block `at` (one block for every view: never mixed with head). Throws when
+   * unreadable (review I-3: callers keep the last good row marked stale and backfill; a failure is never cached).
+   */
+  poolState(pool: Address, at: bigint): Promise<PoolStateLite>;
+  /** IInsurancePool.bookPosition at `at`; throws when unreadable. */
+  poolBookPosition(pool: Address, bookId: bigint, at: bigint): Promise<PoolBookPositionLite>;
+  /** InsurancePool.epochEnd(epoch) (unix s) at `at`; throws when unreadable. */
+  poolEpochEnd(pool: Address, epoch: bigint, at: bigint): Promise<number>;
 }
 
 export class ViemIndexerChain implements IndexerChain {
   readonly pub: PublicClient;
   private readonly ts = new Map<bigint, number>();
+  /** pool state per (pool, block): every pool event of a block shares one SUCCESSFUL read (failures are not kept) */
+  private readonly poolStates = new Map<string, Promise<PoolStateLite>>();
 
   constructor(
     chainId: number,
@@ -125,6 +168,68 @@ export class ViemIndexerChain implements IndexerChain {
     } catch {
       return null;
     }
+  }
+
+  poolState(pool: Address, at: bigint): Promise<PoolStateLite> {
+    const k = `${pool.toLowerCase()}:${at}`;
+    const hit = this.poolStates.get(k);
+    if (hit) return hit;
+    const p = this.readPoolState(pool, at);
+    if (this.poolStates.size > 500) this.poolStates.clear();
+    this.poolStates.set(k, p);
+    // a rejected read is dropped from the cache: the next pass (or the backfill) reads again
+    p.catch(() => this.poolStates.delete(k));
+    return p;
+  }
+
+  private async readPoolState(address: Address, at: bigint): Promise<PoolStateLite> {
+    const q = { address, abi: insurancePoolAbi } as const;
+    const pub = this.pub;
+    // every view at the SAME block, no fallback to head (one snapshot row must not mix blocks; review I-3)
+    const [poolAssets, depositorAssets, totalSupply, sharePrice, firstLoss, freeLiquidity, claims, utilisation, ledger, queue] = await Promise.all([
+      pub.readContract({ ...q, functionName: "poolAssets", blockNumber: at }),
+      pub.readContract({ ...q, functionName: "totalAssets", blockNumber: at }),
+      pub.readContract({ ...q, functionName: "totalSupply", blockNumber: at }),
+      pub.readContract({ ...q, functionName: "convertToAssets", args: [POOL_SHARE_UNIT], blockNumber: at }),
+      pub.readContract({ ...q, functionName: "firstLossAssets", blockNumber: at }),
+      pub.readContract({ ...q, functionName: "freeLiquidity", blockNumber: at }),
+      pub.readContract({ ...q, functionName: "claimsTotal", blockNumber: at }),
+      pub.readContract({ ...q, functionName: "utilisationBps", blockNumber: at }),
+      pub.readContract({ ...q, functionName: "ledger", blockNumber: at }),
+      pub.readContract({ ...q, functionName: "queue", blockNumber: at }),
+    ]);
+    return {
+      poolAssets,
+      depositorAssets,
+      totalSupply,
+      sharePrice,
+      firstLoss,
+      freeLiquidity,
+      claims,
+      utilisationBps: Number(utilisation),
+      premiumsTotal: ledger[3],
+      lossesTotal: ledger[4],
+      depositsPending: ledger[2],
+      pendingShares: queue[3],
+    };
+  }
+
+  async poolBookPosition(address: Address, bookId: bigint, at: bigint): Promise<PoolBookPositionLite> {
+    const p = await this.pub.readContract({ address, abi: insurancePoolAbi, functionName: "bookPosition", args: [bookId], blockNumber: at });
+    return {
+      book: p.book,
+      market: p.market,
+      allocation: p.allocation,
+      claim: p.claim,
+      lossFirstLoss: p.lossFirstLoss,
+      lossDepositors: p.lossDepositors,
+      lastMarkAt: Number(p.lastMarkAt),
+      active: p.active,
+    };
+  }
+
+  async poolEpochEnd(address: Address, epoch: bigint, at: bigint): Promise<number> {
+    return Number(await this.pub.readContract({ address, abi: insurancePoolAbi, functionName: "epochEnd", args: [epoch], blockNumber: at }));
   }
 
   async mandateKeyOperator(mandate: Address, key: Address, at: bigint): Promise<Address | null> {

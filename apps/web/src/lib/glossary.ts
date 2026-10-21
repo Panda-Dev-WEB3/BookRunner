@@ -34,6 +34,9 @@ export type GlossaryId =
   | "marketMaker"
   | "bookrunnerAgent"
   | "insuranceFund"
+  | "insurancePool"
+  | "firstLossSlice"
+  | "poolEpoch"
   | "pullOracle"
   | "usdc"
   | "gas"
@@ -256,8 +259,29 @@ const entries: GlossaryEntry[] = [
   {
     id: "insuranceFund",
     term: "Insurance fund",
-    short: "Capital that absorbs trader losses a liquidation could not cover in one market. Each book funds its market's insurance fund first, then its market-making inventory.",
-    related: ["book", "perp"],
+    short: "Capital that absorbs trader losses a liquidation could not cover in one market. On a pool-funded book the insurance pool lends it; otherwise the book funds it first, then its market-making inventory.",
+    long: "A pool-funded book owes its insurance fund to the pool as a senior debt: whatever draws the fund is first the book's own loss (Junior, then Senior), and the book repays the pool when it retires.",
+    related: ["book", "perp", "insurancePool"],
+  },
+  {
+    id: "insurancePool",
+    term: "Insurance pool",
+    short: "One protocol-wide pool in the settlement token that lends the insurance fund of every pool-funded book and receives a premium from each such book's gross fee flow.",
+    long: "Each book's Junior and Senior take losses before the pool: the pool loses only what a book cannot repay once they are used up, and the treasury's first-loss slice takes that before depositors. Entry and exit are queued to weekly epochs and priced when the epoch is processed; a withdrawal request is never refused.",
+    related: ["insuranceFund", "firstLossSlice", "poolEpoch"],
+  },
+  {
+    id: "firstLossSlice",
+    term: "First-loss slice",
+    short: "Treasury money inside the insurance pool, kept at 10% of the pool or more. A pool loss lands on it before it reaches depositors' shares.",
+    long: "It receives the premium at the same rate as depositors. While it is below its required size, no new book can draw on the pool.",
+    related: ["insurancePool"],
+  },
+  {
+    id: "poolEpoch",
+    term: "Pool epoch",
+    short: "The weekly slot that insurance pool deposits and withdrawals are queued to. Each is priced when its epoch is processed, after every pool-funded book has marked past the epoch end, or 24 hours later at most.",
+    related: ["insurancePool", "mark"],
   },
   {
     id: "pullOracle",

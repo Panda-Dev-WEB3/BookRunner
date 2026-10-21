@@ -10,6 +10,8 @@ import {IRevenueRouter} from "./interfaces/IRevenueRouter.sol";
 import {IBook} from "./interfaces/IBook.sol";
 import {IBkrnFeeRouter} from "./interfaces/IBkrnFeeRouter.sol";
 import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
+import {IInsurancePool, IBookInsurance} from "./interfaces/IInsurancePool.sol";
+import {Waterfall} from "./libraries/Waterfall.sol";
 
 /// @title RevenueRouter — per-book fee-flow waterfall (EIP-1167 clone, one per book).
 /// @notice Fee flow (venue builder share, engine fees, funding, liquidation fees) is pushed here and
@@ -19,8 +21,12 @@ import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 ///         Senior share (`seniorHurdleBps` of the remainder) -> Junior residual. Expenses go to
 ///         `config.expenseRecipient()`, carry to `BkrnFeeRouter.notifyCarry`, Senior + Junior to the
 ///         book's UnderwritingVault, credited via `IBook.creditDistribution`.
+///         [2026-10 insurance pool] A pool-funded book (book.insurancePool() != 0) first pays the pool its premium,
+///         charter.premiumBps of gross (Waterfall.premiumSplit; MarketCharter fixed it at filing to max(the sponsor's
+///         rate, the pool floor of that moment), so a later floor change never re-prices a live book), and the rest is
+///         split as above; `Distributed` keeps `gross` as the whole gross and `PremiumPaid` carries the premium.
 /// @dev Accounting: `pendingGross` is exactly the USDC this router has acknowledged and not yet paid out
-///      (a distribution pays out exactly `gross`: expenses + carry + senior + junior == gross). A
+///      (a distribution pays out exactly `gross`: premium + expenses + carry + senior + junior == gross). A
 ///      settlement of `amount` is accepted only if the actual balance covers `pendingGross + amount`;
 ///      USDC pushed without a notification stays unacknowledged until someone notifies it.
 contract RevenueRouter is Initializable, ReentrancyGuardTransient, IRevenueRouter {
@@ -45,6 +51,8 @@ contract RevenueRouter is Initializable, ReentrancyGuardTransient, IRevenueRoute
 
     /// @notice Lifetime totals: [gross, expenses, carry, senior, junior].
     uint256[5] private _totals;
+    /// @notice Lifetime premium paid to the InsurancePool (appended 2026-10).
+    uint256 private _premiumTotal;
 
     error ZeroAddress();
     error InvalidSource(uint8 source);
@@ -53,6 +61,10 @@ contract RevenueRouter is Initializable, ReentrancyGuardTransient, IRevenueRoute
     error AlreadyDistributed(uint64 period);
     error NotConfigured(bytes32 what);
     error BpsOutOfRange(uint256 bps);
+
+    /// @notice A pool-funded book's premium for `period`: `amount` (`premiumBps` of gross) paid to `pool` before the
+    ///         split (2026-10 insurance pool).
+    event PremiumPaid(uint256 indexed bookId, uint64 indexed period, address indexed pool, uint256 amount, uint256 premiumBps);
 
     /// @dev Locks the implementation; clones are initialized by the BookFactory.
     constructor() {
@@ -111,7 +123,9 @@ contract RevenueRouter is Initializable, ReentrancyGuardTransient, IRevenueRoute
         }
 
         BRTypes.BookComponents memory c = IBook(book).components();
-        a = _preview(c, gross, expensesRequested);
+        (address pool, uint256 premium, uint256 rest, uint256 premiumBps) = _premium(gross);
+        a = _preview(c, rest, expensesRequested);
+        a.gross = gross;
 
         pendingGross = 0;
         _totals[0] += a.gross;
@@ -121,6 +135,13 @@ contract RevenueRouter is Initializable, ReentrancyGuardTransient, IRevenueRoute
         _totals[4] += a.junior;
         emit Distributed(bookId, period, [a.gross, a.expenses, a.carry, a.senior, a.junior]);
 
+        if (premium > 0) {
+            _premiumTotal += premium;
+            emit PremiumPaid(bookId, period, pool, premium, premiumBps);
+            usdc.forceApprove(pool, premium);
+            IInsurancePool(pool).notifyPremium(bookId, premium);
+            usdc.forceApprove(pool, 0);
+        }
         if (a.expenses > 0) {
             address recipient = config.expenseRecipient();
             if (recipient == address(0)) revert NotConfigured("expenseRecipient");
@@ -141,8 +162,22 @@ contract RevenueRouter is Initializable, ReentrancyGuardTransient, IRevenueRoute
     }
 
     /// @inheritdoc IRevenueRouter
-    function previewSplit(uint256 gross, uint256 expensesRequested) external view returns (Amounts memory) {
-        return _preview(IBook(book).components(), gross, expensesRequested);
+    /// @dev A pool-funded book: the split of gross net of the premium (previewPremium), with `gross` the whole gross.
+    function previewSplit(uint256 gross, uint256 expensesRequested) external view returns (Amounts memory a) {
+        (,, uint256 rest,) = _premium(gross);
+        a = _preview(IBook(book).components(), rest, expensesRequested);
+        a.gross = gross;
+    }
+
+    /// @notice The InsurancePool premium `distribute` would pay on `gross` now: the pool (address(0) for a book-funded
+    ///         IF: no premium), the amount and the rate (charter.premiumBps, fixed at filing).
+    function previewPremium(uint256 gross) external view returns (address pool, uint256 premium, uint256 premiumBps) {
+        (pool, premium,, premiumBps) = _premium(gross);
+    }
+
+    /// @notice Lifetime premium paid to the InsurancePool.
+    function premiumTotal() external view returns (uint256) {
+        return _premiumTotal;
     }
 
     /// @notice Lifetime distributed totals: [gross, expenses, carry, senior, junior].
@@ -179,6 +214,21 @@ contract RevenueRouter is Initializable, ReentrancyGuardTransient, IRevenueRoute
             a.senior = (rest * seniorHurdleBps) / BPS;
             a.junior = rest - a.senior;
         }
+    }
+
+    /// @dev The pool premium of a pool-funded book (Waterfall.premiumSplit at charter.premiumBps) and the rest of
+    ///      `gross` to split; no premium (rest == gross) otherwise.
+    function _premium(uint256 gross)
+        private
+        view
+        returns (address pool, uint256 premium, uint256 rest, uint256 premiumBps)
+    {
+        try IBookInsurance(book).insurancePool() returns (address p) {
+            pool = p;
+        } catch {}
+        if (pool == address(0)) return (address(0), 0, gross, 0);
+        premiumBps = IBook(book).getCharter().premiumBps;
+        (premium, rest) = Waterfall.premiumSplit(gross, premiumBps);
     }
 
     function _preview(BRTypes.BookComponents memory c, uint256 gross, uint256 expensesRequested)

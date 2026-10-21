@@ -9,7 +9,7 @@ import { type Address, getAddress } from "viem";
 import type { PreparedTx } from "../lib/api-types";
 import { type FlowTargets, type TxCheck, checkTxs } from "../lib/txcheck";
 import { appChain, publicClient } from "./chains";
-import { useAppContracts } from "./contracts";
+import { useAppContracts, useInsurancePoolAddress } from "./contracts";
 import { useSettlementSymbol } from "./settlementSymbol";
 
 const BOOK_COMPONENTS_ABI = [
@@ -43,6 +43,7 @@ export type { FlowTargets, TxCheck };
 export function useFlowTargets(): { data: FlowTargets | null; error: unknown } {
   const app = useAppContracts();
   const settlementSymbol = useSettlementSymbol();
+  const pool = useInsurancePoolAddress();
   const bookAddrs = useMemo(() => app.books.map((b) => ({ id: b.bookId, book: b.book })), [app.books]);
   const parts = useQuery({
     queryKey: ["book-parts", appChain.id, bookAddrs.map((b) => b.book).join(",")],
@@ -59,7 +60,8 @@ export function useFlowTargets(): { data: FlowTargets | null; error: unknown } {
   });
   const data = useMemo<FlowTargets | null>(() => {
     const p = app.data;
-    if (!p || !parts.data) return null;
+    // the pool read settles to an address or null (no pool on this deployment); wait for it either way
+    if (!p || !parts.data || pool.data === undefined) return null;
     const targets: string[] = [];
     const labels: Record<string, string> = {};
     const decimals: Record<string, number> = {};
@@ -73,13 +75,16 @@ export function useFlowTargets(): { data: FlowTargets | null; error: unknown } {
     add(p.staking, "BKRN staking", 18);
     add(p.charter, "MarketCharter");
     add(p.committee, "RiskCommittee");
+    // 2026-10 insurance pool: requestDeposit / cancelDeposit / claimDeposit / requestWithdraw / claim (no decimals entry:
+    // its share amounts have 12 decimals and its deposit amounts 6, the verifier formats each call itself)
+    if (pool.data) add(pool.data, "Insurance pool");
     for (const b of parts.data) {
       add(b.senior, `Senior tranche (book #${b.id})`, 6);
       add(b.junior, `Junior tranche (book #${b.id})`, 6);
       add(b.mandate, `MMMandate (book #${b.id})`);
     }
     return { targets, labels, decimals };
-  }, [app.data, parts.data, settlementSymbol]);
+  }, [app.data, parts.data, pool.data, settlementSymbol]);
   return { data, error: app.error ?? parts.error ?? null };
 }
 

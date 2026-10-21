@@ -83,6 +83,11 @@ library BRTypes {
         bytes32 symbol; // venue symbol, ASCII right-padded (e.g. "PERP_NVDA_USDC")
         uint16 takerFeeBps; // in-house venue only
         uint16 makerFeeBps; // in-house venue only
+        // ---- insurance pool (appended 2026-10, docs/ARCHITECTURE.md §2.10) ----
+        // Both fit in the slot of takerFeeBps / makerFeeBps, so the struct keeps its storage size: a book stored
+        // before reads false / 0 here, i.e. a book-funded IF and no premium (the old behaviour).
+        bool ifFromPool; // the IF is funded by the InsurancePool at closeWindow, not by the tranches
+        uint16 premiumBps; // pool premium, bps of gross fee flow; effective = max(premiumBps, pool floor)
     }
 
     /// @notice Addresses of one book's components. bookId == charterId.
@@ -112,6 +117,11 @@ library BRTypes {
         ///      redemption-bucket and top-up settlement to the first non-held mark (audit M-1), bounded
         ///      by BookLogic.MAX_HELD_DEFERRAL so a long hold never blocks exits.
         bool held;
+        /// @dev 2026-10 insurance pool: the IF equity (adapter.insuranceEquityUsd) included in deployedValueUsd at the
+        ///      same valuation. Read only for a pool-funded book, to keep Backstop cover off its insurance debt (an IF
+        ///      draw is never covered by the Backstop); 0 (an older mark service) is the safe value (nothing of the debt
+        ///      is then cover-eligible).
+        uint256 insuranceEquityUsd;
     }
 
     struct Mark {

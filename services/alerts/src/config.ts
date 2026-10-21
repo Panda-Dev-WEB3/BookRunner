@@ -177,6 +177,23 @@ const shape = {
   ALERT_BUYBACK_MAX_USD: num(5000),
   ALERT_API_FOR_SECONDS: int(120),
   ALERT_BACKUP_MAX_AGE_HOURS: num(26),
+  // ---- InsurancePool (docs/ARCHITECTURE.md §2.10; rules-pool.ts)
+  /** pool_utilisation: claims / pool assets above this (bps) for 5 min alerts (warning) */
+  ALERT_POOL_UTILISATION_BPS: int(9000),
+  /** pool_utilisation: at or above this (bps) the alert is critical */
+  ALERT_POOL_UTILISATION_CRITICAL_BPS: int(9800),
+  /** pool_epoch_overdue: an ended epoch with something queued, processable and unprocessed this long past its end (warning) */
+  ALERT_POOL_EPOCH_OVERDUE_SECONDS: int(7200),
+  /** pool_epoch_in_grace: books not marked since the epoch end this long after it alert (default: the network's mark grace) */
+  ALERT_POOL_GRACE_WARN_SECONDS: z.coerce.number().int().min(0).optional(),
+  /** pool_market_debt: a market whose active books' marked-down debt reaches this share of pool assets (bps) is critical */
+  ALERT_POOL_MARKET_DEBT_CRITICAL_BPS: int(500),
+  /** pool_book_unrepaid: a retired book still owing its claim this long after its final mark alerts (warning) */
+  ALERT_POOL_UNREPAID_SECONDS: int(21_600),
+  /** pool_final_mark_stuck: a retired book's pool position still open this long (keeper retrying settleInsurance) */
+  ALERT_POOL_FINAL_MARK_STUCK_SECONDS: int(1_800),
+  /** pool_debt_written_off: a retired book's written-off loss is paged (critical, one-off) while its final mark is younger than this */
+  ALERT_POOL_WRITE_OFF_NOTIFY_SECONDS: int(604_800),
   /** default: on for testnet / mainnet (deploy/server backup timer), off on devnet */
   ALERT_BACKUP_EXPECTED: z.string().optional(),
 
@@ -261,6 +278,21 @@ export interface RuleConfig {
   oraclePrimaryLagSec: number;
   backupExpected: boolean;
   backupMaxAgeSec: number;
+  /** pool_utilisation: warning above, critical at or above (bps) */
+  poolUtilisationBps: number;
+  poolUtilisationCriticalBps: number;
+  /** pool_epoch_overdue: seconds past the epoch end before the warning */
+  poolEpochOverdueSec: number;
+  /** pool_epoch_in_grace: seconds past the epoch end before the warning */
+  poolGraceWarnSec: number;
+  /** pool_market_debt: critical share of pool assets (bps) */
+  poolMarketDebtCriticalBps: number;
+  /** pool_book_unrepaid: seconds after the final mark */
+  poolUnrepaidSec: number;
+  /** pool_final_mark_stuck: anti-flap before the warning */
+  poolFinalMarkStuckSec: number;
+  /** pool_debt_written_off: seconds after the final mark the one-off page stays reported */
+  poolWriteOffNotifySec: number;
   supervisorExpected: boolean;
   disabled: Set<string>;
 }
@@ -386,6 +418,14 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       oraclePrimaryLagSec: e.ALERT_ORACLE_PRIMARY_LAG_SECONDS,
       backupExpected: e.ALERT_BACKUP_EXPECTED === undefined || e.ALERT_BACKUP_EXPECTED === "" ? network !== "devnet" : e.ALERT_BACKUP_EXPECTED === "1" || e.ALERT_BACKUP_EXPECTED.toLowerCase() === "true",
       backupMaxAgeSec: Math.round(e.ALERT_BACKUP_MAX_AGE_HOURS * 3600),
+      poolUtilisationBps: e.ALERT_POOL_UTILISATION_BPS,
+      poolUtilisationCriticalBps: e.ALERT_POOL_UTILISATION_CRITICAL_BPS,
+      poolEpochOverdueSec: e.ALERT_POOL_EPOCH_OVERDUE_SECONDS,
+      poolGraceWarnSec: e.ALERT_POOL_GRACE_WARN_SECONDS ?? nd.markGraceSec,
+      poolMarketDebtCriticalBps: e.ALERT_POOL_MARKET_DEBT_CRITICAL_BPS,
+      poolUnrepaidSec: e.ALERT_POOL_UNREPAID_SECONDS,
+      poolFinalMarkStuckSec: e.ALERT_POOL_FINAL_MARK_STUCK_SECONDS,
+      poolWriteOffNotifySec: e.ALERT_POOL_WRITE_OFF_NOTIFY_SECONDS,
       supervisorExpected: true,
       disabled: new Set(e.ALERT_DISABLE.split(/[,\s]+/).filter(Boolean)),
     },

@@ -34,6 +34,7 @@ export class WatchSet {
     add(c.committee, "committee");
     add(c.factory, "factory");
     add(c.markRegistry, "markRegistry");
+    add(c.insurancePool, "pool"); // 2026-10; absent in older deployment records
   }
 
   /** Returns true when the book was not known before. */
@@ -54,6 +55,12 @@ export class WatchSet {
 
   components(bookId: number): BookComponents | undefined {
     return this.comps.get(bookId);
+  }
+
+  /** The InsurancePool of the deployment, when it has one. */
+  poolAddress(): Address | null {
+    for (const [a, e] of this.protocol) if (e.kind === "pool") return a;
+    return null;
   }
 
   protocolAddresses(): Address[] {

@@ -51,6 +51,8 @@ export function CharterTerms({ c, explain = false, stacked = false }: { c: Chart
         <div className="eyebrow mt-4 mb-1">Capital</div>
         <Row k="IF size" v={fmtUsd(c.ifTargetUsd, { symbol: true })} help={h("ifSizeUsd")} />
         <Row k="MM inventory" v={fmtUsd(c.mmInventoryUsd, { symbol: true })} help={h("mmInventoryUsd")} />
+        <Row k="Insurance fund funded by" v={c.ifFromPool ? "Insurance pool" : "The tranches"} help={c.ifFromPool ? "A senior debt of the book to the pool; the window raises only the MM inventory" : h("ifFromPool")} />
+        {c.ifFromPool && <Row k="Pool premium" v={c.premiumBps > 0 ? `${bpsPct(c.premiumBps, c.premiumBps % 100 === 0 ? 0 : 2)} of gross fee flow` : "The pool's floor"} help="Paid to the insurance pool before expenses and carry" />}
         <div className="eyebrow mt-4 mb-1">Tranche terms</div>
         <Row k="Senior cap" v={`${bpsPct(c.seniorCapBps)} of book capital`} help={h("seniorCapBps")} />
         <Row k="Senior share of fee flow" v={bpsPct(c.seniorHurdleBps)} help={h("seniorShareBps")} />

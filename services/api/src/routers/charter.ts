@@ -32,6 +32,8 @@ export const REASON_TEXT: Record<string, string> = {
   BAD_UNDERLYING: "Underlying is neither a canonical Stock Token nor a registered index",
   BAD_SYMBOL: "Venue symbol is required",
   BAD_FEES: "In-house taker fee must be at most 100 bps",
+  BAD_PREMIUM: "Pool premium must be at most 5000 bps of gross fee flow, and 0 for a book-funded insurance fund",
+  NO_POOL: "No insurance pool is configured on this deployment: fund the insurance fund from the tranches",
 };
 
 const statusInput = z
@@ -97,6 +99,7 @@ export const charterRouter = router({
       underlyingKnown,
       newBooksPaused: params?.newBooksPaused,
       orderlyBrokerId: deps.settings.orderlyBrokerId ?? null,
+      poolConfigured: chain ? Boolean(chain.deployment.contracts.insurancePool) : undefined,
     });
 
     const chainReason = await softChain(deps, "charter.validate", (g) => g.validateCharter(c), null);
