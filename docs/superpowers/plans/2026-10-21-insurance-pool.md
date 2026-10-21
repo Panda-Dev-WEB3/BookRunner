@@ -26,6 +26,8 @@ Junior -> Senior -> Backstop.
   insurance debt, the Backstop covers only Senior's other losses (cap from the signed IF equity in the mark), Backstop
   cash is never netted against the debt, and an exhausted book's debt is written down to its own capital (the pool's
   loss, the tail risk the premium pays for). A deposit request can be cancelled only before its epoch ends.
+- *Fix round 3 (N2-1, N2-2).* A due repayment never uses the Backstop money in the vault. The shortfall of an exhausted
+  book is provisional (shown in the pool's share price, restored first by later marks), final only at retirement.
 - *Minors.* The cap is per market (underlying). Allocations need the first-loss slice at its target. The premium floor
   is fixed into the charter at filing. An epoch-length change waits for an idle queue.
 

@@ -120,38 +120,75 @@ contract PoolBookTest is PoolBookFixture {
     }
 
     /// @notice The MM blows through its capital and the venue pays winners from the IF: Junior, then Senior absorb it;
-    ///         the exhausted book's debt is written down to what it holds, the rest is the pool's loss (slice first).
+    ///         the pool's claim on the exhausted book is what it holds, the rest a (provisional) pool loss, slice first.
     function test_mmBlowThrough_poolLosesOnlyWhatTheBookCannotPay() public {
         _goLivePool();
         venue.setMmValue(0);
         venue.setIfEquity(5_000e6); // 20k of the IF paid out on top of the 75k MM
         uint256 id = _poolMark();
-        vm.expectEmit(true, false, false, true, address(book));
-        emit Book.InsuranceWrittenOff(BOOK_ID, 20_000e6);
+        vm.expectEmit(true, false, false, false, address(book));
+        emit Book.InsuranceMarked(BOOK_ID, 25_000e6, 5_000e6, 0, false);
         book.applyMark(id);
         (uint256 s, uint256 j) = book.trancheNav();
         assertEq(s + j, 0, "the tranches are wiped first");
         (uint256 debt, uint256 value,) = _debt();
-        assertEq(debt, 5_000e6, "written down to all the book holds");
-        assertEq(value, 5_000e6);
+        assertEq(debt, 25_000e6, "still owed: the shortfall is provisional");
+        assertEq(value, 5_000e6, "the pool's claim: all the book holds");
         assertEq(pool.bookPosition(BOOK_ID).claim, 5_000e6);
         assertEq(pool.firstLossAssets(), POOL_FIRST_LOSS - 20_000e6, "the shortfall, first-loss slice first");
     }
 
-    /// @notice Owner ruling N-1: once the book is exhausted the shortfall is the pool's for good; a later refill is
-    ///         book value.
-    function test_writeDownAtExhaustion_isFinal() public {
+    /// @notice Review N2-2: a shortfall taken on a mark value is provisional. A dip, then a recovery: the pool is restored
+    ///         before the tranches gain, so a sponsor cannot time a dip to move pool capital to the tranches.
+    function test_N2_2_dipThenRecovery_poolRestoredBeforeTheTranches() public {
         _goLivePool();
         venue.setMmValue(0);
-        venue.setIfEquity(5_000e6);
+        venue.setIfEquity(5_000e6); // the dip: the book holds 5k for its 25k debt
         _applyPoolMark();
-        venue.setIfEquity(27_000e6); // the IF refilled (liquidation fees)
+        assertEq(pool.firstLossAssets(), POOL_FIRST_LOSS - 20_000e6, "the pool's share price shows the loss");
+        assertEq(pool.bookPosition(BOOK_ID).claim, 5_000e6);
+        venue.setMmValue(30_000e6); // the MM recovers 30k (unrealized dip reversed)
         _applyPoolMark();
-        (uint256 debt,,) = _debt();
-        assertEq(debt, 5_000e6);
-        assertEq(pool.firstLossAssets(), POOL_FIRST_LOSS - 20_000e6, "the pool's loss stays");
+        (uint256 debt, uint256 value,) = _debt();
+        assertEq(debt, 25_000e6);
+        assertEq(value, 25_000e6, "the pool's claim restored first");
+        assertEq(pool.firstLossAssets(), POOL_FIRST_LOSS, "the pool's loss reversed");
         (uint256 s, uint256 j) = book.trancheNav();
-        assertEq(s + j, 22_000e6, "the refill above the written-down debt is tranche value");
+        assertEq(s + j, 10_000e6, "only what is above the debt is tranche value");
+        (,,,, bool closed) = book.insuranceDebt();
+        assertFalse(closed);
+    }
+
+    /// @notice Review N2-1: a due repayment never takes the Backstop cover Senior holds. Cover received (the MM's loss),
+    ///         then the IF recall makes the debt due (the pool's claim is still 25k from the last mark), then wind-down
+    ///         bad debt drains the IF: the pool receives no Backstop money, then or at retirement.
+    function test_N2_1_dueRepayment_neverPaysThePoolBackstopMoney() public {
+        _goLivePool();
+        usdc.mint(address(backstop), 1_000_000e6);
+        uint256 bal = usdc.balanceOf(address(backstop));
+        venue.setMmValue(0); // the MM lost its 75k: Senior's 52.5k covered by the Backstop; the IF is intact
+        _applyPoolMark();
+        uint256 cover = bal - usdc.balanceOf(address(backstop));
+        assertEq(cover, 52_500e6);
+        (, uint256 value,) = _debt();
+        assertEq(value, 25_000e6);
+        charterC.retire(BOOK_ID);
+        (uint256 poolCashBefore,,,,) = pool.ledger();
+        vm.prank(keeper);
+        vault.recall(BRTypes.ACCOUNT_IF, 1_000e6); // due; 1k of the IF back
+        venue.setIfEquity(0); // wind-down bad debt drains the rest of the IF
+        book.fundClaims(); // the vault holds the 52.5k cover + 1k of the book's own
+        (uint256 poolCash,,,,) = pool.ledger();
+        assertEq(poolCash - poolCashBefore, 1_000e6, "only the book's own cash repaid, not the cover");
+        assertEq(vault.idle(), cover, "the Backstop cover stays with Senior");
+        _applyPoolMark(); // deployed 0
+        book.finalizeRetirement();
+        (poolCash,,,,) = pool.ledger();
+        assertEq(poolCash - poolCashBefore, 1_000e6, "no Backstop money reached the pool, even at retirement");
+        assertEq(pool.bookPosition(BOOK_ID).allocation, 24_000e6, "the IF lost beyond the book's capital: the pool's");
+        assertEq(usdc.balanceOf(address(backstop)), bal - cover, "the Backstop paid only the MM loss");
+        (uint256 s,) = book.trancheNav();
+        assertEq(s, cover, "Senior keeps its cover");
     }
 
     // ------------------------------------------------------------------ owner ruling N-1: no Backstop for the debt
@@ -174,8 +211,9 @@ contract PoolBookTest is PoolBookFixture {
         }
         (uint256 s, uint256 j) = book.trancheNav();
         assertEq(s + j, 0, "the tranches absorbed it");
-        (uint256 debt,,) = _debt();
-        assertEq(debt, 10_000e6, "written down to the book's own 10k");
+        (uint256 debt, uint256 value,) = _debt();
+        assertEq(debt, 25_000e6, "owed until retirement");
+        assertEq(value, 10_000e6, "the pool's claim: the book's own 10k");
         assertEq(pool.bookPosition(BOOK_ID).claim, 10_000e6);
         (uint256 bsDebt,) = book.backstopDebt();
         assertEq(bsDebt, 0);
@@ -301,14 +339,11 @@ contract PoolBookTest is PoolBookFixture {
         vm.expectEmit(true, false, false, true, address(book));
         emit Book.InsuranceMarkFailed(BOOK_ID, 5_000e6, false);
         book.applyMark(id);
-        (uint256 debt, uint256 value,) = _debt();
-        assertEq(debt, 5_000e6, "the book wrote its debt down");
-        assertEq(value, 25_000e6, "the pool's view is unchanged until it accepts a mark");
-        assertEq(pool.bookPosition(BOOK_ID).claim, 25_000e6);
+        (, uint256 value,) = _debt();
+        assertEq(value, 5_000e6, "the book nets its claim");
+        assertEq(pool.bookPosition(BOOK_ID).claim, 25_000e6, "the pool's view is unchanged until it accepts a mark");
         vm.clearMockedCalls();
         _applyPoolMark();
-        (, value,) = _debt();
-        assertEq(value, 5_000e6);
         assertEq(pool.bookPosition(BOOK_ID).claim, 5_000e6);
     }
 
@@ -485,10 +520,9 @@ contract PoolBookTest is PoolBookFixture {
         vault.recall(BRTypes.ACCOUNT_IF, 1); // the IF recall starts: debt due
         venue.setIfEquity(0);
         venue.setMmValue(0); // everything lost
-        uint256 id = _poolMark();
+        _applyPoolMark(); // exhausted: the pool's claim is the 1 unit recalled (repaid), the rest provisional
         vm.expectEmit(true, false, false, true, address(book));
-        emit Book.InsuranceWrittenOff(BOOK_ID, 25_000e6 - 1); // exhausted at this mark: the 1 unit recalled is all
-        book.applyMark(id);
+        emit Book.InsuranceWrittenOff(BOOK_ID, 25_000e6 - 1); // final only at retirement
         book.finalizeRetirement();
         (uint256 debt,,) = _debt();
         assertEq(debt, 0);

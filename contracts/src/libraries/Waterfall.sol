@@ -400,14 +400,15 @@ library Waterfall {
         rest = gross - premium;
     }
 
-    /// @notice The insurance debt at a mark (owner ruling N-1: Backstop money never goes to the pool). The book's own
-    ///         capital is vault idle + deployed value minus the Backstop money in it (`backstopMoney`: cover still held by
-    ///         Senior + a repayment owed to the Backstop); a debt above it is written down to it, the shortfall being the
-    ///         pool's loss (the book is exhausted). Otherwise the debt is unchanged.
-    function poolDebtAtMark(uint256 debt, uint256 vaultIdle, uint256 deployedValueUsd, uint256 backstopMoney)
+    /// @notice The pool's claim on a book at a mark (owner rulings N-1, N2-2): the debt, capped by the book's own
+    ///         capital, i.e. vault idle + deployed value minus the Backstop money in it (`backstopMoney`: cover still held
+    ///         by Senior + a repayment owed to the Backstop). Below the debt only while the book is exhausted: that
+    ///         shortfall is a provisional pool loss, restored first by later marks, final only at retirement. Backstop
+    ///         money is never part of it.
+    function poolClaimAtMark(uint256 debt, uint256 vaultIdle, uint256 deployedValueUsd, uint256 backstopMoney)
         internal
         pure
-        returns (uint256 debtAfter, uint256 writeOff)
+        returns (uint256 claim, uint256 shortfall)
     {
         uint256 assets = vaultIdle + deployedValueUsd;
         uint256 own = assets > backstopMoney ? assets - backstopMoney : 0;
@@ -418,7 +419,7 @@ library Waterfall {
     /// @notice The NAV that caps Backstop cover for a pool-funded book (owner ruling N-1: the Backstop never covers the
     ///         insurance debt): the mark NAV with the IF draw (debt - IF equity; the IF equity capped at the deployed
     ///         value) added back, i.e. the NAV the losses OTHER than the insurance debt leave. `liabilities` includes the
-    ///         debt. Cover at a mark is at most what applyMarkPnl covers at this NAV.
+    ///         claim netted (`debt` here is that claim). Cover at a mark is at most what applyMarkPnl covers at this NAV.
     function poolCoverNav(
         uint256 vaultIdle,
         uint256 liabilities,

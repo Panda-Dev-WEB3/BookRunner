@@ -83,7 +83,8 @@ Fee flow: venue/engine → RevenueRouter.distribute → [pool-funded book: premi
 Marks:    mark service → MarkRegistry.commit(EIP-712) → Book.applyMark → losses J→S→Backstop, redemptions settle
 IF:       InsurancePool (ERC-4626, depositors + treasury first-loss slice) ──allocate at closeWindow──► book vault → venue IF
           the book owes the IF back as a SENIOR DEBT netted from NAV: an IF draw is a book loss (J → S, never the
-          Backstop); an exhausted book's debt is written down (the pool's loss); each mark reports the debt → pool.markBook
+          Backstop); the pool's claim = the debt capped by the book's own capital (a provisional loss while exhausted,
+          final at retirement); each mark reports it → pool.markBook
 ```
 
 Per book, **bookId == charterId**.
@@ -243,21 +244,26 @@ Subscription --closeWindow ok--> Live --retire--> Retiring --finalizeRetirement-
   backstopPayable + debt`) at the same signed snapshot that values the IF in the mark's `deployedValueUsd` (the mark
   service is unchanged; no live venue read, review I-3). Whatever draws the IF — traders' bad debt, or the MM's losses
   paid from the IF once its own capital is gone — therefore lowers NAV and is absorbed by Junior then Senior.
-  **[owner ruling N-1] Backstop money never goes to the pool.** (1) At each mark, before valuing, the debt is written
-  down to the book's own capital — vault idle + deployed value minus the Backstop money in the book (cover still held by
-  Senior, `min(backstopDebt, S)`, plus a repayment owed to the Backstop) (`Waterfall.poolDebtAtMark`): the shortfall of
-  an exhausted book is the pool's loss for good (`InsuranceWrittenOff`), so Backstop cash is never netted against the
-  debt. (2) Backstop cover is capped at what `applyMarkPnl` would cover at the NAV with the mark's IF draw added back
+  **[owner ruling N-1] Backstop money never goes to the pool.** (1) At each mark, before valuing, the pool's claim is
+  set to the debt capped by the book's own capital — vault idle + deployed value minus the Backstop money in the book
+  (cover still held by Senior, `min(backstopDebt, S)`, plus a repayment owed to the Backstop)
+  (`Waterfall.poolClaimAtMark`) — and NAV nets that claim, so Backstop cash is never netted against the debt. **[review
+  N2-2]** The shortfall of an exhausted book is provisional: the pool's share price shows it at once (markBook), a later
+  mark with more own capital restores the claim first, before any tranche gain (so a dip timed by the sponsor moves
+  nothing to the tranches), and it is written off for good only at `finalizeRetirement` (`InsuranceWrittenOff`); the
+  nominal debt stays owed until then. **[review N2-1]** A due repayment (`fundClaims`) never uses the Backstop money in
+  the vault: it is capped at idle minus that money, in wind-down too. (2) Backstop cover is capped at what `applyMarkPnl` would cover at the NAV with the mark's IF draw added back
   (`Waterfall.poolCoverNav`, from the signed `MarkInput.insuranceEquityUsd`, the IF equity inside `deployedValueUsd`;
   EIP-712 `Mark` gains that field): Senior keeps normal cover for losses other than the insurance debt (e.g. the MM's
   own losses) and none, at any mark or cumulatively, for the insurance debt; a mark without the field (0) treats the
-  whole debt as drawn (no cover for it). After each mark the book reports its debt to the pool (`pool.markBook`, never
+  whole debt as drawn (no cover for it). After each mark the book reports the pool's claim (`pool.markBook`, never
   blocking), which also stamps the book for the pool's epoch gate. An IF recall (vault, only once not Live)
   first calls `book.onInsuranceRecall()`: the debt is **due** — part of `unfundedClaims()` (cash reserved) and repaid
   from vault idle by `fundClaims` **before** tranche claims (`vault.repayInsurancePool`, never blocking). On Orderly the
   debt becomes due at the recall *request*; a request the venue cancels leaves it due, so the pool is then repaid from
   the book's other cash before the IF returns (safe for the pool). `finalizeRetirement` makes it due if no recall did,
-  writes the debt down to its own capital (Backstop money excluded), repays it, and sends the final mark. A failed final
+  values the claim on its own capital (Backstop money excluded), repays it, writes the rest of the debt off for good,
+  and sends the final mark. A failed final
   mark emits `InsuranceMarkFailed` and `settleInsurance()` (anyone, Retired) retries the repayment and the mark. A book with `ifFromPool == false` (and every book stored before: the two new charter fields share
   the slot of the fee fields, so they read false / 0) works exactly as before.
 - `applyMark(markId)` (anyone): mark must be for this book, not applied, newer than the last applied,
@@ -617,10 +623,11 @@ the premium; sponsors raise only the MM inventory.
   (100..10000), `bufferBps` 2000 (≤ 9000), `firstLossTargetBps` 1000 (≤ 5000), `cooldown` 7 days (≤ 30 days),
   `epochLength` 7 days (1..30 days), `processGrace` 1 day (1 h..7 days).
 - **Backstop (owner ruling N-1).** Backstop money never funds the pool: Junior and Senior absorb the insurance debt,
-  the Backstop covers only Senior losses other than it (§2.5), and once the book's own capital is exhausted the rest of
-  the debt is the pool's loss — the tail risk the premium pays for.
+  the Backstop covers only Senior losses other than it (§2.5), Backstop cash is neither netted against the debt nor used
+  to repay it, and once the book's own capital is exhausted the rest of the debt is the pool's loss — provisional until
+  retirement (restored first if the book recovers), final then: the tail risk the premium pays for.
 - **Accepted / deferred (re-audit focus).** Losses on the IF after its recall started are the book's (the debt is due).
-  A write-down at exhaustion is final (a later IF refill is tranche value). The IF surplus above the debt is book value. Premium is
+  Between marks the pool's claim follows the last mark only. The IF surplus above the debt is book value. Premium is
   charged on every distribution of a pool-funded book, also after the IF was returned. No reduction / re-allocation of
   a live book's IF exists (exits beyond the buffer wait for repayments or retirements; deferred). The premium is cash in
   the pool at once: a deposit queued before a distribution shares it (bounded by the epoch queue).

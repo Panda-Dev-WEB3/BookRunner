@@ -19,7 +19,7 @@ import {Waterfall} from "../../src/libraries/Waterfall.sol";
 ///            seniorRestored, backstopRepaid, seniorImpairment', backstopDebt'] (audit L-1)
 ///   insurance pool (2026-10): premium [gross, charterPremiumBps, floorBps, expensesRequested, expenseCapBps, carryBps,
 ///            seniorHurdleBps, seniorSupply, juniorSupply, effectivePremiumBps, premium, expenses, carry, senior, junior];
-///            poolDebt [debt, vaultIdle, unfundedClaims, deployed, backstopMoney, debtAfter, writeOff, nav]; poolMark
+///            poolDebt [debt, vaultIdle, unfundedClaims, deployed, backstopMoney, claim, shortfall, nav]; poolMark
 ///            (scripts/gen-vectors.ts: Backstop cover never pays the insurance debt); poolWindow
 ///            [ifTarget, mm, seniorCapBps, seniorCommitted, juniorCommitted, sponsorJuniorCommitted, ok, reason,
 ///            seniorAllocated, juniorAllocated, ifRaised, mmAmount, idle]. poolBook rows: test/pool/PoolBookParity.t.sol.
@@ -200,9 +200,9 @@ contract WaterfallParityTest is Test {
             uint256[] memory v = _row("poolDebt", i);
             assertEq(v.length, 8, "poolDebt row width");
             string memory tag = string.concat("poolDebt[", vm.toString(i), "]");
-            (uint256 debt, uint256 writeOff) = Waterfall.poolDebtAtMark(v[0], v[1], v[3], v[4]);
-            assertEq(debt, v[5], string.concat(tag, " debtAfter"));
-            assertEq(writeOff, v[6], string.concat(tag, " writeOff"));
+            (uint256 debt, uint256 writeOff) = Waterfall.poolClaimAtMark(v[0], v[1], v[3], v[4]);
+            assertEq(debt, v[5], string.concat(tag, " claim"));
+            assertEq(writeOff, v[6], string.concat(tag, " shortfall"));
             assertEq(debt + writeOff, v[0], string.concat(tag, " debt conserved"));
             // Book.applyMark: markedNavNet(idle, unfunded + debt, deployed)
             assertEq(Waterfall.markedNavNet(v[1], v[2] + debt, v[3]), v[7], string.concat(tag, " nav"));
@@ -224,9 +224,9 @@ contract WaterfallParityTest is Test {
             seniorNav: v[0], juniorNav: v[1], seniorImpairment: v[2], perfIndex: v[3], highWater: v[4], backstopDebt: v[5]
         });
         uint256 backstopMoney = (v[5] < v[0] ? v[5] : v[0]) + v[6];
-        (uint256 debt, uint256 writeOff) = Waterfall.poolDebtAtMark(v[11], v[8], v[9], backstopMoney);
-        assertEq(debt, v[14], string.concat(tag, " debtAfter"));
-        assertEq(writeOff, v[15], string.concat(tag, " writeOff"));
+        (uint256 debt, uint256 writeOff) = Waterfall.poolClaimAtMark(v[11], v[8], v[9], backstopMoney);
+        assertEq(debt, v[14], string.concat(tag, " claim"));
+        assertEq(writeOff, v[15], string.concat(tag, " shortfall"));
         uint256 liabilities = v[7] + v[6] + debt;
         uint256 nav = Waterfall.markedNavNet(v[8], liabilities, v[9]);
         assertEq(nav, v[16], string.concat(tag, " nav"));
