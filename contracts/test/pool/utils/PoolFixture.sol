@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 import {BRTypes} from "../../../src/interfaces/BRTypes.sol";
+import {IInsurancePool} from "../../../src/interfaces/IInsurancePool.sol";
 import {InsurancePool} from "../../../src/InsurancePool.sol";
 import {MockERC20} from "../../../src/mocks/MockERC20.sol";
 import {MockBookConfig} from "../../book/utils/BookMocks.sol";
@@ -15,6 +16,7 @@ import {CoreMockFactory} from "../../core/utils/CoreMocks.sol";
 abstract contract PoolFixture is Test {
     uint256 internal constant U = 1e6; // 1 USDC
     uint256 internal constant EPOCH = 7 days;
+    bytes32 internal constant MKT = bytes32("NVDA");
 
     MockERC20 internal usdc;
     MockBookConfig internal cfg;
@@ -62,12 +64,46 @@ abstract contract PoolFixture is Test {
         factory.register(id, c);
     }
 
-    function _deposit(address who, uint256 assets) internal returns (uint256 shares) {
+    // ---------------------------------------------------------------- epochs
+
+    /// @dev Warps to the end of the oldest unprocessed epoch (if needed), has every active book mark at its current
+    ///      claim (fresh), and processes it.
+    function _process() internal returns (uint64 e) {
+        (, uint64 ends,,,) = pool.queue();
+        if (block.timestamp < ends) vm.warp(ends);
+        _markAllFresh();
+        e = pool.processEpoch();
+    }
+
+    function _procEpoch() internal view returns (uint64 e) {
+        (e,,,,) = pool.queue();
+    }
+
+    function _markAllFresh() internal {
+        uint256[] memory ids = pool.activeBooks();
+        for (uint256 i; i < ids.length; ++i) {
+            IInsurancePool.BookPosition memory p = pool.bookPosition(ids[i]);
+            vm.prank(p.book);
+            pool.markBook(ids[i], p.claim, uint64(block.timestamp), false);
+        }
+    }
+
+    function _requestDeposit(address who, uint256 assets) internal returns (uint256 id) {
         usdc.mint(who, assets);
         vm.startPrank(who);
         usdc.approve(address(pool), assets);
-        shares = pool.deposit(assets, who);
+        id = pool.requestDeposit(assets);
         vm.stopPrank();
+    }
+
+    /// @dev Queued deposit, processed at the next epoch end, claimed: returns the shares.
+    function _deposit(address who, uint256 assets) internal returns (uint256 shares) {
+        uint256 id = _requestDeposit(who, assets);
+        uint64 e = pool.depositInfo(id).epoch;
+        for (uint256 i; i < 16 && !pool.epochInfo(e).processed; ++i) {
+            _process();
+        }
+        shares = pool.claimDeposit(id);
     }
 
     function _seedFirstLoss(uint256 assets) internal {
@@ -79,9 +115,13 @@ abstract contract PoolFixture is Test {
     }
 
     function _allocate(uint256 id, uint256 amount) internal {
+        _allocate(id, amount, MKT);
+    }
+
+    function _allocate(uint256 id, uint256 amount, bytes32 market) internal {
         (address book,,) = _bookAddrs(id);
         vm.prank(book);
-        pool.allocate(id, amount);
+        pool.allocate(id, amount, market);
     }
 
     function _premium(uint256 id, uint256 amount) internal {
@@ -101,16 +141,11 @@ abstract contract PoolFixture is Test {
         vm.stopPrank();
     }
 
-    function _loss(uint256 id, uint256 amount) internal {
+    /// @dev The book reports `value` (what it can repay) at a mark now.
+    function _markValue(uint256 id, uint256 value) internal {
         (address book,,) = _bookAddrs(id);
         vm.prank(book);
-        pool.reportLoss(id, amount);
-    }
-
-    function _recovery(uint256 id, uint256 amount) internal {
-        (address book,,) = _bookAddrs(id);
-        vm.prank(book);
-        pool.reportRecovery(id, amount);
+        pool.markBook(id, value, uint64(block.timestamp), false);
     }
 
     function _bookAddrs(uint256 id) internal view returns (address book, address vault, address router) {
@@ -123,21 +158,24 @@ abstract contract PoolFixture is Test {
         id = pool.requestWithdraw(shares);
     }
 
-    /// @dev Warps past the end of the epoch `requestId` waits for.
-    function _warpPastEpochOf(uint256 requestId) internal {
-        InsurancePool.Request memory r = pool.requestInfo(requestId);
-        (uint64 e, uint64 ends,,) = pool.queue();
-        (,,,,, uint32 len) = pool.params();
-        uint256 target = uint256(ends) + uint256(r.epoch - e) * len;
-        if (block.timestamp < target) vm.warp(target);
+    /// @dev Processes epochs until the one `requestId` waits for is processed.
+    function _processThrough(uint256 requestId) internal {
+        uint64 target = pool.requestInfo(requestId).epoch;
+        for (uint256 i; i < 16; ++i) {
+            (uint64 e,,,,) = pool.queue();
+            if (e > target) return;
+            _process();
+        }
     }
 
     /// @dev Pool accounting identity: assets == free + claims, depositors + slice == assets, cash backed.
     function _checkLedger() internal view {
-        (uint256 cash, uint256 reserved,,) = pool.ledger();
+        (uint256 cash, uint256 reserved, uint256 pendingDeposits,,) = pool.ledger();
         assertEq(pool.poolAssets(), cash - reserved + pool.claimsTotal(), "assets == free + claims");
         assertEq(pool.totalAssets() + pool.firstLossAssets(), pool.poolAssets(), "depositors + slice == assets");
-        assertGe(usdc.balanceOf(address(pool)), cash, "cash backed by balance");
+        assertGe(usdc.balanceOf(address(pool)), cash + pendingDeposits, "cash and queued deposits backed");
         assertGe(cash, reserved, "reserved <= cash");
+        (,,, uint256 pendingShares,) = pool.queue();
+        assertEq(pool.balanceOf(address(pool)), pendingShares + pool.depositSharesUnclaimed(), "escrow == queue");
     }
 }
