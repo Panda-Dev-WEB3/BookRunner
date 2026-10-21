@@ -760,7 +760,10 @@ Three studio-sponsored books (sponsor = anvil #7, committee #8–#10, agent oper
 Insurance pool (2026-10): with `contracts.insurancePool` in the record the launch charters the books with `ifFromPool`
 (the window raises only the MM inventory), sets demo pool parameters as the deployer-timelock (1-day epochs, 1 h cooldown
 and grace), seeds the treasury's first-loss slice to fund every IF at window close (`scripts/launch-plan.ts`
-`poolSeedUsd`) and, on the mock venue, queues two allocators' deposits for the first epoch.
+`poolSeedUsd`) and, on the mock venue, queues two allocators' deposits. The pending 1-day epoch length applies
+only once the pool's first epoch (on the weekly Unix grid of `initialize`) has ended with an idle queue, so the launch
+defers those deposits until then (re-run the idempotent launch after it; `testDepositTiming`); a deposit made earlier,
+e.g. from the app, waits for the weekly end.
 
 Senior cap 7000, Senior share of fee flow 6000, window 10 min, junior notice 15 min (devnet),
 per-wallet cap 250k. Demo prices (WAD, devnet only): NVDA 190, TSLA 440, AAPL 255, MSFT 520,

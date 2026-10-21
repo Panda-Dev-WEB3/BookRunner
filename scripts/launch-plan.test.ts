@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { COMMIT_SHARES, LIVE_SIZES, MOCK_SIZES, commitPlan, launchBooks, launchSizes, poolSeedUsd, raiseOf, settlementNeeds, transferPlan } from "./launch-plan";
+import { COMMIT_SHARES, LIVE_SIZES, MOCK_SIZES, commitPlan, launchBooks, launchSizes, poolSeedUsd, raiseOf, settlementNeeds, testDepositTiming, transferPlan } from "./launch-plan";
 
 const testnetMin = (v: 0 | 1) => (v === 0 ? 101 : 10_000);
 
@@ -83,4 +83,27 @@ describe("insurance pool launch (2026-10)", () => {
     expect(poolSeedUsd([{ name: "NVDA", ...LIVE_SIZES, ifFromPool: true }, { name: "TSLA", ...LIVE_SIZES, ifFromPool: true }])).toBe(550);
     expect(poolSeedUsd(books(false))).toBe(0);
   });
+});
+
+describe("test deposit timing (review I-4: the pending 1-day epoch applies only once the weekly first epoch ended idle)", () => {
+  const base = { nowSec: 1_000, epochLength: 604_800, pendingEpochLength: 86_400, procEndsAt: 5_000, queueIdle: true, demoEpochLength: 86_400 };
+  test("before the first epoch ends: deferred to its end", () => {
+    expect(testDepositTiming(base)).toEqual({ deposit: false, after: 5_000 });
+    expect(testDepositTiming({ ...base, queueIdle: false, nowSec: 6_000 })).toEqual({ deposit: false, after: 5_000 });
+  });
+  test("ended with an idle queue (the deposit applies the 1-day length), or the length is already in force", () => {
+    expect(testDepositTiming({ ...base, nowSec: 5_000 })).toEqual({ deposit: true });
+    expect(testDepositTiming({ ...base, epochLength: 86_400, pendingEpochLength: 0 })).toEqual({ deposit: true });
+    // demo parameters off (LAUNCH_POOL_PARAMS=0): the default weekly grid is intended
+    expect(testDepositTiming({ ...base, pendingEpochLength: 0 })).toEqual({ deposit: true });
+  });
+});
+
+test("review m-1: two pool-funded books on one underlying share its 30% cap", () => {
+  const two = [
+    { name: "NVDA" as const, ifUsd: 30_000, mmUsd: 1, maxInventoryUsd: 1, ifFromPool: true, market: "NVDA" },
+    { name: "TSLA" as const, ifUsd: 30_000, mmUsd: 1, maxInventoryUsd: 1, ifFromPool: true, market: "NVDA" },
+  ];
+  // max(60,000 / 0.3, 60,000 / 0.8) = 200,000, +10%
+  expect(poolSeedUsd(two)).toBe(220_000);
 });

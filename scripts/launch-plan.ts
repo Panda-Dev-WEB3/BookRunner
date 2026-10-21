@@ -49,6 +49,8 @@ export interface BookSize {
   maxInventoryUsd: number;
   /** 2026-10: the InsurancePool funds the IF (charter.ifFromPool): the window raises only the MM inventory */
   ifFromPool?: boolean;
+  /** the book's underlying for the per-market cap (books on one underlying share it); default: the book name */
+  market?: string;
 }
 
 /** Whole USD the subscription window raises: the MM inventory, plus the IF when the tranches fund it. */
@@ -71,7 +73,10 @@ export function poolSeedUsd(sizes: BookSize[], o: { marketCapBps?: number; buffe
   // integer bps arithmetic (whole USD): no float rounding in the seed
   const capBps = o.marketCapBps ?? POOL_DEFAULTS.marketCapBps;
   const freeBps = 10_000 - (o.bufferBps ?? POOL_DEFAULTS.bufferBps);
-  const perMarket = Math.ceil((Math.max(...pooled.map((s) => s.ifUsd)) * 10_000) / capBps);
+  // the cap is per underlying, summed over its books (review m-1)
+  const byMarket = new Map<string, number>();
+  for (const s of pooled) byMarket.set(s.market ?? s.name, (byMarket.get(s.market ?? s.name) ?? 0) + s.ifUsd);
+  const perMarket = Math.ceil((Math.max(...byMarket.values()) * 10_000) / capBps);
   const total = Math.ceil((pooled.reduce((a, s) => a + s.ifUsd, 0) * 10_000) / freeBps);
   return Math.ceil((Math.max(perMarket, total) * (10_000 + (o.marginBps ?? 1000))) / 10_000);
 }
@@ -81,6 +86,21 @@ export const POOL_TEST_DEPOSITS: ReadonlyArray<{ who: "a0" | "a1"; usd: number }
   { who: "a0", usd: 60_000 },
   { who: "a1", usd: 40_000 },
 ];
+
+/**
+ * When the launch may queue the test deposits (review I-4). InsurancePool.setParam("epochLength") only records a PENDING
+ * length; the pool applies it in _skipIdleEpochs, i.e. on the first request (or processing) made while the queue is
+ * idle AND its oldest epoch has ended. The pool's first epoch ends on the weekly Unix grid set at initialize, so a deposit
+ * queued before that lands in the weekly epoch. So the launch deposits only once the demo length is in force, or once
+ * the first epoch has ended with an idle queue (that deposit then applies the pending length itself and lands in a
+ * 1-day epoch); otherwise it defers them until `after` (re-run the launch then: it is idempotent).
+ */
+export function testDepositTiming(p: { nowSec: number; epochLength: number; pendingEpochLength: number; procEndsAt: number; queueIdle: boolean; demoEpochLength: number }): { deposit: true } | { deposit: false; after: number } {
+  if (p.epochLength === p.demoEpochLength) return { deposit: true };
+  if (p.pendingEpochLength !== p.demoEpochLength) return { deposit: true }; // demo params off: the default grid is meant
+  if (p.queueIdle && p.procEndsAt <= p.nowSec) return { deposit: true };
+  return { deposit: false, after: p.procEndsAt };
+}
 
 /** Devnet / testnet pool parameters set by the launch (the deployer is config.timelock() there): faster demos. */
 export const POOL_DEMO_PARAMS = { epochLength: 86_400, cooldown: 3_600, processGrace: 3_600 } as const;

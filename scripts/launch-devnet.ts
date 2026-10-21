@@ -70,6 +70,7 @@ import {
   poolSeedUsd,
   raiseOf,
   settlementNeeds,
+  testDepositTiming,
   transferPlan,
 } from "./launch-plan";
 
@@ -458,6 +459,27 @@ async function setupPool(d: Deployment, sizes: BookSize[], live: boolean) {
 async function poolTestDeposits(d: Deployment) {
   const pool = d.contracts.insurancePool as Address;
   const who = { a0: acct.a0, a1: acct.a1 } as const;
+  // review I-4: never queue the demo deposits into the weekly first epoch (testDepositTiming)
+  const [p, q, ledger, block] = await Promise.all([
+    read<readonly [number, number, number, number, number, number, number, number]>(pool, insurancePoolAbi as Abi, "params"),
+    read<readonly [bigint, bigint, bigint, bigint, bigint]>(pool, insurancePoolAbi as Abi, "queue"),
+    read<readonly [bigint, bigint, bigint, bigint, bigint]>(pool, insurancePoolAbi as Abi, "ledger"),
+    pub.getBlock(),
+  ]);
+  const timing = testDepositTiming({
+    nowSec: Number(block.timestamp),
+    epochLength: Number(p[5]),
+    pendingEpochLength: Number(p[7]),
+    procEndsAt: Number(q[1]),
+    queueIdle: q[3] === 0n && ledger[2] === 0n,
+    demoEpochLength: POOL_DEMO_PARAMS.epochLength,
+  });
+  if (!timing.deposit) {
+    log(
+      `pool: test deposits deferred until the first (weekly-grid) epoch ends at ${new Date(timing.after * 1000).toISOString()}: the 1-day epoch applies from then; re-run bun scripts/launch-devnet.ts after it`,
+    );
+    return;
+  }
   // the pool has no deposit counter view: walk depositInfo(1..) until an unused id (bounded; a launch makes two)
   const owners = new Set<string>();
   for (let i = 1n; i <= 1_000n; i++) {
@@ -494,6 +516,11 @@ async function main() {
   const d = loadDeployment();
   if (d.books.length > 0 && d.launch?.complete !== false) {
     log(`already launched (${d.books.map((b) => b.name).join(", ")}) — registering missing desk keys only`);
+    // review I-4: the pool's test deposits were deferred until the 1-day epoch applies (idempotent)
+    const pa = d.contracts.insurancePool;
+    if (pa && !/^0x0{40}$/i.test(pa) && !liveVenueDeployment(d) && process.env.LAUNCH_IF_FROM_POOL !== "0") {
+      await poolTestDeposits(d).catch((err) => log(`pool test deposits: FAILED (${err instanceof Error ? err.message : String(err)})`));
+    }
     await ensureDeskKeys({ send: true, log: (m) => log(`desk keys: ${m}`) }).catch((err) => log(`desk keys: FAILED (${err instanceof Error ? err.message : String(err)}); run bun scripts/desk-keys.ts --send`));
     return;
   }
