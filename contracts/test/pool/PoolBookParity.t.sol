@@ -12,7 +12,7 @@ import {PoolBookFixture} from "./utils/PoolBookFixture.sol";
 ///   poolBook: [seniorCommitted, juniorCommitted, ifTarget, mmInventory, gross, expensesRequested, premiumBps (as
 ///              filed), ifLoss, mmLoss(0|1), mmPnlAbs, | seniorAllocated, juniorAllocated, premium, expenses, carry,
 ///              senior, junior, seniorCredit, juniorCredit, poolValue, nav, S', J'] (the IF is a senior debt: an IF draw
-///              is a book loss; the pool is owed min(debt, idle + deployed))
+///              is a book loss; an exhausted book's debt is written down to what it holds)
 contract PoolBookParityTest is PoolBookFixture {
     string internal json;
     uint256 internal rows;
@@ -29,8 +29,25 @@ contract PoolBookParityTest is PoolBookFixture {
         assertEq(rows, 32, "poolBook vector count");
     }
 
-    function test_parity_poolBook() public {
-        for (uint256 i = 0; i < rows; i++) {
+    /// @dev Four tests of 8 rows each (one test per row block keeps each under the test gas limit).
+    function test_parity_poolBook_0() public {
+        _rows(0, 8);
+    }
+
+    function test_parity_poolBook_1() public {
+        _rows(8, 16);
+    }
+
+    function test_parity_poolBook_2() public {
+        _rows(16, 24);
+    }
+
+    function test_parity_poolBook_3() public {
+        _rows(24, rows);
+    }
+
+    function _rows(uint256 from, uint256 to) internal {
+        for (uint256 i = from; i < to; i++) {
             vm.revertToState(snap);
             uint256[] memory v = vm.parseJsonUintArray(json, string.concat(".poolBook[", vm.toString(i), "]"));
             assertEq(v.length, 23, "poolBook row width");
@@ -76,7 +93,7 @@ contract PoolBookParityTest is PoolBookFixture {
         venue.setMmValue(v[8] == 1 ? mm - v[9] : mm + v[9]);
         _applyPoolMark();
         (, uint256 debt, uint256 value,,) = book.insuranceDebt();
-        assertEq(debt, v[2], string.concat(tag, " debt"));
+        assertEq(debt, v[19], string.concat(tag, " debt (written down when exhausted)"));
         assertEq(value, v[19], string.concat(tag, " poolValue"));
         assertEq(pool.bookPosition(BOOK_ID).claim, v[19], string.concat(tag, " pool claim"));
         Book.LastMark memory lm = book.lastMarkSummary();

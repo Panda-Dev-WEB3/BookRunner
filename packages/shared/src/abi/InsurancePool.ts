@@ -2487,6 +2487,22 @@ export const insurancePoolAbi = [
   },
   {
     "type": "error",
+    "name": "EpochEnded",
+    "inputs": [
+      {
+        "name": "epoch",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "endedAt",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "EpochNotEnded",
     "inputs": [
       {

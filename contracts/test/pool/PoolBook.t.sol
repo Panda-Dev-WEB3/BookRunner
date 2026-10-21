@@ -120,34 +120,135 @@ contract PoolBookTest is PoolBookFixture {
     }
 
     /// @notice The MM blows through its capital and the venue pays winners from the IF: Junior, then Senior absorb it;
-    ///         the pool loses only the part the exhausted book cannot repay (first-loss slice first).
+    ///         the exhausted book's debt is written down to what it holds, the rest is the pool's loss (slice first).
     function test_mmBlowThrough_poolLosesOnlyWhatTheBookCannotPay() public {
         _goLivePool();
         venue.setMmValue(0);
         venue.setIfEquity(5_000e6); // 20k of the IF paid out on top of the 75k MM
-        _applyPoolMark();
+        uint256 id = _poolMark();
+        vm.expectEmit(true, false, false, true, address(book));
+        emit Book.InsuranceWrittenOff(BOOK_ID, 20_000e6);
+        book.applyMark(id);
         (uint256 s, uint256 j) = book.trancheNav();
         assertEq(s + j, 0, "the tranches are wiped first");
         (uint256 debt, uint256 value,) = _debt();
-        assertEq(debt, 25_000e6);
-        assertEq(value, 5_000e6, "all the book holds");
+        assertEq(debt, 5_000e6, "written down to all the book holds");
+        assertEq(value, 5_000e6);
         assertEq(pool.bookPosition(BOOK_ID).claim, 5_000e6);
         assertEq(pool.firstLossAssets(), POOL_FIRST_LOSS - 20_000e6, "the shortfall, first-loss slice first");
     }
 
-    /// @notice An IF refill reduces the shortfall first: the pool recovers before the tranches see any of it.
-    function test_refill_reducesTheShortfallFirst() public {
+    /// @notice Owner ruling N-1: once the book is exhausted the shortfall is the pool's for good; a later refill is
+    ///         book value.
+    function test_writeDownAtExhaustion_isFinal() public {
         _goLivePool();
         venue.setMmValue(0);
         venue.setIfEquity(5_000e6);
         _applyPoolMark();
-        venue.setIfEquity(27_000e6); // the IF refilled (liquidation fees): 2k above the debt
+        venue.setIfEquity(27_000e6); // the IF refilled (liquidation fees)
         _applyPoolMark();
-        (, uint256 value,) = _debt();
-        assertEq(value, 25_000e6, "the pool recovered first");
-        assertEq(pool.firstLossAssets(), POOL_FIRST_LOSS);
+        (uint256 debt,,) = _debt();
+        assertEq(debt, 5_000e6);
+        assertEq(pool.firstLossAssets(), POOL_FIRST_LOSS - 20_000e6, "the pool's loss stays");
         (uint256 s, uint256 j) = book.trancheNav();
-        assertEq(s + j, 2_000e6, "only the surplus above the debt is tranche value");
+        assertEq(s + j, 22_000e6, "the refill above the written-down debt is tranche value");
+    }
+
+    // ------------------------------------------------------------------ owner ruling N-1: no Backstop for the debt
+
+    /// @notice A book whose losses are all insurance debt (IF 25k > MM 10k): exhausted, its debt written down, and
+    ///         the Backstop pays nothing for it, over repeated marks.
+    function test_N1_exhaustedByInsuranceDebt_drawsNoBackstopCover_overRepeatedMarks() public {
+        BRTypes.Charter memory c = _poolCharter();
+        c.mmInventoryUsd = 10_000e6;
+        _deployPoolBook(c);
+        _subscribeDefault();
+        vm.warp(book.subscriptionEnds());
+        book.closeWindow(); // raises 10k: S 7k, J 3k
+        usdc.mint(address(backstop), 1_000_000e6);
+        uint256 bal = usdc.balanceOf(address(backstop));
+        venue.setIfEquity(0); // traders' bad debt drew the whole 25k IF
+        for (uint256 i; i < 4; ++i) {
+            _applyPoolMark();
+            assertEq(usdc.balanceOf(address(backstop)), bal, "the Backstop pays nothing for the insurance debt");
+        }
+        (uint256 s, uint256 j) = book.trancheNav();
+        assertEq(s + j, 0, "the tranches absorbed it");
+        (uint256 debt,,) = _debt();
+        assertEq(debt, 10_000e6, "written down to the book's own 10k");
+        assertEq(pool.bookPosition(BOOK_ID).claim, 10_000e6);
+        (uint256 bsDebt,) = book.backstopDebt();
+        assertEq(bsDebt, 0);
+    }
+
+    /// @notice Pool-debt marks leave the Backstop untouched: the IF draw beyond Junior impairs Senior, uncovered.
+    function test_N1_poolDebtMarks_leaveTheBackstopBalanceUnchanged() public {
+        _goLivePool();
+        usdc.mint(address(backstop), 1_000_000e6);
+        uint256 bal = usdc.balanceOf(address(backstop));
+        venue.setIfEquity(0); // 25k drawn: Junior 22.5k gone, Senior impaired 2.5k
+        for (uint256 i; i < 3; ++i) {
+            _applyPoolMark();
+        }
+        assertEq(usdc.balanceOf(address(backstop)), bal);
+        assertEq(book.seniorImpairment(), 2_500e6, "Senior keeps its insurance-debt loss");
+        (uint256 debt,,) = _debt();
+        assertEq(debt, 25_000e6, "the book is not exhausted: the pool is owed in full");
+    }
+
+    /// @notice Mixed: an MM loss is covered as before, the insurance debt is not.
+    function test_N1_mixed_mmLossCovered_insuranceDebtNot() public {
+        _goLivePool();
+        usdc.mint(address(backstop), 1_000_000e6);
+        uint256 bal = usdc.balanceOf(address(backstop));
+        venue.setMmValue(15_000e6); // the MM lost 60k
+        venue.setIfEquity(15_000e6); // bad debt drew 10k of the IF
+        _applyPoolMark();
+        assertEq(bal - usdc.balanceOf(address(backstop)), 37_500e6, "the Senior part of the MM loss, covered");
+        assertEq(book.seniorImpairment(), 10_000e6, "the IF draw stays Senior's");
+        (uint256 s, uint256 j) = book.trancheNav();
+        assertEq(s, 42_500e6);
+        assertEq(j, 0);
+        _applyPoolMark();
+        _applyPoolMark();
+        assertEq(bal - usdc.balanceOf(address(backstop)), 37_500e6, "never more, cumulatively");
+        (uint256 debt,,) = _debt();
+        assertEq(debt, 25_000e6, "the Backstop cash is never netted against the debt");
+        assertEq(pool.bookPosition(BOOK_ID).claim, 25_000e6);
+    }
+
+    /// @notice POOL-11 (owner ruling N-1), fuzzed: over repeated marks the Backstop pays exactly Senior's part of the
+    ///         MM loss and nothing of the IF draw, whatever their mix (exhausted books included).
+    function testFuzz_N1_backstopPaysOnlyTheNonInsuranceSeniorLoss(uint256 mmLeft, uint256 ifLeft) public {
+        _goLivePool();
+        mmLeft = bound(mmLeft, 0, 75_000e6);
+        ifLeft = bound(ifLeft, 0, 25_000e6);
+        usdc.mint(address(backstop), 1_000_000e6);
+        uint256 bal = usdc.balanceOf(address(backstop));
+        venue.setMmValue(mmLeft);
+        venue.setIfEquity(ifLeft);
+        for (uint256 i; i < 3; ++i) {
+            _applyPoolMark();
+        }
+        uint256 mmLoss = 75_000e6 - mmLeft;
+        uint256 seniorMmLoss = mmLoss > 22_500e6 ? mmLoss - 22_500e6 : 0;
+        if (seniorMmLoss > 52_500e6) seniorMmLoss = 52_500e6;
+        assertEq(bal - usdc.balanceOf(address(backstop)), seniorMmLoss, "cover == Senior's MM loss, never the IF draw");
+    }
+
+    /// @notice An MM loss within its capital, IF intact: covered exactly as for a book funded the old way.
+    function test_N1_mmLossWithinCapital_coveredAsBefore() public {
+        _goLivePool();
+        usdc.mint(address(backstop), 1_000_000e6);
+        uint256 bal = usdc.balanceOf(address(backstop));
+        venue.setMmValue(0); // the MM lost all 75k, the IF is intact
+        _applyPoolMark();
+        assertEq(bal - usdc.balanceOf(address(backstop)), 52_500e6, "all of Senior's loss, covered");
+        _applyPoolMark();
+        (uint256 s,) = book.trancheNav();
+        assertEq(s, 52_500e6, "Senior keeps the cover: it is never netted against the debt");
+        (uint256 debt,,) = _debt();
+        assertEq(debt, 25_000e6);
     }
 
     /// @notice Review I-3: NAV and the pool's value come from the mark's snapshot; an IF move between valuation and
@@ -200,12 +301,15 @@ contract PoolBookTest is PoolBookFixture {
         vm.expectEmit(true, false, false, true, address(book));
         emit Book.InsuranceMarkFailed(BOOK_ID, 5_000e6, false);
         book.applyMark(id);
-        (, uint256 value,) = _debt();
-        assertEq(value, 25_000e6, "unchanged until the pool accepts a mark");
+        (uint256 debt, uint256 value,) = _debt();
+        assertEq(debt, 5_000e6, "the book wrote its debt down");
+        assertEq(value, 25_000e6, "the pool's view is unchanged until it accepts a mark");
+        assertEq(pool.bookPosition(BOOK_ID).claim, 25_000e6);
         vm.clearMockedCalls();
         _applyPoolMark();
         (, value,) = _debt();
         assertEq(value, 5_000e6);
+        assertEq(pool.bookPosition(BOOK_ID).claim, 5_000e6);
     }
 
     /// @notice POOL-9: the pool's realized loss on a book <= max(0, IF draw - the book's own capital left).
@@ -381,9 +485,10 @@ contract PoolBookTest is PoolBookFixture {
         vault.recall(BRTypes.ACCOUNT_IF, 1); // the IF recall starts: debt due
         venue.setIfEquity(0);
         venue.setMmValue(0); // everything lost
-        _applyPoolMark();
+        uint256 id = _poolMark();
         vm.expectEmit(true, false, false, true, address(book));
-        emit Book.InsuranceWrittenOff(BOOK_ID, 25_000e6 - 1);
+        emit Book.InsuranceWrittenOff(BOOK_ID, 25_000e6 - 1); // exhausted at this mark: the 1 unit recalled is all
+        book.applyMark(id);
         book.finalizeRetirement();
         (uint256 debt,,) = _debt();
         assertEq(debt, 0);

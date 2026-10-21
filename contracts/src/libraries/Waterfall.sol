@@ -400,16 +400,34 @@ library Waterfall {
         rest = gross - premium;
     }
 
-    /// @notice What a pool-funded book can repay the pool at a mark: its senior debt, capped by vault idle + the mark's
-    ///         deployed value (the IF included). Below the debt only once the book is exhausted, i.e. the IF draw is
-    ///         larger than everything else the book holds; the NAV nets the full debt (markedNavNet with
-    ///         unfundedClaims + debt), so Junior, Senior and the backstop absorb the draw first.
-    function poolRecoverable(uint256 debt, uint256 vaultIdle, uint256 deployedValueUsd)
+    /// @notice The insurance debt at a mark (owner ruling N-1: Backstop money never goes to the pool). The book's own
+    ///         capital is vault idle + deployed value minus the Backstop money in it (`backstopMoney`: cover still held by
+    ///         Senior + a repayment owed to the Backstop); a debt above it is written down to it, the shortfall being the
+    ///         pool's loss (the book is exhausted). Otherwise the debt is unchanged.
+    function poolDebtAtMark(uint256 debt, uint256 vaultIdle, uint256 deployedValueUsd, uint256 backstopMoney)
         internal
         pure
-        returns (uint256)
+        returns (uint256 debtAfter, uint256 writeOff)
     {
         uint256 assets = vaultIdle + deployedValueUsd;
-        return assets < debt ? assets : debt;
+        uint256 own = assets > backstopMoney ? assets - backstopMoney : 0;
+        if (own >= debt) return (debt, 0);
+        return (own, debt - own);
+    }
+
+    /// @notice The NAV that caps Backstop cover for a pool-funded book (owner ruling N-1: the Backstop never covers the
+    ///         insurance debt): the mark NAV with the IF draw (debt - IF equity; the IF equity capped at the deployed
+    ///         value) added back, i.e. the NAV the losses OTHER than the insurance debt leave. `liabilities` includes the
+    ///         debt. Cover at a mark is at most what applyMarkPnl covers at this NAV.
+    function poolCoverNav(
+        uint256 vaultIdle,
+        uint256 liabilities,
+        uint256 deployedValueUsd,
+        uint256 debt,
+        uint256 insuranceEquityUsd
+    ) internal pure returns (uint256) {
+        uint256 ifEquity = insuranceEquityUsd < deployedValueUsd ? insuranceEquityUsd : deployedValueUsd;
+        uint256 draw = debt > ifEquity ? debt - ifEquity : 0;
+        return markedNavNet(vaultIdle, liabilities, deployedValueUsd + draw);
     }
 }
