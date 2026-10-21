@@ -70,7 +70,8 @@ describe.skipIf(!IT)("RedisBus (integration)", () => {
     await bus.heartbeat(BOOK, 5_000);
     await Bun.sleep(100);
     expect(got.length).toBe(1);
-    expect(await bus.getJson<typeof msg>(KEYS.agentQuote(BOOK))).toEqual(msg);
+    // the bus stamps its namespace (`ns`) on the quote
+    expect(await bus.getJson<typeof msg>(KEYS.agentQuote(BOOK))).toMatchObject(msg);
     expect(Number(await bus.getJson<number>(KEYS.agentHeartbeat(BOOK)))).toBeGreaterThan(0);
     await bus.clearQuote(BOOK);
     expect(await bus.getJson(KEYS.agentQuote(BOOK))).toBeNull();

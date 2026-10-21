@@ -79,7 +79,7 @@ describe.skipIf(!IT)("CharterStore (integration)", () => {
     expect(await bus.emit(e)).toBe(true);
     expect(await bus.emit(e)).toBe(false);
     expect(published).toHaveLength(1);
-    expect(Object.keys(JSON.parse(published[0]!)).sort()).toEqual(["createdAt", "data", "id", "type"]);
+    expect(Object.keys(JSON.parse(published[0]!)).sort()).toEqual(["createdAt", "data", "id", "ns", "type"]);
   });
 
   test("committee seats follow the chain", async () => {

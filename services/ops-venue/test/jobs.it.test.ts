@@ -29,7 +29,8 @@ d("venue-ops queue (BullMQ)", () => {
     await events.waitUntilReady();
 
     const j1 = await queue.add("create_symbol", { kind: "create_symbol", bookId: 1 });
-    expect(await j1.waitUntilFinished(events, 15_000)).toEqual({ bookId: 1, symbol: "PERP_NVDA_USDC" });
+    // the job also reports the listing state (api mode: listed, awaiting the venue)
+    expect(await j1.waitUntilFinished(events, 15_000)).toMatchObject({ bookId: 1, symbol: "PERP_NVDA_USDC", listed: true });
     expect(t.mock.venue.requireSymbol("PERP_NVDA_USDC").ifAccountId).toBeTruthy();
 
     t.chain.killed = true; // revoke_key revokes only once the mandate is killed on-chain
