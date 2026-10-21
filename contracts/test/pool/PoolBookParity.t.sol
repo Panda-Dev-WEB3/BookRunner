@@ -12,7 +12,7 @@ import {PoolBookFixture} from "./utils/PoolBookFixture.sol";
 ///   poolBook: [seniorCommitted, juniorCommitted, ifTarget, mmInventory, gross, expensesRequested, premiumBps (as
 ///              filed), ifLoss, mmLoss(0|1), mmPnlAbs, | seniorAllocated, juniorAllocated, premium, expenses, carry,
 ///              senior, junior, seniorCredit, juniorCredit, poolValue, nav, S', J'] (the IF is a senior debt: an IF draw
-///              is a book loss; an exhausted book's debt is written down to what it holds)
+///              is a book loss; the pool's claim is the debt capped by what the book holds)
 contract PoolBookParityTest is PoolBookFixture {
     string internal json;
     uint256 internal rows;
@@ -93,7 +93,7 @@ contract PoolBookParityTest is PoolBookFixture {
         venue.setMmValue(v[8] == 1 ? mm - v[9] : mm + v[9]);
         _applyPoolMark();
         (, uint256 debt, uint256 value,,) = book.insuranceDebt();
-        assertEq(debt, v[19], string.concat(tag, " debt (written down when exhausted)"));
+        assertEq(debt, v[2], string.concat(tag, " debt (nominal until retirement)"));
         assertEq(value, v[19], string.concat(tag, " poolValue"));
         assertEq(pool.bookPosition(BOOK_ID).claim, v[19], string.concat(tag, " pool claim"));
         Book.LastMark memory lm = book.lastMarkSummary();
