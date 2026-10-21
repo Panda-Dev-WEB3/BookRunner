@@ -4,6 +4,7 @@ import {
   bkrnFeeRouterAbi,
   bookAbi,
   bookrunnerConfigAbi,
+  insurancePoolAbi,
   markRegistryAbi,
   mockSwapRouterAbi,
   orderlyAdapterAbi,
@@ -19,6 +20,8 @@ import { type PremiumSplit, amountsToSplit } from "../domain/split";
 import { type BookRef, bookStateName } from "../kit/books";
 import { scanEvents } from "../kit/logs";
 import type { TxSender } from "../kit/tx";
+import type { PoolQueueSnapshot } from "../domain/pool";
+import type { PoolKeeperChain } from "../poolKeeper";
 import type { BuybackChain, DistributedLog, FeeForwarding, KeeperChain, KeeperSnapshot, SettlementChain, SettlementReceivedLog, SplitParams } from "../ports";
 import { type CandidateSource, pendingShares } from "./redemptions";
 
@@ -48,7 +51,7 @@ export function premiumIn(ref: BookRef, logs: TransactionReceipt["logs"]): bigin
   return p.reduce((a, l) => a + l.args.amount, 0n);
 }
 
-export class WaterfallChainAdapter implements SettlementChain, KeeperChain, BuybackChain {
+export class WaterfallChainAdapter implements SettlementChain, KeeperChain, BuybackChain, PoolKeeperChain {
   private markInterval: number | null = null;
   private buybackTokens: { usdc: Address; bkrn: Address } | null = null;
   private legacyFeeRouter: boolean | null = null;
@@ -307,6 +310,11 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain, Buyb
       ]);
       pendingWithdraw = pIf + pMm;
     }
+    // 2026-10 insurance pool: (pool, debt, value, due, closed); null for a book-funded IF or an older book
+    const insurance = await this.pc.readContract({ address: book, abi: bookAbi, functionName: "insuranceDebt", blockNumber }).then(
+      (d) => (isAddressEqual(d[0], zeroAddress) ? null : { debt: d[1], due: d[3], closed: d[4] }),
+      () => null,
+    );
     let lastMark: KeeperSnapshot["lastMark"] = null;
     if (lastMarkId > 0n) {
       const m = await this.pc.readContract({ address: this.o.deployment.contracts.markRegistry, abi: markRegistryAbi, functionName: "getMark", args: [lastMarkId], blockNumber });
@@ -328,6 +336,7 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain, Buyb
       sharePriceWad: { senior: seniorPrice, junior: juniorPrice },
       lastMarkPeriodEnd: Number(lastMarkPeriodEnd),
       lastMark,
+      insurance,
     };
   }
 
@@ -356,6 +365,55 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain, Buyb
 
   finalizeRetirement(ref: BookRef) {
     return this.keeperSend(ref, ref.components.book, bookAbi, "finalizeRetirement", [], "finalizeRetirement");
+  }
+
+  settleInsurance(ref: BookRef) {
+    return this.keeperSend(ref, ref.components.book, bookAbi, "settleInsurance", [], "settleInsurance");
+  }
+
+  // ---------------------------------------------------------------- PoolKeeperChain (2026-10 insurance pool)
+  private get insurancePool(): `0x${string}` | null {
+    const p = this.o.deployment.contracts.insurancePool;
+    return p && !isAddressEqual(p, zeroAddress) ? p : null;
+  }
+
+  async poolQueue(): Promise<PoolQueueSnapshot | null> {
+    const address = this.insurancePool;
+    if (!address) return null;
+    const block = await this.pc.getBlock();
+    const q = { address, abi: insurancePoolAbi, blockNumber: block.number } as const;
+    const [queue, ledger, params, active] = await Promise.all([
+      this.pc.readContract({ ...q, functionName: "queue" }),
+      this.pc.readContract({ ...q, functionName: "ledger" }),
+      this.pc.readContract({ ...q, functionName: "params" }),
+      this.pc.readContract({ ...q, functionName: "activeBooks" }),
+    ]);
+    const [procEpoch, procEndsAt, fillEpoch, pendingShares] = queue;
+    const [epoch, positions] = await Promise.all([
+      this.pc.readContract({ ...q, functionName: "epochInfo", args: [procEpoch] }),
+      Promise.all(active.map(async (id) => ({ id: Number(id), p: await this.pc.readContract({ ...q, functionName: "bookPosition", args: [id] }) }))),
+    ]);
+    const stale = positions.filter((x) => BigInt(x.p.lastMarkAt) < BigInt(procEndsAt)).map((x) => x.id);
+    return {
+      nowSec: Number(block.timestamp),
+      procEpoch: Number(procEpoch),
+      procEndsAt: Number(procEndsAt),
+      fillEpoch: Number(fillEpoch),
+      pendingShares,
+      depositsPending: ledger[2],
+      epochDepositAssets: epoch.depositAssets,
+      epochWithdrawShares: epoch.shares,
+      staleBooks: stale.length,
+      staleBookIds: stale,
+      processGrace: Number(params[6]),
+    };
+  }
+
+  async processEpoch(): Promise<Hex> {
+    const address = this.insurancePool;
+    if (!address) throw new Error("no InsurancePool in the deployment");
+    const out = await this.o.sender.send({ address, abi: insurancePoolAbi, functionName: "processEpoch", args: [], label: "pool.processEpoch" });
+    return out.hash;
   }
 
   // ---------------------------------------------------------------- BuybackChain

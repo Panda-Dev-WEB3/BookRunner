@@ -20,6 +20,14 @@ export function canFinalizeRetirement(state: BookState, last: LastMarkInfo | nul
   return state === "Retiring" && last !== null && last.markId > 0n && last.applied && last.deployedValueUsd === 0n;
 }
 
+/**
+ * 2026-10 insurance pool: a Retired pool-funded book whose final mark did not reach the pool (InsuranceMarkFailed):
+ * Book.settleInsurance retries it (and the repayment), so the book leaves the pool's epoch gate.
+ */
+export function shouldSettleInsurance(state: BookState, insurance: { closed: boolean } | null | undefined): boolean {
+  return state === "Retired" && !!insurance && !insurance.closed;
+}
+
 /** Books whose fee flow is swept + distributed each period. */
 export function distributes(state: BookState): boolean {
   return state === "Live" || state === "Retiring";

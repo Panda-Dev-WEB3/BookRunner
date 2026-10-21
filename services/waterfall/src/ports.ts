@@ -110,6 +110,8 @@ export interface KeeperSnapshot {
   sharePriceWad: { senior: bigint; junior: bigint };
   lastMarkPeriodEnd: number;
   lastMark: LastMarkInfo | null;
+  /** 2026-10 insurance pool: Book.insuranceDebt() of a pool-funded book (null: book-funded IF / older book). */
+  insurance?: { debt: bigint; due: boolean; closed: boolean } | null;
 }
 
 export interface KeeperChain {
@@ -120,6 +122,8 @@ export interface KeeperChain {
   fundClaims(ref: BookRef): Promise<Hex>;
   recall(ref: BookRef, account: number, amount: bigint): Promise<Hex>;
   finalizeRetirement(ref: BookRef): Promise<Hex>;
+  /** Book.settleInsurance (Retired pool-funded book whose final pool mark failed): repays and re-reports. */
+  settleInsurance(ref: BookRef): Promise<Hex>;
 }
 
 /** Protocol-level BkrnFeeRouter reads + the KEEPER buyback write. */

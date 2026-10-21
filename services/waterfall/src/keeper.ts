@@ -2,7 +2,7 @@
 // unfunded and the vault has idle cash, recall-before-mark when queued redemptions exceed idle,
 // finalizeRetirement when the last applied mark carried zero deployed value.
 import type { Logger } from "@bookrunner/shared";
-import { type Cooldowns, canFinalizeRetirement, shouldCloseWindow, shouldFundClaims } from "./domain/keeper";
+import { type Cooldowns, canFinalizeRetirement, shouldCloseWindow, shouldFundClaims, shouldSettleInsurance } from "./domain/keeper";
 import { type RecallPlan, planRecall } from "./domain/recall";
 import { usd6 } from "./kit/fmt";
 import { nextMarkPeriodEnd, settlesUpToIndex } from "./kit/period";
@@ -32,7 +32,8 @@ export type KeeperAction =
   | { kind: "closeWindow"; tx?: string; error?: string }
   | { kind: "fundClaims"; tx?: string; error?: string }
   | { kind: "recall"; account: number; amount: bigint; reason: string; tx?: string; error?: string }
-  | { kind: "finalizeRetirement"; tx?: string; error?: string };
+  | { kind: "finalizeRetirement"; tx?: string; error?: string }
+  | { kind: "settleInsurance"; tx?: string; error?: string };
 
 export class KeeperRunner {
   constructor(private readonly d: KeeperDeps) {}
@@ -106,6 +107,9 @@ export class KeeperRunner {
 
     if (canFinalizeRetirement(s.state, s.lastMark)) {
       actions.push(await this.act(ref, "finalizeRetirement", () => this.d.chain.finalizeRetirement(ref), { kind: "finalizeRetirement" }));
+    }
+    if (shouldSettleInsurance(s.state, s.insurance)) {
+      actions.push(await this.act(ref, "settleInsurance", () => this.d.chain.settleInsurance(ref), { kind: "settleInsurance" }));
     }
     return { snapshot: s, plan, actions };
   }

@@ -255,4 +255,7 @@ export class FakeKeeperChain implements KeeperChain {
   async finalizeRetirement() {
     return this.tx("finalizeRetirement");
   }
+  async settleInsurance() {
+    return this.tx("settleInsurance");
+  }
 }
