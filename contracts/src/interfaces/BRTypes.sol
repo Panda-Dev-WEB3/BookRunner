@@ -83,6 +83,11 @@ library BRTypes {
         bytes32 symbol; // venue symbol, ASCII right-padded (e.g. "PERP_NVDA_USDC")
         uint16 takerFeeBps; // in-house venue only
         uint16 makerFeeBps; // in-house venue only
+        // ---- insurance pool (appended 2026-10, docs/ARCHITECTURE.md §2.10) ----
+        // Both fit in the slot of takerFeeBps / makerFeeBps, so the struct keeps its storage size: a book stored
+        // before reads false / 0 here, i.e. a book-funded IF and no premium (the old behaviour).
+        bool ifFromPool; // the IF is funded by the InsurancePool at closeWindow, not by the tranches
+        uint16 premiumBps; // pool premium, bps of gross fee flow; effective = max(premiumBps, pool floor)
     }
 
     /// @notice Addresses of one book's components. bookId == charterId.

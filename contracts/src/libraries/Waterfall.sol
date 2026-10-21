@@ -375,4 +375,34 @@ library Waterfall {
         uint256 assets = vaultIdle + deployedValueUsd;
         return assets > unfundedClaims ? assets - unfundedClaims : 0;
     }
+
+    // -----------------------------------------------------------------------------------------
+    // 5. Insurance pool (appended 2026-10, docs/ARCHITECTURE.md §2.10): a pool-funded book
+    // -----------------------------------------------------------------------------------------
+
+    /// @notice IF target the window raises from the tranches: 0 when the InsurancePool funds the IF (`ifFromPool`),
+    ///         so the sponsor raises only the MM inventory (allocateWindow's max raise and IF_UNFUNDED check, and
+    ///         initialDeployment, then see no IF).
+    function windowIfTarget(uint256 ifTargetUsd, bool ifFromPool) internal pure returns (uint256) {
+        return ifFromPool ? 0 : ifTargetUsd;
+    }
+
+    /// @notice Premium rate a pool-funded book pays: the charter's rate, never below the pool's floor, at most BPS.
+    function effectivePremiumBps(uint256 charterPremiumBps, uint256 floorBps) internal pure returns (uint256) {
+        uint256 bps = charterPremiumBps > floorBps ? charterPremiumBps : floorBps;
+        return bps > BPS ? BPS : bps;
+    }
+
+    /// @notice The pool's premium comes off the gross fee flow first; `rest` is then split by splitDistribution
+    ///         (expenses -> carry -> Senior -> Junior). premium + rest == gross.
+    function premiumSplit(uint256 gross, uint256 premiumBps) internal pure returns (uint256 premium, uint256 rest) {
+        premium = (gross * premiumBps) / BPS;
+        rest = gross - premium;
+    }
+
+    /// @notice What a pool-funded book owes the pool for its IF: the allocation, marked down to the IF's equity
+    ///         when traders' bad debt drew the IF below it (a later refill restores it up to the allocation).
+    function insuranceClaim(uint256 allocation, uint256 insuranceEquityUsd) internal pure returns (uint256) {
+        return insuranceEquityUsd < allocation ? insuranceEquityUsd : allocation;
+    }
 }

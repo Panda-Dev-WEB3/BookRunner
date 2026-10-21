@@ -12,6 +12,7 @@ import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 import {IUnderwritingVault} from "./interfaces/IUnderwritingVault.sol";
 import {IVenueAdapter} from "./interfaces/IVenueAdapter.sol";
 import {IBackstop} from "./interfaces/IBkrnFeeRouter.sol";
+import {IInsurancePool, IBookInsurance} from "./interfaces/IInsurancePool.sol";
 
 /// @title UnderwritingVault — holds one book's undeployed USDC (EIP-1167 clone).
 /// @notice Capital leaves only to the book's venue adapter (IF / MM accounts), the book's desk (hedge
@@ -21,6 +22,10 @@ import {IBackstop} from "./interfaces/IBkrnFeeRouter.sol";
 ///         Cash backing settled-but-unfunded redemption claims (book.unfundedClaims()) is reserved:
 ///         it cannot be deployed to the venue or the desk, and capital only goes out while the book is
 ///         Live (never during wind-down or after retirement).
+///         [2026-10 insurance pool] For a pool-funded book (book.insurancePool() != 0) the IF account belongs to the
+///         InsurancePool: only the book deploys to it (closeWindow, with the pool's USDC), nobody recalls it while
+///         the book is Live, a recall first makes the pool's claim due (book.onInsuranceRecall) and the book repays
+///         the pool from this vault (`repayInsurancePool`).
 contract UnderwritingVault is IUnderwritingVault, Initializable, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
 
@@ -34,6 +39,8 @@ contract UnderwritingVault is IUnderwritingVault, Initializable, ReentrancyGuard
     error NotTranche(address to);
     error InsufficientIdle(uint256 requested, uint256 available);
     error BookNotLive(BRTypes.BookState state);
+    /// @notice The IF of a pool-funded book: deployed only by the book, recalled only once the book is not Live.
+    error PoolFundedInsurance();
 
     event ReturnedFromDesk(uint256 amount);
     event CapitalFlowNotified(address indexed by);
@@ -98,6 +105,9 @@ contract UnderwritingVault is IUnderwritingVault, Initializable, ReentrancyGuard
     function deployToVenue(uint8 account, uint256 amount) external nonReentrant {
         if (msg.sender != book && msg.sender != desk) revert NotAuthorized();
         _checkAccount(account);
+        if (account == BRTypes.ACCOUNT_IF && msg.sender != book && _insurancePool() != address(0)) {
+            revert PoolFundedInsurance();
+        }
         if (amount == 0) revert ZeroAmount();
         _checkLive();
         uint256 available = deployable();
@@ -122,6 +132,10 @@ contract UnderwritingVault is IUnderwritingVault, Initializable, ReentrancyGuard
         }
         _checkAccount(account);
         if (amount == 0) revert ZeroAmount();
+        if (account == BRTypes.ACCOUNT_IF && _insurancePool() != address(0)) {
+            if (IBook(book).state() == BRTypes.BookState.Live) revert PoolFundedInsurance();
+            IBookInsurance(book).onInsuranceRecall();
+        }
         emit RecallRequested(account, amount, msg.sender);
         IVenueAdapter(adapter).requestWithdraw(account, amount);
         IBook(book).onCapitalFlow();
@@ -163,6 +177,19 @@ contract UnderwritingVault is IUnderwritingVault, Initializable, ReentrancyGuard
         try IBackstop(backstop).notifyDeposit(amount) {} catch {}
     }
 
+    /// @notice Only book: repays the InsurancePool that funded the book's IF (`book.insurancePool()`) `amount` of its
+    ///         due claim (the pool pulls exactly `amount`). The book reserves the amount first (unfundedClaims).
+    function repayInsurancePool(uint256 amount) external nonReentrant {
+        if (msg.sender != book) revert NotBook();
+        address pool = _insurancePool();
+        if (pool == address(0)) revert ZeroAddress();
+        if (amount == 0) revert ZeroAmount();
+        emit Paid(pool, amount);
+        _usdc.forceApprove(pool, amount);
+        IInsurancePool(pool).repay(bookId, amount);
+        _usdc.forceApprove(pool, 0);
+    }
+
     /// @notice Desk only (ReturnToVault): pulls `amount` USDC from the desk (desk approves first) and
     ///         bumps the book's flowNonce.
     function returnFromDesk(uint256 amount) external nonReentrant {
@@ -189,6 +216,13 @@ contract UnderwritingVault is IUnderwritingVault, Initializable, ReentrancyGuard
         if (msg.sender != adapter && msg.sender != desk) revert NotAuthorized();
         emit CapitalFlowNotified(msg.sender);
         IBook(book).onCapitalFlow();
+    }
+
+    /// @dev The pool that funded the book's IF; address(0) for a book-funded IF or a book without the getter.
+    function _insurancePool() internal view returns (address pool) {
+        try IBookInsurance(book).insurancePool() returns (address p) {
+            pool = p;
+        } catch {}
     }
 
     function _checkLive() internal view {

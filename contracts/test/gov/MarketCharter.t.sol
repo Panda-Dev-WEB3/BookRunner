@@ -377,6 +377,26 @@ contract MarketCharterTest is GovBase {
         assertEq(_reason(c), bytes32(0));
     }
 
+    /// @notice 2026-10 insurance pool: BAD_PREMIUM (premium above 50%, or a premium on a book-funded IF) and NO_POOL
+    ///         (a pool-funded IF with no pool configured); the venue IF minimum applies to a pool-funded IF too.
+    function test_validate_insurancePool() public {
+        BRTypes.Charter memory c = _charter();
+        c.premiumBps = 1;
+        assertEq(_reason(c), bytes32("BAD_PREMIUM"), "premium on a book-funded IF");
+        c.premiumBps = 0;
+        c.ifFromPool = true;
+        assertEq(_reason(c), bytes32("NO_POOL"));
+        cfg.setInsurancePool(makeAddr("pool"));
+        assertEq(_reason(c), bytes32(0), "0 = the pool's floor");
+        c.premiumBps = 5000;
+        assertEq(_reason(c), bytes32(0));
+        c.premiumBps = 5001;
+        assertEq(_reason(c), bytes32("BAD_PREMIUM"));
+        c.premiumBps = 2000;
+        c.ifTargetUsd = 1;
+        assertEq(_reason(c), bytes32("IF_BELOW_VENUE_MIN"), "the venue minimum still applies");
+    }
+
     function testFuzz_validate_windowAndNotice(uint32 window, uint64 notice) public view {
         BRTypes.Charter memory c = _charter();
         c.subscriptionWindow = window;
