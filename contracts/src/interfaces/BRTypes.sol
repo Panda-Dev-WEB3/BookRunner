@@ -117,6 +117,11 @@ library BRTypes {
         ///      redemption-bucket and top-up settlement to the first non-held mark (audit M-1), bounded
         ///      by BookLogic.MAX_HELD_DEFERRAL so a long hold never blocks exits.
         bool held;
+        /// @dev 2026-10 insurance pool: the IF equity (adapter.insuranceEquityUsd) included in deployedValueUsd at the
+        ///      same valuation. Read only for a pool-funded book, to keep Backstop cover off its insurance debt (an IF
+        ///      draw is never covered by the Backstop); 0 (an older mark service) is the safe value (nothing of the debt
+        ///      is then cover-eligible).
+        uint256 insuranceEquityUsd;
     }
 
     struct Mark {

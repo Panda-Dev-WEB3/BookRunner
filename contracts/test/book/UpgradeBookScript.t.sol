@@ -188,7 +188,8 @@ contract UpgradeBookScriptTest is Test {
             inventoryRoot: keccak256("inventory"),
             pnlJsonHash: keccak256("pnl.json"),
             receiptsRoot: keccak256("receipts"),
-            held: false
+            held: false,
+            insuranceEquityUsd: 0
         });
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(MARK_PK, registry.hashMark(m));
         registry.commitAndApply(m, abi.encodePacked(r, s, v), "", "");
