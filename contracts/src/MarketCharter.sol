@@ -12,7 +12,8 @@ import {IBkrnStaking} from "./interfaces/IBkrnStaking.sol";
 import {IStockTokenRegistry} from "./interfaces/IStockTokenRegistry.sol";
 import {IBookFactory} from "./interfaces/IBookFactory.sol";
 import {IBook} from "./interfaces/IBook.sol";
-import {IBookrunnerConfigPool} from "./interfaces/IInsurancePool.sol";
+import {IBookrunnerConfigPool, IInsurancePool} from "./interfaces/IInsurancePool.sol";
+import {Waterfall} from "./libraries/Waterfall.sol";
 
 /// @title CharterRules — charter / mandate validation rules (ARCHITECTURE.md §2.6).
 /// @notice Shared by MarketCharter.validate and RiskCommittee REMANDATE proposals so a re-mandate can
@@ -159,6 +160,15 @@ contract MarketCharter is IMarketCharter, ReentrancyGuardTransient {
         id = ++_count;
         CharterRecord storage r = _records[id];
         r.charter = c;
+        // [2026-10 insurance pool] the premium is fixed at filing: max(the sponsor's rate, the pool floor now), so a
+        // later floor change applies only to charters filed after it
+        if (c.ifFromPool) {
+            r.charter.premiumBps = uint16(
+                Waterfall.effectivePremiumBps(
+                    c.premiumBps, IInsurancePool(_insurancePool()).premiumFloorBps()
+                )
+            );
+        }
         r.status = BRTypes.CharterStatus.Filed;
         r.filedAt = uint64(block.timestamp);
         _deadline[id] = uint64(block.timestamp + cfg.committeeWindow());

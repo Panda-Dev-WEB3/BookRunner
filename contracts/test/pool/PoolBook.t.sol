@@ -11,10 +11,11 @@ import {RevenueRouter} from "../../src/RevenueRouter.sol";
 import {InsurancePool} from "../../src/InsurancePool.sol";
 import {PoolBookFixture} from "./utils/PoolBookFixture.sol";
 
-/// @notice A pool-funded book end to end (POOL-7, POOL-8, CAP-16, docs/INVARIANTS.md): the window raises only the MM
-///         inventory, the pool funds the IF, the IF never counts in Senior / Junior, traders' bad debt drawn from it is
-///         the pool's, the premium comes off gross fee flow first, retirement returns the IF to the pool first. A
-///         book funded the old way is unchanged.
+/// @notice A pool-funded book end to end (CAP-16, POOL-7, POOL-9, docs/INVARIANTS.md). The window raises only the MM
+///         inventory and the pool funds the IF as a senior debt of the book: every IF draw (traders' bad debt or the MM's
+///         losses) is the book's loss first (Junior -> Senior -> backstop), the pool loses only what an exhausted book
+///         cannot repay, all from the mark's snapshot (no live venue read). The premium comes off gross fee flow first;
+///         retirement repays the pool first. A book funded the old way is unchanged.
 contract PoolBookTest is PoolBookFixture {
     function setUp() public {
         _setUpPoolBook();
@@ -36,27 +37,28 @@ contract PoolBookTest is PoolBookFixture {
         assertEq(j, 22_500e6);
         assertEq(venue.ifEquity(), 25_000e6, "IF from the pool");
         assertEq(venue.mmValue(), 75_000e6, "MM from the tranches");
-        assertEq(vault.idle(), 0);
-        (address p, uint256 allocation, uint256 claim, bool due) = book.insuranceClaim();
+        (address p, uint256 debt, uint256 value, bool due, bool closed) = book.insuranceDebt();
         assertEq(p, address(pool));
         assertEq(book.insurancePool(), address(pool));
-        assertEq(allocation, 25_000e6);
-        assertEq(claim, 25_000e6);
+        assertEq(debt, 25_000e6);
+        assertEq(value, 25_000e6);
         assertFalse(due);
+        assertFalse(closed);
         IInsurancePool.BookPosition memory pos = pool.bookPosition(BOOK_ID);
         assertEq(pos.book, address(book));
         assertEq(pos.vault, address(vault));
         assertEq(pos.router, address(rrouter));
+        assertEq(pos.market, _poolCharter().underlying);
         assertEq(pos.claim, 25_000e6);
-        assertEq(book.unfundedClaims(), 0, "a claim not yet due is not reserved cash");
+        assertEq(book.unfundedClaims(), 0, "a debt not yet due is not reserved cash");
     }
 
     function test_closeWindow_poolCannotFund_reverts_thenCancelStuck() public {
         vm.prank(timelock);
-        pool.setParam("marketCapBps", 100); // 1% of 1.1M = 11k < 25k
+        pool.setParam("marketCapBps", 100); // 1% of 1.12M = 11.2k < 25k
         _subscribeDefault();
         vm.warp(book.subscriptionEnds());
-        vm.expectRevert(abi.encodeWithSelector(InsurancePool.OverMarketCap.selector, 25_000e6, 11_000e6));
+        vm.expectRevert(abi.encodeWithSelector(InsurancePool.OverMarketCap.selector, 25_000e6, 11_200e6));
         book.closeWindow();
         vm.warp(uint256(book.subscriptionEnds()) + book.CLOSE_WINDOW_TIMEOUT());
         book.cancelStuckWindow();
@@ -71,6 +73,16 @@ contract PoolBookTest is PoolBookFixture {
         book.closeWindow();
     }
 
+    function test_closeWindow_zeroIfTarget_reverts() public {
+        BRTypes.Charter memory c = _poolCharter();
+        c.ifTargetUsd = 0;
+        _deployPoolBook(c);
+        _subscribeDefault();
+        vm.warp(book.subscriptionEnds());
+        vm.expectRevert(Book.InsuranceTargetZero.selector);
+        book.closeWindow();
+    }
+
     function test_closeWindow_poolAllocationsPaused_reverts() public {
         vm.prank(guardian);
         pool.setPaused(false, true);
@@ -80,96 +92,152 @@ contract PoolBookTest is PoolBookFixture {
         book.closeWindow();
     }
 
-    // ------------------------------------------------------------------ NAV and bad debt
+    // ------------------------------------------------------------------ NAV: the pool's IF is a senior debt
 
     function test_nav_excludesPoolIf() public {
         _goLivePool();
-        assertEq(book.markedNavPreview(venue.deployedValueUsd()), 75_000e6, "100k deployed - 25k pool claim");
+        assertEq(book.markedNavPreview(venue.deployedValueUsd()), 75_000e6, "100k deployed - 25k debt");
         _applyPoolMark();
         (uint256 s, uint256 j) = book.trancheNav();
         assertEq(s + j, 75_000e6, "no phantom gain from the pool's IF");
         _identity();
     }
 
-    function test_badDebt_isThePools_bookUnaffected() public {
+    /// @notice Review I-1: an IF draw is the book's loss first (Junior), the pool keeps its full claim.
+    function test_ifDraw_isTheBooksLossFirst_poolUntouched() public {
         _goLivePool();
-        uint256 price = pool.convertToAssets(1e12);
-        venue.setIfEquity(20_000e6); // traders' bad debt drew 5k from the IF
-        uint256 id = _poolMark();
-        vm.expectEmit(true, false, false, true, address(book));
-        emit Book.InsuranceClaimSynced(BOOK_ID, 25_000e6, 20_000e6, 20_000e6);
-        book.applyMark(id);
-        (uint256 s, uint256 j) = book.trancheNav();
-        assertEq(s, 52_500e6, "Senior untouched");
-        assertEq(j, 22_500e6, "Junior untouched");
-        (uint256 claim,) = _claim();
-        assertEq(claim, 20_000e6);
-        assertEq(pool.bookPosition(BOOK_ID).claim, 20_000e6);
-        assertEq(pool.firstLossAssets(), POOL_FIRST_LOSS - 5_000e6, "first-loss slice absorbed it");
-        assertEq(pool.convertToAssets(1e12), price, "depositors untouched while the slice lasts");
-        _identity();
-    }
-
-    function test_mmLoss_staysWithTheTranches() public {
-        _goLivePool();
-        venue.setMmValue(65_000e6); // MM trading loss 10k
+        venue.setIfEquity(20_000e6); // traders' bad debt (or MM losses paid from the IF) drew 5k
         _applyPoolMark();
         (uint256 s, uint256 j) = book.trancheNav();
-        assertEq(j, 12_500e6, "Junior first");
+        assertEq(j, 22_500e6 - 5_000e6, "Junior absorbs the IF draw");
         assertEq(s, 52_500e6);
-        assertEq(pool.bookPosition(BOOK_ID).claim, 25_000e6, "pool untouched");
-        assertEq(pool.firstLossAssets(), POOL_FIRST_LOSS);
-    }
-
-    function test_syncInsurance_permissionless_reachesPoolBeforeMark() public {
-        _goLivePool();
-        venue.setIfEquity(15_000e6);
-        vm.prank(eve);
-        book.syncInsurance();
-        assertEq(pool.bookPosition(BOOK_ID).claim, 15_000e6);
-        assertEq(pool.firstLossAssets(), POOL_FIRST_LOSS - 10_000e6);
-        _applyPoolMark();
-        (uint256 s, uint256 j) = book.trancheNav();
-        assertEq(s + j, 75_000e6);
-    }
-
-    function test_refill_restoresClaim_surplusIsTheBooks() public {
-        _goLivePool();
-        venue.setIfEquity(18_000e6);
-        _applyPoolMark();
-        assertEq(pool.firstLossAssets(), POOL_FIRST_LOSS - 7_000e6);
-        venue.setIfEquity(27_000e6); // liquidation fees refilled the IF past its allocation
-        _applyPoolMark();
-        (uint256 claim,) = _claim();
-        assertEq(claim, 25_000e6, "restored up to the allocation");
-        assertEq(pool.firstLossAssets(), POOL_FIRST_LOSS, "the slice got its loss back");
-        (uint256 s, uint256 j) = book.trancheNav();
-        assertEq(s + j, 77_000e6, "the IF surplus above the allocation is book value");
+        (uint256 debt, uint256 value,) = _debt();
+        assertEq(debt, 25_000e6, "still owed in full");
+        assertEq(value, 25_000e6);
+        assertEq(pool.bookPosition(BOOK_ID).claim, 25_000e6);
+        assertEq(pool.firstLossAssets(), POOL_FIRST_LOSS, "the pool lost nothing");
         _identity();
     }
 
-    function test_unreadableAdapter_neverBlocksMarks() public {
+    /// @notice The MM blows through its capital and the venue pays winners from the IF: Junior, then Senior absorb it;
+    ///         the pool loses only the part the exhausted book cannot repay (first-loss slice first).
+    function test_mmBlowThrough_poolLosesOnlyWhatTheBookCannotPay() public {
         _goLivePool();
-        venue.setRevertInsurance(true);
+        venue.setMmValue(0);
+        venue.setIfEquity(5_000e6); // 20k of the IF paid out on top of the 75k MM
         _applyPoolMark();
-        (uint256 claim,) = _claim();
-        assertEq(claim, 25_000e6, "claim kept");
+        (uint256 s, uint256 j) = book.trancheNav();
+        assertEq(s + j, 0, "the tranches are wiped first");
+        (uint256 debt, uint256 value,) = _debt();
+        assertEq(debt, 25_000e6);
+        assertEq(value, 5_000e6, "all the book holds");
+        assertEq(pool.bookPosition(BOOK_ID).claim, 5_000e6);
+        assertEq(pool.firstLossAssets(), POOL_FIRST_LOSS - 20_000e6, "the shortfall, first-loss slice first");
     }
 
-    function test_poolRefusesReport_neverBlocksMarks() public {
+    /// @notice An IF refill reduces the shortfall first: the pool recovers before the tranches see any of it.
+    function test_refill_reducesTheShortfallFirst() public {
         _goLivePool();
-        venue.setIfEquity(20_000e6);
-        vm.mockCallRevert(address(pool), abi.encodeWithSelector(InsurancePool.reportLoss.selector), "down");
+        venue.setMmValue(0);
+        venue.setIfEquity(5_000e6);
+        _applyPoolMark();
+        venue.setIfEquity(27_000e6); // the IF refilled (liquidation fees): 2k above the debt
+        _applyPoolMark();
+        (, uint256 value,) = _debt();
+        assertEq(value, 25_000e6, "the pool recovered first");
+        assertEq(pool.firstLossAssets(), POOL_FIRST_LOSS);
+        (uint256 s, uint256 j) = book.trancheNav();
+        assertEq(s + j, 2_000e6, "only the surplus above the debt is tranche value");
+    }
+
+    /// @notice Review I-3: NAV and the pool's value come from the mark's snapshot; an IF move between valuation and
+    ///         apply creates no phantom NAV (no live venue read).
+    function test_ifMoveBetweenValuationAndApply_noPhantomNav() public {
+        _goLivePool();
+        uint256 id = _poolMark(); // values IF 25k + MM 75k
+        venue.setIfEquity(10_000e6); // the IF moves after the valuation
+        book.applyMark(id);
+        (uint256 s, uint256 j) = book.trancheNav();
+        assertEq(s + j, 75_000e6, "the snapshot's IF against the debt: no phantom loss or gain");
+        (, uint256 value,) = _debt();
+        assertEq(value, 25_000e6);
+        // the next mark values the moved IF: a book loss, still not the pool's
+        _applyPoolMark();
+        (s, j) = book.trancheNav();
+        assertEq(s + j, 60_000e6);
+        assertEq(pool.bookPosition(BOOK_ID).claim, 25_000e6);
+    }
+
+    /// @notice Review I-2: a venue reporting lag (the IF not yet credited in a snapshot) cannot create a fake pool loss
+    ///         and recovery: the book still covers its debt, so the pool's value does not move.
+    function test_venueReportLag_noFakePoolLossOrRecovery() public {
+        _goLivePool();
+        uint256 lossesBefore;
+        (,,,, lossesBefore) = pool.ledger();
+        uint256 id = _commitMark(_nextPeriodEndAfterWarp(), venue.mmValue(), book.flowNonce()); // IF missing
+        book.applyMark(id);
+        (, uint256 value,) = _debt();
+        assertEq(value, 25_000e6, "the book still holds enough");
+        _applyPoolMark(); // the next report has the IF
+        (,,,, uint256 lossesAfter) = pool.ledger();
+        assertEq(lossesAfter, lossesBefore, "no loss, no recovery at the pool");
+        (uint256 s, uint256 j) = book.trancheNav();
+        assertEq(s + j, 75_000e6, "the tranches' dip is undone");
+    }
+
+    function test_marks_stampTheBookForThePoolEpochGate() public {
+        _goLivePool();
+        _applyPoolMark();
+        assertEq(pool.bookPosition(BOOK_ID).lastMarkAt, book.lastMarkPeriodEnd());
+    }
+
+    function test_poolRefusesMark_neverBlocksMarks() public {
+        _goLivePool();
+        venue.setMmValue(0);
+        venue.setIfEquity(5_000e6);
+        vm.mockCallRevert(address(pool), abi.encodeWithSelector(InsurancePool.markBook.selector), "down");
         uint256 id = _poolMark();
         vm.expectEmit(true, false, false, true, address(book));
-        emit Book.InsuranceSyncFailed(BOOK_ID, 25_000e6, 20_000e6);
+        emit Book.InsuranceMarkFailed(BOOK_ID, 5_000e6, false);
         book.applyMark(id);
-        (uint256 claim,) = _claim();
-        assertEq(claim, 25_000e6, "unchanged until the pool accepts it");
+        (, uint256 value,) = _debt();
+        assertEq(value, 25_000e6, "unchanged until the pool accepts a mark");
         vm.clearMockedCalls();
-        book.syncInsurance();
-        (claim,) = _claim();
-        assertEq(claim, 20_000e6);
+        _applyPoolMark();
+        (, value,) = _debt();
+        assertEq(value, 5_000e6);
+    }
+
+    /// @notice POOL-9: the pool's realized loss on a book <= max(0, IF draw - the book's own capital left).
+    function testFuzz_poolRealizedLoss_boundedByDrawBeyondBookCapital(uint256 ifLeft, uint256 mmLeft, uint256 gross)
+        public
+    {
+        _goLivePool();
+        ifLeft = bound(ifLeft, 0, 30_000e6);
+        mmLeft = bound(mmLeft, 0, 120_000e6);
+        gross = bound(gross, 0, 20_000e6);
+        if (gross > 0) _distribute(gross, 0);
+        venue.setIfEquity(ifLeft);
+        venue.setMmValue(mmLeft);
+        _applyPoolMark();
+        charterC.retire(BOOK_ID);
+        vm.startPrank(keeper);
+        if (ifLeft > 0) vault.recall(BRTypes.ACCOUNT_IF, ifLeft);
+        if (mmLeft > 0) vault.recall(BRTypes.ACCOUNT_MM, mmLeft);
+        vm.stopPrank();
+        _applyPoolMark(); // deployed 0
+        book.finalizeRetirement();
+        uint256 draw = ifLeft >= 25_000e6 ? 0 : 25_000e6 - ifLeft;
+        uint256 bookCapital = mmLeft + (gross - rrouter.premiumTotal() - _expensesAndCarry());
+        uint256 realized = pool.bookPosition(BOOK_ID).allocation; // what was never repaid
+        uint256 bound_ = draw > bookCapital ? draw - bookCapital : 0;
+        assertLe(realized, bound_, "the pool's loss is only the draw beyond the book's capital");
+        assertEq(pool.bookPosition(BOOK_ID).claim, 0, "nothing left owed");
+    }
+
+    function _expensesAndCarry() internal view returns (uint256) {
+        uint256[5] memory t = rrouter.totals();
+        return t[1] + t[2];
     }
 
     // ------------------------------------------------------------------ vault rules for a pool-funded IF
@@ -186,7 +254,6 @@ contract PoolBookTest is PoolBookFixture {
         vm.prank(keeper);
         vm.expectRevert(UnderwritingVault.PoolFundedInsurance.selector);
         vault.recall(BRTypes.ACCOUNT_IF, 1_000e6);
-        // the MM account is the book's as before
         vm.prank(desk);
         vault.deployToVenue(BRTypes.ACCOUNT_MM, 1_000e6);
         vm.prank(keeper);
@@ -202,13 +269,11 @@ contract PoolBookTest is PoolBookFixture {
 
     // ------------------------------------------------------------------ premium
 
-    function test_premium_floorFirst_thenSplit() public {
+    function test_premium_charterRate_firstThenSplit() public {
         _goLivePool();
-        uint256 flBefore = pool.firstLossAssets();
-        uint256 dBefore = pool.totalAssets();
         (address p, uint256 premium, uint256 bps) = rrouter.previewPremium(10_000e6);
         assertEq(p, address(pool));
-        assertEq(bps, 1200, "the pool's floor");
+        assertEq(bps, 1200);
         assertEq(premium, 1_200e6);
         usdc.mint(address(rrouter), 10_000e6);
         rrouter.notifySettlement(BRTypes.SRC_ENGINE_FEES, 10_000e6);
@@ -222,70 +287,66 @@ contract PoolBookTest is PoolBookFixture {
         (uint256 s, uint256 j) = book.trancheNav();
         assertEq(s, 52_500e6 + 3_801_600_000);
         assertEq(j, 22_500e6 + 2_534_400_000);
-        assertEq(pool.firstLossAssets() + pool.totalAssets(), flBefore + dBefore + 1_200e6, "premium in the pool");
         assertEq(rrouter.premiumTotal(), 1_200e6);
     }
 
-    function test_premium_charterAboveFloor() public {
-        BRTypes.Charter memory c = _poolCharter();
-        c.premiumBps = 2000;
-        _deployPoolBook(c);
+    /// @notice Minor m-4: the router pays the rate fixed in the charter; a later pool floor change does not re-price it.
+    function test_premium_floorChange_doesNotRepriceALiveBook() public {
         _goLivePool();
+        vm.prank(timelock);
+        pool.setParam("premiumFloorBps", 5000);
         (, uint256 premium, uint256 bps) = rrouter.previewPremium(10_000e6);
-        assertEq(bps, 2000);
-        assertEq(premium, 2_000e6);
-        IRevenueRouterAmounts.Amounts memory a = IRevenueRouterAmounts(address(rrouter)).previewSplit(10_000e6, 0);
-        assertEq(a.gross, 10_000e6);
-        assertEq(a.carry, 800e6, "carry on the 8,000 left after the premium");
+        assertEq(bps, 1200);
+        assertEq(premium, 1_200e6);
     }
 
     // ------------------------------------------------------------------ retirement
 
-    function test_retirement_returnsIfToPoolFirst() public {
+    function test_retirement_repaysThePoolFirst_inFull() public {
         _goLivePool();
-        venue.setIfEquity(21_000e6); // 4k bad debt during Live: the pool's
+        venue.setIfEquity(21_000e6); // 4k drawn while Live: the book's loss
         _applyPoolMark();
         charterC.retire(BOOK_ID);
-        assertEq(uint8(book.state()), uint8(BRTypes.BookState.Retiring));
         vm.prank(keeper);
         vault.recall(BRTypes.ACCOUNT_IF, 21_000e6);
-        (uint256 claim, bool due) = _claim();
+        (uint256 debt,, bool due) = _debt();
         assertTrue(due);
-        assertEq(claim, 21_000e6);
-        assertEq(book.unfundedClaims(), 21_000e6, "a due claim is reserved cash");
-        uint256 poolCash = pool.freeLiquidity();
+        assertEq(book.unfundedClaims(), debt, "a due debt is reserved cash");
         book.fundClaims();
-        assertEq(pool.freeLiquidity(), poolCash + 21_000e6, "IF back in the pool");
-        assertEq(pool.bookPosition(BOOK_ID).claim, 0);
-        assertEq(pool.bookPosition(BOOK_ID).allocation, 4_000e6, "the bad debt stays the pool's loss");
+        (debt,,) = _debt();
+        assertEq(debt, 4_000e6, "21k repaid at once");
         vm.prank(keeper);
         vault.recall(BRTypes.ACCOUNT_MM, 75_000e6);
-        _applyPoolMark(); // deployed 0
+        _applyPoolMark(); // deployed 0: the rest of the debt comes out of the MM cash first
         book.finalizeRetirement();
         assertEq(uint8(book.state()), uint8(BRTypes.BookState.Retired));
+        IInsurancePool.BookPosition memory pos = pool.bookPosition(BOOK_ID);
+        assertEq(pos.allocation, 0, "the pool was repaid in full");
+        assertEq(pos.claim, 0);
+        assertFalse(pos.active);
         (uint256 s, uint256 j) = book.trancheNav();
-        assertEq(s + j, 75_000e6, "tranches keep exactly the MM");
-        assertEq(vault.idle(), 75_000e6);
+        assertEq(s + j, 71_000e6, "the tranches bore the 4k draw");
+        assertEq(vault.idle(), 71_000e6);
     }
 
     function test_retirement_poolPaidBeforeTrancheClaims() public {
         _goLivePool();
         charterC.retire(BOOK_ID);
-        // MM back first; the IF recall makes the claim due: fundClaims pays the pool before any tranche claim
         vm.prank(keeper);
         vault.recall(BRTypes.ACCOUNT_MM, 20_000e6);
         vm.prank(alice);
         senior.requestRedeem(30_000e6, alice, alice); // alice holds 30k of the 52.5k Senior
         vm.prank(keeper);
         vault.recall(BRTypes.ACCOUNT_IF, 25_000e6);
-        _applyPoolMark(); // settles alice's bucket; fundClaims: pool 25k first, then alice from what is left
-        assertEq(pool.bookPosition(BOOK_ID).claim, 0, "pool repaid in full");
+        _applyPoolMark(); // fundClaims: the pool's 25k first, then alice from what is left
+        (uint256 debt,,) = _debt();
+        assertEq(debt, 0, "pool repaid in full");
         assertEq(book.unfundedOf(BRTypes.SENIOR), 30_000e6 - 20_000e6, "Senior waits for the rest of the MM");
         _identity();
     }
 
-    /// @notice A pool that refuses the repayment never blocks marks, retirement or tranche exits: the due claim stays
-    ///         owed and its cash reserved, the tranches are paid from the rest.
+    /// @notice A pool that refuses the repayment never blocks marks, retirement or tranche exits: the due debt stays
+    ///         owed and its cash reserved, the tranches are paid from the rest; settleInsurance retries.
     function test_poolRepayFails_neverBlocksMarksOrExits() public {
         _goLivePool();
         charterC.retire(BOOK_ID);
@@ -297,52 +358,57 @@ contract PoolBookTest is PoolBookFixture {
         vault.recall(BRTypes.ACCOUNT_MM, 75_000e6);
         vm.mockCallRevert(address(pool), abi.encodeWithSelector(InsurancePool.repay.selector), "down");
         _applyPoolMark();
-        (uint256 claim,) = _claim();
-        assertEq(claim, 25_000e6, "still owed");
+        (uint256 debt,,) = _debt();
+        assertEq(debt, 25_000e6, "still owed");
         assertEq(book.unfundedOf(BRTypes.SENIOR), 0, "alice funded from the rest");
         assertEq(vault.idle(), 100_000e6 - 30_000e6, "the pool's 25k stays reserved in the vault");
         vm.prank(alice);
         senior.claimRedemption(alice, alice);
         book.finalizeRetirement();
         assertEq(uint8(book.state()), uint8(BRTypes.BookState.Retired));
-        (claim,) = _claim();
-        assertEq(claim, 25_000e6, "no write-off while the vault holds it");
+        (debt,,) = _debt();
+        assertEq(debt, 25_000e6, "no write-off while the vault holds it");
         vm.clearMockedCalls();
-        book.fundClaims();
-        (claim,) = _claim();
-        assertEq(claim, 0, "repaid on the next fundClaims");
+        book.settleInsurance();
+        (debt,,) = _debt();
+        assertEq(debt, 0, "repaid on the retry");
     }
 
-    function test_finalize_writesOffWhatTheVaultCannotRepay() public {
+    function test_finalize_writesOffWhatTheExhaustedBookCannotRepay() public {
         _goLivePool();
         charterC.retire(BOOK_ID);
         vm.prank(keeper);
-        vault.recall(BRTypes.ACCOUNT_IF, 1); // the IF recall starts: claim due (25k)
-        venue.setIfEquity(0); // lost on the venue after the recall started: the book's
-        venue.setMmValue(0); // and the MM is gone too
+        vault.recall(BRTypes.ACCOUNT_IF, 1); // the IF recall starts: debt due
+        venue.setIfEquity(0);
+        venue.setMmValue(0); // everything lost
         _applyPoolMark();
         vm.expectEmit(true, false, false, true, address(book));
         emit Book.InsuranceWrittenOff(BOOK_ID, 25_000e6 - 1);
         book.finalizeRetirement();
-        (uint256 claim,) = _claim();
-        assertEq(claim, 0);
-        assertEq(pool.bookPosition(BOOK_ID).claim, 0);
-        assertEq(pool.bookPosition(BOOK_ID).allocation, 25_000e6 - 1, "written off as the pool's loss");
+        (uint256 debt,,) = _debt();
+        assertEq(debt, 0);
+        (,,,, bool closed) = book.insuranceDebt();
+        assertTrue(closed);
+        IInsurancePool.BookPosition memory pos = pool.bookPosition(BOOK_ID);
+        assertEq(pos.claim, 0);
+        assertEq(pos.allocation, 25_000e6 - 1, "the pool's loss");
+        assertFalse(pos.active);
     }
 
-    function test_finalize_withoutIfRecall_closesClaim() public {
+    function test_finalize_withoutIfRecall_bookPaysTheDrawnIf() public {
         _goLivePool();
-        venue.setIfEquity(0); // the whole IF went to bad debt while Live: claim 0
+        venue.setIfEquity(0); // the whole IF drawn while Live: the book's loss (it has 75k of MM)
         _applyPoolMark();
         charterC.retire(BOOK_ID);
         vm.prank(keeper);
         vault.recall(BRTypes.ACCOUNT_MM, 75_000e6);
         _applyPoolMark();
         book.finalizeRetirement();
-        (uint256 claim, bool due) = _claim();
-        assertEq(claim, 0);
+        (uint256 debt,, bool due) = _debt();
+        assertEq(debt, 0, "repaid from the MM cash");
         assertTrue(due);
-        assertEq(pool.firstLossAssets(), POOL_FIRST_LOSS - 25_000e6);
+        assertEq(pool.bookPosition(BOOK_ID).allocation, 0, "the pool lost nothing");
+        assertEq(pool.firstLossAssets(), POOL_FIRST_LOSS);
     }
 
     // ------------------------------------------------------------------ the old way
@@ -362,24 +428,20 @@ contract PoolBookTest is PoolBookFixture {
         _applyPoolMark();
         (s, j) = book.trancheNav();
         assertEq(s + j, 100_000e6, "IF in the NAV as before");
-        // the IF stays the book's: recall works while Live
         vm.prank(keeper);
         vault.recall(BRTypes.ACCOUNT_IF, 1_000e6);
     }
 
     /// @notice The charter's new fields share the slot of takerFeeBps / makerFeeBps: Charter keeps its 11 slots, so
-    ///         everything after it in Book's ERC-7201 storage (components, state, ...) stays where it was, and a book
-    ///         stored before reads ifFromPool = false, premiumBps = 0 (funded the old way).
+    ///         everything after it in Book's ERC-7201 storage stays where it was, and a book stored before reads
+    ///         ifFromPool = false, premiumBps = 0 (funded the old way).
     function test_charterStorageSizeUnchanged() public {
         _goLivePool();
         bytes32 loc = 0xafd306892a6154f35c973e251e6b4f2659d2ae19802986651fcc8ec3ae5c4c00;
-        // BookStorage: config (0), bookId (1), charter (2..12), components (13..20): book, senior, ...
         assertEq(address(uint160(uint256(vm.load(address(book), bytes32(uint256(loc) + 13))))), address(book));
         assertEq(address(uint160(uint256(vm.load(address(book), bytes32(uint256(loc) + 14))))), address(senior));
-        // the last charter slot (12): takerFeeBps | makerFeeBps << 16 | ifFromPool << 32 | premiumBps << 40
         uint256 last = uint256(vm.load(address(book), bytes32(uint256(loc) + 12)));
         assertEq((last >> 32) & 0xff, 1, "ifFromPool packed after the fee fields");
-        // clearing the new bytes reads as a book funded the old way
         vm.store(address(book), bytes32(uint256(loc) + 12), bytes32(last & 0xffffffff));
         BRTypes.Charter memory c = book.getCharter();
         assertFalse(c.ifFromPool);
@@ -398,28 +460,20 @@ contract PoolBookTest is PoolBookFixture {
 
     // ------------------------------------------------------------------ helpers
 
-    /// @dev Book identity for a pool-funded book at an applied mark: S + J + unfundedClaims + (claim not yet due)
-    ///      == vault idle + deployed (CAP-3 with the pool's claim).
+    function _nextPeriodEndAfterWarp() internal returns (uint64) {
+        vm.warp(((block.timestamp / INTERVAL) + 1) * INTERVAL);
+        return _nextPeriodEnd();
+    }
+
+    /// @dev Book identity for a pool-funded book at an applied mark: S + J + unfundedClaims + (debt not yet due)
+    ///      == vault idle + deployed (CAP-3 with the pool's debt), while the book is not exhausted.
     function _identity() internal view {
         (uint256 s, uint256 j) = book.trancheNav();
-        (uint256 claim, bool due) = _claim();
+        (uint256 debt,, bool due) = _debt();
         assertEq(
-            s + j + book.unfundedClaims() + (due ? 0 : claim),
+            s + j + book.unfundedClaims() + (due ? 0 : debt),
             vault.idle() + venue.deployedValueUsd(),
-            "identity with the pool's claim"
+            "identity with the pool's debt"
         );
     }
-}
-
-/// @dev IRevenueRouter.Amounts view through the router's previewSplit (avoids importing the frozen interface twice).
-interface IRevenueRouterAmounts {
-    struct Amounts {
-        uint256 gross;
-        uint256 expenses;
-        uint256 carry;
-        uint256 senior;
-        uint256 junior;
-    }
-
-    function previewSplit(uint256 gross, uint256 expensesRequested) external view returns (Amounts memory);
 }

@@ -400,9 +400,16 @@ library Waterfall {
         rest = gross - premium;
     }
 
-    /// @notice What a pool-funded book owes the pool for its IF: the allocation, marked down to the IF's equity
-    ///         when traders' bad debt drew the IF below it (a later refill restores it up to the allocation).
-    function insuranceClaim(uint256 allocation, uint256 insuranceEquityUsd) internal pure returns (uint256) {
-        return insuranceEquityUsd < allocation ? insuranceEquityUsd : allocation;
+    /// @notice What a pool-funded book can repay the pool at a mark: its senior debt, capped by vault idle + the mark's
+    ///         deployed value (the IF included). Below the debt only once the book is exhausted, i.e. the IF draw is
+    ///         larger than everything else the book holds; the NAV nets the full debt (markedNavNet with
+    ///         unfundedClaims + debt), so Junior, Senior and the backstop absorb the draw first.
+    function poolRecoverable(uint256 debt, uint256 vaultIdle, uint256 deployedValueUsd)
+        internal
+        pure
+        returns (uint256)
+    {
+        uint256 assets = vaultIdle + deployedValueUsd;
+        return assets < debt ? assets : debt;
     }
 }

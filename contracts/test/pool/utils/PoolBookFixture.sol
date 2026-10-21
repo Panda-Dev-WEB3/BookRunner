@@ -16,8 +16,8 @@ import {CoreMockFactory} from "../../core/utils/CoreMocks.sol";
 import {MockPoolAdapter, MockCarrySink} from "./PoolMocks.sol";
 
 /// @notice One book on the real Book / Tranche / UnderwritingVault / RevenueRouter with the real InsurancePool (proxy)
-///         and a two-account venue mock (MockPoolAdapter). The pool is seeded: depositor 1,000,000 + first-loss
-///         slice 100,000. Siblings (registry, backstop, charter, mandate) are the book-cluster mocks.
+///         and a two-account venue mock (MockPoolAdapter). The pool is seeded: depositor 1,000,000 + first-loss (120,000)
+///         slice. Siblings (registry, backstop, charter, mandate) are the book-cluster mocks.
 abstract contract PoolBookFixture is BookFixture {
     CoreMockFactory internal factory;
     InsurancePool internal pool;
@@ -29,11 +29,13 @@ abstract contract PoolBookFixture is BookFixture {
     address internal treasury = makeAddr("treasury");
 
     uint256 internal constant POOL_DEPOSIT = 1_000_000e6;
-    uint256 internal constant POOL_FIRST_LOSS = 100_000e6;
+    uint256 internal constant POOL_FIRST_LOSS = 120_000e6; // >= 10% of the pool (allocation gate)
 
+    /// @dev A pool-funded charter as MarketCharter files it: premiumBps already max(sponsor, floor 1200).
     function _poolCharter() internal view returns (BRTypes.Charter memory c) {
         c = _defaultCharter();
         c.ifFromPool = true;
+        c.premiumBps = 1200;
     }
 
     function _deployPoolInfra() internal {
@@ -56,8 +58,12 @@ abstract contract PoolBookFixture is BookFixture {
             usdc.mint(poolDepositor, deposit);
             vm.startPrank(poolDepositor);
             usdc.approve(address(pool), deposit);
-            pool.deposit(deposit, poolDepositor);
+            uint256 id = pool.requestDeposit(deposit);
             vm.stopPrank();
+            (, uint64 ends,,,) = pool.queue();
+            vm.warp(ends);
+            pool.processEpoch();
+            pool.claimDeposit(id);
         }
         if (firstLoss > 0) {
             usdc.mint(treasury, firstLoss);
@@ -138,7 +144,8 @@ abstract contract PoolBookFixture is BookFixture {
         rrouter.distribute(period, expenses);
     }
 
-    function _claim() internal view returns (uint256 claim, bool due) {
-        (,, claim, due) = book.insuranceClaim();
+    /// @dev The book's debt to the pool and the pool's valuation of it (what the book could repay at its last mark).
+    function _debt() internal view returns (uint256 debt, uint256 value, bool due) {
+        (, debt, value, due,) = book.insuranceDebt();
     }
 }

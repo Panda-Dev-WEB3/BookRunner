@@ -15,7 +15,6 @@ import {IMarketCharter} from "../interfaces/IMarketCharter.sol";
 import {IBackstop} from "../interfaces/IBkrnFeeRouter.sol";
 import {IAttestedOracle} from "../interfaces/IAttestedOracle.sol";
 import {IStockTokenRegistry} from "../interfaces/IStockTokenRegistry.sol";
-import {IVenueAdapter} from "../interfaces/IVenueAdapter.sol";
 import {IInsurancePool, IBookrunnerConfigPool} from "../interfaces/IInsurancePool.sol";
 import {Waterfall} from "./Waterfall.sol";
 import {Book, IVaultBackstopRepay} from "../Book.sol";
@@ -157,7 +156,6 @@ library BookLogic {
         sum.flowNonce = $.flowNonce;
         sum.deployedValueUsd = m.input.deployedValueUsd;
 
-        syncInsurance($); // [2026-10 insurance pool] the pool's claim follows the IF before the book is valued
         int256 pnl = _applyPnl($, cfg, sum);
         _maybeDrawdownKill($);
         if (_settles($, m.input.held, markId, sum.periodEnd)) _settleAtMark($, sum);
@@ -173,6 +171,8 @@ library BookLogic {
         });
         if (st == BRTypes.BookState.Retiring) $.markAppliedWhileRetiring = true;
         fundClaims($);
+        // [2026-10 insurance pool] what the book can repay, from this mark's snapshot, to the pool
+        _markInsurance($, sum.deployedValueUsd, sum.periodEnd, false);
         registry.markApplied(markId);
         emit Book.MarkSettled($.bookId, markId, sum.backstopCovered, sum.navPostPnl, sum.owed, sum.topUp);
         emit IBook.MarkApplied(
@@ -260,7 +260,7 @@ library BookLogic {
         uint256 us = $.unfunded[S];
         uint256 uj = $.unfunded[J];
         uint256 owed = $.backstopPayable;
-        uint256 pc = $.poolDue ? $.poolClaim : 0;
+        uint256 pc = $.poolDue ? $.poolDebt : 0;
         if (us == 0 && uj == 0 && owed == 0 && pc == 0) return 0;
         IUnderwritingVault vault = IUnderwritingVault($.components.vault);
         uint256 idle = vault.idle();
@@ -294,48 +294,22 @@ library BookLogic {
     // Insurance pool (2026-10, charter.ifFromPool; docs/ARCHITECTURE.md §2.10)
     // =========================================================================================
 
-    /// @dev Book.syncInsurance and the first step of applyMark: while the IF recall has not started, the pool's claim
-    ///      follows the IF equity, capped by the allocation (Waterfall.insuranceClaim): a fall (traders' bad debt drew
-    ///      the IF) is reported to the pool as a loss, a refill as a recovery. Never reverts: an unreadable adapter
-    ///      or a refused report leaves the claim as it was (the next sync retries).
-    function syncInsurance(Book.BookStorage storage $) public {
-        address pool = $.insurancePool;
-        if (pool == address(0) || $.poolDue) return;
-        try IVenueAdapter($.components.adapter).insuranceEquityUsd() returns (uint256 equity) {
-            _syncClaim($, pool, equity);
-        } catch {}
-    }
-
-    function _syncClaim(Book.BookStorage storage $, address pool, uint256 equity) private {
-        uint256 claim = $.poolClaim;
-        uint256 target = Waterfall.insuranceClaim($.poolAllocation, equity);
-        if (target == claim) return;
-        if (target < claim) {
-            try IInsurancePool(pool).reportLoss($.bookId, claim - target) {}
-            catch {
-                emit Book.InsuranceSyncFailed($.bookId, claim, target);
-                return;
-            }
-        } else {
-            try IInsurancePool(pool).reportRecovery($.bookId, target - claim) {}
-            catch {
-                emit Book.InsuranceSyncFailed($.bookId, claim, target);
-                return;
-            }
-        }
-        $.poolClaim = target;
-        emit Book.InsuranceClaimSynced($.bookId, claim, target, equity);
-    }
-
     /// @dev Book.onInsuranceRecall (msg.sender is the vault: DELEGATECALL keeps it). The vault only recalls a
-    ///      pool-funded IF once the book is no longer Live; the claim is synced a last time and becomes due.
+    ///      pool-funded IF once the book is no longer Live; the debt becomes due (reserved, repaid first).
     function onInsuranceRecall(Book.BookStorage storage $) external {
         if (msg.sender != $.components.vault) revert Book.NotVault();
         if ($.insurancePool == address(0) || $.poolDue) return;
         if ($.state == BRTypes.BookState.Live) revert Book.BadState($.state);
-        syncInsurance($);
         $.poolDue = true;
-        emit Book.InsuranceDue($.bookId, $.poolClaim);
+        emit Book.InsuranceDue($.bookId, $.poolDebt);
+    }
+
+    /// @dev Book.settleInsurance: Retired pool-funded book, retries the repayment and the retirement mark.
+    function settleInsurance(Book.BookStorage storage $) external {
+        if ($.state != BRTypes.BookState.Retired) revert Book.BadState($.state);
+        if ($.insurancePool == address(0)) return;
+        fundClaims($);
+        if (!$.poolClosed) _closeInsurance($);
     }
 
     // =========================================================================================
@@ -343,15 +317,16 @@ library BookLogic {
     // =========================================================================================
 
     /// @dev Cash owed out of the vault (reserved from deployment): unfunded claims, the backstop repayment and, once
-    ///      due, the pool's claim.
+    ///      due, the pool's debt.
     function liabilities(Book.BookStorage storage $) internal view returns (uint256) {
-        return $.unfunded[S] + $.unfunded[J] + $.backstopPayable + ($.poolDue ? $.poolClaim : 0);
+        return $.unfunded[S] + $.unfunded[J] + $.backstopPayable + ($.poolDue ? $.poolDebt : 0);
     }
 
-    /// @dev Liabilities netted from NAV: liabilities() plus the pool's claim before it is due (backed by the venue IF,
-    ///      which the mark's deployedValueUsd counts), so a pool-funded IF is never Senior / Junior value.
+    /// @dev Liabilities netted from NAV: liabilities() plus the pool's debt before it is due (backed by the venue IF,
+    ///      which the mark's deployedValueUsd counts at the same snapshot), so a pool-funded IF is never Senior / Junior
+    ///      value and an IF draw is a book loss (Junior -> Senior -> backstop) before it can be the pool's.
     function navLiabilities(Book.BookStorage storage $) internal view returns (uint256) {
-        return $.unfunded[S] + $.unfunded[J] + $.backstopPayable + $.poolClaim;
+        return $.unfunded[S] + $.unfunded[J] + $.backstopPayable + $.poolDebt;
     }
 
     function tranche(Book.BookStorage storage $, uint8 k) internal view returns (address) {
@@ -623,20 +598,23 @@ library BookLogic {
         address pool = IBookrunnerConfigPool($.config).insurancePool();
         if (pool == address(0)) revert Book.InsurancePoolUnset();
         amount = $.charter.ifTargetUsd;
+        if (amount == 0) revert Book.InsuranceTargetZero();
         $.insurancePool = pool;
-        $.poolAllocation = amount;
-        $.poolClaim = amount;
+        $.poolDebt = amount;
+        $.poolValue = amount;
         emit Book.InsuranceFunded($.bookId, pool, amount);
-        if (amount > 0) IInsurancePool(pool).allocate($.bookId, amount);
+        IInsurancePool(pool).allocate($.bookId, amount, $.charter.underlying);
     }
 
-    /// @dev Repays `amount` of the due pool claim from vault idle; returns the cash reserved for it (== amount,
-    ///      whether or not the vault managed to pay).
+    /// @dev Repays `amount` of the due debt from vault idle; returns the cash reserved for it (== amount, whether or
+    ///      not the vault managed to pay).
     function _repayInsurance(Book.BookStorage storage $, address vault, uint256 amount) private returns (uint256) {
         if (amount == 0) return 0;
         try IVaultPoolRepay(vault).repayInsurancePool(amount) {
-            uint256 left = $.poolClaim - amount;
-            $.poolClaim = left;
+            uint256 left = $.poolDebt - amount;
+            $.poolDebt = left;
+            uint256 v = $.poolValue;
+            $.poolValue = v > amount ? v - amount : 0;
             emit Book.InsuranceRepaid($.bookId, amount, left);
         } catch {
             emit Book.InsuranceRepayFailed($.bookId, amount);
@@ -644,26 +622,41 @@ library BookLogic {
         return amount;
     }
 
-    /// @dev finalizeRetirement of a pool-funded book: everything is back in the vault (deployedValueUsd == 0). The
-    ///      claim is due (if no IF recall made it so), repaid from idle first, and the part idle cannot cover is
-    ///      written off as the pool's loss. Never reverts.
-    function _closeInsurance(Book.BookStorage storage $) private {
+    /// @dev At each applied mark: what the book can repay, min(debt, vault idle + the mark's deployedValueUsd) (Waterfall
+    ///      .poolRecoverable), to the pool, which values its claim at it (a pool loss only once the book is exhausted;
+    ///      a recovery when it is not any more) and counts the mark for its epoch gate. Never reverts.
+    function _markInsurance(Book.BookStorage storage $, uint256 deployed, uint64 periodEnd, bool final_) private {
         address pool = $.insurancePool;
-        if (pool == address(0)) return;
+        if (pool == address(0) || $.poolClosed) return;
+        uint256 value =
+            Waterfall.poolRecoverable($.poolDebt, IUnderwritingVault($.components.vault).idle(), deployed);
+        try IInsurancePool(pool).markBook($.bookId, value, periodEnd, final_) {
+            $.poolValue = value;
+            emit Book.InsuranceMarked($.bookId, $.poolDebt, value, periodEnd, final_);
+            if (final_) {
+                $.poolClosed = true;
+                uint256 debt = $.poolDebt;
+                if (debt > value) {
+                    $.poolDebt = value;
+                    emit Book.InsuranceWrittenOff($.bookId, debt - value);
+                }
+            }
+        } catch {
+            emit Book.InsuranceMarkFailed($.bookId, value, final_);
+        }
+    }
+
+    /// @dev finalizeRetirement of a pool-funded book: everything is back in the vault (deployedValueUsd == 0). The debt
+    ///      is due, repaid from idle first; the retirement mark reports min(debt, idle) and writes off the rest (the
+    ///      pool's loss: the tranches, the recalled MM and the backstop cover are spent). Never reverts.
+    function _closeInsurance(Book.BookStorage storage $) private {
+        if ($.insurancePool == address(0)) return;
         if (!$.poolDue) {
-            syncInsurance($);
             $.poolDue = true;
-            emit Book.InsuranceDue($.bookId, $.poolClaim);
+            emit Book.InsuranceDue($.bookId, $.poolDebt);
         }
         fundClaims($);
-        uint256 claim = $.poolClaim;
-        uint256 idle = IUnderwritingVault($.components.vault).idle();
-        if (claim <= idle) return;
-        uint256 writeOff = claim - idle;
-        try IInsurancePool(pool).reportLoss($.bookId, writeOff) {
-            $.poolClaim = idle;
-            emit Book.InsuranceWrittenOff($.bookId, writeOff);
-        } catch {}
+        _markInsurance($, 0, $.lastMark.periodEnd, true);
     }
 
     function _reasonCode(uint8 reason) private pure returns (bytes32) {

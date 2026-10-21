@@ -7,11 +7,12 @@ import {PoolBookFixture} from "./utils/PoolBookFixture.sol";
 
 /// @notice Parity of a pool-funded book with the NORMATIVE TypeScript waterfall (packages/shared/src/waterfall.ts):
 ///         every `poolBook` row of test/vectors/waterfall.json (scripts/gen-vectors.ts) is run through the real Book,
-///         InsurancePool and RevenueRouter — window (no IF raised), premium + split + credit, IF bad debt synced to
-///         the pool, NAV net of the pool's claim, mark P&L — and must reproduce the TS numbers exactly.
-///   poolBook: [seniorCommitted, juniorCommitted, ifTarget, mmInventory, gross, expensesRequested, charterPremiumBps,
-///              ifLoss, mmLoss(0|1), mmPnlAbs, | seniorAllocated, juniorAllocated, premium, expenses, carry, senior,
-///              junior, seniorCredit, juniorCredit, claim, nav, S', J']
+///         InsurancePool and RevenueRouter — window (no IF raised), premium + split + credit, NAV net of the pool's
+///         senior debt, the pool's value of it, mark P&L — and must reproduce the TS numbers exactly.
+///   poolBook: [seniorCommitted, juniorCommitted, ifTarget, mmInventory, gross, expensesRequested, premiumBps (as
+///              filed), ifLoss, mmLoss(0|1), mmPnlAbs, | seniorAllocated, juniorAllocated, premium, expenses, carry,
+///              senior, junior, seniorCredit, juniorCredit, poolValue, nav, S', J'] (the IF is a senior debt: an IF draw
+///              is a book loss; the pool is owed min(debt, idle + deployed))
 contract PoolBookParityTest is PoolBookFixture {
     string internal json;
     uint256 internal rows;
@@ -74,8 +75,9 @@ contract PoolBookParityTest is PoolBookFixture {
         uint256 mm = venue.mmValue();
         venue.setMmValue(v[8] == 1 ? mm - v[9] : mm + v[9]);
         _applyPoolMark();
-        (,, uint256 claim,) = book.insuranceClaim();
-        assertEq(claim, v[19], string.concat(tag, " claim"));
+        (, uint256 debt, uint256 value,,) = book.insuranceDebt();
+        assertEq(debt, v[2], string.concat(tag, " debt"));
+        assertEq(value, v[19], string.concat(tag, " poolValue"));
         assertEq(pool.bookPosition(BOOK_ID).claim, v[19], string.concat(tag, " pool claim"));
         Book.LastMark memory lm = book.lastMarkSummary();
         assertEq(lm.navUsd, v[20], string.concat(tag, " nav"));

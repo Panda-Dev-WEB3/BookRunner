@@ -22,8 +22,9 @@ import {Waterfall} from "./libraries/Waterfall.sol";
 ///         `config.expenseRecipient()`, carry to `BkrnFeeRouter.notifyCarry`, Senior + Junior to the
 ///         book's UnderwritingVault, credited via `IBook.creditDistribution`.
 ///         [2026-10 insurance pool] A pool-funded book (book.insurancePool() != 0) first pays the pool its premium,
-///         max(charter.premiumBps, pool.premiumFloorBps()) of gross (Waterfall.premiumSplit), and the rest is split
-///         as above; `Distributed` keeps `gross` as the whole gross and `PremiumPaid` carries the premium.
+///         charter.premiumBps of gross (Waterfall.premiumSplit; MarketCharter fixed it at filing to max(the sponsor's
+///         rate, the pool floor of that moment), so a later floor change never re-prices a live book), and the rest is
+///         split as above; `Distributed` keeps `gross` as the whole gross and `PremiumPaid` carries the premium.
 /// @dev Accounting: `pendingGross` is exactly the USDC this router has acknowledged and not yet paid out
 ///      (a distribution pays out exactly `gross`: premium + expenses + carry + senior + junior == gross). A
 ///      settlement of `amount` is accepted only if the actual balance covers `pendingGross + amount`;
@@ -169,7 +170,7 @@ contract RevenueRouter is Initializable, ReentrancyGuardTransient, IRevenueRoute
     }
 
     /// @notice The InsurancePool premium `distribute` would pay on `gross` now: the pool (address(0) for a book-funded
-    ///         IF: no premium), the amount and the rate max(charter.premiumBps, pool.premiumFloorBps()).
+    ///         IF: no premium), the amount and the rate (charter.premiumBps, fixed at filing).
     function previewPremium(uint256 gross) external view returns (address pool, uint256 premium, uint256 premiumBps) {
         (pool, premium,, premiumBps) = _premium(gross);
     }
@@ -215,7 +216,7 @@ contract RevenueRouter is Initializable, ReentrancyGuardTransient, IRevenueRoute
         }
     }
 
-    /// @dev The pool premium of a pool-funded book (Waterfall.effectivePremiumBps / premiumSplit) and the rest of
+    /// @dev The pool premium of a pool-funded book (Waterfall.premiumSplit at charter.premiumBps) and the rest of
     ///      `gross` to split; no premium (rest == gross) otherwise.
     function _premium(uint256 gross)
         private
@@ -226,8 +227,7 @@ contract RevenueRouter is Initializable, ReentrancyGuardTransient, IRevenueRoute
             pool = p;
         } catch {}
         if (pool == address(0)) return (address(0), 0, gross, 0);
-        premiumBps =
-            Waterfall.effectivePremiumBps(IBook(book).getCharter().premiumBps, IInsurancePool(pool).premiumFloorBps());
+        premiumBps = IBook(book).getCharter().premiumBps;
         (premium, rest) = Waterfall.premiumSplit(gross, premiumBps);
     }
 

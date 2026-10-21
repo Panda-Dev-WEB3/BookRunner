@@ -19,7 +19,7 @@ import {Waterfall} from "../../src/libraries/Waterfall.sol";
 ///            seniorRestored, backstopRepaid, seniorImpairment', backstopDebt'] (audit L-1)
 ///   insurance pool (2026-10): premium [gross, charterPremiumBps, floorBps, expensesRequested, expenseCapBps, carryBps,
 ///            seniorHurdleBps, seniorSupply, juniorSupply, effectivePremiumBps, premium, expenses, carry, senior, junior];
-///            claim [allocation, insuranceEquity, claim, vaultIdle, unfundedClaims, deployed, nav]; poolWindow
+///            poolDebt [debt, vaultIdle, unfundedClaims, deployed, nav, recoverable]; poolWindow
 ///            [ifTarget, mm, seniorCapBps, seniorCommitted, juniorCommitted, sponsorJuniorCommitted, ok, reason,
 ///            seniorAllocated, juniorAllocated, ifRaised, mmAmount, idle]. poolBook rows: test/pool/PoolBookParity.t.sol.
 contract WaterfallParityTest is Test {
@@ -194,16 +194,16 @@ contract WaterfallParityTest is Test {
         }
     }
 
-    function test_parity_claim() public view {
+    function test_parity_poolDebt() public view {
         for (uint256 i = 0; i < count; i++) {
-            uint256[] memory v = _row("claim", i);
-            assertEq(v.length, 7, "claim row width");
-            string memory tag = string.concat("claim[", vm.toString(i), "]");
-            uint256 c = Waterfall.insuranceClaim(v[0], v[1]);
-            assertEq(c, v[2], string.concat(tag, " claim"));
-            assertLe(c, v[0], string.concat(tag, " claim <= allocation"));
-            // Book.applyMark: markedNavNet(idle, unfunded + claim, deployed)
-            assertEq(Waterfall.markedNavNet(v[3], v[4] + c, v[5]), v[6], string.concat(tag, " nav"));
+            uint256[] memory v = _row("poolDebt", i);
+            assertEq(v.length, 6, "poolDebt row width");
+            string memory tag = string.concat("poolDebt[", vm.toString(i), "]");
+            // Book.applyMark: markedNavNet(idle, unfunded + debt, deployed); the pool is owed poolRecoverable
+            assertEq(Waterfall.markedNavNet(v[1], v[2] + v[0], v[3]), v[4], string.concat(tag, " nav"));
+            uint256 r = Waterfall.poolRecoverable(v[0], v[1], v[3]);
+            assertEq(r, v[5], string.concat(tag, " recoverable"));
+            assertLe(r, v[0], string.concat(tag, " recoverable <= debt"));
         }
     }
 

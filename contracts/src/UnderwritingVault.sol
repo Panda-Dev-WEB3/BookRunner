@@ -24,7 +24,7 @@ import {IInsurancePool, IBookInsurance} from "./interfaces/IInsurancePool.sol";
 ///         Live (never during wind-down or after retirement).
 ///         [2026-10 insurance pool] For a pool-funded book (book.insurancePool() != 0) the IF account belongs to the
 ///         InsurancePool: only the book deploys to it (closeWindow, with the pool's USDC), nobody recalls it while
-///         the book is Live, a recall first makes the pool's claim due (book.onInsuranceRecall) and the book repays
+///         the book is Live, a recall first makes the pool's debt due (book.onInsuranceRecall) and the book repays
 ///         the pool from this vault (`repayInsurancePool`).
 contract UnderwritingVault is IUnderwritingVault, Initializable, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
