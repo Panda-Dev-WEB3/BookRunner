@@ -174,9 +174,21 @@ export interface Memory {
   buybackSamples: Sample[];
   /** last known on-chain markInterval (kept when a read fails) */
   markIntervalSec: number | null;
+  /** InsurancePool positions of fully settled books (poolPositionSettled): final, never read again, reused as last read */
+  poolSettled?: PoolBookSnap[];
 }
 
-export const emptyMemory = (): Memory => ({ rpcSamples: [], buybackSamples: [], markIntervalSec: null });
+export const emptyMemory = (): Memory => ({ rpcSamples: [], buybackSamples: [], markIntervalSec: null, poolSettled: [] });
+
+/**
+ * A pool position that can no longer change (insurance-pool follow-ups: alerts stop reading every retired book): the book
+ * is Retired (terminal), its final pool mark landed (position closed: `active` false, never reopened) and it owes the pool
+ * nothing (claim 0: no repayment, recovery or write-off can follow). A closed position with a claim (a failed repayment,
+ * retried by settleInsurance) or a retired book whose final mark is stuck (still active) keeps being read.
+ */
+export function poolPositionSettled(b: PoolBookSnap, bookState: string | undefined): boolean {
+  return bookState === "Retired" && !b.active && b.claimUsd === 0;
+}
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e)).split("\n")[0]!.slice(0, 200);
 
@@ -691,10 +703,20 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
   }
   // InsurancePool: null = none in the deployment; undefined = a core read failed (rpc problems are the rpc rule's business)
   let pool: Snapshot["pool"] = null;
+  const poolSettled = new Map((Array.isArray(mem.poolSettled) ? mem.poolSettled : []).map((b) => [b.bookId, b]));
   if (d.chain.pool) {
     try {
       // review m-2: only books that can hold a pool position (a window closed): never Subscription / Cancelled ones
-      pool = await d.chain.pool(bookRows.filter((b) => b.state !== "Subscription" && b.state !== "Cancelled").map((b) => Number(b.id)));
+      const withPosition = bookRows.filter((b) => b.state !== "Subscription" && b.state !== "Cancelled").map((b) => Number(b.id));
+      // fully settled positions are final: not read again, their last read stands in (the rules still see them)
+      pool = await d.chain.pool(withPosition.filter((id) => !poolSettled.has(id)));
+      if (pool) {
+        const stateOf = new Map(bookRows.map((b) => [Number(b.id), b.state]));
+        for (const b of pool.books) if (poolPositionSettled(b, stateOf.get(b.bookId))) poolSettled.set(b.bookId, b);
+        const read = new Set(pool.books.map((b) => b.bookId));
+        const kept = withPosition.flatMap((id) => (read.has(id) ? [] : (poolSettled.get(id) ?? [])));
+        pool = { ...pool, books: [...pool.books, ...kept].sort((a, b) => a.bookId - b.bookId) };
+      }
     } catch {
       pool = undefined;
     }
@@ -749,5 +771,5 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
     pool,
     infraErrors,
   };
-  return { snapshot, memory: { rpcSamples, buybackSamples, markIntervalSec } };
+  return { snapshot, memory: { rpcSamples, buybackSamples, markIntervalSec, poolSettled: [...poolSettled.values()] } };
 }
