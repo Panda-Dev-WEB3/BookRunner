@@ -19,10 +19,10 @@
   "chainlink": {
     "sequencerUptimeFeed": null,
     "feeds": {
-      "NVDA": { "proxy": "0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15", "basis": "per-token", "decimals": 8, "heartbeatSec": 86400, "deviationBps": 50, "description": "Robinhood NVDA / USD", "marketHours": "us_equities_24/5" },
-      "TSLA": { "proxy": "0x4A1166a659A55625345e9515b32adECea5547C38", "basis": "per-token", "decimals": 8, "heartbeatSec": 86400, "deviationBps": 50, "description": "Robinhood TSLA / USD", "marketHours": "us_equities_24/5" },
+      "NVDA": { "proxy": "0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15", "basis": "per-token", "decimals": 8, "heartbeatSec": 86400, "deviationBps": 50, "description": "RHNVDA / USD", "marketHours": "us_equities_24/5" },
+      "TSLA": { "proxy": "0x4A1166a659A55625345e9515b32adECea5547C38", "basis": "per-token", "decimals": 8, "heartbeatSec": 86400, "deviationBps": 50, "description": "RHTSLA / USD", "marketHours": "us_equities_24/5" },
       "AAPL": { "proxy": "0x6B22A786bAa607d76728168703a39Ea9C99f2cD0", "basis": "per-token", "decimals": 8, "heartbeatSec": 86400, "deviationBps": 50, "description": "Robinhood AAPL / USD", "marketHours": "us_equities_24/5" },
-      "MSFT": { "proxy": "0x45C3C877C15E6BA2EBB19eA114Ea508d14C1Af2E", "basis": "per-token", "decimals": 8, "heartbeatSec": 86400, "deviationBps": 50, "description": "Robinhood MSFT / USD", "marketHours": "us_equities_24/5" },
+      "MSFT": { "proxy": "0x45C3C877C15E6BA2EBB19eA114Ea508d14C1Af2E", "basis": "per-token", "decimals": 8, "heartbeatSec": 86400, "deviationBps": 50, "description": "RHMSFT / USD", "marketHours": "us_equities_24/5" },
       "AMZN": { "proxy": "0xD5a1508ceD74c084eBf3cBe853e2C968fB2a651C", "basis": "per-token", "decimals": 8, "heartbeatSec": 86400, "deviationBps": 50, "description": "Robinhood AMZN / USD", "marketHours": "us_equities_24/5" }
     }
   },
