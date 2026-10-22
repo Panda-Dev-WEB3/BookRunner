@@ -90,6 +90,8 @@ root, never under `/app/`. The dev server (`bun run dev`) still serves the app a
   wildcard certificate, hence no 443 block: `https://unknown.bookrunner.tech` still meets another server's
   certificate.
 - `nginx-lib.sh` — the shared install/validate/rollback helpers.
+- `db-migrate.sh` — `db_migrate`, used by `update.sh`: the `packages/db` migrations as `bookrunner`, the Postgres
+  password parsed from `.env.infra` (`env-parse.sh`, never sourced) and passed through the environment only.
 
 HSTS `includeSubDomains`: once a browser has seen it, it only talks HTTPS to every `*.bookrunner.tech` name for
 a year. Every subdomain a person opens in a browser (`leveret.bookrunner.tech`, a webmail, ...) must therefore
@@ -178,7 +180,8 @@ fast-forwards the app checkout to the same commit (refusing local modifications)
 `/var/www/bookrunner/` (so the site's `--delete` never removes the app), installs the nginx rate-limit conf +
 snippet, brings the live site's server-level HSTS line to `includeSubDomains`, installs the wildcard site, and
 the units from the root copy, applies a changed compose file (`systemctl reload
-bookrunner-infra`) and restarts the stack. It warns while the live site does not include the snippet yet
+bookrunner-infra`), applies the database migrations (`bookrunner_testnet`, and `bookrunner_testnet_live` when it
+exists; as `bookrunner`, `db-migrate.sh`: a failure stops the update before any restart) and restarts the stack. It warns while the live site does not include the snippet yet
 (run `patch-nginx.sh` once).
 
 ### Moving an existing server to the site + `/app/` layout (once; historical, before HARDENING.md)

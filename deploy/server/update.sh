@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Update the server to origin/main: refresh the ROOT-OWNED deploy copy, pull the app, build + publish the
-# public site and the operator app, install the nginx conf + units, restart the stack.
+# public site and the operator app, install the nginx conf + units, migrate the databases, restart the stack.
 #   sudo /usr/local/lib/bookrunner-deploy/update.sh            # full update (stack restarts, ~20 s)
 #   sudo /usr/local/lib/bookrunner-deploy/update.sh --web-only # site + app + nginx, no stack restart
 #
@@ -138,6 +138,19 @@ if [ "${1:-}" != "--web-only" ]; then
   echo "==> infra (applies a changed compose file; unchanged containers keep running)"
   systemctl enable --now bookrunner-infra >/dev/null
   systemctl reload bookrunner-infra
+  # database migrations BEFORE the stack restarts (db-migrate.sh: as bookrunner, the password parsed from the root-owned
+  # .env.infra and passed through the environment only); a failure stops here and the stack is not restarted
+  # shellcheck source=env-parse.sh
+  . "$DEPLOY/env-parse.sh"
+  # shellcheck source=db-migrate.sh
+  . "$DEPLOY/db-migrate.sh"
+  PG=bookrunner-postgres-1
+  for _ in $(seq 1 30); do docker exec "$PG" pg_isready -q -U bookrunner -d bookrunner && break; sleep 2; done
+  db_migrate "$INFRA_ENV" "$APP" bookrunner_testnet || exit 1
+  # the live-Orderly rehearsal stack's database (rehearsal-deploy.sh), when it exists: restarted below with the same code
+  if [ "$(docker exec "$PG" psql -U bookrunner -d bookrunner -tAc "SELECT 1 FROM pg_database WHERE datname='bookrunner_testnet_live'" 2>/dev/null)" = 1 ]; then
+    db_migrate "$INFRA_ENV" "$APP" bookrunner_testnet_live || exit 1
+  fi
   # dev.ts migrates the Redis keys / queues to the stack's bus namespace before it starts any service (bus-migrate.ts)
   echo "==> restart stack"
   systemctl restart bookrunner
