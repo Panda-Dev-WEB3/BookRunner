@@ -597,6 +597,19 @@ export const orderlyAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "insuranceInTransitUsd",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "lastFlowAt",
     "inputs": [],
     "outputs": [

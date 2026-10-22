@@ -40,6 +40,8 @@ interface IVaultFlowNotify {
 ///           deployedValueUsd = insurance + max(margin, 0) + inTransit, where inTransit is the amount of
 ///           confirmed (executed on Orderly) withdrawals not yet swept into the vault. Requested but
 ///           unconfirmed withdrawals are still venue-side and are counted there (never twice).
+///           [2026-10 pool follow-up m-6] `insuranceInTransitUsd` is the IF part of inTransit (the mark's signed IF
+///           equity = insurance + that part).
 ///
 ///         Withdrawal / report protocol (each USDC unit is counted exactly once, in any order of venue
 ///         payout vs `confirmWithdraw`):
@@ -165,6 +167,10 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         address ifAccount;
         // appended (v4): builder IF mode, the operator EOA owning the IF account; address(0) = contract mode
         address ifAccountOwner;
+        // appended (v5) [2026-10 pool follow-up m-6, re-audit]: the IF part of `inTransitUsd` (confirmed IF withdrawals
+        // not yet swept), always <= inTransitUsd; a sweep clears it first (see `_leaveTransit`). 0 on a proxy upgraded
+        // while IF was in transit (the pre-v5 reading: no IF in transit).
+        uint256 inTransitIfUsd;
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -439,8 +445,8 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         if (amount == 0) return 0;
         if (principal != 0) _checkSweepOpen($);
 
-        uint256 remaining = $.inTransitUsd - principal;
-        $.inTransitUsd = remaining;
+        // [2026-10 pool follow-up m-6] principal <= inTransitUsd: the IF part is cleared first
+        uint256 remaining = _leaveTransit($, BRTypes.ACCOUNT_IF, principal);
         $.totalReturnedUsd += amount;
 
         $.usdc.safeTransfer($.vault, amount);
@@ -505,9 +511,7 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         if (r.status != WithdrawStatus.Confirmed) revert RequestNotConfirmed(requestNonce, r.status);
         r.status = WithdrawStatus.Failed;
         uint256 amount = r.amount;
-        uint256 expected = amount - r.venueFee;
-        uint256 transit = $.inTransitUsd;
-        $.inTransitUsd = transit - Math.min(transit, expected);
+        _leaveTransit($, r.account, amount - r.venueFee); // [2026-10 pool follow-up m-6]
         _creditVenueSide($, r.account, amount);
         $.lastFlowAt = uint64(block.timestamp);
         emit WithdrawFailed(requestNonce, r.account, amount);
@@ -731,8 +735,7 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         if (block.timestamp < earliest) revert WriteOffTooEarly(requestNonce, earliest);
         r.status = WithdrawStatus.WrittenOff;
         uint256 expected = r.amount - r.venueFee;
-        uint256 transit = $.inTransitUsd;
-        $.inTransitUsd = transit - Math.min(transit, expected);
+        _leaveTransit($, BRTypes.ACCOUNT_IF, expected); // [2026-10 pool follow-up m-6] an IF request (checked above)
         $.lastFlowAt = uint64(block.timestamp);
         emit OperatorPayoutWrittenOff(requestNonce, expected);
         _notifyFlow($);
@@ -861,6 +864,13 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
     ///      Requested-but-unconfirmed amounts are still counted venue-side (see `pendingWithdrawUsd`).
     function inTransitUsd() external view returns (uint256) {
         return _s().inTransitUsd;
+    }
+
+    /// @notice [2026-10 pool follow-up m-6, re-audit] The IF part of `inTransitUsd`: confirmed IF withdrawals not yet swept
+    ///         (net of venue fees), never more than `inTransitUsd`. The mark signs `insuranceEquityUsd() + this` as the IF
+    ///         equity (MarkInput.insuranceEquityUsd), so an IF recall in flight is not an IF draw.
+    function insuranceInTransitUsd() external view returns (uint256) {
+        return _s().inTransitIfUsd;
     }
 
     /// @inheritdoc IVenueAdapter
@@ -1124,9 +1134,23 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         $.pendingWithdrawUsd[account] -= amount;
         _debitVenueSide($, account, amount);
         $.inTransitUsd += amount - venueFee;
+        if (account == BRTypes.ACCOUNT_IF) $.inTransitIfUsd += amount - venueFee; // [2026-10 pool follow-up m-6]
         $.lastFlowAt = uint64(block.timestamp);
 
         emit WithdrawConfirmed(requestNonce, account, amount, venueFee);
+    }
+
+    /// @dev [2026-10 pool follow-up m-6, re-audit] `amount` (<= inTransitUsd for a sweep) leaves in-transit; for `account`
+    ///      IF the IF part goes down by as much as it holds (a sweep cannot tell an IF payout from an MM one: it clears
+    ///      the IF part first, so the IF in transit is never overstated: an understated one only delays Backstop cover
+    ///      to a later mark, Waterfall.poolCoverNav), and it never exceeds what is left in transit. Returns what is left.
+    function _leaveTransit(AdapterStorage storage $, uint8 account, uint256 amount) private returns (uint256 left) {
+        uint256 transit = $.inTransitUsd;
+        left = transit - Math.min(transit, amount);
+        $.inTransitUsd = left;
+        uint256 ifPart = $.inTransitIfUsd;
+        if (account == BRTypes.ACCOUNT_IF) ifPart -= Math.min(ifPart, amount);
+        $.inTransitIfUsd = Math.min(ifPart, left);
     }
 
     /// @dev Principal-first attribution of the adapter's USDC balance:

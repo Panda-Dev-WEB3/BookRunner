@@ -7,7 +7,9 @@ import {IVenueAdapter} from "../../../src/interfaces/IVenueAdapter.sol";
 import {MockERC20} from "../../../src/mocks/MockERC20.sol";
 
 /// @notice Venue adapter mock with separate IF and MM accounts (synchronous, like the engine): the IF equity and the
-///         MM value move independently (gains mint, losses burn the USDC held), deployedValueUsd = IF + MM.
+///         MM value move independently (gains mint, losses burn the USDC held), deployedValueUsd = IF + MM + IF in transit.
+///         [2026-10 pool follow-up m-6] `setIfAsync(true)`: IF deposits and recalls stay in flight (`ifInTransit`,
+///         counted in deployedValueUsd like OrderlyAdapter's in-transit) until `landIf()`.
 contract MockPoolAdapter is IVenueAdapter {
     MockERC20 public immutable usdcToken;
     address public vault;
@@ -15,6 +17,10 @@ contract MockPoolAdapter is IVenueAdapter {
     uint256 public ifEquity;
     uint256 public mmValue;
     bool public revertInsurance;
+    bool public ifAsync;
+    /// @notice IF in flight: a deposit not yet at the venue or a recall not yet in the vault (`ifInTransitIsRecall`).
+    uint256 public ifInTransit;
+    bool public ifInTransitIsRecall;
 
     constructor(MockERC20 usdc_) {
         usdcToken = usdc_;
@@ -36,10 +42,23 @@ contract MockPoolAdapter is IVenueAdapter {
         return BRTypes.VENUE_POOL_ENGINE;
     }
 
+    function setIfAsync(bool a) external {
+        ifAsync = a;
+    }
+
+    /// @notice Test hook: the IF in flight arrives (a deposit at the venue, a recall in the vault).
+    function landIf() external {
+        uint256 amount = ifInTransit;
+        ifInTransit = 0;
+        if (ifInTransitIsRecall) IERC20(address(usdcToken)).transfer(vault, amount);
+        else ifEquity += amount;
+    }
+
     function depositToVenue(uint8 account, uint256 amount) external {
         require(msg.sender == vault, "MockPoolAdapter: not vault");
         IERC20(address(usdcToken)).transferFrom(vault, address(this), amount);
-        if (account == BRTypes.ACCOUNT_IF) ifEquity += amount;
+        if (account == BRTypes.ACCOUNT_IF && ifAsync) (ifInTransit, ifInTransitIsRecall) = (ifInTransit + amount, false);
+        else if (account == BRTypes.ACCOUNT_IF) ifEquity += amount;
         else mmValue += amount;
         emit VenueDeposit(account, amount);
     }
@@ -49,6 +68,11 @@ contract MockPoolAdapter is IVenueAdapter {
         if (account == BRTypes.ACCOUNT_IF) {
             if (amount > ifEquity) amount = ifEquity;
             ifEquity -= amount;
+            if (ifAsync) {
+                (ifInTransit, ifInTransitIsRecall) = (ifInTransit + amount, true);
+                emit WithdrawRequested(account, amount, 0);
+                return;
+            }
         } else {
             if (amount > mmValue) amount = mmValue;
             mmValue -= amount;
@@ -95,12 +119,17 @@ contract MockPoolAdapter is IVenueAdapter {
         return 0;
     }
 
-    function inTransitUsd() external pure returns (uint256) {
-        return 0;
+    function inTransitUsd() external view returns (uint256) {
+        return ifInTransit;
+    }
+
+    /// @notice As OrderlyAdapter.insuranceInTransitUsd: the IF part of inTransitUsd.
+    function insuranceInTransitUsd() external view returns (uint256) {
+        return ifInTransit;
     }
 
     function deployedValueUsd() external view returns (uint256) {
-        return ifEquity + mmValue;
+        return ifEquity + mmValue + ifInTransit;
     }
 
     function valuationAt() external view returns (uint64) {
