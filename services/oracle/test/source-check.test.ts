@@ -27,7 +27,7 @@ class FakeCheckReader implements SourceCheckReader {
   constructor() {
     for (const [id, f] of Object.entries(FEEDS)) {
       this.rounds.set(f.proxy.toLowerCase(), { answer: V.feedAnswer, startedAt: T0S - 120n, updatedAt: T0S - 120n });
-      this.desc.set(f.proxy.toLowerCase(), `Robinhood ${id} / USD`);
+      this.desc.set(f.proxy.toLowerCase(), f.description ?? `Robinhood ${id} / USD`); // what the chain config expects
       this.tokens.set(f.token!.toLowerCase(), { uiMultiplier: V.uiMultiplierWad, newUIMultiplier: V.uiMultiplierWad, effectiveAt: 0n, oraclePaused: false });
     }
   }
