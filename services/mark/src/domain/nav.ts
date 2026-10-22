@@ -53,10 +53,22 @@ export function poolDebtNetted(s: Pick<MarkSnapshot, "insuranceDebt">): bigint {
 /**
  * The IF equity the mark signs (MarkInput.insuranceEquityUsd, 2026-10): the venue IF figure of the SAME snapshot whose
  * deployedValueUsd the mark carries (after the signed venue report overlay), so the book can keep Backstop cover off
- * the insurance debt.
+ * the insurance debt (Waterfall.poolCoverNav: IF draw = the pool's claim - this).
+ *
+ * Pool follow-up m-6: plus the IF in transit (`insuranceInTransitUsd`, the IF part of inTransitUsd, which
+ * deployedValueUsd already counts), so an IF recall in flight is not read as an IF draw. An IF deposit in flight needs
+ * nothing: the adapter counts it as insurance at once and no venue report from before it can value the snapshot
+ * (domain/venue.ts reportConsistent).
+ *
+ * A negative venue IF figure signs as 0 (kept, review m-6): the field is a uint256 (so are the adapter's insuranceUsd
+ * and the signed VenueReport's), and 0 is the right reading for the cover cap: the draw is then the whole claim, which
+ * keeps all of the insurance debt off the Backstop, while a deficit beyond the IF (the part of `insuranceUsd` below 0,
+ * already netted from deployedValueUsd) is a book loss OTHER than the debt (the pool funded only the allocation), which
+ * N-1 lets the Backstop cover like an MM loss. Keeping the sign would add that deficit to the draw and refuse it cover.
  */
 export function markInsuranceEquityUsd(s: Pick<MarkSnapshot, "venue">): bigint {
-  return s.venue.insuranceUsd > 0n ? s.venue.insuranceUsd : 0n;
+  const venueIf = s.venue.insuranceUsd > 0n ? s.venue.insuranceUsd : 0n;
+  return venueIf + (s.venue.insuranceInTransitUsd ?? 0n);
 }
 
 export function composeNav(s: Pick<MarkSnapshot, "vaultIdle" | "unfundedClaims" | "venue" | "desk" | "insuranceDebt">): NavComposition {
@@ -77,6 +89,9 @@ export function navCrossChecks(s: MarkSnapshot, nav: NavComposition): string[] {
   const expectedAdapter = s.venue.insuranceUsd + (s.venue.marginUsd > 0n ? s.venue.marginUsd : 0n) + s.venue.inTransitUsd;
   if (s.venue.poolEquityUsd === null && expectedAdapter !== s.venue.deployedValueUsd) {
     out.push(`adapter.deployedValueUsd ${s.venue.deployedValueUsd} != insurance + max(margin,0) + inTransit ${expectedAdapter}`);
+  }
+  if ((s.venue.insuranceInTransitUsd ?? 0n) > s.venue.inTransitUsd) {
+    out.push(`adapter.insuranceInTransitUsd ${s.venue.insuranceInTransitUsd} > inTransitUsd ${s.venue.inTransitUsd}`);
   }
   if (s.desk.onchainValueUsd !== null && s.desk.onchainValueUsd !== nav.deskValueUsd) {
     out.push(`desk.valueUsd() ${s.desk.onchainValueUsd} != USDC + registry valuation ${nav.deskValueUsd}`);

@@ -254,7 +254,9 @@ Subscription --closeWindow ok--> Live --retire--> Retiring --finalizeRetirement-
   nominal debt stays owed until then. **[review N2-1]** A due repayment (`fundClaims`) never uses the Backstop money in
   the vault: it is capped at idle minus that money, in wind-down too. (2) Backstop cover is capped at what `applyMarkPnl` would cover at the NAV with the mark's IF draw added back
   (`Waterfall.poolCoverNav`, from the signed `MarkInput.insuranceEquityUsd`, the IF equity inside `deployedValueUsd`;
-  EIP-712 `Mark` gains that field): Senior keeps normal cover for losses other than the insurance debt (e.g. the MM's
+  EIP-712 `Mark` gains that field; **[pool follow-up m-6]** the mark signs the venue IF (a negative figure as 0) plus the
+  IF in transit, `OrderlyAdapter.insuranceInTransitUsd`, so an IF recall in flight is no IF draw; an IF deposit counts
+  as insurance from the adapter's deposit on): Senior keeps normal cover for losses other than the insurance debt (e.g. the MM's
   own losses) and none, at any mark or cumulatively, for the insurance debt; a mark without the field (0) treats the
   whole debt as drawn (no cover for it). After each mark the book reports the pool's claim (`pool.markBook`, never
   blocking), which also stamps the book for the pool's epoch gate. An IF recall (vault, only once not Live)
@@ -714,7 +716,8 @@ prepared `pool.deposit` / `cancelDeposit` (before the epoch end) / `claimDeposit
 **waterfall** previews and checks the premium (premium + expenses + carry + Senior + Junior == gross), and its keeper
 calls `processEpoch` once the oldest epoch is processable (every active pool-funded book marked after its end, or the
 grace) and `Book.settleInsurance` for a retired book whose final pool mark failed; the **mark** service signs
-`insuranceEquityUsd` from the snapshot that values the IF and nets the pool's debt from its informational NAV;
+`insuranceEquityUsd` from the snapshot that values the IF (venue IF + the IF in transit) and nets the pool's debt from
+its informational NAV;
 **ops-venue** reports who funds a book's IF (`fund_if`); **alerts** page on utilisation > 90%, an epoch unprocessed 2 h
 past its end or waiting for marks in its grace, a per-market provisional loss (an exhausted live book's claim below its
 debt: recovered first by later marks, final only at retirement), written-off / unrepaid debt of retired books, and the

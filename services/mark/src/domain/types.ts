@@ -56,6 +56,11 @@ export interface MarkSnapshot {
     /** Orderly: requested-but-unconfirmed withdrawals (IF + MM) at the snapshot block. */
     pendingWithdrawUsd?: bigint;
     /**
+     * Orderly: the IF part of inTransitUsd (adapter.insuranceInTransitUsd, 2026-10 pool follow-up m-6): an IF recall
+     * confirmed on the venue, not yet swept. Signed as IF equity with insuranceUsd. Absent / 0: none (engine, pre-v5).
+     */
+    insuranceInTransitUsd?: bigint;
+    /**
      * Where the venue figures come from: the adapter's stored report / live engine views at the stored
      * oracle price ("adapter"), ops-venue's signed report ("signed_report", domain/venue.ts) or the engine
      * views re-evaluated after applying the signed bundle price in an eth_call ("engine_signed_price").
