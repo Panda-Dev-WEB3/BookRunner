@@ -144,7 +144,11 @@ differs, then `systemctl daemon-reload`):
 
 It also refreshes `/usr/local/lib/bookrunner-deploy` itself (rsync from the root clone, `.env.infra` kept),
 fast-forwards `/opt/bookrunner/app` and runs `bun install --frozen-lockfile` and the two builds **as `bookrunner`**
-(outside any unit: they write `node_modules/`, `apps/*/dist` and bun's cache under `HOME=/opt/bookrunner`).
+(outside any unit: they write `node_modules/`, `apps/*/dist` and bun's cache under `HOME=/opt/bookrunner`). Unless
+`--web-only`, it then applies the `packages/db` migrations **as `bookrunner`** before the restart (`db-migrate.sh`): root
+parses `POSTGRES_PASSWORD` from `.env.infra` with `env-parse.sh` (never sources it) and hands it over as `PGPASSWORD`
+in the environment (`sudo --preserve-env=PGPASSWORD,DATABASE_URL`, a URL without the password); a failed migration
+stops `update.sh` before any restart.
 `install.sh` installs the same unit set (the drop-in included) once; `update.sh` re-installs whichever differs.
 `bookrunner@.service` carries the same sandbox as `bookrunner.service` (every directive of the table at the top and of
 "Added in this change" below), except `/etc/bookrunner` stays visible: the template's `EnvironmentFile` is

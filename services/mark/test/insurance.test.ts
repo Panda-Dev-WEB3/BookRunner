@@ -2,11 +2,13 @@
 // (MarkInput.insuranceEquityUsd), the EIP-712 struct hash matches the contracts' parity vector, the commitAndApply
 // selector follows the generated ABI, and a pool-funded book's informational NAV is net of the pool's debt.
 import { describe, expect, test } from "bun:test";
-import { type MarkInput, devAccount, markTypes, usd } from "@bookrunner/shared";
+import { type MarkInput, VENUE, devAccount, markTypes, usd } from "@bookrunner/shared";
 import { type Hex, hashStruct, toFunctionSelector } from "viem";
-import { readInsuranceDebt } from "../src/adapters/chain";
+import { type SignedVenueReport, signVenueReport } from "../../ops-venue/src/report712";
+import { readIfInTransit, readInsuranceDebt } from "../src/adapters/chain";
 import { COMMIT_AND_APPLY_SELECTOR } from "../src/adapters/lowgasAbi";
-import { composeNav, markInsuranceEquityUsd, poolDebtNetted } from "../src/domain/nav";
+import { composeNav, markInsuranceEquityUsd, navCrossChecks, poolDebtNetted } from "../src/domain/nav";
+import { applySignedVenueReport } from "../src/domain/venue";
 import { LocalMarkSigner, MarkPipeline, RetryableMarkError } from "../src/index";
 import { createLogger } from "@bookrunner/shared";
 import { MemoryEventSink } from "@bookrunner/waterfall";
@@ -127,5 +129,76 @@ describe("review I-1: a failed Book.insuranceDebt() read refuses the mark", () =
     await expect(pipeline.run({ bookId: 1, periodEnd: P })).rejects.toBeInstanceOf(RetryableMarkError);
     expect(chain.commitCalls).toBe(0);
     expect(store.rows.size).toBe(0);
+  });
+});
+
+// ------------------------------------------------------------------ pool follow-up m-6: IF in flight
+describe("pool follow-up m-6: the IF in flight is signed as IF equity", () => {
+  const CHAIN = 31337;
+  const ADAPTER = ref(1).components.adapter;
+  const opts = { venue: VENUE.ORDERLY, adapter: ADAPTER, chainId: CHAIN };
+
+  test("a wind-down IF recall in flight (confirmed, not swept): venue IF + its in-transit part, never the MM's", () => {
+    const base = snapshot();
+    // 10k of the 25k IF left the venue (IF part of in-transit) and 20k of MM is in transit too
+    const recalling = snapshot({
+      venue: { ...base.venue, insuranceUsd: usd("15000"), marginUsd: usd("55500"), inTransitUsd: usd("30000"), insuranceInTransitUsd: usd("10000"), deployedValueUsd: usd("100500") },
+    });
+    expect(markInsuranceEquityUsd(recalling)).toBe(usd("25000"));
+    expect(markInsuranceEquityUsd(base)).toBe(usd("25000"));
+    // the engine / an adapter before v5: no IF part
+    expect(markInsuranceEquityUsd({ venue: { ...base.venue, inTransitUsd: usd("30000") } })).toBe(usd("25000"));
+    expect(navCrossChecks(recalling, composeNav(recalling))).toEqual([]);
+    const broken = snapshot({ venue: { ...base.venue, inTransitUsd: 1n, insuranceInTransitUsd: 2n } });
+    expect(navCrossChecks(broken, composeNav(broken)).some((m) => m.includes("insuranceInTransitUsd 2 > inTransitUsd 1"))).toBe(true);
+  });
+
+  test("an IF deposit in flight: the adapter's credited IF stands; a venue report from before it never values the snapshot", async () => {
+    // the window's 25k IF deposit landed on-chain at P (adapter: insurance 25k at once); the venue had not credited it yet
+    const s = snapshot({ venue: { ...snapshot().venue, lastFlowAt: P, valuationAt: P - 10 } });
+    const values = { insuranceUsd: 0n, marginUsd: usd("75500"), netExposureUsd: 0n, asOf: BigInt(P) };
+    const signature = await signVenueReport(devAccount("opsVenue"), CHAIN, ADAPTER, values);
+    const preCredit: SignedVenueReport = { ...values, bookId: 1, chainId: CHAIN, adapter: ADAPTER, signer: devAccount("opsVenue").address, signature, signedAt: 0 };
+    const o = applySignedVenueReport(s, [preCredit], opts);
+    expect(o.report).toBeNull();
+    expect(markInsuranceEquityUsd(o.snapshot)).toBe(usd("25000"));
+  });
+
+  test("a negative venue IF still signs as 0, plus the IF in transit", () => {
+    expect(markInsuranceEquityUsd({ venue: { ...snapshot().venue, insuranceUsd: -5n, insuranceInTransitUsd: usd("3") } })).toBe(usd("3"));
+  });
+
+  test("readIfInTransit: the value; an adapter without the view (before v5) -> 0; any other failure refuses the mark", async () => {
+    expect(await readIfInTransit(async () => usd("10000"), async () => true)).toBe(usd("10000"));
+    const fail = async (): Promise<never> => {
+      throw new Error("HTTP request failed: timeout");
+    };
+    expect(await readIfInTransit(fail, async () => false)).toBe(0n);
+    await expect(readIfInTransit(fail, async () => true)).rejects.toBeInstanceOf(RetryableMarkError);
+    await expect(readIfInTransit(fail, async () => Promise.reject(new Error("rpc down")))).rejects.toBeInstanceOf(RetryableMarkError);
+  });
+
+  test("the pipeline signs it", async () => {
+    const chain = new FakeMarkChain();
+    chain.snap = snapshot({ venue: { ...snapshot().venue, insuranceUsd: usd("15000"), inTransitUsd: usd("10000"), insuranceInTransitUsd: usd("10000") } });
+    const store = new FakeMarkStore();
+    const signer = new LocalMarkSigner(devAccount("markSigner"), 31337, REGISTRY);
+    const pipeline = new MarkPipeline({
+      books: { get: async (id) => (id === 1 ? ref(1) : undefined) },
+      chain,
+      store,
+      receipts: new FakeReceipts(),
+      signer,
+      events: new MemoryEventSink(),
+      log: createLogger("mark-insurance-test", "silent"),
+      maxRetries: 3,
+      confirmations: 0n,
+      receiptsWaitMs: 20,
+      dbRetries: 2,
+      dbRetryBaseMs: 1,
+    });
+    const out = await pipeline.run({ bookId: 1, periodEnd: P });
+    expect(out.status).toBe("applied");
+    expect(store.rows.get(1)!.input.insuranceEquityUsd).toBe(usd("25000"));
   });
 });

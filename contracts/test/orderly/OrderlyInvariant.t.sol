@@ -388,6 +388,11 @@ contract OrderlyInvariantTest is OrderlyFixture {
         assertEq(usdc.receivedFromAdapter(factory), 0);
     }
 
+    /// @notice [2026-10 pool follow-up m-6] The IF part of in-transit never exceeds in-transit.
+    function invariant_ifInTransitWithinInTransit() public view {
+        assertLe(adapter.insuranceInTransitUsd(), adapter.inTransitUsd());
+    }
+
     /// @notice Every USDC unit in existence is held by the vault, the adapter, the venue or the router.
     function invariant_noLeakage() public view {
         uint256 held = usdc.balanceOf(address(uwVault)) + usdc.balanceOf(address(adapter)) + usdc.balanceOf(adapter.ifAccount())

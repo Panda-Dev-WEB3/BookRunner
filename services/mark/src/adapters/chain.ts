@@ -55,6 +55,21 @@ export async function readInsuranceDebt(
     throw new RetryableMarkError(`Book.insuranceDebt() unreadable (${describeRevert(err).message}): mark refused, retried later`);
   }
 }
+const IF_IN_TRANSIT_SELECTOR = toFunctionSelector(getAbiItem({ abi: orderlyAdapterAbi, name: "insuranceInTransitUsd" }));
+
+/**
+ * OrderlyAdapter.insuranceInTransitUsd() (2026-10 pool follow-up m-6): the IF part of the adapter's in-transit, signed as
+ * IF equity with the venue IF. 0 for an adapter whose bytecode has no such view (before v5: no split, the old reading);
+ * any other failure refuses the mark (RetryableMarkError), like every other venue read of the snapshot.
+ */
+export async function readIfInTransit(read: () => Promise<bigint>, hasView: () => Promise<boolean>): Promise<bigint> {
+  try {
+    return await read();
+  } catch (err) {
+    if ((await hasView().catch(() => true)) === false) return 0n;
+    throw new RetryableMarkError(`OrderlyAdapter.insuranceInTransitUsd() unreadable (${describeRevert(err).message}): mark refused, retried later`);
+  }
+}
 const EMPTY_MARK: MarkInput = {
   bookId: 0n,
   periodEnd: 0n,
@@ -334,6 +349,7 @@ export class MarkChainAdapter implements MarkChain {
     let poolEquityUsd: bigint | null = null;
     let lastFlowAt = 0;
     let pendingWithdrawUsd = 0n;
+    let insuranceInTransitUsd = 0n; // the IF part of inTransitUsd (Orderly; the engine has no transit)
     let source: NonNullable<MarkSnapshot["venue"]["source"]> = "adapter";
     if (ref.venue === VENUE.POOL_ENGINE) {
       const [marketId, engine] = await Promise.all([
@@ -356,13 +372,18 @@ export class MarkChainAdapter implements MarkChain {
         }
       }
     } else {
-      const [lf, pIf, pMm] = await Promise.all([
+      const [lf, pIf, pMm, ifTransit] = await Promise.all([
         this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "lastFlowAt", ...b }).catch(() => 0n),
         this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "pendingWithdrawUsd", args: [0], ...b }).catch(() => 0n),
         this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "pendingWithdrawUsd", args: [1], ...b }).catch(() => 0n),
+        readIfInTransit(
+          () => this.pc.readContract({ address: adapter, abi: orderlyAdapterAbi, functionName: "insuranceInTransitUsd", ...b }),
+          () => codeHasSelector(this.pc, adapter, IF_IN_TRANSIT_SELECTOR),
+        ),
       ]);
       lastFlowAt = Number(lf);
       pendingWithdrawUsd = pIf + pMm;
+      insuranceInTransitUsd = ifTransit;
     }
 
     const [deskUsdc, held, deskValue, hedgeNotional] = await Promise.all([
@@ -411,6 +432,7 @@ export class MarkChainAdapter implements MarkChain {
         poolEquityUsd,
         lastFlowAt,
         pendingWithdrawUsd,
+        insuranceInTransitUsd,
         source,
       },
       // the desk views value at the STORED prices: no cross-check against them once a signed price was used
@@ -452,7 +474,7 @@ export class MarkChainAdapter implements MarkChain {
     blockNumber: bigint;
     blockTs: bigint;
   }): Promise<EngineViews | null> {
-    const res = await readAfterPriceUpdate(this.raw, {
+    const res = await this.readAfterPriceUpdate({
       oracle: this.c.oracle,
       priceData: encodePriceData([o.price]),
       blockNumber: o.blockNumber,
@@ -479,6 +501,11 @@ export class MarkChainAdapter implements MarkChain {
       poolCashUsd: st.poolCashUsd,
       poolEquityUsd: res[6] as bigint,
     };
+  }
+
+  /** The deployless eth_call after the oracle update (priceSim.readAfterPriceUpdate on the unbatched client); a test seam. */
+  protected readAfterPriceUpdate(o: Parameters<typeof readAfterPriceUpdate>[1]): Promise<unknown[] | null> {
+    return readAfterPriceUpdate(this.raw, o);
   }
 
   /**

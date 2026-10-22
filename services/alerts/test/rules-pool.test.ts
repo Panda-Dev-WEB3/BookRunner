@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { type ChainPort, type DbPort, type PoolRead, collect, emptyMemory, readPool } from "../src/collect";
+import { type ChainPort, type DbPort, type Memory, type PoolRead, collect, emptyMemory, poolPositionSettled, readPool } from "../src/collect";
 import { loadConfig } from "../src/config";
 import { evaluate } from "../src/rules";
 import { POOL_RULES, poolEpochInGrace, poolEpochOverdue, poolFinalMarkStuck, poolFirstLossLow, poolMarketDebt, poolUtilisation } from "../src/rules-pool";
-import type { Condition, PoolSnap } from "../src/types";
+import type { Condition, PoolBookSnap, PoolSnap } from "../src/types";
 import { NOW, NOW_S, NVDA_MKT, TSLA_MKT, book, pool, poolBook, rules, snap } from "./fixtures";
 
 const ks = (cs: Condition[]) => cs.map((c) => [c.key, c.severity]);
@@ -319,5 +319,47 @@ describe("readPool / collect", () => {
     expect(await run(chain)).toBeNull();
     expect(await run({ ...chain, pool: async () => null })).toBeNull();
     expect(await run({ ...chain, pool: async () => Promise.reject(new Error("timeout")) })).toBeUndefined();
+  });
+
+  test("a fully settled book (Retired, position closed, nothing owed) is read once, then reused from memory; the rest keep being read", async () => {
+    const row = (id: number, state: string) => ({ id, name: `B${id}`, symbol: "PERP_NVDA_USDC", state, venue: 0, subscriptionEnds: new Date(NOW - 86_400_000) });
+    const rows = [row(3, "Live"), row(6, "Retired"), row(8, "Retired"), row(9, "Retired"), row(11, "Cancelled")];
+    const positions: Record<number, PoolBookSnap> = {
+      3: poolBook({ bookId: 3 }),
+      // settled: written off 1k at its final mark (the write-off notification still needs it)
+      6: poolBook({ bookId: 6, active: false, allocationUsd: 1_000, claimUsd: 0, lossFirstLossUsd: 1_000, lastMarkAt: NOW_S - 3_600 }),
+      8: poolBook({ bookId: 8, active: false, claimUsd: 500 }), // closed, still owes (repayment retried)
+      9: poolBook({ bookId: 9, active: true }), // retired, final mark stuck
+    };
+    const asked: number[][] = [];
+    const c: ChainPort = { ...chain, pool: async (ids) => (asked.push(ids), pool({ books: ids.flatMap((id) => (positions[id] ? [positions[id]] : [])) })) };
+    const pass = (mem: Memory) => collect({ db: { ...db, books: async () => rows }, kv, chain: c, fetch: okFetch, now: () => NOW }, settings, mem, 86_400);
+
+    const first = await pass(emptyMemory());
+    expect(asked[0]).toEqual([3, 6, 8, 9]);
+    expect(first.memory.poolSettled!.map((b) => b.bookId)).toEqual([6]);
+    // persisted between passes (service.ts: JSON next to the dedupe state)
+    const second = await pass(JSON.parse(JSON.stringify(first.memory)) as Memory);
+    expect(asked[1]).toEqual([3, 8, 9]);
+    expect(second.snapshot.pool!.books).toEqual(first.snapshot.pool!.books);
+    expect(second.snapshot.pool!.books.map((b) => b.bookId)).toEqual([3, 6, 8, 9]);
+    expect(second.memory.poolSettled!.map((b) => b.bookId)).toEqual([6]);
+    // the rules see the same positions: the write-off notice for book 6 is unchanged
+    const keys = (r: typeof first) => poolMarketDebt(r.snapshot, rules()).map((x) => x.key);
+    expect(keys(second)).toEqual(keys(first));
+    expect(keys(second)).toContain("pool_debt_written_off:6");
+    // a memory from before this change (no poolSettled) or a malformed one: everything is read
+    await pass({ rpcSamples: [], buybackSamples: [], markIntervalSec: null });
+    await pass({ ...emptyMemory(), poolSettled: "nope" as unknown as PoolBookSnap[] });
+    expect(asked.slice(2)).toEqual([[3, 6, 8, 9], [3, 6, 8, 9]]);
+  });
+
+  test("poolPositionSettled: only Retired + closed + nothing owed", () => {
+    const closed = poolBook({ active: false, claimUsd: 0 });
+    expect(poolPositionSettled(closed, "Retired")).toBe(true);
+    expect(poolPositionSettled(closed, "Retiring")).toBe(false);
+    expect(poolPositionSettled(closed, undefined)).toBe(false);
+    expect(poolPositionSettled(poolBook({ active: true, claimUsd: 0 }), "Retired")).toBe(false);
+    expect(poolPositionSettled(poolBook({ active: false, claimUsd: 0.000001 }), "Retired")).toBe(false);
   });
 });

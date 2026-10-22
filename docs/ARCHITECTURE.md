@@ -254,7 +254,9 @@ Subscription --closeWindow ok--> Live --retire--> Retiring --finalizeRetirement-
   nominal debt stays owed until then. **[review N2-1]** A due repayment (`fundClaims`) never uses the Backstop money in
   the vault: it is capped at idle minus that money, in wind-down too. (2) Backstop cover is capped at what `applyMarkPnl` would cover at the NAV with the mark's IF draw added back
   (`Waterfall.poolCoverNav`, from the signed `MarkInput.insuranceEquityUsd`, the IF equity inside `deployedValueUsd`;
-  EIP-712 `Mark` gains that field): Senior keeps normal cover for losses other than the insurance debt (e.g. the MM's
+  EIP-712 `Mark` gains that field; **[pool follow-up m-6]** the mark signs the venue IF (a negative figure as 0) plus the
+  IF in transit, `OrderlyAdapter.insuranceInTransitUsd`, so an IF recall in flight is no IF draw; an IF deposit counts
+  as insurance from the adapter's deposit on): Senior keeps normal cover for losses other than the insurance debt (e.g. the MM's
   own losses) and none, at any mark or cumulatively, for the insurance debt; a mark without the field (0) treats the
   whole debt as drawn (no cover for it). After each mark the book reports the pool's claim (`pool.markBook`, never
   blocking), which also stamps the book for the pool's epoch gate. An IF recall (vault, only once not Live)
@@ -630,7 +632,22 @@ the premium; sponsors raise only the MM inventory.
   Between marks the pool's claim follows the last mark only. The IF surplus above the debt is book value. Premium is
   charged on every distribution of a pool-funded book, also after the IF was returned. No reduction / re-allocation of
   a live book's IF exists (exits beyond the buffer wait for repayments or retirements; deferred). The premium is cash in
-  the pool at once: a deposit queued before a distribution shares it (bounded by the epoch queue).
+  the pool at once: a deposit queued before a distribution shares it (bounded by the epoch queue). The signed IF equity
+  counts an IF recall in flight (m-6); IF cash already swept back into the vault but not yet repaid (until the
+  keeper's next `fundClaims`, or while a repayment fails) still reads as an IF draw at a mark: the conservative
+  direction (less Backstop cover at that mark, offered again at the next one; the pool's claim is unaffected).
+- **Stuck book (design note 2026-10-22, not implemented).** A pool-funded book left in Live with no mark for N days
+  (mark key lost, venue unreadable) keeps its claim at its last mark, its market room and its active slot, and delays
+  every epoch by `processGrace`. The committee can already `retire` it, but `finalizeRetirement` needs a mark applied
+  in Retiring with `deployedValueUsd == 0`, so retiring alone does not unstick it, and a mark-free finalization would
+  have to value the book without a signed snapshot. Proposed path (owner decision and re-audit first; not "small"): a
+  **timelocked governance mark** — `MarkRegistry.commitGovernance(MarkInput)` callable only by `config.timelock()`,
+  only for a book whose last applied mark is older than a bounded `staleMarkDays` (e.g. 14, ≥ 2 × `maxMarkAge`),
+  then applied through the unchanged `applyMark` (same flowNonce, ordering and pool / Backstop rules), so recall,
+  sweep and `finalizeRetirement` proceed as usual and the 48 h timelock delay is the review window for the attested
+  valuation. Rejected: a forced finalization that writes off the deployed value (it would realise a pool and tranche
+  loss on capital that may still come back), and excluding a stale book from the epoch gate (the grace already bounds
+  the delay at one `processGrace` per epoch).
 
 ### 2.11 Red-team checks (Backend §2.9) — required tests
 
@@ -714,7 +731,8 @@ prepared `pool.deposit` / `cancelDeposit` (before the epoch end) / `claimDeposit
 **waterfall** previews and checks the premium (premium + expenses + carry + Senior + Junior == gross), and its keeper
 calls `processEpoch` once the oldest epoch is processable (every active pool-funded book marked after its end, or the
 grace) and `Book.settleInsurance` for a retired book whose final pool mark failed; the **mark** service signs
-`insuranceEquityUsd` from the snapshot that values the IF and nets the pool's debt from its informational NAV;
+`insuranceEquityUsd` from the snapshot that values the IF (venue IF + the IF in transit) and nets the pool's debt from
+its informational NAV;
 **ops-venue** reports who funds a book's IF (`fund_if`); **alerts** page on utilisation > 90%, an epoch unprocessed 2 h
 past its end or waiting for marks in its grace, a per-market provisional loss (an exhausted live book's claim below its
 debt: recovered first by later marks, final only at retirement), written-off / unrepaid debt of retired books, and the

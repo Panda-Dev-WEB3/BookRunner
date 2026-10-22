@@ -125,10 +125,13 @@ abstract contract PoolBookFixture is BookFixture {
         junior.claimAllocation(carol);
     }
 
-    /// @dev Warps to the next period boundary and commits a mark valued at the venue's current IF + MM.
+    /// @dev Warps to the next period boundary and commits a mark valued at the venue's current IF + MM (+ IF in flight),
+    ///      signing the IF equity as the mark service does: venue IF + IF in transit (pool follow-up m-6).
     function _poolMark() internal returns (uint256 id) {
         vm.warp(((block.timestamp / INTERVAL) + 1) * INTERVAL);
-        id = _commitMark(_nextPeriodEnd(), venue.deployedValueUsd(), book.flowNonce(), false, venue.ifEquity());
+        id = _commitMark(
+            _nextPeriodEnd(), venue.deployedValueUsd(), book.flowNonce(), false, venue.ifEquity() + venue.insuranceInTransitUsd()
+        );
     }
 
     function _applyPoolMark() internal returns (uint256 id) {

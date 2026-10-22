@@ -150,6 +150,6 @@ describe("AlertService", () => {
   });
 
   test("starts from empty memory when the store has none", () => {
-    expect(emptyMemory()).toEqual({ rpcSamples: [], buybackSamples: [], markIntervalSec: null });
+    expect(emptyMemory()).toEqual({ rpcSamples: [], buybackSamples: [], markIntervalSec: null, poolSettled: [] });
   });
 });

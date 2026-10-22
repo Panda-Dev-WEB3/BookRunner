@@ -2,6 +2,7 @@
 pragma solidity 0.8.30;
 
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {BRTypes} from "../../src/interfaces/BRTypes.sol";
 import {IBook} from "../../src/interfaces/IBook.sol";
 import {IInsurancePool} from "../../src/interfaces/IInsurancePool.sol";
@@ -322,6 +323,96 @@ contract PoolBookTest is PoolBookFixture {
         assertEq(lossesAfter, lossesBefore, "no loss, no recovery at the pool");
         (uint256 s, uint256 j) = book.trancheNav();
         assertEq(s + j, 75_000e6, "the tranches' dip is undone");
+    }
+
+    // ------------------------------------------------------------------ pool follow-up m-6: IF in flight
+
+    /// @notice m-6: the window's IF deposit still in flight at the first mark is counted in the deployed value and in
+    ///         the signed IF equity (venue IF + IF in transit): no IF draw, so an MM loss in the same mark is covered as
+    ///         usual, and no provisional pool loss.
+    function test_m6_ifDepositInFlight_noIfDraw_noProvisionalLoss() public {
+        venue.setIfAsync(true);
+        _goLivePool();
+        assertEq(venue.ifInTransit(), 25_000e6, "the IF is on its way to the venue");
+        assertEq(venue.ifEquity(), 0);
+        usdc.mint(address(backstop), 1_000_000e6);
+        uint256 bal = usdc.balanceOf(address(backstop));
+        venue.setMmValue(0); // the MM lost its 75k: Senior's 52.5k is a loss other than the insurance debt
+        vm.recordLogs();
+        _applyPoolMark();
+        _assertNoInsuranceShortfall();
+        assertEq(bal - usdc.balanceOf(address(backstop)), 52_500e6, "no IF draw: Senior's MM loss fully covered");
+        (uint256 debt, uint256 value,) = _debt();
+        assertEq(debt, 25_000e6);
+        assertEq(value, debt, "no provisional pool loss");
+        assertEq(pool.bookPosition(BOOK_ID).claim, 25_000e6);
+        venue.landIf();
+        _applyPoolMark();
+        assertEq(bal - usdc.balanceOf(address(backstop)), 52_500e6, "landing changes nothing");
+        (, value,) = _debt();
+        assertEq(value, 25_000e6);
+    }
+
+    /// @notice m-6: the wind-down IF recall in flight (left the venue, not yet in the vault) is no IF draw either: full
+    ///         cover for the MM loss, the pool's claim whole, and the debt repaid in full once the IF lands.
+    function test_m6_ifRecallInFlight_noIfDraw_noProvisionalLoss() public {
+        (uint256 bal,) = _recallIfInFlightWithMmLoss();
+        vm.recordLogs();
+        _applyPoolMark();
+        _assertNoInsuranceShortfall();
+        assertEq(bal - usdc.balanceOf(address(backstop)), 52_500e6, "no IF draw: Senior's MM loss fully covered");
+        (uint256 debt, uint256 value, bool due) = _debt();
+        assertTrue(due);
+        assertEq(value, debt, "no provisional pool loss");
+        assertEq(debt, 25_000e6, "nothing repaid yet: the IF cash is not in the vault");
+        assertEq(pool.bookPosition(BOOK_ID).claim, 25_000e6);
+        venue.landIf();
+        book.fundClaims();
+        (debt,,) = _debt();
+        assertEq(debt, 0, "repaid in full on landing");
+        assertEq(pool.bookPosition(BOOK_ID).allocation, 0);
+        assertEq(pool.firstLossAssets(), POOL_FIRST_LOSS, "the pool lost nothing");
+    }
+
+    /// @notice m-6, the pre-fix signing for the record (venue IF only, the recall in flight left out): the in-flight IF
+    ///         reads as a 25k draw, which TIGHTENS the Backstop cap at that mark (25k less cover for Senior's MM loss; the
+    ///         pool's claim is unaffected), and the next mark after repayment re-offers the cover.
+    function test_m6_preFixSigning_readsTheRecallAsADraw_tighterCapAtThatMarkOnly() public {
+        (uint256 bal,) = _recallIfInFlightWithMmLoss();
+        vm.warp(((block.timestamp / INTERVAL) + 1) * INTERVAL);
+        uint256 id = _commitMark(_nextPeriodEnd(), venue.deployedValueUsd(), book.flowNonce(), false, venue.ifEquity());
+        book.applyMark(id);
+        assertEq(bal - usdc.balanceOf(address(backstop)), 27_500e6, "the IF in flight read as a draw: 25k less cover");
+        (uint256 debt, uint256 value,) = _debt();
+        assertEq(value, debt, "the pool's claim never depended on the signed IF equity");
+        venue.landIf();
+        book.fundClaims();
+        _applyPoolMark();
+        assertEq(bal - usdc.balanceOf(address(backstop)), 52_500e6, "cover re-offered once the draw is gone");
+    }
+
+    /// @dev Live pool book, Backstop funded, retired, the IF recall in flight (debt due), the MM lost its 75k.
+    function _recallIfInFlightWithMmLoss() internal returns (uint256 backstopBalance, uint256 ifInFlight) {
+        _goLivePool();
+        usdc.mint(address(backstop), 1_000_000e6);
+        backstopBalance = usdc.balanceOf(address(backstop));
+        charterC.retire(BOOK_ID);
+        venue.setIfAsync(true);
+        vm.prank(keeper);
+        vault.recall(BRTypes.ACCOUNT_IF, 25_000e6);
+        ifInFlight = venue.ifInTransit();
+        assertEq(ifInFlight, 25_000e6, "the IF left the venue, not yet in the vault");
+        assertEq(venue.ifEquity(), 0);
+        venue.setMmValue(0);
+    }
+
+    function _assertNoInsuranceShortfall() internal {
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].emitter == address(book)) {
+                assertTrue(logs[i].topics[0] != Book.InsuranceShortfall.selector, "no InsuranceShortfall");
+            }
+        }
     }
 
     function test_marks_stampTheBookForThePoolEpochGate() public {
