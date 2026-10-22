@@ -474,7 +474,7 @@ export class MarkChainAdapter implements MarkChain {
     blockNumber: bigint;
     blockTs: bigint;
   }): Promise<EngineViews | null> {
-    const res = await readAfterPriceUpdate(this.raw, {
+    const res = await this.readAfterPriceUpdate({
       oracle: this.c.oracle,
       priceData: encodePriceData([o.price]),
       blockNumber: o.blockNumber,
@@ -501,6 +501,11 @@ export class MarkChainAdapter implements MarkChain {
       poolCashUsd: st.poolCashUsd,
       poolEquityUsd: res[6] as bigint,
     };
+  }
+
+  /** The deployless eth_call after the oracle update (priceSim.readAfterPriceUpdate on the unbatched client); a test seam. */
+  protected readAfterPriceUpdate(o: Parameters<typeof readAfterPriceUpdate>[1]): Promise<unknown[] | null> {
+    return readAfterPriceUpdate(this.raw, o);
   }
 
   /**
