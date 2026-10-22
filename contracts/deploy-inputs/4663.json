@@ -5,11 +5,11 @@
   "governance": {
     "multisig": "0x848c91323f720DEf985adbCC85FA40E3405B70DF",
     "timelockMinDelay": 172800,
-    "guardian": "0x000000000000000000000000000000000000a002"
+    "guardian": "0x848c91323f720DEf985adbCC85FA40E3405B70DF"
   },
   "treasury": {
-    "expenseRecipient": "0x000000000000000000000000000000000000a003",
-    "slashRecipient": "0x000000000000000000000000000000000000a003"
+    "expenseRecipient": "0x848c91323f720DEf985adbCC85FA40E3405B70DF",
+    "slashRecipient": "0x848c91323f720DEf985adbCC85FA40E3405B70DF"
   },
   "roles": {
     "markSigner": ["0x000000000000000000000000000000000000b001"],
@@ -19,9 +19,9 @@
     "keeper": ["0x000000000000000000000000000000000000b005"]
   },
   "committee": [
-    "0x000000000000000000000000000000000000c001",
-    "0x000000000000000000000000000000000000c002",
-    "0x000000000000000000000000000000000000c003"
+    "0x37A94ba80bCaBc9aa435068210360d9CD4Ad1ac4",
+    "0x0E670BbfFc7ead71e4eb05DFe77016729B6b7C0E",
+    "0x5Ef5a5300803C2e0b45d504b6Bd68c7dce26b62b"
   ],
   "oracle": {
     "measurements": [],
@@ -56,10 +56,10 @@
   },
   "bkrn": {
     "token": "0x0000000000000000000000000000000000000000",
-    "community": "0x000000000000000000000000000000000000a004",
-    "studio": "0x000000000000000000000000000000000000a005",
-    "liquidity": "0x000000000000000000000000000000000000a006",
-    "contributors": "0x000000000000000000000000000000000000a007"
+    "community": "0x848c91323f720DEf985adbCC85FA40E3405B70DF",
+    "studio": "0x848c91323f720DEf985adbCC85FA40E3405B70DF",
+    "liquidity": "0x848c91323f720DEf985adbCC85FA40E3405B70DF",
+    "contributors": "0x848c91323f720DEf985adbCC85FA40E3405B70DF"
   },
   "stockTokens": [
     { "symbol": "NVDA", "token": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC", "priceId": "NVDA", "multiplierSource": "uiMultiplier", "multiplierWad": "1000000000000000000", "floatCapRaw": "1000000000000000000000000" },
@@ -71,9 +71,9 @@
   "stockRegistry": { "multiplierBandBps": 500 },
   "hedge": {
     "routes": [
-      { "symbol": "NVDA", "fee": 3000, "hop": "0x0000000000000000000000000000000000000000", "hopFee": 0 },
+      { "symbol": "NVDA", "fee": 500, "hop": "0x0000000000000000000000000000000000000000", "hopFee": 0 },
       { "symbol": "TSLA", "fee": 3000, "hop": "0x0000000000000000000000000000000000000000", "hopFee": 0 },
-      { "symbol": "AAPL", "fee": 3000, "hop": "0x0000000000000000000000000000000000000000", "hopFee": 0 },
+      { "symbol": "AAPL", "fee": 500, "hop": "0x0000000000000000000000000000000000000000", "hopFee": 0 },
       { "symbol": "MSFT", "fee": 3000, "hop": "0x0000000000000000000000000000000000000000", "hopFee": 0 },
       { "symbol": "AMZN", "fee": 3000, "hop": "0x0000000000000000000000000000000000000000", "hopFee": 0 }
     ]
