@@ -50,7 +50,7 @@ describe("db_migrate (deploy/server/db-migrate.sh)", () => {
     expect(r.recorded!.argv).toBe("node_modules/.bin/bun run --cwd packages/db migrate");
     expect(r.recorded!.pgpassword).toBe("s3cr3t-Pw_1");
     expect(r.recorded!.database_url).toBe("postgres://bookrunner@127.0.0.1:54400/bookrunner_testnet");
-    expect(r.recorded!.cwd.endsWith("/app")).toBe(true);
+    expect(r.recorded!.cwd?.endsWith("/app")).toBe(true);
     expect(`${r.recorded!.argv} ${r.recorded!.database_url} ${r.stdout} ${r.stderr}`).not.toContain("s3cr3t");
   });
 
