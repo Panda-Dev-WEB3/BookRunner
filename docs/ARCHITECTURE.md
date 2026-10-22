@@ -632,7 +632,22 @@ the premium; sponsors raise only the MM inventory.
   Between marks the pool's claim follows the last mark only. The IF surplus above the debt is book value. Premium is
   charged on every distribution of a pool-funded book, also after the IF was returned. No reduction / re-allocation of
   a live book's IF exists (exits beyond the buffer wait for repayments or retirements; deferred). The premium is cash in
-  the pool at once: a deposit queued before a distribution shares it (bounded by the epoch queue).
+  the pool at once: a deposit queued before a distribution shares it (bounded by the epoch queue). The signed IF equity
+  counts an IF recall in flight (m-6); IF cash already swept back into the vault but not yet repaid (until the
+  keeper's next `fundClaims`, or while a repayment fails) still reads as an IF draw at a mark: the conservative
+  direction (less Backstop cover at that mark, offered again at the next one; the pool's claim is unaffected).
+- **Stuck book (design note 2026-10-22, not implemented).** A pool-funded book left in Live with no mark for N days
+  (mark key lost, venue unreadable) keeps its claim at its last mark, its market room and its active slot, and delays
+  every epoch by `processGrace`. The committee can already `retire` it, but `finalizeRetirement` needs a mark applied
+  in Retiring with `deployedValueUsd == 0`, so retiring alone does not unstick it, and a mark-free finalization would
+  have to value the book without a signed snapshot. Proposed path (owner decision and re-audit first; not "small"): a
+  **timelocked governance mark** — `MarkRegistry.commitGovernance(MarkInput)` callable only by `config.timelock()`,
+  only for a book whose last applied mark is older than a bounded `staleMarkDays` (e.g. 14, ≥ 2 × `maxMarkAge`),
+  then applied through the unchanged `applyMark` (same flowNonce, ordering and pool / Backstop rules), so recall,
+  sweep and `finalizeRetirement` proceed as usual and the 48 h timelock delay is the review window for the attested
+  valuation. Rejected: a forced finalization that writes off the deployed value (it would realise a pool and tranche
+  loss on capital that may still come back), and excluding a stale book from the epoch gate (the grace already bounds
+  the delay at one `processGrace` per epoch).
 
 ### 2.11 Red-team checks (Backend §2.9) — required tests
 
