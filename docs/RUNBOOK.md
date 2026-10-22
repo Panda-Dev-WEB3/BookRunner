@@ -42,7 +42,13 @@ only (it deploys mocks and refuses 4663). Tick every box in order; two people fo
 - [ ] VERIFY E1: TEE platform chosen, oracle signer attestation verified ("Oracle signer attestation" below),
       attestation digest of each oracle signer known (input `oracle.signers`).
 - [ ] Orderly builder onboarding done: broker id, IF accounts, builder key (MAINNET.md §3).
-- [ ] Safe multisig deployed on RHC (owners, threshold agreed); guardian and treasury addresses decided;
+- [x] Safe multisig deployed on RHC: `0x848c91323f720DEf985adbCC85FA40E3405B70DF` (checked on-chain 2026-10-22: Safe
+      v1.4.1, canonical L2 singleton `0x29fcB43b46531BcA003ddC8FCB67FFE91900C762`, CompatibilityFallbackHandler
+      `0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99`, no guard, no modules, threshold **2 of 3**, owners
+      `0x37A94ba80bCaBc9aa435068210360d9CD4Ad1ac4`, `0x0E670BbfFc7ead71e4eb05DFe77016729B6b7C0E`,
+      `0x5Ef5a5300803C2e0b45d504b6Bd68c7dce26b62b` (an EIP-7702 delegated account: MetaMask smart account,
+      delegate `0x63c0c19a282a1B52b07dD5a65b58948A07DAE32B`), nonce 11; set in `contracts/deploy-inputs/4663.json`).
+- [ ] Guardian and treasury addresses decided;
       BKRN allocation recipients (community / studio / liquidity / contributors: Safe or vesting contracts).
 - [ ] KMS keys created, one per service role, and their addresses printed (MAINNET.md §2).
 - [ ] Services host prepared (MAINNET.md §1, §3) — not started.
