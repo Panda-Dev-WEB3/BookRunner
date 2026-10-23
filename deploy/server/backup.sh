@@ -30,7 +30,13 @@ umask 077
 
 DEPLOY=/usr/local/lib/bookrunner-deploy
 APP="${BACKUP_APP_DIR:-/opt/bookrunner/app}"
-NETWORK="${BACKUP_NETWORK:-testnet}"
+# default: the host network (/etc/bookrunner/host-network, root-owned: mainnet on the mainnet host), else testnet
+HOST_NET=testnet
+if [ -f /etc/bookrunner/host-network ] && [ "$(stat -c %u /etc/bookrunner/host-network)" = 0 ]; then
+  HOST_NET="$(tr -d ' 
+' < /etc/bookrunner/host-network)"
+fi
+NETWORK="${BACKUP_NETWORK:-$HOST_NET}"
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/bookrunner}"
 KEEP_DAILY="${BACKUP_KEEP_DAILY:-14}"
 KEEP_WEEKLY="${BACKUP_KEEP_WEEKLY:-8}"
