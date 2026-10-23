@@ -3,7 +3,7 @@
 // where the chain defines it and falls back to plain eth_call otherwise (anvil has no Multicall3,
 // so explicit client.multicall() would fail on devnet).
 import type { Charter, Deployment, Mandate } from "@bookrunner/shared";
-import { isTokenUnderlying, underlyingToToken } from "@bookrunner/shared";
+import { charterArg, isTokenUnderlying, underlyingToToken } from "@bookrunner/shared";
 import {
   bkrnStakingAbi,
   bookAbi,
@@ -90,7 +90,7 @@ export class ViemChainGateway implements ChainGateway {
   }
 
   validateCharter(c: Charter): Promise<Hex> {
-    return this.client.readContract({ address: this.c.charter, abi: marketCharterAbi, functionName: "validate", args: [c] });
+    return this.client.readContract({ address: this.c.charter, abi: marketCharterAbi, functionName: "validate", args: [charterArg(c)] });
   }
 
   async underlyingKnown(underlying: Hex): Promise<boolean> {

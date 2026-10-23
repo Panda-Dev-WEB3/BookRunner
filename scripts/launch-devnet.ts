@@ -173,6 +173,7 @@ function buildCharter(s: LaunchSpec, markInterval: bigint) {
     makerFeeBps: 0,
     ifFromPool: s.ifFromPool,
     premiumBps: 0, // the pool's floor (12%), fixed into the charter at filing
+    ifPoolFallback: false, // a pool that cannot fund the IF cancels the window (fix round 2 V-3)
   };
 }
 

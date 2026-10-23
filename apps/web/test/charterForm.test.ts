@@ -123,6 +123,13 @@ describe("charter form", () => {
     expect(noPool(true)).toEqual([]);
   });
 
+  test("the pool fallback is off by default and only sent for a pool-funded IF (fix round 2, V-3)", () => {
+    expect(DEFAULT_FORM.ifPoolFallback).toBe(false);
+    expect(formToDraft({ ...DEFAULT_FORM, sponsor: SPONSOR }).ifPoolFallback).toBe(false);
+    expect(formToDraft({ ...DEFAULT_FORM, sponsor: SPONSOR, ifPoolFallback: true }).ifPoolFallback).toBe(true);
+    expect(formToDraft({ ...DEFAULT_FORM, sponsor: SPONSOR, ifFromPool: false, ifPoolFallback: true }).ifPoolFallback).toBe(false);
+  });
+
   test("with the pool the window raises only the MM inventory; the IF still meets the venue minimum", () => {
     expect(windowRaiseUsd(DEFAULT_FORM)).toBe(75_000);
     expect(windowRaiseUsd({ ...DEFAULT_FORM, ifFromPool: false })).toBe(105_000);

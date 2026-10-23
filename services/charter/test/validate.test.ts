@@ -48,6 +48,7 @@ describe("validateCharter (MarketCharter.validate mirror)", () => {
     ],
     ["pool premium > 50%", nvdaCharter({ premiumBps: 5001 }), "BAD_PREMIUM"],
     ["premium on a book-funded IF", nvdaCharter({ ifFromPool: false, premiumBps: 1200 }), "BAD_PREMIUM"],
+    ["pool fallback on a book-funded IF (fix round 2, V-3)", nvdaCharter({ ifFromPool: false, ifPoolFallback: true }), "BAD_FALLBACK"],
   ];
 
   for (const [name, c, reason] of cases) {

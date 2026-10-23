@@ -44,6 +44,7 @@ export function toCharterServiceDraft(c: Charter, meta?: CharterDraftInput["meta
     makerFeeBps: c.makerFeeBps,
     ifFromPool: c.ifFromPool,
     premiumBps: c.premiumBps,
+    ifPoolFallback: c.ifPoolFallback ?? false,
     ...(meta ? { meta } : {}),
   };
 }

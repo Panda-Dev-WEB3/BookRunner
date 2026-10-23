@@ -50,6 +50,8 @@ export interface RiskSnap {
   lossBudgetUnreadable?: true;
   /** meta.quoteUnverified (audit M-3): the book is held reduce-only, its live quote has no fresh attested price to check against */
   quoteUnverified?: boolean;
+  /** meta.capitalShort (pool audit 2026-10-23 fix round 2 Info 4): a pool-funded book's own capital is below the pool's minimum */
+  capitalShort?: boolean;
 }
 
 export interface BookSnap {

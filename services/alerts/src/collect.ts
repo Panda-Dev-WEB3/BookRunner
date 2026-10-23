@@ -221,6 +221,7 @@ export function parseRisk(raw: string | null): RiskSnap | null {
     killed: meta.killed === true,
     killReason: typeof meta.killReason === "string" ? meta.killReason : null,
     ...(meta.quoteUnverified === true ? { quoteUnverified: true } : {}),
+    ...(meta.capitalShort === true ? { capitalShort: true } : {}),
     journal: k
       ? {
           episodeId: String(k.episodeId ?? "?"),

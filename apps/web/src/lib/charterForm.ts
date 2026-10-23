@@ -1,6 +1,6 @@
 // "File a charter" form model: human-unit form state -> charter.file draft input, with client-side
 // hints that mirror MarketCharter.validate (the API and the chain stay authoritative).
-import { DEFAULT_IF_FROM_POOL, DEFAULT_MIN_OWN_CAPITAL_BPS, DEFAULT_PREMIUM_FLOOR_BPS, MAX_PREMIUM_BPS } from "@bookrunner/shared/insurancePool";
+import { DEFAULT_IF_FROM_POOL, DEFAULT_IF_POOL_FALLBACK, DEFAULT_MIN_OWN_CAPITAL_BPS, DEFAULT_PREMIUM_FLOOR_BPS, MAX_PREMIUM_BPS } from "@bookrunner/shared/insurancePool";
 import { parseVenueSymbol } from "@bookrunner/shared/venueSymbol";
 import type { CharterDraftInput } from "./api-types";
 import { getSettlementSymbol } from "./settlementToken";
@@ -39,6 +39,8 @@ export interface CharterForm {
   ifFromPool: boolean;
   /** Pool premium in bps of gross fee flow; "0" = the pool's floor. Must be 0 when the tranches fund the IF. */
   premiumBps: string;
+  /** If the pool cannot fund the IF at window close: true raises it from the tranches, false (default) cancels the window. */
+  ifPoolFallback: boolean;
   mandate: MandateForm;
   seniorCapBps: string;
   seniorShareBps: string;
@@ -72,6 +74,7 @@ export const DEFAULT_FORM: CharterForm = {
   mmInventoryUsd: "75000",
   ifFromPool: DEFAULT_IF_FROM_POOL,
   premiumBps: "0",
+  ifPoolFallback: DEFAULT_IF_POOL_FALLBACK,
   mandate: {
     maxInventoryUsd: "50000",
     maxSkewBps: "4",
@@ -107,6 +110,7 @@ export const FIELD_HELP: Record<string, string> = {
   ifSizeUsd: "Insurance fund size deployed first at window close; must meet the venue minimum whoever funds it",
   ifFromPool: "The insurance pool lends the insurance fund at window close (a senior debt of the book, repaid at retirement), or the tranches fund it from the window's raise",
   premiumBps: `Share of the book's gross fee flow paid to the insurance pool before expenses and carry; 0 uses the pool's floor (${DEFAULT_PREMIUM_FLOOR_BPS / 100}% at deployment), at most ${MAX_PREMIUM_BPS} bps`,
+  ifPoolFallback: "If the insurance pool cannot lend the insurance fund at window close: off (default), the window is cancelled and every commitment refunded 1:1; on, the tranches fund it from the window's raise",
   mmInventoryUsd: "Market-making inventory deployed after the insurance fund",
   "mandate.maxInventoryUsd": "Max |net venue position| notional. Desk key tiers must cover it",
   "mandate.maxSkewBps": "Max distance of the quote mid from the oracle, in bps of the oracle price; at most half the min quote width, so a quote always straddles the oracle",
@@ -144,7 +148,7 @@ export const venueMinIfUsd = (venue: CharterForm["venue"], chainId?: number): nu
 
 export function stepOf(field: string): StepId {
   if (field.startsWith("mandate")) return "mandate";
-  if (["ifSizeUsd", "ifTargetUsd", "mmInventoryUsd", "ifFromPool", "premiumBps"].includes(field)) return "capital";
+  if (["ifSizeUsd", "ifTargetUsd", "mmInventoryUsd", "ifFromPool", "premiumBps", "ifPoolFallback"].includes(field)) return "capital";
   if (["seniorCapBps", "seniorShareBps", "seniorHurdleBps", "windowSeconds", "subscriptionWindowSeconds", "juniorNoticeSeconds", "perWalletCapUsd"].includes(field)) return "tranches";
   if (field === "" || field === "review") return "review";
   return "market";
@@ -300,6 +304,7 @@ export function formToDraft(f: CharterForm): CharterDraftInput {
     makerFeeBps: f.venue === "pool_engine" ? int(f.makerFeeBps) || 0 : 0,
     ifFromPool: f.ifFromPool,
     premiumBps: f.ifFromPool ? int(f.premiumBps) || 0 : 0,
+    ifPoolFallback: f.ifFromPool && f.ifPoolFallback,
     meta: { name: f.name.trim() || undefined, description: f.description.trim() || undefined },
   };
 }

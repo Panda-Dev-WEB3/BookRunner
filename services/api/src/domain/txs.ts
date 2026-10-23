@@ -2,6 +2,7 @@
 // returned to the user's wallet as {to, data, value: "0", chainId, description}.
 import type { Charter } from "@bookrunner/shared/types";
 import { strToBytes32 } from "@bookrunner/shared/bytes32";
+import { charterArg } from "@bookrunner/shared/insurancePool";
 import { bkrnStakingAbi, insurancePoolAbi, marketCharterAbi, mMMandateAbi, riskCommitteeAbi, trancheAbi } from "@bookrunner/shared/abi";
 import { type Address, type Hex, encodeFunctionData, erc20Abi, formatUnits, getAddress } from "viem";
 import { bkrnStr, usdStr } from "../format";
@@ -57,7 +58,7 @@ export function fileCharterTx(chainId: number, marketCharter: Address, c: Charte
   return tx(
     chainId,
     marketCharter,
-    encodeFunctionData({ abi: marketCharterAbi, functionName: "file", args: [c] }),
+    encodeFunctionData({ abi: marketCharterAbi, functionName: "file", args: [charterArg(c)] }),
     `File charter ${label} (pays the flat charter fee and locks the sponsor bond)`,
   );
 }

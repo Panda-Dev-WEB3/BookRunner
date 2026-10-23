@@ -78,6 +78,8 @@ export interface ChainObservation {
   maxPriceAgeSec: number;
   /** Engine books: PoolEngine.lossBudget (null when unreadable, e.g. a pre-M-3 engine); absent for Orderly books. */
   lossBudget?: EngineLossBudget | null;
+  /** Book.capitalShort() (pool audit 2026-10-23 fix round 2 Info 4); absent / false when not short or unreadable. */
+  capitalShort?: boolean;
 }
 
 /** signed_report: ops-venue's signed venue report (newer than the adapter's on-chain one, LOW_GAS §2). */
@@ -108,6 +110,8 @@ export interface BookObservation {
   quote: QuoteObservation | null;
   /** engine books: ChainObservation.lossBudget */
   lossBudget?: EngineLossBudget | null;
+  /** ChainObservation.capitalShort: the book is held reduce-only until its own capital is back above the pool's minimum */
+  capitalShort?: boolean;
 }
 
 export interface NavInputs {
@@ -272,6 +276,8 @@ export interface RiskMeta {
   } | null;
   /** Audit M-3: a live quote could not be checked against a fresh attested price (book held reduce-only). */
   quoteUnverified?: boolean;
+  /** Pool audit 2026-10-23 fix round 2 (Info 4): a pool-funded book's own capital is below the pool's minimum (reduce-only). */
+  capitalShort?: boolean;
   /** Task 7: the engine pool's per-period loss budget (USD strings); null for Orderly books or when unreadable. */
   lossBudget?: { budgetBps: number; period: number; anchorEquityUsd: string; lossUsd: string; budgetUsd: string; blocked: boolean } | null;
   /**

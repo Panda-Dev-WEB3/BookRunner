@@ -82,6 +82,13 @@ describe("agent mode", () => {
     expect(resolveMode({ ...live, riskState: "breach", venueGate: { reason: "VENUE_NOT_LISTED" } }).reason).toBe("RISK_BREACH");
   });
 
+  test("a pool-funded book below the pool's minimum own capital stops new risk (fix round 2, Info 4)", () => {
+    expect(resolveMode({ ...live, capitalShort: true })).toEqual({ mode: "reduce_only", hedgeMode: "reduce_only", reason: "POOL_CAPITAL_SHORT" });
+    expect(resolveMode({ ...live, capitalShort: false }).mode).toBe("quote");
+    expect(resolveMode({ ...live, bookState: "Retiring", capitalShort: true }).hedgeMode).toBe("flatten");
+    expect(resolveMode({ ...live, riskState: "killed", capitalShort: true }).mode).toBe("halt");
+  });
+
   test("breach and reduce_only stop new risk; Retiring flattens hedges", () => {
     expect(resolveMode({ ...live, riskState: "breach" })).toMatchObject({ mode: "reduce_only", hedgeMode: "reduce_only" });
     expect(resolveMode({ ...live, riskState: "reduce_only" })).toMatchObject({ mode: "reduce_only", hedgeMode: "reduce_only" });

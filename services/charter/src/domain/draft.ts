@@ -4,6 +4,7 @@
 import {
   type Charter,
   DEFAULT_IF_FROM_POOL,
+  DEFAULT_IF_POOL_FALLBACK,
   HEDGE_VENUES,
   ORACLE,
   SESSIONS_24X5,
@@ -155,6 +156,11 @@ export const charterDraftSchema = z.object({
   ifFromPool: z.boolean().default(DEFAULT_IF_FROM_POOL),
   /** Pool premium, bps of gross fee flow; 0 = the pool's floor (MarketCharter.file fixes max(premiumBps, floor)). */
   premiumBps: uint(U16).default(0),
+  /**
+   * Fix round 2 (V-3): opt in to having the IF raised from the tranches when the pool cannot fund it at closeWindow
+   * (default off: the window is cancelled, refunds 1:1). Only for a pool-funded IF (BAD_FALLBACK otherwise).
+   */
+  ifPoolFallback: z.boolean().default(DEFAULT_IF_POOL_FALLBACK),
   meta: z
     .object({ name: z.string().max(120).optional(), description: z.string().max(4000).optional() })
     .optional(),
@@ -255,6 +261,7 @@ export function parseCharterDraft(body: unknown, tickers: TickerBook = {}): Draf
     makerFeeBps: d.makerFeeBps,
     ifFromPool: d.ifFromPool,
     premiumBps: d.premiumBps,
+    ifPoolFallback: d.ifPoolFallback,
   };
   return { charter, meta: d.meta, hedgeAllow, warnings };
 }

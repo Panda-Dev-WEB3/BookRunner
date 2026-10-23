@@ -104,6 +104,7 @@ describe("validateCharterLocal mirrors MarketCharter.validate", () => {
       ["BAD_FEES", (c) => ((c.venue = 1), (c.takerFeeBps = 101))],
       ["BAD_PREMIUM", (c) => (c.premiumBps = 5001)],
       ["BAD_PREMIUM", (c) => ((c.ifFromPool = false), (c.premiumBps = 1200))],
+      ["BAD_FALLBACK", (c) => ((c.ifFromPool = false), (c.ifPoolFallback = true))], // fix round 2 (V-3)
     ];
     for (const [code, mutate] of cases) {
       const c = structuredClone(base);

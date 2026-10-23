@@ -49,6 +49,7 @@ export function nvdaCharter(overrides: Partial<Charter> = {}): Charter {
     makerFeeBps: 0,
     ifFromPool: true,
     premiumBps: 0,
+    ifPoolFallback: false,
     ...overrides,
   };
 }

@@ -85,6 +85,8 @@ export const charterDraftSchema = z.object({
   ifFromPool: z.boolean().default(DEFAULT_IF_FROM_POOL),
   /** Pool premium, bps of gross fee flow; 0 = the pool's floor (fixed at filing as max(premiumBps, floor)). */
   premiumBps: uint(65_535).default(0),
+  /** Fix round 2 (V-3): the tranches raise the IF if the pool cannot fund it at closeWindow (default off: cancelled). */
+  ifPoolFallback: z.boolean().default(false),
   meta: z
     .object({ name: z.string().max(80).optional(), description: z.string().max(2000).optional() })
     .optional(),
@@ -106,6 +108,7 @@ export type CharterReasonCode =
   | "BAD_SYMBOL"
   | "BAD_FEES"
   | "BAD_PREMIUM"
+  | "BAD_FALLBACK"
   | "NO_POOL"
   | "UNDERCAPITALISED"
   | "NEW_BOOKS_PAUSED";
@@ -230,6 +233,7 @@ export function draftToCharter(d: CharterDraft, ctx: DraftContext = {}): DraftCo
     makerFeeBps: d.makerFeeBps,
     ifFromPool: d.ifFromPool,
     premiumBps: d.premiumBps,
+    ifPoolFallback: d.ifPoolFallback,
   };
   return { charter, issues, warnings };
 }
@@ -308,6 +312,8 @@ export function validateCharterLocal(c: Charter, ctx: ValidationContext = {}): C
       "premiumBps",
       c.ifFromPool ? `Pool premium must be at most ${MAX_PREMIUM_BPS} bps of gross fee flow` : "A book-funded insurance fund pays no pool premium (premiumBps must be 0)",
     );
+  } else if (pool === "BAD_FALLBACK") {
+    add("BAD_FALLBACK", "ifPoolFallback", "The pool fallback only applies to an insurance fund funded by the pool");
   } else if (pool === "NO_POOL") {
     add("NO_POOL", "ifFromPool", "No insurance pool is configured on this deployment: fund the insurance fund from the tranches");
   } else if (pool === "UNDERCAPITALISED") {
@@ -384,6 +390,7 @@ export function charterFromJson(json: unknown): Charter {
     // absent in charters stored before 2026-10: a book-funded IF, no premium (the contract's reading too)
     ifFromPool: o.ifFromPool === true || o.ifFromPool === "true",
     premiumBps: num(o.premiumBps),
+    ifPoolFallback: o.ifPoolFallback === true || o.ifPoolFallback === "true",
   };
 }
 
@@ -431,6 +438,8 @@ export interface CharterView {
   ifFromPool: boolean;
   /** Pool premium (bps of gross fee flow) as filed; a draft's 0 means the pool's floor. */
   premiumBps: number;
+  /** Fix round 2 (V-3): the tranches raise the IF if the pool cannot fund it (otherwise the window is cancelled). */
+  ifPoolFallback: boolean;
 }
 
 export function mandateToView(m: Mandate): MandateView {
@@ -487,6 +496,7 @@ export function charterToView(c: Charter, ctx: DraftContext = {}): CharterView {
     makerFeeBps: c.makerFeeBps,
     ifFromPool: c.ifFromPool,
     premiumBps: c.premiumBps,
+    ifPoolFallback: c.ifPoolFallback ?? false,
   };
 }
 

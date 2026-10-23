@@ -18,6 +18,7 @@ export const REASON_CODES = [
   "BAD_SYMBOL",
   "BAD_FEES",
   "BAD_PREMIUM",
+  "BAD_FALLBACK",
   "NO_POOL",
   "UNDERCAPITALISED",
 ] as const;
@@ -112,6 +113,8 @@ export function validateCharter(c: Charter, ctx: ValidationContext): ValidationR
   const pool = poolCharterReason(c, ctx.poolConfigured ?? true, ctx.minOwnCapitalBps);
   if (pool === "BAD_PREMIUM") {
     fail("BAD_PREMIUM", c.ifFromPool ? `premiumBps ${c.premiumBps} > ${MAX_PREMIUM_BPS}` : `premiumBps ${c.premiumBps} on a book-funded insurance fund (must be 0)`);
+  } else if (pool === "BAD_FALLBACK") {
+    fail("BAD_FALLBACK", "ifPoolFallback only applies to a pool-funded insurance fund");
   } else if (pool === "NO_POOL") {
     fail("NO_POOL", "ifFromPool is set but no insurance pool is configured");
   } else if (pool === "UNDERCAPITALISED") {

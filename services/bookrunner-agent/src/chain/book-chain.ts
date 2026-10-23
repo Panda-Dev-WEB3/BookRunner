@@ -66,6 +66,7 @@ export class BookChain {
       makerFeeBps: c.makerFeeBps,
       ifFromPool: c.ifFromPool,
       premiumBps: c.premiumBps,
+      ifPoolFallback: c.ifPoolFallback,
     };
   }
 
@@ -91,6 +92,19 @@ export class BookChain {
     const name = BOOK_STATE[s];
     if (!name) throw new Error(`unknown book state ${s}`);
     return name;
+  }
+
+  /**
+   * Book.capitalShort() (pool audit 2026-10-23 fix round 2 Info 4): a pool-funded Live book whose own capital is below
+   * the pool's minimum; the agent is then reduce-only. A book without the view (older deployment) reads false.
+   */
+  async capitalShort(): Promise<boolean> {
+    try {
+      return await this.pub.readContract({ address: this.components.book, abi: bookAbi, functionName: "capitalShort" });
+    } catch (err) {
+      if (/returned no data|does not have the function|reverted/i.test(err instanceof Error ? err.message : String(err))) return false;
+      throw err;
+    }
   }
 
   /** Inputs of the desk's mark-window gate on capital flows (domain/mark-window.ts). */

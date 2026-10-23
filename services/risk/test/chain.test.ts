@@ -91,6 +91,7 @@ const charter = {
   makerFeeBps: 0,
   ifFromPool: false,
   premiumBps: 0,
+  ifPoolFallback: false,
 };
 
 const RESULTS: Record<string, unknown> = {
