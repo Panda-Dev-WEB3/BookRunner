@@ -62,7 +62,7 @@ async function main() {
   const watch = new WatchSet(dep);
   const indexer = new Indexer({
     store: PgIndexerStore.create(db),
-    chain: new ViemIndexerChain(env.CHAIN_ID, env.RPC_URL, { charter: dep.contracts.charter, markRegistry: dep.contracts.markRegistry }, env.INDEXER_ADDRESS_CHUNK),
+    chain: new ViemIndexerChain(env.CHAIN_ID, env.INDEXER_RPC_URL ?? env.RPC_URL, { charter: dep.contracts.charter, markRegistry: dep.contracts.markRegistry }, env.INDEXER_ADDRESS_CHUNK),
     watch,
     deployment: dep,
     publisher: redis,

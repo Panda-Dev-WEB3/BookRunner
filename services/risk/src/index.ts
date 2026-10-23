@@ -1,4 +1,5 @@
 // risk service entry: wiring + graceful shutdown. See ARCHITECTURE.md §3 flow 4 and §4 (risk row).
+import { redactUrl } from "@bookrunner/shared";
 import { createDb } from "@bookrunner/db";
 import { FORGED_WINDOW_SEC, ForgedLog, KEYS, assertVenueSymbolConfig, busJson, createLogger, oracleSignerCheck, publicClientFor, roleSigner, tryLoadDeployment, walletClientFor } from "@bookrunner/shared";
 import { attestedOracleAbi, mMMandateAbi } from "@bookrunner/shared/abi";
@@ -26,7 +27,7 @@ async function main(): Promise<void> {
   log.info(
     {
       chainId: env.CHAIN_ID,
-      rpc: env.RPC_URL,
+      rpc: redactUrl(env.RPC_URL),
       deploymentFile: env.DEPLOYMENT_FILE,
       riskAccount: account.address,
       intervalMs: settings.intervalMs,

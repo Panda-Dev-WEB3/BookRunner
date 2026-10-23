@@ -7,6 +7,9 @@ export const indexerEnvShape = {
   /** Max blocks per eth_getLogs range. */
   INDEXER_BATCH_BLOCKS: z.coerce.number().int().positive().default(2000),
   INDEXER_POLL_MS: z.coerce.number().int().positive().default(2000),
+  /** RPC for the indexer's reads (eth_getLogs ranges); default RPC_URL. E.g. the public RPC when the main provider's plan caps
+   *  the eth_getLogs block range (Alchemy free tier: 10 blocks). Never logged. */
+  INDEXER_RPC_URL: z.string().url().optional(),
   /** With a log subscription (RPC_WS_URL): a step at least this often (src/trigger.ts); notifications trigger the others. */
   INDEXER_WS_SAFETY_POLL_MS: z.coerce.number().int().positive().default(120_000),
   /** A notification's step waits this long (its block reaches INDEXER_CONFIRMATIONS; bursts share one step). */
