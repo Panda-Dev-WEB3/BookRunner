@@ -270,14 +270,23 @@ contract BkrnFeeRouterTest is CoreFixture {
 
         vm.startPrank(admin);
         vm.expectRevert(BkrnFeeRouter.BadBuybackParams.selector);
-        feeRouter.setBuybackParams(0, 20e18, 500, 1);
-        vm.expectRevert(BkrnFeeRouter.BadBuybackParams.selector);
         feeRouter.setBuybackParams(3000, 0, 500, 1);
         vm.expectRevert(BkrnFeeRouter.BadBuybackParams.selector);
         feeRouter.setBuybackParams(3000, 20e18, 2001, 1);
         vm.expectRevert(BkrnFeeRouter.BadBuybackParams.selector);
         feeRouter.setBuybackParams(3000, 20e18, 500, 0);
         vm.stopPrank();
+    }
+
+    /// @dev poolFee 0 = no v3 pool (a VENUE_UNIV4 deployment): accepted, and a v3 buyback is not configured.
+    function test_setBuybackParams_zeroPoolFee_disablesV3() public {
+        vm.prank(admin);
+        feeRouter.setBuybackParams(0, 20e18, 500, 1e6);
+        assertEq(feeRouter.buybackPoolFee(), 0);
+        _carry(20e6);
+        vm.expectRevert(abi.encodeWithSelector(BkrnFeeRouter.NotConfigured.selector, bytes32("buybackParams")));
+        vm.prank(keeper);
+        feeRouter.executeBuyback(1e6, 1);
     }
 
     function test_executeBuyback_revertsWhenRouterUnset() public {

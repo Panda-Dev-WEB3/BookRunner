@@ -12,7 +12,11 @@ import {IBookFactory} from "./interfaces/IBookFactory.sol";
 import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 import {ISwapRouter02} from "./interfaces/external/ISwapRouter02.sol";
 import {IUniswapV3PoolView} from "./interfaces/external/IUniswapV3.sol";
+import {IV4PoolManager} from "./interfaces/external/IUniswapV4.sol";
+import {IBkrnV4Swapper} from "./interfaces/IBkrnV4Swapper.sol";
+import {BkrnV4Swapper} from "./BkrnV4Swapper.sol";
 import {UniswapV3Twap} from "./libraries/UniswapV3Twap.sol";
+import {UniswapV4Lib} from "./libraries/UniswapV4Lib.sol";
 
 /// @title BkrnFeeRouter — splits protocol carry 50% buyback-to-stakers / 50% syndicate backstop.
 /// @notice Each book's RevenueRouter transfers its carry here and calls `notifyCarry`. The backstop half
@@ -31,12 +35,31 @@ import {UniswapV3Twap} from "./libraries/UniswapV3Twap.sol";
 ///             spot tick is more than `twapMaxTickDeviation` ticks from the mean (manipulation in
 ///             progress); window and deviation are bounded by the MIN/MAX constants;
 ///           - REF_ATTESTED: the AttestedOracle price of `bkrnPriceId` (USD per BKRN; the settlement token
-///             is valued at $1).
+///             is valued at $1);
+///           - REF_FIXED_ETH: BKRN/ETH x ETH/USD from the timelock-set `refBkrnPerEthWad` / `refUsdcPerEthWad`
+///             (a BKRN quoted in ETH; no ETH/USD feed is wired on Robinhood Chain, none verified).
 ///         Each call is capped at `maxBuybackPerCall`, which bounds the loss if the reference is
 ///         stale/manipulated in the keeper's favour. A reference off in the other direction (BKRN up) only
 ///         makes buybacks revert until it recovers or governance acts: fail-safe, the settlement token
 ///         stays in `buybackPending`. "USDC" in names = the protocol settlement token (`config.usdc()`:
 ///         USDG on Robinhood Chain; 6 decimals enforced by BookrunnerConfig).
+///
+///         Venue (governance, `buybackVenue`): VENUE_UNIV3 (default) swaps through `buybackRouter` as above;
+///         VENUE_UNIV4 swaps directly against the Uniswap v4 PoolManager `v4PoolManager` (no router: `unlock` ->
+///         `unlockCallback` -> `swap` exact input -> `sync` + transfer + `settle` the settlement token -> `take`
+///         BKRN) along the timelock-set route `v4Route()`: a BKRN launched on Pons graduates into a locked v4
+///         pool, possibly with a hook, most likely BKRN/native ETH (ROUTE_V4_ETH: USDG -> ETH in a v4 ETH/USDG
+///         pool, then ETH -> BKRN, one unlock; ROUTE_V3_WETH: USDG -> WETH through the v3 router, unwrap, ETH ->
+///         BKRN, inside the same unlock) or BKRN/USDG (ROUTE_DIRECT). The route is chosen off-chain
+///         (scripts/buyback-route.ts). v4 has no TWAP oracle: VENUE_UNIV4 works with REF_FIXED / REF_ATTESTED /
+///         REF_FIXED_ETH (REF_TWAP and VENUE_UNIV4 refuse each other). Every hop carries a `sqrtPriceLimitX96` at
+///         its reference minus `maxSlippageBps` (a moved pool or a sandwich fills less, never worse; the unspent
+///         input stays pending), the BKRN out must clear `buybackFloor(spent)` over the whole path, and
+///         `maxBuybackPerCall` applies. While the route is unset or a pool uninitialized (before graduation) a v4
+///         buyback is a no-op (`BuybackDeferred`): the settlement token waits in `buybackPending`. A revert inside
+///         the unlock (a hook, a pool, a hop) is caught: `BuybackV4Failed`, nothing moves. Native ETH is accepted
+///         only from WETH / the PoolManager during the swap, and none may remain after it. Fee distribution
+///         (`notifyCarry`) never touches the venue.
 /// @dev Accounting: the only USDC this contract is meant to hold is `buybackPending`; `notifyCarry`
 ///      requires the USDC balance to cover `buybackPending + amount` (push-then-notify).
 contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
@@ -73,6 +96,8 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
     uint8 public constant REF_FIXED = 0;
     uint8 public constant REF_TWAP = 1;
     uint8 public constant REF_ATTESTED = 2;
+    /// @notice BKRN/ETH x ETH/USD from the fixed `refBkrnPerEthWad` / `refUsdcPerEthWad` (`setEthReference`).
+    uint8 public constant REF_FIXED_ETH = 3;
     /// @notice Active reference source (REF_FIXED by default).
     uint8 public referenceSource;
     /// @notice TWAP averaging window (seconds), within [MIN_TWAP_WINDOW, MAX_TWAP_WINDOW].
@@ -93,6 +118,35 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
     uint256 private constant BPS = 10_000;
     uint256 private constant WAD = 1e18;
     uint256 private constant USDC_UNIT = 1e6;
+
+    /// @notice Buyback venues (governance-chosen, `buybackVenue`).
+    uint8 public constant VENUE_UNIV3 = 0;
+    uint8 public constant VENUE_UNIV4 = 1;
+    /// @notice Active buyback venue (VENUE_UNIV3 by default).
+    uint8 public buybackVenue;
+    /// @notice Uniswap v4 PoolManager (code checked; VERIFY U2 on RHC). Changing it clears the route.
+    address public v4PoolManager;
+    /// @notice Hooks a v4 buyback pool may carry (timelock allow-list; a hook can take fees or revert).
+    mapping(address hook => bool) public v4HookAllowed;
+
+    /// @notice v4 buyback routes (`V4Route.kind`). Native ETH is v4 currency address(0).
+    /// @dev USDG -> BKRN in one v4 pool.
+    uint8 public constant ROUTE_DIRECT = 0;
+    /// @dev USDG -> ETH (v4 ETH/USDG pool) -> BKRN (v4 ETH/BKRN pool) in one unlock: ETH never leaves the PoolManager.
+    uint8 public constant ROUTE_V4_ETH = 1;
+    /// @dev USDG -> WETH (v3 `buybackRouter`, tier `v3Fee`) -> unwrap -> ETH -> BKRN (v4 ETH/BKRN pool), all inside
+    ///      the unlock (a failure anywhere reverts the whole path).
+    uint8 public constant ROUTE_V3_WETH = 2;
+
+    /// @dev The v4 route (bkrnPool.currency1 == 0: not set).
+    IBkrnV4Swapper.V4Route private _route;
+    /// @notice The v4 executor this router created (holds nothing between buybacks).
+    IBkrnV4Swapper public immutable v4Swapper;
+    /// @notice Fixed ETH reference: whole settlement token per whole ETH (WAD); splits the via-ETH price limits.
+    uint256 public refUsdcPerEthWad;
+    /// @notice Fixed BKRN/ETH reference: whole BKRN per whole ETH (WAD), read by REF_FIXED_ETH.
+    uint256 public refBkrnPerEthWad;
+    address private constant NATIVE = address(0);
 
     /// @notice Lifetime carry received (USDC 6dp).
     uint256 public totalCarryReceived;
@@ -119,6 +173,12 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
     error TwapDeviation(int24 spotTick, int24 meanTick);
     /// @notice migrate() while this contract is still config.feeRouter().
     error StillCurrent();
+    error BadVenue(uint8 venue);
+    error BadV4Pool();
+    /// @notice The pool's price is already past the slippage limit (moved pool / stale reference).
+    error V4PriceBeyondLimit(uint160 sqrtPriceX96, uint160 limitX96);
+    /// @notice The v4 swapper's reported amounts disagree with the balances.
+    error V4DeltaNotSettled();
 
     /// @notice Buyback router changed.
     event BuybackRouterSet(address router);
@@ -134,6 +194,22 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
     event Migrated(address indexed to, uint256 amount);
     /// @notice USDC acknowledged as pending buyback by notifyMigration.
     event MigrationReceived(address indexed from, uint256 amount);
+    /// @notice Buyback venue changed (VENUE_UNIV3 / VENUE_UNIV4).
+    event BuybackVenueSet(uint8 venue);
+    /// @notice Uniswap v4 PoolManager changed (the route is cleared).
+    event V4PoolManagerSet(address poolManager);
+    /// @notice A hook was allowed / disallowed for the v4 buyback pools.
+    event V4HookAllowedSet(address indexed hook, bool allowed);
+    /// @notice The v4 buyback route was set.
+    event V4RouteSet(uint8 kind, bytes32 indexed bkrnPoolId, bytes32 ethPoolId, uint24 v3Fee, address weth);
+    /// @notice The v4 buyback route was cleared (PoolManager changed or a hook disallowed).
+    event V4RouteCleared();
+    /// @notice Fixed ETH references changed.
+    event EthReferenceSet(uint256 usdcPerEthWad, uint256 bkrnPerEthWad);
+    /// @notice VENUE_UNIV4 buyback with no initialized pool set (before graduation): nothing swapped.
+    event BuybackDeferred(uint256 amountIn);
+    /// @notice The v4 unlock reverted (hook or pool): nothing swapped, `amountIn` stays pending.
+    event BuybackV4Failed(uint256 amountIn, bytes reason);
 
     /// @param config_ BookrunnerConfig; `usdc()` and `bkrn()` must already be set.
     constructor(address config_) {
@@ -144,6 +220,7 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
         if (usdc_ == address(0) || bkrn_ == address(0)) revert ZeroAddress();
         usdc = IERC20(usdc_);
         bkrn = IERC20(bkrn_);
+        v4Swapper = new BkrnV4Swapper(config_, usdc_, bkrn_);
     }
 
     /// @inheritdoc IBkrnFeeRouter
@@ -215,6 +292,7 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
         if (amountIn == 0) revert ZeroAmount();
         uint256 pending = buybackPending;
         if (amountIn > pending) revert InsufficientPending(pending, amountIn);
+        if (buybackVenue == VENUE_UNIV4) return _buybackV4(amountIn, minBkrnOut, pending);
         address router = buybackRouter;
         if (router == address(0)) revert NotConfigured("buybackRouter");
         uint24 poolFee = buybackPoolFee;
@@ -266,6 +344,7 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
     function referenceBkrnPerUsdc() public view returns (uint256) {
         uint8 src = referenceSource;
         if (src == REF_TWAP) return twapBkrnPerUsdc();
+        if (src == REF_FIXED_ETH) return Math.mulDiv(refBkrnPerEthWad, WAD, refUsdcPerEthWad);
         if (src == REF_ATTESTED) {
             address oracle = config.oracle();
             if (oracle == address(0)) revert NotConfigured("oracle");
@@ -293,12 +372,230 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
     /// @notice Minimum BKRN any buyback of `amountIn` USDC must return:
     ///         `amountIn x referenceBkrnPerUsdc() x (10000 - maxSlippageBps) / 10000` (floored).
     function buybackFloor(uint256 amountIn) public view returns (uint256) {
-        uint256 atRef = Math.mulDiv(amountIn, referenceBkrnPerUsdc(), USDC_UNIT);
-        return Math.mulDiv(atRef, BPS - maxSlippageBps, BPS);
+        return _floorAt(amountIn, referenceBkrnPerUsdc());
+    }
+
+    function _floorAt(uint256 amountIn, uint256 ref) private view returns (uint256) {
+        return Math.mulDiv(Math.mulDiv(amountIn, ref, USDC_UNIT), BPS - maxSlippageBps, BPS);
+    }
+
+    // ------------------------------------------------------------------------------------------- Uniswap v4
+
+    /// @dev VENUE_UNIV4 buyback; `pending` = buybackPending (>= amountIn). A no-op before graduation (no route, or
+    ///      a v4 pool of the route uninitialized). Every hop's price is checked against its limit first, then
+    ///      the whole path runs inside one PoolManager unlock under try/catch: a hook / pool / hop revert leaves
+    ///      everything as it was. The keeper minimum is pro-rated to the input actually spent (the first hop's
+    ///      price limit may stop it early) and the output must clear `buybackFloor(spent)` (the whole path).
+    function _buybackV4(uint256 amountIn, uint256 minBkrnOut, uint256 pending) private returns (uint256 bkrnOut) {
+        uint256 maxPerCall = maxBuybackPerCall;
+        if (maxPerCall == 0) revert NotConfigured("buybackParams");
+        if (amountIn > maxPerCall) revert BuybackTooLarge(amountIn, maxPerCall);
+        address staking = config.staking();
+        if (staking == address(0)) revert NotConfigured("staking");
+        if (!_v4RouteLive()) {
+            emit BuybackDeferred(amountIn);
+            return 0;
+        }
+        uint256 ref = referenceBkrnPerUsdc();
+        IBkrnV4Swapper.V4Job memory job = _v4Job(amountIn, ref);
+
+        buybackPending = pending - amountIn;
+        uint256 spent;
+        (spent, bkrnOut) = _runV4(job);
+        if (spent < amountIn) buybackPending += amountIn - spent; // a caught failure spends nothing
+        if (spent == 0) return 0;
+        uint256 minOut = Math.max(Math.mulDiv(minBkrnOut, spent, amountIn, Math.Rounding.Ceil), _floorAt(spent, ref));
+        if (bkrnOut == 0 || bkrnOut < minOut) revert InsufficientOutput(bkrnOut, minOut);
+
+        totalBuybackUsdc += spent;
+        totalBkrnDistributed += bkrnOut;
+        emit BuybackExecuted(spent, bkrnOut);
+
+        bkrn.safeTransfer(staking, bkrnOut);
+        IBkrnStaking(staking).notifyReward(bkrnOut);
+    }
+
+    /// @dev Runs `job` through `v4Swapper` (one PoolManager unlock; exact allowance of `amountIn`, reset after);
+    ///      (settlement token spent, BKRN received), both measured by balance and required to match what the
+    ///      swapper reports. A revert inside the swap is caught: `BuybackV4Failed`, (0, 0), nothing moved.
+    function _runV4(IBkrnV4Swapper.V4Job memory job) private returns (uint256 spent, uint256 bkrnOut) {
+        uint256 usdcBefore = usdc.balanceOf(address(this));
+        uint256 bkrnBefore = bkrn.balanceOf(address(this));
+        address swapper = address(v4Swapper);
+        usdc.forceApprove(swapper, job.amountIn);
+        try v4Swapper.swap(v4PoolManager, job) returns (uint256 paid, uint256 out) {
+            usdc.forceApprove(swapper, 0);
+            uint256 usdcAfter = usdc.balanceOf(address(this));
+            spent = usdcBefore > usdcAfter ? usdcBefore - usdcAfter : 0;
+            bkrnOut = bkrn.balanceOf(address(this)) - bkrnBefore;
+            // the swapper paid exactly `paid` (<= amountIn, the allowance) and sent `out`; a mismatch = a broken venue
+            if (spent != paid || bkrnOut != out) revert V4DeltaNotSettled();
+        } catch (bytes memory reason) {
+            usdc.forceApprove(swapper, 0);
+            emit BuybackV4Failed(job.amountIn, reason);
+            return (0, 0);
+        }
+    }
+
+    /// @dev The swap job for `amountIn` at the reference `ref` (whole BKRN per whole settlement token): per-hop
+    ///      price limits at the reference minus `maxSlippageBps`, each v4 pool refused when already past its limit.
+    ///      Via ETH the reference is split with `refUsdcPerEthWad`: hop 0 at >= (1 / ethRef) ETH per settlement
+    ///      token, hop 1 at >= ref x ethRef BKRN per ETH (each less the slippage).
+    function _v4Job(uint256 amountIn, uint256 ref) private view returns (IBkrnV4Swapper.V4Job memory job) {
+        job.route = _route;
+        job.amountIn = amountIn;
+        job.v3Router = buybackRouter;
+        uint256 keep = BPS - maxSlippageBps;
+        address u = address(usdc);
+        if (job.route.kind == ROUTE_DIRECT) {
+            bool zfo = job.route.bkrnPool.currency0 == u;
+            job.limit0 = UniswapV4Lib.priceLimit(Math.mulDiv(ref, keep, BPS), 6, 18, zfo);
+            _checkPoolPrice(job.route.bkrnPool, zfo, job.limit0);
+            return job;
+        }
+        uint256 ethRef = refUsdcPerEthWad;
+        if (ethRef == 0) revert NotConfigured("ethReference");
+        uint256 minEthPerUsdc = Math.mulDiv(WAD * WAD, keep, ethRef * BPS);
+        if (job.route.kind == ROUTE_V4_ETH) {
+            bool zfo0 = job.route.ethPool.currency0 == u;
+            job.limit0 = UniswapV4Lib.priceLimit(minEthPerUsdc, 6, 18, zfo0);
+            _checkPoolPrice(job.route.ethPool, zfo0, job.limit0);
+        } else {
+            job.limit0 = UniswapV4Lib.priceLimit(minEthPerUsdc, 6, 18, u < job.route.weth);
+        }
+        job.limit1 = UniswapV4Lib.priceLimit(Math.mulDiv(ref, ethRef * keep, WAD * BPS), 18, 18, true);
+        _checkPoolPrice(job.route.bkrnPool, true, job.limit1);
+    }
+
+    function _checkPoolPrice(IV4PoolManager.PoolKey memory key, bool zeroForOne, uint160 limit) private view {
+        uint160 p = UniswapV4Lib.sqrtPriceX96(v4PoolManager, key);
+        if (zeroForOne ? p <= limit : p >= limit) revert V4PriceBeyondLimit(p, limit);
+    }
+
+    /// @notice The v4 buyback route (bkrnPool.currency1 == 0: not set).
+    function v4Route() external view returns (IBkrnV4Swapper.V4Route memory) {
+        return _route;
+    }
+
+    /// @notice Whether a buyback would swap on v4 now: VENUE_UNIV4 and every v4 pool of the route initialized.
+    ///         False with VENUE_UNIV4 = buybacks defer (before graduation).
+    function v4BuybackReady() external view returns (bool) {
+        return buybackVenue == VENUE_UNIV4 && _v4RouteLive();
+    }
+
+    function _v4RouteLive() private view returns (bool) {
+        address m = v4PoolManager;
+        if (m == address(0) || _route.bkrnPool.currency1 == address(0)) return false;
+        if (UniswapV4Lib.sqrtPriceX96(m, _route.bkrnPool) == 0) return false;
+        return _route.kind != ROUTE_V4_ETH || UniswapV4Lib.sqrtPriceX96(m, _route.ethPool) != 0;
+    }
+
+    /// @notice Selects the buyback venue. VENUE_UNIV4 refuses REF_TWAP (v4 has no TWAP oracle) and may be selected
+    ///         before the pool exists (buybacks defer until `setV4Route`). Config admin (timelock) only.
+    function setBuybackVenue(uint8 venue) external {
+        _onlyAdmin();
+        if (venue > VENUE_UNIV4 || (venue == VENUE_UNIV4 && referenceSource == REF_TWAP)) revert BadVenue(venue);
+        buybackVenue = venue;
+        emit BuybackVenueSet(venue);
+    }
+
+    /// @notice Sets the Uniswap v4 PoolManager (must have code) and clears the route. Config admin only.
+    function setV4PoolManager(address manager) external {
+        _onlyAdmin();
+        if (manager.code.length == 0) revert BadV4Pool();
+        v4PoolManager = manager;
+        emit V4PoolManagerSet(manager);
+        _clearRoute();
+    }
+
+    /// @notice Allows / disallows a hook for the v4 buyback pools (a hook can take fees or revert: fees are bounded
+    ///         by the floor, a reverting hook only makes buybacks fail safe with `BuybackV4Failed`). Disallowing a
+    ///         hook of the current route clears the route. Config admin (timelock) only.
+    function setV4HookAllowed(address hook, bool allowed) external {
+        _onlyAdmin();
+        if (hook == address(0) || (allowed && hook.code.length == 0)) revert BadV4Pool();
+        v4HookAllowed[hook] = allowed;
+        emit V4HookAllowedSet(hook, allowed);
+        if (!allowed && (_route.bkrnPool.hooks == hook || _route.ethPool.hooks == hook)) _clearRoute();
+    }
+
+    /// @notice Fixed ETH reference (whole settlement token per whole ETH, WAD, > 0): splits the via-ETH price limits
+    ///         and, with `bkrnPerEthWad` (whole BKRN per whole ETH, 0 = unset), feeds REF_FIXED_ETH
+    ///         (BKRN/ETH x ETH/USD). No ETH/USD feed on Robinhood Chain is wired (none verified): keep it near market
+    ///         (a stale value only makes via-ETH buybacks stop early or fail safe). Config admin (timelock) only.
+    function setEthReference(uint256 usdcPerEthWad, uint256 bkrnPerEthWad) external {
+        _onlyAdmin();
+        if (usdcPerEthWad == 0 || (bkrnPerEthWad == 0 && referenceSource == REF_FIXED_ETH)) revert BadBuybackParams();
+        refUsdcPerEthWad = usdcPerEthWad;
+        refBkrnPerEthWad = bkrnPerEthWad;
+        emit EthReferenceSet(usdcPerEthWad, bkrnPerEthWad);
+    }
+
+    /// @notice Sets the v4 buyback route (discovery is off-chain: scripts/buyback-route.ts; an on-chain choice could
+    ///         be steered). Pools must be initialized on `v4PoolManager`, their hooks 0 or allow-listed, and:
+    ///           - ROUTE_DIRECT: `bkrnPool` = {settlement token, BKRN} (v4 order); `ethPool`, `v3Fee`, `weth` zero;
+    ///           - ROUTE_V4_ETH: `bkrnPool` = {native ETH, BKRN}, `ethPool` = {native ETH, settlement token};
+    ///             `v3Fee`, `weth` zero; `refUsdcPerEthWad` set;
+    ///           - ROUTE_V3_WETH: `bkrnPool` = {native ETH, BKRN}, `ethPool` zero, `v3Fee` in (0, 1e6), `weth` with
+    ///             code (WETH9), `buybackRouter` set (SwapRouter02, its USDG/WETH `v3Fee` pool); `refUsdcPerEthWad` set.
+    ///         Config admin (timelock) only.
+    function setV4Route(IBkrnV4Swapper.V4Route calldata r) external {
+        _onlyAdmin();
+        address m = v4PoolManager;
+        if (m == address(0)) revert NotConfigured("v4PoolManager");
+        (address u, address b) = (address(usdc), address(bkrn));
+        bool viaEth = r.kind != ROUTE_DIRECT;
+        if (r.kind > ROUTE_V3_WETH) revert BadV4Pool();
+        if (viaEth && refUsdcPerEthWad == 0) revert NotConfigured("ethReference");
+        if (viaEth ? !_pair(r.bkrnPool, NATIVE, b) : !_pair(r.bkrnPool, u, b)) revert BadV4Pool();
+        _checkPool(m, r.bkrnPool);
+        if (r.kind == ROUTE_V4_ETH) {
+            if (!_pair(r.ethPool, NATIVE, u) || r.v3Fee != 0 || r.weth != address(0)) revert BadV4Pool();
+            _checkPool(m, r.ethPool);
+        } else {
+            if (!_isEmpty(r.ethPool)) revert BadV4Pool();
+            if (r.kind == ROUTE_V3_WETH) {
+                if (r.v3Fee == 0 || r.v3Fee >= 1e6 || r.weth.code.length == 0) revert BadV4Pool();
+                if (buybackRouter == address(0)) revert NotConfigured("buybackRouter");
+            } else if (r.v3Fee != 0 || r.weth != address(0)) {
+                revert BadV4Pool();
+            }
+        }
+        _route = r;
+        emit V4RouteSet(
+            r.kind,
+            UniswapV4Lib.poolId(r.bkrnPool),
+            r.kind == ROUTE_V4_ETH ? UniswapV4Lib.poolId(r.ethPool) : bytes32(0),
+            r.v3Fee,
+            r.weth
+        );
+    }
+
+    /// @dev `key` is exactly the pair {a, b} in v4 order (currency0 < currency1).
+    function _pair(IV4PoolManager.PoolKey calldata key, address a, address b) private pure returns (bool) {
+        (address c0, address c1) = a < b ? (a, b) : (b, a);
+        return key.currency0 == c0 && key.currency1 == c1;
+    }
+
+    function _isEmpty(IV4PoolManager.PoolKey calldata key) private pure returns (bool) {
+        return key.currency0 == address(0) && key.currency1 == address(0) && key.fee == 0 && key.tickSpacing == 0
+            && key.hooks == address(0);
+    }
+
+    function _checkPool(address m, IV4PoolManager.PoolKey calldata key) private view {
+        if (key.hooks != address(0) && !v4HookAllowed[key.hooks]) revert BadV4Pool();
+        if (UniswapV4Lib.sqrtPriceX96(m, key) == 0) revert BadV4Pool();
+    }
+
+    function _clearRoute() private {
+        if (_route.bkrnPool.currency1 == address(0)) return;
+        delete _route;
+        emit V4RouteCleared();
     }
 
     /// @notice Pins the buyback pool fee tier and sets the price bound. Config admin (timelock) only.
-    /// @param poolFee Uniswap v3 fee tier of the deep BKRN/USDC pool (> 0; VERIFY on RHC).
+    /// @param poolFee Uniswap v3 fee tier of the deep BKRN/USDC pool (VERIFY on RHC); 0 = no v3 pool (VENUE_UNIV3
+    ///        buybacks revert NotConfigured; VENUE_UNIV4 uses the fee of its pool key).
     /// @param refBkrnPerUsdcWad_ Reference price, whole BKRN per whole USDC (WAD, > 0); used while
     ///        `bkrnPriceId` is unset. Must be kept near market: too high stalls buybacks (fail-safe),
     ///        too low loosens the bound (bounded by `maxPerCall`).
@@ -308,7 +605,7 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
         external
     {
         if (!config.hasRole(DEFAULT_ADMIN_ROLE, msg.sender)) revert NotAdmin(msg.sender);
-        if (poolFee == 0 || refBkrnPerUsdcWad_ == 0 || maxSlippageBps_ > MAX_SLIPPAGE_BPS || maxPerCall == 0) {
+        if (refBkrnPerUsdcWad_ == 0 || maxSlippageBps_ > MAX_SLIPPAGE_BPS || maxPerCall == 0) {
             revert BadBuybackParams();
         }
         buybackPoolFee = poolFee;
@@ -349,12 +646,17 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
     }
 
     /// @notice Selects the buyback reference source, which must be configured (REF_FIXED: buyback params
-    ///         set; REF_TWAP: `setTwapParams`; REF_ATTESTED: `bkrnPriceId`). Config admin (timelock) only.
+    ///         set; REF_TWAP: `setTwapParams`, never with VENUE_UNIV4; REF_ATTESTED: `bkrnPriceId`). Config admin
+    ///         (timelock) only.
     function setReferenceSource(uint8 source) external {
         _onlyAdmin();
         bool ok = source == REF_FIXED
             ? refBkrnPerUsdcWad != 0
-            : source == REF_TWAP ? twapPool != address(0) : source == REF_ATTESTED && bkrnPriceId != bytes32(0);
+            : source == REF_TWAP
+                ? twapPool != address(0) && buybackVenue != VENUE_UNIV4
+                : source == REF_ATTESTED
+                    ? bkrnPriceId != bytes32(0)
+                    : source == REF_FIXED_ETH && refBkrnPerEthWad != 0 && refUsdcPerEthWad != 0;
         if (!ok) revert BadReferenceSource(source);
         _setReferenceSource(source);
     }

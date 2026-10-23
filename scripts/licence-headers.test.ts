@@ -30,7 +30,7 @@ const pragma = (t: string) => /^pragma solidity ([^;]+);/m.exec(t)?.[1];
 describe("Solidity licence and pragma headers", () => {
   test("the tree is there", () => {
     expect(files.length).toBeGreaterThan(150);
-    expect(files.filter((f) => isMit(f.rel)).length).toBe(25);
+    expect(files.filter((f) => isMit(f.rel)).length).toBe(28);
   });
 
   test("interfaces/ and UniswapV3Twap.sol are MIT, everything else BUSL-1.1", () => {

@@ -181,6 +181,29 @@ describe("BuybackRunner", () => {
     expect(await runner.tick()).toEqual({ status: "skipped", reason: "cooldown" });
   });
 
+  test("v4 venue before graduation (no live route): nothing sent, cooled down", async () => {
+    const { chain, runner, now } = setup();
+    chain.pending = usd("50");
+    chain.venue = 1;
+    expect(await runner.tick()).toEqual({ status: "skipped", reason: "v4 route not live" });
+    expect(chain.executed).toEqual([]);
+    expect(await runner.tick()).toEqual({ status: "skipped", reason: "cooldown" });
+    chain.v4Ready = true; // graduated, route set by governance
+    now.t += 30_001;
+    expect((await runner.tick()).status).toBe("bought");
+  });
+
+  test("v4 swap caught on-chain (BuybackV4Failed): failed + cooldown, pending kept", async () => {
+    const { chain, runner } = setup();
+    chain.pending = usd("50");
+    chain.venue = 1;
+    chain.v4Ready = true;
+    chain.v4Fails = true;
+    expect(await runner.tick()).toEqual({ status: "failed", error: "v4 swap failed (0xdeadbeef)" });
+    expect(chain.pending).toBe(usd("50"));
+    expect(await runner.tick()).toEqual({ status: "skipped", reason: "cooldown" });
+  });
+
   test("pending read fails: failed, cooled down (never throws into the loop)", async () => {
     const { chain, runner } = setup();
     chain.buybackPending = async () => Promise.reject(new Error("rpc down"));

@@ -199,12 +199,22 @@ export class FakeBuybackChain implements BuybackChain {
     if (this.failQuote) throw new Error("quote reverted");
     return this.quoteWad === null ? null : (amountIn * this.quoteWad) / 10n ** 6n;
   }
+  /** BkrnFeeRouter venue (0 v3, 1 v4) and v4BuybackReady(); `v4Fails` = the v4 swap reverts on-chain (caught). */
+  venue = 0;
+  v4Ready = false;
+  v4Fails = false;
+  async buybackV4State() {
+    return { venue: this.venue, ready: this.v4Ready };
+  }
   async executeBuyback(amountIn: bigint, minOut: bigint, poolFee?: number) {
     if (this.failExecute) throw new Error("execution reverted: InsufficientOutput");
     this.executed.push(poolFee === undefined ? { amountIn, minOut } : { amountIn, minOut, poolFee });
+    if (this.venue === 1 && this.v4Fails) {
+      return { hash: fakeHash(), usdcIn: null, bkrnOut: null, v4Outcome: "failed" as const, v4Reason: "0xdeadbeef" as const };
+    }
     const bkrnOut = this.quoteWad === null ? minOut : (amountIn * this.quoteWad) / 10n ** 6n;
     this.pending -= amountIn;
-    return { hash: fakeHash(), usdcIn: amountIn, bkrnOut };
+    return { hash: fakeHash(), usdcIn: amountIn, bkrnOut, v4Outcome: null };
   }
 }
 

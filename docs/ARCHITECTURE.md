@@ -163,7 +163,29 @@ venueMinIf[PoolEngine] 10,000 USDC, tiers: entry 50k USD → 0, ≥50k → 25k B
   TWAP of the BKRN/settlement pool (`libraries/UniswapV3Twap.sol`: mean tick over `twapWindow` ∈
   [10 min, 2 days], refused with `TwapDeviation` while the spot tick is more than
   `twapMaxTickDeviation` ≤ 2,000 ticks away; "OLD" when the pool's history is shorter than the
-  window), REF_ATTESTED = AttestedOracle `bkrnPriceId`. Sends BKRN to staking and calls `notifyReward`.
+  window), REF_ATTESTED = AttestedOracle `bkrnPriceId`, REF_FIXED_ETH = fixed BKRN/ETH x ETH/USD
+  (`setEthReference`). Sends BKRN to staking and calls `notifyReward`.
+  **Venue** (`buybackVenue`, timelock): VENUE_UNIV3 (default, the SwapRouter02 path above) or VENUE_UNIV4 for a
+  BKRN launched on Pons (graduated into a locked Uniswap v4 pool, possibly hooked; BKRN/native ETH by default):
+  the router hands the swap to its own `BkrnV4Swapper` (created in its constructor, holds nothing between
+  calls), which calls `PoolManager.unlock` and, in `unlockCallback` (only that PoolManager, only during its own
+  swap), runs the timelock-set route exact-input: ROUTE_DIRECT USDG -> BKRN; ROUTE_V4_ETH USDG -> ETH (v4
+  ETH/USDG pool) -> BKRN in one unlock (the ETH deltas cancel, no ETH moves); ROUTE_V3_WETH USDG -> WETH
+  (SwapRouter02, inside the unlock) -> unwrap -> `settle{value:}` -> BKRN. USDG is paid with sync + transferFrom
+  (exact allowance of `amountIn`, reset after) + settle, BKRN is `take`n to the router, every delta of the
+  swapper must be closed and its ETH balance unchanged; native ETH is accepted only from WETH / the PoolManager
+  during a swap (`sweepNative` for forced ETH). Each hop carries a `sqrtPriceLimitX96` at its reference minus
+  `maxSlippageBps` (a moved pool fills less, never worse; a via-ETH buyback whose BKRN hop would stop early
+  reverts as a whole), the output must clear `buybackFloor(spent)` (the keeper minimum is pro-rated to what was
+  spent), `maxBuybackPerCall` applies, and any revert inside the unlock (a hook, a pool) is caught:
+  `BuybackV4Failed`, nothing moves. No route / an uninitialized pool (before graduation) = `BuybackDeferred`,
+  the USDG waits. REF_TWAP and VENUE_UNIV4 refuse each other (v4 has no oracle). The route is chosen off-chain
+  (`scripts/buyback-route.ts`), never on-chain. Hooks are allow-listed (`setV4HookAllowed`); disallowing one, or
+  changing the PoolManager, clears the route.
+  **Staking rewards come only from buybacks**: `BkrnStaking.notifyReward` is callable only by
+  `config.feeRouter()`, whose only call is in `executeBuyback` with the BKRN it just bought and transferred; BKRN
+  sent to staking any other way is never distributed (it is not in `rewardReserve`), and a pre-existing (Pons)
+  BKRN has no protocol allocation to fund rewards from.
 - `Backstop`: holds USDC. `cover(bookId, shortfall)` only by `factory.bookOf(bookId) == msg.sender`;
   pays `min(shortfall, balance)` to the book's vault; emits `Covered`. Optional per-cover cap param
   (`maxCoverBps` of balance, default 10000).
@@ -717,7 +739,7 @@ guarded by `process.env.BKRN_IT === "1"`.
 | `bookrunner-agent` | — | One process per book (`BOOK_ID`). Avellaneda-Stoikov quoting: reservation price `r = s − q·γ·σ²·τ`, spread `δ = γσ²τ + (2/γ)ln(1+γ/k)`, then clamp to mandate (width ≥ min, |skew| ≤ max, sides per `allowedSides`). Venues: `OrderlyVenue` or `EngineVenue` (desk SetQuote). Hedge planner: keep `hedgeRatioBps` in band using desk `Hedge`/`Flatten` (signed with the session key, direct `execute` tx on devnet; userOp path for bundlers). Kill logic: on `CHANNELS.kill` or mandate killed → cancel-all and stop. Writes quotes/fills/hedges to DB (+ receipts leaves), heartbeat in Redis. Includes `trader-sim` entry (`src/trader-sim.ts`) generating taker flow on the engine and mock venue. |
 | `risk` | — | Every few seconds per live book: read venue exposure (adapter / venue API), desk hedge, last quote, live NAV estimate → `classifyLimits` → write `limits` row + Redis state; transitions emit `limit.breached`; breach → kill sequence (§3.4) with `kill_events` row and `kill.executed`. Off-hours flags from oracle held/stale. Drawdown intra-mark from live NAV vs book high-water. Exports nothing; consumes `QuotingVenue`. |
 | `mark` | — | Per book per period: wait for distribution of the period (or timeout), recall-if-needed check, compute NAV components (vault idle, adapter equity/in-transit, desk USDC + hedge value via registry), inventory tree, receipts root over hourly roots of the period, `MarkPnl` JSON (canonical, hash), sign EIP-712, `commit`, `applyMark`, persist `marks`, emit `mark.committed`. Uses archive-style reads at a fixed block. |
-| `waterfall` | — | Per book per period: Orderly → enqueue ops-venue sweep, then wait (bounded, `WATERFALL_FEE_FORWARD_WAIT_SECONDS`) for the earmarked fees to reach the router via `forwardPendingFees`; engine → `adapter.sweepFees`; then `router.distribute(period, expenses)` with expenses from oracle/keeper gas accounting (devnet: fixed small amount, capped on-chain); persist `settlements`; emit `distribution.paid`. Also keeper duties: `closeWindow` when due, `fundClaims`, `finalizeRetirement`, and once per pass `BkrnFeeRouter.executeBuyback` when `buybackPending` ≥ `WATERFALL_BUYBACK_THRESHOLD_USD` (amountIn capped at `maxBuybackPerCall`; minBkrnOut = max(buyback router quote − `WATERFALL_BUYBACK_SLIPPAGE_BPS`, on-chain `buybackFloor`); a quote below the floor is skipped). |
+| `waterfall` | — | Per book per period: Orderly → enqueue ops-venue sweep, then wait (bounded, `WATERFALL_FEE_FORWARD_WAIT_SECONDS`) for the earmarked fees to reach the router via `forwardPendingFees`; engine → `adapter.sweepFees`; then `router.distribute(period, expenses)` with expenses from oracle/keeper gas accounting (devnet: fixed small amount, capped on-chain); persist `settlements`; emit `distribution.paid`. Also keeper duties: `closeWindow` when due, `fundClaims`, `finalizeRetirement`, and once per pass `BkrnFeeRouter.executeBuyback` when `buybackPending` ≥ `WATERFALL_BUYBACK_THRESHOLD_USD` (amountIn capped at `maxBuybackPerCall`; minBkrnOut = max(buyback router quote − `WATERFALL_BUYBACK_SLIPPAGE_BPS`, on-chain `buybackFloor`); a quote below the floor is skipped; Uniswap v4 venue: nothing is sent while `v4BuybackReady()` is false (BKRN not graduated), the v3 quote is not used (the floor is the minimum), and a landed tx that did not swap (`BuybackV4Failed` / `BuybackDeferred`) counts as failed with a cooldown). |
 | `receipts` | — | Hourly (devnet: `RECEIPTS_INTERVAL_SECONDS`) per book: StandardMerkleTree over `receipts` leaves in the window → `receipt_roots`; proof API helpers. Leaves are written by agent (quotes, fills, hedges), risk (decisions), charter (decisions). |
 | `charter` | 4430 | Intake API (validated charter drafts → prepared tx), indexing of `CharterFiled`, model jury: N models (Claude via `@anthropic-ai/sdk` when `ANTHROPIC_API_KEY`, models from `JURY_MODELS`) each return structured `{vote, rationale, risks[]}` given the charter + rule checks; majority → recommendation; deterministic rule-based jury fallback without a key. Verdict JSON → CIDv1 (raw, sha2-256 via `multiformats`) → `postJuryVerdict(digest)`; committee notifications (`committee` table, events). |
 | `indexer` | — | Chain → DB: watches all protocol events from `deployment.startBlock` with a `chain_cursor` (reorg-safe with N confirmations on mainnet, 0 on devnet): charters, books, subscriptions, redemptions, marks, settlements, desk keys, kills, committee votes. Emits internal domain events. |

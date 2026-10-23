@@ -3,6 +3,10 @@ pragma solidity 0.8.30;
 
 import {Script} from "forge-std/Script.sol";
 import {stdJson} from "forge-std/StdJson.sol";
+import {console2} from "forge-std/Script.sol";
+import {IBkrnV4Swapper} from "../src/interfaces/IBkrnV4Swapper.sol";
+import {IV4PoolManager} from "../src/interfaces/external/IUniswapV4.sol";
+import {UniswapV4Lib} from "../src/libraries/UniswapV4Lib.sol";
 
 /// @title MainnetInput — the single JSON input of DeployMainnet / VerifyHandover.
 /// @notice Every external address and every parameter of a mainnet (Robinhood Chain 4663) deployment lives in
@@ -36,6 +40,15 @@ abstract contract MainnetInput is Script {
     uint8 internal constant REF_FIXED = 0;
     uint8 internal constant REF_TWAP = 1;
     uint8 internal constant REF_ATTESTED = 2;
+    uint8 internal constant REF_FIXED_ETH = 3;
+    /// @notice BkrnFeeRouter venues / v4 routes (BkrnFeeRouter.VENUE_* / ROUTE_*).
+    uint8 internal constant VENUE_UNIV3 = 0;
+    uint8 internal constant VENUE_UNIV4 = 1;
+    uint8 internal constant ROUTE_DIRECT = 0;
+    uint8 internal constant ROUTE_V4_ETH = 1;
+    uint8 internal constant ROUTE_V3_WETH = 2;
+    /// @notice Supply of a Pons launch (1e9 whole tokens): a pre-existing BKRN with another supply is only warned.
+    uint256 internal constant PONS_TOTAL_SUPPLY = 1e9 * 1e18;
     /// @notice BkrnFeeRouter TWAP bounds (BkrnFeeRouter.MIN_TWAP_WINDOW / MAX_TWAP_WINDOW / MAX_TWAP_TICK_DEVIATION).
     uint256 internal constant MIN_TWAP_WINDOW = 10 minutes;
     uint256 internal constant MAX_TWAP_WINDOW = 2 days;
@@ -63,6 +76,7 @@ abstract contract MainnetInput is Script {
         address swapRouter02; // Uniswap v3 SwapRouter02 (VERIFY U1): HedgeExecutor UNIV3 + BKRN buybacks
         address univ3Factory; // UniswapV3Factory (VERIFY U1): HedgeExecutor.setV3Factory (setRoute checks pools)
         address univ4Router; // optional (0 = UNIV4 stays NotConfigured, VERIFY U3)
+        address univ4PoolManager; // Uniswap v4 PoolManager (VERIFY U2); required with buyback.venue univ4
         address entryPoint; // ERC-4337 v0.7 (VERIFY A1)
         // Chain price config the oracle service loads (config/chains/<chainId>.json: Stock Tokens + Chainlink
         // feeds), relative to contracts/ or absolute; the input's tokens / feeds must match it. "" = none.
@@ -124,6 +138,17 @@ abstract contract MainnetInput is Script {
         address twapPool; // BKRN/settlement Uniswap v3 pool (twap only; needs a pre-existing bkrn.token)
         uint256 twapWindow; // seconds, [10 min, 2 days]
         uint256 twapMaxTickDeviation; // [1, 2000] ticks
+        // venue (BkrnFeeRouter.setBuybackVenue): "univ3" (default) | "univ4" (direct PoolManager swaps; no twap)
+        uint8 venue;
+        // fixed ETH references (BkrnFeeRouter.setEthReference): whole USDG per ETH (required by a via-ETH route
+        // and "fixedEth"), whole BKRN per ETH (read by referenceSource "fixedEth"); 0 = unset
+        uint256 usdcPerEthWad;
+        uint256 bkrnPerEthWad;
+        // hooks allow-listed at deploy (e.g. the Pons hook, so graduation only needs setV4Route)
+        address[] v4Hooks;
+        // optional route set at deploy (after graduation; else later through the timelock)
+        bool v4RouteSet;
+        IBkrnV4Swapper.V4Route v4Route;
     }
 
     /// @dev Attested form (mainnet): `platform` + `measurement` + `quoteHash` -> AttestedOracle.setAttestedSigner
@@ -277,6 +302,7 @@ abstract contract MainnetInput is Script {
         ext.swapRouter02 = json.readAddress(".externals.uniswapV3SwapRouter02");
         ext.univ3Factory = json.readAddressOr(".externals.uniswapV3Factory", address(0));
         ext.univ4Router = json.readAddressOr(".externals.uniswapV4Router", address(0));
+        ext.univ4PoolManager = json.readAddressOr(".externals.uniswapV4PoolManager", address(0));
         ext.entryPoint = json.readAddress(".externals.entryPoint");
         ext.chainPriceConfig = json.readStringOr(".externals.chainPriceConfig", "");
     }
@@ -332,10 +358,47 @@ abstract contract MainnetInput is Script {
         if (_eq(src, "fixed")) bb.referenceSource = REF_FIXED;
         else if (_eq(src, "twap")) bb.referenceSource = REF_TWAP;
         else if (_eq(src, "attested")) bb.referenceSource = REF_ATTESTED;
-        else revert("MainnetInput: buyback.referenceSource must be fixed | twap | attested");
+        else if (_eq(src, "fixedEth")) bb.referenceSource = REF_FIXED_ETH;
+        else revert("MainnetInput: buyback.referenceSource must be fixed | twap | attested | fixedEth");
         bb.twapPool = json.readAddressOr(".buyback.twap.pool", address(0));
         bb.twapWindow = json.readUintOr(".buyback.twap.window", 0);
         bb.twapMaxTickDeviation = json.readUintOr(".buyback.twap.maxTickDeviation", 0);
+        string memory venue = json.readStringOr(".buyback.venue", "univ3");
+        if (_eq(venue, "univ3")) bb.venue = VENUE_UNIV3;
+        else if (_eq(venue, "univ4")) bb.venue = VENUE_UNIV4;
+        else revert("MainnetInput: buyback.venue must be univ3 | univ4");
+        bb.usdcPerEthWad = json.readUintOr(".buyback.ethReference.usdcPerEthWad", 0);
+        bb.bkrnPerEthWad = json.readUintOr(".buyback.ethReference.bkrnPerEthWad", 0);
+        bb.v4Hooks = json.readAddressArrayOr(".buyback.v4Hooks", new address[](0));
+        _loadV4Route(json);
+    }
+
+    /// @dev `buyback.v4Route` = {kind: "direct" | "v4Eth" | "v3Weth", bkrnPool: PoolKey, ethPool: PoolKey (v4Eth),
+    ///      v3Fee + weth (v3Weth)}; PoolKey = {currency0, currency1, fee, tickSpacing, hooks} (native ETH = 0x0).
+    function _loadV4Route(string memory json) private {
+        if (!vm.keyExistsJson(json, ".buyback.v4Route")) return;
+        bb.v4RouteSet = true;
+        IBkrnV4Swapper.V4Route storage r = bb.v4Route;
+        string memory kind = json.readString(".buyback.v4Route.kind");
+        if (_eq(kind, "direct")) r.kind = ROUTE_DIRECT;
+        else if (_eq(kind, "v4Eth")) r.kind = ROUTE_V4_ETH;
+        else if (_eq(kind, "v3Weth")) r.kind = ROUTE_V3_WETH;
+        else revert("MainnetInput: buyback.v4Route.kind must be direct | v4Eth | v3Weth");
+        r.bkrnPool = _readKey(json, ".buyback.v4Route.bkrnPool");
+        if (vm.keyExistsJson(json, ".buyback.v4Route.ethPool")) r.ethPool = _readKey(json, ".buyback.v4Route.ethPool");
+        r.v3Fee = uint24(json.readUintOr(".buyback.v4Route.v3Fee", 0));
+        r.weth = json.readAddressOr(".buyback.v4Route.weth", address(0));
+    }
+
+    function _readKey(string memory json, string memory k) private view returns (IV4PoolManager.PoolKey memory key) {
+        key.currency0 = json.readAddress(string.concat(k, ".currency0"));
+        key.currency1 = json.readAddress(string.concat(k, ".currency1"));
+        uint256 fee = json.readUint(string.concat(k, ".fee"));
+        int256 spacing = json.readInt(string.concat(k, ".tickSpacing"));
+        require(fee < (1 << 24) && spacing > 0 && spacing < (1 << 15), string.concat("MainnetInput: ", k, " fee / tickSpacing"));
+        key.fee = uint24(fee);
+        key.tickSpacing = int24(spacing);
+        key.hooks = json.readAddress(string.concat(k, ".hooks"));
     }
 
     function _loadRoles(string memory json) private {
@@ -457,6 +520,7 @@ abstract contract MainnetInput is Script {
         _validateOracle(mainnet);
         _validateParams(mainnet);
         _validateBuybackReference();
+        _validateBuybackV4();
         _validateMarkets(mainnet);
         _validateHedgeRoutes();
         _validateChainPriceConfig(mainnet);
@@ -558,7 +622,8 @@ abstract contract MainnetInput is Script {
         require(prm.oracleMinSources > 0, "input: oracleMinSources 0");
         require(prm.oracleMinSources <= type(uint32).max, "input: oracleMinSources > uint32");
         require(tierThresholds.length == tierBonds.length, "input: tiers length mismatch");
-        require(bb.poolFee > 0 && bb.poolFee < (1 << 24), "input: buyback.poolFee");
+        // poolFee 0 = no v3 BKRN pool (the univ4 venue swaps through its v4 route)
+        require(bb.poolFee < (1 << 24) && (bb.poolFee > 0 || bb.venue == VENUE_UNIV4), "input: buyback.poolFee");
         require(bb.refBkrnPerUsdcWad > 0 && bb.maxPerCall > 0, "input: buyback ref price / maxPerCall");
         require(bb.maxSlippageBps <= 2000, "input: buyback.maxSlippageBps > 2000");
         require(multiplierBandBps <= MAX_MULTIPLIER_BAND_BPS, "input: stockRegistry.multiplierBandBps > 5000");
@@ -592,6 +657,39 @@ abstract contract MainnetInput is Script {
         } else {
             require(bb.twapPool == address(0), "input: buyback.twap set but referenceSource is not twap");
         }
+        if (bb.referenceSource == REF_FIXED_ETH) {
+            require(bb.usdcPerEthWad > 0 && bb.bkrnPerEthWad > 0, "input: buyback.referenceSource fixedEth needs ethReference");
+        }
+    }
+
+    /// @dev Uniswap v4 venue (VERIFY U2): the PoolManager, no TWAP (v4 has no oracle), the allow-listed hooks, and an
+    ///      optional route (only for a pre-existing BKRN: a BKRN deployed here has no pool). Pool existence, currencies
+    ///      and code are checked against the chain in checkExternals.
+    function _validateBuybackV4() private view {
+        _opt(ext.univ4PoolManager, "externals.uniswapV4PoolManager");
+        for (uint256 i; i < bb.v4Hooks.length; ++i) _req(bb.v4Hooks[i], "buyback.v4Hooks");
+        if (bb.venue == VENUE_UNIV4) {
+            _req(ext.univ4PoolManager, "externals.uniswapV4PoolManager");
+            require(bb.referenceSource != REF_TWAP, "input: buyback.venue univ4 cannot use referenceSource twap (no v4 TWAP)");
+        }
+        if (!bb.v4RouteSet) return;
+        IBkrnV4Swapper.V4Route storage r = bb.v4Route;
+        require(bb.venue == VENUE_UNIV4, "input: buyback.v4Route needs buyback.venue univ4");
+        require(bkrnIn.token != address(0), "input: buyback.v4Route needs a pre-existing bkrn.token (pool)");
+        if (r.kind != ROUTE_DIRECT) require(bb.usdcPerEthWad > 0, "input: a via-ETH buyback.v4Route needs ethReference.usdcPerEthWad");
+        if (r.kind == ROUTE_V3_WETH) {
+            _req(r.weth, "buyback.v4Route.weth");
+            require(r.v3Fee > 0 && r.v3Fee < 1e6, "input: buyback.v4Route.v3Fee");
+        }
+        require(_hookListed(r.bkrnPool.hooks) && _hookListed(r.ethPool.hooks), "input: buyback.v4Route hook not in buyback.v4Hooks");
+    }
+
+    function _hookListed(address h) internal view returns (bool) {
+        if (h == address(0)) return true;
+        for (uint256 i; i < bb.v4Hooks.length; ++i) {
+            if (bb.v4Hooks[i] == h) return true;
+        }
+        return false;
     }
 
     function _validateMarkets(bool mainnet) private view {
@@ -676,10 +774,7 @@ abstract contract MainnetInput is Script {
         _code(ext.entryPoint, "entryPoint");
         _code(gov.multisig, "governance.multisig (a Safe)");
         if (ext.univ4Router != address(0)) _code(ext.univ4Router, "uniswapV4Router");
-        if (bkrnIn.token != address(0)) {
-            _code(bkrnIn.token, "bkrn.token");
-            require(_decimals(bkrnIn.token) == 18, "externals: bkrn.token decimals != 18");
-        }
+        if (bkrnIn.token != address(0)) _checkBkrnToken();
         require(_decimals(ext.settlementToken) == SETTLEMENT_DECIMALS, "externals: settlement token decimals != 6");
         (bool ok, bytes memory ret) = ext.orderlyVault.staticcall(
             abi.encodeWithSignature("getAllowedToken(bytes32)", keccak256(bytes(ext.orderlyTokenSymbol)))
@@ -699,10 +794,54 @@ abstract contract MainnetInput is Script {
         }
         if (ext.univ3Factory != address(0)) _code(ext.univ3Factory, "uniswapV3Factory");
         if (bb.referenceSource == REF_TWAP) _code(bb.twapPool, "buyback.twap.pool");
+        _checkV4Externals();
         for (uint256 i; i < hedgeRoutes.length; ++i) {
             if (hedgeRoutes[i].hop != address(0)) _code(hedgeRoutes[i].hop, string.concat("hedge.routes.", hedgeRoutes[i].symbol, ".hop"));
         }
         _checkLiveMultiplierAnchors();
+    }
+
+    /// @dev A pre-existing BKRN (Pons launch): code and 18 decimals are required; a supply other than 1e9 x 1e18 is
+    ///      only warned. Fee-on-transfer cannot be ruled out read-only (no test transfer): RUNBOOK manual check.
+    function _checkBkrnToken() internal view {
+        _code(bkrnIn.token, "bkrn.token");
+        require(_decimals(bkrnIn.token) == 18, "externals: bkrn.token decimals != 18");
+        (bool ok, bytes memory ret) = bkrnIn.token.staticcall(abi.encodeWithSignature("totalSupply()"));
+        require(ok && ret.length >= 32, "externals: bkrn.token totalSupply() failed");
+        uint256 supply = abi.decode(ret, (uint256));
+        if (supply != PONS_TOTAL_SUPPLY) console2.log("WARN externals: bkrn.token totalSupply != 1e9 x 1e18:", supply);
+        console2.log("NOTE bkrn.token: fee-on-transfer cannot be checked read-only; do the RUNBOOK manual transfer check");
+    }
+
+    /// @dev v4 venue: PoolManager code; allow-listed hooks have code; the route's pools are initialized and pair
+    ///      exactly {settlement token | native ETH, BKRN} / {native ETH, settlement token}; WETH has code.
+    function _checkV4Externals() internal view {
+        if (ext.univ4PoolManager != address(0)) _code(ext.univ4PoolManager, "uniswapV4PoolManager");
+        for (uint256 i; i < bb.v4Hooks.length; ++i) _code(bb.v4Hooks[i], "buyback.v4Hooks");
+        if (!bb.v4RouteSet) return;
+        IBkrnV4Swapper.V4Route storage r = bb.v4Route;
+        address u = ext.settlementToken;
+        address b = bkrnIn.token;
+        bool viaEth = r.kind != ROUTE_DIRECT;
+        require(_isPair(r.bkrnPool, viaEth ? address(0) : u, b), "externals: buyback.v4Route.bkrnPool is not {USDG|ETH, BKRN} in v4 order");
+        _initialized(r.bkrnPool, "buyback.v4Route.bkrnPool");
+        if (r.kind == ROUTE_V4_ETH) {
+            require(_isPair(r.ethPool, address(0), u), "externals: buyback.v4Route.ethPool is not {ETH, USDG}");
+            _initialized(r.ethPool, "buyback.v4Route.ethPool");
+        }
+        if (r.kind == ROUTE_V3_WETH) _code(r.weth, "buyback.v4Route.weth");
+    }
+
+    function _isPair(IV4PoolManager.PoolKey storage k, address x, address y) internal view returns (bool) {
+        (address c0, address c1) = x < y ? (x, y) : (y, x);
+        return k.currency0 == c0 && k.currency1 == c1;
+    }
+
+    function _initialized(IV4PoolManager.PoolKey storage k, string memory what) internal view {
+        require(
+            UniswapV4Lib.sqrtPriceX96(ext.univ4PoolManager, k) != 0,
+            string.concat("externals: ", what, " is not initialized on the PoolManager")
+        );
     }
 
     /// @dev Live-mode tokens: `uiMultiplier()` must answer and sit within the band of the input anchor (the

@@ -14,6 +14,7 @@ const CONTRACTS: Record<string, string[]> = {
   BkrnToken: ["BkrnToken", "ERC20"],
   BkrnStaking: ["BkrnStaking", "IBkrnStaking"],
   BkrnFeeRouter: ["BkrnFeeRouter", "IBkrnFeeRouter"],
+  BkrnV4Swapper: ["BkrnV4Swapper", "IBkrnV4Swapper"],
   Backstop: ["Backstop", "IBackstop"],
   MarkRegistry: ["MarkRegistry", "IMarkRegistry"],
   RevenueRouter: ["RevenueRouter", "IRevenueRouter"],

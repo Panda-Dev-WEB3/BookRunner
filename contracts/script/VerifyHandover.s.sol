@@ -20,6 +20,8 @@ import {PoolEngineAdapter} from "../src/PoolEngineAdapter.sol";
 import {InsurancePool} from "../src/InsurancePool.sol";
 import {BRTypes} from "../src/interfaces/BRTypes.sol";
 import {IStockTokenRegistry} from "../src/interfaces/IStockTokenRegistry.sol";
+import {IBkrnV4Swapper} from "../src/interfaces/IBkrnV4Swapper.sol";
+import {BkrnV4Swapper} from "../src/BkrnV4Swapper.sol";
 
 interface IHasConfig {
     function config() external view returns (address);
@@ -92,6 +94,7 @@ contract VerifyHandover is MainnetInput {
         _checkParams();
         _checkInsurancePool(deploymentJson);
         _checkEconomics();
+        _checkBuybackV4();
         _checkOracleAndMarkets();
         _checkHedgeRoutes();
         _checkLiveMultipliers();
@@ -586,6 +589,38 @@ contract VerifyHandover is MainnetInput {
         }
         _row(ok, what);
     }
+
+    /// @dev BkrnFeeRouter Uniswap v4 venue as input (Pons BKRN): venue, PoolManager (code), hooks, ETH references,
+    ///      route (or none), the swapper bound to this router; the BKRN token's decimals / supply (supply only warns).
+    function _checkBuybackV4() internal {
+        BkrnFeeRouter fr = BkrnFeeRouter(cfg.feeRouter());
+        _row(fr.buybackVenue() == bb.venue, "buyback venue == input (0 univ3, 1 univ4)");
+        _row(
+            fr.v4PoolManager() == ext.univ4PoolManager
+                && (ext.univ4PoolManager == address(0) || ext.univ4PoolManager.code.length > 0),
+            "buyback v4PoolManager == input (has code)"
+        );
+        bool hooksOk = true;
+        for (uint256 i; i < bb.v4Hooks.length; ++i) {
+            if (!fr.v4HookAllowed(bb.v4Hooks[i])) hooksOk = false;
+        }
+        _row(hooksOk, "buyback v4 hooks allow-listed as input");
+        _row(
+            fr.refUsdcPerEthWad() == bb.usdcPerEthWad && fr.refBkrnPerEthWad() == bb.bkrnPerEthWad,
+            "buyback ETH references == input"
+        );
+        bytes32 want = bb.v4RouteSet ? keccak256(abi.encode(bb.v4Route)) : keccak256(abi.encode(_noRoute()));
+        _row(keccak256(abi.encode(fr.v4Route())) == want, "buyback v4 route == input (none before graduation)");
+        if (bb.v4RouteSet) _row(fr.v4BuybackReady(), "buyback v4 route live (pools initialized)");
+        _row(BkrnV4Swapper(payable(address(fr.v4Swapper()))).feeRouter() == address(fr), "BkrnV4Swapper bound to this fee router");
+        _row(IERC20Min(cfg.bkrn()).decimals() == 18, "BKRN decimals == 18");
+        (bool ok, bytes memory ret) = cfg.bkrn().staticcall(abi.encodeWithSignature("totalSupply()"));
+        uint256 supply = ok && ret.length >= 32 ? abi.decode(ret, (uint256)) : 0;
+        if (supply == PONS_TOTAL_SUPPLY) console2.log("  PASS  BKRN totalSupply == 1e9 x 1e18");
+        else console2.log("  WARN  BKRN totalSupply != 1e9 x 1e18 (not a failure):", supply);
+    }
+
+    function _noRoute() internal pure returns (IBkrnV4Swapper.V4Route memory r) {}
 
     function _row(bool ok, string memory what) internal {
         if (ok) {

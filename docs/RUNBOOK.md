@@ -192,6 +192,23 @@ the same wiring against the VERIFY-ed external addresses of the input and keeps 
   `increaseObservationCardinalityNext` on the pool first, e.g. >= window / average block spacing of swaps;
   window 10 min–2 days, deviation <= 2,000 ticks), or `setBkrnPriceId` (REF_ATTESTED, once the oracle prices
   BKRN);
+- **BKRN launched on Pons (Uniswap v4 venue, owner decision 2026-10-23)**: input `bkrn.token` = the Pons token
+  (code, 18 decimals; `totalSupply` other than 1e9 x 1e18 only warns; no allocation recipients needed),
+  `externals.uniswapV4PoolManager` (VERIFY U2), `buyback.venue = "univ4"`, `buyback.v4Hooks` = the
+  PonsV2MemeHook (VERIFY U6), `buyback.ethReference` (USDG per ETH, BKRN per ETH, near market), `referenceSource`
+  `fixed` / `attested` / `fixedEth` (never `twap`: v4 has no oracle), `poolFee` may be 0 (no v3 BKRN pool),
+  `maxSlippageBps` **above the hook's fee** (1.2–3.5% observed on Pons pools 2026-10-23, VERIFY U6; 500 bps is
+  too tight for some launches) and `maxPerCall` sized to the graduated pool's depth (a via-ETH buyback whose
+  ETH -> BKRN hop hits its price limit fails safe as a whole, `BuybackV4Failed`, and the keeper retries the same
+  size after its cooldown). Before graduation leave `buyback.v4Route` out: buybacks defer (`BuybackDeferred`,
+  the keeper sends nothing while `v4BuybackReady()` is false) and the USDG waits in `buybackPending`. After
+  graduation run `bun scripts/buyback-route.ts --bkrn <token>` (read-only; ranks USDG -> BKRN direct,
+  USDG -> ETH -> BKRN via the v4 ETH/USDG pool, USDG -> WETH (v3) -> ETH -> BKRN, prints the deploy-input values
+  and the timelock calldata) and schedule `setEthReference` (via-ETH) + `setV4Route` through the timelock;
+- **manual BKRN transfer check (fee-on-transfer cannot be proven read-only)**: before the deploy, move a small
+  amount of the Pons BKRN between two treasury-controlled addresses and confirm the receiver got exactly the
+  amount sent (no tax / reflection / rebase); a fee-on-transfer BKRN breaks the staking accounting
+  (`notifyReward` checks the balance) and must not be used;
 - `HedgeExecutor` with the real SwapRouter02 (`0xcaf6…5cb2`, VERIFY U1), `setV3Factory(UniswapV3Factory)` and
   one `setRoute("UNIV3", stockToken, fee, hop, hopFee)` per hedge asset (direct USDG pool, or a two-pool route
   through WETH). With the factory set, `setRoute` reverts unless every pool exists. Agents / risk send

@@ -39,6 +39,13 @@ export class BuybackRunner {
     try {
       const pending = await this.d.chain.buybackPending();
       if (!buybackDue(pending, this.d.policy.thresholdUsd)) return { status: "skipped", reason: "below threshold" };
+      const v4 = this.d.chain.buybackV4State ? await this.d.chain.buybackV4State() : { venue: 0, ready: false };
+      if (v4.venue === 1 && !v4.ready) {
+        // Uniswap v4 venue before BKRN graduates (no route / pool yet): the router would defer; send nothing
+        this.d.cooldowns.hold(KEY, this.d.cooldownMs);
+        log.info({ pending: usd6(pending) }, "buyback deferred: v4 venue without a live route (BKRN not graduated yet)");
+        return { status: "skipped", reason: "v4 route not live" };
+      }
       const b = await this.d.chain.buybackBounds();
       legacy = b.legacy;
       const amountIn = buybackAmount(pending, b.maxPerCall);
@@ -65,6 +72,12 @@ export class BuybackRunner {
     }
     try {
       const r = await this.d.chain.executeBuyback(plan.amountIn, plan.minOut, legacy ? this.d.policy.poolFee : undefined);
+      if (r.v4Outcome) {
+        // the tx landed but nothing swapped (a hook / pool revert caught on-chain, or the route went away)
+        this.d.cooldowns.hold(KEY, this.d.cooldownMs);
+        log.warn({ tx: r.hash, outcome: r.v4Outcome, reason: r.v4Reason ?? null, amountIn: usd6(plan.amountIn) }, "v4 buyback did not swap; retrying after the cooldown");
+        return { status: "failed", error: r.v4Outcome === "failed" ? `v4 swap failed${r.v4Reason ? ` (${r.v4Reason})` : ""}` : "v4 buyback deferred" };
+      }
       log.info(
         { tx: r.hash, usdcIn: usd6(r.usdcIn ?? plan.amountIn), bkrnOut: r.bkrnOut === null ? null : wad18(r.bkrnOut), minBkrnOut: wad18(plan.minOut), floor: wad18(plan.floor), priceSource: plan.priceSource, reference, legacy },
         "BKRN buyback executed; streamed to stakers",
