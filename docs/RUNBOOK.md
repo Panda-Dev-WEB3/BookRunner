@@ -155,10 +155,14 @@ only (it deploys mocks and refuses 4663). Tick every box in order; two people fo
         so at launch the slice alone funds every pool-funded IF. Each IF must fit 30% of the pool (`marketCapBps`; the
         books on one underlying share it), and all of them together must fit the free cash above the 20% buffer.
         Check `maxAllocation(bookId, market) >= ifTargetUsd` per book before `subscriptionEnds`, otherwise
-        `closeWindow` reverts (retry after a top-up). Premiums go wholly to the slice until depositor shares exist.
-        Withdrawing from the slice is timelock-only (48 h), from free cash, never while withdrawals are due, and never
-        below 10% of the pool. Once depositors exceed about 9× the slice, new allocations stop until the treasury tops
-        it up (alert `pool_first_loss_low`). Do NOT apply the devnet demo parameters (`epochLength` / `cooldown` /
+        `closeWindow` does not wait: it raises the IF from the tranches if they raised enough (`InsuranceFallback`), or
+        cancels the book (`POOL_UNFUNDED`; pool audit 2026-10-23 A-M2). A pool-funded window also needs a raise of at
+        least `minOwnCapitalBps` (50%) of the IF (`UNDERCAPITALISED` otherwise, B-M2). Premiums go wholly to the slice
+        until depositor shares exist. Withdrawing from the slice is timelock-only (48 h), from free cash above the buffer
+        and the value of every queued withdrawal, and never below 10% of the book claims. The 10% gate covers the
+        exposure (claims), so deposits can no longer dilute it and block allocations; the slice still absorbs losses
+        first, pool-wide (a recovery restores the depositors first). Pause deposits (guardian) during an incident: an
+        epoch processed while paused mints nothing and refunds its queued deposits. Do NOT apply the devnet demo parameters (`epochLength` / `cooldown` /
         `processGrace`): mainnet keeps 7 d / 7 d / 24 h.
         Ordering when depositors' money should count at launch: open deposits (`requestDeposit`) at least one full
         epoch before the books' `subscriptionEnds`, so that epoch ends and is processed first (`processEpoch` waits for
