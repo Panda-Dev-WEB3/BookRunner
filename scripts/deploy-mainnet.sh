@@ -59,7 +59,7 @@ case "$MODE" in
     echo "==> forge build"
     bash scripts/forge.sh build >/dev/null
     echo "==> DeployMainnet dry run (validate input, check externals on-chain, simulate every tx; nothing is sent)"
-    bash scripts/forge.sh script script/DeployMainnet.s.sol:DeployMainnet --sender "$DEPLOYER"
+    bash scripts/forge.sh script script/DeployMainnet.s.sol:DeployMainnet --rpc-url rpc --sender "$DEPLOYER"
     echo "==> ok: plan in contracts/broadcast/DeployMainnet.s.sol/$EXPECTED/dry-run/, record contracts/deployments/$EXPECTED.simulation.json"
     echo "    deployer balance: $(cast_ balance "$DEPLOYER" --ether) ETH"
     ;;
@@ -75,14 +75,14 @@ case "$MODE" in
     [ "$CONFIRM" = "$EXPECTED" ] || die "not confirmed"
     # forge writes $OUT while executing the script, BEFORE it sends the transactions: after a failed / partial
     # broadcast the record exists but VerifyHandover fails (RUNBOOK "Rollback and incidents")
-    RESUME="bash scripts/forge.sh script script/DeployMainnet.s.sol:DeployMainnet --sender $DEPLOYER --broadcast --slow --resume ${WALLET[*]}"
-    bash scripts/forge.sh script script/DeployMainnet.s.sol:DeployMainnet --sender "$DEPLOYER" --broadcast --slow "${WALLET[@]}" \
+    RESUME="bash scripts/forge.sh script script/DeployMainnet.s.sol:DeployMainnet --rpc-url rpc --sender $DEPLOYER --broadcast --slow --resume ${WALLET[*]}"
+    bash scripts/forge.sh script script/DeployMainnet.s.sol:DeployMainnet --rpc-url rpc --sender "$DEPLOYER" --broadcast --slow "${WALLET[@]}" \
       || die "broadcast failed or incomplete: do NOT start services. Resume with (same env): $RESUME ; then: FIX_START_BLOCK=1 bash scripts/deploy-mainnet.sh verify"
     [ -f "$OUT" ] || die "broadcast finished without $OUT"
 
     fix_start_block
     echo "==> VerifyHandover (read-only)"
-    bash scripts/forge.sh script script/VerifyHandover.s.sol:VerifyHandover
+    bash scripts/forge.sh script script/VerifyHandover.s.sol:VerifyHandover --rpc-url rpc
     echo "==> ABIs"
     BUN="$ROOT/node_modules/.bin/bun"; [ -x "$BUN" ] || BUN="$ROOT/node_modules/bun/bin/bun.exe"
     "$BUN" scripts/gen-abi.ts >/dev/null
@@ -92,7 +92,7 @@ case "$MODE" in
   verify)
     [ -f "$OUT" ] || die "$OUT missing"
     [ "${FIX_START_BLOCK:-0}" = "1" ] && fix_start_block # after a --resume
-    bash scripts/forge.sh script script/VerifyHandover.s.sol:VerifyHandover
+    bash scripts/forge.sh script script/VerifyHandover.s.sol:VerifyHandover --rpc-url rpc
     ;;
 
   *)

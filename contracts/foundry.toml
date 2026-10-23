@@ -35,6 +35,11 @@ runs = 800
 depth = 128
 fail_on_revert = false
 
+# `forge script --rpc-url rpc`: the URL comes from ETH_RPC_URL (scripts/forge.sh forwards it), so it never appears on a
+# command line; forge script ignores ETH_RPC_URL on its own and would simulate against an empty local chain
+[rpc_endpoints]
+rpc = "${ETH_RPC_URL}"
+
 [fmt]
 line_length = 110
 tab_width = 4
