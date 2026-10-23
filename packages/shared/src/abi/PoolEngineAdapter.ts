@@ -243,6 +243,19 @@ export const poolEngineAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "insuranceReturnedUsd",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "lossBudgetBps",
     "inputs": [
       {

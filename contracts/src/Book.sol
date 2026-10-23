@@ -137,6 +137,12 @@ contract Book is
         uint256 coverHeld;
         /// @dev the outstanding IF draw at the last mark: max(0, poolDebt - the mark's signed IF equity)
         uint256 ifDrawAtMark;
+        // ---- appended 2026-10-24 (pool audit fix round 2) ----
+        /// @dev V-1: the pool's shortfall taken only because Senior held cover: Senior's share of the IF draw, charged to
+        ///      Senior once it holds own capital again (Waterfall.PoolMarkState.seniorIfDeferred); scaled on Senior burns
+        uint256 seniorIfDeferred;
+        /// @dev Info 4: InsurancePool.minOwnCapitalBps at closeWindow (capitalShort() measures against it)
+        uint16 poolMinCapitalBps;
     }
 
     // keccak256(abi.encode(uint256(keccak256("bookrunner.storage.Book")) - 1)) & ~bytes32(uint256(0xff))
@@ -168,6 +174,9 @@ contract Book is
     error NewBooksPaused();
     error WindowNotStuck(uint64 cancellableAt);
     error InsuranceTargetZero();
+    /// @notice Fix round 2 (V-3): the pool cannot fund the IF now; closeWindow waits (retry) until CLOSE_WINDOW_TIMEOUT,
+    ///         then cancels (or raises the IF from the tranches if the charter opted in): no caller chooses the outcome.
+    error InsurancePoolCannotFund(uint64 retryUntil);
     /// @dev OZ SafeCast's error (same signature/selector), raised by Waterfall.applyMarkPnl inside the
     ///      linked BookLogic library and bubbled through Book. Declared here so Book's ABI still lists it
     ///      (an external library's errors are not part of the linking contract's ABI).
@@ -408,6 +417,24 @@ contract Book is
     {
         BookStorage storage $ = _s();
         return ($.seniorIfImpairment, $.juniorIfLoss, $.coverHeld, $.ifDrawAtMark);
+    }
+
+    /// @notice Fix round 2 (V-1): Senior's deferred share of an IF draw the pool took while Senior held only Backstop cover;
+    ///         charged to Senior (seniorImpairment) once it holds own capital again.
+    function seniorIfDeferred() external view returns (uint256) {
+        return _s().seniorIfDeferred;
+    }
+
+    /// @notice Fix round 2 (Info 4): a Live pool-funded book whose own tranche capital (Senior + Junior NAV less the
+    ///         Backstop cover held) fell below the pool's minimum own capital at its close (poolMinCapitalBps of its debt):
+    ///         the book is REDUCE-ONLY while this holds (the risk service and the agent enforce it, an alert fires); exits
+    ///         are never blocked by it. False once the capital is back above the minimum.
+    function capitalShort() external view returns (bool) {
+        BookStorage storage $ = _s();
+        if ($.insurancePool == address(0) || $.poolClosed || $.state != BRTypes.BookState.Live) return false;
+        uint256 tv = $.nav[S] + $.nav[J];
+        uint256 own = tv > $.coverHeld ? tv - $.coverHeld : 0;
+        return !Waterfall.poolCapitalOk(own, $.poolDebt, $.poolMinCapitalBps);
     }
 
     /// @notice The InsurancePool that funded this book's IF at closeWindow (address(0) for a book-funded IF).

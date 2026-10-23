@@ -241,32 +241,38 @@ contract B_PoolBookAuditTest is PoolBookFixture {
     }
 
     // =========================================================================================================
-    // B-L2: an exhausted book's fee flow restores the pool's claim first, never repays the Backstop from Senior's cover
+    // B-L2: an exhausted book's fee flow is a gain: the Backstop first, then the pool; never Senior's cover without a gain
     // =========================================================================================================
 
     /// @notice Was: the Junior residual was booked as a Backstop repayment while the next mark gave the whole fee to the
-    ///         pool, so Senior's cover repaid the Backstop (3,168). Now the fee goes to the pool's claim at once and
-    ///         Senior keeps its whole cover.
-    function test_B_L2_exhaustedBook_feeRestoresThePool_seniorKeepsItsCover() public {
+    ///         pool, so Senior's cover repaid the Backstop with no gain behind it. Now (fix round 2 ruling: the Backstop
+    ///         first, then the pool) the fee itself repays the Backstop with the residual (3,168) and restores the pool's
+    ///         claim with the rest (4,752); the cover the repayment turned into Senior's own capital is then charged
+    ///         Senior's deferred share of the IF draw (3,168 to the pool): Senior keeps exactly the cover it still owes.
+    function test_B_L2_exhaustedBook_feeRepaysTheBackstop_thenThePool() public {
         _goLivePool();
         usdc.mint(address(backstop), 1_000_000e6);
         uint256 bal0 = usdc.balanceOf(address(backstop));
         venue.setMmValue(0);
         _applyPoolMark(); // cover 52.5k
         venue.setIfEquity(0);
-        _applyPoolMark(); // exhausted: claim 0, Senior keeps its cover
+        _applyPoolMark(); // exhausted: claim 0, Senior keeps its cover; its share of the drain is deferred
         (, uint256 value,) = _debt();
         assertEq(value, 0);
+        assertEq(book.seniorIfDeferred(), 25_000e6);
 
-        _distribute(10_000e6, 0); // premium 1,200, carry 880, 7,920 credited -> the pool's claim
+        _distribute(10_000e6, 0); // premium 1,200, carry 880, 7,920 credited
         (, value,) = _debt();
-        assertEq(value, 7_920e6, "the pool recovers the whole fee at once");
+        assertEq(value, 7_920e6, "the pool: the hurdle share 4,752 + Senior's charged IF share 3,168");
         _applyPoolMark();
         (, value,) = _debt();
         assertEq(value, 7_920e6);
         (uint256 s,) = book.trancheNav();
-        assertEq(s, 52_500e6, "Senior keeps its whole cover");
-        assertEq(bal0 - usdc.balanceOf(address(backstop)), 52_500e6, "no repayment out of the cover");
+        (,, uint256 cover,) = book.insuranceLedger();
+        assertEq(s, 52_500e6 - 3_168e6, "Senior keeps only the cover it still owes");
+        assertEq(cover, s);
+        assertEq(bal0 - usdc.balanceOf(address(backstop)), 52_500e6 - 3_168e6, "repaid from the fee (a gain)");
+        assertEq(book.seniorIfDeferred(), 25_000e6 - 7_920e6, "the rest stays deferred (<= the shortfall)");
     }
 
     // =========================================================================================================

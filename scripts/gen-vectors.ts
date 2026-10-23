@@ -21,13 +21,15 @@
 //                seniorSupply, juniorSupply, effectivePremiumBps, premium, expenses, carry, senior, junior]
 //   poolCredit: [senior, junior, juniorSupply, imp, impIf, backstopDebt, coverHeld, poolShortfall, | seniorCredit,
 //                juniorCredit, poolRestored, seniorRestored, backstopRepaid, imp', impIf', backstopDebt', coverHeld',
-//                juniorIfLoss, juniorIfLoss'] (juniorIfLoss appended, derived from the row index: no RNG draw)
+//                juniorIfLoss, juniorIfLoss', seniorNav, seniorIfDeferred, | seniorIfCharged, seniorIfDeferred'] (appended
+//                columns derived from the row index: no RNG draw)
 //               (applyPoolDistribution, pool audit 2026-10-23 B-L2: an exhausted book's fee flow restores the claim first)
 //   poolMark:   [S, J, imp, impIf, juniorIfLoss, coverHeld, backstopDebt, perfIndex, highWater, poolValue, poolDebt,
-//                ifDraw, netAssets, insuranceEquity, due(0|1), juniorSupply, backstopAvailable, | S', J', imp', impIf',
+//                ifDraw, netAssets, ifDrawNow (poolIfDraw), juniorSupply, backstopAvailable, | S', J', imp', impIf',
 //                juniorIfLoss', coverHeld', backstopDebt', perfIndex', highWater', poolValue', ifDraw', nav,
 //                |drawdownBps|, juniorLoss, seniorLoss, seniorIfLoss, poolLoss, poolRestored, seniorRestored, juniorGain,
-//                backstopRepaid, backstopCovered] (applyPoolMarkPnl: the explicit insurance ledger, pool audit 2026-10-23)
+//                backstopRepaid, backstopCovered, seniorIfDeferred, seniorIfDeferred', seniorIfCharged] (applyPoolMarkPnl: the
+//                explicit insurance ledger, pool audit 2026-10-23; the last three appended in fix round 2)
 //   poolWindow: [ifTarget, mmInventory, seniorCapBps, seniorCommitted, juniorCommitted, sponsorJuniorCommitted,
 //                ok, reason, seniorAllocated, juniorAllocated, ifRaised(0), mmAmount, idle, minOwnCapitalBps,
 //                capitalOk(0|1)] (window with ifFromPool; poolCapitalOk, pool audit 2026-10-23 B-M2)
@@ -51,6 +53,7 @@ import {
   applyPoolDistribution,
   applyPoolMarkPnl,
   poolCapitalOk,
+  poolIfDraw,
   splitDistribution,
   splitPoolDistribution,
   windowIfTarget,
@@ -174,8 +177,11 @@ for (let i = 0; i < N; i++) {
   const coverHeld = rnd(backstopDebt);
   const poolShortfall = rnd(2n) === 0n ? 0n : pick([amt(), junior, senior + junior, 1n]);
   const juniorIfLoss = i % 3 === 0 ? 0n : (junior * BigInt(i % 7)) / 3n; // no RNG draw: keeps the stream
-  const c = applyPoolDistribution({ senior, junior, juniorSupply, seniorImpairment, seniorIfImpairment, backstopDebt, coverHeld, juniorIfLoss, poolShortfall });
-  poolCredit.push([senior, junior, juniorSupply, seniorImpairment, seniorIfImpairment, backstopDebt, coverHeld, poolShortfall, c.seniorCredit, c.juniorCredit, c.poolRestored, c.seniorRestored, c.backstopRepaid, c.seniorImpairment, c.seniorIfImpairment, c.backstopDebt, c.coverHeld, juniorIfLoss, c.juniorIfLoss].map(String));
+  // fix round 2 columns, derived from the row index (no RNG draw): Senior NAV >= the cover, a deferred IF share <= the shortfall
+  const seniorNav = coverHeld + (senior * BigInt(i % 4)) / 2n;
+  const seniorIfDeferred = (poolShortfall * BigInt(i % 3)) / 2n;
+  const c = applyPoolDistribution({ senior, junior, juniorSupply, seniorNav, seniorImpairment, seniorIfImpairment, seniorIfDeferred, juniorIfLoss, backstopDebt, coverHeld, poolShortfall });
+  poolCredit.push([senior, junior, juniorSupply, seniorImpairment, seniorIfImpairment, backstopDebt, coverHeld, poolShortfall, c.seniorCredit, c.juniorCredit, c.poolRestored, c.seniorRestored, c.backstopRepaid, c.seniorImpairment, c.seniorIfImpairment, c.backstopDebt, c.coverHeld, juniorIfLoss, c.juniorIfLoss, seniorNav, seniorIfDeferred, c.seniorIfCharged, c.seniorIfDeferred].map(String));
 
   const ifTargetUsd = amt();
   const mmInventoryUsd = amt();
@@ -217,14 +223,17 @@ for (let i = 0; i < N; i++) {
   const ifDraw = pick([0n, rnd(poolDebt), poolDebt]);
   const held = S + J + poolValue;
   const netAssets = pick([0n, held, rnd(held), held + rnd(50_000n * U6), held - minBig(held, rnd(30_000n * U6))]);
+  // the IF lost now (poolIfDraw of the IF deployed, returned and signed equity): the same draws as the earlier layout
   const insuranceEquityUsd = pick([0n, poolDebt, rnd(poolDebt), poolDebt + rnd(5_000n * U6), poolDebt - minBig(poolDebt, ifDraw)]);
-  const due = rnd(3n) === 0n;
+  rnd(3n); // the former `due` draw (keeps the stream)
+  const ifDrawNow = poolIfDraw(poolDebt, 0n, insuranceEquityUsd);
   const juniorSupply = J === 0n ? pick([0n, 1n]) : 10n ** 9n;
   const backstopAvailable = pick([0n, rnd(200_000n) * U6, 10n ** 15n]);
-  const st = { seniorNav: S, juniorNav: J, seniorImpairment, seniorIfImpairment, juniorIfLoss, coverHeld, backstopDebt, perfIndex, highWater, poolValue, poolDebt, ifDraw };
-  const r = applyPoolMarkPnl(st, { netAssets, insuranceEquityUsd, due, juniorSupply, backstopAvailable });
+  const seniorIfDeferred = ((poolDebt - poolValue) * BigInt(i % 3)) / 2n; // no RNG draw
+  const st = { seniorNav: S, juniorNav: J, seniorImpairment, seniorIfImpairment, juniorIfLoss, coverHeld, backstopDebt, perfIndex, highWater, poolValue, poolDebt, ifDraw, seniorIfDeferred };
+  const r = applyPoolMarkPnl(st, { netAssets, ifDraw: ifDrawNow, juniorSupply, backstopAvailable });
   const o = r.s;
-  poolMark.push([S, J, seniorImpairment, seniorIfImpairment, juniorIfLoss, coverHeld, backstopDebt, perfIndex, highWater, poolValue, poolDebt, ifDraw, netAssets, insuranceEquityUsd, due ? 1n : 0n, juniorSupply, backstopAvailable, o.seniorNav, o.juniorNav, o.seniorImpairment, o.seniorIfImpairment, o.juniorIfLoss, o.coverHeld, o.backstopDebt, o.perfIndex, o.highWater, o.poolValue, o.ifDraw, r.nav, -r.drawdownBps, r.juniorLoss, r.seniorLoss, r.seniorIfLoss, r.poolLoss, r.poolRestored, r.seniorRestored, r.juniorGain, r.backstopRepaid, r.backstopCovered].map(String));
+  poolMark.push([S, J, seniorImpairment, seniorIfImpairment, juniorIfLoss, coverHeld, backstopDebt, perfIndex, highWater, poolValue, poolDebt, ifDraw, netAssets, ifDrawNow, juniorSupply, backstopAvailable, o.seniorNav, o.juniorNav, o.seniorImpairment, o.seniorIfImpairment, o.juniorIfLoss, o.coverHeld, o.backstopDebt, o.perfIndex, o.highWater, o.poolValue, o.ifDraw, r.nav, -r.drawdownBps, r.juniorLoss, r.seniorLoss, r.seniorIfLoss, r.poolLoss, r.poolRestored, r.seniorRestored, r.juniorGain, r.backstopRepaid, r.backstopCovered, seniorIfDeferred, o.seniorIfDeferred, r.seniorIfCharged].map(String));
 }
 
 // End-to-end pool-funded book (realistic magnitudes; every window succeeds: the sponsor commits all of Junior, and the
@@ -250,14 +259,14 @@ for (let i = 0; i < POOL_BOOK_N; i++) {
     { gross, expensesRequested, expenseCapBps: 2000n, carryBps: 1000n, seniorHurdleBps: 6000n, seniorSupply: w.seniorAllocated, juniorSupply: w.juniorAllocated },
     premiumBps,
   );
-  const cr = applyPoolDistribution({ senior: s.senior, junior: s.junior, juniorSupply: w.juniorAllocated, seniorImpairment: 0n, seniorIfImpairment: 0n, backstopDebt: 0n, coverHeld: 0n, juniorIfLoss: 0n, poolShortfall: 0n });
+  const cr = applyPoolDistribution({ senior: s.senior, junior: s.junior, juniorSupply: w.juniorAllocated, seniorNav: w.seniorAllocated, seniorImpairment: 0n, seniorIfImpairment: 0n, seniorIfDeferred: 0n, juniorIfLoss: 0n, backstopDebt: 0n, coverHeld: 0n, poolShortfall: 0n });
   const ifEquity = ifTargetUsd - ifLoss;
   const mmValue = mmLoss ? dep.mmAmount - mmPnlAbs : dep.mmAmount + mmPnlAbs;
   const vaultIdle = dep.idle + s.senior + s.junior;
   const deployed = ifEquity + mmValue;
   const m = applyPoolMarkPnl(
-    { seniorNav: w.seniorAllocated + cr.seniorCredit, juniorNav: w.juniorAllocated + cr.juniorCredit, seniorImpairment: 0n, seniorIfImpairment: 0n, juniorIfLoss: 0n, coverHeld: 0n, backstopDebt: 0n, perfIndex: WAD, highWater: WAD, poolValue: ifTargetUsd, poolDebt: ifTargetUsd, ifDraw: 0n },
-    { netAssets: vaultIdle + deployed, insuranceEquityUsd: minBig(ifEquity, deployed), due: false, juniorSupply: w.juniorAllocated, backstopAvailable: 0n },
+    { seniorNav: w.seniorAllocated + cr.seniorCredit, juniorNav: w.juniorAllocated + cr.juniorCredit, seniorImpairment: 0n, seniorIfImpairment: 0n, juniorIfLoss: 0n, coverHeld: 0n, backstopDebt: 0n, perfIndex: WAD, highWater: WAD, poolValue: ifTargetUsd, poolDebt: ifTargetUsd, ifDraw: 0n, seniorIfDeferred: 0n },
+    { netAssets: vaultIdle + deployed, ifDraw: poolIfDraw(ifTargetUsd, 0n, minBig(ifEquity, deployed)), juniorSupply: w.juniorAllocated, backstopAvailable: 0n },
   );
   poolBook.push([seniorCommitted, juniorCommitted, ifTargetUsd, mmInventoryUsd, gross, expensesRequested, premiumBps, ifLoss, mmLoss ? 1n : 0n, mmPnlAbs, w.seniorAllocated, w.juniorAllocated, s.premium, s.expenses, s.carry, s.senior, s.junior, cr.seniorCredit, cr.juniorCredit, m.s.poolValue, m.nav, m.s.seniorNav, m.s.juniorNav].map(String));
 }

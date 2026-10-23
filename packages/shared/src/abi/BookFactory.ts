@@ -441,6 +441,11 @@ export const bookFactoryAbi = [
             "name": "premiumBps",
             "type": "uint16",
             "internalType": "uint16"
+          },
+          {
+            "name": "ifPoolFallback",
+            "type": "bool",
+            "internalType": "bool"
           }
         ]
       }

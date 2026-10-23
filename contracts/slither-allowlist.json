@@ -128,21 +128,6 @@
     },
     {
       "check": "uninitialized-local",
-      "target": "BookLogic._applyPoolPnl.covered",
-      "reason": "explicitly 0, the USDC received when the Backstop covers (pool audit 2026-10-23 ledger, same pattern as _applyPnl.covered)"
-    },
-    {
-      "check": "uninitialized-local",
-      "target": "BookLogic.closeWindow.pool",
-      "reason": "explicitly address(0) = the tranches fund the IF; set only when the pool can fund it (pool audit 2026-10-23 A-M2 / B-M2)"
-    },
-    {
-      "check": "uninitialized-local",
-      "target": "BookLogic.closeWindow.poolReason",
-      "reason": "explicitly 0 = no fallback; set to POOL_UNFUNDED / UNDERCAPITALISED only when the pool does not fund the IF (pool audit 2026-10-23)"
-    },
-    {
-      "check": "uninitialized-local",
       "target": "BookLogic._settleRetiredBacklog.owed",
       "reason": "the local is meant to start at zero / false / address(0) and is assigned on the paths that use it (accumulators, optional out-values) (audit 2026-10 triage: intended zero locals)"
     },
@@ -215,6 +200,16 @@
       "check": "uninitialized-state",
       "target": "Tranche._ctrlBuckets",
       "reason": "a mapping (address => uint256[]) written through a storage pointer (_pushControllerBucket: list.push), which Slither does not track; mappings need no initialisation"
+    },
+    {
+      "check": "unused-return",
+      "target": "BookLogic.applyMark",
+      "reason": "BookPoolLogic.repayPoolDue returns the amount repaid; at a mark only its storage effect matters (the debt, poolDue and the vault idle it pulled), the amount is used where idle is budgeted (_fundClaims)"
+    },
+    {
+      "check": "unused-return",
+      "target": "InsurancePool.staleBooks",
+      "reason": "the view returns only the count of stale books; PoolLogic.staleBooks also returns their claims, which only processEpoch needs (fix round 2 NEW-1 exposure)"
     },
     {
       "check": "unused-return",

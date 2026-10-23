@@ -88,6 +88,9 @@ library BRTypes {
         // before reads false / 0 here, i.e. a book-funded IF and no premium (the old behaviour).
         bool ifFromPool; // the IF is funded by the InsurancePool at closeWindow, not by the tranches
         uint16 premiumBps; // pool premium, bps of gross fee flow; effective = max(premiumBps, pool floor)
+        // pool audit 2026-10-23 fix round 2 (V-3), same slot: the sponsor opts in to having the IF raised from the
+        // tranches when the pool cannot fund it at closeWindow (default false: the window is cancelled, refunds 1:1)
+        bool ifPoolFallback;
     }
 
     /// @notice Addresses of one book's components. bookId == charterId.

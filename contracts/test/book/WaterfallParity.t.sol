@@ -200,18 +200,20 @@ contract WaterfallParityTest is Test {
     function test_parity_poolCredit() public view {
         for (uint256 i = 0; i < count; i++) {
             uint256[] memory v = _row("poolCredit", i);
-            assertEq(v.length, 19, "poolCredit row width");
+            assertEq(v.length, 23, "poolCredit row width");
             string memory tag = string.concat("poolCredit[", vm.toString(i), "]");
             Waterfall.PoolDistributionResult memory r = Waterfall.applyPoolDistribution(
                 Waterfall.PoolDistributionInput({
                     senior: v[0],
                     junior: v[1],
                     juniorSupply: v[2],
+                    seniorNav: v[19],
                     seniorImpairment: v[3],
                     seniorIfImpairment: v[4],
+                    seniorIfDeferred: v[20],
+                    juniorIfLoss: v[17],
                     backstopDebt: v[5],
                     coverHeld: v[6],
-                    juniorIfLoss: v[17],
                     poolShortfall: v[7]
                 })
             );
@@ -225,6 +227,8 @@ contract WaterfallParityTest is Test {
             assertEq(r.backstopDebt, v[15], string.concat(tag, " backstopDebt'"));
             assertEq(r.coverHeld, v[16], string.concat(tag, " coverHeld'"));
             assertEq(r.juniorIfLoss, v[18], string.concat(tag, " juniorIfLoss'"));
+            assertEq(r.seniorIfCharged, v[21], string.concat(tag, " seniorIfCharged"));
+            assertEq(r.seniorIfDeferred, v[22], string.concat(tag, " seniorIfDeferred'"));
             assertEq(
                 r.seniorCredit + r.juniorCredit + r.poolRestored + r.backstopRepaid,
                 v[0] + v[1],
@@ -238,7 +242,7 @@ contract WaterfallParityTest is Test {
     function test_parity_poolMark() public view {
         for (uint256 i = 0; i < count; i++) {
             uint256[] memory v = _row("poolMark", i);
-            assertEq(v.length, 39, "poolMark row width");
+            assertEq(v.length, 41, "poolMark row width");
             _poolMarkRow(v, string.concat("poolMark[", vm.toString(i), "]"));
         }
     }
@@ -257,41 +261,43 @@ contract WaterfallParityTest is Test {
                 highWater: v[8],
                 poolValue: v[9],
                 poolDebt: v[10],
-                ifDraw: v[11]
+                ifDraw: v[11],
+                seniorIfDeferred: v[38]
             }),
-            Waterfall.PoolMarkInputs({
-                netAssets: v[12], insuranceEquityUsd: v[13], due: v[14] == 1, juniorSupply: v[15], backstopAvailable: v[16]
-            })
+            Waterfall.PoolMarkInputs({netAssets: v[12], ifDraw: v[13], juniorSupply: v[14], backstopAvailable: v[15]})
         );
         Waterfall.PoolMarkState memory s = r.s;
-        assertEq(s.seniorNav, v[17], string.concat(tag, " S'"));
-        assertEq(s.juniorNav, v[18], string.concat(tag, " J'"));
-        assertEq(s.seniorImpairment, v[19], string.concat(tag, " imp'"));
-        assertEq(s.seniorIfImpairment, v[20], string.concat(tag, " impIf'"));
-        assertEq(s.juniorIfLoss, v[21], string.concat(tag, " juniorIfLoss'"));
-        assertEq(s.coverHeld, v[22], string.concat(tag, " coverHeld'"));
-        assertEq(s.backstopDebt, v[23], string.concat(tag, " backstopDebt'"));
-        assertEq(s.perfIndex, v[24], string.concat(tag, " perfIndex'"));
-        assertEq(s.highWater, v[25], string.concat(tag, " highWater'"));
-        assertEq(s.poolValue, v[26], string.concat(tag, " poolValue'"));
-        assertEq(s.ifDraw, v[27], string.concat(tag, " ifDraw'"));
-        assertEq(r.nav, v[28], string.concat(tag, " nav"));
-        assertEq(uint256(-r.drawdownBps), v[29], string.concat(tag, " |drawdownBps|"));
-        assertEq(r.juniorLoss, v[30], string.concat(tag, " juniorLoss"));
-        assertEq(r.seniorLoss, v[31], string.concat(tag, " seniorLoss"));
-        assertEq(r.seniorIfLoss, v[32], string.concat(tag, " seniorIfLoss"));
-        assertEq(r.poolLoss, v[33], string.concat(tag, " poolLoss"));
-        assertEq(r.poolRestored, v[34], string.concat(tag, " poolRestored"));
-        assertEq(r.seniorRestored, v[35], string.concat(tag, " seniorRestored"));
-        assertEq(r.juniorGain, v[36], string.concat(tag, " juniorGain"));
-        assertEq(r.backstopRepaid, v[37], string.concat(tag, " backstopRepaid"));
-        assertEq(r.backstopCovered, v[38], string.concat(tag, " backstopCovered"));
+        assertEq(s.seniorNav, v[16], string.concat(tag, " S'"));
+        assertEq(s.juniorNav, v[17], string.concat(tag, " J'"));
+        assertEq(s.seniorImpairment, v[18], string.concat(tag, " imp'"));
+        assertEq(s.seniorIfImpairment, v[19], string.concat(tag, " impIf'"));
+        assertEq(s.juniorIfLoss, v[20], string.concat(tag, " juniorIfLoss'"));
+        assertEq(s.coverHeld, v[21], string.concat(tag, " coverHeld'"));
+        assertEq(s.backstopDebt, v[22], string.concat(tag, " backstopDebt'"));
+        assertEq(s.perfIndex, v[23], string.concat(tag, " perfIndex'"));
+        assertEq(s.highWater, v[24], string.concat(tag, " highWater'"));
+        assertEq(s.poolValue, v[25], string.concat(tag, " poolValue'"));
+        assertEq(s.ifDraw, v[26], string.concat(tag, " ifDraw'"));
+        assertEq(r.nav, v[27], string.concat(tag, " nav"));
+        assertEq(uint256(-r.drawdownBps), v[28], string.concat(tag, " |drawdownBps|"));
+        assertEq(r.juniorLoss, v[29], string.concat(tag, " juniorLoss"));
+        assertEq(r.seniorLoss, v[30], string.concat(tag, " seniorLoss"));
+        assertEq(r.seniorIfLoss, v[31], string.concat(tag, " seniorIfLoss"));
+        assertEq(r.poolLoss, v[32], string.concat(tag, " poolLoss"));
+        assertEq(r.poolRestored, v[33], string.concat(tag, " poolRestored"));
+        assertEq(r.seniorRestored, v[34], string.concat(tag, " seniorRestored"));
+        assertEq(r.juniorGain, v[35], string.concat(tag, " juniorGain"));
+        assertEq(r.backstopRepaid, v[36], string.concat(tag, " backstopRepaid"));
+        assertEq(r.backstopCovered, v[37], string.concat(tag, " backstopCovered"));
+        assertEq(s.seniorIfDeferred, v[39], string.concat(tag, " seniorIfDeferred'"));
+        assertEq(r.seniorIfCharged, v[40], string.concat(tag, " seniorIfCharged"));
+        assertLe(s.seniorIfDeferred, s.poolDebt - s.poolValue, string.concat(tag, " deferred <= shortfall"));
         // the ledger's invariants hold after every mark
         assertLe(s.seniorIfImpairment, s.seniorImpairment, string.concat(tag, " impIf <= imp"));
         assertLe(s.coverHeld, s.seniorNav, string.concat(tag, " cover <= S"));
         assertLe(s.coverHeld, s.backstopDebt, string.concat(tag, " cover <= backstopDebt"));
         assertLe(s.poolValue, s.poolDebt, string.concat(tag, " claim <= debt"));
-        assertLe(r.backstopCovered, v[2] + r.seniorLoss - v[3] - r.seniorIfLoss, string.concat(tag, " cover off the IF"));
+        assertLe(r.backstopCovered, v[2] + r.seniorLoss - v[3] - (r.seniorIfLoss - r.seniorIfCharged), string.concat(tag, " cover off the IF"));
     }
 
     function test_parity_poolWindow() public view {

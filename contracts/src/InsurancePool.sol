@@ -15,6 +15,7 @@ import {BRTypes} from "./interfaces/BRTypes.sol";
 import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 import {IBookFactory} from "./interfaces/IBookFactory.sol";
 import {IInsurancePool} from "./interfaces/IInsurancePool.sol";
+import {PoolLogic} from "./libraries/PoolLogic.sol";
 
 /// @title InsurancePool — protocol-wide pool funding the insurance fund (IF) of every `ifFromPool` book (NEW 2026-10,
 ///        needs the focused re-audit before mainnet; docs/ARCHITECTURE.md §2.10).
@@ -67,18 +68,26 @@ contract InsurancePool is
     /// @notice Share decimals above the settlement token's (ERC-4626 virtual offset, inflation-attack mitigation).
     uint8 public constant DECIMALS_OFFSET = 6;
     /// @notice Bound of the premium floor and of a charter's premium (MarketCharter BAD_PREMIUM).
-    uint16 public constant MAX_PREMIUM_BPS = 5000;
+    uint16 public constant MAX_PREMIUM_BPS = PoolLogic.MAX_PREMIUM_BPS;
     /// @notice Books whose freshness gates an epoch (each processing reads every one of them).
-    uint256 public constant MAX_ACTIVE_BOOKS = 64;
+    uint256 public constant MAX_ACTIVE_BOOKS = PoolLogic.MAX_ACTIVE_BOOKS;
 
-    bytes32 public constant PARAM_PREMIUM_FLOOR_BPS = "premiumFloorBps";
-    bytes32 public constant PARAM_MARKET_CAP_BPS = "marketCapBps";
-    bytes32 public constant PARAM_BUFFER_BPS = "bufferBps";
-    bytes32 public constant PARAM_COOLDOWN = "cooldown";
-    bytes32 public constant PARAM_EPOCH_LENGTH = "epochLength";
-    bytes32 public constant PARAM_FIRST_LOSS_TARGET_BPS = "firstLossTargetBps";
-    bytes32 public constant PARAM_PROCESS_GRACE = "processGrace";
-    bytes32 public constant PARAM_MIN_OWN_CAPITAL_BPS = "minOwnCapitalBps";
+    bytes32 public constant PARAM_PREMIUM_FLOOR_BPS = PoolLogic.PARAM_PREMIUM_FLOOR_BPS;
+    bytes32 public constant PARAM_MARKET_CAP_BPS = PoolLogic.PARAM_MARKET_CAP_BPS;
+    bytes32 public constant PARAM_BUFFER_BPS = PoolLogic.PARAM_BUFFER_BPS;
+    bytes32 public constant PARAM_COOLDOWN = PoolLogic.PARAM_COOLDOWN;
+    bytes32 public constant PARAM_EPOCH_LENGTH = PoolLogic.PARAM_EPOCH_LENGTH;
+    bytes32 public constant PARAM_FIRST_LOSS_TARGET_BPS = PoolLogic.PARAM_FIRST_LOSS_TARGET_BPS;
+    bytes32 public constant PARAM_PROCESS_GRACE = PoolLogic.PARAM_PROCESS_GRACE;
+    bytes32 public constant PARAM_MIN_OWN_CAPITAL_BPS = PoolLogic.PARAM_MIN_OWN_CAPITAL_BPS;
+    /// @notice Fix round 2 (NEW-1): how long an epoch's exits and deposits wait for its stale books (books with no
+    ///         fresh, non-held mark since the epoch end). == BookLogic.MAX_HELD_DEFERRAL: past 30 days of held marks a book
+    ///         itself settles its exits at the held valuation, and the pool does too (exits are never blocked for good).
+    uint256 public constant STALE_BOUND = 30 days;
+    /// @notice Past STALE_BOUND, the haircut on the depositors' exposure to the stale books for the remaining fills:
+    ///         with nothing known after 30 days without a fresh mark, 50% halves the worst transfer either way between
+    ///         exiting and remaining holders (the book whole, or lost).
+    uint256 public constant STALE_HAIRCUT_BPS = 5000;
 
     struct Epoch {
         uint256 shares; // withdrawal shares escrowed for this epoch
@@ -145,6 +154,8 @@ contract InsurancePool is
         uint256 depositorLoss; // A-M1: the depositors' outstanding net loss, pool-wide (> 0 only while firstLoss == 0)
         uint256 refundsPending; // A-L5 / A-I2: assets of deposits processed without minting, refundable by claimDeposit
         uint16 minOwnCapitalBps; // B-M2: minimum tranche capital of a pool-funded book, bps of its IF
+        // ---- appended 2026-10-24 (pool audit fix round 2) ----
+        uint64 depositEpoch; // NEW-1: oldest processed epoch whose deposits are neither minted nor refunded (deferred)
     }
 
     // keccak256(abi.encode(uint256(keccak256("bookrunner.storage.InsurancePool")) - 1)) & ~bytes32(uint256(0xff))
@@ -197,13 +208,13 @@ contract InsurancePool is
         __ERC4626_init(IERC20(usdc));
         PoolStorage storage $ = _s();
         $.config = IBookrunnerConfig(config_);
-        _setParam($, PARAM_PREMIUM_FLOOR_BPS, 1200);
-        _setParam($, PARAM_MARKET_CAP_BPS, 3000);
-        _setParam($, PARAM_BUFFER_BPS, 2000);
-        _setParam($, PARAM_FIRST_LOSS_TARGET_BPS, 1000);
-        _setParam($, PARAM_COOLDOWN, 7 days);
-        _setParam($, PARAM_PROCESS_GRACE, 1 days);
-        _setParam($, PARAM_MIN_OWN_CAPITAL_BPS, 5000);
+        PoolLogic.setParam($, PARAM_PREMIUM_FLOOR_BPS, 1200);
+        PoolLogic.setParam($, PARAM_MARKET_CAP_BPS, 3000);
+        PoolLogic.setParam($, PARAM_BUFFER_BPS, 2000);
+        PoolLogic.setParam($, PARAM_FIRST_LOSS_TARGET_BPS, 1000);
+        PoolLogic.setParam($, PARAM_COOLDOWN, 7 days);
+        PoolLogic.setParam($, PARAM_PROCESS_GRACE, 1 days);
+        PoolLogic.setParam($, PARAM_MIN_OWN_CAPITAL_BPS, 5000);
         $.epochLength = 7 days;
         emit PoolParamSet(PARAM_EPOCH_LENGTH, 7 days);
         $.procEndsAt = _nextGridEnd(7 days);
@@ -255,7 +266,8 @@ contract InsurancePool is
         if (owner != msg.sender) revert NotOwner(msg.sender);
         if (d.done) revert DepositDone(depositId);
         Epoch storage ep = $.epochs[d.epoch];
-        if (!ep.processed) revert EpochNotProcessed(d.epoch);
+        // NEW-1: a deferred deposit (its epoch processed while a book was stale) is not priced yet
+        if (!ep.processed || d.epoch >= $.depositEpoch) revert EpochNotProcessed(d.epoch);
         d.done = true;
         uint256 a = d.assets;
         if (ep.depositShares == 0) {
@@ -317,42 +329,27 @@ contract InsurancePool is
         // the epoch prices something (deposits, its withdrawals or older leftovers): every active book must have
         // marked after its end, or the grace period passed (exits are never blocked)
         bool stale = false;
-        uint256 haircut = 0;
-        if (ep.depositAssets != 0 || ep.shares != 0 || $.fillEpoch < e) {
-            (uint256 stale_, uint256 staleClaims) = _staleBooks($, ends);
+        uint256 exposure = 0;
+        if (ep.depositAssets != 0 || ep.shares != 0 || $.fillEpoch < e || $.depositEpoch < e) {
+            (uint256 stale_, uint256 staleClaims) = PoolLogic.staleBooks($, ends);
             if (stale_ != 0) {
                 uint256 graceEnds = ends + $.processGrace;
                 if (block.timestamp < graceEnds) revert BooksNotMarked(e, stale_, graceEnds);
                 stale = true;
-                // audit 2026-10-23 A-L1: exits never get a better price than a fresh mark could show: the stale books
-                // are valued at 0 for this processing's fills (the slice absorbing it first, as it would a loss)
+                // fix round 2 (NEW-1): the depositors' exposure to the stale books (the slice in front): exits are
+                // filled only for the part backed by fresh books, deposits wait (_fillProcessed / _resolveDeposits)
                 uint256 fl = $.firstLoss;
-                if (staleClaims > fl) haircut = staleClaims - fl;
+                if (staleClaims > fl) exposure = staleClaims - fl;
                 emit EpochProcessedStale(e, stale_);
-            }
-        }
-        uint256 da = ep.depositAssets;
-        uint256 ds = 0;
-        if (da != 0) {
-            $.depositsPending -= da;
-            // A-L5: while deposits are paused nothing is minted at a price under investigation; A-I2: nor for no share
-            if (!$.depositsPaused) ds = _toShares(da, 0);
-            if (ds == 0) {
-                $.refundsPending += da;
-                emit EpochDepositsRefunded(e, da);
-            } else {
-                $.cash += da;
-                $.depositSharesUnclaimed += ds;
-                ep.depositShares = ds;
-                _mint(address(this), ds);
             }
         }
         ep.endsAt = uint64(ends);
         ep.processed = true;
         $.procEpoch = e + 1;
         $.procEndsAt = uint64(ends + $.epochLength);
-        emit EpochProcessed(e, da, ds, stale);
-        _fillProcessed($, haircut);
+        _resolveDeposits($, stale);
+        emit EpochProcessed(e, ep.depositAssets, ep.depositShares, stale);
+        _fillProcessed($, exposure, stale);
     }
 
     /// @notice Anyone: adds `amount` to the first-loss slice (pulled from the caller). Never paused. The slice is the
@@ -378,14 +375,8 @@ contract InsurancePool is
         if (msg.sender != $.config.timelock()) revert NotTimelock();
         if (to == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
-        if (amount > $.firstLoss) revert InsufficientFreeLiquidity(amount, $.firstLoss);
-        uint256 free = $.cash - $.reserved;
-        uint256 keep = Math.mulDiv(_poolAssets($) - amount, $.bufferBps, BPS) + _queuedExitValue($);
-        if (free < amount + keep) revert InsufficientFreeLiquidity(amount, free > keep ? free - keep : 0);
-        uint256 remaining = $.firstLoss - amount;
-        uint256 target = Math.mulDiv($.claims, $.firstLossTargetBps, BPS);
-        if (remaining < target) revert FirstLossBelowTarget(remaining, target);
-        $.firstLoss = remaining;
+        PoolLogic.checkFirstLossWithdrawal($, amount, _queuedExitValue($));
+        $.firstLoss -= amount;
         $.cash -= amount;
         emit FirstLossWithdrawn(to, amount);
         IERC20(asset()).safeTransfer(to, amount);
@@ -400,20 +391,10 @@ contract InsurancePool is
         PoolStorage storage $ = _s();
         IBookFactory factory = IBookFactory($.config.factory());
         if (address(factory) == address(0) || factory.bookOf(bookId) != msg.sender) revert NotBook(bookId, msg.sender);
-        if ($.allocationsPaused) revert AllocationsPaused();
-        if (amount == 0) revert ZeroAmount();
+        // the slice covers the exposure and the largest book (A-M2, NEW-3); never the liquidity queued exits need
+        // (A-L3, NEW-2): PoolLogic.checkAllocation
+        PoolLogic.checkAllocation($, bookId, amount, market, _queuedExitValue($));
         BookPosition storage p = $.books[bookId];
-        if (p.book != address(0)) revert AlreadyAllocated(bookId);
-        if ($.activeBooks.length >= MAX_ACTIVE_BOOKS) revert TooManyBooks();
-        // audit 2026-10-23 A-M2: the slice covers the exposure (book claims), so idle depositor cash cannot dilute it
-        if (amount > _firstLossRoom($)) {
-            revert FirstLossBelowTarget($.firstLoss, Math.mulDiv($.claims + amount, $.firstLossTargetBps, BPS));
-        }
-        uint256 cap = _marketRoom($, market);
-        if (amount > cap) revert OverMarketCap(amount, cap);
-        // A-L3: never the liquidity queued withdrawals need (due or not)
-        uint256 available = _allocatable($);
-        if (amount > available) revert InsufficientFreeLiquidity(amount, available);
 
         BRTypes.BookComponents memory c = factory.componentsOf(bookId);
         if (c.vault == address(0) || c.router == address(0)) revert ZeroAddress();
@@ -436,15 +417,7 @@ contract InsurancePool is
 
     /// @inheritdoc IInsurancePool
     function markBook(uint256 bookId, uint256 value, uint64 periodEnd, bool final_, bool held) external nonReentrant {
-        PoolStorage storage $ = _s();
-        BookPosition storage p = $.books[bookId];
-        if (p.book == address(0) || msg.sender != p.book) revert NotBook(bookId, msg.sender);
-        if (value > p.allocation) revert ExceedsAllocation(value, p.allocation);
-        _revalue($, bookId, p, value);
-        // audit 2026-10-23 B-L4: a held mark (a held price) is not fresh for the epoch gate
-        if (!held && periodEnd > p.lastMarkAt) p.lastMarkAt = periodEnd;
-        if (final_ && p.active) _deactivate($, bookId, p);
-        emit BookMarked(bookId, value, periodEnd, final_);
+        PoolLogic.markBook(_s(), bookId, value, periodEnd, final_, held, _noDepositors());
     }
 
     /// @inheritdoc IInsurancePool
@@ -455,7 +428,7 @@ contract InsurancePool is
         if (amount == 0) revert ZeroAmount();
         if (amount > p.allocation) revert ExceedsAllocation(amount, p.allocation);
         // paying more than the pool valued is a recovery first (the book did better than its last mark)
-        if (amount > p.claim) _revalue($, bookId, p, amount);
+        if (amount > p.claim) PoolLogic.revalue($, bookId, amount, _noDepositors());
         p.claim -= amount;
         p.allocation -= amount;
         if (p.active) $.marketAllocated[p.market] -= amount;
@@ -473,7 +446,9 @@ contract InsurancePool is
         if (amount == 0) return;
         uint256 t = _poolAssets($);
         // no depositor shares beyond dust (A-L4): the whole premium is the slice's (never a gift to the next depositor)
-        uint256 flShare = (t == 0 || _noDepositors()) ? amount : Math.mulDiv(amount, $.firstLoss, t);
+        bool none = _noDepositors();
+        uint256 flShare = (t == 0 || none) ? amount : Math.mulDiv(amount, $.firstLoss, t);
+        if (none) $.depositorLoss = 0; // NEW-4: no depositor left to restore (dust)
         $.firstLoss += flShare;
         $.cash += amount;
         $.premiumsTotal += amount;
@@ -493,7 +468,7 @@ contract InsurancePool is
     function setParam(bytes32 key, uint256 value) external {
         PoolStorage storage $ = _s();
         if (msg.sender != $.config.timelock()) revert NotTimelock();
-        _setParam($, key, value);
+        PoolLogic.setParam($, key, value);
     }
 
     /// @notice GUARDIAN or timelock: pause new deposits and / or new allocations. Lifting a pause is timelock only.
@@ -584,16 +559,13 @@ contract InsurancePool is
 
     /// @notice Active books whose last mark predates `epochEnd`.
     function staleBooks(uint256 epochEnd_) external view returns (uint256 n) {
-        (n,) = _staleBooks(_s(), epochEnd_);
+        (n,) = PoolLogic.staleBooks(_s(), epochEnd_);
     }
 
     /// @inheritdoc IInsurancePool
     function maxAllocation(uint256 bookId, bytes32 market) external view returns (uint256) {
         PoolStorage storage $ = _s();
-        if ($.allocationsPaused || $.books[bookId].book != address(0) || $.activeBooks.length >= MAX_ACTIVE_BOOKS) {
-            return 0;
-        }
-        return Math.min(Math.min(_marketRoom($, market), _allocatable($)), _firstLossRoom($));
+        return PoolLogic.maxAllocation($, bookId, market, _queuedExitValue($));
     }
 
     /// @inheritdoc IInsurancePool
@@ -786,32 +758,9 @@ contract InsurancePool is
         return $.cash - $.reserved + $.claims;
     }
 
-    /// @dev Room left under the per-market cap: marketCapBps of T minus the active books' allocations on `market`.
-    function _marketRoom(PoolStorage storage $, bytes32 market) private view returns (uint256) {
-        uint256 cap = Math.mulDiv(_poolAssets($), $.marketCapBps, BPS);
-        uint256 used = $.marketAllocated[market];
-        return cap > used ? cap - used : 0;
-    }
-
-    /// @dev Free liquidity above the buffer and the value of every queued withdrawal (audit 2026-10-23 A-L3).
-    function _allocatable(PoolStorage storage $) private view returns (uint256) {
-        uint256 free = $.cash - $.reserved;
-        uint256 keep = Math.mulDiv(_poolAssets($), $.bufferBps, BPS) + _queuedExitValue($);
-        return free > keep ? free - keep : 0;
-    }
-
     /// @dev Escrowed withdrawal shares not yet filled, at the current share price.
     function _queuedExitValue(PoolStorage storage $) private view returns (uint256) {
         return _toAssets($.pendingShares, 0);
-    }
-
-    /// @dev Largest allocation the first-loss slice covers at its target (audit 2026-10-23 A-M2: the slice covers the
-    ///      exposure, firstLoss >= target * (claims + amount)): unbounded at a 0 target.
-    function _firstLossRoom(PoolStorage storage $) private view returns (uint256) {
-        uint256 bps = $.firstLossTargetBps;
-        if (bps == 0) return type(uint256).max;
-        uint256 covered = Math.mulDiv($.firstLoss, BPS, bps);
-        return covered > $.claims ? covered - $.claims : 0;
     }
 
     /// @dev No depositor holds more than dust: the pro-rata floors of claimDeposit leave a few share units in escrow
@@ -823,67 +772,6 @@ contract InsurancePool is
     function _entitled(PoolStorage storage $, Request storage r) private view returns (uint256) {
         Epoch storage ep = $.epochs[r.epoch];
         return ep.shares == 0 ? 0 : Math.mulDiv(r.shares, ep.assets, ep.shares);
-    }
-
-    /// @dev Moves a book's claim to `value` (<= allocation). The slice is the pool's junior tranche (audit 2026-10-23
-    ///      A-M1), accounted pool-wide so the order of marks across books never moves value between the depositors and
-    ///      the treasury: a loss hits the slice first, then the depositors (`depositorLoss`); a recovery, whichever book
-    ///      it comes from, restores `depositorLoss` first, then the slice. Invariant: depositorLoss == 0 || firstLoss
-    ///      == 0. The per-book split (lossFirstLoss / lossDepositors) is reporting only.
-    function _revalue(PoolStorage storage $, uint256 bookId, BookPosition storage p, uint256 value) private {
-        uint256 c = p.claim;
-        if (value < c) {
-            uint256 amount = c - value;
-            uint256 fl = Math.min(amount, $.firstLoss);
-            $.firstLoss -= fl;
-            $.depositorLoss += amount - fl;
-            p.lossFirstLoss += fl;
-            p.lossDepositors += amount - fl;
-            $.lossesTotal += amount;
-            $.claims -= amount;
-            p.claim = value;
-            emit LossReported(bookId, amount, fl, amount - fl, value);
-        } else if (value > c) {
-            uint256 amount = value - c;
-            uint256 pd = Math.min(amount, p.lossDepositors);
-            p.lossDepositors -= pd;
-            p.lossFirstLoss -= amount - pd;
-            // no depositor shares beyond dust: their part is the slice's (never a gift to the next depositor)
-            uint256 dl = _noDepositors() ? 0 : $.depositorLoss;
-            uint256 d = Math.min(amount, dl);
-            $.depositorLoss = dl - d;
-            $.firstLoss += amount - d;
-            $.lossesTotal -= amount;
-            $.claims += amount;
-            p.claim = value;
-            emit LossRecovered(bookId, amount, amount - d, d, value);
-        }
-    }
-
-    function _deactivate(PoolStorage storage $, uint256 bookId, BookPosition storage p) private {
-        p.active = false;
-        $.marketAllocated[p.market] -= p.allocation;
-        uint256 idx = $.activeIndex[bookId];
-        uint256 last = $.activeBooks.length;
-        if (idx != last) {
-            uint256 moved = $.activeBooks[last - 1];
-            $.activeBooks[idx - 1] = moved;
-            $.activeIndex[moved] = idx;
-        }
-        $.activeBooks.pop();
-        delete $.activeIndex[bookId];
-    }
-
-    /// @dev Active books not marked (non-held) since `epochEnd_`, and the sum of their claims.
-    function _staleBooks(PoolStorage storage $, uint256 epochEnd_) private view returns (uint256 n, uint256 claims_) {
-        uint256 len = $.activeBooks.length;
-        for (uint256 i; i < len; ++i) {
-            BookPosition storage p = $.books[$.activeBooks[i]];
-            if (p.lastMarkAt < epochEnd_) {
-                ++n;
-                claims_ += p.claim;
-            }
-        }
     }
 
     /// @dev End of the epoch `epoch` (>= procEpoch) on the current grid.
@@ -899,41 +787,84 @@ contract InsurancePool is
         return $.procEpoch + uint64(k);
     }
 
-    /// @dev Fills processed epochs' withdrawals oldest first from free liquidity, at the current share price less
-    ///      `haircut` of the depositors' assets (a stale processing, A-L1). The burned shares take their pro-rata part of
-    ///      `depositorLoss` with them (they exited at the impaired price; a later recovery restores only the holders
-    ///      left, the rest refills the slice: A-L4).
-    function _fillProcessed(PoolStorage storage $, uint256 haircut) private {
-        while ($.fillEpoch < $.procEpoch) {
-            uint64 e = $.fillEpoch;
+    /// @dev Fills processed epochs' withdrawals oldest first from free liquidity at the current share price. Fix round 2
+    ///      (NEW-1): while books are stale (`stale`, `exposure` = the depositors' part of their claims), an epoch is filled
+    ///      only for the part backed by fresh books, ep.shares * (D - exposure) / D in all, at the normal price; the rest
+    ///      stays queued and exposed until a fresh processing (no value moves either way). Past STALE_BOUND after the
+    ///      epoch's end it is filled in full, the stale exposure at a STALE_HAIRCUT_BPS haircut. The burned shares take
+    ///      their pro-rata part of `depositorLoss` with them (A-L4).
+    function _fillProcessed(PoolStorage storage $, uint256 exposure, bool stale) private {
+        bool contiguous = true;
+        for (uint64 e = $.fillEpoch; e < $.procEpoch; ++e) {
             Epoch storage ep = $.epochs[e];
             uint256 remaining = ep.shares - ep.filledShares;
-            if (remaining != 0) {
-                uint256 free = $.cash - $.reserved;
-                uint256 value = _toAssets(remaining, haircut);
-                uint256 s = remaining;
-                if (value > free) {
-                    // partial: the shares free liquidity buys at the fill price (assets <= free)
-                    s = Math.min(_toShares(free, haircut), remaining);
-                    value = _toAssets(s, haircut);
+            uint256 s = remaining;
+            uint256 h = 0;
+            if (stale && remaining != 0) {
+                if (block.timestamp >= uint256(ep.endsAt) + STALE_BOUND) {
+                    h = Math.mulDiv(exposure, STALE_HAIRCUT_BPS, BPS);
+                } else {
+                    uint256 d = totalAssets();
+                    uint256 cap = d == 0 ? ep.shares : Math.mulDiv(ep.shares, d - exposure, d);
+                    s = cap > ep.filledShares ? Math.min(cap - ep.filledShares, remaining) : 0;
                 }
-                if (s != 0) {
-                    uint256 dl = $.depositorLoss;
-                    if (dl != 0) {
-                        uint256 supply = totalSupply();
-                        $.depositorLoss = Math.mulDiv(dl, supply - s, supply);
-                    }
-                    _burn(address(this), s);
-                    ep.filledShares += s;
-                    ep.assets += value;
-                    $.reserved += value;
-                    $.pendingShares -= s;
-                    emit EpochFilled(e, s, value, s == remaining);
-                }
-                if (s != remaining) return;
             }
-            $.fillEpoch = e + 1;
+            uint256 free = $.cash - $.reserved;
+            uint256 value = _toAssets(s, h);
+            bool short = value > free;
+            if (short) {
+                // partial: the shares free liquidity buys at the fill price (assets <= free)
+                s = Math.min(_toShares(free, h), s);
+                value = _toAssets(s, h);
+            }
+            if (s != 0) {
+                uint256 dl = $.depositorLoss;
+                if (dl != 0) {
+                    uint256 supply = totalSupply();
+                    $.depositorLoss = Math.mulDiv(dl, supply - s, supply);
+                }
+                _burn(address(this), s);
+                ep.filledShares += s;
+                ep.assets += value;
+                $.reserved += value;
+                $.pendingShares -= s;
+                emit EpochFilled(e, s, value, s == remaining);
+            }
+            if (s != remaining) {
+                contiguous = false;
+                if (short) return;
+            } else if (contiguous) {
+                $.fillEpoch = e + 1;
+            }
         }
+    }
+
+    /// @dev Mints or refunds the processed epochs' deposits, oldest first (fix round 2, NEW-1): never at a stale value.
+    ///      While deposits are paused they are refunded (A-L5), as is a deposit that would mint no share (A-I2); while
+    ///      books are stale they stay queued (deferred, in epoch order) until a fresh processing mints them at its
+    ///      price, or STALE_BOUND after their epoch's end refunds them.
+    function _resolveDeposits(PoolStorage storage $, bool stale) private {
+        uint64 e = $.depositEpoch;
+        uint64 end = $.procEpoch;
+        for (; e < end; ++e) {
+            Epoch storage ep = $.epochs[e];
+            uint256 da = ep.depositAssets;
+            if (da == 0) continue;
+            bool refund = $.depositsPaused || (stale && block.timestamp >= uint256(ep.endsAt) + STALE_BOUND);
+            if (stale && !refund) break;
+            uint256 ds = refund ? 0 : _toShares(da, 0);
+            $.depositsPending -= da;
+            if (ds == 0) {
+                $.refundsPending += da;
+                emit EpochDepositsRefunded(e, da);
+            } else {
+                $.cash += da;
+                $.depositSharesUnclaimed += ds;
+                ep.depositShares = ds;
+                _mint(address(this), ds);
+            }
+        }
+        $.depositEpoch = e;
     }
 
     /// @dev ERC-4626 conversion (virtual offset of DECIMALS_OFFSET, floor: in the pool's favour) with the depositors'
@@ -962,6 +893,7 @@ contract InsurancePool is
         uint256 k = (uint256(next) - $.procEndsAt + len - 1) / len; // epochs skipped (>= 1)
         $.procEpoch += uint64(k);
         $.fillEpoch = $.procEpoch;
+        $.depositEpoch = $.procEpoch;
         $.procEndsAt = next;
         if (applied) emit EpochLengthApplied(len, next);
     }
@@ -981,37 +913,6 @@ contract InsurancePool is
             if (block.timestamp < until) revert SharesInCooldown(from, until);
         }
         super._update(from, to, value);
-    }
-
-    function _setParam(PoolStorage storage $, bytes32 key, uint256 value) private {
-        if (key == PARAM_PREMIUM_FLOOR_BPS) {
-            if (value > MAX_PREMIUM_BPS) revert ParamOutOfRange(key, value);
-            $.premiumFloorBps = uint16(value);
-        } else if (key == PARAM_MARKET_CAP_BPS) {
-            if (value < 100 || value > BPS) revert ParamOutOfRange(key, value);
-            $.marketCapBps = uint16(value);
-        } else if (key == PARAM_BUFFER_BPS) {
-            if (value > 9000) revert ParamOutOfRange(key, value);
-            $.bufferBps = uint16(value);
-        } else if (key == PARAM_FIRST_LOSS_TARGET_BPS) {
-            if (value > 5000) revert ParamOutOfRange(key, value);
-            $.firstLossTargetBps = uint16(value);
-        } else if (key == PARAM_COOLDOWN) {
-            if (value > 30 days) revert ParamOutOfRange(key, value);
-            $.cooldown = uint32(value);
-        } else if (key == PARAM_PROCESS_GRACE) {
-            if (value < 1 hours || value > 7 days) revert ParamOutOfRange(key, value);
-            $.processGrace = uint32(value);
-        } else if (key == PARAM_MIN_OWN_CAPITAL_BPS) {
-            if (value > 2 * BPS) revert ParamOutOfRange(key, value);
-            $.minOwnCapitalBps = uint16(value);
-        } else if (key == PARAM_EPOCH_LENGTH) {
-            if (value < 1 days || value > 30 days) revert ParamOutOfRange(key, value);
-            $.pendingEpochLength = uint32(value);
-        } else {
-            revert UnknownParam(key);
-        }
-        emit PoolParamSet(key, value);
     }
 
     /// @dev Upgrades only through the protocol timelock.

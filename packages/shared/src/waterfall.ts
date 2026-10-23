@@ -371,15 +371,17 @@ export function poolCapitalOk(trancheCapital: bigint, ifTargetUsd: bigint, minOw
 }
 
 /**
- * The explicit insurance ledger of a pool-funded book (pool audit 2026-10-23 B-H1, B-M1, B-L2, B-L3; Book storage).
- * Moved only by explicit events, never rebuilt from NAV:
+ * The explicit insurance ledger of a pool-funded book (pool audit 2026-10-23 B-H1, B-M1, B-L2, B-L3; fix round 2 V-1,
+ * V-2; Book storage). Moved only by explicit events, never rebuilt from NAV:
  * - seniorIfImpairment: the part of seniorImpairment that is insurance debt (never covered by the Backstop; a gain
  *   restores it only after the Backstop is repaid);
- * - juniorIfLoss: IF draws Junior absorbed; had the IF never been drawn Junior would still hold them in front of Senior,
- *   so a later other loss reaching Senior is insurance debt up to it (the Backstop never covers more than without them);
+ * - juniorIfLoss: IF draws Junior absorbed, and what a gain gave the pool or Senior's IF impairment; had the IF never been
+ *   drawn Junior would still hold them in front of Senior;
  * - coverHeld: Backstop cover Senior still holds (never own capital: never backs nor repays the pool's claim);
  * - poolValue: the pool's claim (< poolDebt only while the tranches hold no own capital: provisional, N2-2);
- * - ifDraw: the outstanding IF draw at the last mark, max(0, poolDebt - IF equity).
+ * - ifDraw: the IF lost at the last mark (poolIfDraw);
+ * - seniorIfDeferred: the pool's shortfall taken only because Senior held cover, Senior's share of the IF draw, charged to
+ *   Senior once it holds own capital again (after the Backstop is repaid).
  */
 export interface PoolMarkState {
   seniorNav: bigint;
@@ -394,14 +396,24 @@ export interface PoolMarkState {
   poolValue: bigint;
   poolDebt: bigint;
   ifDraw: bigint;
+  seniorIfDeferred: bigint;
 }
 
 export interface PoolMarkInputs {
   netAssets: bigint; // max(vault idle + deployed - unfunded claims - backstop repayment owed, 0)
-  insuranceEquityUsd: bigint; // signed in the mark, capped at its deployed value
-  due: boolean; // the debt is due: a fall of the draw is never read as an IF recovery
+  ifDraw: bigint; // the IF lost so far (poolIfDraw)
   juniorSupply: bigint;
   backstopAvailable: bigint;
+}
+
+/**
+ * A pool-funded book's IF draw (Waterfall.poolIfDraw, fix round 2 V-2): the IF deployed less the IF cash returned to the
+ * vault (the adapter's cumulative insuranceReturnedUsd) and the signed IF equity (venue + in transit). Repaying the debt
+ * never moves it.
+ */
+export function poolIfDraw(ifDeployed: bigint, ifReturned: bigint, insuranceEquityUsd: bigint): bigint {
+  const held = ifReturned + insuranceEquityUsd;
+  return ifDeployed > held ? ifDeployed - held : 0n;
 }
 
 export interface PoolMarkResult {
@@ -418,42 +430,32 @@ export interface PoolMarkResult {
   juniorGain: bigint;
   backstopRepaid: bigint;
   backstopCovered: bigint;
+  seniorIfCharged: bigint;
 }
 
 /**
  * Book.applyMark P&L of a pool-funded book (Waterfall.applyPoolMarkPnl): the change of the book's net assets against
- * what the tranches and the pool's claim held, allocated on the ledger. While Live the change splits exactly into an IF
- * recovery (first), the other P&L, then the IF draw; once due only a net loss is split. The IF draw since the last mark is the insurance
- * debt's loss (Junior, Senior's own capital, the pool's claim; never the cover). Any other loss: Junior first (within a
- * mark, before the IF draw), then up to juniorIfLoss an IF loss of Senior's, then the cover, Senior's own capital, the
- * pool. A gain: the pool's shortfall first, an IF recovery (not due) to the IF losses, then Senior's other impairment,
- * the Backstop, Senior's IF impairment, Junior. Cover: only Senior's other impairment, only while Junior is empty.
+ * what the tranches and the pool's claim held, allocated on the ledger: an IF recovery first, then the other
+ * P&L, then the IF draw since the last mark, whatever their signs. The IF draw: Junior, Senior's own capital, the pool's
+ * claim (the cover's part deferred to Senior); never the cover. Other losses: Junior, then up to juniorIfLoss an IF loss
+ * of Senior's, then the cover, Senior's own capital, the pool. A gain: an IF recovery reverses the IF losses; the rest
+ * restores Senior's other impairment, repays the Backstop, restores the pool, Senior's IF impairment, then Junior; last,
+ * Senior's deferred IF share is charged from its own capital. Cover: only Senior's other impairment, only while Junior is
+ * empty.
  */
 export function applyPoolMarkPnl(state: PoolMarkState, i: PoolMarkInputs): PoolMarkResult {
   const s = { ...state };
-  const r: PoolMarkResult = { s, nav: 0n, pnl: 0n, drawdownBps: 0n, juniorLoss: 0n, seniorLoss: 0n, seniorIfLoss: 0n, poolLoss: 0n, poolRestored: 0n, seniorRestored: 0n, juniorGain: 0n, backstopRepaid: 0n, backstopCovered: 0n };
+  const r: PoolMarkResult = { s, nav: 0n, pnl: 0n, drawdownBps: 0n, juniorLoss: 0n, seniorLoss: 0n, seniorIfLoss: 0n, poolLoss: 0n, poolRestored: 0n, seniorRestored: 0n, juniorGain: 0n, backstopRepaid: 0n, backstopCovered: 0n, seniorIfCharged: 0n };
   const accounted = s.seniorNav + s.juniorNav;
-  const draw = s.poolDebt > i.insuranceEquityUsd ? s.poolDebt - i.insuranceEquityUsd : 0n;
-  const held = accounted + s.poolValue;
-  if (!i.due) {
-    // Live: the draw moves only by IF P&L: an IF recovery first, then the other P&L, then the IF draw
-    const up = draw > s.ifDraw ? draw - s.ifDraw : 0n;
-    const down = s.ifDraw > draw ? s.ifDraw - draw : 0n;
-    if (down > 0n) poolGain(s, r, down, down, i.juniorSupply);
-    const plus = i.netAssets + up;
-    const minus = held + down;
-    if (plus > minus) poolGain(s, r, plus - minus, 0n, i.juniorSupply);
-    else if (plus < minus) poolLossOther(s, r, minus - plus);
-    poolLossIf(s, r, up);
-  } else if (i.netAssets < held) {
-    // due: only a net loss is split (the draw first within it), no fall of the draw is an IF recovery
-    const loss = held - i.netAssets;
-    const ifLoss = draw > s.ifDraw ? minBig(loss, draw - s.ifDraw) : 0n;
-    poolLossOther(s, r, loss - ifLoss);
-    poolLossIf(s, r, ifLoss);
-  } else if (i.netAssets > held) {
-    poolGain(s, r, i.netAssets - held, 0n, i.juniorSupply);
-  }
+  const draw = i.ifDraw;
+  const up = draw > s.ifDraw ? draw - s.ifDraw : 0n;
+  const down = s.ifDraw > draw ? s.ifDraw - draw : 0n;
+  if (down > 0n) poolGain(s, r, down, down, i.juniorSupply);
+  const plus = i.netAssets + up;
+  const minus = accounted + s.poolValue + down;
+  if (plus > minus) poolGain(s, r, plus - minus, 0n, i.juniorSupply);
+  else if (plus < minus) poolLossOther(s, r, minus - plus);
+  poolLossIf(s, r, up);
   r.nav = i.netAssets - s.poolValue;
   r.pnl = r.nav - accounted;
 
@@ -508,6 +510,7 @@ function poolLossIfSenior(s: PoolMarkState, r: PoolMarkResult, x: bigint) {
   const p = minBig(x - own, s.poolValue);
   s.poolValue -= p;
   r.poolLoss += p;
+  s.seniorIfDeferred += minBig(p, s.coverHeld);
   const c = minBig(x - own - p, s.coverHeld);
   s.coverHeld -= c;
   const sl = own + c;
@@ -519,30 +522,38 @@ function poolLossIfSenior(s: PoolMarkState, r: PoolMarkResult, x: bigint) {
 }
 
 function poolGain(s: PoolMarkState, r: PoolMarkResult, g: bigint, ifGain: bigint, jSupply: bigint) {
-  const p = minBig(g, s.poolDebt - s.poolValue);
+  const gi = minBig(g, ifGain);
+  const p = minBig(gi, s.poolDebt - s.poolValue);
   s.poolValue += p;
   r.poolRestored += p;
-  g -= p;
-  const gi = minBig(g, ifGain);
-  const a = minBig(gi, s.seniorIfImpairment);
+  const a = minBig(gi - p, s.seniorIfImpairment);
   s.seniorIfImpairment -= a;
-  const b = jSupply === 0n ? 0n : minBig(gi - a, s.juniorIfLoss);
+  const b = jSupply === 0n ? 0n : minBig(gi - p - a, s.juniorIfLoss);
   s.juniorIfLoss -= b;
   s.juniorNav += b;
   r.juniorGain += b;
-  g -= a + b;
-  const n = minBig(g, s.seniorImpairment - a - s.seniorIfImpairment);
+  g -= p + a + b;
+  // while the pool has a shortfall: the Backstop, then the pool, then Senior's other impairment (V-1, N2-2)
+  const exhausted = s.poolValue < s.poolDebt;
+  let n = exhausted ? 0n : minBig(g, s.seniorImpairment - a - s.seniorIfImpairment);
   g -= n;
   const rp = minBig(g, s.backstopDebt);
   s.backstopDebt -= rp;
   if (s.coverHeld > s.backstopDebt) s.coverHeld = s.backstopDebt;
   r.backstopRepaid += rp;
   g -= rp;
+  const q = minBig(g, s.poolDebt - s.poolValue);
+  s.poolValue += q;
+  r.poolRestored += q;
+  g -= q;
+  if (exhausted) {
+    n = minBig(g, s.seniorImpairment - a - s.seniorIfImpairment);
+    g -= n;
+  }
   const f = minBig(g, s.seniorIfImpairment);
   s.seniorIfImpairment -= f;
   g -= f;
-  // what an other gain gives the pool and Senior's IF impairment is counterfactual Junior capital
-  if (ifGain === 0n && jSupply !== 0n) s.juniorIfLoss += p + f;
+  if (jSupply !== 0n) s.juniorIfLoss += q + f;
   const restored = a + n + f;
   s.seniorImpairment -= restored;
   s.seniorNav += restored;
@@ -552,65 +563,99 @@ function poolGain(s: PoolMarkState, r: PoolMarkResult, g: bigint, ifGain: bigint
     s.juniorNav += g;
     r.juniorGain += g;
   }
+  chargeDeferred(s, r);
+}
+
+function chargeDeferred(s: PoolMarkState, r: PoolMarkResult) {
+  const short = s.poolDebt - s.poolValue;
+  if (s.seniorIfDeferred > short) s.seniorIfDeferred = short;
+  const d = minBig(s.seniorIfDeferred, s.seniorNav - s.coverHeld);
+  if (d === 0n) return;
+  s.seniorIfDeferred -= d;
+  s.seniorNav -= d;
+  s.seniorImpairment += d;
+  s.seniorIfImpairment += d;
+  s.poolValue += d;
+  r.poolRestored += d;
+  r.seniorIfLoss += d;
+  r.seniorIfCharged += d;
 }
 
 export interface PoolDistributionInput {
   senior: bigint; // Senior hurdle share credited by the router
   junior: bigint; // Junior residual credited by the router
   juniorSupply: bigint;
+  seniorNav: bigint;
   seniorImpairment: bigint;
   seniorIfImpairment: bigint;
+  seniorIfDeferred: bigint;
+  juniorIfLoss: bigint;
   backstopDebt: bigint;
   coverHeld: bigint;
-  juniorIfLoss: bigint;
   poolShortfall: bigint; // poolDebt - poolValue (0 once the pool's position is closed)
 }
 
 export interface PoolDistributionResult {
-  seniorCredit: bigint;
+  seniorCredit: bigint; // before the deferred charge
   juniorCredit: bigint;
-  poolRestored: bigint;
+  poolRestored: bigint; // the charge excluded
   seniorRestored: bigint;
   backstopRepaid: bigint;
+  seniorIfCharged: bigint;
   seniorImpairment: bigint;
   seniorIfImpairment: bigint;
+  seniorIfDeferred: bigint;
+  juniorIfLoss: bigint;
   backstopDebt: bigint;
   coverHeld: bigint;
-  juniorIfLoss: bigint;
 }
 
 /**
- * Book.creditDistribution of a pool-funded book (Waterfall.applyPoolDistribution, pool audit 2026-10-23 B-L2): while the
- * book is exhausted the fee flow restores the pool's claim first (the residual, then the hurdle share); the rest of the
- * residual follows the mark gain order (Senior's other impairment, the Backstop, Senior's IF impairment, Junior).
+ * Book.creditDistribution of a pool-funded book (Waterfall.applyPoolDistribution, B-L2; fix round 2 V-1): the residual
+ * follows the mark gain order (Senior's other impairment, the Backstop, the pool's shortfall, then the hurdle share if the
+ * residual is short, Senior's IF impairment, Junior); what the residual gives the pool and Senior's IF impairment is
+ * booked to juniorIfLoss; last, Senior's deferred IF share is charged from its own capital.
  * seniorCredit + juniorCredit + poolRestored + backstopRepaid == senior + junior.
  */
 export function applyPoolDistribution(i: PoolDistributionInput): PoolDistributionResult {
   let residual = i.juniorSupply === 0n ? i.senior + i.junior : i.junior;
   let hurdle = i.senior + i.junior - residual;
-  const pr = minBig(residual, i.poolShortfall);
-  const ph = minBig(hurdle, i.poolShortfall - pr);
-  residual -= pr;
-  hurdle -= ph;
-  const n = minBig(residual, i.seniorImpairment - i.seniorIfImpairment);
+  const exhausted = i.poolShortfall > 0n;
+  let n = exhausted ? 0n : minBig(residual, i.seniorImpairment - i.seniorIfImpairment);
   residual -= n;
   const backstopRepaid = minBig(residual, i.backstopDebt);
   residual -= backstopRepaid;
+  const pr = minBig(residual, i.poolShortfall);
+  residual -= pr;
+  const ph = minBig(hurdle, i.poolShortfall - pr);
+  hurdle -= ph;
+  if (exhausted) {
+    n = minBig(residual, i.seniorImpairment - i.seniorIfImpairment);
+    residual -= n;
+  }
   const f = minBig(residual, i.seniorIfImpairment);
   residual -= f;
   const toSenior = i.juniorSupply === 0n;
+  const seniorCredit = hurdle + n + f + (toSenior ? residual : 0n);
   const backstopDebt = i.backstopDebt - backstopRepaid;
+  const coverHeld = i.coverHeld < backstopDebt ? i.coverHeld : backstopDebt;
+  const short = i.poolShortfall - pr - ph;
+  const deferred = i.seniorIfDeferred < short ? i.seniorIfDeferred : short;
+  const sNav = i.seniorNav + seniorCredit;
+  const d = minBig(deferred, sNav - minBig(coverHeld, sNav));
   return {
-    seniorCredit: hurdle + n + f + (toSenior ? residual : 0n),
+    seniorCredit,
     juniorCredit: toSenior ? 0n : residual,
     poolRestored: pr + ph,
     seniorRestored: n + f,
     backstopRepaid,
-    seniorImpairment: i.seniorImpairment - n - f,
-    seniorIfImpairment: i.seniorIfImpairment - f,
-    backstopDebt,
-    coverHeld: i.coverHeld < backstopDebt ? i.coverHeld : backstopDebt,
+    seniorIfCharged: d,
+    seniorImpairment: i.seniorImpairment - n - f + d,
+    seniorIfImpairment: i.seniorIfImpairment - f + d,
+    seniorIfDeferred: deferred - d,
     juniorIfLoss: toSenior ? i.juniorIfLoss : i.juniorIfLoss + pr + f,
+    backstopDebt,
+    coverHeld,
   };
 }
 

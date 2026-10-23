@@ -337,6 +337,11 @@ export const marketCharterAbi = [
             "name": "premiumBps",
             "type": "uint16",
             "internalType": "uint16"
+          },
+          {
+            "name": "ifPoolFallback",
+            "type": "bool",
+            "internalType": "bool"
           }
         ]
       }
@@ -507,6 +512,11 @@ export const marketCharterAbi = [
                 "name": "premiumBps",
                 "type": "uint16",
                 "internalType": "uint16"
+              },
+              {
+                "name": "ifPoolFallback",
+                "type": "bool",
+                "internalType": "bool"
               }
             ]
           },
@@ -758,6 +768,11 @@ export const marketCharterAbi = [
             "name": "premiumBps",
             "type": "uint16",
             "internalType": "uint16"
+          },
+          {
+            "name": "ifPoolFallback",
+            "type": "bool",
+            "internalType": "bool"
           }
         ]
       }

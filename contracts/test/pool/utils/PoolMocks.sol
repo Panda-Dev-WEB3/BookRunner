@@ -20,6 +20,8 @@ contract MockPoolAdapter is IVenueAdapter {
     bool public ifAsync;
     /// @notice IF in flight: a deposit not yet at the venue or a recall not yet in the vault (`ifInTransitIsRecall`).
     uint256 public ifInTransit;
+    /// @notice IF cash returned to the vault so far (IInsuranceReturns).
+    uint256 public insuranceReturnedUsd;
     bool public ifInTransitIsRecall;
 
     constructor(MockERC20 usdc_) {
@@ -50,8 +52,12 @@ contract MockPoolAdapter is IVenueAdapter {
     function landIf() external {
         uint256 amount = ifInTransit;
         ifInTransit = 0;
-        if (ifInTransitIsRecall) IERC20(address(usdcToken)).transfer(vault, amount);
-        else ifEquity += amount;
+        if (ifInTransitIsRecall) {
+            insuranceReturnedUsd += amount;
+            IERC20(address(usdcToken)).transfer(vault, amount);
+        } else {
+            ifEquity += amount;
+        }
     }
 
     function depositToVenue(uint8 account, uint256 amount) external {
@@ -73,6 +79,7 @@ contract MockPoolAdapter is IVenueAdapter {
                 emit WithdrawRequested(account, amount, 0);
                 return;
             }
+            insuranceReturnedUsd += amount;
         } else {
             if (amount > mmValue) amount = mmValue;
             mmValue -= amount;

@@ -171,6 +171,8 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         // not yet swept), always <= inTransitUsd; a sweep clears it first (see `_leaveTransit`). 0 on a proxy upgraded
         // while IF was in transit (the pre-v5 reading: no IF in transit).
         uint256 inTransitIfUsd;
+        // appended (v6) [pool audit 2026-10-23 fix round 2]: IF principal swept back to the vault, cumulative
+        uint256 insuranceReturnedUsd;
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -446,7 +448,9 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         if (principal != 0) _checkSweepOpen($);
 
         // [2026-10 pool follow-up m-6] principal <= inTransitUsd: the IF part is cleared first
+        uint256 ifBefore = $.inTransitIfUsd;
         uint256 remaining = _leaveTransit($, BRTypes.ACCOUNT_IF, principal);
+        $.insuranceReturnedUsd += ifBefore - $.inTransitIfUsd;
         $.totalReturnedUsd += amount;
 
         $.usdc.safeTransfer($.vault, amount);
@@ -873,6 +877,11 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         return _s().inTransitIfUsd;
     }
 
+    /// @notice IF principal swept back to the vault so far (IInsuranceReturns).
+    function insuranceReturnedUsd() external view returns (uint256) {
+        return _s().insuranceReturnedUsd;
+    }
+
     /// @inheritdoc IVenueAdapter
     function deployedValueUsd() external view returns (uint256) {
         AdapterStorage storage $ = _s();
@@ -1022,16 +1031,21 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
         }
     }
 
+    /// @dev Reads only the charter words it needs (venue, ifTargetUsd, mmInventoryUsd: words 1, 4 and 5 of the static
+    ///      Charter's ABI encoding) instead of decoding the whole struct: bytecode headroom (pool audit 2026-10-23 fix
+    ///      round 2 appended a charter field).
     function _bindBook(AdapterStorage storage $, address book_) private {
-        BRTypes.Charter memory charter = IBook(book_).getCharter();
-        if (charter.venue != BRTypes.VENUE_ORDERLY) revert WrongVenue(charter.venue);
+        (bool ok, bytes memory ret) = book_.staticcall(abi.encodeWithSelector(IBook.getCharter.selector));
+        if (!ok || ret.length < 192) revert WrongVenue(type(uint8).max);
+        (, uint256 venue,,, uint256 ifTarget, uint256 mmInventory) =
+            abi.decode(ret, (bytes32, uint256, bytes32, bytes32, uint256, uint256));
+        if (venue != BRTypes.VENUE_ORDERLY) revert WrongVenue(uint8(venue));
         BRTypes.BookComponents memory c = IBook(book_).components();
         if (c.adapter != address(this)) revert NotBookAdapter();
         if (c.vault == address(0) || c.router == address(0)) revert ZeroAddress();
         $.vault = c.vault;
         $.router = c.router;
-        $.maxFeeSweepPerPeriodUsd = (uint256(charter.ifTargetUsd) + uint256(charter.mmInventoryUsd))
-            * DEFAULT_FEE_SWEEP_CAP_BPS / BPS;
+        $.maxFeeSweepPerPeriodUsd = (ifTarget + mmInventory) * DEFAULT_FEE_SWEEP_CAP_BPS / BPS;
     }
 
     function _bindVenue(AdapterStorage storage $, IBookrunnerConfig cfg) private {

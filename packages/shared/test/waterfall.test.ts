@@ -10,6 +10,7 @@ import {
   juniorWindowAllocation,
   applyPoolDistribution,
   applyPoolMarkPnl,
+  poolIfDraw,
   poolBookNav,
   poolCapitalOk,
   type PoolMarkInputs,
@@ -333,10 +334,10 @@ describe("insurance pool (2026-10): a pool-funded book", () => {
   // the default pool book: S 52.5k, J 22.5k, debt 25k, IF intact
   const st = (o: Partial<PoolMarkState> = {}): PoolMarkState => ({
     seniorNav: usd(52_500), juniorNav: usd(22_500), seniorImpairment: 0n, seniorIfImpairment: 0n, juniorIfLoss: 0n, coverHeld: 0n,
-    backstopDebt: 0n, perfIndex: WAD, highWater: WAD, poolValue: usd(25_000), poolDebt: usd(25_000), ifDraw: 0n, ...o,
+    backstopDebt: 0n, perfIndex: WAD, highWater: WAD, poolValue: usd(25_000), poolDebt: usd(25_000), ifDraw: 0n, seniorIfDeferred: 0n, ...o,
   });
   const inp = (mm: bigint, ifEq: bigint, o: Partial<PoolMarkInputs> = {}): PoolMarkInputs => ({
-    netAssets: mm + ifEq, insuranceEquityUsd: ifEq, due: false, juniorSupply: 1n, backstopAvailable: usd(1_000_000), ...o,
+    netAssets: mm + ifEq, ifDraw: poolIfDraw(usd(25_000), 0n, ifEq), juniorSupply: 1n, backstopAvailable: usd(1_000_000), ...o,
   });
 
   test("the Backstop never covers the insurance debt (owner ruling N-1)", () => {
@@ -362,9 +363,9 @@ describe("insurance pool (2026-10): a pool-funded book", () => {
 
   test("B-H1: a repaid debt never lifts the cap, a gain repays the Backstop before Senior's IF impairment", () => {
     const m1 = applyPoolMarkPnl(st(), inp(usd(75_000), 0n)); // IF drawn: Senior 2.5k IF impairment
-    // the debt repaid from MM cash (due): debt 0, draw 0; nothing is covered
+    // the debt repaid from MM cash: debt 0, the draw unchanged (V-2: repayments never move it); nothing is covered
     const repaid = { ...m1.s, poolValue: 0n, poolDebt: 0n };
-    expect(applyPoolMarkPnl(repaid, inp(usd(50_000), 0n, { due: true })).backstopCovered).toBe(0n);
+    expect(applyPoolMarkPnl(repaid, inp(usd(50_000), 0n)).backstopCovered).toBe(0n);
     // an MM dip of 45k: Junior's 22.5k IF loss stands in front (counterfactual), 22.5k covered
     const m2 = applyPoolMarkPnl(m1.s, inp(usd(30_000), 0n));
     expect(m2.backstopCovered).toBe(usd(22_500));
@@ -383,10 +384,46 @@ describe("insurance pool (2026-10): a pool-funded book", () => {
     expect(drained.s.seniorNav).toBe(usd(52_500)); // Senior keeps its cover
   });
 
-  test("B-L2: an exhausted book's fee flow restores the pool's claim first", () => {
-    const r = applyPoolDistribution({ senior: usd(4_752), junior: usd(3_168), juniorSupply: 1n, seniorImpairment: 0n, seniorIfImpairment: 0n, backstopDebt: usd(52_500), coverHeld: usd(52_500), juniorIfLoss: 0n, poolShortfall: usd(25_000) });
-    expect(r.poolRestored).toBe(usd(7_920));
-    expect(r.backstopRepaid).toBe(0n);
+  test("B-L2 / V-1: an exhausted book's fee flow repays the Backstop, then the pool; Senior's deferred share charged", () => {
+    const r = applyPoolDistribution({ senior: usd(4_752), junior: usd(3_168), juniorSupply: 1n, seniorNav: usd(52_500), seniorImpairment: 0n, seniorIfImpairment: 0n, seniorIfDeferred: usd(25_000), backstopDebt: usd(52_500), coverHeld: usd(52_500), juniorIfLoss: 0n, poolShortfall: usd(25_000) });
+    expect(r.backstopRepaid).toBe(usd(3_168)); // the residual: the Backstop first
+    expect(r.poolRestored).toBe(usd(4_752)); // the hurdle share: the pool's shortfall
     expect(r.seniorCredit + r.juniorCredit).toBe(0n);
+    // Senior's own capital freed by the repayment (3,168) is charged its deferred IF share: the pool gets 7,920 in all
+    expect(r.seniorIfCharged).toBe(usd(3_168));
+    expect(r.seniorIfDeferred).toBe(usd(25_000 - 7_920));
+    expect(r.coverHeld).toBe(usd(52_500 - 3_168));
+  });
+
+  test("poolIfDraw: deployed less returned less equity; repayments never move it (V-2)", () => {
+    expect(poolIfDraw(usd(25_000), 0n, usd(25_000))).toBe(0n);
+    expect(poolIfDraw(usd(25_000), 0n, usd(20_000))).toBe(usd(5_000));
+    expect(poolIfDraw(usd(25_000), usd(5_000), usd(20_000))).toBe(0n); // IF cash back in the vault is not a draw
+    expect(poolIfDraw(usd(25_000), usd(25_000), 0n)).toBe(0n);
+  });
+
+  test("V-1: an exhausted book's recovery repays the Backstop first, then the pool, and Senior bears its IF share", () => {
+    const covered = applyPoolMarkPnl(st(), inp(0n, usd(25_000))); // MM -75k: Junior gone, Senior 52.5k covered
+    const drained = applyPoolMarkPnl(covered.s, inp(covered.backstopCovered, 0n)); // the IF drained: the pool's loss
+    expect(drained.s.seniorIfDeferred).toBe(usd(25_000));
+    const back = applyPoolMarkPnl(drained.s, inp(covered.backstopCovered + usd(75_000), 0n)); // the MM recovers 75k
+    expect(back.backstopRepaid).toBe(usd(52_500));
+    expect(back.s.backstopDebt).toBe(0n);
+    expect(back.s.poolValue).toBe(usd(25_000));
+    expect(back.seniorIfCharged).toBe(usd(2_500));
+    expect(back.s.seniorNav).toBe(usd(50_000)); // as with the IF draw alone
+    expect(back.s.seniorIfDeferred).toBe(0n);
+  });
+
+  test("V-2: an IF draw inside a larger MM gain is charged in the ledger order, the Backstop repaid", () => {
+    const m1 = applyPoolMarkPnl(st(), inp(usd(45_000), usd(25_000))); // MM -30k: Junior 22.5k, Senior 7.5k covered
+    expect(m1.backstopCovered).toBe(usd(7_500));
+    const m2 = applyPoolMarkPnl(m1.s, inp(usd(55_000) + usd(7_500), usd(20_000))); // MM +10k, IF -5k
+    expect(m2.backstopRepaid).toBe(usd(7_500));
+    expect(m2.s.seniorNav).toBe(usd(50_000));
+    expect(m2.s.juniorNav).toBe(0n);
+    expect(m2.s.seniorIfImpairment).toBe(usd(2_500));
+    expect(m2.s.juniorIfLoss).toBe(usd(2_500));
+    expect(m2.s.poolValue).toBe(usd(25_000));
   });
 });

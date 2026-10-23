@@ -1,11 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_IF_FROM_POOL, DEFAULT_MIN_OWN_CAPITAL_BPS, MAX_PREMIUM_BPS, poolCharterReason } from "../src/insurancePool";
+import { DEFAULT_IF_FROM_POOL, DEFAULT_IF_POOL_FALLBACK, DEFAULT_MIN_OWN_CAPITAL_BPS, MAX_PREMIUM_BPS, poolCharterReason } from "../src/insurancePool";
 
 // Same table as contracts/test/gov/MarketCharter.t.sol test_validate_insurancePool (CharterRules.poolReason).
 describe("poolCharterReason (MarketCharter BAD_PREMIUM / NO_POOL)", () => {
   test("a book-funded IF pays no premium", () => {
     expect(poolCharterReason({ ifFromPool: false, premiumBps: 0 }, false)).toBeNull();
     expect(poolCharterReason({ ifFromPool: false, premiumBps: 1 }, true)).toBe("BAD_PREMIUM");
+    // fix round 2 (V-3): the fallback opt-in only applies to a pool-funded IF; BAD_PREMIUM first, as on chain
+    expect(poolCharterReason({ ifFromPool: false, premiumBps: 0, ifPoolFallback: true }, true)).toBe("BAD_FALLBACK");
+    expect(poolCharterReason({ ifFromPool: false, premiumBps: 1, ifPoolFallback: true }, true)).toBe("BAD_PREMIUM");
+    expect(poolCharterReason({ ifFromPool: true, premiumBps: 0, ifPoolFallback: true }, true)).toBeNull();
+    expect(DEFAULT_IF_POOL_FALLBACK).toBe(false);
   });
 
   test("a pool-funded IF needs a pool and a premium <= 50%", () => {

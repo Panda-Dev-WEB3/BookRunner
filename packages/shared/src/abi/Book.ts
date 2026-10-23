@@ -123,6 +123,19 @@ export const bookAbi = [
   },
   {
     "type": "function",
+    "name": "capitalShort",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "closeWindow",
     "inputs": [],
     "outputs": [],
@@ -406,6 +419,11 @@ export const bookAbi = [
             "name": "premiumBps",
             "type": "uint16",
             "internalType": "uint16"
+          },
+          {
+            "name": "ifPoolFallback",
+            "type": "bool",
+            "internalType": "bool"
           }
         ]
       }
@@ -580,6 +598,11 @@ export const bookAbi = [
             "name": "premiumBps",
             "type": "uint16",
             "internalType": "uint16"
+          },
+          {
+            "name": "ifPoolFallback",
+            "type": "bool",
+            "internalType": "bool"
           }
         ]
       },
@@ -968,6 +991,19 @@ export const bookAbi = [
         "name": "epoch",
         "type": "uint64",
         "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "seniorIfDeferred",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -2164,6 +2200,17 @@ export const bookAbi = [
       },
       {
         "name": "provided",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "InsurancePoolCannotFund",
+    "inputs": [
+      {
+        "name": "retryUntil",
         "type": "uint64",
         "internalType": "uint64"
       }

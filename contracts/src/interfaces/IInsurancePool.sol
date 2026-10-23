@@ -114,6 +114,13 @@ interface IInsurancePool {
     event PausedSet(bool deposits, bool allocations, address indexed by);
 }
 
+/// @notice Venue adapter extension (pool audit 2026-10-23 fix round 2): the IF cash returned to the vault so far
+///         (cumulative). With the signed IF equity it makes a pool-funded book's IF draw exact, whatever repays the
+///         debt: IF lost = IF deployed - returned - IF equity (venue + in transit).
+interface IInsuranceReturns {
+    function insuranceReturnedUsd() external view returns (uint256);
+}
+
 /// @notice BookrunnerConfig getter of the pool address (not in the frozen IBookrunnerConfig).
 interface IBookrunnerConfigPool {
     function insurancePool() external view returns (address);

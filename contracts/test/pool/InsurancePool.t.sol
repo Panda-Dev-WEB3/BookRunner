@@ -217,11 +217,13 @@ contract InsurancePoolTest is PoolFixture {
         // the first deposit's epoch: gated, processed after the grace (stale)
         vm.warp(uint256(ends) + 1 days);
         pool.processEpoch();
-        // the empty epochs: nothing to price, no marks needed, nothing minted
+        // fix round 2 (NEW-1): bob's deposit was not minted at the stale value but deferred, so the empty epochs after it
+        // still price something (it) and are gated too; past each grace they process stale and keep it deferred
+        assertEq(pool.epochInfo(e).depositShares, 0, "deferred, not minted at a stale value");
         while (true) {
             (e, ends,,,) = pool.queue();
             if (e == e2) break;
-            if (block.timestamp < ends) vm.warp(ends);
+            vm.warp(uint256(ends) + 1 days);
             assertEq(pool.epochInfo(e).depositAssets, 0);
             pool.processEpoch();
             assertEq(pool.epochInfo(e).depositShares, 0);
@@ -416,7 +418,7 @@ contract InsurancePoolTest is PoolFixture {
         assertEq(pool.maxAllocation(1, MKT), 0);
         (address book,,) = _bookAddrs(1);
         vm.prank(book);
-        vm.expectRevert(abi.encodeWithSelector(InsurancePool.FirstLossBelowTarget.selector, 0, U / 10));
+        vm.expectRevert(abi.encodeWithSelector(InsurancePool.FirstLossBelowTarget.selector, 0, U / 4)); // 25% of the book (NEW-3)
         pool.allocate(1, 1 * U, MKT);
         uint256 id = _request(alice, shares);
         _processThrough(id);
@@ -424,14 +426,16 @@ contract InsurancePoolTest is PoolFixture {
     }
 
     /// @notice Audit 2026-10-23 A-L3: an allocation never takes the liquidity queued withdrawals need, due or not.
+    /// @notice ... and (fix round 2, NEW-2) the buffer is a share of the assets that stay: 20% of (T - queued) + queued.
     function test_allocate_neverTakesQueuedExitLiquidity() public {
-        uint256 shares = _fund(); // T 100k, free 100k
+        uint256 shares = _fund(); // slice 10k, depositors 90k
+        _seedFirstLoss(20_000 * U); // T 120k, free 120k; the slice covers up to 120k of a single book (NEW-3)
         vm.prank(timelock);
         pool.setParam("marketCapBps", 10_000);
-        assertEq(pool.maxAllocation(1, MKT), 80_000 * U, "free 100k - buffer 20k");
+        assertEq(pool.maxAllocation(1, MKT), 96_000 * U, "free 120k - buffer 24k");
         _request(alice, shares / 2); // 45k queued for the open epoch (not due yet)
         uint256 room = pool.maxAllocation(1, MKT);
-        assertApproxEqAbs(room, 35_000 * U, 1, "free 100k - buffer 20k - the 45k queued");
+        assertApproxEqAbs(room, 60_000 * U, 1, "free 120k - (20% of the 75k that stay + the 45k queued)");
         (address book,,) = _bookAddrs(1);
         vm.prank(book);
         vm.expectRevert(abi.encodeWithSelector(InsurancePool.InsufficientFreeLiquidity.selector, room + 1, room));
@@ -570,20 +574,20 @@ contract InsurancePoolTest is PoolFixture {
         uint256 shares = _deposit(alice, 90_000 * U); // T 110k
         vm.prank(timelock);
         pool.setParam("marketCapBps", 10_000);
-        _allocate(1, 50_000 * U); // claims 50k: the slice must keep 5k
+        _allocate(1, 50_000 * U); // the slice must keep max(10% of the claims, 25% of the largest book) = 12.5k
         vm.prank(alice);
         vm.expectRevert(InsurancePool.NotTimelock.selector);
         pool.withdrawFirstLoss(1, alice);
         vm.prank(timelock);
-        vm.expectRevert(abi.encodeWithSelector(InsurancePool.FirstLossBelowTarget.selector, 5_000 * U - 1, 5_000 * U));
-        pool.withdrawFirstLoss(15_000 * U + 1, treasury);
-        _request(alice, shares / 3); // 30k queued: free 60k must keep 20% of T + 30k
+        vm.expectRevert(abi.encodeWithSelector(InsurancePool.FirstLossBelowTarget.selector, 12_500 * U - 1, 12_500 * U));
+        pool.withdrawFirstLoss(7_500 * U + 1, treasury);
+        _request(alice, shares / 2); // 45k queued: free 60k must keep 20% of what stays + 45k
         vm.prank(timelock);
         vm.expectRevert();
-        pool.withdrawFirstLoss(15_000 * U, treasury);
+        pool.withdrawFirstLoss(7_500 * U, treasury);
         vm.prank(timelock);
-        pool.withdrawFirstLoss(5_000 * U, treasury);
-        assertEq(usdc.balanceOf(treasury), 5_000 * U);
+        pool.withdrawFirstLoss(2_000 * U, treasury);
+        assertEq(usdc.balanceOf(treasury), 2_000 * U);
         _checkLedger();
     }
 
@@ -725,17 +729,53 @@ contract InsurancePoolTest is PoolFixture {
 
     // ------------------------------------------------------------------ pool audit 2026-10-23
 
-    /// @notice A-L1: past the grace, an epoch processed with a stale book prices exits as if that book were worth 0 (the
-    ///         slice absorbing it first, as a loss), never at the stale claim; the value stays with the holders left.
-    function test_staleProcessing_exitsPricedConservatively() public {
+    /// @notice Fix round 2 (NEW-1, replaces the A-L1 haircut): past the grace, an epoch with a stale book fills its exits
+    ///         only for the part backed by fresh books, at the normal price (no value moves); the rest stays queued and
+    ///         exposed until the book marks, then fills at that price. Deposits are not minted at the stale value.
+    function test_staleProcessing_fillsOnlyTheFreshPart_restAfterTheMark() public {
         uint256 shares = _fund(); // slice 10k, depositors 90k
-        _allocate(1, 30_000 * U); // a book that will not mark
-        uint256 id = _request(alice, shares / 2); // 45k at a fresh price
+        _allocate(1, 30_000 * U); // a book that does not mark
+        uint256 id = _request(alice, shares / 2); // 45k
+        uint256 dep = _requestDeposit(bob, 9_000 * U);
         (, uint64 ends,,,) = pool.queue();
         vm.warp(uint256(ends) + 1 days);
-        pool.processEpoch(); // stale: the 30k claim valued at 0 for the fills, 10k of it on the slice
-        assertApproxEqAbs(pool.claimable(id), 35_000 * U, 1, "half of (90k - (30k - 10k))");
-        assertApproxEqAbs(pool.convertToAssets(pool.balanceOf(alice)), 55_000 * U, 1, "the holders left keep the rest");
+        pool.processEpoch(); // stale: the depositors' exposure to the book is 30k - 10k = 20k of their 90k
+        assertApproxEqAbs(pool.claimable(id), 35_000 * U, 1, "7/9 of 45k: the part backed by fresh books");
+        uint64 depEpoch = pool.depositInfo(dep).epoch;
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(InsurancePool.EpochNotProcessed.selector, depEpoch));
+        pool.claimDeposit(dep); // deferred: no stale price
+        _markValue(1, 30_000 * U); // the book marks, unchanged
+        _process(); // the next epoch: fresh, the rest fills and bob's deposit is minted at this price
+        pool.claim(id);
+        (, uint256 reserved,,,) = pool.ledger();
+        assertEq(reserved, 0);
+        assertApproxEqAbs(usdc.balanceOf(alice), 45_000 * U, 2, "alice: her full 45k, no value moved");
+        assertApproxEqAbs(pool.convertToAssets(_claimDeposit(dep)), 9_000 * U, 2, "bob bought at the fresh price");
+        _checkLedger();
+    }
+
+    /// @notice NEW-1 bound: past STALE_BOUND (30 days) after the epoch end, the queued rest fills at the last value with a
+    ///         50% haircut on the depositors' stale exposure, and deferred deposits are refunded (exits never wait for good).
+    function test_staleProcessing_pastTheBound_haircutFill_depositRefunded() public {
+        uint256 shares = _fund();
+        _allocate(1, 30_000 * U);
+        uint256 id = _request(alice, shares / 2);
+        uint256 dep = _requestDeposit(bob, 9_000 * U);
+        (, uint64 ends,,,) = pool.queue();
+        vm.warp(uint256(ends) + 1 days);
+        pool.processEpoch();
+        vm.warp(uint256(ends) + pool.STALE_BOUND());
+        _requestDeposit(carol, 1 * U); // something to process
+        (, uint64 ends2,,,) = pool.queue();
+        if (block.timestamp < uint256(ends2) + 1 days) vm.warp(uint256(ends2) + 1 days);
+        pool.processEpoch();
+        // the rest: 2/9 of the request (10k worth) at (D - 10k) / D
+        uint256 got = pool.claimable(id);
+        assertGt(got, 35_000 * U, "the rest filled");
+        assertLt(got, 45_000 * U, "with the haircut");
+        assertEq(_claimDeposit(dep), 0, "refunded");
+        assertEq(usdc.balanceOf(bob), 9_000 * U);
         _checkLedger();
     }
 

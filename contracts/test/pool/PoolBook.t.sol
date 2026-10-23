@@ -54,38 +54,68 @@ contract PoolBookTest is PoolBookFixture {
         assertEq(book.unfundedClaims(), 0, "a debt not yet due is not reserved cash");
     }
 
-    /// @notice Pool audit 2026-10-23 A-M2: the pool cannot fund the IF now (here its market cap): the window never waits
-    ///         on it; the tranches raised enough, so the IF is raised from them (the window re-run the old way).
-    function test_closeWindow_poolCannotFund_fallsBackToTheTranches() public {
+    /// @notice Fix round 2 (V-3): the pool cannot fund the IF now (here its market cap): the window waits (closeWindow
+    ///         reverts, retried) until CLOSE_WINDOW_TIMEOUT, so nobody picks the outcome at an instant; then it is
+    ///         cancelled (refunds 1:1): no silent switch to a tranche-funded IF.
+    function test_closeWindow_poolCannotFund_waits_thenCancels() public {
         vm.prank(timelock);
         pool.setParam("marketCapBps", 100); // 1% of 1.12M = 11.2k < 25k
         _subscribeDefault();
         vm.warp(book.subscriptionEnds());
+        uint64 until = book.subscriptionEnds() + uint64(book.CLOSE_WINDOW_TIMEOUT());
+        vm.expectRevert(abi.encodeWithSelector(Book.InsurancePoolCannotFund.selector, until));
+        book.closeWindow();
+        vm.warp(until);
+        vm.expectEmit(true, false, false, true, address(book));
+        emit IBook.BookCancelled(BOOK_ID, "POOL_UNFUNDED");
+        book.closeWindow();
+        assertEq(uint8(book.state()), uint8(BRTypes.BookState.Cancelled), "commitments refundable 1:1");
+        assertEq(pool.bookPosition(BOOK_ID).book, address(0), "nothing allocated");
+    }
+
+    /// @notice V-3: a pool that has room again before the timeout funds the book: the first successful close decides.
+    function test_closeWindow_poolCannotFund_thenHasRoom_poolFunds() public {
+        vm.prank(timelock);
+        pool.setParam("marketCapBps", 100);
+        _subscribeDefault();
+        vm.warp(book.subscriptionEnds());
+        vm.expectRevert();
+        book.closeWindow();
+        vm.prank(timelock);
+        pool.setParam("marketCapBps", 3000);
+        book.closeWindow();
+        assertEq(book.insurancePool(), address(pool));
+    }
+
+    /// @notice V-3: only a charter that opted in (ifPoolFallback) has its IF raised from the tranches, after the timeout.
+    function test_closeWindow_optedInFallback_afterTheTimeout() public {
+        BRTypes.Charter memory c = _poolCharter();
+        c.ifPoolFallback = true;
+        _deployPoolBook(c);
+        cfg.setInsurancePool(address(0));
+        _subscribeDefault();
+        vm.warp(book.subscriptionEnds());
+        vm.expectRevert();
+        book.closeWindow();
+        vm.warp(uint256(book.subscriptionEnds()) + book.CLOSE_WINDOW_TIMEOUT());
+        vm.expectRevert(); // cancelStuckWindow cannot pre-empt a close the charter accepted
+        book.cancelStuckWindow();
         vm.expectEmit(true, false, false, true, address(book));
         emit Book.InsuranceFallback(BOOK_ID, "POOL_UNFUNDED");
         book.closeWindow();
         _assertFundedTheOldWay();
     }
 
-    function test_closeWindow_poolUnset_fallsBackToTheTranches() public {
-        cfg.setInsurancePool(address(0));
+    /// @notice V-3: cancelStuckWindow cannot pre-empt a pool-funded close (until twice the timeout, for a venue that
+    ///         keeps reverting).
+    function test_cancelStuckWindow_cannotPreemptAPoolFundedClose() public {
         _subscribeDefault();
-        vm.warp(book.subscriptionEnds());
-        book.closeWindow();
-        _assertFundedTheOldWay();
-    }
-
-    /// @notice A-M2: the pool cannot fund it and the tranches did not raise the IF either: cancelled cleanly at once.
-    function test_closeWindow_poolCannotFund_tranchesNeither_cancelledCleanly() public {
-        vm.prank(timelock);
-        pool.setParam("marketCapBps", 100);
-        _deposit(junior, sponsor, 20_000e6); // 20k raised < the 25k IF
-        vm.warp(book.subscriptionEnds());
-        vm.expectEmit(true, false, false, true, address(book));
-        emit IBook.BookCancelled(BOOK_ID, "POOL_UNFUNDED");
-        book.closeWindow();
-        assertEq(uint8(book.state()), uint8(BRTypes.BookState.Cancelled), "commitments refundable 1:1");
-        assertEq(pool.bookPosition(BOOK_ID).book, address(0), "nothing allocated");
+        vm.warp(uint256(book.subscriptionEnds()) + book.CLOSE_WINDOW_TIMEOUT());
+        vm.expectRevert();
+        book.cancelStuckWindow();
+        vm.warp(uint256(book.subscriptionEnds()) + 2 * book.CLOSE_WINDOW_TIMEOUT());
+        book.cancelStuckWindow();
+        assertEq(uint8(book.state()), uint8(BRTypes.BookState.Cancelled));
     }
 
     /// @dev Live, IF 25k + MM 75k raised from the tranches (S 70k, J 30k), no pool position, no premium.
@@ -111,13 +141,13 @@ contract PoolBookTest is PoolBookFixture {
         book.closeWindow();
     }
 
-    function test_closeWindow_poolAllocationsPaused_fallsBackToTheTranches() public {
+    function test_closeWindow_poolAllocationsPaused_waits() public {
         vm.prank(guardian);
         pool.setPaused(false, true);
         _subscribeDefault();
         vm.warp(book.subscriptionEnds());
+        vm.expectRevert();
         book.closeWindow();
-        _assertFundedTheOldWay();
     }
 
     // ------------------------------------------------------------------ NAV: the pool's IF is a senior debt
@@ -164,6 +194,28 @@ contract PoolBookTest is PoolBookFixture {
         assertEq(value, 5_000e6, "the pool's claim: all the book holds");
         assertEq(pool.bookPosition(BOOK_ID).claim, 5_000e6);
         assertEq(pool.firstLossAssets(), POOL_FIRST_LOSS - 20_000e6, "the shortfall, first-loss slice first");
+    }
+
+    /// @notice Fix round 2 (Info 4): redemptions are never blocked by the pool's minimum own capital; once they take the
+    ///         book below it, Book.capitalShort() reads true (risk and the agent hold the book reduce-only) until the
+    ///         capital is back above it.
+    function test_capitalShort_redemptionsBelowTheMinimum_flagged_exitsNotBlocked() public {
+        vm.prank(timelock);
+        pool.setParam("minOwnCapitalBps", 20_000); // the tranches must hold 2x the IF: 50k
+        _goLivePool();
+        assertFalse(book.capitalShort(), "75k of own capital");
+        vm.prank(alice);
+        senior.requestRedeem(30_000e6, alice, alice); // never refused
+        vm.prank(keeper);
+        vault.recall(BRTypes.ACCOUNT_MM, 30_000e6);
+        _applyPoolMark(); // the redemption is funded: own capital 45k
+        assertEq(book.unfundedOf(BRTypes.SENIOR), 0, "alice's exit filled");
+        assertTrue(book.capitalShort(), "below the minimum: reduce-only");
+        vm.prank(alice);
+        senior.claimRedemption(alice, alice);
+        venue.setMmValue(45_000e6 + 10_000e6); // a gain of 10k on the 45k left at the venue
+        _applyPoolMark();
+        assertFalse(book.capitalShort(), "back above the minimum");
     }
 
     /// @notice Review N2-2: a shortfall taken on a mark value is provisional. A dip, then a recovery: the pool is restored
@@ -404,11 +456,11 @@ contract PoolBookTest is PoolBookFixture {
     /// @notice m-6, the pre-fix signing for the record (venue IF only, the recall in flight left out): the in-flight IF
     ///         reads as a 25k draw, which TIGHTENS the Backstop cap at that mark (25k less cover for Senior's MM loss; the
     ///         pool's claim is unaffected), and the next mark after repayment re-offers the cover.
-    /// @notice Pool audit 2026-10-23: the ledger is cumulative, so the conservative misreading sticks: the 25k the old
-    ///         signing read as an IF draw within the MM loss is booked as Senior's insurance-debt impairment and is not
-    ///         re-offered after the IF lands (the debt being due, a later fall of the draw is a repayment, never read as
-    ///         an IF recovery). The Backstop pays less, never more; the current mark service signs the IF in transit.
-    function test_m6_preFixSigning_readsTheRecallAsADraw_conservativeForGood() public {
+    /// @notice Pool audit fix round 2: the IF draw is exact (IF deployed - IF returned to the vault - signed equity), so
+    ///         the old signing's misreading (the IF in flight read as a 25k draw: less cover at that mark) is a draw that
+    ///         reverses once the IF lands (returned): an IF recovery that restores Senior's IF impairment, and the cover is
+    ///         re-offered at the next mark. The Backstop never pays more.
+    function test_m6_preFixSigning_readsTheRecallAsADraw_reversedOnLanding() public {
         (uint256 bal,) = _recallIfInFlightWithMmLoss();
         vm.warp(((block.timestamp / INTERVAL) + 1) * INTERVAL);
         uint256 id = _commitMark(_nextPeriodEnd(), venue.deployedValueUsd(), book.flowNonce(), false, venue.ifEquity());
@@ -421,7 +473,7 @@ contract PoolBookTest is PoolBookFixture {
         venue.landIf();
         book.fundClaims();
         _applyPoolMark();
-        assertEq(bal - usdc.balanceOf(address(backstop)), 27_500e6, "never re-offered: the ledger only ever errs low");
+        assertEq(bal - usdc.balanceOf(address(backstop)), 52_500e6, "re-offered once the IF is back");
         (debt,,) = _debt();
         assertEq(debt, 0, "the pool repaid in full on landing");
     }
@@ -743,12 +795,12 @@ contract PoolBookTest is PoolBookFixture {
 
     /// @notice B-H1 recommendation 3 / owner ruling N-1, cumulative and in any path: over a sequence of marks (IF draws and
     ///         MM moves in any order), a fee distribution and the whole wind-down to retirement, the Backstop never covers
-    ///         more than on the same book whose IF was never drawn (runs both paths from one snapshot). Its repayments
-    ///         can come later: an exhausted book's later gains restore the pool's provisional shortfall first (N2-2, the
-    ///         IF is the book's senior debt), which the Backstop's cash never funds.
+    ///         more, never ends shorter net of its repayments, and Senior never ends better off, than on the same book
+    ///         whose IF was never drawn (runs both paths from one snapshot; fix round 2: V-1, V-2 included).
     function testFuzz_N1_cumulative_backstopNeverPaysMoreThanWithoutTheIfDraws(
         uint256[3] memory mm,
         uint256[3] memory ifLeft,
+        uint256[2] memory windDown,
         uint256 gross
     ) public {
         _goLivePool();
@@ -759,43 +811,68 @@ contract PoolBookTest is PoolBookFixture {
             ifLeft[i] = bound(ifLeft[i], 0, 25_000e6);
             if (i > 0 && ifLeft[i] > ifLeft[i - 1]) ifLeft[i] = ifLeft[i - 1]; // bad debt only draws the IF
         }
+        windDown[0] = bound(windDown[0], 0, 120_000e6); // the MM at a wind-down mark (debt due)
+        windDown[1] = bound(windDown[1], 0, ifLeft[2]); // the IF left after wind-down bad debt (V-2)
         uint256 s0 = vm.snapshotState();
-        uint256 withDraws = _runPath(mm, ifLeft, gross, true);
+        PathResult memory a = _runPath(mm, ifLeft, windDown, gross, true);
         vm.revertToState(s0);
-        uint256 without = _runPath(mm, ifLeft, gross, false);
-        assertLe(withDraws, without, "the Backstop covered part of the insurance debt");
+        PathResult memory b = _runPath(mm, ifLeft, windDown, gross, false);
+        assertLe(a.covered, b.covered, "the Backstop covered part of the insurance debt");
+        // fix round 2 (V-1, V-2): net of its repayments, after retirement, the Backstop is never shorter
+        assertLe(a.backstopNet, b.backstopNet, "the Backstop ended shorter than without the IF draws");
+        assertLe(a.senior, b.senior, "Senior ended better off than without the IF draws");
     }
 
-    /// @dev One path to retirement; returns the cover the Backstop paid (gross, MarkSettled.backstopCovered summed).
-    function _runPath(uint256[3] memory mm, uint256[3] memory ifLeft, uint256 gross, bool draws)
-        internal
-        returns (uint256)
-    {
-        uint256 covered;
+    struct PathResult {
+        uint256 covered; // gross cover (MarkSettled.backstopCovered summed)
+        uint256 backstopNet; // the Backstop's net outflow after retirement (cover - repayments)
+        uint256 senior; // Senior NAV after retirement
+    }
+
+    /// @dev One path to retirement: three Live marks (a fee distribution after the second), a wind-down mark with the
+    ///      debt due, then the full recall and the final mark.
+    function _runPath(
+        uint256[3] memory mm,
+        uint256[3] memory ifLeft,
+        uint256[2] memory windDown,
+        uint256 gross,
+        bool draws
+    ) internal returns (PathResult memory res) {
+        uint256 bal0 = usdc.balanceOf(address(backstop));
         for (uint256 i; i < 3; ++i) {
             venue.setMmValue(mm[i]);
             venue.setIfEquity(draws ? ifLeft[i] : 25_000e6);
             _applyPoolMark();
-            covered += book.lastMarkSummary().backstopCovered;
+            res.covered += book.lastMarkSummary().backstopCovered;
             if (i == 1 && gross > 0) _distribute(gross, 0);
             _checkLedgerInvariants();
         }
         charterC.retire(BOOK_ID);
+        vm.prank(keeper);
+        vault.recall(BRTypes.ACCOUNT_IF, 1); // due
+        venue.setMmValue(windDown[0]);
+        if (draws) venue.setIfEquity(windDown[1] > 0 ? windDown[1] - 1 : 0); // wind-down bad debt (the unit recalled)
+        _applyPoolMark();
+        res.covered += book.lastMarkSummary().backstopCovered;
+        _checkLedgerInvariants();
         vm.startPrank(keeper);
         uint256 ifEq = venue.ifEquity();
-        vault.recall(BRTypes.ACCOUNT_IF, ifEq > 0 ? ifEq : 1);
+        if (ifEq > 0) vault.recall(BRTypes.ACCOUNT_IF, ifEq);
         if (venue.mmValue() > 0) vault.recall(BRTypes.ACCOUNT_MM, venue.mmValue());
         vm.stopPrank();
         book.fundClaims();
         _applyPoolMark(); // deployed 0
-        covered += book.lastMarkSummary().backstopCovered;
+        res.covered += book.lastMarkSummary().backstopCovered;
         book.finalizeRetirement();
         _checkLedgerInvariants();
-        return covered;
+        uint256 bal = usdc.balanceOf(address(backstop));
+        res.backstopNet = bal0 > bal ? bal0 - bal : 0;
+        (res.senior,) = book.trancheNav();
     }
 
     /// @dev The ledger's invariants: IF impairment within the impairment, the cover within Senior NAV and the Backstop
-    ///      debt, the claim within the debt, and a shortfall only once the tranches hold no own capital.
+    ///      debt, the claim within the debt, Senior's deferred IF share within the pool's shortfall, and a shortfall only
+    ///      with Junior empty.
     function _checkLedgerInvariants() internal view {
         (uint256 impIf,, uint256 cover,) = book.insuranceLedger();
         (uint256 s, uint256 j) = book.trancheNav();
@@ -805,9 +882,9 @@ contract PoolBookTest is PoolBookFixture {
         assertLe(cover, s, "cover <= S");
         assertLe(cover, bsDebt, "cover <= backstopDebt");
         assertLe(value, debt, "claim <= debt");
+        assertLe(book.seniorIfDeferred(), debt - value, "deferred <= shortfall");
         if (value < debt && uint8(book.state()) != uint8(BRTypes.BookState.Retired)) {
             assertEq(j, 0, "a shortfall only with Junior empty");
-            assertEq(s, cover, "... and Senior holding only cover");
         }
     }
 
