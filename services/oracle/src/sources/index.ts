@@ -116,6 +116,8 @@ export function buildSources(cfg: OracleConfig, log: Logger, now: () => number =
         sequencerGraceMs: cfg.ORACLE_SEQUENCER_GRACE_MS,
         readIntervalMs: cfg.cadence.chainlinkReadMs,
         tokenStateIntervalMs: cfg.cadence.tokenStateReadMs,
+        // event mode only with a subscription endpoint (index.ts wires it; setPushMode follows its state)
+        ...(cfg.chainlinkWsUrl ? { eventIntervalMs: cfg.cadence.chainlinkEventReadMs, aggregatorResolveMs: cfg.cadence.aggregatorResolveMs } : {}),
         ...(onBlockTimestamp ? { onBlockTimestamp } : {}),
       }),
     );
@@ -123,7 +125,9 @@ export function buildSources(cfg: OracleConfig, log: Logger, now: () => number =
       {
         feeds: Object.fromEntries(Object.entries(feeds).map(([t, f]) => [t, { proxy: f.proxy, basis: f.basis, token: f.token, maxAgeMs: f.maxAgeMs }])),
         multicall: multicall ?? null,
+        subscription: !!cfg.chainlinkWsUrl, // never the URL (it carries the key)
         readIntervalMs: cfg.cadence.chainlinkReadMs,
+        eventReadMs: cfg.chainlinkWsUrl ? cfg.cadence.chainlinkEventReadMs : null,
         tokenStateIntervalMs: cfg.cadence.tokenStateReadMs,
       },
       "Chainlink source enabled (per-token feeds divided by uiMultiplier; run source-check before mainnet)",

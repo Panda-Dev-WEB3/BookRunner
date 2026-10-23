@@ -102,7 +102,8 @@ ANTHROPIC_API_KEY=<key>                                # charter jury
 # ORACLE_DEX_TWAP_SEC=600                               # overrides every pool's twapSec; 300-3600 on mainnet
 # ORACLE_DEX_MAX_AGE_MS=120000                          # mainnet default; at most 120000, at least 2 x ORACLE_DEX_READ_MS
 # RPC cadence (section 5 "RPC budget"; mainnet defaults, bounded at startup):
-# ORACLE_CHAINLINK_READ_MS=10000 ORACLE_TOKEN_STATE_READ_MS=10000 ORACLE_DEX_READ_MS=60000 ORACLE_HEAD_READ_MS=30000
+# ORACLE_CHAINLINK_READ_MS=10000 ORACLE_CHAINLINK_EVENT_READ_MS=300000 ORACLE_TOKEN_STATE_READ_MS=60000 ORACLE_DEX_READ_MS=60000 ORACLE_HEAD_READ_MS=60000
+# RHC_WS_URL=wss://<rpc>/<key>                        # log subscriptions; default derived from an Alchemy RHC_RPC_URL; off = polling
 # ALERT_ORACLE_PRIMARY_LAG_SECONDS=600                  # services/alerts: suspect-stale gap duration in session
 # ORACLE_DEX_RPC_URL=https://<rpc>                      # default ORACLE_CHAINLINK_RPC_URL, else RPC_URL
 # optional extra confirm source, only if bought (never counts for signing; licence VERIFY C6):
@@ -151,55 +152,73 @@ dev.ts starts the new books' agents within seconds; archive the updated record. 
 ## 5. RPC budget
 
 The mainnet RPC (Alchemy) bills every JSON-RPC call by compute units (CU), **each call inside an HTTP batch
-too**: eth_call 26, eth_getLogs 75, eth_getBlockByNumber 16, eth_blockNumber 10, eth_getBalance 20. What saves CU
-is fewer calls: Multicall3 `aggregate3` folds many views into ONE eth_call, and nothing is polled faster than it
-needs to be.
+too**: eth_call 26, eth_getLogs 75, eth_getBlockByNumber 16, eth_blockNumber 10, eth_getBalance 20 (the owner's
+plan; Alchemy's public table lists eth_getLogs 60 and eth_getBlockByNumber 20). WebSocket subscriptions are billed by
+the bytes delivered (0.04 CU per byte, ~40 CU for a typical log) plus 10 CU per `eth_subscribe`, never per poll: idle,
+a filtered log subscription costs nothing. Three things save CU: Multicall3 `aggregate3` folds many views into ONE
+eth_call, log subscriptions replace polling where an event says when to read, and nothing polls faster than it needs.
 
-| 0 books, 5 tickers | calls/s | CU/s |
-|---|---|---|
-| Before (measured 2026-10-23, 7 min) | ~49 | ~1,270 |
-| After (computed from the cadences below) | ~0.5 | ~15 |
+| 5 tickers | calls/s | CU/s | CU / 30 days |
+|---|---|---|---|
+| Before, 0 books (measured 2026-10-23, 7 min) | ~49 | ~1,270 | ~3.3 billion |
+| After, 0 books, polling only (no WebSocket endpoint) | ~0.5 | ~15 | ~38 million |
+| After, 0 books, log subscriptions up | ~0.2 | ~6 | ~16 million |
+| After, + 1 book in Subscription (subscriptions up) | | ~14 | ~36 million |
+| After, + 1 Live book (subscriptions up) | | ~55 | ~140 million |
 
 Before: the oracle read each ticker's Chainlink round and Stock Token state (4 views) and each DEX pool (slot0,
 liquidity, observe + the token's 4 views) every 1 s tick as separate calls (~44 calls/s, ~1,140 CU/s), plus a head
 `eth_getBlockByNumber` per tick, the indexer every 2 s, and `BookFactory.bookIds()` every 5 s in four services.
 
-| After, per service | Reads | calls/s | CU/s |
-|---|---|---|---|
-| oracle, Chainlink | ONE `aggregate3` per pass (sequencer, every round, decimals once, every token state, block timestamp), every `ORACLE_CHAINLINK_READ_MS` 10 s | 0.10 | 2.6 |
-| oracle, DEX TWAP | block + ONE `aggregate3` (every pool + its token at that block) + one for the rings that moved, every `ORACLE_DEX_READ_MS` 60 s | 0.03-0.05 | 0.7-1.1 |
-| oracle, head / universe | head clock fed by every pass (`ORACLE_HEAD_READ_MS` 30 s, never reached); signer + minSources every 60 s; band every 10 min | 0.02 | 0.5 |
-| indexer | `eth_blockNumber` + ONE `eth_getLogs` (protocol + every watched book) every `INDEXER_POLL_MS` 12 s | 0.17 | 7.1 |
-| ops-venue | `bookIds()` every `OPS_BOOK_POLL_MS` 60 s; log / report / fee loops idle without an Orderly book | 0.02 | 0.4 |
-| risk | `bookIds()` every `RISK_BOOKS_REFRESH_MS` 60 s | 0.02 | 0.4 |
-| mark, waterfall | `bookIds()` every `BOOKS_REFRESH_SECONDS` 60 s each; no head read without a book; buyback / pool epoch every `WATERFALL_PROTOCOL_DUTY_SECONDS` 300 s | 0.04 | 1.0 |
-| alerts | head + role balances (Multicall3 `getEthBalance`, one call) + buybackPending every 60 s; markInterval hourly | 0.05 | 1.1 |
-| charter | jury fallback scan every `JURY_POLL_MS` 60 s; committee sync every `COMMITTEE_SYNC_MS` 300 s | 0.02 | 0.6 |
-| **Total** | | **~0.5** | **~15** |
+| After, 0 books, per service | Reads (subscriptions up; polling in brackets) | CU/s |
+|---|---|---|
+| oracle, Chainlink | ONE `aggregate3` per pass (sequencer, every round, decimals once, due token states, block timestamp, aggregators every 10 min). A pass on every `AnswerUpdated` / `NewRound` of a feed's aggregator or `UIMultiplierUpdated` of a token, and every 60 s (token states due; every 10 s for a token in a split window or paused); safety re-read `ORACLE_CHAINLINK_EVENT_READ_MS` 5 min. [every `ORACLE_CHAINLINK_READ_MS` 10 s, token states in every pass] | 0.5 [2.6] |
+| oracle, DEX TWAP | block + ONE `aggregate3` (every pool + its token at that block) + one for the rings that moved, every `ORACLE_DEX_READ_MS` 60 s | 0.7-1.1 |
+| oracle, head / universe | head clock fed by every pass (`ORACLE_HEAD_READ_MS` 60 s); signer + minSources every 60 s; band every 10 min | 0.5 |
+| indexer | a step (`eth_blockNumber` + ONE `eth_getLogs`: protocol + every watched book) after each notification of a watched contract, and every `INDEXER_WS_SAFETY_POLL_MS` 120 s [every `INDEXER_POLL_MS` 12 s] | 0.7 [7.1] |
+| ops-venue | `bookIds()` every `OPS_BOOK_POLL_MS` 60 s; log / report / fee loops idle without an Orderly book | 0.4 |
+| risk | `bookIds()` every `RISK_BOOKS_REFRESH_MS` 60 s | 0.4 |
+| mark, waterfall | `bookIds()` every `BOOKS_REFRESH_SECONDS` 60 s each; no head read without a book; buyback / pool epoch every `WATERFALL_PROTOCOL_DUTY_SECONDS` 300 s | 1.0 |
+| alerts | head + role balances (Multicall3 `getEthBalance`, one call) + buybackPending every 60 s; markInterval hourly | 1.1 |
+| charter | jury fallback scan every `JURY_POLL_MS` 60 s; committee sync every `COMMITTEE_SYNC_MS` 300 s | 0.6 |
+| **Total** | | **~6 [~15]** |
 
-The indexer is half of it: `INDEXER_POLL_MS` 20000 would save ~3 CU/s.
+**Per book.** A book in Subscription adds ~8 CU/s (ops-venue state + IF binding every 60 s and adapter / mandate logs
+every `OPS_LOG_POLL_MS` 30 s in ONE `eth_getLogs`, ~2.8 of it; mark and waterfall snapshots every 60 s). A **Live**
+book adds ~40 CU/s more, deliberately not slowed down: risk ticks every `RISK_INTERVAL_MS` 2 s (kill-path latency; its
+views share one `aggregate3` per round, 2-3 rounds per tick), the agent reads its mandate every
+`AGENT_STATE_REFRESH_MS` 5 s, and ops-venue signs a venue report every `OPS_REPORT_INTERVAL_MS` 15 s (risk values
+Orderly exposure with it). Lengthening any of these is an owner decision.
 
-**Per book (not in the totals above).** A book in Subscription adds ~8 CU/s (ops-venue state + IF binding every
-60 s and adapter / mandate logs every `OPS_LOG_POLL_MS` 30 s in ONE `eth_getLogs`; mark and waterfall snapshots
-every 60 s). A **Live** book adds ~40 CU/s more, deliberately not slowed down: risk ticks every `RISK_INTERVAL_MS`
-2 s (kill-path latency; its views share one `aggregate3` per round, 2-3 rounds per tick), the agent reads its mandate
-every `AGENT_STATE_REFRESH_MS` 5 s, and ops-venue signs a venue report every `OPS_REPORT_INTERVAL_MS` 15 s (risk
-values Orderly exposure with it). Lengthening any of these is an owner decision.
+**Log subscriptions are triggers, never a data source.** The indexer still indexes with its canonical `eth_getLogs`
+range up to `head - INDEXER_CONFIRMATIONS` (2); a notification only makes that step run within ~1 s (retried until the
+log's block is confirmed), so a missed notification, a reorg or a dead socket costs latency (at most the 120 s safety
+step), never data; on (re)connect it catches up from its cursor at once. The oracle still reads the feed with its pass
+and applies the same staleness rules (heartbeat + grace in session); an event only makes the pass happen at the next
+tick. No `newHeads` subscription (Robinhood Chain makes several blocks per second, each one billed). The socket is
+kept alive with WebSocket ping frames (no JSON-RPC call); no pong for 90 s reconnects. While a subscription is down,
+the service polls at the bracketed cadence above and says so in its log.
 
-**Freshness.** The oracle still signs every `ORACLE_TICK_MS` 1 s from the last pass (no RPC), so
-signed prices stay as fresh as before for risk (`RISK_QUOTE_PRICE_MAX_AGE_MS` 15 s), ops-venue's builder push
-(re-sends a price at most 3 ticks old, at least 1/s) and consumers (`maxTradePriceAge`). A new Chainlink round
-(0.5% deviation, 24 h heartbeat) is picked up within 10 s instead of 1 s. The DEX TWAP (1800 s window) confirms with
-a pass up to 60 s old (`ORACLE_DEX_MAX_AGE_MS` 120 s on mainnet). Stock Token state rides in every Chainlink
-`aggregate3` (no extra CU); with a longer `ORACLE_TOKEN_STATE_READ_MS` a token is still read at every pass while
-its `effectiveAt` is within 10 minutes or its `oraclePaused` is set, and a change that became active after the cached
-read forces a new pass and drops the observation until a post-change read (audit M-2: split windows fail closed).
+**Freshness.** The oracle still signs every `ORACLE_TICK_MS` 1 s from the last pass (no RPC), so signed prices stay
+as fresh as before for risk (`RISK_QUOTE_PRICE_MAX_AGE_MS` 15 s), ops-venue's builder push (re-sends a price at most
+3 ticks old, at least 1/s) and consumers (`maxTradePriceAge`). A new Chainlink round (0.5% deviation, 24 h heartbeat)
+is picked up at the next tick after its `AnswerUpdated` (within 10 s while polling; within 60 s if a notification were
+missed). The DEX TWAP (1800 s window) confirms with a pass up to 60 s old (`ORACLE_DEX_MAX_AGE_MS` 120 s on mainnet).
+Stock Token state (audit M-2): read on its `UIMultiplierUpdated` (VERIFY T2: the event is in the token ABI), at least
+every `ORACLE_TOKEN_STATE_READ_MS` 60 s, at every pass (10 s) while its `effectiveAt` is within 10 minutes or its
+`oraclePaused` is set (no event is known for the pause), and a change that became active after the cached read forces a
+new pass and drops the observation until a post-change read (split windows fail closed). While polling, the states
+ride every pass.
 
-**Configuration.** `scripts/network-profile.ts` `MAINNET_RPC_DEFAULTS` sets the non-oracle cadences unless
-`mainnet.env` sets them, and the preflight refuses any value outside `MAINNET_RPC_BOUNDS` (e.g. `ORACLE_TICK_MS=100`,
-`INDEXER_POLL_MS=500`, `RISK_INTERVAL_MS` above 5 s) or a broken relation (`MARK_WAIT_SECONDS` must exceed
-`WATERFALL_TICK_SECONDS` + sweep wait + fee-forward wait). The oracle resolves its own cadence per network
-(`services/oracle/src/config.ts` `MAINNET_RPC_CADENCE`; devnet / testnet read every tick, as before) and refuses to
-start outside `MAINNET_RPC_BOUNDS` (`services/oracle/src/production.ts`). Multicall3 is
-`0xcA11bde05977b3631167028862bE2a173976CA11` (packages/shared chains.ts, listed on the mainnet chain only: every
-`publicClientFor(4663)` client batches the views of a round into one `aggregate3`).
+**Configuration.** The WebSocket endpoint is `RPC_WS_URL`, set by the mainnet profile from `RHC_WS_URL`, else derived
+from `RHC_RPC_URL` for Alchemy (`https://` -> `wss://`, same path). It carries the provider key: never logged (dev.ts
+prints only whether subscriptions are on). Another provider needs `RHC_WS_URL`; `RHC_WS_URL=off` forces polling;
+`ORACLE_WS=0` turns off the oracle's subscription alone. `scripts/network-profile.ts` `MAINNET_RPC_DEFAULTS` sets the
+non-oracle cadences unless `mainnet.env` sets them, and the preflight refuses any value outside `MAINNET_RPC_BOUNDS`
+(e.g. `ORACLE_TICK_MS=100`, `INDEXER_POLL_MS=500`, `RISK_INTERVAL_MS` above 5 s, `INDEXER_WS_SAFETY_POLL_MS` above
+10 min) or a broken relation (`MARK_WAIT_SECONDS` must exceed `WATERFALL_TICK_SECONDS` + sweep wait + fee-forward
+wait). The oracle resolves its own cadence per network (`services/oracle/src/config.ts` `MAINNET_RPC_CADENCE`; devnet /
+testnet read every tick, as before, with no subscription) and refuses to start outside `MAINNET_RPC_BOUNDS`
+(`services/oracle/src/production.ts`). Multicall3 is `0xcA11bde05977b3631167028862bE2a173976CA11` (packages/shared
+chains.ts, listed on the mainnet chain only: every `publicClientFor(4663)` client batches the views of a round into one
+`aggregate3`).

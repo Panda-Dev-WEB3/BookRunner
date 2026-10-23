@@ -9,6 +9,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { ADMIN_KEY_OPT_IN, DEV_MNEMONIC, type DevRole, MAINNET_CHAIN_ID, assertDistinctRoleKeys, assertNoMnemonicOnMainnet, devAccount, roleAccount } from "../packages/shared/src/devkeys";
 import { KMS_ENV_FOR_ROLE, SERVICE_ROLES, roleSignerSource } from "../packages/shared/src/signer";
 import { busNames } from "../packages/shared/src/queues";
+import { deriveWsUrl } from "../packages/shared/src/logSubscription";
 
 export type Env = Record<string, string | undefined>;
 
@@ -97,7 +98,25 @@ export const MAINNET_RPC_BOUNDS: Readonly<Record<string, { min: number; max: num
   ORACLE_TOKEN_STATE_READ_MS: { min: 2_000, max: 60_000, why: "audit M-2: Stock Token multiplier state at most 60 s old" },
   ORACLE_DEX_READ_MS: { min: 10_000, max: 60_000, why: "at most half ORACLE_DEX_MAX_AGE_MS (120 s)" },
   ORACLE_HEAD_READ_MS: { min: 1_000, max: 60_000, why: "publishedAt clamp: at most 60 s of extrapolation" },
+  ORACLE_CHAINLINK_EVENT_READ_MS: { min: 60_000, max: 600_000, why: "subscription up: safety re-read of every feed without an event" },
+  ORACLE_AGGREGATOR_RESOLVE_MS: { min: 60_000, max: 3_600_000, why: "a Chainlink phase change must move the subscription" },
+  INDEXER_WS_SAFETY_POLL_MS: { min: 30_000, max: 600_000, why: "subscription up: a step at least this often (a missed notification costs at most this)" },
+  INDEXER_WS_DEBOUNCE_MS: { min: 250, max: 10_000, why: "a notification's block must reach INDEXER_CONFIRMATIONS first" },
 };
+
+/** RHC_WS_URL values that turn the log subscriptions off (polling only). */
+const WS_OFF = new Set(["0", "off", "none", "false"]);
+
+/**
+ * The stack's WebSocket endpoint (RPC_WS_URL for the indexer's and the oracle's log subscriptions): RHC_WS_URL, else
+ * derived from RHC_RPC_URL (Alchemy: wss:// on the same path), null = none (polling; "off" forces that). The URL carries
+ * the provider key, like RHC_RPC_URL: never printed (dev.ts shows only whether it is set).
+ */
+export function mainnetWsUrl(inherited: Env): string | null {
+  const o = inherited.RHC_WS_URL?.trim();
+  if (o && WS_OFF.has(o.toLowerCase())) return null;
+  return deriveWsUrl(inherited.RHC_RPC_URL, o);
+}
 
 /** services/waterfall config defaults the MARK_WAIT_SECONDS relation uses when they are not set */
 const WATERFALL_WAIT_DEFAULTS = { WATERFALL_SWEEP_WAIT_SECONDS: 30, WATERFALL_FEE_FORWARD_WAIT_SECONDS: 45 } as const;
@@ -368,6 +387,9 @@ export function mainnetProfile(inherited: Env, root: string, only: readonly stri
   errors.push(...oracleSourcesProblems(inherited, root));
   const cadence = mainnetRpcCadence(inherited);
   errors.push(...cadence.errors);
+  const ws = mainnetWsUrl(inherited);
+  if (ws && !/^wss:\/\//.test(ws)) errors.push("RHC_WS_URL must be a wss:// URL (the provider key travels in it)");
+  if (ws && isLocal(ws)) errors.push("RHC_WS_URL points at a local node");
 
   const merged: Env = { ...inherited, ...MAINNET_FIXED };
   for (const role of SERVICE_ROLES) {
@@ -414,6 +436,7 @@ export function mainnetProfile(inherited: Env, root: string, only: readonly stri
     ...cadence.env,
     ...MAINNET_FIXED,
     RPC_URL: rpc,
+    ...(ws ? { RPC_WS_URL: ws } : {}),
     DATABASE_URL: `postgres://bookrunner:${pg}@127.0.0.1:54400/bookrunner_mainnet`,
     REDIS_URL: `redis://:${redis}@127.0.0.1:63790/0`,
   };

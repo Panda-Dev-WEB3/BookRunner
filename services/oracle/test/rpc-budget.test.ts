@@ -5,7 +5,7 @@
 // defaults and mainnet bounds hold.
 import { describe, expect, test } from "bun:test";
 import { MULTICALL3_ADDRESS, MULTIPLIER_VECTOR as V, WAD } from "@bookrunner/shared";
-import { type Address, getAddress } from "viem";
+import { type Address, type Hex, getAddress } from "viem";
 import { DEFAULT_RPC_CADENCE, MAINNET_RPC_CADENCE, loadOracleConfig, rpcCadenceFor } from "../src/config";
 import { HeadClock } from "../src/head";
 import { MAINNET_RPC_BOUNDS, productionProblems, rpcCadenceProblems } from "../src/production";
@@ -14,6 +14,7 @@ import { type CachedTokenState, ChainlinkSource, type ResolvedFeed, SPLIT_WINDOW
 import { DexTwapSource, uniswapV3OracleAbi, viemDexReader } from "../src/sources/dex-twap";
 import { FACTORY, USDG, dexPool, liquidityForDepth, sqrtPriceX96At, tickFor } from "./dex-fakes";
 import { FakeRpc } from "./rpc-fakes";
+import { ANSWER_UPDATED_TOPIC, NEW_ROUND_TOPIC, UI_MULTIPLIER_UPDATED_TOPIC, oracleLogFilter, routeOracleLogs } from "../src/subscription";
 
 const TICKERS = ["NVDA", "TSLA", "AAPL", "MSFT", "AMZN"] as const;
 const addr = (n: number) => getAddress(`0x${n.toString(16).padStart(40, "0")}`);
@@ -128,28 +129,40 @@ describe("Chainlink source on mainnet: one Multicall3 aggregate3 per pass", () =
 });
 
 describe("Chainlink source: Stock Token state caching (audit M-2)", () => {
-  test("cached for ORACLE_TOKEN_STATE_READ_MS; read at every pass inside the split window and while paused", async () => {
+  test("event mode: no pass while idle; token states every ORACLE_TOKEN_STATE_READ_MS, every pass in the split window / while paused", async () => {
     const { rpc, feeds, tokens } = chainlinkNode();
     const t0 = rpc.blockTs * 1000;
     let now = t0;
-    const src = new ChainlinkSource(feeds, viemAggregatorReader(rpc.client(), MULTICALL3_ADDRESS), { readIntervalMs: 10_000, tokenStateIntervalMs: 60_000, now: () => now });
+    const src = new ChainlinkSource(feeds, viemAggregatorReader(rpc.client(), MULTICALL3_ADDRESS), {
+      readIntervalMs: 10_000,
+      eventIntervalMs: 300_000,
+      tokenStateIntervalMs: 60_000,
+      now: () => now,
+    });
+    src.setPushMode(true);
     const tick = () => Promise.all(TICKERS.map((t) => src.fetch(t)));
     await tick();
     expect(tokenTargets(rpc, 0).size).toBe(5);
-    now += 10_000;
-    await tick();
-    expect(tokenTargets(rpc, 1).size).toBe(0); // cached
-    // at 60 s the states are due again; this read sees a change staged 5 min ahead (token 0) and a pause (token 1)
+    // no event, nothing due: the pass serves every tick for 60 s, no RPC at all
+    for (let s = 1; s < 60; s++) {
+      now = t0 + s * 1_000;
+      await tick();
+    }
+    expect(rpc.count("eth_call")).toBe(1);
+    // at 60 s the states are due again; this read sees a change staged 6 min ahead (token 0) and a pause (token 1)
     tokens.set(tokenOf(0), { ui: V.uiMultiplierWad, next: V.uiMultiplierWad + 1n, eff: BigInt(rpc.blockTs + 360), paused: false });
     tokens.set(tokenOf(1), { ui: V.uiMultiplierWad, next: V.uiMultiplierWad, eff: 0n, paused: true });
     now = t0 + 60_000;
     await tick();
-    expect(tokenTargets(rpc, 2).size).toBe(5);
+    expect(tokenTargets(rpc, 1).size).toBe(5);
     expect((await src.observe("TSLA")).ok).toBe(false); // paused: no observation
-    // next pass: only the two tokens in the window / paused are read
-    now += 10_000;
+    // from now on a pass every ORACLE_CHAINLINK_READ_MS (10 s), reading only the two tokens in the window / paused
+    now += 9_000;
     await tick();
-    expect(tokenTargets(rpc, 3)).toEqual(new Set([tokenOf(0), tokenOf(1)]));
+    expect(rpc.count("eth_call")).toBe(2);
+    now += 1_000;
+    await tick();
+    expect(tokenTargets(rpc, 2)).toEqual(new Set([tokenOf(0), tokenOf(1)]));
     // the issuer clears the pause: picked up at the next pass
     tokens.set(tokenOf(1), { ui: V.uiMultiplierWad, next: V.uiMultiplierWad, eff: 0n, paused: false });
     now += 10_000;
@@ -157,7 +170,95 @@ describe("Chainlink source: Stock Token state caching (audit M-2)", () => {
     expect((await src.observe("TSLA")).ok).toBe(true);
     now += 10_000;
     await tick();
-    expect(tokenTargets(rpc, 5)).toEqual(new Set([tokenOf(0)])); // TSLA cached again, NVDA still in its window
+    expect(tokenTargets(rpc, 4)).toEqual(new Set([tokenOf(0)])); // TSLA cached again, NVDA still in its window
+  });
+
+  test("event mode: a feed event starts a pass at once; a token event forces that token; down = polling with the token states", async () => {
+    const { rpc, feeds } = chainlinkNode();
+    const t0 = rpc.blockTs * 1000;
+    let now = t0;
+    const src = new ChainlinkSource(feeds, viemAggregatorReader(rpc.client(), MULTICALL3_ADDRESS), { readIntervalMs: 10_000, eventIntervalMs: 300_000, tokenStateIntervalMs: 60_000, now: () => now });
+    src.setPushMode(true);
+    const tick = () => Promise.all(TICKERS.map((t) => src.fetch(t)));
+    await tick();
+    now += 2_000;
+    await tick();
+    expect(rpc.count("eth_call")).toBe(1);
+    src.notifyFeed(); // AnswerUpdated: the next tick reads the new round, even 2 s after the last pass
+    now += 1_000;
+    await tick();
+    expect(rpc.count("eth_call")).toBe(2);
+    expect(tokenTargets(rpc, 1).size).toBe(0); // rounds only: the token states are not due
+    src.notifyToken(tokenOf(3)); // UIMultiplierUpdated
+    now += 1_000;
+    await tick();
+    expect(tokenTargets(rpc, 2)).toEqual(new Set([tokenOf(3)]));
+    // the subscription drops: polling every 10 s, the token states riding every pass (free in the same aggregate3)
+    src.setPushMode(false);
+    now += 10_000;
+    await tick();
+    expect(rpc.count("eth_call")).toBe(4);
+    expect(tokenTargets(rpc, 3).size).toBe(5);
+    // it comes back: one catch-up pass at once
+    src.setPushMode(true);
+    now += 1_000;
+    await tick();
+    expect(rpc.count("eth_call")).toBe(5);
+  });
+
+  test("event mode: the safety re-read (ORACLE_CHAINLINK_EVENT_READ_MS) bounds a missed event (per-share feeds: no token cadence)", async () => {
+    const { rpc, feeds } = chainlinkNode();
+    const perShare = Object.fromEntries(Object.entries(feeds).map(([t, f]) => [t, { ...f, basis: "per-share" as const, token: null }]));
+    const t0 = rpc.blockTs * 1000;
+    let now = t0;
+    const src = new ChainlinkSource(perShare, viemAggregatorReader(rpc.client(), MULTICALL3_ADDRESS), { readIntervalMs: 10_000, eventIntervalMs: 300_000, now: () => now });
+    src.setPushMode(true);
+    await src.fetch("NVDA");
+    now = t0 + 299_000;
+    await src.fetch("NVDA");
+    expect(rpc.count("eth_call")).toBe(1);
+    now = t0 + 300_000;
+    await src.fetch("NVDA");
+    expect(rpc.count("eth_call")).toBe(2);
+  });
+
+  test("aggregators resolved in the pass (free) every aggregatorResolveMs; a phase change moves the event sources", async () => {
+    const { rpc, feeds } = chainlinkNode();
+    const agg = new Map(TICKERS.map((_, i) => [feedOf(i), addr(0xab0 + i)]));
+    TICKERS.forEach((_, i) => rpc.on(feedOf(i), aggregatorV3Abi, "aggregator", () => agg.get(feedOf(i))));
+    // the sequencer feed is not a proxy (aggregator() reverts): its own address is the event source
+    const t0 = rpc.blockTs * 1000;
+    let now = t0;
+    const seen: Array<Map<Address, Address>> = [];
+    const src = new ChainlinkSource(feeds, viemAggregatorReader(rpc.client(), MULTICALL3_ADDRESS), {
+      sequencerFeed: SEQ,
+      sequencerGraceMs: 3_600_000,
+      readIntervalMs: 10_000,
+      eventIntervalMs: 300_000,
+      tokenStateIntervalMs: 60_000,
+      aggregatorResolveMs: 600_000,
+      now: () => now,
+    });
+    src.setAggregatorListener((m) => seen.push(new Map(m)));
+    src.setPushMode(true);
+    await src.fetch("NVDA");
+    expect(rpc.count("eth_call")).toBe(1); // resolved inside the first aggregate3
+    // 5 proxies + the sequencer (its aggregator() reverts: allowFailure) in the same call
+    expect(rpc.aggregates[0]).toHaveLength(1 + 1 + 5 + 5 + 20 + 6);
+    expect(fnsOf(rpc.aggregates[0] ?? []).filter((f) => f === "aggregator")).toHaveLength(5);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.get(feedOf(0))).toBe(addr(0xab0));
+    expect(seen[0]?.get(SEQ)).toBe(SEQ);
+    // inside 10 min: not re-resolved; after it (with the token pass at 60 s cadence): re-resolved, a change reported
+    now = t0 + 60_000;
+    await src.fetch("NVDA");
+    expect(fnsOf(rpc.aggregates[1] ?? []).filter((f) => f === "aggregator")).toHaveLength(0);
+    agg.set(feedOf(2), addr(0xbb2));
+    now = t0 + 600_000;
+    await src.fetch("NVDA");
+    expect(fnsOf(rpc.aggregates[2] ?? []).filter((f) => f === "aggregator")).toHaveLength(5);
+    expect(seen).toHaveLength(2);
+    expect(seen[1]?.get(feedOf(2))).toBe(addr(0xbb2));
   });
 
   test("tokenStateDue / tokenStatePredatesChange (pure rules)", () => {
@@ -292,11 +393,24 @@ describe("DEX TWAP source on mainnet: block + one aggregate3 per pass", () => {
 describe("cadence: per-network defaults, mainnet bounds", () => {
   test("mainnet defaults; devnet / testnet read every tick (unchanged); env overrides; token state follows the Chainlink pass", () => {
     expect(rpcCadenceFor(4663, {})).toEqual(MAINNET_RPC_CADENCE);
-    expect(MAINNET_RPC_CADENCE).toEqual({ chainlinkReadMs: 10_000, tokenStateReadMs: 10_000, dexReadMs: 60_000, dexMaxAgeMs: 120_000, headReadMs: 30_000 });
+    expect(MAINNET_RPC_CADENCE).toEqual({
+      chainlinkReadMs: 10_000,
+      chainlinkEventReadMs: 300_000,
+      aggregatorResolveMs: 600_000,
+      tokenStateReadMs: 60_000,
+      dexReadMs: 60_000,
+      dexMaxAgeMs: 120_000,
+      headReadMs: 60_000,
+    });
     expect(rpcCadenceFor(46630, {})).toEqual(DEFAULT_RPC_CADENCE);
-    expect(rpcCadenceFor(31337, {})).toEqual({ chainlinkReadMs: 0, tokenStateReadMs: 0, dexReadMs: 0, dexMaxAgeMs: 60_000, headReadMs: 0 });
-    expect(rpcCadenceFor(4663, { ORACLE_CHAINLINK_READ_MS: 5_000 }).tokenStateReadMs).toBe(5_000);
-    expect(rpcCadenceFor(4663, { ORACLE_CHAINLINK_READ_MS: 5_000, ORACLE_TOKEN_STATE_READ_MS: 60_000 }).tokenStateReadMs).toBe(60_000);
+    expect(rpcCadenceFor(31337, {})).toEqual({ chainlinkReadMs: 0, chainlinkEventReadMs: 0, aggregatorResolveMs: 0, tokenStateReadMs: 0, dexReadMs: 0, dexMaxAgeMs: 60_000, headReadMs: 0 });
+    expect(rpcCadenceFor(4663, { ORACLE_CHAINLINK_READ_MS: 5_000 })).toMatchObject({ chainlinkReadMs: 5_000, tokenStateReadMs: 60_000 });
+    expect(rpcCadenceFor(4663, { ORACLE_CHAINLINK_EVENT_READ_MS: 120_000 }).chainlinkEventReadMs).toBe(120_000);
+    // the subscription endpoint: RPC_WS_URL, ORACLE_WS=0 turns it off, none off mainnet unless given
+    expect(loadOracleConfig({ CHAIN_ID: "4663", RPC_WS_URL: "wss://x.g.alchemy.com/v2/K" }).chainlinkWsUrl).toBe("wss://x.g.alchemy.com/v2/K");
+    expect(loadOracleConfig({ CHAIN_ID: "4663", RPC_WS_URL: "wss://x.g.alchemy.com/v2/K", ORACLE_WS: "0" }).chainlinkWsUrl).toBeNull();
+    expect(loadOracleConfig({ CHAIN_ID: "46630" }).chainlinkWsUrl).toBeNull();
+    expect(loadOracleConfig({ CHAIN_ID: "4663", RPC_URL: "https://a.example/k", ORACLE_CHAINLINK_RPC_URL: "https://cl.g.alchemy.com/v2/K" }).chainlinkWsUrl).toBe("wss://cl.g.alchemy.com/v2/K");
     const main = loadOracleConfig({ CHAIN_ID: "4663" });
     expect(main.cadence).toEqual(MAINNET_RPC_CADENCE);
     expect(main.ORACLE_DEX_MAX_AGE_MS).toBe(120_000);
@@ -319,6 +433,8 @@ describe("cadence: per-network defaults, mainnet bounds", () => {
     expect(rpcCadenceProblems({ ...base, dexReadMs: 90_000 })[0]).toContain("ORACLE_DEX_READ_MS=90000 outside 10000-60000");
     expect(rpcCadenceProblems({ ...base, dexReadMs: 1_000 })[0]).toContain("ORACLE_DEX_READ_MS=1000");
     expect(rpcCadenceProblems({ ...base, headReadMs: 0 })[0]).toContain("ORACLE_HEAD_READ_MS=0 outside 1000-60000");
+    expect(rpcCadenceProblems({ ...base, chainlinkEventReadMs: 3_600_000 })[0]).toContain("ORACLE_CHAINLINK_EVENT_READ_MS=3600000 outside 60000-600000");
+    expect(rpcCadenceProblems({ ...base, aggregatorResolveMs: 0 })[0]).toContain("ORACLE_AGGREGATOR_RESOLVE_MS=0");
     expect(MAINNET_RPC_BOUNDS.tickMs.min).toBe(1_000);
     // wired into the startup refusal (productionProblems), mainnet only
     const src = (name: string, kind: PriceSource["kind"]): PriceSource => ({ name, kind, fetch: async () => null });
@@ -361,5 +477,19 @@ describe("HeadClock", () => {
     // an older observation never replaces a newer one
     clock.observe(1, now - 1);
     expect(await clock.headTimestamp()).toBe(1_790_000_002);
+  });
+});
+
+describe("oracle log subscription: filter and routing", () => {
+  test("aggregators + tokens, topic0 one of AnswerUpdated / NewRound / UIMultiplierUpdated; events routed to the source", () => {
+    const sources = new Map([[feedOf(0), addr(0xab0)], [SEQ, SEQ]]);
+    const f = oracleLogFilter(sources, [tokenOf(0), tokenOf(0)]);
+    expect(f.address as readonly string[]).toEqual([addr(0xab0).toLowerCase(), SEQ.toLowerCase(), tokenOf(0).toLowerCase()]);
+    expect(f.topics).toEqual([[ANSWER_UPDATED_TOPIC, NEW_ROUND_TOPIC, UI_MULTIPLIER_UPDATED_TOPIC]]);
+    const calls: string[] = [];
+    const sink = { notifyFeed: () => calls.push("feed"), notifyToken: (t: Address) => calls.push(`token:${t}`) };
+    const log = (address: Address, topic: Hex) => ({ address, topics: [topic], data: "0x" as Hex, blockNumber: 1n, transactionHash: null, logIndex: 0, removed: false });
+    routeOracleLogs([log(addr(0xab0), ANSWER_UPDATED_TOPIC), log(addr(0xab0), NEW_ROUND_TOPIC), log(tokenOf(0), UI_MULTIPLIER_UPDATED_TOPIC), log(tokenOf(0), "0x1234" as Hex)], sink, [tokenOf(0)]);
+    expect(calls).toEqual(["feed", "feed", `token:${tokenOf(0)}`]);
   });
 });

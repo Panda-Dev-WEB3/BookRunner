@@ -1,5 +1,5 @@
 // Oracle service configuration: shared base env (baseEnvSchema) + oracle-specific fields.
-import { type ChainPriceConfig, type FeedConfig, baseEnvSchema, feedConfigSchema, feedToken, isMainnet, loadChainPriceConfig } from "@bookrunner/shared";
+import { type ChainPriceConfig, type FeedConfig, baseEnvSchema, deriveWsUrl, feedConfigSchema, feedToken, isMainnet, loadChainPriceConfig } from "@bookrunner/shared";
 import { getAddress } from "viem";
 import { z } from "zod";
 import { ORACLE_POLICIES, type OraclePolicy } from "./domain/types";
@@ -194,11 +194,26 @@ export const oracleEnvShape = {
   ORACLE_DEX_READ_MS: z.coerce.number().int().min(0).max(300_000).optional(),
   /** Chain head (publishedAt clamp) reused, extrapolated, for this long; every batched pass also refreshes it. 0 = read every tick. */
   ORACLE_HEAD_READ_MS: z.coerce.number().int().min(0).max(300_000).optional(),
+  /**
+   * Log subscription (RPC_WS_URL, shared logSubscription.ts) on the feeds' aggregators (AnswerUpdated / NewRound) and
+   * the Stock Tokens (UIMultiplierUpdated): a Chainlink pass on each event instead of every ORACLE_CHAINLINK_READ_MS.
+   * Default on; without RPC_WS_URL (devnet / testnet) or while the subscription is down: polling.
+   */
+  ORACLE_WS: flag(true),
+  /** Event mode: safety re-read of every feed even without an event (a missed notification never leaves a price stale). */
+  ORACLE_CHAINLINK_EVENT_READ_MS: z.coerce.number().int().min(0).max(3_600_000).optional(),
+  /** Event mode: each proxy's aggregator() (the event source) is re-resolved this often (Chainlink phase changes). */
+  ORACLE_AGGREGATOR_RESOLVE_MS: z.coerce.number().int().min(0).max(86_400_000).optional(),
 };
 
 /** The oracle's RPC cadence (ms) on one network. */
 export interface RpcCadence {
+  /** poll mode (no subscription): Chainlink pass reuse */
   chainlinkReadMs: number;
+  /** event mode: safety re-read without an event */
+  chainlinkEventReadMs: number;
+  aggregatorResolveMs: number;
+  /** event mode (poll mode: every pass) */
   tokenStateReadMs: number;
   dexReadMs: number;
   dexMaxAgeMs: number;
@@ -206,27 +221,57 @@ export interface RpcCadence {
 }
 
 /**
- * Mainnet defaults (RPC budget, deploy/server/MAINNET.md). Chainlink every 10 s (feeds: 0.5% deviation / 24 h
- * heartbeat). The token state rides in the same aggregate3 (no extra eth_call, so no extra CU), at every Chainlink
- * pass: a longer ORACLE_TOKEN_STATE_READ_MS saves nothing billable and would widen the window in which a short-notice
- * multiplier change goes unseen (audit M-2). DEX TWAP (1800 s window) every 60 s, its observations valid 120 s
- * (MAINNET_DEX_MAX_AGE_MS). Head clock 30 s (refreshed for free by every Chainlink pass). The signing tick
- * (ORACLE_TICK_MS) stays 1 s: signed-price freshness (risk 15 s, ops-venue 3 ticks, consumers' maxTradePriceAge)
- * costs no RPC.
+ * Mainnet defaults (RPC budget, deploy/server/MAINNET.md). Event mode (the log subscription is up): a Chainlink pass
+ * on every AnswerUpdated / NewRound / UIMultiplierUpdated, and at least every 60 s because the Stock Token states are
+ * due then (every 10 s for a token in a split window or paused); safety re-read 5 min (never reached while tokens are
+ * configured); aggregators re-resolved every 10 min. Poll mode (no subscription): a pass every 10 s (feeds: 0.5%
+ * deviation / 24 h heartbeat) with the token states in it (same aggregate3: free). DEX TWAP (1800 s window) every
+ * 60 s, its observations valid 120 s (MAINNET_DEX_MAX_AGE_MS). Head clock 60 s (refreshed for free by every pass).
+ * The signing tick (ORACLE_TICK_MS) stays 1 s: signed-price freshness (risk 15 s, ops-venue 3 ticks, consumers'
+ * maxTradePriceAge) costs no RPC.
  */
-export const MAINNET_RPC_CADENCE: Readonly<RpcCadence> = { chainlinkReadMs: 10_000, tokenStateReadMs: 10_000, dexReadMs: 60_000, dexMaxAgeMs: 120_000, headReadMs: 30_000 };
-/** Devnet / testnet: every read every tick, as before. */
-export const DEFAULT_RPC_CADENCE: Readonly<RpcCadence> = { chainlinkReadMs: 0, tokenStateReadMs: 0, dexReadMs: 0, dexMaxAgeMs: 60_000, headReadMs: 0 };
+export const MAINNET_RPC_CADENCE: Readonly<RpcCadence> = {
+  chainlinkReadMs: 10_000,
+  chainlinkEventReadMs: 300_000,
+  aggregatorResolveMs: 600_000,
+  tokenStateReadMs: 60_000,
+  dexReadMs: 60_000,
+  dexMaxAgeMs: 120_000,
+  headReadMs: 60_000,
+};
+/** Devnet / testnet: every read every tick, as before (no subscription without RPC_WS_URL). */
+export const DEFAULT_RPC_CADENCE: Readonly<RpcCadence> = {
+  chainlinkReadMs: 0,
+  chainlinkEventReadMs: 0,
+  aggregatorResolveMs: 0,
+  tokenStateReadMs: 0,
+  dexReadMs: 0,
+  dexMaxAgeMs: 60_000,
+  headReadMs: 0,
+};
 
 /** The network's cadence with any explicit env value over it. */
 export function rpcCadenceFor(
   chainId: number,
-  env: Partial<Record<"ORACLE_CHAINLINK_READ_MS" | "ORACLE_TOKEN_STATE_READ_MS" | "ORACLE_DEX_READ_MS" | "ORACLE_DEX_MAX_AGE_MS" | "ORACLE_HEAD_READ_MS", number | undefined>>,
+  env: Partial<
+    Record<
+      | "ORACLE_CHAINLINK_READ_MS"
+      | "ORACLE_CHAINLINK_EVENT_READ_MS"
+      | "ORACLE_AGGREGATOR_RESOLVE_MS"
+      | "ORACLE_TOKEN_STATE_READ_MS"
+      | "ORACLE_DEX_READ_MS"
+      | "ORACLE_DEX_MAX_AGE_MS"
+      | "ORACLE_HEAD_READ_MS",
+      number | undefined
+    >
+  >,
 ): RpcCadence {
   const d = isMainnet(chainId) ? MAINNET_RPC_CADENCE : DEFAULT_RPC_CADENCE;
   return {
     chainlinkReadMs: env.ORACLE_CHAINLINK_READ_MS ?? d.chainlinkReadMs,
-    tokenStateReadMs: env.ORACLE_TOKEN_STATE_READ_MS ?? env.ORACLE_CHAINLINK_READ_MS ?? d.tokenStateReadMs,
+    chainlinkEventReadMs: env.ORACLE_CHAINLINK_EVENT_READ_MS ?? d.chainlinkEventReadMs,
+    aggregatorResolveMs: env.ORACLE_AGGREGATOR_RESOLVE_MS ?? d.aggregatorResolveMs,
+    tokenStateReadMs: env.ORACLE_TOKEN_STATE_READ_MS ?? d.tokenStateReadMs,
     dexReadMs: env.ORACLE_DEX_READ_MS ?? d.dexReadMs,
     dexMaxAgeMs: env.ORACLE_DEX_MAX_AGE_MS ?? d.dexMaxAgeMs,
     headReadMs: env.ORACLE_HEAD_READ_MS ?? d.headReadMs,
@@ -334,7 +379,20 @@ export function loadOracleConfig(source: Record<string, string | undefined> = pr
     pythFeeds: { ...DEFAULT_PYTH_FEEDS, ...parseJson("ORACLE_PYTH_FEEDS", env.ORACLE_PYTH_FEEDS, pythFeedMap, {}) },
     /** ticker -> confirm pool (chain config dexConfirm.pools); empty when ORACLE_DEX_CONFIRM=0 or none configured */
     dexPools: env.ORACLE_DEX_CONFIRM ? resolveDexPools(chainConfig, env.ORACLE_DEX_TWAP_SEC) : {},
+    /** WebSocket of the Chainlink RPC for the log subscription (secret: carries the key); null = poll only */
+    chainlinkWsUrl: chainlinkWsUrl(env),
   };
+}
+
+/**
+ * The subscription endpoint of the Chainlink reads: RPC_WS_URL when they go to RPC_URL, else derived from
+ * ORACLE_CHAINLINK_RPC_URL (Alchemy: wss:// on the same path); null with ORACLE_WS=0 or no WebSocket endpoint.
+ */
+export function chainlinkWsUrl(env: Pick<OracleEnv, "ORACLE_WS" | "RPC_URL" | "RPC_WS_URL" | "ORACLE_CHAINLINK_RPC_URL">): string | null {
+  if (!env.ORACLE_WS) return null;
+  const own = env.ORACLE_CHAINLINK_RPC_URL?.trim();
+  if (own && own !== env.RPC_URL) return deriveWsUrl(own);
+  return env.RPC_WS_URL?.trim() || null;
 }
 
 /** The chain config's DEX confirm pools with their Stock Token (stockTokens[ticker]) and window resolved. */

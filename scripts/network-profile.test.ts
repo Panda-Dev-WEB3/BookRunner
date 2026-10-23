@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { privateKeyToAccount } from "viem/accounts";
-import { type Env, MAINNET_EXCLUDED, MAINNET_FIXED, MAINNET_REQUIRED_ENV, MAINNET_RPC_BOUNDS, MAINNET_RPC_DEFAULTS, deskKeyEnvFor, mainnetProfile, mainnetRpcCadence, watchedRoleAddresses } from "./network-profile";
+import { type Env, MAINNET_EXCLUDED, MAINNET_FIXED, MAINNET_REQUIRED_ENV, MAINNET_RPC_BOUNDS, MAINNET_RPC_DEFAULTS, deskKeyEnvFor, mainnetProfile, mainnetRpcCadence, mainnetWsUrl, watchedRoleAddresses } from "./network-profile";
 
 /** The repo's mainnet price config: a Chainlink feed and a DEX confirm pool per launch ticker. */
 const GOOD_CFG = JSON.parse(readFileSync(join(import.meta.dir, "../config/chains/4663.json"), "utf8")) as {
@@ -312,5 +312,23 @@ describe("mainnet RPC budget (deploy/server/MAINNET.md \"RPC budget\")", () => {
     expect(r.errors).toEqual([]);
     expect(r.env.MARK_TICK_SECONDS).toBeUndefined();
     expect(r.env.INDEXER_POLL_MS).toBe("12000");
+  });
+});
+
+describe("mainnet log subscriptions: RPC_WS_URL from RHC_RPC_URL / RHC_WS_URL", () => {
+  test("Alchemy: wss:// on the same path; another provider needs RHC_WS_URL; off forces polling; bad URLs refused", () => {
+    const alchemy = "https://robinhood-mainnet.g.alchemy.com/v2/KEY";
+    const env = (e: Env) => mainnetProfile({ ...goodEnv(), ...e }, hostRoot(GOOD_DEP));
+    expect(env({ RHC_RPC_URL: alchemy }).env.RPC_WS_URL).toBe("wss://robinhood-mainnet.g.alchemy.com/v2/KEY");
+    expect(env({ RHC_RPC_URL: alchemy }).errors).toEqual([]);
+    expect(env({}).env.RPC_WS_URL).toBeUndefined(); // Dwellir: no known WebSocket mapping
+    expect(env({ RHC_WS_URL: "wss://ws.example.org/KEY" }).env.RPC_WS_URL).toBe("wss://ws.example.org/KEY");
+    expect(env({ RHC_RPC_URL: alchemy, RHC_WS_URL: "off" }).env.RPC_WS_URL).toBeUndefined();
+    expect(env({ RHC_WS_URL: "ws://ws.example.org/KEY" }).errors).toEqual(["RHC_WS_URL must be a wss:// URL (the provider key travels in it)"]);
+    expect(env({ RHC_WS_URL: "wss://127.0.0.1:8546" }).errors).toEqual(["RHC_WS_URL points at a local node"]);
+    expect(mainnetWsUrl({ RHC_RPC_URL: alchemy, RHC_WS_URL: " none " })).toBeNull();
+    // the subscription knobs are bounded too
+    expect(env({ INDEXER_WS_SAFETY_POLL_MS: "5000" }).errors).toEqual([expect.stringMatching(/^INDEXER_WS_SAFETY_POLL_MS=5000 must be within 30000-600000/)]);
+    expect(env({ ORACLE_CHAINLINK_EVENT_READ_MS: "3600000" }).errors).toEqual([expect.stringMatching(/^ORACLE_CHAINLINK_EVENT_READ_MS=3600000 must be within 60000-600000/)]);
   });
 });

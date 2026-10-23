@@ -7,6 +7,10 @@ export const indexerEnvShape = {
   /** Max blocks per eth_getLogs range. */
   INDEXER_BATCH_BLOCKS: z.coerce.number().int().positive().default(2000),
   INDEXER_POLL_MS: z.coerce.number().int().positive().default(2000),
+  /** With a log subscription (RPC_WS_URL): a step at least this often (src/trigger.ts); notifications trigger the others. */
+  INDEXER_WS_SAFETY_POLL_MS: z.coerce.number().int().positive().default(120_000),
+  /** A notification's step waits this long (its block reaches INDEXER_CONFIRMATIONS; bursts share one step). */
+  INDEXER_WS_DEBOUNCE_MS: z.coerce.number().int().positive().default(1_000),
   /** Consecutive failures of one range before logs are applied one by one (failing logs skipped). */
   INDEXER_POISON_ATTEMPTS: z.coerce.number().int().positive().default(8),
   /** Optional override of deployment.startBlock (only used when no cursor exists yet). */

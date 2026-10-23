@@ -28,6 +28,8 @@ import type { PriceSource, SourceObservation } from "../domain/types";
 
 export const aggregatorV3Abi = [
   { type: "function", name: "decimals", inputs: [], outputs: [{ name: "", type: "uint8" }], stateMutability: "view" },
+  /** AggregatorProxy: the current (phase) aggregator, the contract that emits AnswerUpdated / NewRound */
+  { type: "function", name: "aggregator", inputs: [], outputs: [{ name: "", type: "address" }], stateMutability: "view" },
   { type: "function", name: "description", inputs: [], outputs: [{ name: "", type: "string" }], stateMutability: "view" },
   {
     type: "function",
@@ -83,6 +85,8 @@ export interface ChainlinkReadRequest {
   decimals: readonly Address[];
   /** Stock Token states due this pass */
   tokens: readonly Address[];
+  /** proxies whose current aggregator() is resolved this pass (event sources of the log subscription) */
+  aggregators?: readonly Address[];
 }
 
 export interface ChainlinkRead {
@@ -92,6 +96,7 @@ export interface ChainlinkRead {
   rounds: ReadonlyMap<Address, Settled<RoundData>>;
   decimals: ReadonlyMap<Address, Settled<number>>;
   tokens: ReadonlyMap<Address, Settled<TokenState>>;
+  aggregators?: ReadonlyMap<Address, Settled<Address>>;
 }
 
 export interface AggregatorReader {
@@ -101,17 +106,21 @@ export interface AggregatorReader {
   tokenState(token: Address, blockNumber?: bigint): Promise<TokenState>;
   /** One pass in one batched call at one block (Multicall3 aggregate3). Absent: per-call reads (readPerCall). */
   read?(req: ChainlinkReadRequest): Promise<ChainlinkRead>;
+  /** AggregatorProxy.aggregator() (per-call reads; absent = not resolved) */
+  aggregator?(proxy: Address): Promise<Address>;
 }
 
 /** A pass through the per-call reads (readers without a batched read: tests, chains without Multicall3). */
-export async function readPerCall(r: Pick<AggregatorReader, "decimals" | "latestRoundData" | "tokenState">, req: ChainlinkReadRequest): Promise<ChainlinkRead> {
-  const [sequencer, rounds, decimals, tokens] = await Promise.all([
+export async function readPerCall(r: Pick<AggregatorReader, "decimals" | "latestRoundData" | "tokenState" | "aggregator">, req: ChainlinkReadRequest): Promise<ChainlinkRead> {
+  const resolve = r.aggregator?.bind(r);
+  const [sequencer, rounds, decimals, tokens, aggregators] = await Promise.all([
     req.sequencer ? settle(r.latestRoundData(req.sequencer)) : Promise.resolve(null),
     Promise.all(req.feeds.map(async (f) => [f, await settle(r.latestRoundData(f))] as const)),
     Promise.all(req.decimals.map(async (f) => [f, await settle(r.decimals(f))] as const)),
     Promise.all(req.tokens.map(async (t) => [t, await settle(r.tokenState(t))] as const)),
+    resolve ? Promise.all((req.aggregators ?? []).map(async (a) => [a, await settle(resolve(a))] as const)) : Promise.resolve([]),
   ]);
-  return { blockTimestamp: null, sequencer, rounds: new Map(rounds), decimals: new Map(decimals), tokens: new Map(tokens) };
+  return { blockTimestamp: null, sequencer, rounds: new Map(rounds), decimals: new Map(decimals), tokens: new Map(tokens), aggregators: new Map(aggregators) };
 }
 
 /** Multicall3: aggregate3 + the block-timestamp view (the rest of its ABI is not used). */
@@ -171,6 +180,7 @@ export function viemAggregatorReader(pub: PublicClient, multicall: Address | nul
         ...req.feeds.map((address) => ({ address, abi: aggregatorV3Abi, functionName: "latestRoundData" as const })),
         ...req.decimals.map((address) => ({ address, abi: aggregatorV3Abi, functionName: "decimals" as const })),
         ...req.tokens.flatMap((address) => TOKEN_STATE_VIEWS.map((functionName) => ({ address, abi: stockTokenAbi, functionName }))),
+        ...(req.aggregators ?? []).map((address) => ({ address, abi: aggregatorV3Abi, functionName: "aggregator" as const })),
       ];
       // batchSize 0: never chunked, one aggregate3 whatever the size
       const res = await pub.multicall({ contracts, allowFailure: true, multicallAddress: multicall, batchSize: 0 });
@@ -192,7 +202,11 @@ export function viemAggregatorReader(pub: PublicClient, multicall: Address | nul
         }),
       );
       const tokens = new Map(req.tokens.map((t) => [t, tokenStateFromViews(TOKEN_STATE_VIEWS.map(() => next()))] as const));
-      return { blockTimestamp: ts.ok ? Number(ts.value) : null, sequencer, rounds, decimals, tokens };
+      const aggregators = new Map(req.aggregators?.map((a) => [a, next() as Settled<Address>] as const) ?? []);
+      return { blockTimestamp: ts.ok ? Number(ts.value) : null, sequencer, rounds, decimals, tokens, aggregators };
+    },
+    async aggregator(proxy) {
+      return pub.readContract({ address: proxy, abi: aggregatorV3Abi, functionName: "aggregator" });
     },
     async decimals(feed) {
       return Number(await pub.readContract({ address: feed, abi: aggregatorV3Abi, functionName: "decimals" }));
@@ -243,6 +257,16 @@ export interface ChainlinkOptions {
   tokenStateIntervalMs?: number;
   /** Every pass that knows its block timestamp reports it here (the oracle's HeadClock). */
   onBlockTimestamp?: (tsSec: number) => void;
+  /**
+   * Event mode (setPushMode(true): the log subscription on the aggregators and tokens is up): a pass is reused this
+   * long (ORACLE_CHAINLINK_EVENT_READ_MS, the safety re-read) unless a feed / token event arrived, a token state is
+   * due, or a split-window rule forces one. Default: readIntervalMs (no event mode).
+   */
+  eventIntervalMs?: number;
+  /** Each proxy's aggregator() (the event source) is re-resolved this often (phase changes); 0 = never resolved. */
+  aggregatorResolveMs?: number;
+  /** The event sources changed: proxy (feeds + sequencer) -> the aggregator emitting AnswerUpdated / NewRound. */
+  onAggregators?: (sources: ReadonlyMap<Address, Address>) => void;
   now?: () => number;
 }
 
@@ -329,8 +353,18 @@ export class ChainlinkSource implements PriceSource {
   private pass: { startedAt: number; promise: Promise<ChainlinkRead>; done: boolean; failed: boolean } | null = null;
   private readonly readIntervalMs: number;
   private readonly tokenStateIntervalMs: number;
+  private readonly eventIntervalMs: number;
   /** completed passes (tests, /health diagnostics) */
   passes = 0;
+  /** event mode: the subscription is up (pass on events, safety re-read on eventIntervalMs) */
+  private push = false;
+  /** a feed / token event since the current pass started: the next observation starts a new pass */
+  private eventPending = false;
+  /** tokens whose UIMultiplierUpdated arrived: read at the next pass whatever their cache */
+  private readonly forcedTokens = new Set<Address>();
+  private readonly eventSources = new Map<Address, Address>();
+  private aggregatorsAt: number | null = null;
+  private aggregatorListener: ((sources: ReadonlyMap<Address, Address>) => void) | null = null;
 
   constructor(
     private readonly feeds: Record<string, ResolvedFeed>,
@@ -341,6 +375,43 @@ export class ChainlinkSource implements PriceSource {
     this.splitBandBps = opts.splitBandBps ?? MULTIPLIER_SPLIT_BAND_BPS;
     this.readIntervalMs = Math.max(0, opts.readIntervalMs ?? 0);
     this.tokenStateIntervalMs = Math.max(0, opts.tokenStateIntervalMs ?? 0);
+    this.eventIntervalMs = Math.max(this.readIntervalMs, opts.eventIntervalMs ?? this.readIntervalMs);
+  }
+
+  /** The log subscription is up (event mode) or down (poll every readIntervalMs, token states with every pass). */
+  setPushMode(up: boolean): void {
+    if (up && !this.push) this.eventPending = true; // catch up on whatever the subscription missed
+    this.push = up;
+  }
+
+  get pushMode(): boolean {
+    return this.push;
+  }
+
+  /** AnswerUpdated / NewRound of a feed or sequencer aggregator: a new pass at the next observation. */
+  notifyFeed(): void {
+    this.eventPending = true;
+  }
+
+  /** UIMultiplierUpdated of a Stock Token: its state is read at the next pass (which starts at once). */
+  notifyToken(token: Address): void {
+    this.forcedTokens.add(token);
+    this.eventPending = true;
+  }
+
+  /** Replaces opts.onAggregators (the log subscription is created after the source). */
+  setAggregatorListener(fn: (sources: ReadonlyMap<Address, Address>) => void): void {
+    this.aggregatorListener = fn;
+  }
+
+  /** Current event sources (proxy -> aggregator), as last resolved. */
+  aggregatorSources(): ReadonlyMap<Address, Address> {
+    return this.eventSources;
+  }
+
+  /** Token-state cadence in force: in poll mode the states ride every pass (free: same aggregate3). */
+  private tokenInterval(): number {
+    return this.push ? this.tokenStateIntervalMs : Math.min(this.tokenStateIntervalMs, this.readIntervalMs);
   }
 
   /** The cached state of a Stock Token (null = never read). */
@@ -356,21 +427,23 @@ export class ChainlinkSource implements PriceSource {
   private currentPass(nowMs: number): Promise<ChainlinkRead> {
     const p = this.pass;
     if (p && !p.done) return p.promise;
-    const reuseMs = p?.failed ? Math.min(this.readIntervalMs, READ_RETRY_MS) : this.readIntervalMs;
-    const stale = this.perTokenFeeds().some((f) => {
-      const c = this.tokenStates.get(f.token);
-      return !!c && tokenStatePredatesChange(c, nowMs);
-    });
-    if (p && nowMs - p.startedAt < reuseMs && !stale) return p.promise;
+    const allTokens = [...new Set(this.perTokenFeeds().map((f) => f.token))];
+    const due = (t: Address) => this.forcedTokens.has(t) || tokenStateDue(this.tokenStates.get(t), nowMs, this.tokenInterval());
+    if (p && this.reusable(p, nowMs, allTokens.some(due))) return p.promise;
 
     const feeds = Object.values(this.feeds);
-    const tokens = [...new Set(this.perTokenFeeds().map((f) => f.token))].filter((t) => tokenStateDue(this.tokenStates.get(t), nowMs, this.tokenStateIntervalMs));
+    const proxies = [...new Set(feeds.map((f) => f.proxy))];
+    const resolveMs = this.opts.aggregatorResolveMs ?? 0;
+    const resolve = resolveMs > 0 && (this.aggregatorsAt === null || nowMs - this.aggregatorsAt >= resolveMs);
     const req: ChainlinkReadRequest = {
       sequencer: this.opts.sequencerFeed ?? null,
-      feeds: [...new Set(feeds.map((f) => f.proxy))],
-      decimals: [...new Set(feeds.map((f) => f.proxy))].filter((a) => !this.decimalsCache.has(a)),
-      tokens,
+      feeds: proxies,
+      decimals: proxies.filter((a) => !this.decimalsCache.has(a)),
+      tokens: allTokens.filter(due),
+      ...(resolve ? { aggregators: [...proxies, ...(this.opts.sequencerFeed ? [this.opts.sequencerFeed] : [])] } : {}),
     };
+    this.eventPending = false;
+    for (const t of req.tokens) this.forcedTokens.delete(t);
     const startedAt = nowMs;
     const entry = { startedAt, promise: null as unknown as Promise<ChainlinkRead>, done: false, failed: false };
     entry.promise = (this.reader.read ? this.reader.read(req) : readPerCall(this.reader, req)).then(
@@ -383,16 +456,49 @@ export class ChainlinkSource implements PriceSource {
           else this.tokenStates.delete(t); // a failed read is never served from the cache
         }
         if (r.blockTimestamp !== null) this.opts.onBlockTimestamp?.(r.blockTimestamp);
+        if (resolve && r.aggregators) this.noteAggregators(r.aggregators, startedAt);
         return r;
       },
       (e: unknown) => {
         entry.done = true;
         entry.failed = true;
+        for (const t of req.tokens) if (!this.tokenStates.has(t)) this.forcedTokens.add(t);
         throw e;
       },
     );
     this.pass = entry;
     return entry.promise;
+  }
+
+  /**
+   * Whether the last pass still serves. Never after a failure past the retry delay, a token state that predates an
+   * active change, or an event. Poll mode: younger than readIntervalMs. Event mode: younger than eventIntervalMs, and
+   * than readIntervalMs when a token state is due (the 60 s / split-window / paused rules).
+   */
+  private reusable(p: { startedAt: number; failed: boolean }, nowMs: number, tokenDue: boolean): boolean {
+    const age = nowMs - p.startedAt;
+    if (p.failed) return age < Math.min(this.readIntervalMs, READ_RETRY_MS);
+    const stale = this.perTokenFeeds().some((f) => {
+      const c = this.tokenStates.get(f.token);
+      return !!c && tokenStatePredatesChange(c, nowMs);
+    });
+    if (stale || this.eventPending) return false;
+    if (!this.push) return age < this.readIntervalMs;
+    return age < this.eventIntervalMs && !(tokenDue && age >= this.readIntervalMs);
+  }
+
+  private noteAggregators(res: ReadonlyMap<Address, Settled<Address>>, at: number): void {
+    let changed = false;
+    let any = false;
+    for (const [proxy, s] of res) {
+      // a configured address that is not a proxy (no aggregator()) emits its own events
+      const source = s.ok && !/^0x0{40}$/i.test(s.value) ? s.value : proxy;
+      if (s.ok) any = true;
+      if (this.eventSources.get(proxy)?.toLowerCase() !== source.toLowerCase()) changed = true;
+      this.eventSources.set(proxy, source);
+    }
+    if (any) this.aggregatorsAt = at;
+    if (changed) (this.aggregatorListener ?? this.opts.onAggregators)?.(new Map(this.eventSources));
   }
 
   /** The registry's live-multiplier band (StockTokenRegistry.multiplierBandBps): a step beyond it is a split. */

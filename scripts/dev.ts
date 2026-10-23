@@ -205,7 +205,8 @@ if (mainnet) {
     process.exit(1);
   }
   Object.assign(env, profile.env);
-  console.log(`[dev] network: Robinhood Chain MAINNET (4663) via ${redactUrl(env.RPC_URL ?? "")}`);
+  // the WebSocket URL carries the provider key: only whether the log subscriptions are on is printed
+  console.log(`[dev] network: Robinhood Chain MAINNET (4663) via ${redactUrl(env.RPC_URL ?? "")}; log subscriptions ${env.RPC_WS_URL ? "on (RPC_WS_URL)" : "off (polling: set RHC_WS_URL, or an Alchemy RHC_RPC_URL)"}`);
 } else {
   loadEnvFile(".env", false);
 }

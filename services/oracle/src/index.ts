@@ -2,7 +2,7 @@
 // oracle_prices (+ AttestedOracle.pushMany in ORACLE_PUSH_MODE=heartbeat only), builder prices to the
 // venue, HTTP on ORACLE_PORT (default 4410).
 import { createDb } from "@bookrunner/db";
-import { createLogger, publicClientFor, roleSigner, tryLoadDeployment } from "@bookrunner/shared";
+import { LogSubscription, createLogger, publicClientFor, roleSigner, tryLoadDeployment } from "@bookrunner/shared";
 import { attestedOracleAbi, stockTokenRegistryAbi } from "@bookrunner/shared/abi";
 import type { LocalAccount } from "viem";
 import { DrizzlePriceStore } from "./adapters/db";
@@ -19,6 +19,7 @@ import { OracleService } from "./service";
 import { accountSigner } from "./signing";
 import { ChainlinkSource } from "./sources/chainlink";
 import { buildSources } from "./sources/index";
+import { oracleLogFilter, routeOracleLogs } from "./subscription";
 
 const cfg = loadOracleConfig();
 const log = createLogger("oracle", cfg.LOG_LEVEL);
@@ -90,6 +91,34 @@ if (production) {
     };
     await readBand();
     setInterval(() => void readBand(), 600_000).unref();
+  }
+}
+
+// RPC budget: Chainlink passes on AnswerUpdated / NewRound / UIMultiplierUpdated (src/subscription.ts) while the log
+// subscription is up; polling every ORACLE_CHAINLINK_READ_MS while it is down or without an endpoint
+let subscription: LogSubscription | null = null;
+{
+  const chainlink = sources.find((s): s is ChainlinkSource => s instanceof ChainlinkSource);
+  const wsUrl = cfg.chainlinkWsUrl;
+  if (chainlink && wsUrl) {
+    const tokens = [...new Set(Object.values(cfg.chainlinkFeeds).flatMap((f) => (f.basis === "per-token" && f.token ? [f.token] : [])))];
+    const sub = new LogSubscription({
+      url: wsUrl,
+      label: "oracle chainlink",
+      filter: oracleLogFilter(chainlink.aggregatorSources(), tokens),
+      log,
+      onLogs: (logs) => routeOracleLogs(logs, chainlink, tokens),
+      onState: (up) => {
+        chainlink.setPushMode(up);
+        log.info({ subscribed: up }, up ? "Chainlink log subscription up: passes on feed / token events" : "Chainlink log subscription down: polling every ORACLE_CHAINLINK_READ_MS");
+      },
+    });
+    chainlink.setAggregatorListener((sources) => {
+      log.info({ aggregators: Object.fromEntries(sources) }, "Chainlink event sources (proxy -> aggregator)");
+      sub.setFilter(oracleLogFilter(sources, tokens));
+    });
+    sub.start();
+    subscription = sub;
   }
 }
 
@@ -172,6 +201,7 @@ async function shutdown(signal: string) {
   }, 15_000);
   try {
     await Promise.all(loops.map((l) => l.stop()));
+    subscription?.stop();
     await service.idle();
     server.stop();
     await redis.quit().catch(() => redis.disconnect());

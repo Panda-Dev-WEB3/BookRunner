@@ -8,6 +8,12 @@ export const baseEnvSchema = z.object({
   REDIS_URL: z.string().default("redis://127.0.0.1:63790"),
   CHAIN_ID: z.coerce.number().default(31337),
   RPC_URL: z.string().default("http://127.0.0.1:8547"),
+  /**
+   * WebSocket endpoint for log subscriptions (logSubscription.ts; RPC budget, deploy/server/MAINNET.md). Unset = no
+   * subscription, polling only (devnet / testnet). The mainnet profile sets it from RHC_WS_URL, else derives it from
+   * RHC_RPC_URL (Alchemy: wss:// on the same path). Carries the provider key: never logged (redactUrl).
+   */
+  RPC_WS_URL: z.string().optional(),
   DEPLOYMENT_FILE: z.string().default("contracts/deployments/31337.json"),
   DEV_MNEMONIC: z.string().optional(),
   MARK_INTERVAL_SECONDS: z.coerce.number().default(300),

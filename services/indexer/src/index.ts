@@ -1,12 +1,13 @@
 // indexer service: chain -> DB (ARCHITECTURE §4). Idles (log + retry) until the deployment file
 // exists; transient RPC/DB errors back off exponentially; SIGINT/SIGTERM stop between steps.
 import { createDb } from "@bookrunner/db";
-import { type Deployment, createLogger, tryLoadDeployment } from "@bookrunner/shared";
+import { type Deployment, LogSubscription, createLogger, tryLoadDeployment } from "@bookrunner/shared";
 import { Redis } from "ioredis";
 import { ViemIndexerChain } from "./chain";
 import { loadIndexerEnv } from "./config";
 import { PgIndexerStore } from "./pgStore";
 import { Indexer } from "./runner";
+import { StepTrigger } from "./trigger";
 import { WatchSet } from "./watch";
 
 const env = loadIndexerEnv();
@@ -18,6 +19,15 @@ redis.connect().catch((err) => logger.warn({ err: (err as Error).message }, "red
 
 let stopping = false;
 let wake: (() => void) | null = null;
+let wakeTimer: ReturnType<typeof setTimeout> | null = null;
+/** wakes the loop's sleep after `ms` (the earliest request wins) */
+const wakeIn = (ms: number) => {
+  if (wakeTimer) return;
+  wakeTimer = setTimeout(() => {
+    wakeTimer = null;
+    wake?.();
+  }, ms);
+};
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => {
     const t = setTimeout(() => {
@@ -49,15 +59,37 @@ async function main() {
   const startBlock = env.INDEXER_START_BLOCK ?? dep.startBlock;
   logger.info({ chainId: dep.chainId, startBlock, confirmations: env.INDEXER_CONFIRMATIONS, batch: env.INDEXER_BATCH_BLOCKS }, "indexer starting");
 
+  const watch = new WatchSet(dep);
   const indexer = new Indexer({
     store: PgIndexerStore.create(db),
     chain: new ViemIndexerChain(env.CHAIN_ID, env.RPC_URL, { charter: dep.contracts.charter, markRegistry: dep.contracts.markRegistry }, env.INDEXER_ADDRESS_CHUNK),
-    watch: new WatchSet(dep),
+    watch,
     deployment: dep,
     publisher: redis,
     logger,
     config: { confirmations: env.INDEXER_CONFIRMATIONS, batchBlocks: env.INDEXER_BATCH_BLOCKS, poisonAttempts: env.INDEXER_POISON_ATTEMPTS, startBlock },
   });
+
+  // RPC budget: a log subscription on every watched contract triggers the steps (src/trigger.ts); polling while down
+  const trigger = new StepTrigger({ pollMs: env.INDEXER_POLL_MS, safetyMs: env.INDEXER_WS_SAFETY_POLL_MS, debounceMs: env.INDEXER_WS_DEBOUNCE_MS });
+  const filter = () => ({ address: [...watch.protocolAddresses(), ...watch.bookAddresses()] });
+  const sub = env.RPC_WS_URL
+    ? new LogSubscription({
+        url: env.RPC_WS_URL,
+        label: "indexer",
+        filter: filter(),
+        log: logger,
+        onLogs: (logs) => {
+          const d = trigger.onLogs(logs.map((l) => l.blockNumber));
+          if (d !== null) wakeIn(d);
+        },
+        onState: (up) => {
+          const d = trigger.onState(up);
+          logger.info({ subscribed: up }, up ? "log subscription up: steps on notifications (safety step every INDEXER_WS_SAFETY_POLL_MS)" : "log subscription down: polling every INDEXER_POLL_MS");
+          if (d !== null) wakeIn(d);
+        },
+      })
+    : null;
 
   let backoff = env.INDEXER_POLL_MS;
   let initialised = false;
@@ -66,11 +98,15 @@ async function main() {
       if (!initialised) {
         await indexer.init();
         initialised = true;
+        sub?.setFilter(filter());
+        sub?.start();
       }
       const r = await indexer.step();
       backoff = env.INDEXER_POLL_MS;
+      sub?.setFilter(filter()); // a BookCreated in the range added addresses
       if (r.status === "idle") {
-        await sleep(env.INDEXER_POLL_MS);
+        const safeHead = r.head - BigInt(env.INDEXER_CONFIRMATIONS);
+        await sleep(trigger.idleDelay(safeHead));
         continue;
       }
       logger.info(
@@ -83,12 +119,14 @@ async function main() {
       backoff = Math.min(backoff * 2, 30_000);
     }
   }
+  sub?.stop();
 }
 
 async function shutdown(signal: string) {
   if (stopping) return;
   stopping = true;
   logger.info({ signal }, "shutting down");
+  if (wakeTimer) clearTimeout(wakeTimer);
   wake?.();
 }
 
