@@ -94,6 +94,7 @@ contract DeployMainnetTest is Test {
         bool plainSigner;
         bytes32 attestation;
         bool requireAtt;
+        bool attestLater; // guarded launch: plain signers on mainnet, requireAttestations later
         // buyback reference
         string bkrnPriceId;
         string refSource; // "" = omitted (default from bkrnPriceId)
@@ -642,6 +643,23 @@ contract DeployMainnetTest is Test {
         _expectValidateRevert(o, "input: oracle signer must be attested on mainnet (platform, measurement, quoteHash; VERIFY E1)");
     }
 
+    function test_attestLater_accepts_plain_signer_on_mainnet() public {
+        Opts memory o = _mainnetOpts();
+        o.plainSigner = true;
+        o.attestation = keccak256("tee-quote");
+        o.requireAtt = false;
+        o.attestLater = true;
+        DeployMainnet s = new DeployMainnet();
+        s.loadInput(_json(o));
+        s.validateInput(); // the guarded-launch opt-in passes
+    }
+
+    function test_attestLater_refuses_requireAttestations_true() public {
+        Opts memory o = _mainnetOpts();
+        o.attestLater = true; // attested signer + requireAttestations true + attestLater: contradictory
+        _expectValidateRevert(o, "input: oracle.attestLater with requireAttestations true");
+    }
+
     function test_refuses_mainnet_without_required_attestations() public {
         Opts memory o = _mainnetOpts();
         o.requireAtt = false;
@@ -889,7 +907,7 @@ contract DeployMainnetTest is Test {
                 ",\"quoteHash\":", _b(QUOTE_HASH), "}"
             );
         return string.concat(
-            "\"oracle\":{\"measurements\":[", _b(MEASUREMENT), "],\"requireAttestations\":", o.requireAtt ? "true" : "false",
+            "\"oracle\":{\"measurements\":[", _b(MEASUREMENT), "],\"requireAttestations\":", o.requireAtt ? "true" : "false", o.attestLater ? ",\"attestLater\":true" : "",
             ",\"signers\":[", signer, "]},"
         );
     }

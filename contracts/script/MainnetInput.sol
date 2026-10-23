@@ -188,6 +188,10 @@ abstract contract MainnetInput is Script {
     OracleSignerIn[] internal oracleSigners;
     bytes32[] internal oracleMeasurements;
     bool internal requireAttestations;
+    /// @dev Guarded-launch opt-in (owner decision 2026-10-23): mainnet accepts plain (non-attested) oracle signers and
+    ///      requireAttestations false; the one-way AttestedOracle.requireAttestations() is turned on later by governance
+    ///      once the TEE signer is attested (RUNBOOK "Oracle signer attestation").
+    bool internal attestLater;
     StockTokenIn[] internal stocks;
     uint256 internal multiplierBandBps; // 0 = registry default
     IndexIn[] internal indexes;
@@ -365,6 +369,7 @@ abstract contract MainnetInput is Script {
             oracleMeasurements.push(json.readBytes32(k));
         }
         requireAttestations = json.readBoolOr(".oracle.requireAttestations", false);
+        attestLater = json.readBoolOr(".oracle.attestLater", false);
     }
 
     function _loadStocks(string memory json) private {
@@ -517,11 +522,12 @@ abstract contract MainnetInput is Script {
                 require(s.platform != bytes32(0) && s.quoteHash != bytes32(0), "input: oracle signer platform / quoteHash missing");
                 require(_measurementListed(s.measurement), "input: oracle signer measurement not in oracle.measurements");
             } else {
-                require(!mainnet, "input: oracle signer must be attested on mainnet (platform, measurement, quoteHash; VERIFY E1)");
+                require(!mainnet || attestLater, "input: oracle signer must be attested on mainnet (platform, measurement, quoteHash; VERIFY E1)");
                 require(!requireAttestations, "input: oracle.requireAttestations needs every signer attested");
             }
         }
-        if (mainnet) require(requireAttestations, "input: oracle.requireAttestations must be true on mainnet (VERIFY E1)");
+        if (mainnet && !attestLater) require(requireAttestations, "input: oracle.requireAttestations must be true on mainnet (VERIFY E1)");
+        if (attestLater) require(!requireAttestations, "input: oracle.attestLater with requireAttestations true");
     }
 
     function _attested(OracleSignerIn storage s) internal view returns (bool) {
