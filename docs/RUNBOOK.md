@@ -153,16 +153,21 @@ only (it deploys mocks and refuses 4663). Tick every box in order; two people fo
         `InsurancePool.depositFirstLoss(seed)`, with `seed = scripts/launch-plan.ts poolSeedUsd(launch sizes)` (≈ 91,671
         USDG for NVDA / TSLA at 25,001 and RHX5 at 10,000). Queued deposits count only after their epoch is processed,
         so at launch the slice alone funds every pool-funded IF. Each IF must fit 30% of the pool (`marketCapBps`; the
-        books on one underlying share it), and all of them together must fit the free cash above the 20% buffer.
+        books on one underlying share it), and all of them together must fit the free cash above the buffer (20% of the assets that stay plus the queued exits); the slice must also cover 25% of the largest single IF (NEW-3: the seed covers up to about 366k).
         Check `maxAllocation(bookId, market) >= ifTargetUsd` per book before `subscriptionEnds`, otherwise
-        `closeWindow` does not wait: it raises the IF from the tranches if they raised enough (`InsuranceFallback`), or
-        cancels the book (`POOL_UNFUNDED`; pool audit 2026-10-23 A-M2). A pool-funded window also needs a raise of at
+        `closeWindow` reverts `InsurancePoolCannotFund` and is retried until `CLOSE_WINDOW_TIMEOUT` after `subscriptionEnds`, then
+        cancels the book (`POOL_UNFUNDED`, refunds 1:1), unless the charter opted in to `ifPoolFallback` (the tranches then
+        raise the IF, `InsuranceFallback`; fix round 2 V-3). A pool-funded window also needs a raise of at
         least `minOwnCapitalBps` (50%) of the IF (`UNDERCAPITALISED` otherwise, B-M2). Premiums go wholly to the slice
         until depositor shares exist. Withdrawing from the slice is timelock-only (48 h), from free cash above the buffer
-        and the value of every queued withdrawal, and never below 10% of the book claims. The 10% gate covers the
+        and the value of every queued withdrawal, and never below 10% of the book claims nor 25% of the largest single allocation. The 10% gate covers the
         exposure (claims), so deposits can no longer dilute it and block allocations; the slice still absorbs losses
         first, pool-wide (a recovery restores the depositors first). Pause deposits (guardian) during an incident: an
-        epoch processed while paused mints nothing and refunds its queued deposits. Do NOT apply the devnet demo parameters (`epochLength` / `cooldown` /
+        epoch processed while paused mints nothing and refunds its queued deposits. A stale processing (a book not marked by
+        the grace end) fills only the part of each exit backed by fresh books and defers deposits; the rest fills at the
+        next fresh processing, or after 30 days at a 50% haircut on the stale exposure (deposits refunded): fix the marks.
+        A pool-funded book whose own capital falls below the pool's minimum after redemptions is held reduce-only
+        (`Book.capitalShort()`, alert `pool_book_capital_short`) until it is restored; exits stay open. Do NOT apply the devnet demo parameters (`epochLength` / `cooldown` /
         `processGrace`): mainnet keeps 7 d / 7 d / 24 h.
         Ordering when depositors' money should count at launch: open deposits (`requestDeposit`) at least one full
         epoch before the books' `subscriptionEnds`, so that epoch ends and is processed first (`processEpoch` waits for

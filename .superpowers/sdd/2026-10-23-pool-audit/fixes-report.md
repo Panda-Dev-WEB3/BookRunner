@@ -6,6 +6,9 @@ will be redeployed fresh, so no in-place upgrade compatibility was kept (notes a
 **Status: DONE_WITH_CONCERNS.** Every finding is fixed or, where noted, documented with a reason. The concerns are
 owner decision points (section 2) and the pool's bytecode headroom (74 B).
 
+**Fix round 2 (section 6): DONE.** The owner's rulings settle decision points 1 and 4. The headroom is restored
+(InsurancePool now has 1,106 B).
+
 Commits: `C1` = `1134733` (contracts, tests, vectors, ABI and the TS waterfall mirror); `C2` = `c419c19` (services and
 web: charter rule, pool view); `C3` = the docs commit that carries this report.
 
@@ -75,3 +78,56 @@ web: charter rule, pool view); `C3` = the docs commit that carries this report.
 - **Pool storage.** It is appended: `depositorLoss`, `refundsPending`, `minOwnCapitalBps`. A migration must set `depositorLoss = Σ lossDepositors` and `minOwnCapitalBps = 5000`.
 - **`IInsurancePool.markBook` gained `held`.** Book and pool must be upgraded together.
 - **`BookPosition` is unchanged**, so the ABI for indexers stays the same. Removed: `DUE_SCAN_EPOCHS`, `WithdrawalsDue`, `Book.InsurancePoolUnset`. Added: `insuranceLedger()`, `depositorLoss()`, `refundsPending()`, `minOwnCapitalBps()`, events `InsuranceRestored`, `InsuranceFallback` and `EpochDepositsRefunded`. ABIs are regenerated (`packages/shared/src/abi`).
+
+## 6. Fix round 2 (the verification audits: audit-A-verify.md, audit-B-verify.md)
+
+Commits: `C4` = `ffa9f58` (contracts, tests, vectors, ABI, the TS mirror, the Slither allowlist); `C5` = `b0d936b`
+(services and web); `C6` = the docs commit that carries this section. The auditors' new PoCs (`PoolAuditAVerify.t.sol`,
+`B_VerifyFixes.t.sol`) passed on `ec6cf2c`, which demonstrated the problems. They failed on the fixed code (RED) and
+are now inverted into regressions.
+
+| Finding | Fix | Commit | Regression test | Status |
+|---|---|---|---|---|
+| **V-1** an exhausted book's recovery restores the pool before the Backstop, and Senior's share of the IF draw is never charged | Owner ruling: on an exhausted book (`poolValue < poolDebt`), a gain or a distribution repays the Backstop first, then the pool, then Senior's other impairment, Senior's IF impairment, then Junior. A book that is not exhausted keeps the B-H1 order. New ledger field `seniorIfDeferred`: the pool's shortfall taken only because Senior held cover, that is Senior's share of the draw (capped at the shortfall). It is charged to Senior's own capital, restoring the pool, as soon as a gain or a distribution frees that capital after the Backstop is repaid (`_chargeDeferred`, `seniorIfCharged`). It scales on Senior burns, blocks Senior top-ups while owed, and is settled at finalize. TS mirror and vectors (`poolMark` width 41, `poolCredit` width 23). | C4 | `B_VerifyFixes.t.sol` `test_B_V1_exhaustedThenRecovery_backstopFirst_seniorChargedItsIfShare` (Backstop whole, Senior 50k, pool whole). `B_PoolBookAudit.t.sol` `test_B_L2_exhaustedBook_feeRepaysTheBackstop_thenThePool`. The cumulative fuzz in `PoolBook.t.sol` now adds wind-down IF draws and checks the Backstop's **net recovery**, the cover and Senior against the never-drawn counterfactual: 20,000 runs (4,096 under ci), ledger invariants at every step (deferred ≤ shortfall; Junior 0 while short). TS: `waterfall.test.ts` "V-1" and "B-L2 / V-1". | Fixed |
+| **V-2** an IF draw in the same mark as a larger MM gain is netted away, so the Backstop is under-repaid | The draw is exact in every state: `Waterfall.poolIfDraw` = IF deployed − IF cash returned to the vault − min(signed IF equity, deployed). The returned cash comes from the adapters' cumulative `insuranceReturnedUsd()` (`IInsuranceReturns`): OrderlyAdapter counts it in `sweepToVault`, PoolEngineAdapter on the IF withdraw. Repayments and recalls never move the draw, so the "due" branch is gone. A mark splits in the ledger order whatever the signs: IF recovery, then other P&L, then the IF draw. | C4 | `test_B_V2_dueBranch_ifDrawInsideNetGain_charged_backstopRepaid` (Backstop repaid 7.5k; Junior and Senior each charged 2.5k). TS `poolIfDraw` and "V-2" tests. `WaterfallParity` `test_parity_poolMark`. | Fixed |
+| **V-3** a queued withdrawal just before closeWindow silently switches a pool-funded charter to a tranche-funded one | No silent switch. While the pool cannot fund (`POOL_UNFUNDED`), `closeWindow` reverts `InsurancePoolCannotFund(retryUntil)` until `subscriptionEnds + CLOSE_WINDOW_TIMEOUT`. `cancelStuckWindow` refuses while a close would succeed (`windowCanClose`), until twice the timeout, so the first caller cannot pick the outcome. Then, or at once for `UNDERCAPITALISED`, the book is cancelled and refunded 1:1, unless the charter opted in with the new field `Charter.ifPoolFallback` (default false; `BAD_FALLBACK` on a book-funded IF). The field is mirrored in `@bookrunner/shared` (`poolCharterReason`, `charterArg`), the charter service (validate, draft, JSON, prepare, rule checks, jury prompt), the api, and the web form (checkbox, review row, CharterTerms). | C4, C5 | `test_B_V3_queuedWithdrawal_waits_thenCancels_noSilentSwitch`. `PoolBook.t.sol` `test_closeWindow_poolCannotFund_waits_thenCancels`, `_thenHasRoom_poolFunds`, `_optedInFallback_afterTheTimeout`, `_cancelStuckWindow_cannotPreemptAPoolFundedClose`, `_poolAllocationsPaused_waits`. TS: shared, charter, api and web tests. | Fixed |
+| **Info 4** redemptions can take a pool book below the minimum own capital | Exits are never blocked. `Book.capitalShort()` is true for a Live pool book whose own capital (S + J − coverHeld) is below `poolMinCapitalBps` of the debt (the minimum is snapshotted at closeWindow). Risk then holds the book `reduce_only`, the agent goes reduce-only (`POOL_CAPITAL_SHORT`), and the alert `pool_book_capital_short` fires (warning, after 5 min), until the capital is back above the minimum. | C4, C5 | `PoolBook.t.sol` `test_capitalShort_redemptionsBelowTheMinimum_flagged_exitsNotBlocked`. `services/risk` `classify.test.ts`, `bookrunner-agent` `sides-mode.test.ts`, `alerts` `rules-pool.test.ts`. | Fixed |
+| **NEW-1 (High)** held marks through the grace value the books at 0, so a 45k exit gets 25k | A stale processing never prices at a stale value. Let exposure = stale claims − slice. Exits fill only `shares × (D − exposure)/D` per epoch, at the normal price; the rest stays queued and exposed. Deposits are deferred, not minted (`depositEpoch` cursor; `claimDeposit` reverts `EpochNotProcessed`). **Bound:** past `STALE_BOUND` = 30 days after the epoch end, the rest fills at the last values with a 50% haircut on the exposure, and deferred deposits are refunded. **Why 30 days:** it equals `BookLogic.MAX_HELD_DEFERRAL`, so a book that is merely held has marked by then; a book still silent later is stuck. **Why 50%:** a stuck book's value is unknown within [0, claim]; the midpoint caps the worst-case transfer between exits and the holders left at half the exposure. Refunding the deposits keeps new entries out of that bet. | C4 | `PoolAuditAVerify.t.sol` `test_verify_NEW1_heldMarksOverTheEpochEnd_noValueMoves` (Alice/Bob: Alice gets 25k at the grace and the rest after the live mark, 45k in all; Bob stays at 45k), `_control_liveMarks_exitWhole`. `InsurancePool.t.sol` `test_staleProcessing_fillsOnlyTheFreshPart_restAfterTheMark`, `test_staleProcessing_pastTheBound_haircutFill_depositRefunded`. | Fixed |
+| **NEW-2** the 20% buffer counts queued exits, so depositing and then queueing the exit shrinks the room at no risk | Buffer = 20% × (T − queued) + queued, in `_allocatable`, `checkAllocation` and `withdrawFirstLoss` (`PoolLogic._keep`). | C4 | `test_verify_NEW2_depositAndQueueExit_doesNotShrinkAllocatable` (room not reduced; Carol exits whole); `InsurancePool.t.sol` `test_allocate_neverTakesQueuedExitLiquidity` and the withdrawFirstLoss test. | Fixed |
+| **NEW-3** a small slice funds one large book | Implemented (small and sound). The slice must also cover `CONCENTRATION_BPS` = 25% of the largest single allocation, so a 10k slice funds at most a 40k book. A full write-down of that book then puts at most 75% of it on the depositors. With the 50% minimum own capital in front of the IF, the slice absorbs at least half of the pool's worst single-book loss. The launch seed (91,671) covers single IFs up to about 366k. | C4 | `test_verify_AM2_smallSlice_capsTheLargestSingleBook` (max 40k; 100k reverts `FirstLossBelowTarget(10k, 25k)`; after a full write-down the depositors bear 30k); `InsurancePool.t.sol` `test_allocate_needsFirstLossAtTarget`. | Fixed |
+| **A-L4 PARTIAL** value moves between holder cohorts during a provisional shortfall | Justified, not changed further. Per-cohort tracking is impossible with fungible shares: a share bought after the loss cannot be told apart from one held through it. The residual is bounded instead: entries are priced at the marked value (POOL-10), a stale epoch never mints at a stale value (NEW-1), and exits scale `depositorLoss` pro rata. Documented in ARCHITECTURE §2.10. | C6 | Bounded by the NEW-1 tests and `test_exitsTakeTheirPartOfTheDepositorLoss`. | Justified |
+
+### Sizes after round 2 (runtime, EIP-170 24,576 B)
+
+Room was made first with two new external libraries, which took custom errors and view helpers with them:
+- `PoolLogic`, linked into InsurancePool: allocation, first-loss and mark logic, parameters;
+- `BookPoolLogic`, linked into BookLogic: the pool-book logic.
+
+| Contract | Round 1 | Round 2 | Headroom |
+|---|---|---|---|
+| InsurancePool | 24,502 | **23,470** | 1,106 |
+| PoolLogic (new library) | — | 4,929 | 19,647 |
+| BookLogic (library) | 23,845 | **19,480** | 5,096 |
+| BookPoolLogic (new library) | — | 11,893 | 12,683 |
+| Book | 13,953 | 14,388 | 10,188 |
+| MarketCharter | 13,411 | 13,568 | 11,008 |
+| OrderlyAdapter | 24,552 | **24,143** | 433 (`_bindBook` decodes only the charter words it needs, so the new counter fits) |
+| PoolEngineAdapter | — | 14,510 | 10,066 |
+
+### Test evidence (round 2)
+
+- **Full forge suite:** 133 suites, 1,509/1,509 pass.
+- **`FOUNDRY_PROFILE=ci`** on `test/pool/*` and `test/audit/pool2026/*`: 117/117 pass. This includes the 8 pool invariants and the cumulative fuzz at 4,096 runs; the fuzz also passed 20,000 runs under the default profile.
+- **Repo-wide `bun test`:** 2,349 pass, 82 skip, 0 fail.
+- **Typechecks** (`bun run typecheck`, `typecheck:scripts`) pass.
+- **Repo checks:** check-copy passes (165 files). The licence-headers, image-pins and slither-gate tests pass.
+- **Slither gate** (pinned 0.11.6, after a clean rebuild): 80 findings, 0 outside the allowlist, 0 stale. Two `unused-return` entries were added with reasons, and three stale `uninitialized-local` entries were removed.
+- **Parity vectors:** regenerating them reproduces `waterfall.json` byte for byte.
+
+### Notes for a future in-place upgrade (round 2 additions)
+
+- **Book storage (appended):** `seniorIfDeferred` and `poolMinCapitalBps`. A migration sets `poolMinCapitalBps` from the pool, and sets `seniorIfDeferred` to Senior's share of a live shortfall (`min(shortfall, coverHeld)`) or 0.
+- **Pool storage (appended):** `depositEpoch`. A migration sets it to `procEpoch`.
+- **Charter struct:** `ifPoolFallback` shares the `premiumBps` slot, so stored charters read false.
+- **Adapters:** `insuranceReturnedUsd` is appended and starts at 0. A pool book upgraded mid-life needs its adapter upgraded together with BookPoolLogic, with the counter seeded with the IF cash already returned. Otherwise that cash reads as a draw: conservative for the Backstop, but it charges the tranches.
+- **Libraries:** InsurancePool now links PoolLogic, and BookLogic links BookPoolLogic. The deployment must deploy and link both (forge links them automatically; `DeployMainnet.t.sol` passes).
