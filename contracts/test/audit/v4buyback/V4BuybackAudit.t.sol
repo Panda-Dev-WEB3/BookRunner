@@ -63,26 +63,25 @@ contract V4BuybackAuditTest is BkrnFeeRouterV4Base {
         assertGe(out, spent * REF * (10_000 - SLIP) / 10_000 / 1e6);
     }
 
-    /// @dev M-1 via ETH (fixed): the slippage budget is split between the hops (hop 0 = slippage / 4 by default,
-    ///      hop 1 the rest) so their limits compose to the floor. Pools within their hop budgets land above the
-    ///      floor; pools past a hop budget are refused before any swap (V4PriceBeyondLimit), never a swap that
-    ///      then fails the floor.
+    /// @dev M-1 via ETH (fixed, then re-review 2 M-A): hop 1's limit follows the ETH hop 0 really delivered, so the
+    ///      whole path meets the floor. Pools that together still clear it land above the floor; pools that together
+    ///      cannot (3% worse each, 5% slippage) are refused inside the unlock (caught, nothing moves), never a swap
+    ///      that then fails the floor.
     function test_audit_via_eth_two_limits_compound_below_floor() public {
         _use(_route(V4_ETH, ethBkrnKey));
         hook.configure(0, 0, false);
-        // ETH 1% dearer (hop 0 budget 1.25% less the 0.05% LP fee), BKRN 3.5% dearer in ETH (hop 1 budget ~3.8%)
         pm.setPrice(ethUsdcKey, _sqrtEthUsdc(ETH_USD * 10_100 / 10_000));
         pm.setPrice(ethBkrnKey, _sqrtEthBkrn(BKRN_ETH * 9650 / 10_000));
         _seed(100_000e6);
         vm.prank(keeper);
         uint256 out = fr.executeBuyback(10e6, 0);
         assertGe(out, fr.buybackFloor(10e6));
-        // 3% worse each: hop 0 is past its 1.25% budget -> refused up front, nothing swapped
         pm.setPrice(ethUsdcKey, _sqrtEthUsdc(ETH_USD * 10_300 / 10_000));
         pm.setPrice(ethBkrnKey, _sqrtEthBkrn(BKRN_ETH * 9700 / 10_000));
+        uint256 pending = fr.buybackPending();
         vm.prank(keeper);
-        vm.expectPartialRevert(BkrnFeeRouter.V4PriceBeyondLimit.selector);
-        fr.executeBuyback(10e6, 0);
+        assertEq(fr.executeBuyback(10e6, 0), 0); // BuybackV4Failed: hop 1 cannot meet the floor
+        assertEq(fr.buybackPending(), pending);
     }
 
     /// @dev I-1 (fixed): an allow-listed hook on the ETH/BKRN pool that calls sync(USDG) no longer breaks

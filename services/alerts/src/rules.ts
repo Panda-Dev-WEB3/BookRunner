@@ -603,13 +603,16 @@ export function buyback(s: Snapshot, c: RuleConfig): Condition[] {
   // (setEthReference / setBuybackParams, through the 48 h timelock): RUNBOOK "BKRN buybacks on Uniswap v4"
   const hop = s.buybackV4BlockedHop ?? 0;
   if (hop > 0 && last.value >= c.buybackMinUsd) {
-    const which = hop === 1 ? "the first hop (USDG -> ETH, or the direct BKRN pool)" : "the ETH -> BKRN hop";
+    const which =
+      hop === 1
+        ? "the first hop sits past its limit (the direct BKRN pool vs the BKRN reference, or ETH/USDG beyond the ETH reference tolerance: refresh setEthReference)"
+        : "the ETH -> BKRN pool cannot meet the USDG floor (the BKRN reference is stale or BKRN fell: refresh setBuybackParams / setEthReference)";
     out.push({
       key: "buyback_v4_reference_stale",
       rule: "buyback_v4_reference_stale",
       severity: "warning",
       forSec: 3600,
-      summary: `v4 buybacks stalled: ${which} sits past its price limit with $${last.value.toFixed(2)} pending; the fixed ETH / BKRN reference is stale (refresh setEthReference / setBuybackParams via the timelock; bun scripts/buyback-route.ts prints the values)`,
+      summary: `v4 buybacks stalled with $${last.value.toFixed(2)} pending: ${which}, via the timelock; bun scripts/buyback-route.ts prints the values`,
     });
   }
   if (c.buybackMaxUsd > 0 && last.value >= c.buybackMaxUsd) {

@@ -400,8 +400,8 @@ async function main(): Promise<number> {
       console.log("timelock calls on BkrnFeeRouter (schedule + execute through the TimelockController):");
       for (const t of report.best.timelockCalls) console.log(`  ${t.fn}\n    ${t.data}`);
       for (const w of warnings) console.log(`WARN ${w}`);
-      console.log("Set setV4Fees(hookFeeBps, ...) to the hook's fee (Pons: ~1-3.5% observed on 2026-10-23), maxSlippageBps above it, and");
-      console.log("refresh setEthReference whenever ETH moves more than (maxSlippageBps / 4 - 5 bps) from it (RUNBOOK); alert buyback_v4_reference_stale.");
+      console.log("Set setV4Fees(hookFeeBps, ethToleranceBps) with the hook's fee (Pons: ~1-3.5% observed on 2026-10-23), maxSlippageBps above it;");
+      console.log("the BKRN reference must track BKRN/USDG within the slippage; refresh setEthReference when ETH moved ~10% (RUNBOOK); alert buyback_v4_reference_stale.");
     } else {
       console.log("no candidate route quotes (BKRN not graduated yet, or no pool with liquidity)");
     }

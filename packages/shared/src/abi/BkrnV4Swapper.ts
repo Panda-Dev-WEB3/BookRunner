@@ -175,9 +175,14 @@ export const bkrnV4SwapperAbi = [
             "internalType": "uint160"
           },
           {
-            "name": "limit1",
-            "type": "uint160",
-            "internalType": "uint160"
+            "name": "minBkrnPerUsdcWad",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "bkrnNetPpm",
+            "type": "uint256",
+            "internalType": "uint256"
           },
           {
             "name": "v3Router",
@@ -370,6 +375,22 @@ export const bkrnV4SwapperAbi = [
         "name": "used",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "V4PriceBeyondLimit",
+    "inputs": [
+      {
+        "name": "sqrtPriceX96",
+        "type": "uint160",
+        "internalType": "uint160"
+      },
+      {
+        "name": "limitX96",
+        "type": "uint160",
+        "internalType": "uint160"
       }
     ]
   },

@@ -98,6 +98,9 @@ contract V4BuybackAuditForkTest is BkrnFeeRouterV4ForkTest {
         console2.log("full run: gas used (exec)", used);
         console2.log("estimate >= net used    ", net);
         console2.log("keeper bufferedGas      ", net * 13 / 10 + 30_000);
-        assertGt(net * 13 / 10 + 30_000, minSwap, "keeper buffer below the swapping limit");
+        // with the forwarded swap gas every limit below minOk reverts (V4SwapGasTooLow), so eth_estimateGas
+        // converges on minOk (not on the gas used) and the keeper buffers that
+        console2.log("estimate (lowest ok)    ", minOk, "buffered", minOk * 13 / 10 + 30_000);
+        assertGt(minOk * 13 / 10 + 30_000, minSwap, "keeper buffer below the swapping limit");
     }
 }

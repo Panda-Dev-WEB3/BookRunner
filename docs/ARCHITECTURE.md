@@ -176,13 +176,18 @@ venueMinIf[PoolEngine] 10,000 USDC, tiers: entry 50k USD → 0, ≥50k → 25k B
   swapper must be closed and its ETH balance unchanged; native ETH is accepted only from WETH / the PoolManager
   during a swap (`sweepNative` for forced ETH). Each hop carries a `sqrtPriceLimitX96`: the worst gross marginal
   price whose net (less the pool's static LP fee and, for a hooked pool, the timelock-set `v4HookFeeBps` ≤ 10%)
-  still meets the floor, +1 bp; via ETH the slippage is split (first hop `v4EthHopBps`, default a quarter; the
-  BKRN hop the rest) so the limits compose to the floor. A swap stopped at its limit therefore clears the floor
-  and partially fills (the unspent input stays pending); a via-ETH buyback whose BKRN hop would stop early
-  reverts as a whole. The output must clear `buybackFloor(spent)` (the keeper minimum is pro-rated to what was
+  still meets the floor, +1 bp. Via ETH the BKRN hop's limit is computed in the swapper from the ETH the first
+  hop really delivered (paid USDG -> ETH -> BKRN meets the floor price net of the BKRN pool's fees), and the first
+  hop is only bounded within `v4EthToleranceBps` (default 20%) of the fixed ETH reference, so ETH moves do not stall
+  buybacks. A swap stopped at its limit therefore clears the floor and partially fills (the unspent input stays
+  pending); a via-ETH buyback whose BKRN hop would stop early, or whose BKRN pool cannot meet the floor from the
+  real ETH fill, reverts inside the unlock (caught). The swap gets exactly `v4SwapGas` (default 1M; the call refuses
+  to start without it plus a 200k reserve, `V4SwapGasTooLow`), so what it catches never depends on the
+  transaction's gas limit. The output must clear `buybackFloor(spent)` (the keeper minimum is pro-rated to what was
   spent), `maxBuybackPerCall` applies, and a revert inside the unlock with data (a hook, a pool) is caught:
   `BuybackV4Failed`, nothing moves; one without data or that burnt the call's gas (out of gas) is re-raised
-  (`V4SwapNoReason`), so a gas-starved transaction reverts instead of landing without a swap. A swap that spends
+  (`V4SwapNoReason`: also when it burnt more than 7/8 of the forwarded gas, i.e. `v4SwapGas` is too low), so a
+  transaction never lands without a swap. A swap that spends
   nothing emits `BuybackNoFill`. `previewBuyback(amountIn)` (keeper, eth_call) runs the same swap and reverts
   `BuybackPreview(usdcIn, bkrnOut)`; `v4BlockedHop()` names a hop already past its limit (alerts). No route / an uninitialized pool (before graduation) = `BuybackDeferred`,
   the USDG waits. REF_TWAP and VENUE_UNIV4 refuse each other (v4 has no oracle). The route is chosen off-chain

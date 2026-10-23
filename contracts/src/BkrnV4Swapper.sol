@@ -3,6 +3,7 @@ pragma solidity 0.8.30;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
 import {IBkrnV4Swapper} from "./interfaces/IBkrnV4Swapper.sol";
@@ -19,7 +20,8 @@ import {UniswapV4Lib} from "./libraries/UniswapV4Lib.sol";
 ///         price limit, the settlement token owed is paid straight from the fee router (`sync` + `transferFrom` +
 ///         `settle`; the fee router grants exactly `amountIn` and resets it), the BKRN is `take`n to the fee
 ///         router. Via ETH the intermediate is consumed in full by the BKRN hop (a partial BKRN hop reverts:
-///         nothing is left half-swapped); ROUTE_V4_ETH never moves ETH (the hop deltas cancel), ROUTE_V3_WETH
+///         nothing is left half-swapped); the BKRN hop's limit comes from the ETH the first hop really delivered,
+///         so the whole path meets the floor price; ROUTE_V4_ETH never moves ETH (the hop deltas cancel), ROUTE_V3_WETH
 ///         unwraps the v3 WETH output and settles it with `settle{value:}`. Every delta of this contract
 ///         (settlement token, BKRN, native ETH) must be closed and its ETH balance unchanged when the callback
 ///         returns, else the unlock reverts. Holds nothing between calls; the price checks and the floor live in
@@ -56,6 +58,8 @@ contract BkrnV4Swapper is IBkrnV4Swapper, IV4UnlockCallback {
     error V4BadDelta(int128 inDelta, int128 outDelta);
     /// @notice A delta of this contract is open, ETH is left, or a settle paid a different amount.
     error V4DeltaNotSettled();
+    /// @notice The ETH -> BKRN pool is already past the limit the first hop's fill requires.
+    error V4PriceBeyondLimit(uint160 sqrtPriceX96, uint160 limitX96);
     /// @notice The ETH -> BKRN hop did not consume all the ETH of the first hop.
     error V4HopPartialFill(uint256 ethIn, uint256 used);
     /// @notice Native ETH from anything but WETH / the PoolManager, or outside a swap.
@@ -104,7 +108,7 @@ contract BkrnV4Swapper is IBkrnV4Swapper, IV4UnlockCallback {
             } else {
                 (paid, ethIn) = _v3WethHop(job);
             }
-            (uint256 used, uint256 o) = _hop(m, job.route.bkrnPool, NATIVE, ethIn, job.limit1);
+            (uint256 used, uint256 o) = _hop(m, job.route.bkrnPool, NATIVE, ethIn, _bkrnLimit(m, job, paid, ethIn));
             if (used != ethIn) revert V4HopPartialFill(ethIn, used);
             out = o;
             // ROUTE_V4_ETH: hop 0's ETH credit (+ethIn) is closed by hop 1 (-ethIn); nothing moves
@@ -120,6 +124,18 @@ contract BkrnV4Swapper is IBkrnV4Swapper, IV4UnlockCallback {
             revert V4DeltaNotSettled();
         }
         return abi.encode(paid, out);
+    }
+
+    /// @dev ETH -> BKRN limit from the first hop's REAL fill (review 2 M-A): the net BKRN per ETH that makes `paid`
+    ///      USDG -> `ethIn` ETH -> BKRN meet the floor price `minBkrnPerUsdcWad`, grossed up by the BKRN pool's fees.
+    ///      A pool already past it (the first hop filled too dear) reverts: caught by the fee router, nothing moves.
+    function _bkrnLimit(address m, V4Job memory job, uint256 paid, uint256 ethIn) private view returns (uint160 limit) {
+        if (ethIn == 0) revert V4HopPartialFill(0, 0);
+        // whole BKRN per whole ETH (WAD) = floor x paid (6 dp -> 18 dp) / ethIn
+        uint256 minNet = Math.mulDiv(paid * 1e12, job.minBkrnPerUsdcWad, ethIn);
+        limit = UniswapV4Lib.priceLimit(UniswapV4Lib.grossPrice(minNet, job.bkrnNetPpm), 18, 18, true);
+        uint160 p = UniswapV4Lib.sqrtPriceX96(m, job.route.bkrnPool);
+        if (p <= limit) revert V4PriceBeyondLimit(p, limit);
     }
 
     /// @dev One exact-input v4 swap of `amountIn` `currencyIn` along `key`, stopping at `limit`; returns (input owed,

@@ -220,9 +220,10 @@ contract DeployMainnet is MainnetInput {
     function _wireBuybackV4(BkrnFeeRouter feeRouter) internal {
         if (ext.univ4PoolManager != address(0)) feeRouter.setV4PoolManager(ext.univ4PoolManager);
         for (uint256 i; i < bb.v4Hooks.length; ++i) feeRouter.setV4HookAllowed(bb.v4Hooks[i], true);
-        if (bb.v4HookFeeBps != 0 || bb.v4EthHopBps != 0) {
-            feeRouter.setV4Fees(uint16(bb.v4HookFeeBps), uint16(bb.v4EthHopBps));
+        if (bb.v4HookFeeBps != 0 || bb.v4EthToleranceBps != 0) {
+            feeRouter.setV4Fees(uint16(bb.v4HookFeeBps), uint16(bb.v4EthToleranceBps));
         }
+        if (bb.v4SwapGas != 0) feeRouter.setV4SwapGas(uint32(bb.v4SwapGas));
         if (bb.v4RouteSet) feeRouter.setV4Route(bb.v4Route);
         if (bb.venue != VENUE_UNIV3) feeRouter.setBuybackVenue(bb.venue);
     }

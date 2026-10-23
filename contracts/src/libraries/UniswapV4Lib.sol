@@ -39,6 +39,12 @@ library UniswapV4Lib {
         amount1 = int128(delta);
     }
 
+    /// @notice The gross marginal price whose net share `netPpm` (1e6 = no fee) is `netPrice`, plus 1 bp for rounding
+    ///         (rounded up: the stricter side).
+    function grossPrice(uint256 netPrice, uint256 netPpm) internal pure returns (uint256) {
+        return Math.mulDiv(netPrice, 1e6 * 10_001, netPpm * 10_000, Math.Rounding.Ceil);
+    }
+
     /// @notice sqrtPriceX96 limit of an exact-input swap selling `decIn`-decimal tokens for `decOut`-decimal tokens
     ///         at the worst acceptable price `minOutPerInWad` (whole out per whole in, WAD, > 0): the pool's marginal
     ///         price never goes past it. Raw price (token1 per token0, Uniswap v3 / v4 convention) r = p x 10^decOut /

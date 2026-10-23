@@ -13,6 +13,32 @@ export const bkrnFeeRouterAbi = [
   },
   {
     "type": "function",
+    "name": "DEFAULT_V4_ETH_TOLERANCE_BPS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "DEFAULT_V4_SWAP_GAS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "MAX_SLIPPAGE_BPS",
     "inputs": [],
     "outputs": [
@@ -52,6 +78,19 @@ export const bkrnFeeRouterAbi = [
   },
   {
     "type": "function",
+    "name": "MAX_V4_ETH_TOLERANCE_BPS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "MAX_V4_HOOK_FEE_BPS",
     "inputs": [],
     "outputs": [
@@ -65,7 +104,33 @@ export const bkrnFeeRouterAbi = [
   },
   {
     "type": "function",
+    "name": "MAX_V4_SWAP_GAS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "MIN_TWAP_WINDOW",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MIN_V4_SWAP_GAS",
     "inputs": [],
     "outputs": [
       {
@@ -617,7 +682,7 @@ export const bkrnFeeRouterAbi = [
         "internalType": "uint16"
       },
       {
-        "name": "ethHopBps",
+        "name": "ethToleranceBps",
         "type": "uint16",
         "internalType": "uint16"
       }
@@ -745,6 +810,19 @@ export const bkrnFeeRouterAbi = [
             "internalType": "address"
           }
         ]
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setV4SwapGas",
+    "inputs": [
+      {
+        "name": "gas",
+        "type": "uint32",
+        "internalType": "uint32"
       }
     ],
     "outputs": [],
@@ -895,7 +973,7 @@ export const bkrnFeeRouterAbi = [
   },
   {
     "type": "function",
-    "name": "v4EthHopBps",
+    "name": "v4EthToleranceBps",
     "inputs": [],
     "outputs": [
       {
@@ -1041,6 +1119,19 @@ export const bkrnFeeRouterAbi = [
             "internalType": "address"
           }
         ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "v4SwapGas",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
       }
     ],
     "stateMutability": "view"
@@ -1329,7 +1420,7 @@ export const bkrnFeeRouterAbi = [
         "internalType": "uint16"
       },
       {
-        "name": "ethHopBps",
+        "name": "ethToleranceBps",
         "type": "uint16",
         "indexed": false,
         "internalType": "uint16"
@@ -1408,6 +1499,19 @@ export const bkrnFeeRouterAbi = [
         "type": "address",
         "indexed": false,
         "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "V4SwapGasSet",
+    "inputs": [
+      {
+        "name": "gas",
+        "type": "uint32",
+        "indexed": false,
+        "internalType": "uint32"
       }
     ],
     "anonymous": false
@@ -1639,6 +1743,22 @@ export const bkrnFeeRouterAbi = [
         "name": "limitX96",
         "type": "uint160",
         "internalType": "uint160"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "V4SwapGasTooLow",
+    "inputs": [
+      {
+        "name": "gasLeft",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "needed",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ]
   },

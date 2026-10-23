@@ -146,10 +146,12 @@ abstract contract MainnetInput is Script {
         uint256 bkrnPerEthWad;
         // hooks allow-listed at deploy (e.g. the Pons hook, so graduation only needs setV4Route)
         address[] v4Hooks;
-        // BkrnFeeRouter.setV4Fees: hook fee allowance priced into hooked hops' limits (<= 1000 bps) and the via-ETH
-        // USDG -> ETH hop share of the slippage (0 = a quarter); hook fee + share < maxSlippageBps
+        // BkrnFeeRouter.setV4Fees: hook fee allowance priced into hooked hops' limits (<= 1000 bps, < maxSlippageBps)
+        // and the via-ETH USDG -> ETH hop's sanity tolerance around the ETH reference (0 = 20%, <= 5000 bps)
         uint256 v4HookFeeBps;
-        uint256 v4EthHopBps;
+        uint256 v4EthToleranceBps;
+        // BkrnFeeRouter.setV4SwapGas: gas forwarded to each v4 swap (0 = 1,000,000; else 200,000..5,000,000)
+        uint256 v4SwapGas;
         // optional route set at deploy (after graduation; else later through the timelock)
         bool v4RouteSet;
         IBkrnV4Swapper.V4Route v4Route;
@@ -375,7 +377,8 @@ abstract contract MainnetInput is Script {
         bb.bkrnPerEthWad = json.readUintOr(".buyback.ethReference.bkrnPerEthWad", 0);
         bb.v4Hooks = json.readAddressArrayOr(".buyback.v4Hooks", new address[](0));
         bb.v4HookFeeBps = json.readUintOr(".buyback.v4HookFeeBps", 0);
-        bb.v4EthHopBps = json.readUintOr(".buyback.v4EthHopBps", 0);
+        bb.v4EthToleranceBps = json.readUintOr(".buyback.v4EthToleranceBps", 0);
+        bb.v4SwapGas = json.readUintOr(".buyback.v4SwapGas", 0);
         _loadV4Route(json);
     }
 
@@ -675,10 +678,11 @@ abstract contract MainnetInput is Script {
         _opt(ext.univ4PoolManager, "externals.uniswapV4PoolManager");
         for (uint256 i; i < bb.v4Hooks.length; ++i) _req(bb.v4Hooks[i], "buyback.v4Hooks");
         require(bb.v4HookFeeBps <= 1000, "input: buyback.v4HookFeeBps > 1000");
-        uint256 s0 = bb.v4EthHopBps == 0 ? bb.maxSlippageBps / 4 : bb.v4EthHopBps;
+        require(bb.v4HookFeeBps == 0 || bb.v4HookFeeBps < bb.maxSlippageBps, "input: buyback.v4HookFeeBps must stay below maxSlippageBps");
+        require(bb.v4EthToleranceBps <= 5000, "input: buyback.v4EthToleranceBps > 5000");
         require(
-            (bb.v4HookFeeBps == 0 && bb.v4EthHopBps == 0) || bb.v4HookFeeBps + s0 < bb.maxSlippageBps,
-            "input: buyback.v4HookFeeBps + v4EthHopBps must stay below maxSlippageBps"
+            bb.v4SwapGas == 0 || (bb.v4SwapGas >= 200_000 && bb.v4SwapGas <= 5_000_000),
+            "input: buyback.v4SwapGas outside [200000, 5000000]"
         );
         if (bb.venue == VENUE_UNIV4) {
             _req(ext.univ4PoolManager, "externals.uniswapV4PoolManager");

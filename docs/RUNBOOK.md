@@ -199,8 +199,14 @@ the same wiring against the VERIFY-ed external addresses of the input and keeps 
   `fixed` / `attested` / `fixedEth` (never `twap`: v4 has no oracle), `poolFee` may be 0 (no v3 BKRN pool),
   `buyback.v4HookFeeBps` = the hook's fee (1.2–3.5% observed on Pons pools 2026-10-23, VERIFY U6; at most 1,000
   bps; `setV4Fees`): it is priced into every hooked hop's price limit, so a buyback stopped at its limit still
-  clears the floor and partially fills (review 2026-10-23 M-1); `maxSlippageBps` above hook fee + the via-ETH
-  first-hop share (`v4EthHopBps`, default slippage / 4), e.g. 1,000 bps with a 300 bps hook. `maxPerCall` sized to
+  clears the floor and partially fills (review 2026-10-23 M-1); `maxSlippageBps` above the hook fee, e.g.
+  1,000 bps with a 300 bps hook. Via ETH the ETH -> BKRN hop's limit is set from the ETH the first hop really
+  delivered (review 2 M-A), so the fixed ETH reference only bounds the USDG -> ETH hop within the wide
+  `buyback.v4EthToleranceBps` (default 2,000 = 20%, at most 5,000). `buyback.v4SwapGas` (default 1,000,000, within
+  200,000..5,000,000) is the gas forwarded to every v4 swap: `executeBuyback` refuses to start without it plus a
+  200k reserve (`V4SwapGasTooLow`; the keeper's eth_estimateGas converges on ~1.3M), so the swap behaves the same
+  whatever the transaction's gas limit (review 2 L-1); keep it well above the route's swap gas (fork: well under
+  0.5M for a Pons-hooked V3_WETH swap). `maxPerCall` sized to
   the graduated pool's depth: a via-ETH buyback whose ETH -> BKRN hop hits its limit fails safe as a whole
   (`BuybackV4Failed`); the keeper then halves the next size (down to `WATERFALL_BUYBACK_THRESHOLD_USD`) with a
   growing cooldown (x2 per failure, at most x16), sets its minimum from `previewBuyback` (a simulated fill, minus
@@ -210,16 +216,16 @@ the same wiring against the VERIFY-ed external addresses of the input and keeps 
   graduation run `bun scripts/buyback-route.ts --bkrn <token>` (read-only; ranks USDG -> BKRN direct,
   USDG -> ETH -> BKRN via the v4 ETH/USDG pool, USDG -> WETH (v3) -> ETH -> BKRN, prints the deploy-input values
   and the timelock calldata) and schedule `setEthReference` (via-ETH) + `setV4Route` through the timelock;
-- **refreshing the fixed references (via-ETH routes)**: `refUsdcPerEthWad` splits the hop limits. ETH moving
-  more than about the first hop's share less its LP fee (default `maxSlippageBps / 4` − 5 bps for the v4 0.05% /
-  v3 0.01% pool) above it, or BKRN/ETH moving more than the second hop's share (1 − keep / (1 − s0) less the hook
-  allowance) below `refBkrnPerEthWad x refUsdcPerEthWad / refBkrnPerUsdc`, puts a hop past its limit: every
-  buyback stops (`V4PriceBeyondLimit`, nothing lost, USDG waits). With the 48 h timelock, schedule a
-  `setEthReference` (and, for REF_FIXED / REF_FIXED_ETH, the BKRN reference) refresh from `bun
-  scripts/buyback-route.ts` (ETH = v3 30-min TWAP, BKRN/ETH = median over recent blocks of the picked pool)
-  whenever ETH/USD has moved ~half that share, at least weekly; `services/alerts` raises
-  `buyback_v4_reference_stale` after 1 h with a hop blocked (`BkrnFeeRouter.v4BlockedHop()`: 1 the first hop, 2 the
-  BKRN hop) and pending above `ALERT_BUYBACK_MIN_USD`;
+- **refreshing the fixed references (via-ETH routes)**: since review 2 M-A, ETH moves no longer stall buybacks
+  with REF_FIXED / REF_ATTESTED: the floor is in USDG, the BKRN hop follows the real ETH fill, and
+  `refUsdcPerEthWad` only gates the USDG -> ETH hop within `v4EthToleranceBps` (20%): refresh it (`setEthReference`,
+  48 h timelock) when ETH/USD has moved ~10% from it, at least monthly. REF_FIXED_ETH (BKRN/ETH x ETH/USD) still
+  derives the BKRN floor from it: with that source refresh both values whenever ETH or BKRN/ETH moves ~half of
+  `maxSlippageBps`. The BKRN reference itself (REF_FIXED `refBkrnPerUsdcWad`) must track BKRN/USDG within the
+  slippage: refresh from `bun scripts/buyback-route.ts` (ETH = v3 30-min TWAP, BKRN/ETH = median over recent blocks
+  of the picked pool). `services/alerts` raises `buyback_v4_reference_stale` after 1 h with a hop blocked
+  (`BkrnFeeRouter.v4BlockedHop()`: 1 = the direct pool, or ETH/USDG beyond the ETH tolerance; 2 = the ETH -> BKRN
+  pool cannot meet the floor: BKRN reference stale or BKRN fell) and pending above `ALERT_BUYBACK_MIN_USD`;
 - **manual BKRN transfer check (fee-on-transfer cannot be proven read-only)**: before the deploy, move a small
   amount of the Pons BKRN between two treasury-controlled addresses and confirm the receiver got exactly the
   amount sent (no tax / reflection / rebase); a fee-on-transfer BKRN breaks the staking accounting

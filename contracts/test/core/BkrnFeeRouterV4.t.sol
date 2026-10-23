@@ -62,6 +62,29 @@ contract BareRevertHook is IMockV4Hook {
     }
 }
 
+/// @dev Hook that burns ~400k gas in beforeSwap.
+contract GasBurnHook is IMockV4Hook {
+    uint256 public sink;
+
+    function beforeSwap(address, IV4PoolManager.PoolKey calldata, IV4PoolManager.SwapParams calldata, bytes calldata)
+        external
+        returns (int128)
+    {
+        for (uint256 i; i < 18; ++i) sink = uint256(keccak256(abi.encode(sink, i, gasleft()))); // warm writes
+        uint256 stop = gasleft() > 400_000 ? gasleft() - 400_000 : 0;
+        while (gasleft() > stop) sink += 1;
+        return 0;
+    }
+
+    function afterSwap(address, IV4PoolManager.PoolKey calldata, IV4PoolManager.SwapParams calldata, int256, bytes calldata)
+        external
+        pure
+        returns (int128)
+    {
+        return 0;
+    }
+}
+
 /// @dev Hook that calls PoolManager.sync(token) from afterSwap (sync is global, not per locker).
 contract SyncingHook is IMockV4Hook {
     MockV4PoolManager internal immutable pm;
@@ -321,14 +344,14 @@ abstract contract BkrnFeeRouterV4Base is Test {
         vm.expectRevert(BkrnFeeRouter.BadBuybackParams.selector);
         fr.setV4Fees(1001, 0); // above MAX_V4_HOOK_FEE_BPS
         vm.expectRevert(BkrnFeeRouter.BadBuybackParams.selector);
-        fr.setV4Fees(400, 0); // 400 + 500 / 4 >= 500
+        fr.setV4Fees(500, 0); // not below the 500 bps slippage
         vm.expectRevert(BkrnFeeRouter.BadBuybackParams.selector);
-        fr.setV4Fees(200, 300); // 200 + 300 >= 500
-        fr.setV4Fees(300, 100);
+        fr.setV4Fees(300, 5001); // ETH tolerance above MAX_V4_ETH_TOLERANCE_BPS
+        fr.setV4Fees(300, 3000);
         assertEq(fr.v4HookFeeBps(), 300);
-        assertEq(fr.v4EthHopBps(), 100);
+        assertEq(fr.v4EthToleranceBps(), 3000);
         vm.expectRevert(BkrnFeeRouter.BadBuybackParams.selector);
-        fr.setBuybackParams(0, REF, 400, 1_000_000e6); // slippage no longer above the allowances
+        fr.setBuybackParams(0, REF, 300, 1_000_000e6); // slippage no longer above the hook allowance
         fr.setBuybackParams(0, REF, 1000, 1_000_000e6);
         fr.setV4Fees(0, 0);
         vm.stopPrank();
@@ -396,22 +419,51 @@ abstract contract BkrnFeeRouterV4Base is Test {
         fr.executeBuyback(10e6, 0);
     }
 
-    /// @dev Review L-1 regression: no gas window where executeBuyback succeeds without swapping (an inner out-of-
-    ///      gas is re-raised): the lowest non-reverting gas limit swaps.
+    /// @dev Review 2 L-1 regression: a LINEAR scan (pockets are not monotonic in gas) finds no gas limit where
+    ///      executeBuyback succeeds without swapping: below what the forwarded swap gas needs it refuses up front
+    ///      (V4SwapGasTooLow), above it the swap always gets exactly v4SwapGas.
     function test_no_gas_window_without_swap() public {
         _use(_route(V3_WETH, ethBkrnKey));
         _seed(100e6);
-        uint256 a = 50_000;
-        uint256 b = 3_000_000;
-        while (a + 1 < b) {
-            uint256 m = (a + b) / 2;
-            (bool ok,) = _tryGas(m);
-            if (ok) b = m;
-            else a = m;
+        uint256 firstOk;
+        for (uint256 g = 100_000; g <= 2_000_000; g += 5_000) {
+            (bool ok, bool swapped) = _tryGas(g);
+            assertTrue(!ok || swapped, "a gas limit landed without swapping");
+            if (ok && firstOk == 0) firstOk = g;
         }
-        (bool okAt, bool swappedAt) = _tryGas(b);
-        assertTrue(okAt);
-        assertTrue(swappedAt, "a non-reverting gas limit landed without swapping");
+        assertGt(firstOk, uint256(fr.DEFAULT_V4_SWAP_GAS())); // never below the forwarded amount
+        vm.prank(keeper); // just below: refused before any swap
+        vm.expectPartialRevert(BkrnFeeRouter.V4SwapGasTooLow.selector);
+        fr.executeBuyback{gas: 1_000_000}(10e6, 0);
+    }
+
+    /// @dev A swap that runs out of the forwarded gas reverts the buyback (V4SwapNoReason), never lands empty;
+    ///      v4SwapGas is a bounded governance setting.
+    function test_forwarded_swap_gas_out_of_gas_reverts() public {
+        GasBurnHook burn = new GasBurnHook();
+        IV4PoolManager.PoolKey memory k = _key(address(0), address(bkrn), 0, 200, address(burn));
+        pm.initialize(k, _sqrtEthBkrn(BKRN_ETH), L_ETH_BKRN);
+        _use(_route(V4_ETH, k));
+        _seed(100e6);
+        vm.startPrank(admin);
+        vm.expectRevert(BkrnFeeRouter.BadBuybackParams.selector);
+        fr.setV4SwapGas(199_999);
+        vm.expectRevert(BkrnFeeRouter.BadBuybackParams.selector);
+        fr.setV4SwapGas(5_000_001);
+        vm.expectEmit(false, false, false, true, address(fr));
+        emit BkrnFeeRouter.V4SwapGasSet(250_000);
+        fr.setV4SwapGas(250_000); // the hook burns ~400k: out of the forwarded gas
+        vm.stopPrank();
+        vm.expectRevert(BkrnFeeRouter.V4SwapNoReason.selector);
+        vm.prank(keeper);
+        fr.executeBuyback{gas: 2_000_000}(10e6, 0);
+        vm.prank(admin);
+        fr.setV4SwapGas(0); // back to the 1M default: the hook fits, the buyback lands
+        vm.prank(keeper);
+        assertGt(fr.executeBuyback{gas: 3_000_000}(10e6, 0), 0);
+        vm.expectRevert(abi.encodeWithSelector(BkrnFeeRouter.NotAdmin.selector, keeper));
+        vm.prank(keeper);
+        fr.setV4SwapGas(300_000);
     }
 
     function _tryGas(uint256 g) internal returns (bool ok, bool swapped) {
@@ -427,8 +479,12 @@ abstract contract BkrnFeeRouterV4Base is Test {
         assertEq(fr.v4BlockedHop(), 0); // venue v3
         _use(_route(V4_ETH, ethBkrnKey));
         assertEq(fr.v4BlockedHop(), 0);
-        pm.setPrice(ethUsdcKey, _sqrtEthUsdc(2600e18)); // ETH up 8% vs the fixed reference
+        pm.setPrice(ethUsdcKey, _sqrtEthUsdc(2600e18)); // ETH up 8%: within the 20% tolerance, hop 1 follows it
+        pm.setPrice(ethBkrnKey, _sqrtEthBkrn(BKRN_ETH * 2600e18 / ETH_USD)); // BKRN/USDG unchanged
+        assertEq(fr.v4BlockedHop(), 0);
+        pm.setPrice(ethUsdcKey, _sqrtEthUsdc(3000e18)); // ETH up 25%: past the tolerance
         assertEq(fr.v4BlockedHop(), 1);
+        pm.setPrice(ethBkrnKey, _sqrtEthBkrn(BKRN_ETH));
         pm.setPrice(ethUsdcKey, _sqrtEthUsdc(ETH_USD));
         pm.setPrice(ethBkrnKey, _sqrtEthBkrn(BKRN_ETH * 90 / 100)); // BKRN 10% dearer in ETH
         assertEq(fr.v4BlockedHop(), 2);
@@ -605,14 +661,52 @@ abstract contract BkrnFeeRouterV4Base is Test {
         }
         return false;
     }
-
+    /// @dev The ETH/USDG pool far outside the wide tolerance of the ETH reference (here 25% > 20%): refused up front.
     function test_v4_eth_route_refuses_moved_first_hop() public {
         _use(_route(V4_ETH, ethBkrnKey));
         _seed(100e6);
-        pm.setPrice(ethUsdcKey, _sqrtEthUsdc(2600e18)); // ETH 8% dearer than the reference: fewer ETH per USDG
+        pm.setPrice(ethUsdcKey, _sqrtEthUsdc(3000e18)); // ETH 25% dearer than the reference
         vm.expectPartialRevert(BkrnFeeRouter.V4PriceBeyondLimit.selector);
         vm.prank(keeper);
         fr.executeBuyback(10e6, 0);
+    }
+
+    /// @dev Review 2 M-A regression (the reviewer's PoC): ETH 1.3% off the fixed reference with BKRN/USDG exact no
+    ///      longer stalls via-ETH buybacks: hop 1's limit follows the ETH hop 0 really delivered. Both ways, and on
+    ///      both via-ETH routes; the whole path still clears the USDG floor.
+    function test_via_eth_follows_eth_moves_against_the_fixed_reference() public {
+        for (uint256 k; k < 4; ++k) {
+            uint256 snap = vm.snapshotState();
+            uint8 kind = k < 2 ? V4_ETH : V3_WETH;
+            uint256 ethUsd = k % 2 == 0 ? ETH_USD * 10_130 / 10_000 : ETH_USD * 9_000 / 10_000; // +1.3% / -10%
+            _use(_route(kind, ethBkrnKey));
+            _seed(100e6);
+            pm.setPrice(ethUsdcKey, _sqrtEthUsdc(ethUsd));
+            pm.setPrice(ethBkrnKey, _sqrtEthBkrn(BKRN_ETH * ethUsd / ETH_USD)); // BKRN/USDG unchanged
+            vm.prank(admin);
+            v3.setPriceBoth(address(usdc), address(weth), 1e36 / ethUsd);
+            assertEq(fr.v4BlockedHop(), 0);
+            vm.prank(keeper);
+            uint256 out = fr.executeBuyback(10e6, 0);
+            assertGe(out, fr.buybackFloor(10e6));
+            _assertNoStuckBalances();
+            vm.revertToState(snap);
+        }
+    }
+
+    /// @dev Via ETH with BKRN really cheaper in USDG than the floor allows: hop 1 cannot meet the floor from the
+    ///      ETH hop 0 delivered: refused inside the unlock (caught, nothing moves), never an under-floor fill.
+    function test_via_eth_bkrn_below_floor_refused_in_the_swap() public {
+        _use(_route(V4_ETH, ethBkrnKey));
+        _seed(100e6);
+        pm.setPrice(ethBkrnKey, _sqrtEthBkrn(BKRN_ETH * 9400 / 10_000)); // 6% fewer BKRN per ETH (slippage 5%)
+        assertEq(fr.v4BlockedHop(), 2);
+        vm.recordLogs();
+        vm.prank(keeper);
+        assertEq(fr.executeBuyback(10e6, 0), 0);
+        assertEq(fr.buybackPending(), 100e6);
+        assertTrue(_logged(BkrnFeeRouter.BuybackV4Failed.selector));
+        _assertNoStuckBalances();
     }
 
     /// @dev USDG -> WETH (v3) -> unwrap (WETH9 `transfer`, 2300 gas) -> settle{value:} -> BKRN.

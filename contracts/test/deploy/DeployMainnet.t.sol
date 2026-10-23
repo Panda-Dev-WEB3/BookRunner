@@ -812,7 +812,7 @@ contract DeployMainnetTest is Test {
         o.v4Hook = address(h);
         o.usdcPerEthWad = 2400e18;
         o.bkrnPerEthWad = 48_000e18;
-        o.v4HookFeeBps = 300; // Pons-like hook fee allowance (300 + 500 / 4 < 500)
+        o.v4HookFeeBps = 300; // Pons-like hook fee allowance (< the 500 bps slippage)
     }
 
     function _ethRouteJson(IV4PoolManager.PoolKey memory ethBkrn, IV4PoolManager.PoolKey memory ethUsdg)
@@ -846,8 +846,8 @@ contract DeployMainnetTest is Test {
     function test_refuses_v4_hook_fee_not_below_slippage() public {
         MockERC20 t = _ponsBkrn();
         (Opts memory o,,) = _v4World(address(t));
-        o.v4HookFeeBps = 400; // 400 + 500 / 4 >= 500
-        _expectValidateRevert(o, "input: buyback.v4HookFeeBps + v4EthHopBps must stay below maxSlippageBps");
+        o.v4HookFeeBps = 500; // not below the 500 bps slippage
+        _expectValidateRevert(o, "input: buyback.v4HookFeeBps must stay below maxSlippageBps");
         o.v4HookFeeBps = 1001;
         _expectValidateRevert(o, "input: buyback.v4HookFeeBps > 1000");
     }

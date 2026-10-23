@@ -24,7 +24,10 @@ interface IBkrnV4Swapper {
         V4Route route;
         uint256 amountIn;
         uint160 limit0; // first hop (USDG ->)
-        uint160 limit1; // ETH -> BKRN hop (via ETH only)
+        // via ETH: the ETH -> BKRN hop's limit is set from the ETH the first hop actually delivered, so the whole
+        // path meets this floor price (whole BKRN per whole USDG, WAD) net of the BKRN pool's fees (bkrnNetPpm)
+        uint256 minBkrnPerUsdcWad;
+        uint256 bkrnNetPpm;
         address v3Router; // ROUTE_V3_WETH: SwapRouter02
     }
 
