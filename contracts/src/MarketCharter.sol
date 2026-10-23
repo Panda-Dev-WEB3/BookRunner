@@ -34,6 +34,9 @@ library CharterRules {
     bytes32 internal constant BAD_PREMIUM = "BAD_PREMIUM";
     /// @dev 2026-10 insurance pool: `ifFromPool` while config.insurancePool() is unset.
     bytes32 internal constant NO_POOL = "NO_POOL";
+    /// @dev pool audit 2026-10-23 B-M2: a pool-funded charter whose MM inventory (the planned tranche raise) is below
+    ///      the pool's minimum own capital (InsurancePool.minOwnCapitalBps of the IF, 50% by default).
+    bytes32 internal constant UNDERCAPITALISED = "UNDERCAPITALISED";
 
     // ---- bounds ----
     uint256 internal constant BPS = 1e4;
@@ -422,7 +425,14 @@ contract MarketCharter is IMarketCharter, ReentrancyGuardTransient {
         if (c.venue == BRTypes.VENUE_POOL_ENGINE && c.takerFeeBps > CharterRules.MAX_ENGINE_TAKER_FEE_BPS) {
             return CharterRules.BAD_FEES;
         }
-        return CharterRules.poolReason(c.ifFromPool, c.premiumBps, _insurancePool());
+        address pool = _insurancePool();
+        bytes32 poolReason = CharterRules.poolReason(c.ifFromPool, c.premiumBps, pool);
+        if (poolReason != bytes32(0) || !c.ifFromPool) return poolReason;
+        // pool audit 2026-10-23 B-M2 (closeWindow checks the raise against the same rule)
+        if (!Waterfall.poolCapitalOk(c.mmInventoryUsd, c.ifTargetUsd, IInsurancePool(pool).minOwnCapitalBps())) {
+            return CharterRules.UNDERCAPITALISED;
+        }
+        return bytes32(0);
     }
 
     /// @dev config.insurancePool() (BookrunnerConfig extension); address(0) when unset or not exposed.

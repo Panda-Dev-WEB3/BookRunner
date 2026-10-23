@@ -409,6 +409,12 @@ contract VerifyHandover is MainnetInput {
                 && (pendingLen != 0 ? pendingLen : len) == poolIn.epochLength && grace == poolIn.processGrace,
             "insurance pool params == input"
         );
+        _row(ip.minOwnCapitalBps() == poolIn.minOwnCapitalBps, "insurance pool minOwnCapitalBps == input");
+        // pool audit 2026-10-23 A-I8: the implementation can never be initialized (OZ Initializable, ERC-7201 slot)
+        uint64 implInit = uint64(
+            uint256(vm.load(impl, 0xf0c57e16840df040f15088dc2f81fe391c3923bec73e23a9662efc9c229c6a00))
+        );
+        _row(implInit == type(uint64).max, "insurance pool implementation: initializers disabled");
         (bool dp, bool ap) = ip.paused();
         _row(!dp && !ap, "insurance pool not paused (launch-ready)");
     }

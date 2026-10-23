@@ -400,35 +400,285 @@ library Waterfall {
         rest = gross - premium;
     }
 
-    /// @notice The pool's claim on a book at a mark (owner rulings N-1, N2-2): the debt, capped by the book's own
-    ///         capital, i.e. vault idle + deployed value minus the Backstop money in it (`backstopMoney`: cover still held
-    ///         by Senior + a repayment owed to the Backstop). Below the debt only while the book is exhausted: that
-    ///         shortfall is a provisional pool loss, restored first by later marks, final only at retirement. Backstop
-    ///         money is never part of it.
-    function poolClaimAtMark(uint256 debt, uint256 vaultIdle, uint256 deployedValueUsd, uint256 backstopMoney)
+    /// @notice Minimum own capital of a pool-funded book (audit 2026-10-23 B-M2): the tranche capital raised must be at
+    ///         least `minOwnCapitalBps` of the IF the pool lends (InsurancePool.minOwnCapitalBps, 5000 = 50% by default).
+    ///         Book.closeWindow checks the raise, MarketCharter the charter's MM inventory (the planned raise) at filing.
+    function poolCapitalOk(uint256 trancheCapital, uint256 ifTargetUsd, uint256 minOwnCapitalBps)
         internal
         pure
-        returns (uint256 claim, uint256 shortfall)
+        returns (bool)
     {
-        uint256 assets = vaultIdle + deployedValueUsd;
-        uint256 own = assets > backstopMoney ? assets - backstopMoney : 0;
-        if (own >= debt) return (debt, 0);
-        return (own, debt - own);
+        return trancheCapital * BPS >= ifTargetUsd * minOwnCapitalBps;
     }
 
-    /// @notice The NAV that caps Backstop cover for a pool-funded book (owner ruling N-1: the Backstop never covers the
-    ///         insurance debt): the mark NAV with the IF draw (debt - IF equity; the IF equity capped at the deployed
-    ///         value) added back, i.e. the NAV the losses OTHER than the insurance debt leave. `liabilities` includes the
-    ///         claim netted (`debt` here is that claim). Cover at a mark is at most what applyMarkPnl covers at this NAV.
-    function poolCoverNav(
-        uint256 vaultIdle,
-        uint256 liabilities,
-        uint256 deployedValueUsd,
-        uint256 debt,
-        uint256 insuranceEquityUsd
-    ) internal pure returns (uint256) {
-        uint256 ifEquity = insuranceEquityUsd < deployedValueUsd ? insuranceEquityUsd : deployedValueUsd;
-        uint256 draw = debt > ifEquity ? debt - ifEquity : 0;
-        return markedNavNet(vaultIdle, liabilities, deployedValueUsd + draw);
+    // ---- the explicit insurance ledger of a pool-funded book (audit 2026-10-23: B-H1, B-M1, B-L2, B-L3) ----
+
+    /// @notice Waterfall state of a pool-funded book. Every field is persistent book state, moved only by explicit
+    ///         events (a mark's IF draw or other loss, Backstop cover, a gain, a fee distribution, a pool repayment, a
+    ///         redemption), never rebuilt from NAV:
+    ///         - `seniorIfImpairment`: the part of `seniorImpairment` that is insurance debt (an IF draw Senior absorbed).
+    ///           The Backstop never covers it, and a gain restores it only after the Backstop is repaid.
+    ///         - `juniorIfLoss`: the IF draws Junior absorbed. Had the IF never been drawn, Junior would still hold this
+    ///           capital in front of Senior, so a later loss of another kind that reaches Senior is an insurance-debt
+    ///           loss up to it (owner ruling N-1: the Backstop never covers more than it would without the IF draws).
+    ///         - `coverHeld`: Backstop cover Senior still holds (<= Senior NAV, <= backstopDebt). Never the book's own
+    ///           capital: it never backs the pool's claim nor repays it; a loss other than an IF draw consumes it first.
+    ///         - `poolValue`: the pool's claim, <= `poolDebt`; below it only while the tranches hold no own capital
+    ///           (Junior 0, Senior == coverHeld): a provisional pool loss, restored first by any later gain (N2-2).
+    ///         - `ifDraw`: the outstanding IF draw at the last mark, max(0, poolDebt - IF equity).
+    struct PoolMarkState {
+        uint256 seniorNav;
+        uint256 juniorNav;
+        uint256 seniorImpairment;
+        uint256 seniorIfImpairment;
+        uint256 juniorIfLoss;
+        uint256 coverHeld;
+        uint256 backstopDebt;
+        uint256 perfIndex;
+        uint256 highWater;
+        uint256 poolValue;
+        uint256 poolDebt;
+        uint256 ifDraw;
+    }
+
+    struct PoolMarkInputs {
+        uint256 netAssets; // max(vault idle + deployed - unfunded claims - backstop repayment owed, 0)
+        uint256 insuranceEquityUsd; // the mark's signed IF equity, capped at its deployed value
+        bool due; // the debt is due (IF recall started): repayments move the draw, so it is never read as a recovery
+        uint256 juniorSupply;
+        uint256 backstopAvailable;
+    }
+
+    struct PoolMarkResult {
+        PoolMarkState s; // after the mark, cover included (the input struct, updated in place)
+        uint256 nav; // tranche NAV before cover, the repayment owed to the Backstop included: netAssets - poolValue'
+        int256 pnl; // nav - accounted
+        int256 drawdownBps;
+        uint256 juniorLoss;
+        uint256 seniorLoss; // seniorIfLoss included
+        uint256 seniorIfLoss;
+        uint256 poolLoss;
+        uint256 poolRestored;
+        uint256 seniorRestored;
+        uint256 juniorGain;
+        uint256 backstopRepaid;
+        uint256 backstopCovered;
+    }
+
+    /// @notice Book.applyMark P&L of a pool-funded book: the change of the book's net assets against what the tranches
+    ///         and the pool's claim held, allocated on the explicit ledger. `s` is updated in place (r.s == s).
+    ///         - The IF draw since the last mark (`ifDraw` growth; once due only within a net loss) is the insurance debt's loss: Junior
+    ///           (-> juniorIfLoss), then Senior's own capital (-> seniorIfImpairment), then the pool's claim; never the
+    ///           Backstop cover.
+    ///         - Any other loss: Junior first (within a mark Junior absorbs it before the IF draw: the conservative
+    ///           split), then on Senior up to `juniorIfLoss` it is insurance debt as above (counterfactual Junior), the
+    ///           rest consumes `coverHeld` first and is coverable, then the pool's claim (only once nothing is left).
+    ///         - While Live the change splits exactly into an IF recovery (applied first), the other P&L, then the IF draw.
+    ///         - A gain: the pool's provisional shortfall first (N2-2); an IF recovery (Live) then restores the IF losses
+    ///           (Senior's, then Junior's); the rest restores Senior's impairment
+    ///           other than the IF part, then repays the Backstop (coverHeld <= backstopDebt), then restores Senior's IF
+    ///           impairment, then goes to Junior (Senior when Junior has no supply).
+    ///         - Cover: only Senior's impairment other than the IF part, only while Junior is empty.
+    function applyPoolMarkPnl(PoolMarkState memory s, PoolMarkInputs memory i)
+        internal
+        pure
+        returns (PoolMarkResult memory r)
+    {
+        uint256 accounted = s.seniorNav + s.juniorNav;
+        uint256 draw = s.poolDebt > i.insuranceEquityUsd ? s.poolDebt - i.insuranceEquityUsd : 0;
+        uint256 held = accounted + s.poolValue;
+        if (!i.due) {
+            // Live: nothing recalls or repays the IF, so the draw moves only by IF P&L and splits the change exactly: an
+            // IF recovery first, then the other P&L, then the IF draw (Junior absorbs other losses first, and the IF
+            // draw takes what an other gain brought, as it would have without the gain)
+            uint256 up = draw > s.ifDraw ? draw - s.ifDraw : 0;
+            uint256 down = s.ifDraw > draw ? s.ifDraw - draw : 0;
+            if (down > 0) _poolGain(s, r, down, down, i.juniorSupply);
+            uint256 plus = i.netAssets + up;
+            uint256 minus = held + down;
+            if (plus > minus) _poolGain(s, r, plus - minus, 0, i.juniorSupply);
+            else if (plus < minus) _poolLossOther(s, r, minus - plus);
+            _poolLossIf(s, r, up);
+        } else if (i.netAssets < held) {
+            // due: repayments and recalls move the draw too, so only a net loss is split (the draw first within it:
+            // conservative) and no fall of the draw is read as an IF recovery
+            uint256 loss = held - i.netAssets;
+            uint256 ifLoss = draw > s.ifDraw ? Math.min(loss, draw - s.ifDraw) : 0;
+            _poolLossOther(s, r, loss - ifLoss);
+            _poolLossIf(s, r, ifLoss);
+        } else if (i.netAssets > held) {
+            _poolGain(s, r, i.netAssets - held, 0, i.juniorSupply);
+        }
+        r.nav = i.netAssets - s.poolValue;
+        r.pnl = SafeCast.toInt256(r.nav) - SafeCast.toInt256(accounted);
+
+        uint256 other = s.seniorImpairment - s.seniorIfImpairment;
+        if (s.juniorNav == 0 && other > 0) {
+            uint256 c = Math.min(other, i.backstopAvailable);
+            r.backstopCovered = c;
+            s.seniorNav += c;
+            s.seniorImpairment -= c;
+            s.backstopDebt += c;
+            s.coverHeld += c;
+        }
+
+        uint256 pi = accounted > 0 ? Math.mulDiv(s.perfIndex, r.nav, accounted) : s.perfIndex;
+        uint256 hw = pi > s.highWater ? pi : s.highWater;
+        r.drawdownBps = hw > 0 ? -SafeCast.toInt256(Math.mulDiv(hw - pi, BPS, hw)) : int256(0);
+        s.perfIndex = pi;
+        s.highWater = hw;
+        s.ifDraw = draw;
+        r.s = s;
+    }
+
+    /// @dev A loss other than the IF draw: Junior, then (counterfactual Junior) an IF loss of Senior's, then the cover,
+    ///      then Senior's own capital, then the pool's claim.
+    function _poolLossOther(PoolMarkState memory s, PoolMarkResult memory r, uint256 x) private pure {
+        uint256 j = Math.min(x, s.juniorNav);
+        s.juniorNav -= j;
+        r.juniorLoss += j;
+        x -= j;
+        uint256 sw = Math.min(x, s.juniorIfLoss);
+        s.juniorIfLoss -= sw;
+        _poolLossIfSenior(s, r, sw);
+        x -= sw;
+        uint256 sl = Math.min(x, s.seniorNav);
+        s.coverHeld -= Math.min(sl, s.coverHeld);
+        s.seniorNav -= sl;
+        s.seniorImpairment += sl;
+        r.seniorLoss += sl;
+        uint256 p = Math.min(x - sl, s.poolValue);
+        s.poolValue -= p;
+        r.poolLoss += p;
+    }
+
+    /// @dev The IF draw: Junior (juniorIfLoss), then Senior's own capital, then the pool's claim.
+    function _poolLossIf(PoolMarkState memory s, PoolMarkResult memory r, uint256 x) private pure {
+        uint256 j = Math.min(x, s.juniorNav);
+        s.juniorNav -= j;
+        s.juniorIfLoss += j;
+        r.juniorLoss += j;
+        _poolLossIfSenior(s, r, x - j);
+    }
+
+    /// @dev An insurance-debt loss reaching Senior: its own capital (seniorIfImpairment), then the pool's claim, and
+    ///      only if nothing else is left (net assets below the cover) the cover itself, still never coverable.
+    function _poolLossIfSenior(PoolMarkState memory s, PoolMarkResult memory r, uint256 x) private pure {
+        uint256 own = Math.min(x, s.seniorNav - s.coverHeld);
+        uint256 p = Math.min(x - own, s.poolValue);
+        s.poolValue -= p;
+        r.poolLoss += p;
+        uint256 c = Math.min(x - own - p, s.coverHeld);
+        s.coverHeld -= c;
+        uint256 sl = own + c;
+        s.seniorNav -= sl;
+        s.seniorImpairment += sl;
+        s.seniorIfImpairment += sl;
+        r.seniorLoss += sl;
+        r.seniorIfLoss += sl;
+    }
+
+    function _poolGain(PoolMarkState memory s, PoolMarkResult memory r, uint256 g, uint256 ifGain, uint256 jSupply)
+        private
+        pure
+    {
+        uint256 p = Math.min(g, s.poolDebt - s.poolValue);
+        s.poolValue += p;
+        r.poolRestored += p;
+        g -= p;
+        // an IF recovery reverses the IF losses: Senior's, then Junior's
+        uint256 gi = Math.min(g, ifGain);
+        uint256 a = Math.min(gi, s.seniorIfImpairment);
+        s.seniorIfImpairment -= a;
+        uint256 b = jSupply == 0 ? 0 : Math.min(gi - a, s.juniorIfLoss);
+        s.juniorIfLoss -= b;
+        s.juniorNav += b;
+        r.juniorGain += b;
+        g -= a + b;
+        // the rest: Senior's other impairment, the Backstop, Senior's IF impairment, Junior
+        uint256 n = Math.min(g, s.seniorImpairment - a - s.seniorIfImpairment);
+        g -= n;
+        uint256 rp = Math.min(g, s.backstopDebt);
+        s.backstopDebt -= rp;
+        if (s.coverHeld > s.backstopDebt) s.coverHeld = s.backstopDebt;
+        r.backstopRepaid += rp;
+        g -= rp;
+        uint256 f = Math.min(g, s.seniorIfImpairment);
+        s.seniorIfImpairment -= f;
+        g -= f;
+        // what a gain other than an IF recovery gives the pool's shortfall and Senior's IF impairment would, had the IF
+        // never been drawn, have gone to Junior: counterfactual Junior capital in front of Senior's later other losses
+        // (so neither the pool's priority nor the restoration ever makes the Backstop cover more)
+        if (ifGain == 0 && jSupply != 0) s.juniorIfLoss += p + f;
+        uint256 restored = a + n + f;
+        s.seniorImpairment -= restored;
+        s.seniorNav += restored;
+        r.seniorRestored += restored;
+        if (jSupply == 0) {
+            s.seniorNav += g;
+        } else {
+            s.juniorNav += g;
+            r.juniorGain += g;
+        }
+    }
+
+    struct PoolDistributionInput {
+        uint256 senior; // Senior hurdle share credited by the router
+        uint256 junior; // Junior residual credited by the router
+        uint256 juniorSupply;
+        uint256 seniorImpairment;
+        uint256 seniorIfImpairment;
+        uint256 backstopDebt;
+        uint256 coverHeld;
+        uint256 juniorIfLoss;
+        uint256 poolShortfall; // poolDebt - poolValue (0 once the pool's position is closed)
+    }
+
+    struct PoolDistributionResult {
+        uint256 seniorCredit;
+        uint256 juniorCredit;
+        uint256 poolRestored; // raises the pool's claim (stays in the vault, owed to the pool)
+        uint256 seniorRestored;
+        uint256 backstopRepaid; // owed to the Backstop (leaves the tranches)
+        uint256 seniorImpairment;
+        uint256 seniorIfImpairment;
+        uint256 backstopDebt;
+        uint256 coverHeld;
+        uint256 juniorIfLoss;
+    }
+
+    /// @notice Book.creditDistribution of a pool-funded book (audit 2026-10-23 B-L2): fee flow is own capital, so while
+    ///         the book is exhausted it restores the pool's claim first (N2-2; the residual first, then the hurdle
+    ///         share; the residual's part, and what restores Senior's IF impairment, is booked to juniorIfLoss). The rest of the residual follows the mark gain order: Senior's impairment other than the IF part,
+    ///         the Backstop, Senior's IF impairment, then Junior (Senior when Junior has no supply). seniorCredit +
+    ///         juniorCredit + poolRestored + backstopRepaid == senior + junior.
+    function applyPoolDistribution(PoolDistributionInput memory i)
+        internal
+        pure
+        returns (PoolDistributionResult memory r)
+    {
+        uint256 residual = i.juniorSupply == 0 ? i.senior + i.junior : i.junior;
+        uint256 hurdle = i.senior + i.junior - residual;
+        uint256 pr = Math.min(residual, i.poolShortfall);
+        uint256 ph = Math.min(hurdle, i.poolShortfall - pr);
+        r.poolRestored = pr + ph;
+        residual -= pr;
+        hurdle -= ph;
+        uint256 n = Math.min(residual, i.seniorImpairment - i.seniorIfImpairment);
+        residual -= n;
+        r.backstopRepaid = Math.min(residual, i.backstopDebt);
+        residual -= r.backstopRepaid;
+        uint256 f = Math.min(residual, i.seniorIfImpairment);
+        residual -= f;
+        // the residual given to the pool and to Senior's IF impairment would otherwise be Junior's (applyPoolMarkPnl)
+        r.juniorIfLoss = i.juniorSupply == 0 ? i.juniorIfLoss : i.juniorIfLoss + pr + f;
+        r.seniorRestored = n + f;
+        r.seniorCredit = hurdle + n + f;
+        if (i.juniorSupply == 0) r.seniorCredit += residual;
+        else r.juniorCredit = residual;
+        r.seniorImpairment = i.seniorImpairment - n - f;
+        r.seniorIfImpairment = i.seniorIfImpairment - f;
+        r.backstopDebt = i.backstopDebt - r.backstopRepaid;
+        r.coverHeld = i.coverHeld < r.backstopDebt ? i.coverHeld : r.backstopDebt;
     }
 }

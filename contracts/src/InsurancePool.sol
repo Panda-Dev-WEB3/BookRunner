@@ -23,12 +23,15 @@ import {IInsurancePool} from "./interfaces/IInsurancePool.sol";
 ///
 ///         Value. Pool assets T = free liquidity + book claims, where free liquidity = accounted cash - cash reserved
 ///         for filled withdrawals (queued deposits are held apart until their epoch is processed). A book owes its
-///         allocation as a senior debt; the pool's claim on it is what the book can repay at its last applied mark
-///         (`markBook`: min(debt, vault idle + marked deployed value)), so the pool only loses once a book is exhausted
-///         (Junior, Senior and the backstop have absorbed the IF draw first). T splits into the treasury's first-loss
-///         slice FL (own accounting, no shares) and the depositors' assets D = T - FL = `totalAssets()`.
+///         allocation as a senior debt; the pool's claim on it is what the book can repay from its own capital at its
+///         last applied mark (`markBook`, the book's ledger), so the pool only loses once a book is exhausted (Junior
+///         and Senior have absorbed the IF draw first; the Backstop never pays it). T splits into the treasury's
+///         first-loss slice FL (own accounting, no shares) and the depositors' assets D = T - FL = `totalAssets()`.
+///         The slice is the pool's junior tranche, accounted pool-wide (audit 2026-10-23 A-M1):
 ///           - premium (`notifyPremium`): T += p, FL += p * FL / T (same rate as D);
-///           - loss (a book's claim falls): FL absorbs first, then D; recovery reverses that book's loss, D first;
+///           - loss (a book's claim falls): FL absorbs first, then D (`depositorLoss`); a recovery, whichever book it
+///             comes from, and a slice top-up restore `depositorLoss` first, then FL (depositorLoss == 0 || FL == 0);
+///             exits take their pro-rata part of `depositorLoss` with them;
 ///           - allocate / repay move cash <-> claims and never change T; deposits mint and withdrawals fill at the
 ///             share price of the epoch's processing (rounding in the pool's favour).
 ///         Cash is tracked, never read from `balanceOf`: a donation changes nothing (inflation attack), on top of the
@@ -41,12 +44,15 @@ import {IInsurancePool} from "./interfaces/IInsurancePool.sol";
 ///         oldest ended epoch once every active pool-funded book has marked after its end (or `processGrace`, 24 h,
 ///         after it, emitting EpochProcessedStale): it mints the epoch's deposits and fills withdrawals oldest epoch
 ///         first from free liquidity, partially if cash is short (the rest stays escrowed and exposed until the next
-///         processing). Deposits are paused by the guardian, exits never.
+///         processing). Deposits are paused by the guardian, exits never; an epoch processed while deposits are paused
+///         mints nothing and its deposits are refunded (A-L5). Past the grace, fills price the stale books at 0, the
+///         slice first (A-L1: an exit never gets a better price than a fresh mark could show).
 ///
 ///         Books. `allocate` only from the BookFactory's book for the id (its closeWindow), once per book, within the
 ///         per-market cap (30% of T summed over the books on one underlying), the free liquidity above the buffer
-///         (20% of T) and with the first-loss slice at its target (10% of T); the book, its vault and router are
-///         recorded then and authenticate every later hook.
+///         (20% of T) and the value of every queued withdrawal (A-L3), and with the first-loss slice covering its target
+///         (10%) of the book claims after it (the exposure, A-M2: idle depositor cash needs no cover, so no deposit can
+///         block an allocation); the book, its vault and router are recorded then and authenticate every later hook.
 /// @dev UUPS behind an ERC1967 proxy, upgrades and parameters only by `config.timelock()`. ERC-7201 storage.
 contract InsurancePool is
     IInsurancePool,
@@ -64,8 +70,6 @@ contract InsurancePool is
     uint16 public constant MAX_PREMIUM_BPS = 5000;
     /// @notice Books whose freshness gates an epoch (each processing reads every one of them).
     uint256 public constant MAX_ACTIVE_BOOKS = 64;
-    /// @notice Ended epochs `allocate` / `withdrawFirstLoss` look through for due withdrawals.
-    uint256 public constant DUE_SCAN_EPOCHS = 64;
 
     bytes32 public constant PARAM_PREMIUM_FLOOR_BPS = "premiumFloorBps";
     bytes32 public constant PARAM_MARKET_CAP_BPS = "marketCapBps";
@@ -74,6 +78,7 @@ contract InsurancePool is
     bytes32 public constant PARAM_EPOCH_LENGTH = "epochLength";
     bytes32 public constant PARAM_FIRST_LOSS_TARGET_BPS = "firstLossTargetBps";
     bytes32 public constant PARAM_PROCESS_GRACE = "processGrace";
+    bytes32 public constant PARAM_MIN_OWN_CAPITAL_BPS = "minOwnCapitalBps";
 
     struct Epoch {
         uint256 shares; // withdrawal shares escrowed for this epoch
@@ -136,6 +141,10 @@ contract InsurancePool is
         uint32 processGrace;
         bool depositsPaused;
         bool allocationsPaused;
+        // ---- appended 2026-10-23 (pool audit fixes) ----
+        uint256 depositorLoss; // A-M1: the depositors' outstanding net loss, pool-wide (> 0 only while firstLoss == 0)
+        uint256 refundsPending; // A-L5 / A-I2: assets of deposits processed without minting, refundable by claimDeposit
+        uint16 minOwnCapitalBps; // B-M2: minimum tranche capital of a pool-funded book, bps of its IF
     }
 
     // keccak256(abi.encode(uint256(keccak256("bookrunner.storage.InsurancePool")) - 1)) & ~bytes32(uint256(0xff))
@@ -152,7 +161,6 @@ contract InsurancePool is
     error AlreadyAllocated(uint256 bookId);
     error AllocationsPaused();
     error DepositsPaused();
-    error WithdrawalsDue();
     error TooManyBooks();
     error OverMarketCap(uint256 amount, uint256 cap);
     error InsufficientFreeLiquidity(uint256 amount, uint256 available);
@@ -195,6 +203,7 @@ contract InsurancePool is
         _setParam($, PARAM_FIRST_LOSS_TARGET_BPS, 1000);
         _setParam($, PARAM_COOLDOWN, 7 days);
         _setParam($, PARAM_PROCESS_GRACE, 1 days);
+        _setParam($, PARAM_MIN_OWN_CAPITAL_BPS, 5000);
         $.epochLength = 7 days;
         emit PoolParamSet(PARAM_EPOCH_LENGTH, 7 days);
         $.procEndsAt = _nextGridEnd(7 days);
@@ -241,15 +250,25 @@ contract InsurancePool is
     function claimDeposit(uint256 depositId) external nonReentrant returns (uint256 shares) {
         PoolStorage storage $ = _s();
         DepositRequest storage d = $.deposits[depositId];
-        if (d.owner == address(0)) revert UnknownRequest(depositId);
+        // audit 2026-10-23 A-L6: only the owner (a claim starts the cooldown on all of the owner's shares)
+        address owner = d.owner;
+        if (owner != msg.sender) revert NotOwner(msg.sender);
         if (d.done) revert DepositDone(depositId);
         Epoch storage ep = $.epochs[d.epoch];
         if (!ep.processed) revert EpochNotProcessed(d.epoch);
         d.done = true;
-        shares = Math.mulDiv(d.assets, ep.depositShares, ep.depositAssets);
+        uint256 a = d.assets;
+        if (ep.depositShares == 0) {
+            // A-L5 / A-I2: the epoch was processed without minting (deposits paused, or no share): refunded
+            $.refundsPending -= a;
+            emit DepositCancelled(depositId, owner, a);
+            IERC20(asset()).safeTransfer(owner, a);
+            return 0;
+        }
+        shares = Math.mulDiv(a, ep.depositShares, ep.depositAssets);
         $.depositSharesUnclaimed -= shares;
-        address owner = d.owner;
-        if (ep.endsAt > $.lastDepositAt[owner]) $.lastDepositAt[owner] = ep.endsAt;
+        // A-I1: the cooldown runs from the hand-over of the shares, never from an earlier epoch end
+        $.lastDepositAt[owner] = uint64(block.timestamp);
         emit DepositClaimed(depositId, owner, shares);
         ERC20Upgradeable._update(address(this), owner, shares);
     }
@@ -298,57 +317,73 @@ contract InsurancePool is
         // the epoch prices something (deposits, its withdrawals or older leftovers): every active book must have
         // marked after its end, or the grace period passed (exits are never blocked)
         bool stale = false;
+        uint256 haircut = 0;
         if (ep.depositAssets != 0 || ep.shares != 0 || $.fillEpoch < e) {
-            uint256 stale_ = _staleBooks($, ends);
+            (uint256 stale_, uint256 staleClaims) = _staleBooks($, ends);
             if (stale_ != 0) {
                 uint256 graceEnds = ends + $.processGrace;
                 if (block.timestamp < graceEnds) revert BooksNotMarked(e, stale_, graceEnds);
                 stale = true;
+                // audit 2026-10-23 A-L1: exits never get a better price than a fresh mark could show: the stale books
+                // are valued at 0 for this processing's fills (the slice absorbing it first, as it would a loss)
+                uint256 fl = $.firstLoss;
+                if (staleClaims > fl) haircut = staleClaims - fl;
                 emit EpochProcessedStale(e, stale_);
             }
         }
         uint256 da = ep.depositAssets;
         uint256 ds = 0;
         if (da != 0) {
-            ds = _convertToShares(da, Math.Rounding.Floor);
-            $.cash += da;
             $.depositsPending -= da;
-            $.depositSharesUnclaimed += ds;
-            ep.depositShares = ds;
-            _mint(address(this), ds);
+            // A-L5: while deposits are paused nothing is minted at a price under investigation; A-I2: nor for no share
+            if (!$.depositsPaused) ds = _toShares(da, 0);
+            if (ds == 0) {
+                $.refundsPending += da;
+                emit EpochDepositsRefunded(e, da);
+            } else {
+                $.cash += da;
+                $.depositSharesUnclaimed += ds;
+                ep.depositShares = ds;
+                _mint(address(this), ds);
+            }
         }
         ep.endsAt = uint64(ends);
         ep.processed = true;
         $.procEpoch = e + 1;
         $.procEndsAt = uint64(ends + $.epochLength);
         emit EpochProcessed(e, da, ds, stale);
-        _fillProcessed($);
+        _fillProcessed($, haircut);
     }
 
-    /// @notice Anyone: adds `amount` to the first-loss slice (pulled from the caller). Never paused; never moves the
-    ///         depositors' share price.
+    /// @notice Anyone: adds `amount` to the first-loss slice (pulled from the caller). Never paused. The slice is the
+    ///         pool's junior tranche (audit 2026-10-23 A-M1): while the depositors carry a net loss (`depositorLoss`, the
+    ///         slice then empty) the deposit restores them first, the rest goes to the slice.
     function depositFirstLoss(uint256 amount) external nonReentrant {
         if (amount == 0) revert ZeroAmount();
         PoolStorage storage $ = _s();
         $.cash += amount;
-        $.firstLoss += amount;
+        uint256 dl = $.depositorLoss;
+        uint256 d = amount < dl ? amount : dl;
+        $.depositorLoss = dl - d;
+        $.firstLoss += amount - d;
         emit FirstLossDeposited(msg.sender, amount);
         IERC20(asset()).safeTransferFrom(msg.sender, address(this), amount);
     }
 
-    /// @notice Timelock: withdraws `amount` of the first-loss slice to `to`, from free liquidity, never while
-    ///         withdrawals are due, keeping the slice at or above `firstLossTargetBps` of the pool after it.
+    /// @notice Timelock: withdraws `amount` of the first-loss slice to `to`, from free liquidity above the buffer and the
+    ///         value of every queued withdrawal (audit 2026-10-23 A-L3), keeping the slice at or above
+    ///         `firstLossTargetBps` of the book claims (the exposure it covers, A-M2).
     function withdrawFirstLoss(uint256 amount, address to) external nonReentrant {
         PoolStorage storage $ = _s();
         if (msg.sender != $.config.timelock()) revert NotTimelock();
         if (to == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
-        if (_withdrawalsDue($)) revert WithdrawalsDue();
-        uint256 free = $.cash - $.reserved;
-        if (amount > free) revert InsufficientFreeLiquidity(amount, free);
         if (amount > $.firstLoss) revert InsufficientFreeLiquidity(amount, $.firstLoss);
+        uint256 free = $.cash - $.reserved;
+        uint256 keep = Math.mulDiv(_poolAssets($) - amount, $.bufferBps, BPS) + _queuedExitValue($);
+        if (free < amount + keep) revert InsufficientFreeLiquidity(amount, free > keep ? free - keep : 0);
         uint256 remaining = $.firstLoss - amount;
-        uint256 target = Math.mulDiv(_poolAssets($) - amount, $.firstLossTargetBps, BPS);
+        uint256 target = Math.mulDiv($.claims, $.firstLossTargetBps, BPS);
         if (remaining < target) revert FirstLossBelowTarget(remaining, target);
         $.firstLoss = remaining;
         $.cash -= amount;
@@ -369,13 +404,14 @@ contract InsurancePool is
         if (amount == 0) revert ZeroAmount();
         BookPosition storage p = $.books[bookId];
         if (p.book != address(0)) revert AlreadyAllocated(bookId);
-        if (_withdrawalsDue($)) revert WithdrawalsDue(); // due withdrawals come first
         if ($.activeBooks.length >= MAX_ACTIVE_BOOKS) revert TooManyBooks();
-        uint256 t = _poolAssets($);
-        uint256 flTarget = Math.mulDiv(t, $.firstLossTargetBps, BPS);
-        if ($.firstLoss < flTarget) revert FirstLossBelowTarget($.firstLoss, flTarget);
+        // audit 2026-10-23 A-M2: the slice covers the exposure (book claims), so idle depositor cash cannot dilute it
+        if (amount > _firstLossRoom($)) {
+            revert FirstLossBelowTarget($.firstLoss, Math.mulDiv($.claims + amount, $.firstLossTargetBps, BPS));
+        }
         uint256 cap = _marketRoom($, market);
         if (amount > cap) revert OverMarketCap(amount, cap);
+        // A-L3: never the liquidity queued withdrawals need (due or not)
         uint256 available = _allocatable($);
         if (amount > available) revert InsufficientFreeLiquidity(amount, available);
 
@@ -399,13 +435,14 @@ contract InsurancePool is
     }
 
     /// @inheritdoc IInsurancePool
-    function markBook(uint256 bookId, uint256 value, uint64 periodEnd, bool final_) external nonReentrant {
+    function markBook(uint256 bookId, uint256 value, uint64 periodEnd, bool final_, bool held) external nonReentrant {
         PoolStorage storage $ = _s();
         BookPosition storage p = $.books[bookId];
         if (p.book == address(0) || msg.sender != p.book) revert NotBook(bookId, msg.sender);
         if (value > p.allocation) revert ExceedsAllocation(value, p.allocation);
         _revalue($, bookId, p, value);
-        if (periodEnd > p.lastMarkAt) p.lastMarkAt = periodEnd;
+        // audit 2026-10-23 B-L4: a held mark (a held price) is not fresh for the epoch gate
+        if (!held && periodEnd > p.lastMarkAt) p.lastMarkAt = periodEnd;
         if (final_ && p.active) _deactivate($, bookId, p);
         emit BookMarked(bookId, value, periodEnd, final_);
     }
@@ -435,8 +472,8 @@ contract InsurancePool is
         if (p.router == address(0) || msg.sender != p.router) revert NotBookRouter(bookId, msg.sender);
         if (amount == 0) return;
         uint256 t = _poolAssets($);
-        // no depositor shares: the whole premium is the slice's (never a gift to the next depositor)
-        uint256 flShare = (t == 0 || totalSupply() == 0) ? amount : Math.mulDiv(amount, $.firstLoss, t);
+        // no depositor shares beyond dust (A-L4): the whole premium is the slice's (never a gift to the next depositor)
+        uint256 flShare = (t == 0 || _noDepositors()) ? amount : Math.mulDiv(amount, $.firstLoss, t);
         $.firstLoss += flShare;
         $.cash += amount;
         $.premiumsTotal += amount;
@@ -449,7 +486,8 @@ contract InsurancePool is
     // =========================================================================================================
 
     /// @notice Timelock: sets a bounded parameter. premiumFloorBps <= 5000 (applies to charters filed afterwards);
-    ///         marketCapBps 100..10000; bufferBps <= 9000; firstLossTargetBps <= 5000; cooldown <= 30 days;
+    ///         marketCapBps 100..10000; bufferBps <= 9000; firstLossTargetBps <= 5000 (of the book claims);
+    ///         minOwnCapitalBps <= 20000 (of a pool-funded book's IF, read at filing and at closeWindow); cooldown <= 30 days;
     ///         processGrace 1 h..7 days; epochLength 1..30 days (pending until the queue is idle, so it never moves a
     ///         queued request).
     function setParam(bytes32 key, uint256 value) external {
@@ -545,8 +583,8 @@ contract InsurancePool is
     }
 
     /// @notice Active books whose last mark predates `epochEnd`.
-    function staleBooks(uint256 epochEnd_) external view returns (uint256) {
-        return _staleBooks(_s(), epochEnd_);
+    function staleBooks(uint256 epochEnd_) external view returns (uint256 n) {
+        (n,) = _staleBooks(_s(), epochEnd_);
     }
 
     /// @inheritdoc IInsurancePool
@@ -555,13 +593,27 @@ contract InsurancePool is
         if ($.allocationsPaused || $.books[bookId].book != address(0) || $.activeBooks.length >= MAX_ACTIVE_BOOKS) {
             return 0;
         }
-        if ($.firstLoss < Math.mulDiv(_poolAssets($), $.firstLossTargetBps, BPS) || _withdrawalsDue($)) return 0;
-        return Math.min(_marketRoom($, market), _allocatable($));
+        return Math.min(Math.min(_marketRoom($, market), _allocatable($)), _firstLossRoom($));
     }
 
     /// @inheritdoc IInsurancePool
     function premiumFloorBps() external view returns (uint16) {
         return _s().premiumFloorBps;
+    }
+
+    /// @inheritdoc IInsurancePool
+    function minOwnCapitalBps() external view returns (uint16) {
+        return _s().minOwnCapitalBps;
+    }
+
+    /// @inheritdoc IInsurancePool
+    function depositorLoss() external view returns (uint256) {
+        return _s().depositorLoss;
+    }
+
+    /// @notice Assets of deposits processed without minting (deposits paused, or no share), refundable by claimDeposit.
+    function refundsPending() external view returns (uint256) {
+        return _s().refundsPending;
     }
 
     /// @notice Every bounded parameter (`pendingEpochLength` 0 = none pending).
@@ -673,6 +725,33 @@ contract InsurancePool is
         return 0;
     }
 
+    /// @notice Entry and exit are queued and priced at an epoch's processing (audit 2026-10-23 A-I3): no preview is a
+    ///         quote, so every preview reverts. convertToShares / convertToAssets price the depositors' assets
+    ///         (totalAssets(), the first-loss slice excluded) at the last processed state, for display only.
+    function convertToShares(uint256 assets) public view override returns (uint256) {
+        return _toShares(assets, 0);
+    }
+
+    function convertToAssets(uint256 shares) public view override returns (uint256) {
+        return _toAssets(shares, 0);
+    }
+
+    function previewDeposit(uint256) public pure override returns (uint256) {
+        revert QueuedOnly();
+    }
+
+    function previewMint(uint256) public pure override returns (uint256) {
+        revert QueuedOnly();
+    }
+
+    function previewWithdraw(uint256) public pure override returns (uint256) {
+        revert QueuedOnly();
+    }
+
+    function previewRedeem(uint256) public pure override returns (uint256) {
+        revert QueuedOnly();
+    }
+
     function deposit(uint256, address) public pure override returns (uint256) {
         revert QueuedOnly();
     }
@@ -714,11 +793,31 @@ contract InsurancePool is
         return cap > used ? cap - used : 0;
     }
 
-    /// @dev Free liquidity above the buffer.
+    /// @dev Free liquidity above the buffer and the value of every queued withdrawal (audit 2026-10-23 A-L3).
     function _allocatable(PoolStorage storage $) private view returns (uint256) {
         uint256 free = $.cash - $.reserved;
-        uint256 buffer = Math.mulDiv(_poolAssets($), $.bufferBps, BPS);
-        return free > buffer ? free - buffer : 0;
+        uint256 keep = Math.mulDiv(_poolAssets($), $.bufferBps, BPS) + _queuedExitValue($);
+        return free > keep ? free - keep : 0;
+    }
+
+    /// @dev Escrowed withdrawal shares not yet filled, at the current share price.
+    function _queuedExitValue(PoolStorage storage $) private view returns (uint256) {
+        return _toAssets($.pendingShares, 0);
+    }
+
+    /// @dev Largest allocation the first-loss slice covers at its target (audit 2026-10-23 A-M2: the slice covers the
+    ///      exposure, firstLoss >= target * (claims + amount)): unbounded at a 0 target.
+    function _firstLossRoom(PoolStorage storage $) private view returns (uint256) {
+        uint256 bps = $.firstLossTargetBps;
+        if (bps == 0) return type(uint256).max;
+        uint256 covered = Math.mulDiv($.firstLoss, BPS, bps);
+        return covered > $.claims ? covered - $.claims : 0;
+    }
+
+    /// @dev No depositor holds more than dust: the pro-rata floors of claimDeposit leave a few share units in escrow
+    ///      for good, worth less than one asset unit (audit 2026-10-23 A-L4).
+    function _noDepositors() private view returns (bool) {
+        return totalSupply() < 10 ** DECIMALS_OFFSET;
     }
 
     function _entitled(PoolStorage storage $, Request storage r) private view returns (uint256) {
@@ -726,14 +825,18 @@ contract InsurancePool is
         return ep.shares == 0 ? 0 : Math.mulDiv(r.shares, ep.assets, ep.shares);
     }
 
-    /// @dev Moves a book's claim to `value` (<= allocation): a fall is a loss (first-loss slice first), a rise a
-    ///      recovery of that book's losses (depositors first, the reverse order).
+    /// @dev Moves a book's claim to `value` (<= allocation). The slice is the pool's junior tranche (audit 2026-10-23
+    ///      A-M1), accounted pool-wide so the order of marks across books never moves value between the depositors and
+    ///      the treasury: a loss hits the slice first, then the depositors (`depositorLoss`); a recovery, whichever book
+    ///      it comes from, restores `depositorLoss` first, then the slice. Invariant: depositorLoss == 0 || firstLoss
+    ///      == 0. The per-book split (lossFirstLoss / lossDepositors) is reporting only.
     function _revalue(PoolStorage storage $, uint256 bookId, BookPosition storage p, uint256 value) private {
         uint256 c = p.claim;
         if (value < c) {
             uint256 amount = c - value;
             uint256 fl = Math.min(amount, $.firstLoss);
             $.firstLoss -= fl;
+            $.depositorLoss += amount - fl;
             p.lossFirstLoss += fl;
             p.lossDepositors += amount - fl;
             $.lossesTotal += amount;
@@ -742,17 +845,18 @@ contract InsurancePool is
             emit LossReported(bookId, amount, fl, amount - fl, value);
         } else if (value > c) {
             uint256 amount = value - c;
-            uint256 lossD = p.lossDepositors;
-            uint256 d = Math.min(amount, lossD);
-            uint256 f = amount - d;
-            p.lossDepositors = lossD - d;
-            p.lossFirstLoss -= f;
-            // no depositor shares left: their part is the slice's (never a gift to the next depositor)
-            $.firstLoss += totalSupply() == 0 ? amount : f;
+            uint256 pd = Math.min(amount, p.lossDepositors);
+            p.lossDepositors -= pd;
+            p.lossFirstLoss -= amount - pd;
+            // no depositor shares beyond dust: their part is the slice's (never a gift to the next depositor)
+            uint256 dl = _noDepositors() ? 0 : $.depositorLoss;
+            uint256 d = Math.min(amount, dl);
+            $.depositorLoss = dl - d;
+            $.firstLoss += amount - d;
             $.lossesTotal -= amount;
             $.claims += amount;
             p.claim = value;
-            emit LossRecovered(bookId, amount, f, d, value);
+            emit LossRecovered(bookId, amount, amount - d, d, value);
         }
     }
 
@@ -770,10 +874,15 @@ contract InsurancePool is
         delete $.activeIndex[bookId];
     }
 
-    function _staleBooks(PoolStorage storage $, uint256 epochEnd_) private view returns (uint256 n) {
+    /// @dev Active books not marked (non-held) since `epochEnd_`, and the sum of their claims.
+    function _staleBooks(PoolStorage storage $, uint256 epochEnd_) private view returns (uint256 n, uint256 claims_) {
         uint256 len = $.activeBooks.length;
         for (uint256 i; i < len; ++i) {
-            if ($.books[$.activeBooks[i]].lastMarkAt < epochEnd_) ++n;
+            BookPosition storage p = $.books[$.activeBooks[i]];
+            if (p.lastMarkAt < epochEnd_) {
+                ++n;
+                claims_ += p.claim;
+            }
         }
     }
 
@@ -790,39 +899,30 @@ contract InsurancePool is
         return $.procEpoch + uint64(k);
     }
 
-    /// @dev Withdrawals are due: a processed epoch still has unfilled shares, or an ended unprocessed epoch holds
-    ///      withdrawal shares (scans at most DUE_SCAN_EPOCHS ended epochs; beyond that, assumed due).
-    function _withdrawalsDue(PoolStorage storage $) private view returns (bool) {
-        if ($.pendingShares == 0) return false;
-        if ($.fillEpoch < $.procEpoch) return true;
-        uint256 ends = $.procEndsAt;
-        uint256 len = $.epochLength;
-        uint64 e = $.procEpoch;
-        for (uint256 i; i < DUE_SCAN_EPOCHS; ++i) {
-            if (ends > block.timestamp) return false;
-            if ($.epochs[e].shares != 0) return true;
-            ++e;
-            ends += len;
-        }
-        return true;
-    }
-
-    /// @dev Fills processed epochs' withdrawals oldest first from free liquidity, at the current share price.
-    function _fillProcessed(PoolStorage storage $) private {
+    /// @dev Fills processed epochs' withdrawals oldest first from free liquidity, at the current share price less
+    ///      `haircut` of the depositors' assets (a stale processing, A-L1). The burned shares take their pro-rata part of
+    ///      `depositorLoss` with them (they exited at the impaired price; a later recovery restores only the holders
+    ///      left, the rest refills the slice: A-L4).
+    function _fillProcessed(PoolStorage storage $, uint256 haircut) private {
         while ($.fillEpoch < $.procEpoch) {
             uint64 e = $.fillEpoch;
             Epoch storage ep = $.epochs[e];
             uint256 remaining = ep.shares - ep.filledShares;
             if (remaining != 0) {
                 uint256 free = $.cash - $.reserved;
-                uint256 value = _convertToAssets(remaining, Math.Rounding.Floor);
+                uint256 value = _toAssets(remaining, haircut);
                 uint256 s = remaining;
                 if (value > free) {
-                    // partial: the shares free liquidity buys at the current price (assets <= free)
-                    s = Math.min(_convertToShares(free, Math.Rounding.Floor), remaining);
-                    value = _convertToAssets(s, Math.Rounding.Floor);
+                    // partial: the shares free liquidity buys at the fill price (assets <= free)
+                    s = Math.min(_toShares(free, haircut), remaining);
+                    value = _toAssets(s, haircut);
                 }
                 if (s != 0) {
+                    uint256 dl = $.depositorLoss;
+                    if (dl != 0) {
+                        uint256 supply = totalSupply();
+                        $.depositorLoss = Math.mulDiv(dl, supply - s, supply);
+                    }
                     _burn(address(this), s);
                     ep.filledShares += s;
                     ep.assets += value;
@@ -834,6 +934,16 @@ contract InsurancePool is
             }
             $.fillEpoch = e + 1;
         }
+    }
+
+    /// @dev ERC-4626 conversion (virtual offset of DECIMALS_OFFSET, floor: in the pool's favour) with the depositors'
+    ///      assets less `haircut` (<= them; 0 but for a stale processing's fills).
+    function _toAssets(uint256 shares, uint256 haircut) private view returns (uint256) {
+        return Math.mulDiv(shares, totalAssets() - haircut + 1, totalSupply() + 10 ** DECIMALS_OFFSET);
+    }
+
+    function _toShares(uint256 assets, uint256 haircut) private view returns (uint256) {
+        return Math.mulDiv(assets, totalSupply() + 10 ** DECIMALS_OFFSET, totalAssets() - haircut + 1);
     }
 
     /// @dev Nothing queued (no escrowed withdrawal, no queued deposit): every ended epoch is empty, so the queue moves
@@ -892,6 +1002,9 @@ contract InsurancePool is
         } else if (key == PARAM_PROCESS_GRACE) {
             if (value < 1 hours || value > 7 days) revert ParamOutOfRange(key, value);
             $.processGrace = uint32(value);
+        } else if (key == PARAM_MIN_OWN_CAPITAL_BPS) {
+            if (value > 2 * BPS) revert ParamOutOfRange(key, value);
+            $.minOwnCapitalBps = uint16(value);
         } else if (key == PARAM_EPOCH_LENGTH) {
             if (value < 1 days || value > 30 days) revert ParamOutOfRange(key, value);
             $.pendingEpochLength = uint32(value);

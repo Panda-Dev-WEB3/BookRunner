@@ -128,6 +128,21 @@
     },
     {
       "check": "uninitialized-local",
+      "target": "BookLogic._applyPoolPnl.covered",
+      "reason": "explicitly 0, the USDC received when the Backstop covers (pool audit 2026-10-23 ledger, same pattern as _applyPnl.covered)"
+    },
+    {
+      "check": "uninitialized-local",
+      "target": "BookLogic.closeWindow.pool",
+      "reason": "explicitly address(0) = the tranches fund the IF; set only when the pool can fund it (pool audit 2026-10-23 A-M2 / B-M2)"
+    },
+    {
+      "check": "uninitialized-local",
+      "target": "BookLogic.closeWindow.poolReason",
+      "reason": "explicitly 0 = no fallback; set to POOL_UNFUNDED / UNDERCAPITALISED only when the pool does not fund the IF (pool audit 2026-10-23)"
+    },
+    {
+      "check": "uninitialized-local",
       "target": "BookLogic._settleRetiredBacklog.owed",
       "reason": "the local is meant to start at zero / false / address(0) and is assigned on the paths that use it (accumulators, optional out-values) (audit 2026-10 triage: intended zero locals)"
     },

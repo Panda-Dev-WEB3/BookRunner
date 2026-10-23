@@ -110,6 +110,7 @@ abstract contract MainnetInput is Script {
         uint256 cooldown;
         uint256 epochLength;
         uint256 processGrace;
+        uint256 minOwnCapitalBps; // pool audit 2026-10-23 B-M2 (default 5000: the tranches raise at least half the IF)
     }
 
     struct Buyback {
@@ -320,6 +321,7 @@ abstract contract MainnetInput is Script {
         poolIn.cooldown = json.readUintOr(".insurancePool.cooldown", 7 days);
         poolIn.epochLength = json.readUintOr(".insurancePool.epochLength", 7 days);
         poolIn.processGrace = json.readUintOr(".insurancePool.processGrace", 1 days);
+        poolIn.minOwnCapitalBps = json.readUintOr(".insurancePool.minOwnCapitalBps", 5000);
     }
 
     function _loadBuyback(string memory json) private {
@@ -570,6 +572,7 @@ abstract contract MainnetInput is Script {
         require(poolIn.cooldown <= 30 days, "input: insurancePool.cooldown > 30 days");
         require(poolIn.epochLength >= 1 days && poolIn.epochLength <= 30 days, "input: insurancePool.epochLength");
         require(poolIn.processGrace >= 1 hours && poolIn.processGrace <= 7 days, "input: insurancePool.processGrace");
+        require(poolIn.minOwnCapitalBps <= 20_000, "input: insurancePool.minOwnCapitalBps > 20000");
     }
 
     /// @dev BkrnFeeRouter reference source (VERIFY U5). TWAP needs a pool of the pre-existing BKRN (a BKRN the

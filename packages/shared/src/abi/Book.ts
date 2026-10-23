@@ -669,6 +669,34 @@ export const bookAbi = [
   },
   {
     "type": "function",
+    "name": "insuranceLedger",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "seniorIfImpairment_",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "juniorIfLoss",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "coverHeld",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "ifDraw",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "insurancePool",
     "inputs": [],
     "outputs": [
@@ -1385,6 +1413,25 @@ export const bookAbi = [
   },
   {
     "type": "event",
+    "name": "InsuranceFallback",
+    "inputs": [
+      {
+        "name": "bookId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "reason",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "InsuranceFunded",
     "inputs": [
       {
@@ -1507,6 +1554,31 @@ export const bookAbi = [
       },
       {
         "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "InsuranceRestored",
+    "inputs": [
+      {
+        "name": "bookId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "value",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
@@ -2096,11 +2168,6 @@ export const bookAbi = [
         "internalType": "uint64"
       }
     ]
-  },
-  {
-    "type": "error",
-    "name": "InsurancePoolUnset",
-    "inputs": []
   },
   {
     "type": "error",

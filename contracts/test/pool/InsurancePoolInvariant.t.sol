@@ -34,6 +34,7 @@ contract PoolHandler is StdUtils, Test {
     bool public priceMovedOnProcessing;
     bool public overCap;
     bool public processedTooEarly;
+    bool public exitLiquidityTaken; // A-L3: an allocation / slice withdrawal left less than the queued exits need
     mapping(uint256 => bool) public allocated;
 
     constructor(InsurancePool pool_, MockERC20 usdc_, CoreMockFactory factory_, address timelock_) {
@@ -86,7 +87,15 @@ contract PoolHandler is StdUtils, Test {
         uint256 id = depositIds[seed % depositIds.length];
         InsurancePool.DepositRequest memory d = pool.depositInfo(id);
         if (d.done || !pool.epochInfo(d.epoch).processed) return;
+        _claimDeposit(id, d);
+    }
+
+    /// @dev A deposit of an epoch processed without minting (deposits paused) is refunded: it leaves the pool.
+    function _claimDeposit(uint256 id, InsurancePool.DepositRequest memory d) internal {
+        bool refunded = pool.epochInfo(d.epoch).depositShares == 0;
+        vm.prank(d.owner);
         pool.claimDeposit(id);
+        if (refunded) ghostIn -= d.assets;
     }
 
     function requestWithdraw(uint256 who, uint256 fraction) external {
@@ -94,7 +103,7 @@ contract PoolHandler is StdUtils, Test {
         // claim the actor's processed deposits first (more exits per sequence)
         for (uint256 k; k < depositIds.length && k < 16; ++k) {
             InsurancePool.DepositRequest memory d = pool.depositInfo(depositIds[k]);
-            if (d.owner == a && !d.done && pool.epochInfo(d.epoch).processed) pool.claimDeposit(depositIds[k]);
+            if (d.owner == a && !d.done && pool.epochInfo(d.epoch).processed) _claimDeposit(depositIds[k], d);
         }
         uint256 bal = pool.balanceOf(a);
         if (bal == 0) return;
@@ -143,7 +152,7 @@ contract PoolHandler is StdUtils, Test {
             for (uint256 i; i < ids.length; ++i) {
                 IInsurancePool.BookPosition memory p = pool.bookPosition(ids[i]);
                 vm.prank(p.book);
-                pool.markBook(ids[i], p.claim, uint64(block.timestamp), false);
+                pool.markBook(ids[i], p.claim, uint64(block.timestamp), false, false);
             }
         }
         uint256 p0 = _price();
@@ -181,6 +190,25 @@ contract PoolHandler is StdUtils, Test {
         ghostIn += amount;
     }
 
+    /// @dev Timelock: a first-loss withdrawal within its rules (audit 2026-10-23 A-I9: no handler before).
+    function firstLossWithdraw(uint256 amount) external {
+        uint256 fl = pool.firstLossAssets();
+        if (fl == 0) return;
+        amount = bound(amount, 1, fl);
+        vm.prank(timelock);
+        try pool.withdrawFirstLoss(amount, makeAddr("treasury")) {
+            ghostIn -= amount;
+            _checkExitLiquidity();
+        } catch {}
+    }
+
+    /// @dev Free liquidity still covers every queued withdrawal at the current price (A-L3).
+    function _checkExitLiquidity() internal {
+        (uint256 cash, uint256 reserved,,,) = pool.ledger();
+        (,,, uint256 pendingShares,) = pool.queue();
+        if (cash - reserved < pool.convertToAssets(pendingShares)) exitLiquidityTaken = true;
+    }
+
     function pause(bool deposits, bool allocations) external {
         vm.prank(timelock);
         pool.setPaused(deposits, allocations);
@@ -198,6 +226,7 @@ contract PoolHandler is StdUtils, Test {
         vm.prank(factory.bookOf(id));
         pool.allocate(id, amount, m);
         allocated[id] = true;
+        _checkExitLiquidity();
         if (amount > room) overCap = true;
     }
 
@@ -222,8 +251,15 @@ contract PoolHandler is StdUtils, Test {
         value = bound(value, 0, p.allocation);
         uint256 fl0 = pool.firstLossAssets();
         uint256 d0 = pool.totalAssets();
+        uint256 dl0 = pool.depositorLoss();
         vm.prank(p.book);
-        pool.markBook(id, value, uint64(block.timestamp), false);
+        pool.markBook(id, value, uint64(block.timestamp), false, false);
+        if (value > p.claim && pool.totalSupply() >= 1e6) {
+            // audit 2026-10-23 A-M1: a recovery, from whichever book, restores the depositors' net loss first
+            uint256 rec = value - p.claim;
+            uint256 d = rec < dl0 ? rec : dl0;
+            if (pool.firstLossAssets() != fl0 + rec - d || pool.totalAssets() != d0 + d) firstLossOrderBroken = true;
+        }
         if (value < p.claim) {
             uint256 loss = p.claim - value;
             uint256 fl1 = pool.firstLossAssets();
@@ -286,7 +322,7 @@ contract InsurancePoolInvariantTest is PoolFixture {
         (, uint256 reserved, uint256 pendingDeposits,, uint256 losses) = pool.ledger();
         assertEq(
             handler.ghostIn() - handler.ghostLossesNet() - handler.ghostClaimed(),
-            pool.poolAssets() + reserved + pendingDeposits
+            pool.poolAssets() + reserved + pendingDeposits + pool.refundsPending()
         );
         assertEq(losses, handler.ghostLossesNet(), "net losses");
     }
@@ -310,8 +346,17 @@ contract InsurancePoolInvariantTest is PoolFixture {
         assertFalse(handler.exitBlocked(), "a withdrawal refused, a filled claim failed, or processing blocked past grace");
     }
 
+    /// @notice POOL-4, pool-wide and through recoveries (audit 2026-10-23 A-M1): the slice is the pool's junior tranche,
+    ///         so the depositors never carry a net loss while it holds assets, whatever the order of losses, recoveries,
+    ///         premiums, slice deposits / withdrawals and exits.
     function invariant_firstLossAbsorbsFirst() public view {
         assertFalse(handler.firstLossOrderBroken(), "a loss reached depositors while the slice had assets");
+        assertTrue(pool.depositorLoss() == 0 || pool.firstLossAssets() == 0, "depositors impaired while the slice holds");
+    }
+
+    /// @notice Audit 2026-10-23 A-L3: an allocation or a slice withdrawal never takes the liquidity queued exits need.
+    function invariant_queuedExitsKeepTheirLiquidity() public view {
+        assertFalse(handler.exitLiquidityTaken(), "an allocation or slice withdrawal took queued exits' liquidity");
     }
 
     function invariant_priceStableOnDepositAndWithdraw() public view {

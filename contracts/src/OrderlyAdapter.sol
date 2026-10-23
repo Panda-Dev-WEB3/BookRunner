@@ -1142,8 +1142,9 @@ contract OrderlyAdapter is IOrderlyAdapter, Initializable, UUPSUpgradeable, Reen
 
     /// @dev [2026-10 pool follow-up m-6, re-audit] `amount` (<= inTransitUsd for a sweep) leaves in-transit; for `account`
     ///      IF the IF part goes down by as much as it holds (a sweep cannot tell an IF payout from an MM one: it clears
-    ///      the IF part first, so the IF in transit is never overstated: an understated one only delays Backstop cover
-    ///      to a later mark, Waterfall.poolCoverNav), and it never exceeds what is left in transit. Returns what is left.
+    ///      the IF part first, so the IF in transit is never overstated: an understated one can only read as an IF
+    ///      draw, i.e. less Backstop cover, Waterfall.applyPoolMarkPnl), and it never exceeds what is left in transit.
+    ///      Returns what is left.
     function _leaveTransit(AdapterStorage storage $, uint8 account, uint256 amount) private returns (uint256 left) {
         uint256 transit = $.inTransitUsd;
         left = transit - Math.min(transit, amount);

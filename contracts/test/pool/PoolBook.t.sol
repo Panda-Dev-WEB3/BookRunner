@@ -54,24 +54,51 @@ contract PoolBookTest is PoolBookFixture {
         assertEq(book.unfundedClaims(), 0, "a debt not yet due is not reserved cash");
     }
 
-    function test_closeWindow_poolCannotFund_reverts_thenCancelStuck() public {
+    /// @notice Pool audit 2026-10-23 A-M2: the pool cannot fund the IF now (here its market cap): the window never waits
+    ///         on it; the tranches raised enough, so the IF is raised from them (the window re-run the old way).
+    function test_closeWindow_poolCannotFund_fallsBackToTheTranches() public {
         vm.prank(timelock);
         pool.setParam("marketCapBps", 100); // 1% of 1.12M = 11.2k < 25k
         _subscribeDefault();
         vm.warp(book.subscriptionEnds());
-        vm.expectRevert(abi.encodeWithSelector(InsurancePool.OverMarketCap.selector, 25_000e6, 11_200e6));
+        vm.expectEmit(true, false, false, true, address(book));
+        emit Book.InsuranceFallback(BOOK_ID, "POOL_UNFUNDED");
         book.closeWindow();
-        vm.warp(uint256(book.subscriptionEnds()) + book.CLOSE_WINDOW_TIMEOUT());
-        book.cancelStuckWindow();
-        assertEq(uint8(book.state()), uint8(BRTypes.BookState.Cancelled), "commitments refundable 1:1");
+        _assertFundedTheOldWay();
     }
 
-    function test_closeWindow_poolUnset_reverts() public {
+    function test_closeWindow_poolUnset_fallsBackToTheTranches() public {
         cfg.setInsurancePool(address(0));
         _subscribeDefault();
         vm.warp(book.subscriptionEnds());
-        vm.expectRevert(Book.InsurancePoolUnset.selector);
         book.closeWindow();
+        _assertFundedTheOldWay();
+    }
+
+    /// @notice A-M2: the pool cannot fund it and the tranches did not raise the IF either: cancelled cleanly at once.
+    function test_closeWindow_poolCannotFund_tranchesNeither_cancelledCleanly() public {
+        vm.prank(timelock);
+        pool.setParam("marketCapBps", 100);
+        _deposit(junior, sponsor, 20_000e6); // 20k raised < the 25k IF
+        vm.warp(book.subscriptionEnds());
+        vm.expectEmit(true, false, false, true, address(book));
+        emit IBook.BookCancelled(BOOK_ID, "POOL_UNFUNDED");
+        book.closeWindow();
+        assertEq(uint8(book.state()), uint8(BRTypes.BookState.Cancelled), "commitments refundable 1:1");
+        assertEq(pool.bookPosition(BOOK_ID).book, address(0), "nothing allocated");
+    }
+
+    /// @dev Live, IF 25k + MM 75k raised from the tranches (S 70k, J 30k), no pool position, no premium.
+    function _assertFundedTheOldWay() internal view {
+        assertEq(uint8(book.state()), uint8(BRTypes.BookState.Live));
+        assertEq(book.insurancePool(), address(0), "funded the old way");
+        (uint256 s, uint256 j) = book.trancheNav();
+        assertEq(s + j, 100_000e6, "IF + MM from the tranches");
+        assertEq(venue.ifEquity(), 25_000e6);
+        assertEq(venue.mmValue(), 75_000e6);
+        assertEq(pool.bookPosition(BOOK_ID).book, address(0), "no allocation");
+        (address p,,) = rrouter.previewPremium(10_000e6);
+        assertEq(p, address(0), "no premium");
     }
 
     function test_closeWindow_zeroIfTarget_reverts() public {
@@ -84,13 +111,13 @@ contract PoolBookTest is PoolBookFixture {
         book.closeWindow();
     }
 
-    function test_closeWindow_poolAllocationsPaused_reverts() public {
+    function test_closeWindow_poolAllocationsPaused_fallsBackToTheTranches() public {
         vm.prank(guardian);
         pool.setPaused(false, true);
         _subscribeDefault();
         vm.warp(book.subscriptionEnds());
-        vm.expectRevert(InsurancePool.AllocationsPaused.selector);
         book.closeWindow();
+        _assertFundedTheOldWay();
     }
 
     // ------------------------------------------------------------------ NAV: the pool's IF is a senior debt
@@ -194,15 +221,15 @@ contract PoolBookTest is PoolBookFixture {
 
     // ------------------------------------------------------------------ owner ruling N-1: no Backstop for the debt
 
-    /// @notice A book whose losses are all insurance debt (IF 25k > MM 10k): exhausted, its debt written down, and
+    /// @notice A book whose losses are all insurance debt (IF 25k > MM 12.5k): exhausted, its debt written down, and
     ///         the Backstop pays nothing for it, over repeated marks.
     function test_N1_exhaustedByInsuranceDebt_drawsNoBackstopCover_overRepeatedMarks() public {
         BRTypes.Charter memory c = _poolCharter();
-        c.mmInventoryUsd = 10_000e6;
+        c.mmInventoryUsd = 12_500e6; // the pool's minimum own capital: 50% of the IF
         _deployPoolBook(c);
         _subscribeDefault();
         vm.warp(book.subscriptionEnds());
-        book.closeWindow(); // raises 10k: S 7k, J 3k
+        book.closeWindow(); // raises 12.5k: S 8.75k, J 3.75k
         usdc.mint(address(backstop), 1_000_000e6);
         uint256 bal = usdc.balanceOf(address(backstop));
         venue.setIfEquity(0); // traders' bad debt drew the whole 25k IF
@@ -214,8 +241,8 @@ contract PoolBookTest is PoolBookFixture {
         assertEq(s + j, 0, "the tranches absorbed it");
         (uint256 debt, uint256 value,) = _debt();
         assertEq(debt, 25_000e6, "owed until retirement");
-        assertEq(value, 10_000e6, "the pool's claim: the book's own 10k");
-        assertEq(pool.bookPosition(BOOK_ID).claim, 10_000e6);
+        assertEq(value, 12_500e6, "the pool's claim: the book's own 12.5k");
+        assertEq(pool.bookPosition(BOOK_ID).claim, 12_500e6);
         (uint256 bsDebt,) = book.backstopDebt();
         assertEq(bsDebt, 0);
     }
@@ -377,7 +404,11 @@ contract PoolBookTest is PoolBookFixture {
     /// @notice m-6, the pre-fix signing for the record (venue IF only, the recall in flight left out): the in-flight IF
     ///         reads as a 25k draw, which TIGHTENS the Backstop cap at that mark (25k less cover for Senior's MM loss; the
     ///         pool's claim is unaffected), and the next mark after repayment re-offers the cover.
-    function test_m6_preFixSigning_readsTheRecallAsADraw_tighterCapAtThatMarkOnly() public {
+    /// @notice Pool audit 2026-10-23: the ledger is cumulative, so the conservative misreading sticks: the 25k the old
+    ///         signing read as an IF draw within the MM loss is booked as Senior's insurance-debt impairment and is not
+    ///         re-offered after the IF lands (the debt being due, a later fall of the draw is a repayment, never read as
+    ///         an IF recovery). The Backstop pays less, never more; the current mark service signs the IF in transit.
+    function test_m6_preFixSigning_readsTheRecallAsADraw_conservativeForGood() public {
         (uint256 bal,) = _recallIfInFlightWithMmLoss();
         vm.warp(((block.timestamp / INTERVAL) + 1) * INTERVAL);
         uint256 id = _commitMark(_nextPeriodEnd(), venue.deployedValueUsd(), book.flowNonce(), false, venue.ifEquity());
@@ -385,10 +416,14 @@ contract PoolBookTest is PoolBookFixture {
         assertEq(bal - usdc.balanceOf(address(backstop)), 27_500e6, "the IF in flight read as a draw: 25k less cover");
         (uint256 debt, uint256 value,) = _debt();
         assertEq(value, debt, "the pool's claim never depended on the signed IF equity");
+        (uint256 impIf,,,) = book.insuranceLedger();
+        assertEq(impIf, 25_000e6, "booked as insurance debt");
         venue.landIf();
         book.fundClaims();
         _applyPoolMark();
-        assertEq(bal - usdc.balanceOf(address(backstop)), 52_500e6, "cover re-offered once the draw is gone");
+        assertEq(bal - usdc.balanceOf(address(backstop)), 27_500e6, "never re-offered: the ledger only ever errs low");
+        (debt,,) = _debt();
+        assertEq(debt, 0, "the pool repaid in full on landing");
     }
 
     /// @dev Live pool book, Backstop funded, retired, the IF recall in flight (debt due), the MM lost its 75k.
@@ -686,6 +721,94 @@ contract PoolBookTest is PoolBookFixture {
         bytes memory init = abi.encodeCall(Book.initialize, (address(cfg), 2, c, comps));
         vm.expectRevert(Book.BadCharter.selector);
         new ERC1967Proxy(address(bookImpl), init);
+    }
+
+    // ------------------------------------------------------------------ pool audit 2026-10-23: the explicit ledger
+
+    /// @notice B-L4: a held mark reaches the pool (its claim moves) but does not stamp the book fresh for the pool's
+    ///         epoch gate; the next non-held mark does.
+    function test_heldMark_doesNotSatisfyThePoolEpochGate() public {
+        _goLivePool();
+        _applyPoolMark();
+        uint64 at0 = pool.bookPosition(BOOK_ID).lastMarkAt;
+        vm.warp(((block.timestamp / INTERVAL) + 1) * INTERVAL);
+        uint256 id = _commitMark(
+            _nextPeriodEnd(), venue.deployedValueUsd(), book.flowNonce(), true, venue.ifEquity() + venue.insuranceInTransitUsd()
+        );
+        book.applyMark(id);
+        assertEq(pool.bookPosition(BOOK_ID).lastMarkAt, at0, "a held mark is not fresh");
+        _applyPoolMark();
+        assertEq(pool.bookPosition(BOOK_ID).lastMarkAt, book.lastMarkPeriodEnd());
+    }
+
+    /// @notice B-H1 recommendation 3 / owner ruling N-1, cumulative and in any path: over a sequence of marks (IF draws and
+    ///         MM moves in any order), a fee distribution and the whole wind-down to retirement, the Backstop never covers
+    ///         more than on the same book whose IF was never drawn (runs both paths from one snapshot). Its repayments
+    ///         can come later: an exhausted book's later gains restore the pool's provisional shortfall first (N2-2, the
+    ///         IF is the book's senior debt), which the Backstop's cash never funds.
+    function testFuzz_N1_cumulative_backstopNeverPaysMoreThanWithoutTheIfDraws(
+        uint256[3] memory mm,
+        uint256[3] memory ifLeft,
+        uint256 gross
+    ) public {
+        _goLivePool();
+        usdc.mint(address(backstop), 1_000_000e6);
+        gross = bound(gross, 0, 20_000e6);
+        for (uint256 i; i < 3; ++i) {
+            mm[i] = bound(mm[i], 0, 120_000e6);
+            ifLeft[i] = bound(ifLeft[i], 0, 25_000e6);
+            if (i > 0 && ifLeft[i] > ifLeft[i - 1]) ifLeft[i] = ifLeft[i - 1]; // bad debt only draws the IF
+        }
+        uint256 s0 = vm.snapshotState();
+        uint256 withDraws = _runPath(mm, ifLeft, gross, true);
+        vm.revertToState(s0);
+        uint256 without = _runPath(mm, ifLeft, gross, false);
+        assertLe(withDraws, without, "the Backstop covered part of the insurance debt");
+    }
+
+    /// @dev One path to retirement; returns the cover the Backstop paid (gross, MarkSettled.backstopCovered summed).
+    function _runPath(uint256[3] memory mm, uint256[3] memory ifLeft, uint256 gross, bool draws)
+        internal
+        returns (uint256)
+    {
+        uint256 covered;
+        for (uint256 i; i < 3; ++i) {
+            venue.setMmValue(mm[i]);
+            venue.setIfEquity(draws ? ifLeft[i] : 25_000e6);
+            _applyPoolMark();
+            covered += book.lastMarkSummary().backstopCovered;
+            if (i == 1 && gross > 0) _distribute(gross, 0);
+            _checkLedgerInvariants();
+        }
+        charterC.retire(BOOK_ID);
+        vm.startPrank(keeper);
+        uint256 ifEq = venue.ifEquity();
+        vault.recall(BRTypes.ACCOUNT_IF, ifEq > 0 ? ifEq : 1);
+        if (venue.mmValue() > 0) vault.recall(BRTypes.ACCOUNT_MM, venue.mmValue());
+        vm.stopPrank();
+        book.fundClaims();
+        _applyPoolMark(); // deployed 0
+        covered += book.lastMarkSummary().backstopCovered;
+        book.finalizeRetirement();
+        _checkLedgerInvariants();
+        return covered;
+    }
+
+    /// @dev The ledger's invariants: IF impairment within the impairment, the cover within Senior NAV and the Backstop
+    ///      debt, the claim within the debt, and a shortfall only once the tranches hold no own capital.
+    function _checkLedgerInvariants() internal view {
+        (uint256 impIf,, uint256 cover,) = book.insuranceLedger();
+        (uint256 s, uint256 j) = book.trancheNav();
+        (uint256 bsDebt,) = book.backstopDebt();
+        (uint256 debt, uint256 value,) = _debt();
+        assertLe(impIf, book.seniorImpairment(), "impIf <= imp");
+        assertLe(cover, s, "cover <= S");
+        assertLe(cover, bsDebt, "cover <= backstopDebt");
+        assertLe(value, debt, "claim <= debt");
+        if (value < debt && uint8(book.state()) != uint8(BRTypes.BookState.Retired)) {
+            assertEq(j, 0, "a shortfall only with Junior empty");
+            assertEq(s, cover, "... and Senior holding only cover");
+        }
     }
 
     // ------------------------------------------------------------------ helpers
