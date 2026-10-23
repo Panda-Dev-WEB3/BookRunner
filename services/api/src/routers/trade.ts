@@ -127,13 +127,18 @@ const traderOf = (deps: ApiDeps, marketId: number, wallet: Address) => hardChain
 const isoSec = (s: number) => new Date(s * 1000).toISOString();
 
 /** Quote of a trade of `sizeDelta` for a position (flat without a wallet), with its refusal (if any) and warnings. */
-function quoteOf(pr: Priced, pos: EnginePosition | null, sizeDelta: bigint, slippageBps: number) {
+function quoteOf(pr: Priced, pos: EnginePosition | null, sizeDelta: bigint, slippageBps: number, refuseUnholdable = false) {
   const m = pr.m.chain;
   const math = mathOf(m);
   const px = pr.price?.priceWad ?? 0n;
   const base: EnginePosition = pos ?? { size: 0n, entryPriceWad: 0n, marginUsd: 0n, fundingIndexAtEntry: m.state.fundingIndex };
   const sim = simulateTrade(math, base, px, sizeDelta, pos !== null);
   const s = pr.session;
+  const ohBps = offHoursMarginBps(m.config.initialMarginBps);
+  const after: EnginePosition = { size: sim.newSize, entryPriceWad: sim.newEntryWad, marginUsd: sim.marginAfterUsd, fundingIndexAtEntry: m.state.fundingIndex };
+  // a position that would be liquidatable at the closing price of the next session close (equity < 2 x initial margin)
+  const unholdable = sim.newRisk && sim.newSize !== 0n && pos !== null && isLiquidatable(after, px, m.state.fundingIndex, ohBps);
+  const holdable = (10_000 / ohBps).toFixed(1).replace(/\.0$/, "");
   const refusal = !pr.price
     ? { code: "NO_PRICE", message: s.reasons[0] ?? "The market has no price." }
     : !s.canTrade
@@ -142,13 +147,16 @@ function quoteOf(pr: Priced, pos: EnginePosition | null, sizeDelta: bigint, slip
         ? { code: s.session.toUpperCase(), message: `${s.reasons.join(" ")} This order adds risk.` }
         : sim.refusal
           ? { code: sim.refusal.code, message: sim.refusal.message }
-          : null;
-  const after: EnginePosition = { size: sim.newSize, entryPriceWad: sim.newEntryWad, marginUsd: sim.marginAfterUsd, fundingIndexAtEntry: m.state.fundingIndex };
-  const ohBps = offHoursMarginBps(m.config.initialMarginBps);
+          : unholdable && refuseUnholdable
+            ? {
+                code: "UNHOLDABLE_LEVERAGE",
+                message: `Above ${holdable}x on this deployment: the position must be able to stay open through a session close, when the requirement is ${ohBps / 100}% of notional (2x initial margin). Add margin or trade a smaller size.`,
+              }
+            : null;
   const warnings: string[] = [];
-  if (sim.newRisk && sim.newSize !== 0n && pos !== null && isLiquidatable(after, px, m.state.fundingIndex, ohBps))
+  if (unholdable && !refuseUnholdable)
     warnings.push(
-      `Above ${(10_000 / ohBps).toFixed(1).replace(/\.0$/, "")}x, a position cannot be held through a session close: while the stock's session is closed the requirement is ${ohBps / 100}% of notional (2x initial margin), so this one would be liquidated at the closing price unless you add margin or reduce before the close.`,
+      `Above ${holdable}x, a position cannot be held through a session close: while the stock's session is closed the requirement is ${ohBps / 100}% of notional (2x initial margin), so this one would be liquidated at the closing price unless you add margin or reduce before the close.`,
     );
   if (pos === null && sim.newSize !== 0n) warnings.push(`Connect a wallet to check your margin: this position needs at least ${usdStr(sim.requiredInitialUsd)} of equity (initial margin).`);
   const liq = (bps: number) => {
@@ -223,7 +231,7 @@ export const tradeRouter = router({
       const markets = await Promise.all(
         books.flatMap((b, i) => {
           const c = chains[i];
-          return c ? [price(deps, loaded(b, c), src, false).then((pr) => marketView(pr.m.meta, c, pr.price, pr.session, pr.nowSec))] : [];
+          return c ? [price(deps, loaded(b, c), src, false).then((pr) => marketView(pr.m.meta, c, pr.price, pr.session, pr.nowSec, !!deps.settings.tradeRefuseUnholdable))] : [];
         }),
       );
       return { asOf: new Date(deps.now()).toISOString(), chainReadable: true, markets: markets.sort((a, b) => a.marketId - b.marketId) };
@@ -236,7 +244,7 @@ export const tradeRouter = router({
   /** One market. */
   market: publicProcedure.input(z.object({ marketId: marketIdInput })).query(async ({ ctx: { deps }, input }) => {
     const pr = await loadPriced(deps, input.marketId, false);
-    return marketView(pr.m.meta, pr.m.chain, pr.price, pr.session, pr.nowSec);
+    return marketView(pr.m.meta, pr.m.chain, pr.price, pr.session, pr.nowSec, !!deps.settings.tradeRefuseUnholdable);
   }),
 
   /** A wallet's position at the freshest price: size, entry, margin, equity, margin ratio, liquidation prices, PnL. */
@@ -253,7 +261,7 @@ export const tradeRouter = router({
     .query(async ({ ctx: { deps }, input }) => {
       const pr = await loadPriced(deps, input.marketId);
       const t = input.wallet ? await traderOf(deps, input.marketId, input.wallet) : null;
-      return quoteOf(pr, t ? position(t) : null, input.sizeDelta, input.slippageBps);
+      return quoteOf(pr, t ? position(t) : null, input.sizeDelta, input.slippageBps, !!deps.settings.tradeRefuseUnholdable);
     }),
 
   /** Prepared [settlement-token approve (if needed), depositMargin]: always allowed, off-hours and reduce-only too. */
@@ -314,7 +322,7 @@ export const tradeRouter = router({
       const gw = requireChain(deps);
       const pr = await loadPriced(deps, input.marketId);
       const t = await traderOf(deps, input.marketId, input.wallet);
-      const q = quoteOf(pr, position(t), input.sizeDelta, input.slippageBps);
+      const q = quoteOf(pr, position(t), input.sizeDelta, input.slippageBps, !!deps.settings.tradeRefuseUnholdable);
       if (q.refusal || !pr.price) fail("PRECONDITION_FAILED", q.refusal?.message ?? "The market has no price yet");
       const what = q.newRisk ? (t.position.size === 0n ? "open" : "increase or flip") : q.after.side === "flat" ? "close" : "reduce";
       const tx = engineTradeTx(gw.chainId, pr.m.chain.engine, input.marketId, input.sizeDelta, BigInt(q.acceptablePriceWad), pr.price.priceData, pr.m.label, what);
@@ -332,7 +340,7 @@ export const tradeRouter = router({
       if (size === 0n) fail("PRECONDITION_FAILED", "This wallet has no position in this market");
       const sizeDelta = input.portionBps === 10_000 ? -size : -((size * BigInt(input.portionBps)) / BPS);
       if (sizeDelta === 0n) fail("BAD_REQUEST", "The portion is too small to trade");
-      const q = quoteOf(pr, position(t), sizeDelta, input.slippageBps);
+      const q = quoteOf(pr, position(t), sizeDelta, input.slippageBps, !!deps.settings.tradeRefuseUnholdable);
       if (q.refusal || !pr.price) fail("PRECONDITION_FAILED", q.refusal?.message ?? "The market has no price yet");
       const tx = engineTradeTx(gw.chainId, pr.m.chain.engine, input.marketId, sizeDelta, BigInt(q.acceptablePriceWad), pr.price.priceData, pr.m.label, input.portionBps === 10_000 ? "close" : "reduce");
       return { txs: [tx], warnings: orderWarnings(pr, q), quote: q };

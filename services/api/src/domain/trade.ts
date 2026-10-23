@@ -2,9 +2,8 @@
 // (pull oracle: the trade carries the freshest signed print, docs/LOW_GAS.md §1), the market's session state
 // (open / reduce-only / split close-only / off-hours / split window / no fresh price / closed), and the views of a
 // market and a trader's position. Every rule mirrors PoolEngine.sol; the math is in ./engine.ts. Pure.
-import { decodePriceData, encodePriceData, type PriceUpdate, priceUpdateFromMsg } from "@bookrunner/shared/eip712";
-import type { OraclePriceMsg } from "@bookrunner/shared/queues";
-import { type Address, type Hex, isAddress, isHex } from "viem";
+import type { SignedPrice } from "@bookrunner/shared/signedPrice";
+import type { Hex } from "viem";
 import type { EngineMarketChainState, EngineTraderChainState } from "../chain/gateway";
 import { usdStr, wadStr } from "../format";
 import {
@@ -34,49 +33,7 @@ export const MAX_SLIPPAGE_BPS = 500;
 /** Adverse move the safe margin withdrawal keeps room for. */
 export const WITHDRAW_BUFFER_BPS = 100;
 
-export interface SignedPrice {
-  update: PriceUpdate;
-  signature: Hex;
-  /** abi.encode([update], [signature]): the trade's `priceData` (only this market's print) */
-  priceData: Hex;
-}
-
-/**
- * The freshest signed print of `underlying` from the oracle's bundle (KEYS.oracleBundle) or its per-key messages
- * (KEYS.oracleLast, heartbeat mode). A bundle signed for another chain or oracle is ignored (the signature would
- * not verify on this deployment's AttestedOracle).
- */
-export function signedPriceFor(rawBundle: unknown, messages: unknown[], underlying: Hex, domain: { chainId: number; oracle: Address }): SignedPrice | null {
-  const want = underlying.toLowerCase();
-  const found: Array<{ update: PriceUpdate; signature: Hex }> = [];
-  const b = rawBundle && typeof rawBundle === "object" ? (rawBundle as Record<string, unknown>) : null;
-  const sameDomain =
-    b !== null &&
-    (b.chainId === undefined || b.chainId === domain.chainId) &&
-    (b.oracle === undefined || (typeof b.oracle === "string" && isAddress(b.oracle, { strict: false }) && b.oracle.toLowerCase() === domain.oracle.toLowerCase()));
-  if (b && sameDomain && typeof b.priceData === "string" && isHex(b.priceData) && b.priceData !== "0x") {
-    try {
-      const { updates, sigs } = decodePriceData(b.priceData);
-      updates.forEach((u, i) => {
-        if (u.underlying.toLowerCase() === want && sigs[i]) found.push({ update: u, signature: sigs[i] });
-      });
-    } catch {
-      /* malformed bundle: the per-key messages */
-    }
-  }
-  for (const m of messages) {
-    if (!m || typeof m !== "object") continue;
-    const o = m as Partial<OraclePriceMsg>;
-    if (typeof o.underlying !== "string" || o.underlying.toLowerCase() !== want || typeof o.signature !== "string" || !isHex(o.signature)) continue;
-    try {
-      found.push({ update: priceUpdateFromMsg(o as OraclePriceMsg), signature: o.signature });
-    } catch {
-      /* malformed message */
-    }
-  }
-  const best = found.filter((f) => f.update.priceWad > 0n).sort((a, b) => (a.update.publishedAt > b.update.publishedAt ? -1 : a.update.publishedAt < b.update.publishedAt ? 1 : 0))[0];
-  return best ? { ...best, priceData: encodePriceData([best.update], [best.signature]) } : null;
-}
+export { type SignedPrice, signedPriceFor } from "@bookrunner/shared/signedPrice";
 
 /** The price a trade fills at: the carried signed print when it is newer than the stored one (AttestedOracle.update skips a not-newer entry). */
 export interface TradePrice {
@@ -185,7 +142,7 @@ export interface MarketMeta {
   bookState: string;
 }
 
-export function marketView(meta: MarketMeta, m: EngineMarketChainState, price: TradePrice | null, s: SessionState, nowSec: number) {
+export function marketView(meta: MarketMeta, m: EngineMarketChainState, price: TradePrice | null, s: SessionState, nowSec: number, refuseUnholdable = false) {
   const math = mathOf(m);
   const px = price?.priceWad ?? 0n;
   const maxAge = tradeMaxAge(m);
@@ -235,6 +192,10 @@ export function marketView(meta: MarketMeta, m: EngineMarketChainState, price: T
       maxLeverage: 10_000 / m.config.initialMarginBps,
       /** the most leverage a position can carry through a session close without being liquidatable at the held price */
       holdableLeverage: 10_000 / ohBps,
+      /** true: an order is refused above holdableLeverage on this deployment (mainnet default), not only warned */
+      refusesUnholdable: refuseUnholdable,
+      /** the most leverage an order may reach here */
+      orderLeverageCap: refuseUnholdable ? 10_000 / ohBps : 10_000 / m.config.initialMarginBps,
     },
     funding: {
       ratePerDayWad: m.fundingRatePerDayWad.toString(),

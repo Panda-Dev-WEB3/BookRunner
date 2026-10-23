@@ -66,6 +66,9 @@ export const MAINNET_RPC_DEFAULTS: Readonly<Record<string, string>> = {
   WATERFALL_TICK_SECONDS: "60",
   // buyback threshold / insurance-pool epoch: fees accrue per daily mark
   WATERFALL_PROTOCOL_DUTY_SECONDS: "300",
+  // liquidation keeper (in-house engine markets): one aggregate3 per pass while a market trades, slower off-hours / idle
+  WATERFALL_LIQ_INTERVAL_SECONDS: "10",
+  WATERFALL_LIQ_IDLE_INTERVAL_SECONDS: "60",
   // BookFactory.bookIds() in mark + waterfall
   BOOKS_REFRESH_SECONDS: "60",
   // the jury is triggered by the charter.filed domain event; this is the fallback scan
@@ -88,6 +91,8 @@ export const MAINNET_RPC_BOUNDS: Readonly<Record<string, { min: number; max: num
   MARK_WAIT_SECONDS: { min: 90, max: 1_800, why: "the mark waits this long for the period's distribution" },
   WATERFALL_TICK_SECONDS: { min: 5, max: 120, why: "settlement scheduling and keeper duties" },
   WATERFALL_PROTOCOL_DUTY_SECONDS: { min: 0, max: 3_600, why: "buyback / pool epoch keeper duty" },
+  WATERFALL_LIQ_INTERVAL_SECONDS: { min: 2, max: 30, why: "liquidation latency while a market trades (loss beyond maintenance grows into IF bad debt)" },
+  WATERFALL_LIQ_IDLE_INTERVAL_SECONDS: { min: 10, max: 300, why: "liquidations at the held price after a session close" },
   BOOKS_REFRESH_SECONDS: { min: 0, max: 300, why: "a chartered book is picked up within this" },
   JURY_POLL_MS: { min: 15_000, max: 600_000, why: "fallback scan for filed charters" },
   COMMITTEE_SYNC_MS: { min: 30_000, max: 600_000, why: "charter finalisation after the committee window" },

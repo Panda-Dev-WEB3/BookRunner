@@ -7,6 +7,7 @@ import type { RawLog } from "../src/decode";
 import type {
   AgentKeyRow,
   BookPatch,
+  EnginePositionRow,
   BookRow,
   CharterFiledRow,
   IndexerStore,
@@ -141,6 +142,8 @@ interface MemState {
   poolWithdrawals: Record<number, PoolWithdrawalRow & { claimedAssets: string; lastClaimAt?: string }>;
   poolEpochs: Record<number, Omit<PoolEpochPatch, "addFilledSharesRaw" | "addFilledAssets"> & { filledSharesRaw: string; filledAssets: string }>;
   poolBooks: Record<number, PoolBookRow & { premiumsUsd: string }>;
+  /** key: `marketId|trader` */
+  enginePositions: Record<string, EnginePositionRow>;
   poolFlows: Record<string, PoolFlowRow>;
   poolSnapshots: Record<number, PoolSnapshotRow>;
 }
@@ -163,6 +166,7 @@ const emptyState = (): MemState => ({
   poolWithdrawals: {},
   poolEpochs: {},
   poolBooks: {},
+  enginePositions: {},
   poolFlows: {},
   poolSnapshots: {},
 });
@@ -189,6 +193,12 @@ export class MemoryIndexerStore implements IndexerStore {
     return this.transaction(fn);
   }
 
+  async upsertEnginePosition(r: Omit<EnginePositionRow, "sizeRaw"> & { sizeRaw: string | null }) {
+    const k = `${r.marketId}|${r.trader.toLowerCase()}`;
+    const prev = this.s.enginePositions[k];
+    if (prev && (prev.lastBlock > r.lastBlock || (prev.lastBlock === r.lastBlock && prev.lastLogIndex >= r.lastLogIndex))) return;
+    this.s.enginePositions[k] = { marketId: r.marketId, trader: r.trader.toLowerCase(), sizeRaw: r.sizeRaw ?? prev?.sizeRaw ?? "0", lastBlock: r.lastBlock, lastLogIndex: r.lastLogIndex };
+  }
   async getCursor(name: string) {
     return this.s.cursors[name] ?? null;
   }

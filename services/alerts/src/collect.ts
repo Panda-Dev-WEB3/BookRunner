@@ -2,6 +2,7 @@
 // signed venue reports, supervisor heartbeat), the chain (head, role key balances, buybackPending,
 // markInterval, the InsurancePool) and the API's /health. Each source fails independently: a failed source becomes an
 // infra / rpc / api condition instead of blinding the other rules.
+import { parseLiquidationStatus } from "@bookrunner/shared/liquidationKeeper";
 import { KEYS } from "@bookrunner/shared/queues";
 import { SESSIONS_24X7, type Sessions, effectiveSessions } from "@bookrunner/shared/sessions";
 import { parseVenueMarkets, type VenueMarketMsg } from "@bookrunner/shared/venueMarket";
@@ -612,10 +613,11 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
   let ifAccounts: ReturnType<typeof parseIfAccounts> = { issues: new Map(), waits: new Map(), unadopted: new Map(), drops: new Map(), failed: new Map() };
   let builderFeed: Snapshot["builderFeed"];
   let venueOps: Snapshot["venueOps"];
+  let liquidationKeeper: Snapshot["liquidationKeeper"];
   try {
     const ids = bookRows.map((b) => b.id);
     const forgedSources = ["ops-venue", "risk", ...ids.map((id) => `agent-${id}`)];
-    const [sup, bk, risk, venue, issues, feed, rejects, forged, status] = await Promise.all([
+    const [sup, bk, risk, venue, issues, feed, rejects, forged, status, liq] = await Promise.all([
       d.kv.get(SUPERVISOR_STATUS_KEY),
       d.kv.get(BACKUP_STATUS_KEY),
       ids.length ? d.kv.mget(ids.map((id) => KEYS.riskState(id))) : Promise.resolve([]),
@@ -625,7 +627,9 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
       ids.length ? d.kv.mget(ids.map((id) => KEYS.agentDeskRejects(id))) : Promise.resolve([]),
       d.kv.mget(forgedSources.map((src) => KEYS.busForged(src))),
       ids.length ? d.kv.mget(ids.map((id) => KEYS.agentStatus(id))) : Promise.resolve([]),
+      d.kv.get(KEYS.liquidationKeeper),
     ]);
+    liquidationKeeper = parseLiquidationStatus(liq);
     statusRaw = status;
     rejectsRaw = rejects;
     busForged = forged.map(parseBusForged).filter((x): x is NonNullable<typeof x> => x !== null);
@@ -642,6 +646,7 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
   } catch (err) {
     supervisor = undefined;
     backup = undefined;
+    liquidationKeeper = undefined;
     infraErrors.push({ source: "redis", error: errMsg(err) });
   }
   if (!infraErrors.some((e) => e.source === "db")) {
@@ -769,6 +774,7 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
     venueOps,
     busForged,
     pool,
+    liquidationKeeper,
     infraErrors,
   };
   return { snapshot, memory: { rpcSamples, buybackSamples, markIntervalSec, poolSettled: [...poolSettled.values()] } };

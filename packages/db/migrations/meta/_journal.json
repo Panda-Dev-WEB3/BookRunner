@@ -22,6 +22,13 @@
       "when": 1792604053087,
       "tag": "0002_insurance_pool_stale",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1792782783166,
+      "tag": "0003_engine_positions",
+      "breakpoints": true
     }
   ]
 }

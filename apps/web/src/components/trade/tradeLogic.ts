@@ -120,7 +120,8 @@ export function leverageOf(notionalUsd: bigint, equityUsd: bigint): number | nul
   return Number((notionalUsd * 100n) / equityUsd) / 100;
 }
 
-export const fmtLeverage = (x: number | null | undefined): string => (x == null || !Number.isFinite(x) ? "—" : `${x >= 10 ? x.toFixed(1) : x.toFixed(2)}x`);
+export const fmtLeverage = (x: number | null | undefined): string =>
+  x == null || !Number.isFinite(x) ? "—" : Number.isInteger(x) ? `${x}x` : `${x >= 10 ? x.toFixed(1) : x.toFixed(2)}x`;
 
 export const SESSION_BADGE: Record<TradeSession, { label: string; tone: Tone }> = {
   open: { label: "Open", tone: "good" },
@@ -175,6 +176,21 @@ export function orderIssueText(issue: OrderIssue | null, m: Pick<TradeMarket, "r
     default:
       return null;
   }
+}
+
+/** The leverage rule shown next to the order: refused above the holdable leverage on this deployment, or only warned. */
+export function leverageNote(m: Pick<TradeMarket["margin"], "maxLeverage" | "holdableLeverage" | "offHoursMarginBps" | "refusesUnholdable">): { title: string; body: string } {
+  const hold = fmtLeverage(m.holdableLeverage);
+  const req = `${(m.offHoursMarginBps / 100).toFixed(0)}% of notional`;
+  if (m.refusesUnholdable)
+    return {
+      title: `Leverage up to ${hold} here`,
+      body: `Orders above ${hold} are refused: a position must be able to stay open through a session close, when the requirement rises to ${req}. A loss can still bring it below that before the close: add margin or reduce in time.`,
+    };
+  return {
+    title: `Above ${hold}, a position does not survive a session close`,
+    body: `The engine allows up to ${fmtLeverage(m.maxLeverage)} while the session is open, but when it closes the requirement rises to ${req}: a position above ${hold} is then liquidated at the closing price unless you add margin or reduce before.`,
+  };
 }
 
 /** Plain risk copy of the page (every line passes the copy rules; test/trade.test.ts). */

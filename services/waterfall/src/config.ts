@@ -44,6 +44,27 @@ export const waterfallEnvShape = {
   WATERFALL_BUYBACK_THRESHOLD_USD: zUsd("10.00"),
   /** Keeper (2026-10 insurance pool): InsurancePool.processEpoch once the oldest epoch is processable. */
   WATERFALL_POOL_EPOCH_ENABLED: zBool(true),
+  /**
+   * Keeper (2026-10 in-house engine markets): liquidation keeper (liquidationKeeper.ts). Liquidates positions that are
+   * liquidatable at the fresh signed price, closes out wind-down / settled markets (forceClose).
+   */
+  WATERFALL_LIQ_ENABLED: zBool(true),
+  /** Pass cadence while a market trades or closes out (mainnet profile 10 s). */
+  WATERFALL_LIQ_INTERVAL_SECONDS: z.coerce.number().positive().max(300).default(10),
+  /** Pass cadence with no open position or every market held / settled (off-hours: the held price does not move). */
+  WATERFALL_LIQ_IDLE_INTERVAL_SECONDS: z.coerce.number().positive().max(3_600).default(60),
+  /** Gas guard: a liquidation may cost at most its reward plus this (USD; a forceClose, which pays nothing, at most this). */
+  WATERFALL_LIQ_GAS_MARGIN_USD: zUsd("0.50"),
+  /** Gas guard: USD per ETH to compare cost and reward; 0 = WATERFALL_ETH_USD; both 0 = only the caps below apply. */
+  WATERFALL_LIQ_ETH_USD: zWad("0"),
+  /** Gas guard: most ETH one liquidation / close-out transaction may cost. */
+  WATERFALL_LIQ_MAX_TX_COST_ETH: zWad("0.002"),
+  /** Gas guard: most ETH the liquidation keeper spends in any hour. */
+  WATERFALL_LIQ_HOURLY_GAS_ETH: zWad("0.02"),
+  /** Transactions per pass at most (liquidations first, largest reward first). */
+  WATERFALL_LIQ_MAX_TX_PER_PASS: z.coerce.number().int().positive().max(100).default(10),
+  /** Open positions read per pass at most (one aggregate3). */
+  WATERFALL_LIQ_MAX_POSITIONS: z.coerce.number().int().positive().max(5_000).default(1_000),
   /** Slippage tolerance below the buyback router's quote for minBkrnOut. */
   WATERFALL_BUYBACK_SLIPPAGE_BPS: z.coerce.number().int().min(0).max(9_999).default(100),
   /** Uniswap v3 fee tier passed ONLY to a legacy (pre-A5-02) BkrnFeeRouter; the current router pins it on-chain. */

@@ -743,9 +743,19 @@ retired book's "written off". The **charter** service and api validators mirror 
 Trading on the in-house engine (2026-10, §5.1) in the services: the **api** serves `trade.markets` / `market` /
 `position` / `quote` and the prepared `trade.deposit` / `withdraw` / `order` / `close` (chain reads: engine config,
 state, caps, funding, loss budget, the stored price, the split gate; the signed price from the oracle's Redis
-bundle). No new service: the oracle already publishes the signed bundle. Liquidations are permissionless (the
-liquidator earns half the liquidation fee), but no protocol keeper liquidates real traders yet: trader-sim only sweeps
-its own sim positions (devnet / testnet). Run a liquidation keeper before the first mainnet engine market (RUNBOOK).
+bundle). The **indexer** follows the PoolEngine (`Trade` / `MarginChanged` / `Liquidation` / `ClosedOut`) into
+`engine_positions` (market, trader, size after the newest event). The **waterfall** keeper runs the liquidation keeper
+(`liquidationKeeper.ts`, KEEPER role key, the keeper's serialised sender, its own cadence: 10 s while a market trades,
+60 s idle / off-hours). It reads the open positions from `engine_positions` and every market and position in ONE
+`aggregate3`, applies the engine's rule off-chain at the freshest signed price (maintenance; `min(2 x IM, 100 %)` while
+held; maintenance on a settled market, audit Task 7a), then sends `liquidate(marketId, trader, priceData)` for a
+liquidatable position and `forceClose(marketId, trader, priceData)` for the rest of a settled market or an open
+wind-down close-out. Races (`NotLiquidatable` / `NoPosition` at the estimate) are skipped; a gas guard caps each
+transaction at its reward (half the nominal fee, from the IF when the margin is gone) plus a margin, per transaction and
+per hour. Its status (`KEYS.liquidationKeeper`: backlog with reasons, failure run) feeds the **alerts**
+(`liquidation_backlog`, `keeper_liquidation_failing`) and the **api** `/health` `liquidationKeeper`. trader-sim keeps
+liquidating only its own sim positions. The api refuses an order above the leverage a position holds through a session
+close (`TRADE_REFUSE_UNHOLDABLE_LEVERAGE`, auto = on mainnet); the web states the rule next to the order.
 
 Queues/channels/keys: `packages/shared/src/queues.ts`. Events: `packages/shared/src/events.ts`.
 Data model: `packages/db/src/schema.ts` (tables of Backend §4 plus extensions).
@@ -795,7 +805,8 @@ API + web over the existing trader surface (`depositMargin`, `withdrawMargin`, `
   ≤ quote cap and side OI ≤ inventory cap for new risk, equity ≥ initial margin for new risk = maximum leverage
   `1e4 / initialMarginBps`, a reduction must not be left liquidatable). Pool-level `PoolUndercollateralized` is not
   simulated (the engine may still refuse; the web decodes the revert). A position above the holdable leverage
-  (`1e4 / min(2 × IM, 100 %)`) gets a warning: it is liquidatable at the closing price of the next session close.
+  (`1e4 / min(2 × IM, 100 %)`, 5x by default) is refused on mainnet (`TRADE_REFUSE_UNHOLDABLE_LEVERAGE` auto; `UNHOLDABLE_LEVERAGE`)
+  and warned elsewhere: it is liquidatable at the closing price of the next session close.
 - **Position** (`trade.position`): valued at the trade price: entry, margin, equity (margin + PnL − unsettled
   funding), margin ratio, leverage, liquidation price at maintenance and at the off-hours requirement. Liquidation
   price: the closed form `long: (E·1e4 − (M − F)·1e34/s) / (1e4 − bps)`, `short: (E·1e4 + (M − F)·1e34/s) / (1e4 + bps)`

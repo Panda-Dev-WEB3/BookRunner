@@ -3,6 +3,7 @@
 import type { VenueMarketMsg } from "@bookrunner/shared/venueMarket";
 import type { Sessions } from "@bookrunner/shared/sessions";
 import type { SupervisorStatus } from "@bookrunner/shared/supervisor";
+import type { LiquidationKeeperStatus } from "@bookrunner/shared/liquidationKeeper";
 
 export type Severity = "warning" | "critical";
 
@@ -329,6 +330,8 @@ export interface Snapshot {
    * core read failed this pass (the rpc rule reports RPC trouble). Either way the pool rules raise nothing.
    */
   pool?: PoolSnap | null;
+  /** the waterfall liquidation keeper (KEYS.liquidationKeeper): null = no status, undefined = the Redis read failed */
+  liquidationKeeper?: LiquidationKeeperStatus | null;
   /** collection failures that are themselves worth an alert (db / redis unreachable) */
   infraErrors: Array<{ source: "db" | "redis"; error: string }>;
 }

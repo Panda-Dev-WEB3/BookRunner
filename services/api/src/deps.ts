@@ -22,6 +22,8 @@ export interface ApiSettings {
   markIntervalSeconds: number;
   receiptsIntervalSeconds: number;
   maxPriceAgeSeconds: number;
+  /** Trading page: refuse orders above the leverage a position can hold through a session close (TRADE_REFUSE_UNHOLDABLE_LEVERAGE). */
+  tradeRefuseUnholdable?: boolean;
   /** Leaves kept by the receipts tree cache (API_RECEIPT_CACHE_LEAVES; default RECEIPT_TREE_CACHE.maxLeaves). */
   receiptCacheLeaves?: number;
   /** Required for webhook management (disabled while unset). */

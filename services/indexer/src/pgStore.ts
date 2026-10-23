@@ -7,6 +7,7 @@ import {
   chainCursor,
   charters,
   committee,
+  enginePositions,
   events,
   juryVerdicts,
   killEvents,
@@ -29,6 +30,7 @@ import type { PostgresJsQueryResultHKT } from "drizzle-orm/postgres-js";
 import type { Address } from "viem";
 import type {
   AgentKeyRow,
+  EnginePositionRow,
   BookPatch,
   BookRow,
   CharterFiledRow,
@@ -473,6 +475,17 @@ export class PgIndexerStore implements IndexerStore {
       return;
     }
     await this.db.insert(poolEpochs).values(values).onConflictDoUpdate({ target: poolEpochs.epoch, set: update });
+  }
+
+  async upsertEnginePosition(r: Omit<EnginePositionRow, "sizeRaw"> & { sizeRaw: string | null }): Promise<void> {
+    const trader = lc(r.trader);
+    // later log wins: (last_block, last_log_index) < the incoming one
+    const newer = sql`(${enginePositions.lastBlock}, ${enginePositions.lastLogIndex}) < (${r.lastBlock}, ${r.lastLogIndex})`;
+    const set = { lastBlock: r.lastBlock, lastLogIndex: r.lastLogIndex, updatedAt: new Date(), ...(r.sizeRaw === null ? {} : { sizeRaw: r.sizeRaw }) };
+    await this.db
+      .insert(enginePositions)
+      .values({ marketId: r.marketId, trader, sizeRaw: r.sizeRaw ?? "0", lastBlock: r.lastBlock, lastLogIndex: r.lastLogIndex })
+      .onConflictDoUpdate({ target: [enginePositions.marketId, enginePositions.trader], set, where: newer });
   }
 
   async upsertPoolBook(r: PoolBookRow): Promise<void> {

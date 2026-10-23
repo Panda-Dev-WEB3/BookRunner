@@ -1,5 +1,6 @@
 // Hono app: /health (+ ops-venue's Orderly listing status), tRPC at /trpc, REST mirror at /v1, read-only MCP at /mcp, CORS for apps/web.
 import { KEYS, parseVenueMarkets, type VenueMarketMsg, venueMarketGate } from "@bookrunner/shared";
+import { parseLiquidationStatus } from "@bookrunner/shared/liquidationKeeper";
 import { trpcServer } from "@hono/trpc-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
@@ -100,6 +101,39 @@ export async function orderlyListingHealth(kv: Kv, timeoutMs = 500): Promise<Ord
   }
 }
 
+/** /health `liquidationKeeper`: the waterfall liquidation keeper (KEYS.liquidationKeeper, in-house engine markets), counts only. */
+export interface LiquidationKeeperHealth {
+  ageSec: number;
+  enabled: boolean;
+  markets: Array<{ marketId: number; regime: string; openPositions: number }>;
+  openPositions: number;
+  backlog: number;
+  oldestBacklogSec: number | null;
+  /** consecutive failed attempts (errors stay in the waterfall logs and the alerts, never on this public endpoint) */
+  failingAttempts: number;
+  gasGuard: "reward" | "cap_only";
+  totals: { liquidations: number; forceCloses: number; raced: number };
+}
+
+export async function liquidationKeeperHealth(kv: Kv, nowMs: number, timeoutMs = 500): Promise<LiquidationKeeperHealth | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const raw = await Promise.race([kv.get(KEYS.liquidationKeeper).catch(() => null), new Promise<null>((r) => (timer = setTimeout(() => r(null), timeoutMs)))]).finally(() => clearTimeout(timer));
+  const s = parseLiquidationStatus(raw);
+  if (!s) return null;
+  const oldest = s.backlog.reduce<number | null>((m, b) => (m === null || b.since < m ? b.since : m), null);
+  return {
+    ageSec: Math.max(0, Math.round((nowMs - s.ts) / 1000)),
+    enabled: s.enabled,
+    markets: s.markets.map((m) => ({ marketId: m.marketId, regime: m.regime, openPositions: m.openPositions })),
+    openPositions: s.markets.reduce((n, m) => n + m.openPositions, 0),
+    backlog: s.backlog.length,
+    oldestBacklogSec: oldest === null ? null : Math.max(0, Math.round((nowMs - oldest) / 1000)),
+    failingAttempts: s.failures.consecutive,
+    gasGuard: s.gasGuard,
+    totals: { liquidations: s.totals.liquidations, forceCloses: s.totals.forceCloses, raced: s.totals.raced },
+  };
+}
+
 export function createApp(deps: ApiDeps, opts: AppOptions) {
   const app = new Hono();
   const started = deps.now();
@@ -125,7 +159,11 @@ export function createApp(deps: ApiDeps, opts: AppOptions) {
   );
 
   app.get("/health", async (c) => {
-    const [extra, orderlyListing] = await Promise.all([deps.health ? deps.health().catch((err) => ({ healthError: String(err) })) : {}, orderlyListingHealth(deps.kv)]);
+    const [extra, orderlyListing, liquidationKeeper] = await Promise.all([
+      deps.health ? deps.health().catch((err) => ({ healthError: String(err) })) : {},
+      orderlyListingHealth(deps.kv),
+      liquidationKeeperHealth(deps.kv, deps.now()),
+    ]);
     const token = deps.settings.adminToken;
     const verbose = c.req.query("verbose") !== undefined && !!token && bearerMatches(c.req.header("authorization"), token);
     return c.json({
@@ -136,6 +174,7 @@ export function createApp(deps: ApiDeps, opts: AppOptions) {
       capabilities,
       ...(verbose ? { uptimeSec: Math.floor((deps.now() - started) / 1000), procedures } : {}),
       ...(orderlyListing ? { orderlyListing } : {}),
+      ...(liquidationKeeper ? { liquidationKeeper } : {}),
       ...extra,
     });
   });

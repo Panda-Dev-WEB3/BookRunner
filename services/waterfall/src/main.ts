@@ -12,11 +12,12 @@ import {
   uniswapV3For,
   walletClientFor,
 } from "@bookrunner/shared";
-import { bookrunnerConfigAbi } from "@bookrunner/shared/abi";
+import { bookrunnerConfigAbi, poolEngineAdapterAbi } from "@bookrunner/shared/abi";
 import { Queue, Worker } from "bullmq";
 import { Redis } from "ioredis";
 import type { Address } from "viem";
 import { WaterfallChainAdapter } from "./adapters/chain";
+import { ViemLiquidationChain, openEnginePositions, redisSignedPrices, redisStatusSink } from "./adapters/liquidation";
 import { RedeemLogIndex, UnionCandidates } from "./adapters/redemptions";
 import { DbRedeemCandidates, PgSettlementStore } from "./adapters/store";
 import { BullVenueOps } from "./adapters/venue-ops";
@@ -26,10 +27,11 @@ import { loadWaterfallConfig } from "./config";
 import { GasMeter, expensesRequested } from "./domain/expenses";
 import { Cooldowns, distributes } from "./domain/keeper";
 import { KeeperRunner } from "./keeper";
+import { LiquidationKeeper } from "./liquidationKeeper";
 import { BookDirectory } from "./kit/books";
 import { waitForDeployment } from "./kit/deployment";
 import { PgRedisEventSink } from "./kit/events";
-import { onShutdown, startLoop } from "./kit/loop";
+import { onShutdown, sleep, startLoop } from "./kit/loop";
 import { isNewPeriod, periodEndAt } from "./kit/period";
 import { insertReceipt } from "./kit/receipts";
 import { RedisSettlementSignals } from "./kit/signals";
@@ -194,6 +196,48 @@ export async function main() {
     }
   }
   cleanups.push(() => loop.stop());
+
+  // in-house engine markets: the liquidation keeper (own cadence; same KEEPER key and serialised sender)
+  const engine = deployment.contracts.poolEngine;
+  if (cfg.WATERFALL_KEEPER_ENABLED && cfg.WATERFALL_LIQ_ENABLED && engine && !/^0x0{40}$/i.test(engine)) {
+    const marketBook = new Map<number, number>();
+    let marketsScannedAt = 0; // engine books -> market ids, re-scanned at most every 10 min (RPC budget)
+    const liq = new LiquidationKeeper({
+      chain: new ViemLiquidationChain(pc, sender, deployment),
+      openPositions: () => openEnginePositions(db),
+      signedPrices: redisSignedPrices(redis, { chainId: cfg.CHAIN_ID, oracle: deployment.contracts.oracle }),
+      writeStatus: redisStatusSink(redis),
+      bookOf: async (marketId) => {
+        if (!marketBook.has(marketId) && Date.now() - marketsScannedAt > 600_000) {
+          marketsScannedAt = Date.now();
+          for (const ref of (await books.list()).filter((b) => b.venue === 1)) {
+            const id = Number(await pc.readContract({ address: ref.components.adapter, abi: poolEngineAdapterAbi, functionName: "marketId" }));
+            marketBook.set(id, ref.bookId);
+          }
+        }
+        return marketBook.get(marketId) ?? null;
+      },
+      gas: {
+        ethUsdWad: cfg.WATERFALL_LIQ_ETH_USD > 0n ? cfg.WATERFALL_LIQ_ETH_USD : cfg.WATERFALL_ETH_USD,
+        marginUsd: cfg.WATERFALL_LIQ_GAS_MARGIN_USD,
+        maxTxWei: cfg.WATERFALL_LIQ_MAX_TX_COST_ETH,
+        hourlyWei: cfg.WATERFALL_LIQ_HOURLY_GAS_ETH,
+      },
+      keeper: keeperAccount.address,
+      log: log.child({ duty: "liquidation" }),
+      intervalMs: cfg.WATERFALL_LIQ_INTERVAL_SECONDS * 1000,
+      idleIntervalMs: cfg.WATERFALL_LIQ_IDLE_INTERVAL_SECONDS * 1000,
+      maxTxPerPass: cfg.WATERFALL_LIQ_MAX_TX_PER_PASS,
+      maxPositions: cfg.WATERFALL_LIQ_MAX_POSITIONS,
+    });
+    if (cfg.WATERFALL_LIQ_ETH_USD === 0n && cfg.WATERFALL_ETH_USD === 0n)
+      log.warn("liquidation gas guard: no ETH/USD configured (WATERFALL_LIQ_ETH_USD / WATERFALL_ETH_USD): only the per-tx and hourly caps apply");
+    const liqDone = (async () => {
+      while (!ac.signal.aborted) await sleep(await liq.tick(), ac.signal);
+    })();
+    cleanups.push(() => liqDone);
+    log.info({ engine, intervalSec: cfg.WATERFALL_LIQ_INTERVAL_SECONDS, idleSec: cfg.WATERFALL_LIQ_IDLE_INTERVAL_SECONDS }, "liquidation keeper running");
+  }
   log.info({ books: (await books.list()).map((b) => b.bookId), keeper: keeperAccount.address }, "waterfall running");
 }
 

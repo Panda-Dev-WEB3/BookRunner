@@ -231,6 +231,16 @@ export interface VoteEntry {
   ts: string;
 }
 
+/** engine_positions row (liquidation keeper trader set). */
+export interface EnginePositionRow {
+  marketId: number;
+  trader: string;
+  /** signed size after the event, 1e18 units (decimal string) */
+  sizeRaw: string;
+  lastBlock: number;
+  lastLogIndex: number;
+}
+
 export interface IndexerStore {
   /** Runs fn atomically (DB transaction). */
   transaction<T>(fn: (s: IndexerStore) => Promise<T>): Promise<T>;
@@ -297,6 +307,13 @@ export interface IndexerStore {
   stalePoolSnapshots(limit: number): Promise<number[]>;
   stalePoolBooks(): Promise<number[]>;
   poolEpochsWithoutEnd(limit: number): Promise<number[]>;
+
+  // in-house engine (2026-10 liquidation keeper)
+  /**
+   * Upserts the (market, trader) row. `sizeRaw` null = keep the stored size (MarginChanged: a new trader starts at 0).
+   * A row written by a later log (block, logIndex) is never overwritten by an earlier one (re-applied ranges).
+   */
+  upsertEnginePosition(r: Omit<EnginePositionRow, "sizeRaw"> & { sizeRaw: string | null }): Promise<void>;
 
   /** Domain-event protocol insert; null when the dedupe key already exists. */
   insertEvent(e: PendingEvent): Promise<{ id: number; createdAt: Date } | null>;

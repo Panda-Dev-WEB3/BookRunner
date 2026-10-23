@@ -177,6 +177,13 @@ const shape = {
   ALERT_BUYBACK_MAX_USD: num(5000),
   ALERT_API_FOR_SECONDS: int(120),
   ALERT_BACKUP_MAX_AGE_HOURS: num(26),
+  // ---- liquidation keeper (in-house engine markets; rules-liquidation.ts)
+  /** liquidation_backlog: a liquidatable position still open this long (warning; critical at 5x) */
+  ALERT_LIQ_BACKLOG_SECONDS: int(60),
+  /** keeper_liquidation_failing: this many consecutive failed attempts */
+  ALERT_LIQ_FAILURES: int(3),
+  /** keeper_liquidation_failing: status older than this while an engine book is live */
+  ALERT_LIQ_STATUS_STALE_SECONDS: int(300),
   // ---- InsurancePool (docs/ARCHITECTURE.md §2.10; rules-pool.ts)
   /** pool_utilisation: claims / pool assets above this (bps) for 5 min alerts (warning) */
   ALERT_POOL_UTILISATION_BPS: int(9000),
@@ -278,6 +285,12 @@ export interface RuleConfig {
   oraclePrimaryLagSec: number;
   backupExpected: boolean;
   backupMaxAgeSec: number;
+  /** liquidation_backlog: seconds a liquidatable position may stay open */
+  liqBacklogSec: number;
+  /** keeper_liquidation_failing: consecutive failed attempts */
+  liqFailures: number;
+  /** keeper_liquidation_failing: max age of the keeper status (s) */
+  liqStatusStaleSec: number;
   /** pool_utilisation: warning above, critical at or above (bps) */
   poolUtilisationBps: number;
   poolUtilisationCriticalBps: number;
@@ -418,6 +431,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       oraclePrimaryLagSec: e.ALERT_ORACLE_PRIMARY_LAG_SECONDS,
       backupExpected: e.ALERT_BACKUP_EXPECTED === undefined || e.ALERT_BACKUP_EXPECTED === "" ? network !== "devnet" : e.ALERT_BACKUP_EXPECTED === "1" || e.ALERT_BACKUP_EXPECTED.toLowerCase() === "true",
       backupMaxAgeSec: Math.round(e.ALERT_BACKUP_MAX_AGE_HOURS * 3600),
+      liqBacklogSec: e.ALERT_LIQ_BACKLOG_SECONDS,
+      liqFailures: e.ALERT_LIQ_FAILURES,
+      liqStatusStaleSec: e.ALERT_LIQ_STATUS_STALE_SECONDS,
       poolUtilisationBps: e.ALERT_POOL_UTILISATION_BPS,
       poolUtilisationCriticalBps: e.ALERT_POOL_UTILISATION_CRITICAL_BPS,
       poolEpochOverdueSec: e.ALERT_POOL_EPOCH_OVERDUE_SECONDS,

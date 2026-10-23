@@ -11,6 +11,7 @@ import {
   fmtLeverage,
   fmtUnits,
   isNewRisk,
+  leverageNote,
   leverageOf,
   notionalRaw,
   orderEffect,
@@ -87,7 +88,8 @@ describe("what an order does", () => {
     expect(leverageOf(0n, 1n)).toBeNull();
     expect(leverageOf(1n, 0n)).toBeNull();
     expect(fmtLeverage(9.21)).toBe("9.21x");
-    expect(fmtLeverage(10)).toBe("10.0x");
+    expect(fmtLeverage(10)).toBe("10x");
+    expect(fmtLeverage(12.25)).toBe("12.3x");
     expect(fmtLeverage(null)).toBe("—");
   });
 
@@ -129,9 +131,23 @@ describe("session and price", () => {
   });
 });
 
+describe("leverage rule", () => {
+  const margin = { maxLeverage: 10, holdableLeverage: 5, offHoursMarginBps: 2000 };
+  test("refused above the holdable leverage on this deployment (mainnet default), else a warning", () => {
+    const on = leverageNote({ ...margin, refusesUnholdable: true });
+    expect(on.title).toBe("Leverage up to 5x here");
+    expect(on.body).toContain("refused");
+    expect(on.body).toContain("20% of notional");
+    const off = leverageNote({ ...margin, refusesUnholdable: false });
+    expect(off.title).toContain("Above 5x");
+    expect(off.body).toContain("up to 10x");
+    expect(checkCopy([on.title, on.body, off.title, off.body].join("\n"))).toEqual([]);
+  });
+});
+
 describe("copy", () => {
   test("risk lines pass the copy rules and state the rules of the market", () => {
-    const lines = tradeRiskLines({ margin: { initialMarginBps: 1000, maintenanceMarginBps: 500, offHoursMarginBps: 2000, maxLeverage: 10, holdableLeverage: 5 }, tradePriceMaxAgeSeconds: 15 });
+    const lines = tradeRiskLines({ margin: { initialMarginBps: 1000, maintenanceMarginBps: 500, offHoursMarginBps: 2000, maxLeverage: 10, holdableLeverage: 5, refusesUnholdable: true, orderLeverageCap: 5 }, tradePriceMaxAgeSeconds: 15 });
     const text = lines.map((l) => `${l.title}. ${l.body}`).join("\n");
     expect(checkCopy(text)).toEqual([]);
     expect(text).toContain("10x");

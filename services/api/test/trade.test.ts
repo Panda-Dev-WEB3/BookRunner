@@ -485,3 +485,30 @@ describe("trade router: prepared transactions (verified like the web does)", () 
     expect(() => verifyPreparedTxs(pos.txs, { ...check(), targets: [ENGINE] })).toThrow(/not a contract of this flow/);
   });
 });
+
+describe("leverage that survives a session close (TRADE_REFUSE_UNHOLDABLE_LEVERAGE)", () => {
+  test("auto: refused on mainnet only; true / false force it", async () => {
+    const { refuseUnholdable } = await import("../src/config");
+    expect([refuseUnholdable("auto", 4663), refuseUnholdable("auto", 46630), refuseUnholdable("true", 31337), refuseUnholdable("0", 4663)]).toEqual([true, false, true, false]);
+  });
+
+  test("refused above the holdable leverage (5x) when on; a warning only when off; the market view says which", async () => {
+    const w = await world();
+    setTrader(w, flat(U(110)));
+    const size = UNITS(10).toString(); // ~9.2x on 110
+    expect((await w.caller.trade.quote({ marketId: 1, wallet: ALICE, sizeDelta: size })).refusal).toBeNull();
+    expect((await w.caller.trade.markets()).markets[0]!.margin).toMatchObject({ refusesUnholdable: false, orderLeverageCap: 10 });
+    w.deps.settings.tradeRefuseUnholdable = true;
+    const q = await w.caller.trade.quote({ marketId: 1, wallet: ALICE, sizeDelta: size });
+    expect(q.refusal?.code).toBe("UNHOLDABLE_LEVERAGE");
+    expect(q.refusal?.message).toContain("Above 5x");
+    expect(await code(w.caller.trade.order({ marketId: 1, wallet: ALICE, sizeDelta: size }))).toContain("session close");
+    expect((await w.caller.trade.markets()).markets[0]!.margin).toMatchObject({ refusesUnholdable: true, orderLeverageCap: 5 });
+    // 4x on 250 margin is holdable: built
+    setTrader(w, flat(U(250)));
+    expect((await w.caller.trade.order({ marketId: 1, wallet: ALICE, sizeDelta: size })).txs).toHaveLength(1);
+    // a reduction is never refused by it
+    setTrader(w, opened(U(110), UNITS(10)));
+    expect((await w.caller.trade.order({ marketId: 1, wallet: ALICE, sizeDelta: (-UNITS(1)).toString() })).txs).toHaveLength(1);
+  });
+});

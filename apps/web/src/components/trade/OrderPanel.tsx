@@ -22,6 +22,7 @@ import {
   type SizeUnit,
   fmtLeverage,
   fmtUnits,
+  leverageNote,
   notionalRaw,
   orderEffect,
   orderIssue,
@@ -72,6 +73,16 @@ function SignSummary({ m, q, now }: { m: TradeMarket; q: TradeQuoteOut; now: num
         ]}
       />
     </div>
+  );
+}
+
+/** The leverage rule of this deployment, always in view next to the order. */
+export function LeverageNote({ m }: { m: TradeMarket }) {
+  const text = leverageNote(m.margin);
+  return (
+    <Callout tone={m.margin.refusesUnholdable ? "neutral" : "warn"} compact title={text.title}>
+      {text.body}
+    </Callout>
   );
 }
 
@@ -166,6 +177,7 @@ export function OrderPanel(props: { m: TradeMarket; address: string | null; posi
           </div>
         </Field>
 
+        <LeverageNote m={m} />
         {issueText && (
           <Callout tone="warn" compact>
             {issueText}

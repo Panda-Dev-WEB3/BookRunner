@@ -4,6 +4,7 @@
 import { formatEther } from "viem";
 import type { RuleConfig } from "./config";
 import { HOLD_RULES } from "./rules-holds";
+import { LIQUIDATION_RULES } from "./rules-liquidation";
 import { POOL_RULES } from "./rules-pool";
 import type { BookSnap, Condition, OracleConfirmSnap, OracleProbe, OracleSourceSnap, Sample, Snapshot } from "./types";
 
@@ -847,6 +848,7 @@ export const RULES = {
   indexer_lag: indexerLag,
   buyback,
   ...POOL_RULES,
+  ...LIQUIDATION_RULES,
   api_health: apiHealth,
   oracle,
   backup,

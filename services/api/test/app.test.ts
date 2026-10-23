@@ -53,6 +53,34 @@ describe("http app", () => {
     expect(JSON.stringify(body)).not.toContain("HTTP 502");
   });
 
+  test("GET /health carries the liquidation keeper status (counts only, no error text, no trader address)", async () => {
+    const { w, app } = setup();
+    const none = (await (await app.request("/health")).json()) as { liquidationKeeper?: unknown };
+    expect(none.liquidationKeeper).toBeUndefined();
+    const now = w.deps.now();
+    await w.deps.kv.set(
+      KEYS.liquidationKeeper,
+      JSON.stringify({
+        ts: now - 4_000,
+        enabled: true,
+        keeper: "0x000000000000000000000000000000000000beef",
+        nextPassSec: 10,
+        markets: [{ marketId: 1, bookId: 7, regime: "open", openPositions: 4, priceAgeSec: 2 }],
+        backlog: [{ marketId: 1, trader: "0x0000000000000000000000000000000000000a11", action: "liquidate", since: now - 90_000, reason: "failed", detail: "secret-ish detail" }],
+        lastPass: { at: now - 4_000, durationMs: 50, checked: 4, liquidated: 0, forceClosed: 0, raced: 0 },
+        failures: { consecutive: 2, since: now - 90_000, lastError: "nonce too low", lastErrorAt: now },
+        totals: { liquidations: 3, forceCloses: 1, raced: 2, rewardsUsd: "7.000000", gasWei: "1" },
+        gasGuard: "reward",
+      }),
+      600,
+    );
+    const body = (await (await app.request("/health")).json()) as { liquidationKeeper?: Record<string, unknown> };
+    expect(body.liquidationKeeper).toMatchObject({ ageSec: 4, openPositions: 4, backlog: 1, oldestBacklogSec: 90, failingAttempts: 2, gasGuard: "reward", totals: { liquidations: 3, forceCloses: 1, raced: 2 } });
+    const text = JSON.stringify(body);
+    expect(text).not.toContain("nonce too low");
+    expect(text).not.toContain("0a11");
+  });
+
   test("GET /health?verbose lists every procedure and the uptime for the admin token only", async () => {
     const { w, app } = setup();
     const TOKEN = "health-admin-token-0123456789";

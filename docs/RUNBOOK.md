@@ -481,12 +481,29 @@ can redo it during the timelock delay from the published quote.
 The trading page (`/trade`, ARCHITECTURE §5.1) lists an engine market as soon as its book is Live; until then it
 shows "No market open yet". Guarded launch: small, insured, watched.
 
-1. [ ] **Liquidation keeper first.** Liquidations are permissionless (`PoolEngine.liquidate(marketId, trader,
-       priceData)`, the liquidator earns half the liquidation fee) but no protocol service liquidates real traders:
-       trader-sim only sweeps its own positions. Run a keeper for the market before the window closes (scan
-       `Trade` / `MarginChanged` traders, `isLiquidatable`, liquidate with the oracle's signed bundle; while held it
-       liquidates below 2x initial margin at the held price). Without one, a position under maintenance waits and its
-       loss grows into IF bad debt.
+1. [ ] **Liquidation keeper running.** It is a job of the waterfall service (`bookrunner@mainnet`, no extra unit): the
+       KEEPER role key (`KEEPER_PRIVATE_KEY` or KMS via roleSigner, the same serialised sender as the other keeper
+       duties; never a trader-sim key). Each pass (every `WATERFALL_LIQ_INTERVAL_SECONDS` 10 s while a market trades or
+       closes out, `WATERFALL_LIQ_IDLE_INTERVAL_SECONDS` 60 s with no open position or every market held / settled) it
+       reads the open positions from the indexer's `engine_positions` (no chain scan: the indexer follows the engine's
+       `Trade` / `MarginChanged` / `Liquidation` / `ClosedOut`), reads every market and position in ONE Multicall3
+       `aggregate3`, applies the engine's rule off-chain at the freshest signed price (maintenance in session, 2x initial
+       margin while held, maintenance on a settled market) and sends `liquidate(marketId, trader, priceData)` only for a
+       position liquidatable there; on a settled market and in an open wind-down close-out it sends
+       `forceClose(marketId, trader, priceData)` for the rest. A revert at the estimate (`NotLiquidatable`,
+       `NoPosition`: someone else was first) is skipped; a stale or held price is retried next pass. Gas guard: a
+       transaction may cost at most its reward (half the nominal liquidation fee, from the IF when the margin is gone)
+       plus `WATERFALL_LIQ_GAS_MARGIN_USD` (0.50) at `WATERFALL_LIQ_ETH_USD` (else `WATERFALL_ETH_USD`; with neither only
+       the caps apply and the log says so), and never more than `WATERFALL_LIQ_MAX_TX_COST_ETH` (0.002) per transaction
+       or `WATERFALL_LIQ_HOURLY_GAS_ETH` (0.02) per hour. **Set `WATERFALL_LIQ_ETH_USD`** before the window closes,
+       apply migration `0003_engine_positions` (update.sh runs the migrations), and keep the keeper address funded.
+       Check: the waterfall log shows "liquidation keeper running"; `/health` `liquidationKeeper` (age, open positions,
+       backlog, failing attempts); the alerts `liquidation_backlog` (a liquidatable position still open after
+       `ALERT_LIQ_BACKLOG_SECONDS` 60 s, critical at 5x; the summary says gas guard / price / failing transaction) and
+       `keeper_liquidation_failing` (`ALERT_LIQ_FAILURES` 3 failed attempts, or no / a stale status while an engine book
+       is live). On a page: read the waterfall log for the revert; if the gas guard holds a position back, raise the
+       margin or the caps (otherwise the IF takes the loss beyond maintenance); anyone may also call `liquidate` by
+       hand with the oracle's bundle.
 2. [ ] **Charter with venue PoolEngine** (`venue` 1 = `BRTypes.VENUE_POOL_ENGINE`), as step 11 above: underlying the
        NVDA Stock Token (`tokenUnderlying(NVDA)`), an engine symbol (e.g. `NVDA-PERP`, not Orderly's
        `PERP_NVDA_USDC`), `takerFeeBps` ≤ 100 (`MAX_ENGINE_TAKER_FEE_BPS`), `ifTargetUsd` ≥ `venueMinIfUsd(1)` =
