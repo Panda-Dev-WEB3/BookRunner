@@ -550,7 +550,12 @@ contract VerifyHandover is MainnetInput {
         }
         _row(measured, "oracle signer measurements == input");
         _row(o.attestationRequired() == requireAttestations, "oracle requireAttestations == input");
-        if (inChainId == MAINNET_CHAIN_ID) _row(o.attestationRequired(), "oracle requires attestations (mainnet)");
+        // guarded launch (input oracle.attestLater): attestations are switched on later by governance; until then the
+        // row only reports it (the one-way requireAttestations() stays a launch-gate item, RUNBOOK checklist A)
+        if (inChainId == MAINNET_CHAIN_ID && !attestLater) _row(o.attestationRequired(), "oracle requires attestations (mainnet)");
+        if (inChainId == MAINNET_CHAIN_ID && attestLater) {
+            console2.log("    NOTE  oracle attestations NOT yet required (input oracle.attestLater: guarded launch)");
+        }
     }
 
     function _checkPriceConfig(string memory j) internal {
