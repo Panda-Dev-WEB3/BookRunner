@@ -9,6 +9,7 @@
     "dev:testnet": "vite --mode testnet --host 127.0.0.1 --port 5180 --strictPort",
     "build": "vite build",
     "build:testnet": "vite build --mode testnet",
+    "build:mainnet": "vite build --mode mainnet",
     "preview": "vite preview --host 127.0.0.1 --port 5180 --strictPort",
     "test": "bun test",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.node.json",

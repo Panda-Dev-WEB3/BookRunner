@@ -68,9 +68,18 @@ fi
 echo "==> at $("${AS[@]}" git log --oneline -1)"
 "${AS[@]}" node_modules/.bin/bun install --frozen-lockfile
 
+# ---- host network: /etc/bookrunner/host-network (root-owned, one word) = mainnet on the mainnet host (guarded launch
+# 2026-10-23: the former testnet VPS), else testnet. It picks the app build, the database and the unit restarted.
+HOST_NET=testnet
+if [ -f /etc/bookrunner/host-network ] && [ "$(stat -c %u /etc/bookrunner/host-network)" = 0 ]; then
+  case "$(tr -d ' 
+' < /etc/bookrunner/host-network)" in mainnet) HOST_NET=mainnet ;; testnet) ;; *) echo "!! /etc/bookrunner/host-network must be mainnet or testnet" >&2; exit 1 ;; esac
+fi
+echo "==> host network: $HOST_NET"
+
 # ---- operator app -> /var/www/bookrunner/app/
-echo "==> app build (apps/web, base /app/, API: $API_URL)"
-( cd apps/web && "${AS[@]}" VITE_API_URL="$API_URL" WEB_BASE=/app/ ../../node_modules/.bin/bun run build:testnet >/dev/null )
+echo "==> app build (apps/web, base /app/, API: $API_URL, $HOST_NET)"
+( cd apps/web && "${AS[@]}" VITE_API_URL="$API_URL" WEB_BASE=/app/ ../../node_modules/.bin/bun run "build:$HOST_NET" >/dev/null )
 [ -f apps/web/dist/index.html ] || { echo "!! apps/web/dist/index.html missing after the build"; exit 1; }
 grep -q '/app/assets/' apps/web/dist/index.html || { echo "!! apps/web/dist was not built for /app/ (vite base)"; exit 1; }
 
@@ -146,14 +155,30 @@ if [ "${1:-}" != "--web-only" ]; then
   . "$DEPLOY/db-migrate.sh"
   PG=bookrunner-postgres-1
   for _ in $(seq 1 30); do docker exec "$PG" pg_isready -q -U bookrunner -d bookrunner && break; sleep 2; done
-  db_migrate "$INFRA_ENV" "$APP" bookrunner_testnet || exit 1
+  if [ "$HOST_NET" = mainnet ]; then
+    if [ "$(docker exec "$PG" psql -U bookrunner -d bookrunner -tAc "SELECT 1 FROM pg_database WHERE datname='bookrunner_mainnet'" 2>/dev/null)" != 1 ]; then
+      docker exec "$PG" psql -U bookrunner -d bookrunner -c "CREATE DATABASE bookrunner_mainnet" >/dev/null && echo "==> created database bookrunner_mainnet"
+    fi
+    db_migrate "$INFRA_ENV" "$APP" bookrunner_mainnet || exit 1
+  else
+    db_migrate "$INFRA_ENV" "$APP" bookrunner_testnet || exit 1
+  fi
   # the live-Orderly rehearsal stack's database (rehearsal-deploy.sh), when it exists: restarted below with the same code
   if [ "$(docker exec "$PG" psql -U bookrunner -d bookrunner -tAc "SELECT 1 FROM pg_database WHERE datname='bookrunner_testnet_live'" 2>/dev/null)" = 1 ]; then
     db_migrate "$INFRA_ENV" "$APP" bookrunner_testnet_live || exit 1
   fi
   # dev.ts migrates the Redis keys / queues to the stack's bus namespace before it starts any service (bus-migrate.ts)
-  echo "==> restart stack"
-  systemctl restart bookrunner
+  if [ "$HOST_NET" = mainnet ]; then
+    # the testnet unit never runs on the mainnet host (MAINNET.md)
+    systemctl disable --now bookrunner.service >/dev/null 2>&1 || true
+    install -d -o bookrunner -g bookrunner -m 0750 "$APP/.data/mainnet"  # the unit appends its log there
+    echo "==> restart stack (bookrunner@mainnet)"
+    systemctl enable bookrunner@mainnet >/dev/null 2>&1 || true
+    systemctl restart bookrunner@mainnet
+  else
+    echo "==> restart stack"
+    systemctl restart bookrunner
+  fi
   # the live-Orderly rehearsal stack (if running) follows the same code
   if systemctl is-active --quiet bookrunner@testnet-live; then echo "==> restart bookrunner@testnet-live"; systemctl restart bookrunner@testnet-live; fi
 fi
