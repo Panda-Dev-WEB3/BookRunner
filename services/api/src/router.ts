@@ -5,6 +5,7 @@ import { bookRouter } from "./routers/book";
 import { charterRouter } from "./routers/charter";
 import { eventsRouter, oracleRouter, receiptsRouter, riskRouter, settlementsRouter } from "./routers/misc";
 import { poolRouter } from "./routers/pool";
+import { tradeRouter } from "./routers/trade";
 import { trancheRouter } from "./routers/tranche";
 import { createCallerFactory, router } from "./trpc";
 
@@ -19,6 +20,7 @@ export const appRouter = router({
   oracle: oracleRouter,
   events: eventsRouter,
   pool: poolRouter,
+  trade: tradeRouter,
 });
 
 export type AppRouter = typeof appRouter;

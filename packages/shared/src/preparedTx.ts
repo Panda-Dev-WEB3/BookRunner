@@ -7,13 +7,19 @@
 //   - ERC-20 approve: the spender is the destination of a LATER step of the same flow (the contract that
 //     pulls the funds), never unlimited, and exactly the amount that step moves (deposit / stake)
 //   - amounts equal the amount the user entered; receivers / owners are the user's account
+//   - PoolEngine (2026-10 trading page): depositMargin / withdrawMargin move exactly the entered amount (they
+//     credit / pay the signer, no receiver argument); trade (the priceData overload only) carries the entered
+//     signed size and a real price limit (never "any price": max uint for a buy, 0 for a sell); the only oracle
+//     call is the permissionless AttestedOracle.update(priceData) relay (the oracle verifies every signature)
 // The decoded summary (verifyPreparedTxs -> DecodedStep.summary) is what the review UI shows.
-import { type Abi, type AbiFunction, type Hex, decodeFunctionData, erc20Abi, getAddress, isAddress, maxUint256 } from "viem";
+import { type Abi, type AbiFunction, type Hex, decodeAbiParameters, decodeFunctionData, erc20Abi, getAddress, isAddress, maxUint256 } from "viem";
+import { attestedOracleAbi } from "./abi/AttestedOracle";
 import { bkrnStakingAbi } from "./abi/BkrnStaking";
 import { bookAbi } from "./abi/Book";
 import { insurancePoolAbi } from "./abi/InsurancePool";
 import { marketCharterAbi } from "./abi/MarketCharter";
 import { mMMandateAbi } from "./abi/MMMandate";
+import { poolEngineAbi } from "./abi/PoolEngine";
 import { riskCommitteeAbi } from "./abi/RiskCommittee";
 import { trancheAbi } from "./abi/Tranche";
 
@@ -58,6 +64,9 @@ const MOCK_MINT_ABI = [
   { type: "function", name: "mint", stateMutability: "nonpayable", inputs: [{ name: "to", type: "address" }, { name: "amount", type: "uint256" }], outputs: [] },
 ] as const;
 
+/** PoolEngine.trade(marketId, sizeDelta, acceptablePriceWad, priceData) only: the pull-oracle overload the API prepares. */
+const ENGINE_TRADE_ABI = poolEngineAbi.filter((f) => f.type === "function" && f.name === "trade" && f.inputs.length === 4) as unknown as Abi;
+
 /** Function names a prepared step may call, per ABI (anything else is refused). */
 const ALLOWED: Array<[Abi, readonly string[]]> = [
   [erc20Abi as Abi, ["approve"]],
@@ -69,6 +78,11 @@ const ALLOWED: Array<[Abi, readonly string[]]> = [
   [bookAbi as Abi, ["openTopUp"]],
   // 2026-10 insurance pool: queued entry / exit (no ERC-4626 deposit / withdraw / redeem: they revert anyway)
   [insurancePoolAbi as Abi, ["requestDeposit", "cancelDeposit", "claimDeposit", "requestWithdraw", "claim"]],
+  // 2026-10 trading page (in-house engine): margin in / out and the priceData trade, plus the oracle relay a margin
+  // withdrawal with an open position needs (withdrawMargin has no priceData overload)
+  [ENGINE_TRADE_ABI, ["trade"]],
+  [poolEngineAbi as Abi, ["depositMargin", "withdrawMargin"]],
+  [attestedOracleAbi as Abi, ["update"]],
   [MOCK_MINT_ABI as Abi, ["mint"]],
 ];
 
@@ -86,7 +100,34 @@ const KNOWN_ABI: Abi = (() => {
 })();
 
 /** The amount a step moves out of the signer's wallet through an approval (null: none). */
-const pulledAmount = (fn: string, args: readonly unknown[]): bigint | null => (fn === "deposit" || fn === "stake" || fn === "requestDeposit" ? (args[0] as bigint) : null);
+const pulledAmount = (fn: string, args: readonly unknown[]): bigint | null =>
+  fn === "deposit" || fn === "stake" || fn === "requestDeposit" ? (args[0] as bigint) : fn === "depositMargin" ? (args[1] as bigint) : null;
+
+const WAD = 10n ** 18n;
+
+/** Signed 18-decimal size or WAD price -> "1.25" (trailing zeros trimmed). */
+function fmtWad(raw: bigint): string {
+  const neg = raw < 0n;
+  const a = neg ? -raw : raw;
+  const frac = (a % WAD).toString().padStart(18, "0").replace(/0+$/, "");
+  return `${neg ? "-" : ""}${(a / WAD).toLocaleString("en-US")}${frac ? `.${frac}` : ""}`;
+}
+
+const PRICE_DATA = [
+  { type: "tuple[]", components: [{ type: "bytes32" }, { type: "uint256" }, { type: "uint64" }, { type: "bool" }, { type: "uint32" }, { type: "bytes32" }] },
+  { type: "bytes[]" },
+] as const;
+
+/** Number of signed prices an abi.encode(PriceUpdate[], bytes[]) carries ("0x": none; null: malformed). */
+function priceCount(priceData: string): number | null {
+  if (priceData === "0x") return 0;
+  try {
+    const [updates, sigs] = decodeAbiParameters(PRICE_DATA, priceData as Hex);
+    return updates.length === sigs.length ? updates.length : null;
+  } catch {
+    return null;
+  }
+}
 
 const lower = (a: string) => a.toLowerCase();
 
@@ -194,6 +235,31 @@ export function verifyPreparedTxs(txs: readonly PreparedTxInput[], check: Prepar
       case "claim": {
         // pay / refund the request's recorded owner only (no receiver argument to redirect)
         summary = `${name(to)}.${fn}(#${String(args[0])})`;
+        break;
+      }
+      case "depositMargin":
+      case "withdrawMargin": {
+        // the engine credits / pays msg.sender (the signer): no receiver argument to redirect
+        const [marketId, amount] = args as [bigint, bigint];
+        if (check.amount !== undefined && amount !== check.amount) throw new PreparedTxError(`Step ${n} moves ${amount} of margin, not the ${check.amount} you entered.`);
+        summary = `${name(to)}.${fn}(market #${marketId}, ${fmtAmount(amount, 6)} ${fn === "depositMargin" ? "from your wallet into your margin" : "from your margin back to your wallet"})`;
+        break;
+      }
+      case "trade": {
+        const [marketId, sizeDelta, acceptable, priceData] = args as [bigint, bigint, bigint, string];
+        if (sizeDelta === 0n) throw new PreparedTxError(`Step ${n} trades a zero size.`);
+        if (check.amount !== undefined && sizeDelta !== check.amount) throw new PreparedTxError(`Step ${n} trades a size of ${fmtWad(sizeDelta)}, not the ${fmtWad(check.amount)} you entered.`);
+        if (sizeDelta > 0n ? acceptable === maxUint256 : acceptable === 0n) throw new PreparedTxError(`Step ${n} accepts any fill price; a trade must carry a price limit.`);
+        const prices = priceCount(priceData);
+        if (prices === null) throw new PreparedTxError(`Step ${n} carries malformed price data.`);
+        const abs = sizeDelta < 0n ? -sizeDelta : sizeDelta;
+        summary = `${name(to)}.trade(market #${marketId}, ${sizeDelta > 0n ? "buy" : "sell"} ${fmtWad(abs)} units, fill ${sizeDelta > 0n ? "at most" : "at least"} ${fmtWad(acceptable)} per unit, ${prices} signed price${prices === 1 ? "" : "s"})`;
+        break;
+      }
+      case "update": {
+        const prices = priceCount(args[0] as string);
+        if (prices === null) throw new PreparedTxError(`Step ${n} carries malformed price data.`);
+        summary = `${name(to)}.update(${prices} signed price${prices === 1 ? "" : "s"}; the oracle checks each signature)`;
         break;
       }
       case "mint": {

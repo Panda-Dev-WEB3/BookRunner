@@ -117,6 +117,47 @@ export interface PoolWalletState {
   epochs: Map<number, { shares: bigint; filledShares: bigint; assets: bigint; depositAssets: bigint; depositShares: bigint; endsAt: number; processed: boolean }>;
 }
 
+/** PoolEngine market of an in-house book (2026-10 trading page). Sizes 1e18, prices WAD, USD 6dp. */
+export interface EngineMarketChainState {
+  engine: Address;
+  adapter: Address;
+  marketId: number;
+  /** block timestamp (unix s) the state was read at */
+  nowSec: number;
+  config: {
+    underlying: Hex;
+    symbol: Hex;
+    takerFeeBps: number;
+    makerFeeBps: number;
+    initialMarginBps: number;
+    maintenanceMarginBps: number;
+    liquidationFeeBps: number;
+    fundingVelocityBps: number;
+    /** the live quote cap on |pool net exposure| (setQuote, clamped to the inventory cap) */
+    maxNetExposureUsd: bigint;
+  };
+  state: { spreadBps: number; skewBps: number; reduceOnly: boolean; longSize: bigint; shortSize: bigint; poolCashUsd: bigint; insuranceUsd: bigint; fundingIndex: bigint };
+  /** per-side open-interest cap (mandate maxInventoryUsd) */
+  inventoryCapUsd: bigint;
+  /** wind-down close-out time (0: none) */
+  closeOutAfter: number;
+  /** signed WAD fraction of notional per day (positive: longs pay) */
+  fundingRatePerDayWad: bigint;
+  /** audit M-3 loss budget spent this period: new risk reverts LossBudgetExceeded */
+  lossBudgetBlocked: boolean;
+  /** AttestedOracle.latest(underlying): the STORED price (old by design on a quiet pull-oracle market); null when never priced */
+  stored: { priceWad: bigint; publishedAt: number; held: boolean } | null;
+  maxPriceAge: number;
+  maxTradePriceAge: number;
+}
+
+export interface EngineTraderChainState {
+  position: { size: bigint; entryPriceWad: bigint; marginUsd: bigint; fundingIndexAtEntry: bigint };
+  usdcBalance: bigint;
+  /** settlement-token allowance to the engine */
+  usdcAllowance: bigint;
+}
+
 export interface ChainGateway {
   readonly chainId: number;
   readonly deployment: Deployment;
@@ -145,6 +186,12 @@ export interface ChainGateway {
   poolState(): Promise<PoolChainState | null>;
   /** A wallet's pool position (uncached: read right after the wallet's own transactions). */
   poolWallet(wallet: Address, q: { requestIds: number[]; depositIds: number[]; epochs: number[] }): Promise<PoolWalletState | null>;
+  /** The PoolEngine market an engine book adapter owns (short-TTL cached); null when the adapter has none. */
+  engineMarket(adapter: Address): Promise<EngineMarketChainState | null>;
+  /** A wallet in a market (uncached: read right after the wallet's own transactions). */
+  engineTrader(marketId: number, wallet: Address): Promise<EngineTraderChainState>;
+  /** StockTokenRegistry.splitGate(priceId, basisAt) (audit N-1); no registry: no gate. */
+  splitGate(priceId: Hex, basisAt: number): Promise<{ pending: boolean; window: boolean }>;
 }
 
 /** Provides the gateway when the deployment file is present; null while it is missing. */

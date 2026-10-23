@@ -73,6 +73,8 @@ const routes: RouteObject[] = [
       { path: "portfolio", handle: bleed, lazy: async () => ({ Component: (await import("./pages/Portfolio")).PortfolioPage }) },
       { path: "stake", handle: bleed, lazy: async () => ({ Component: (await import("./pages/Stake")).StakePage }) },
       { path: "pool", handle: bleed, lazy: async () => ({ Component: (await import("./pages/Pool")).PoolPage }) },
+      { path: "trade", handle: bleed, lazy: async () => ({ Component: (await import("./pages/Trade")).TradePage }) },
+      { path: "trade/:marketId", handle: bleed, lazy: async () => ({ Component: (await import("./pages/Trade")).TradeMarketPage }) },
       // Protocol (operator) pages
       { path: "books", lazy: async () => ({ Component: (await import("./pages/Books")).BooksPage }) },
       { path: "books/:bookId", lazy: async () => ({ Component: (await import("./pages/book/BookDetail")).BookDetailPage }) },

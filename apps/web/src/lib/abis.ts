@@ -24,6 +24,9 @@ export const CONFIG_ADDRESSES_ABI = [
  */
 export const CONFIG_POOL_ABI = [addressGetter("insurancePool")] as const;
 
+/** PoolEngineAdapter.engine(): the PoolEngine an in-house book trades on (trading page: the only engine a prepared step may call). */
+export const ADAPTER_ENGINE_ABI = [addressGetter("engine")] as const;
+
 /** Book.config(): the BookrunnerConfig the book reads its siblings from. */
 export const BOOK_CONFIG_ABI = [addressGetter("config")] as const;
 

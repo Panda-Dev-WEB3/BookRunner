@@ -5,12 +5,15 @@
 import type { Charter, Deployment, Mandate } from "@bookrunner/shared";
 import { isTokenUnderlying, underlyingToToken } from "@bookrunner/shared";
 import {
+  attestedOracleAbi,
   bkrnStakingAbi,
   bookAbi,
   bookrunnerConfigAbi,
   insurancePoolAbi,
   marketCharterAbi,
   mMMandateAbi,
+  poolEngineAbi,
+  poolEngineAdapterAbi,
   riskCommitteeAbi,
   stockTokenRegistryAbi,
   trancheAbi,
@@ -23,6 +26,8 @@ import type {
   ChainGateway,
   CharterChainRecord,
   CommitteeState,
+  EngineMarketChainState,
+  EngineTraderChainState,
   MandateChainState,
   PoolChainState,
   PoolWalletState,
@@ -368,5 +373,94 @@ export class ViemChainGateway implements ChainGateway {
         ]),
       ),
     };
+  }
+
+  // ------------------------------------------------------------------ in-house engine (2026-10 trading page)
+  private engineMarketId(adapter: Address): Promise<number> {
+    // fixed at the adapter's initialisation: cached for an hour
+    return cached(this.kv, this.key("engine-market-id", adapter.toLowerCase()), 3_600, async () =>
+      Number(await this.client.readContract({ address: adapter, abi: poolEngineAdapterAbi, functionName: "marketId" })),
+    );
+  }
+
+  async engineMarket(adapter: Address): Promise<EngineMarketChainState | null> {
+    const engine = this.c.poolEngine;
+    if (!engine || engine === zeroAddress) return null;
+    const marketId = await this.engineMarketId(adapter);
+    if (marketId === 0) return null;
+    return cached(this.kv, this.key("engine-market", marketId), this.ttlSeconds, async () => {
+      const r = this.client;
+      const id = BigInt(marketId);
+      const e = { address: engine, abi: poolEngineAbi } as const;
+      const cfgAddr = this.c.config;
+      const [block, cfg, st, cap, closeOut, funding, budget, maxPriceAge, maxTradePriceAge] = await Promise.all([
+        r.getBlock(),
+        r.readContract({ ...e, functionName: "config", args: [id] }),
+        r.readContract({ ...e, functionName: "state", args: [id] }),
+        r.readContract({ ...e, functionName: "inventoryCapUsd", args: [id] }),
+        r.readContract({ ...e, functionName: "closeOutAfter", args: [id] }),
+        // reverts NoPrice while an open market was never priced
+        orDefault(r.readContract({ ...e, functionName: "fundingRatePerDayWad", args: [id] }), 0n),
+        orDefault(r.readContract({ ...e, functionName: "lossBudget", args: [id] }), null),
+        r.readContract({ address: cfgAddr, abi: bookrunnerConfigAbi, functionName: "maxPriceAge" }),
+        // an older config without the getter: the engine default (15 s)
+        orDefault(r.readContract({ address: cfgAddr, abi: bookrunnerConfigAbi, functionName: "maxTradePriceAge" }), 15),
+      ]);
+      const latest = await r.readContract({ address: this.c.oracle, abi: attestedOracleAbi, functionName: "latest", args: [cfg.underlying] });
+      return {
+        engine: getAddress(engine),
+        adapter: getAddress(adapter),
+        marketId,
+        nowSec: Number(block.timestamp),
+        config: {
+          underlying: cfg.underlying,
+          symbol: cfg.symbol,
+          takerFeeBps: Number(cfg.takerFeeBps),
+          makerFeeBps: Number(cfg.makerFeeBps),
+          initialMarginBps: Number(cfg.initialMarginBps),
+          maintenanceMarginBps: Number(cfg.maintenanceMarginBps),
+          liquidationFeeBps: Number(cfg.liquidationFeeBps),
+          fundingVelocityBps: Number(cfg.fundingVelocityBps),
+          maxNetExposureUsd: cfg.maxNetExposureUsd,
+        },
+        state: {
+          spreadBps: Number(st.spreadBps),
+          skewBps: Number(st.skewBps),
+          reduceOnly: st.reduceOnly,
+          longSize: st.longSize,
+          shortSize: st.shortSize,
+          poolCashUsd: st.poolCashUsd,
+          insuranceUsd: st.insuranceUsd,
+          fundingIndex: st.fundingIndex,
+        },
+        inventoryCapUsd: cap,
+        closeOutAfter: Number(closeOut),
+        fundingRatePerDayWad: funding.v,
+        lossBudgetBlocked: budget.v ? budget.v[5] : false,
+        stored: latest.priceWad > 0n && latest.publishedAt > 0n ? { priceWad: latest.priceWad, publishedAt: Number(latest.publishedAt), held: latest.held } : null,
+        maxPriceAge: Number(maxPriceAge),
+        maxTradePriceAge: Number(maxTradePriceAge.v),
+      };
+    });
+  }
+
+  async engineTrader(marketId: number, wallet: Address): Promise<EngineTraderChainState> {
+    const engine = this.c.poolEngine;
+    const r = this.client;
+    const [p, usdcBalance, usdcAllowance] = await Promise.all([
+      r.readContract({ address: engine, abi: poolEngineAbi, functionName: "positionOf", args: [BigInt(marketId), wallet] }),
+      r.readContract({ address: this.c.usdc, abi: erc20Abi, functionName: "balanceOf", args: [wallet] }),
+      r.readContract({ address: this.c.usdc, abi: erc20Abi, functionName: "allowance", args: [wallet, engine] }),
+    ]);
+    return { position: { size: p.size, entryPriceWad: p.entryPriceWad, marginUsd: p.marginUsd, fundingIndexAtEntry: p.fundingIndexAtEntry }, usdcBalance, usdcAllowance };
+  }
+
+  async splitGate(priceId: Hex, basisAt: number): Promise<{ pending: boolean; window: boolean }> {
+    const reg = this.c.stockRegistry;
+    if (!reg || reg === zeroAddress) return { pending: false, window: false };
+    return cached(this.kv, this.key("split-gate", priceId.toLowerCase(), basisAt), this.ttlSeconds, async () => {
+      const [pending, window] = await this.client.readContract({ address: reg, abi: stockTokenRegistryAbi, functionName: "splitGate", args: [priceId, BigInt(basisAt)] });
+      return { pending, window };
+    });
   }
 }

@@ -61,3 +61,10 @@ export type PoolEpochItem = PoolEpochsOut["items"][number];
 export type PoolHistoryOut = Outputs["pool"]["history"];
 export type PoolExposureOut = Outputs["pool"]["exposure"];
 export type PoolMarketItem = PoolExposureOut["markets"][number];
+// 2026-10 trading page (trade.* router; trade.markets is optional: an older API may not serve it)
+export type TradeMarketsOut = Outputs["trade"]["markets"];
+export type TradeMarket = Outputs["trade"]["market"];
+export type TradeSession = TradeMarket["session"];
+export type TradePositionOut = Outputs["trade"]["position"];
+export type TradeQuoteOut = Outputs["trade"]["quote"];
+export type TradeOrderOut = Outputs["trade"]["order"];

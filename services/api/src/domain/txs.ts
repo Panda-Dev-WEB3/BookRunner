@@ -2,7 +2,7 @@
 // returned to the user's wallet as {to, data, value: "0", chainId, description}.
 import type { Charter } from "@bookrunner/shared/types";
 import { strToBytes32 } from "@bookrunner/shared/bytes32";
-import { bkrnStakingAbi, insurancePoolAbi, marketCharterAbi, mMMandateAbi, riskCommitteeAbi, trancheAbi } from "@bookrunner/shared/abi";
+import { attestedOracleAbi, bkrnStakingAbi, insurancePoolAbi, marketCharterAbi, mMMandateAbi, poolEngineAbi, riskCommitteeAbi, trancheAbi } from "@bookrunner/shared/abi";
 import { type Address, type Hex, encodeFunctionData, erc20Abi, formatUnits, getAddress } from "viem";
 import { bkrnStr, usdStr } from "../format";
 
@@ -213,4 +213,46 @@ export function poolClaimTx(chainId: number, pool: Address, requestId: number, a
     encodeFunctionData({ abi: insurancePoolAbi, functionName: "claim", args: [BigInt(requestId)] }),
     `Collect ${trimUsd(assetsUsd)} USDC of insurance pool withdrawal #${requestId}`,
   );
+}
+
+// ------------------------------------------------------------------ in-house engine (2026-10 trading page)
+const unitsText = (raw: bigint) => formatUnits(raw < 0n ? -raw : raw, 18).replace(/.0$/, "");
+const priceText = (wad: bigint) => {
+  const s = formatUnits(wad, 18);
+  const [i, f = ""] = s.split(".");
+  return `${i}.${f.padEnd(2, "0").slice(0, 4)}`;
+};
+
+export function engineDepositMarginTx(chainId: number, engine: Address, marketId: number, amountUsd: bigint, label: string): PreparedTx {
+  return tx(
+    chainId,
+    engine,
+    encodeFunctionData({ abi: poolEngineAbi, functionName: "depositMargin", args: [BigInt(marketId), amountUsd] }),
+    `Deposit ${trimUsd(amountUsd)} USDC of margin into the ${label} market (isolated: it backs only your position there)`,
+  );
+}
+
+export function engineWithdrawMarginTx(chainId: number, engine: Address, marketId: number, amountUsd: bigint, label: string): PreparedTx {
+  return tx(
+    chainId,
+    engine,
+    encodeFunctionData({ abi: poolEngineAbi, functionName: "withdrawMargin", args: [BigInt(marketId), amountUsd] }),
+    `Withdraw ${trimUsd(amountUsd)} USDC of margin from the ${label} market to your wallet`,
+  );
+}
+
+/** PoolEngine.trade(marketId, sizeDelta, acceptablePriceWad, priceData): the trade carries its signed price (pull oracle). */
+export function engineTradeTx(chainId: number, engine: Address, marketId: number, sizeDelta: bigint, acceptablePriceWad: bigint, priceData: Hex, label: string, what: string): PreparedTx {
+  const side = sizeDelta > 0n ? "Buy" : "Sell";
+  return tx(
+    chainId,
+    engine,
+    encodeFunctionData({ abi: poolEngineAbi, functionName: "trade", args: [BigInt(marketId), sizeDelta, acceptablePriceWad, priceData] }),
+    `${side} ${unitsText(sizeDelta)} ${label} (${what}), filled at no ${sizeDelta > 0n ? "more" : "less"} than ${priceText(acceptablePriceWad)} per unit, or not at all`,
+  );
+}
+
+/** AttestedOracle.update(priceData): relays a signed price (permissionless; the oracle verifies the signature). */
+export function oracleUpdateTx(chainId: number, oracle: Address, priceData: Hex, label: string): PreparedTx {
+  return tx(chainId, oracle, encodeFunctionData({ abi: attestedOracleAbi, functionName: "update", args: [priceData] }), `Bring the latest signed ${label} price on chain (needed by the next step)`);
 }

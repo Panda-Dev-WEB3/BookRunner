@@ -476,6 +476,40 @@ can redo it during the timelock delay from the published quote.
 - Stored-multiplier mode (devnet / testnet): give engine markets a close-only period by calling
   `setNextMultiplierAnchor(token, new)` before `setMultiplier(token, new)`, and clear it afterwards.
 
+### Opening the first in-house engine market on mainnet (Plan B2: NVDA on the PoolEngine)
+
+The trading page (`/trade`, ARCHITECTURE §5.1) lists an engine market as soon as its book is Live; until then it
+shows "No market open yet". Guarded launch: small, insured, watched.
+
+1. [ ] **Liquidation keeper first.** Liquidations are permissionless (`PoolEngine.liquidate(marketId, trader,
+       priceData)`, the liquidator earns half the liquidation fee) but no protocol service liquidates real traders:
+       trader-sim only sweeps its own positions. Run a keeper for the market before the window closes (scan
+       `Trade` / `MarginChanged` traders, `isLiquidatable`, liquidate with the oracle's signed bundle; while held it
+       liquidates below 2x initial margin at the held price). Without one, a position under maintenance waits and its
+       loss grows into IF bad debt.
+2. [ ] **Charter with venue PoolEngine** (`venue` 1 = `BRTypes.VENUE_POOL_ENGINE`), as step 11 above: underlying the
+       NVDA Stock Token (`tokenUnderlying(NVDA)`), an engine symbol (e.g. `NVDA-PERP`, not Orderly's
+       `PERP_NVDA_USDC`), `takerFeeBps` ≤ 100 (`MAX_ENGINE_TAKER_FEE_BPS`), `ifTargetUsd` ≥ `venueMinIfUsd(1)` =
+       **10,000 USDG** (`IF_BELOW_VENUE_MIN` otherwise; size it so the IF covers a gap of the off-hours requirement on
+       the whole cap, i.e. ≥ 20 % of `maxInventoryUsd` with the default 10 % initial margin), and a **small
+       `mandate.maxInventoryUsd`** (e.g. 10,000-25,000 USDG): it becomes the engine's per-side open-interest cap and
+       funding normaliser (`inventoryCapUsd`), the desk's quote cap is clamped to it, so it bounds what the pool can
+       owe. `maxSkewBps` ≤ `minQuoteWidthBps / 2` (audit M-3); `killAtDrawdownBps` sets the per-period loss budget.
+       With `ifFromPool`, check `InsurancePool.maxAllocation(bookId, market) >= ifTargetUsd` before `subscriptionEnds`
+       (step 13b).
+3. [ ] After the window closes ops-venue deploys the IF and the MM capital to the engine (`depositToVenue`). Check on
+       `/trade` in session hours: the market is listed, "Open", the signed price under 15 s old
+       (`maxTradePriceAge`), room left = the cap, insurance fund = `ifTargetUsd`. Prepare a tiny order from a test
+       wallet and read the "you will sign" summary (PoolEngine address = `adapter.engine()`, the size you typed, a
+       slippage limit) before sending.
+4. [ ] **Audit N-1 (splits).** Positions are per share and never rebased. Before any NVDA split or multiplier change,
+       pre-approve it (`setNextMultiplierAnchor`): the market turns close-only ("Close-only (split pending)" on
+       `/trade`), and in the window no voluntary trade fills ("Paused (split)"). Re-anchor right after the first live
+       post-split print (Corporate actions above), or wind the market down first. A split announced while open
+       interest is large is a reason to lower the cap (re-mandate) beforehand.
+5. [ ] Raise `maxInventoryUsd` only through a re-mandate after a period of observed marks, IF stable, no
+       `LossBudgetBreached`, and the keeper proven (step 1).
+
 ## Operations
 
 - **Kill switch for new business**: `BookrunnerConfig.setNewBooksPaused(true)` (GUARDIAN or timelock)

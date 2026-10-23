@@ -25,6 +25,7 @@ export const PRIMARY_NAV = [
   { to: "/invest", label: "Invest" },
   { to: "/portfolio", label: "Portfolio" },
   { to: "/pool", label: "Insurance pool" },
+  { to: "/trade", label: "Trade" },
   { to: "/stake", label: "Stake" },
   { to: "/learn", label: "How it works" },
 ] as const;
@@ -342,6 +343,7 @@ function Footer() {
             { label: "Invest", to: "/invest" },
             { label: "Portfolio", to: "/portfolio" },
             { label: "Insurance pool", to: "/pool" },
+            { label: "Trade", to: "/trade" },
             { label: "Stake BKRN", to: "/stake" },
             { label: "How it works", to: "/learn" },
           ]}
