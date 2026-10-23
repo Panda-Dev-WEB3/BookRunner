@@ -49,7 +49,8 @@ only (it deploys mocks and refuses 4663). Tick every box in order; two people fo
       `0x5Ef5a5300803C2e0b45d504b6Bd68c7dce26b62b` (an EIP-7702 delegated account: MetaMask smart account,
       delegate `0x63c0c19a282a1B52b07dD5a65b58948A07DAE32B`), nonce 11; set in `contracts/deploy-inputs/4663.json`).
 - [x] Guardian, treasury (expense + slash) and the four BKRN allocations = the same Safe (owner decision 2026-10-22);
-      Risk Committee = the Safe's three owners (the committee needs three distinct seats). Hedge route fee tiers set
+      Risk Committee (three distinct seats) = `0x9c1B7179554304995dD58bA9ba203b0cbA8fe8b9` and the Safe owners
+      `0x0E67…7C0E`, `0x5Ef5…b62b`. Hedge route fee tiers set
       to the live USDG pools (NVDA / AAPL 500, TSLA / MSFT / AMZN 3000).
 - [ ] KMS keys created, one per service role, and their addresses printed (MAINNET.md §2).
 - [ ] Services host prepared (MAINNET.md §1, §3) — not started.
