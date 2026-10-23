@@ -172,7 +172,7 @@ liquidity, observe + the token's 4 views) every 1 s tick as separate calls (~44 
 
 | After, 0 books, per service | Reads (subscriptions up; polling in brackets) | CU/s |
 |---|---|---|
-| oracle, Chainlink | ONE `aggregate3` per pass (sequencer, every round, decimals once, due token states, block timestamp, aggregators every 10 min). A pass on every `AnswerUpdated` / `NewRound` of a feed's aggregator or `UIMultiplierUpdated` of a token, and every 60 s (token states due; every 10 s for a token in a split window or paused); safety re-read `ORACLE_CHAINLINK_EVENT_READ_MS` 5 min. [every `ORACLE_CHAINLINK_READ_MS` 10 s, token states in every pass] | 0.5 [2.6] |
+| oracle, Chainlink | ONE `aggregate3` per pass (sequencer, every round, decimals once, due token states, block timestamp, aggregators every 10 min). A pass on every `AnswerUpdated` / `NewRound` of a feed's aggregator or `UIMultiplierUpdated` of a token, and every 10 s for the token states (`ORACLE_TOKEN_STATE_READ_MS`, review: a pause has no event; about 2 CU/s); safety re-read `ORACLE_CHAINLINK_EVENT_READ_MS` 5 min. [every `ORACLE_CHAINLINK_READ_MS` 10 s, token states in every pass] | 0.5 [2.6] |
 | oracle, DEX TWAP | block + ONE `aggregate3` (every pool + its token at that block) + one for the rings that moved, every `ORACLE_DEX_READ_MS` 60 s | 0.7-1.1 |
 | oracle, head / universe | head clock fed by every pass (`ORACLE_HEAD_READ_MS` 60 s); signer + minSources every 60 s; band every 10 min | 0.5 |
 | indexer | a step (`eth_blockNumber` + ONE `eth_getLogs`: protocol + every watched book) after each notification of a watched contract, and every `INDEXER_WS_SAFETY_POLL_MS` 120 s [every `INDEXER_POLL_MS` 12 s] | 0.7 [7.1] |
@@ -205,7 +205,7 @@ as fresh as before for risk (`RISK_QUOTE_PRICE_MAX_AGE_MS` 15 s), ops-venue's bu
 is picked up at the next tick after its `AnswerUpdated` (within 10 s while polling; within 60 s if a notification were
 missed). The DEX TWAP (1800 s window) confirms with a pass up to 60 s old (`ORACLE_DEX_MAX_AGE_MS` 120 s on mainnet).
 Stock Token state (audit M-2): read on its `UIMultiplierUpdated` (VERIFY T2: the event is in the token ABI), at least
-every `ORACLE_TOKEN_STATE_READ_MS` 60 s, at every pass (10 s) while its `effectiveAt` is within 10 minutes or its
+every `ORACLE_TOKEN_STATE_READ_MS` 10 s, at every pass (10 s) while its `effectiveAt` is within 10 minutes or its
 `oraclePaused` is set (no event is known for the pause), and a change that became active after the cached read forces a
 new pass and drops the observation until a post-change read (split windows fail closed). While polling, the states
 ride every pass.

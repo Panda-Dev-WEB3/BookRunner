@@ -254,7 +254,9 @@ export class LogSubscription {
     this.failures++;
     const wait = Math.min((this.o.reconnectMs ?? 1_000) * 2 ** Math.min(this.failures - 1, 16), this.o.maxReconnectMs ?? 60_000);
     if (this.failures === 1 || this.failures % 10 === 0) {
-      this.o.log?.warn({ subscription: this.label(), err: err instanceof Error ? err.message : String(err), retryInMs: wait, failures: this.failures }, "log subscription down: polling until it reconnects");
+      // the URL carries the provider key: never log a raw error message (a WebSocket constructor error quotes the URL)
+      const msg = (err instanceof Error ? err.message : String(err)).split(this.o.url).join("<ws-url>").replace(/wss?:\/\/\S+/g, "<ws-url>");
+      this.o.log?.warn({ subscription: this.label(), err: msg, retryInMs: wait, failures: this.failures }, "log subscription down: polling until it reconnects");
     }
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;

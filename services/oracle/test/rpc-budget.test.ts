@@ -397,14 +397,14 @@ describe("cadence: per-network defaults, mainnet bounds", () => {
       chainlinkReadMs: 10_000,
       chainlinkEventReadMs: 300_000,
       aggregatorResolveMs: 600_000,
-      tokenStateReadMs: 60_000,
+      tokenStateReadMs: 10_000,
       dexReadMs: 60_000,
       dexMaxAgeMs: 120_000,
       headReadMs: 60_000,
     });
     expect(rpcCadenceFor(46630, {})).toEqual(DEFAULT_RPC_CADENCE);
     expect(rpcCadenceFor(31337, {})).toEqual({ chainlinkReadMs: 0, chainlinkEventReadMs: 0, aggregatorResolveMs: 0, tokenStateReadMs: 0, dexReadMs: 0, dexMaxAgeMs: 60_000, headReadMs: 0 });
-    expect(rpcCadenceFor(4663, { ORACLE_CHAINLINK_READ_MS: 5_000 })).toMatchObject({ chainlinkReadMs: 5_000, tokenStateReadMs: 60_000 });
+    expect(rpcCadenceFor(4663, { ORACLE_CHAINLINK_READ_MS: 5_000 })).toMatchObject({ chainlinkReadMs: 5_000, tokenStateReadMs: 10_000 });
     expect(rpcCadenceFor(4663, { ORACLE_CHAINLINK_EVENT_READ_MS: 120_000 }).chainlinkEventReadMs).toBe(120_000);
     // the subscription endpoint: RPC_WS_URL, ORACLE_WS=0 turns it off, none off mainnet unless given
     expect(loadOracleConfig({ CHAIN_ID: "4663", RPC_WS_URL: "wss://x.g.alchemy.com/v2/K" }).chainlinkWsUrl).toBe("wss://x.g.alchemy.com/v2/K");

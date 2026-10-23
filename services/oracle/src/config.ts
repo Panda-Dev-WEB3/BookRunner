@@ -234,7 +234,7 @@ export const MAINNET_RPC_CADENCE: Readonly<RpcCadence> = {
   chainlinkReadMs: 10_000,
   chainlinkEventReadMs: 300_000,
   aggregatorResolveMs: 600_000,
-  tokenStateReadMs: 60_000,
+  tokenStateReadMs: 10_000, // review: split / pause state at most 10 s old (audit M-2; a pause has no event), ~2 CU/s
   dexReadMs: 60_000,
   dexMaxAgeMs: 120_000,
   headReadMs: 60_000,
