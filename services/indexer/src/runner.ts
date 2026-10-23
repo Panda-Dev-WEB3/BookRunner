@@ -99,13 +99,16 @@ export class Indexer {
       }
       return out;
     };
-    const protocol = decodeAll(await chain.getLogs(watch.protocolAddresses(), range.from, range.to));
-    for (const b of booksCreatedIn(protocol)) {
+    // RPC budget: protocol + already-watched books in ONE eth_getLogs (75 CU each on the mainnet RPC); only books
+    // created inside this range need a second call for the same range (their addresses were not in the filter)
+    const known = new Set(watch.bookAddresses().map((a) => a.toLowerCase()));
+    const first = decodeAll(await chain.getLogs([...watch.protocolAddresses(), ...watch.bookAddresses()], range.from, range.to));
+    for (const b of booksCreatedIn(first.filter((l) => l.group === "protocol"))) {
       if (watch.addBook(b.bookId, b.components)) this.d.logger.info({ bookId: b.bookId, book: b.components.book }, "watching new book");
     }
-    const bookAddrs = watch.bookAddresses();
-    const bookLogs = bookAddrs.length ? decodeAll(await chain.getLogs(bookAddrs, range.from, range.to)) : [];
-    return { logs: orderLogs([...protocol, ...bookLogs]), skips };
+    const added = watch.bookAddresses().filter((a) => !known.has(a.toLowerCase()));
+    const newBookLogs = added.length ? decodeAll(await chain.getLogs(added, range.from, range.to)) : [];
+    return { logs: orderLogs([...first, ...newBookLogs]), skips };
   }
 
   async apply(range: Range, logs: DecodedLog[], isolated: boolean): Promise<{ applied: number; skipped: number; events: PublishedEvent[] }> {

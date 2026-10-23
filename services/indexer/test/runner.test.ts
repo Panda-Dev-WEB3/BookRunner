@@ -176,6 +176,10 @@ describe("indexer runner", () => {
     const r = await resumed.step();
     expect(r.status === "indexed" && [Number(r.from), Number(r.to)]).toEqual([5, 8]);
     expect(chain.getLogsCalls.every((c) => c.from === 5n)).toBe(true);
+    // RPC budget: with every book already watched, protocol and book logs share ONE eth_getLogs per range
+    expect(chain.getLogsCalls).toHaveLength(1);
+    expect(chain.getLogsCalls[0]!.addresses).toContain(ADDR.senior);
+    expect(chain.getLogsCalls[0]!.addresses).toContain(ADDR.charter);
   });
 
   test("a failing range is retried; after the poison threshold the bad log is skipped and the cursor advances", async () => {

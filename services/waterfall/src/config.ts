@@ -4,6 +4,13 @@ import { loadServiceEnv, zBool, zUsd, zWad } from "./kit/env";
 export const waterfallEnvShape = {
   /** Scheduler + keeper loop cadence. */
   WATERFALL_TICK_SECONDS: z.coerce.number().positive().default(5),
+  /**
+   * RPC budget: protocol-level keeper duties (buyback threshold, insurance-pool epoch) run at most this often; 0 = every
+   * tick (default; mainnet profile 300: fees accrue per daily mark, the epoch is days long).
+   */
+  WATERFALL_PROTOCOL_DUTY_SECONDS: z.coerce.number().min(0).max(86_400).default(0),
+  /** RPC budget: BookFactory.bookIds() re-read at most this often (kit/books.ts BookDirectory); 0 = every tick. */
+  BOOKS_REFRESH_SECONDS: z.coerce.number().min(0).max(3_600).default(0),
   WATERFALL_EXPENSE_MODE: z.enum(["fixed", "metered"]).default("fixed"),
   /** fixed mode: expenses requested per period per book (on-chain cap applies). */
   WATERFALL_EXPENSES_USD: zUsd("1.00"),

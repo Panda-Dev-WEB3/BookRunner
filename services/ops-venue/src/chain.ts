@@ -15,6 +15,7 @@ import {
   decodeEventLog,
   type Hex,
   type LocalAccount,
+  type Log,
   parseAbi,
   parseAbiItem,
   type PublicClient,
@@ -172,6 +173,8 @@ export interface ChainPort {
   blockNumber(): Promise<bigint>;
   adapterLogs(adapters: Address[], from: bigint, to: bigint): Promise<AdapterLog[]>;
   mandateLogs(mandates: Address[], from: bigint, to: bigint): Promise<MandateLog[]>;
+  /** Adapter + mandate logs of one range in ONE eth_getLogs (RPC budget); absent = the two calls above. */
+  bookLogs?(adapters: Address[], mandates: Address[], from: bigint, to: bigint): Promise<{ adapter: AdapterLog[]; mandate: MandateLog[] }>;
   /** adapter.withdrawRequest(nonce): the on-chain status is the authority for every withdraw step. */
   withdrawStatus(adapter: Address, nonce: bigint): Promise<WithdrawRequestView>;
   adapterFlowState(adapter: Address): Promise<AdapterFlowState>;
@@ -415,7 +418,21 @@ export class ViemChain implements ChainPort {
 
   async adapterLogs(adapters: Address[], from: bigint, to: bigint): Promise<AdapterLog[]> {
     if (adapters.length === 0 || from > to) return [];
-    const logs = await this.pc.getLogs({ address: adapters, fromBlock: from, toBlock: to });
+    return this.decodeAdapterLogs(await this.pc.getLogs({ address: adapters, fromBlock: from, toBlock: to }));
+  }
+
+  async bookLogs(adapters: Address[], mandates: Address[], from: bigint, to: bigint): Promise<{ adapter: AdapterLog[]; mandate: MandateLog[] }> {
+    if ((adapters.length === 0 && mandates.length === 0) || from > to) return { adapter: [], mandate: [] };
+    const logs = await this.pc.getLogs({ address: [...adapters, ...mandates], fromBlock: from, toBlock: to });
+    const a = new Set(adapters.map((x) => x.toLowerCase()));
+    const m = new Set(mandates.map((x) => x.toLowerCase()));
+    return {
+      adapter: this.decodeAdapterLogs(logs.filter((l) => a.has(l.address.toLowerCase()))),
+      mandate: this.decodeMandateLogs(logs.filter((l) => m.has(l.address.toLowerCase()))),
+    };
+  }
+
+  private decodeAdapterLogs(logs: Log[]): AdapterLog[] {
     const out: AdapterLog[] = [];
     for (const l of logs) {
       if (!l.transactionHash || l.logIndex === null || l.blockNumber === null) continue;
@@ -435,7 +452,10 @@ export class ViemChain implements ChainPort {
 
   async mandateLogs(mandates: Address[], from: bigint, to: bigint): Promise<MandateLog[]> {
     if (mandates.length === 0 || from > to) return [];
-    const logs = await this.pc.getLogs({ address: mandates, fromBlock: from, toBlock: to });
+    return this.decodeMandateLogs(await this.pc.getLogs({ address: mandates, fromBlock: from, toBlock: to }));
+  }
+
+  private decodeMandateLogs(logs: Log[]): MandateLog[] {
     const out: MandateLog[] = [];
     for (const l of logs) {
       if (!l.transactionHash || l.blockNumber === null) continue;

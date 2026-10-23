@@ -2,7 +2,7 @@
 // oracle_prices (+ AttestedOracle.pushMany in ORACLE_PUSH_MODE=heartbeat only), builder prices to the
 // venue, HTTP on ORACLE_PORT (default 4410).
 import { createDb } from "@bookrunner/db";
-import { createLogger, publicClientFor, roleSigner, tryLoadDeployment } from "@bookrunner/shared";
+import { LogSubscription, createLogger, publicClientFor, roleSigner, tryLoadDeployment } from "@bookrunner/shared";
 import { attestedOracleAbi, stockTokenRegistryAbi } from "@bookrunner/shared/abi";
 import type { LocalAccount } from "viem";
 import { DrizzlePriceStore } from "./adapters/db";
@@ -10,6 +10,7 @@ import { type AttestationDocument, loadAttestationDocument } from "./attestation
 import { RedisPricePublisher, createRedis } from "./adapters/redis";
 import { builderPriceClient } from "./adapters/venue";
 import { loadOracleConfig } from "./config";
+import { HeadClock } from "./head";
 import { MAX_SAFE_PUSH_DEVIATION_BPS, createApp, serveOptions } from "./http";
 import { startLoop } from "./loop";
 import { Runtime } from "./runtime";
@@ -18,6 +19,7 @@ import { OracleService } from "./service";
 import { accountSigner } from "./signing";
 import { ChainlinkSource } from "./sources/chainlink";
 import { buildSources } from "./sources/index";
+import { oracleLogFilter, routeOracleLogs } from "./subscription";
 
 const cfg = loadOracleConfig();
 const log = createLogger("oracle", cfg.LOG_LEVEL);
@@ -38,7 +40,11 @@ process.on("unhandledRejection", (err) => log.error({ err: err instanceof Error 
 const redis = createRedis(cfg.REDIS_URL, log);
 const database = createDb(cfg.DATABASE_URL, 3);
 const store = new DrizzlePriceStore(database.db);
-const { sources, market, syntheticRefused } = buildSources(cfg, log);
+// one head clock per process (RPC budget): the batched source passes keep it fresh, the tick reads the head only
+// when no pass reported one within ORACLE_HEAD_READ_MS (0 off mainnet: read every tick, as before)
+const headClient = publicClientFor(cfg.CHAIN_ID, cfg.RPC_URL);
+const head = new HeadClock({ read: async () => Number((await headClient.getBlock({ blockTag: "latest" })).timestamp), maxAgeMs: cfg.cadence.headReadMs });
+const { sources, market, syntheticRefused } = buildSources(cfg, log, Date.now, cfg.cadence.headReadMs > 0 ? head : null);
 if (syntheticRefused) {
   // never sign predictable synthetic prices on a public chain: fail loudly instead of running source-less
   log.fatal({ chainId: cfg.CHAIN_ID }, `refusing to start: ${syntheticRefused}`);
@@ -88,6 +94,34 @@ if (production) {
   }
 }
 
+// RPC budget: Chainlink passes on AnswerUpdated / NewRound / UIMultiplierUpdated (src/subscription.ts) while the log
+// subscription is up; polling every ORACLE_CHAINLINK_READ_MS while it is down or without an endpoint
+let subscription: LogSubscription | null = null;
+{
+  const chainlink = sources.find((s): s is ChainlinkSource => s instanceof ChainlinkSource);
+  const wsUrl = cfg.chainlinkWsUrl;
+  if (chainlink && wsUrl) {
+    const tokens = [...new Set(Object.values(cfg.chainlinkFeeds).flatMap((f) => (f.basis === "per-token" && f.token ? [f.token] : [])))];
+    const sub = new LogSubscription({
+      url: wsUrl,
+      label: "oracle chainlink",
+      filter: oracleLogFilter(chainlink.aggregatorSources(), tokens),
+      log,
+      onLogs: (logs) => routeOracleLogs(logs, chainlink, tokens),
+      onState: (up) => {
+        chainlink.setPushMode(up);
+        log.info({ subscribed: up }, up ? "Chainlink log subscription up: passes on feed / token events" : "Chainlink log subscription down: polling every ORACLE_CHAINLINK_READ_MS");
+      },
+    });
+    chainlink.setAggregatorListener((sources) => {
+      log.info({ aggregators: Object.fromEntries(sources) }, "Chainlink event sources (proxy -> aggregator)");
+      sub.setFilter(oracleLogFilter(sources, tokens));
+    });
+    sub.start();
+    subscription = sub;
+  }
+}
+
 const service = new OracleService({
   log,
   sources,
@@ -117,7 +151,7 @@ const service = new OracleService({
   },
 });
 
-const runtime = new Runtime(cfg, log, service, account, store, market);
+const runtime = new Runtime(cfg, log, service, account, store, market, undefined, cfg.cadence.headReadMs > 0 ? head : null);
 const loops = [
   startLoop("universe", cfg.ORACLE_UNIVERSE_REFRESH_MS, () => runtime.refresh(), log),
   startLoop("tick", cfg.ORACLE_TICK_MS, async () => void (await service.tick()), log),
@@ -145,6 +179,7 @@ log.info(
     policy: cfg.ORACLE_POLICY,
     sessionsMode: cfg.SESSIONS_MODE,
     orderlyMode: cfg.ORDERLY_MODE,
+    rpcCadence: { tickMs: cfg.ORACLE_TICK_MS, ...cfg.cadence },
   },
   cfg.ORACLE_PUSH_MODE === "pull" ? "oracle service started (pull: no timer pushes, signed bundle in Redis + /prices/signed)" : "oracle service started (heartbeat pushes)",
 );
@@ -166,6 +201,7 @@ async function shutdown(signal: string) {
   }, 15_000);
   try {
     await Promise.all(loops.map((l) => l.stop()));
+    subscription?.stop();
     await service.idle();
     server.stop();
     await redis.quit().catch(() => redis.disconnect());

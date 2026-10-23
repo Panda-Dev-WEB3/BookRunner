@@ -141,6 +141,10 @@ export class ViemChain implements ChainPort, DiscoveryPort {
   async observe(ref: BookRef, prices?: SignedPriceMap): Promise<ChainObservation> {
     const k = ref.components;
     const p = this.pub;
+    // RPC budget: started with the views below, so on mainnet (Multicall3) they share their aggregate3 (one block);
+    // none of them rejects (each falls back on its own)
+    const oracleRead = Promise.all([this.readOracle(ref.priceId), this.readMaxPriceAge()]);
+    const lastFlowRead = ref.venue === VENUE.ORDERLY ? this.orderlyLastFlowAt(ref) : Promise.resolve(0);
     const [
       state,
       mandate,
@@ -177,7 +181,7 @@ export class ViemChain implements ChainPort, DiscoveryPort {
       p.readContract({ address: k.book, abi: bookAbi, functionName: "perfIndex" }),
       p.readContract({ address: k.book, abi: bookAbi, functionName: "trancheNav" }),
     ]);
-    const [chainOracle, maxPriceAgeSec] = await Promise.all([this.readOracle(ref.priceId), this.readMaxPriceAge()]);
+    const [chainOracle, maxPriceAgeSec] = await oracleRead;
     const nowSec = Math.floor(this.now() / 1000);
     // pull oracle (LOW_GAS §1): the signed print supersedes an older stored price; staleness off-chain
     const signedUnderlying = pickSignedPrice(prices, ref.priceId, BigInt(chainOracle?.publishedAt ?? 0), BigInt(nowSec));
@@ -208,7 +212,7 @@ export class ViemChain implements ChainPort, DiscoveryPort {
         ...adapter,
         inTransitUsd,
         valuationAt: Number(valuationAt),
-        lastFlowAt: ref.venue === VENUE.ORDERLY ? await this.orderlyLastFlowAt(ref) : 0,
+        lastFlowAt: await lastFlowRead,
         ...(adapterSource !== "onchain" ? { source: adapterSource } : {}),
       },
       desk,

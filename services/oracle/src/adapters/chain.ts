@@ -45,9 +45,17 @@ export class ViemOracleChain implements OracleChain {
     readonly chainId: number,
     private readonly log: Logger,
     private readonly receiptTimeoutMs = 30_000,
+    /** the process's head clock (ORACLE_HEAD_READ_MS); null = read the head every call */
+    private readonly head: { headTimestamp(): Promise<number> } | null = null,
   ) {}
 
   async headTimestamp(): Promise<number> {
+    if (this.head) return this.head.headTimestamp();
+    return this.readHeadTimestamp();
+  }
+
+  /** The latest block's timestamp (unix s), always read. */
+  async readHeadTimestamp(): Promise<number> {
     const b = await this.pub.getBlock({ blockTag: "latest" });
     return Number(b.timestamp);
   }

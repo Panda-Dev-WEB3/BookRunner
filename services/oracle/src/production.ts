@@ -22,7 +22,7 @@
 //   - synthetic sources are impossible (ORACLE_SYNTHETIC must be 0; any synthetic source is fatal);
 //   - session calendar on (SESSIONS_MODE=24x7 is a demo override that would never hold off-hours: C3).
 import { MAINNET_CHAIN_ID } from "@bookrunner/shared";
-import type { OracleConfig } from "./config";
+import type { OracleConfig, RpcCadence } from "./config";
 import { type OraclePolicy, type PriceSource, PRIMARY_SOURCE, sourceKind } from "./domain/types";
 
 /** sourceCount of every primary-confirm price, and the only ORACLE_MIN_SOURCES / on-chain minSources() it accepts. */
@@ -41,6 +41,44 @@ export const MAINNET_CHAINLINK_DEFAULT_HEARTBEAT_SEC = 86_400;
 export const MAINNET_DEX_TWAP_SEC = { min: 300, max: 3_600 } as const;
 /** Largest DEX observation age (block time vs now) on mainnet. */
 export const MAINNET_DEX_MAX_AGE_MS = 120_000;
+
+/**
+ * Mainnet RPC cadence bounds (ms; deploy/server/MAINNET.md "RPC budget"), mirrored by scripts/network-profile.ts.
+ * Lower bounds keep the RPC bill bounded (a 100 ms tick would multiply it), upper bounds keep the prices safe:
+ *   - ORACLE_TICK_MS: the signing tick (no RPC of its own): >= 1 s, <= 5 s (ops-venue re-sends a price at most 3 ticks
+ *     old, risk wants one younger than 15 s);
+ *   - Chainlink pass (poll mode): <= 30 s behind a new round (0.5% deviation feeds); event mode: a safety re-read
+ *     every 1-10 min, aggregators re-resolved every 1-60 min;
+ *   - token state (event mode): at least the poll pass, at most 60 s old (audit M-2; the split window forces every pass);
+ *   - DEX pass: at most half ORACLE_DEX_MAX_AGE_MS (a reused pass must never look stale);
+ *   - head clock: at most 60 s of extrapolation.
+ */
+export const MAINNET_RPC_BOUNDS = {
+  tickMs: { min: 1_000, max: 5_000 },
+  chainlinkReadMs: { min: 2_000, max: 30_000 },
+  chainlinkEventReadMs: { min: 60_000, max: 600_000 },
+  aggregatorResolveMs: { min: 60_000, max: 3_600_000 },
+  tokenStateReadMs: { max: 60_000 },
+  dexReadMs: { min: 10_000 },
+  headReadMs: { min: 1_000, max: 60_000 },
+} as const;
+
+/** Mainnet RPC cadence problems (empty = within bounds). */
+export function rpcCadenceProblems(c: { tickMs: number } & RpcCadence): string[] {
+  const b = MAINNET_RPC_BOUNDS;
+  const out: string[] = [];
+  const range = (name: string, v: number, min: number, max: number, why: string) => {
+    if (!(v >= min && v <= max)) out.push(`${name}=${v} outside ${min}-${max} ms on mainnet (${why})`);
+  };
+  range("ORACLE_TICK_MS", c.tickMs, b.tickMs.min, b.tickMs.max, "signing cadence: RPC-free, but each tick re-signs every price");
+  range("ORACLE_CHAINLINK_READ_MS", c.chainlinkReadMs, b.chainlinkReadMs.min, b.chainlinkReadMs.max, "one aggregate3 per pass; a new Chainlink round must be seen within 30 s");
+  range("ORACLE_CHAINLINK_EVENT_READ_MS", c.chainlinkEventReadMs, b.chainlinkEventReadMs.min, b.chainlinkEventReadMs.max, "event mode: safety re-read of every feed without an event");
+  range("ORACLE_AGGREGATOR_RESOLVE_MS", c.aggregatorResolveMs, b.aggregatorResolveMs.min, b.aggregatorResolveMs.max, "event mode: a Chainlink phase change must move the subscription");
+  range("ORACLE_TOKEN_STATE_READ_MS", c.tokenStateReadMs, c.chainlinkReadMs, b.tokenStateReadMs.max, "at least every Chainlink pass, at most 60 s old: audit M-2");
+  range("ORACLE_DEX_READ_MS", c.dexReadMs, b.dexReadMs.min, Math.floor(c.dexMaxAgeMs / 2), "at most half ORACLE_DEX_MAX_AGE_MS: a reused pass must stay fresh");
+  range("ORACLE_HEAD_READ_MS", c.headReadMs, b.headReadMs.min, b.headReadMs.max, "publishedAt clamp: at most 60 s of extrapolation");
+  return out;
+}
 
 export const isProductionChain = (chainId: number): boolean => chainId === MAINNET_CHAIN_ID;
 
@@ -65,6 +103,8 @@ export type ProductionConfig = Pick<
       | "ORACLE_CHAINLINK_MAX_AGE_MS"
       | "ORACLE_DEX_MAX_AGE_MS"
       | "ORACLE_PRIMARY_LAG_BPS"
+      | "ORACLE_TICK_MS"
+      | "cadence"
     >
   >;
 
@@ -161,6 +201,7 @@ export function productionProblems(cfg: ProductionConfig, sources: readonly Pric
   if (cfg.SESSIONS_MODE === "24x7") {
     problems.push("SESSIONS_MODE=24x7 is a demo override: set SESSIONS_MODE=charter so prices hold off-hours (session calendar, VERIFY C3)");
   }
+  if (cfg.cadence) problems.push(...rpcCadenceProblems({ tickMs: cfg.ORACLE_TICK_MS ?? 1_000, ...cfg.cadence }));
   return problems;
 }
 

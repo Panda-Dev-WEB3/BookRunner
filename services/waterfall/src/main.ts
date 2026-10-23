@@ -80,7 +80,7 @@ export async function main() {
   }
 
   const events = new PgRedisEventSink(db, redis, log);
-  const books = new BookDirectory(pc, deployment, log);
+  const books = new BookDirectory(pc, deployment, log, cfg.BOOKS_REFRESH_SECONDS * 1000);
   const candidates = new UnionCandidates([new RedeemLogIndex(pc, BigInt(deployment.startBlock ?? 0), cfg.WATERFALL_LOG_CHUNK_BLOCKS, log), new DbRedeemCandidates(db)], log);
   const univ3Quoter = cfg.WATERFALL_UNIV3_QUOTER ? (cfg.WATERFALL_UNIV3_QUOTER as Address) : (uniswapV3For(cfg.CHAIN_ID)?.quoterV2 ?? null);
   const chain = new WaterfallChainAdapter({ pc, sender, deployment, candidates, logChunk: cfg.WATERFALL_LOG_CHUNK_BLOCKS, logLookback: cfg.WATERFALL_LOG_LOOKBACK_BLOCKS, univ3Quoter });
@@ -147,42 +147,52 @@ export async function main() {
 
   const enqueued = new Map<number, number>();
   let intervalWarned = false;
+  let dutiesAt = Number.NEGATIVE_INFINITY;
   const loop = startLoop({
     name: "waterfall",
     intervalMs: cfg.WATERFALL_TICK_SECONDS * 1000,
     log,
     run: async (signal) => {
       const list = await books.list();
-      const head = await pc.getBlock();
-      const interval = await chain.getMarkInterval();
-      if (interval !== cfg.MARK_INTERVAL_SECONDS && !intervalWarned) {
-        intervalWarned = true;
-        log.warn({ onchain: interval, env: cfg.MARK_INTERVAL_SECONDS }, "config.markInterval() differs from MARK_INTERVAL_SECONDS; using the on-chain value");
-      }
-      const period = periodEndAt(Number(head.timestamp), interval);
-      for (const ref of list) {
-        if (signal.aborted) return;
-        try {
-          const state = await chain.bookState(ref);
-          if (distributes(state) && isNewPeriod(period, enqueued.get(ref.bookId))) {
-            await settleQueue.add(
-              "settle",
-              { bookId: ref.bookId, period },
-              { jobId: settleJobId(ref.bookId, period), attempts: 5, backoff: { type: "exponential", delay: 5_000 }, removeOnComplete: { age: 86_400 }, removeOnFail: { age: 86_400 } },
-            );
-            enqueued.set(ref.bookId, period);
-            log.debug({ bookId: ref.bookId, period }, "settlement enqueued");
-          }
-          if (cfg.WATERFALL_KEEPER_ENABLED && state !== "Cancelled") await keeper.tick(ref);
-        } catch (err) {
-          log.warn({ bookId: ref.bookId, err: err instanceof Error ? err.message.split("\n")[0] : String(err) }, "book tick failed");
-        }
-      }
-      // protocol-level keeper duty (never throws: failures are logged and retried after the cooldown)
+      // RPC budget: no book, no per-book duty: the head and the mark interval are only read when a book needs them
+      if (list.length > 0) await booksTick(list, signal);
+      // protocol-level keeper duties (never throw: failures are logged and retried after the cooldown), at most every
+      // WATERFALL_PROTOCOL_DUTY_SECONDS
+      const nowMs = Date.now();
+      if (signal.aborted || nowMs - dutiesAt < cfg.WATERFALL_PROTOCOL_DUTY_SECONDS * 1000) return;
+      dutiesAt = nowMs;
       if (cfg.WATERFALL_KEEPER_ENABLED && cfg.WATERFALL_BUYBACK_ENABLED && !signal.aborted) await buyback.tick();
       if (cfg.WATERFALL_KEEPER_ENABLED && cfg.WATERFALL_POOL_EPOCH_ENABLED && !signal.aborted) await poolKeeper.tick();
     },
   });
+  /** The per-book part of a tick: settlement scheduling at a new period, the book keeper duties. */
+  async function booksTick(list: Awaited<ReturnType<typeof books.list>>, signal: AbortSignal) {
+    const head = await pc.getBlock();
+    const interval = await chain.getMarkInterval();
+    if (interval !== cfg.MARK_INTERVAL_SECONDS && !intervalWarned) {
+      intervalWarned = true;
+      log.warn({ onchain: interval, env: cfg.MARK_INTERVAL_SECONDS }, "config.markInterval() differs from MARK_INTERVAL_SECONDS; using the on-chain value");
+    }
+    const period = periodEndAt(Number(head.timestamp), interval);
+    for (const ref of list) {
+      if (signal.aborted) return;
+      try {
+        const state = await chain.bookState(ref);
+        if (distributes(state) && isNewPeriod(period, enqueued.get(ref.bookId))) {
+          await settleQueue.add(
+            "settle",
+            { bookId: ref.bookId, period },
+            { jobId: settleJobId(ref.bookId, period), attempts: 5, backoff: { type: "exponential", delay: 5_000 }, removeOnComplete: { age: 86_400 }, removeOnFail: { age: 86_400 } },
+          );
+          enqueued.set(ref.bookId, period);
+          log.debug({ bookId: ref.bookId, period }, "settlement enqueued");
+        }
+        if (cfg.WATERFALL_KEEPER_ENABLED && state !== "Cancelled") await keeper.tick(ref);
+      } catch (err) {
+        log.warn({ bookId: ref.bookId, err: err instanceof Error ? err.message.split("\n")[0] : String(err) }, "book tick failed");
+      }
+    }
+  }
   cleanups.push(() => loop.stop());
   log.info({ books: (await books.list()).map((b) => b.bookId), keeper: keeperAccount.address }, "waterfall running");
 }
