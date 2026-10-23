@@ -4,6 +4,7 @@
 // sent through TxRunner), the epoch queue, observed share price and premium history, exposure per market, the
 // first-loss slice and the risks. Facts follow InsurancePool.sol (docs/ARCHITECTURE.md §2.10).
 import { useState } from "react";
+import { POOL_ENABLED } from "../lib/features";
 import { FirstLossExplainer, PoolRisks } from "../components/pool/PoolRisks";
 import { PoolActions } from "../components/pool/PoolActions";
 import { PoolExposure } from "../components/pool/PoolExposure";
@@ -57,6 +58,20 @@ function PoolContract({ apiAddress }: { apiAddress: string | null }) {
 }
 
 export function PoolPage() {
+  if (!POOL_ENABLED) {
+    return (
+      <div className="mx-auto max-w-2xl px-4 py-16 text-center">
+        <h1 className="text-2xl font-semibold">Insurance pool: not open yet</h1>
+        <p className="mt-3 opacity-80">
+          The insurance pool is being reviewed before it opens. Deposits are not available on this network for now.
+        </p>
+      </div>
+    );
+  }
+  return <PoolPageInner />;
+}
+
+function PoolPageInner() {
   const w = useWallet();
   const address = w.active?.address ?? null;
   const ob = useOnboarding();

@@ -1,6 +1,7 @@
 // App shell: sticky header (investor nav + "Protocol" menu for the operator pages, API status,
 // theme, wallet), mobile drawer, wrong-network banner, footer. Routes with handle.bleed render
 // full-width (investor pages build their own Sections); every other route gets the page container.
+import { POOL_ENABLED } from "../lib/features";
 import { useEffect, useId, useRef, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useMatches } from "react-router";
 import { useHealth } from "../api/hooks";
@@ -24,7 +25,7 @@ export const PRIMARY_NAV = [
   { to: "/", label: "Home", end: true },
   { to: "/invest", label: "Invest" },
   { to: "/portfolio", label: "Portfolio" },
-  { to: "/pool", label: "Insurance pool" },
+  ...(POOL_ENABLED ? ([{ to: "/pool", label: "Insurance pool" }] as const) : []),
   { to: "/stake", label: "Stake" },
   { to: "/learn", label: "How it works" },
 ] as const;
@@ -341,7 +342,7 @@ function Footer() {
           links={[
             { label: "Invest", to: "/invest" },
             { label: "Portfolio", to: "/portfolio" },
-            { label: "Insurance pool", to: "/pool" },
+            ...(POOL_ENABLED ? [{ label: "Insurance pool", to: "/pool" }] : []),
             { label: "Stake BKRN", to: "/stake" },
             { label: "How it works", to: "/learn" },
           ]}
