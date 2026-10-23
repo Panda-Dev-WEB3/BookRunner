@@ -5,7 +5,7 @@ import { HEDGE_VENUES, bytes32ToStr, indexUnderlying, isTokenUnderlying, strToBy
 import { SESSIONS_24X5, SESSIONS_24X7, SESSIONS_NYSE_RTH, type Sessions, encodeSessions } from "@bookrunner/shared/sessions";
 import { hedgeAllowTree } from "@bookrunner/shared/merkle";
 import { orderlyCharterSymbolIssue } from "@bookrunner/shared/venueSymbol";
-import { DEFAULT_IF_FROM_POOL, MAX_PREMIUM_BPS, poolCharterReason } from "@bookrunner/shared/insurancePool";
+import { DEFAULT_IF_FROM_POOL, DEFAULT_MIN_OWN_CAPITAL_BPS, MAX_PREMIUM_BPS, poolCharterReason } from "@bookrunner/shared/insurancePool";
 import { type Address, type Hex, getAddress, isAddress, toBytes, zeroHash } from "viem";
 import { z } from "zod";
 import { parseUsd, usdStr } from "../format";
@@ -107,6 +107,7 @@ export type CharterReasonCode =
   | "BAD_FEES"
   | "BAD_PREMIUM"
   | "NO_POOL"
+  | "UNDERCAPITALISED"
   | "NEW_BOOKS_PAUSED";
 
 export interface CharterIssue {
@@ -309,6 +310,12 @@ export function validateCharterLocal(c: Charter, ctx: ValidationContext = {}): C
     );
   } else if (pool === "NO_POOL") {
     add("NO_POOL", "ifFromPool", "No insurance pool is configured on this deployment: fund the insurance fund from the tranches");
+  } else if (pool === "UNDERCAPITALISED") {
+    add(
+      "UNDERCAPITALISED",
+      "mmInventoryUsd",
+      `A pool-funded book must raise at least ${DEFAULT_MIN_OWN_CAPITAL_BPS / 100}% of its insurance fund: MM inventory ${usdStr(c.mmInventoryUsd)} USDC is below ${usdStr((c.ifTargetUsd * BigInt(DEFAULT_MIN_OWN_CAPITAL_BPS)) / 10_000n)} USDC (the pool's parameter applies)`,
+    );
   }
   if (ctx.newBooksPaused) add("NEW_BOOKS_PAUSED", null, "New charters are paused by the guardian; filing would revert");
   return out;

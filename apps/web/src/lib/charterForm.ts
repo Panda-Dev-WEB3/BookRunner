@@ -1,6 +1,6 @@
 // "File a charter" form model: human-unit form state -> charter.file draft input, with client-side
 // hints that mirror MarketCharter.validate (the API and the chain stay authoritative).
-import { DEFAULT_IF_FROM_POOL, DEFAULT_PREMIUM_FLOOR_BPS, MAX_PREMIUM_BPS } from "@bookrunner/shared/insurancePool";
+import { DEFAULT_IF_FROM_POOL, DEFAULT_MIN_OWN_CAPITAL_BPS, DEFAULT_PREMIUM_FLOOR_BPS, MAX_PREMIUM_BPS } from "@bookrunner/shared/insurancePool";
 import { parseVenueSymbol } from "@bookrunner/shared/venueSymbol";
 import type { CharterDraftInput } from "./api-types";
 import { getSettlementSymbol } from "./settlementToken";
@@ -213,6 +213,13 @@ export function formIssues(f: CharterForm, ctx: { markIntervalSeconds?: number |
     if (!Number.isInteger(premium) || premium < 0) add("premiumBps", "Pool premium: whole bps (0 = the pool's floor)");
     else if (premium > MAX_PREMIUM_BPS) add("premiumBps", `Pool premium must be at most ${MAX_PREMIUM_BPS} bps of gross fee flow`);
     if (ctx.poolConfigured === false) add("ifFromPool", "No insurance pool is configured on this deployment: fund the insurance fund from the tranches");
+    // pool audit 2026-10-23 B-M2 (MarketCharter UNDERCAPITALISED; closeWindow checks the actual raise the same way)
+    if (USD_RE.test(f.ifSizeUsd.trim()) && USD_RE.test(f.mmInventoryUsd.trim())) {
+      const minRaise = (Number(f.ifSizeUsd) * DEFAULT_MIN_OWN_CAPITAL_BPS) / 10_000;
+      if (Number(f.mmInventoryUsd) < minRaise) {
+        add("mmInventoryUsd", `A pool-funded book must raise at least ${DEFAULT_MIN_OWN_CAPITAL_BPS / 100}% of its insurance fund: MM inventory of at least ${minRaise.toLocaleString("en-US")} ${getSettlementSymbol()} (the pool's parameter applies)`);
+      }
+    }
   } else if (f.premiumBps.trim() !== "" && premium !== 0) {
     add("premiumBps", "A book-funded insurance fund pays no pool premium: set it to 0");
   }

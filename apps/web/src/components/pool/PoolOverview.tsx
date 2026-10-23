@@ -25,7 +25,7 @@ export function PoolOverview(props: { data: PoolOverviewOut | undefined; error: 
   const sym = useSettlementSymbol();
   const d = props.data;
   if (!d) return props.error ? <ErrorState error={props.error} onRetry={props.onRetry} /> : <PoolOverviewSkeleton />;
-  const fl = firstLossView(d.firstLossBps, d.params?.firstLossTargetBps ?? DEFAULT_FIRST_LOSS_LEVEL_BPS);
+  const fl = firstLossView(d.firstLossBps, d.params?.firstLossTargetBps ?? DEFAULT_FIRST_LOSS_LEVEL_BPS, d.utilisationBps);
   return (
     <div className="space-y-3">
       {!d.live && (

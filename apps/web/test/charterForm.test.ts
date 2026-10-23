@@ -95,6 +95,11 @@ describe("charter form", () => {
 
   test("2026-10 insurance pool: new charters default to a pool-funded IF at the pool's floor", () => {
     expect(DEFAULT_FORM.ifFromPool).toBe(true);
+    // pool audit 2026-10-23 B-M2: the MM inventory must be at least half the pool-funded insurance fund
+    const under = formIssues({ ...DEFAULT_FORM, sponsor: SPONSOR, ifSizeUsd: "30000", mmInventoryUsd: "14999" }).find((i) => i.field === "mmInventoryUsd");
+    expect(under?.message).toContain("at least 50% of its insurance fund");
+    expect(formIssues({ ...DEFAULT_FORM, sponsor: SPONSOR, ifSizeUsd: "30000", mmInventoryUsd: "15000" }).find((i) => i.field === "mmInventoryUsd")).toBeUndefined();
+    expect(formIssues({ ...DEFAULT_FORM, sponsor: SPONSOR, ifFromPool: false, premiumBps: "0", ifSizeUsd: "30000", mmInventoryUsd: "1" }).find((i) => i.field === "mmInventoryUsd")).toBeUndefined();
     expect(DEFAULT_FORM.premiumBps).toBe("0");
     expect(formToDraft({ ...DEFAULT_FORM, sponsor: SPONSOR })).toMatchObject({ ifFromPool: true, premiumBps: 0 });
     expect(formToDraft({ ...DEFAULT_FORM, sponsor: SPONSOR, premiumBps: "1500" })).toMatchObject({ ifFromPool: true, premiumBps: 1500 });

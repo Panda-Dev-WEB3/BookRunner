@@ -175,7 +175,7 @@ export function cooldownLine(p: Pick<PoolPositionOut, "cooldownEnds" | "inCooldo
 export interface FirstLossView {
   /** the slice as a share of the pool (bps) */
   bps: number;
-  /** the required size (bps of the pool) */
+  /** the required size (bps of what the books hold from the pool: the exposure the slice covers, pool audit 2026-10-23) */
   levelBps: number;
   /** slice / required size, 0..1+ */
   fill: number;
@@ -183,17 +183,26 @@ export interface FirstLossView {
   text: string;
 }
 
-export function firstLossView(firstLossBps: number, levelBps: number | null | undefined): FirstLossView {
+/**
+ * The slice against its required size (InsurancePool: firstLoss >= level of the book claims, pool audit 2026-10-23
+ * A-M2): `utilisationBps` (claims / pool) turns the slice's share of the pool into its share of what the books hold.
+ */
+export function firstLossView(firstLossBps: number, levelBps: number | null | undefined, utilisationBps: number | null | undefined): FirstLossView {
   const level = levelBps && levelBps > 0 ? levelBps : DEFAULT_FIRST_LOSS_LEVEL_BPS;
-  const below = firstLossBps < level;
+  const util = utilisationBps && utilisationBps > 0 ? utilisationBps : 0;
+  const cover = util > 0 ? Math.floor((firstLossBps * 10_000) / util) : null;
+  const below = cover !== null && cover < level;
   return {
     bps: firstLossBps,
     levelBps: level,
-    fill: firstLossBps / level,
+    fill: cover === null ? 1 : Math.min(cover / level, 1),
     below,
-    text: below
-      ? `${bpsPct(firstLossBps, 1)} of the pool, below the ${bpsPct(level)} level: new books cannot draw on the pool until the treasury tops it up`
-      : `${bpsPct(firstLossBps, 1)} of the pool, at or above the ${bpsPct(level)} level`,
+    text:
+      cover === null
+        ? `${bpsPct(firstLossBps, 1)} of the pool; no book holds pool money yet (each needs the slice to cover ${bpsPct(level)} of what it draws)`
+        : below
+          ? `${bpsPct(cover, 1)} of what the books hold, below the ${bpsPct(level)} level: no new book can draw on the pool until the treasury tops it up`
+          : `${bpsPct(cover, 1)} of what the books hold, at or above the ${bpsPct(level)} level`,
   };
 }
 

@@ -60,6 +60,14 @@ describe("validateCharter (MarketCharter.validate mirror)", () => {
     });
   }
 
+  test("pool audit 2026-10-23 B-M2: UNDERCAPITALISED below the pool's minimum own capital", () => {
+    const c = nvdaCharter();
+    const half = (c.ifTargetUsd * 5000n) / 10_000n;
+    expect(validateCharter(nvdaCharter({ mmInventoryUsd: half }), devValidationContext).ok).toBe(true);
+    expect(validateCharter(nvdaCharter({ mmInventoryUsd: half - 1n }), devValidationContext).reason).toBe("UNDERCAPITALISED");
+    expect(validateCharter(nvdaCharter({ mmInventoryUsd: half - 1n }), { ...devValidationContext, minOwnCapitalBps: 0 }).ok).toBe(true);
+  });
+
   test("2026-10 insurance pool: NO_POOL when ifFromPool and no pool is configured (absent = not checked)", () => {
     expect(validateCharter(nvdaCharter(), { ...devValidationContext, poolConfigured: false }).reason).toBe("NO_POOL");
     expect(validateCharter(nvdaCharter(), { ...devValidationContext, poolConfigured: true }).ok).toBe(true);
