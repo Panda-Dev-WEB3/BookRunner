@@ -52,6 +52,19 @@ export const bkrnFeeRouterAbi = [
   },
   {
     "type": "function",
+    "name": "MAX_V4_HOOK_FEE_BPS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "MIN_TWAP_WINDOW",
     "inputs": [],
     "outputs": [
@@ -386,6 +399,30 @@ export const bkrnFeeRouterAbi = [
   },
   {
     "type": "function",
+    "name": "previewBuyback",
+    "inputs": [
+      {
+        "name": "amountIn",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "refBkrnPerEthWad",
     "inputs": [],
     "outputs": [
@@ -565,6 +602,24 @@ export const bkrnFeeRouterAbi = [
         "name": "maxTickDeviation",
         "type": "uint24",
         "internalType": "uint24"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setV4Fees",
+    "inputs": [
+      {
+        "name": "hookFeeBps",
+        "type": "uint16",
+        "internalType": "uint16"
+      },
+      {
+        "name": "ethHopBps",
+        "type": "uint16",
+        "internalType": "uint16"
       }
     ],
     "outputs": [],
@@ -814,6 +869,19 @@ export const bkrnFeeRouterAbi = [
   },
   {
     "type": "function",
+    "name": "v4BlockedHop",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "hop",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "v4BuybackReady",
     "inputs": [],
     "outputs": [
@@ -821,6 +889,19 @@ export const bkrnFeeRouterAbi = [
         "name": "",
         "type": "bool",
         "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "v4EthHopBps",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
       }
     ],
     "stateMutability": "view"
@@ -840,6 +921,19 @@ export const bkrnFeeRouterAbi = [
         "name": "",
         "type": "bool",
         "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "v4HookFeeBps",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
       }
     ],
     "stateMutability": "view"
@@ -1002,6 +1096,19 @@ export const bkrnFeeRouterAbi = [
       },
       {
         "name": "bkrnOut",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "BuybackNoFill",
+    "inputs": [
+      {
+        "name": "amountIn",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
@@ -1213,6 +1320,25 @@ export const bkrnFeeRouterAbi = [
   },
   {
     "type": "event",
+    "name": "V4FeesSet",
+    "inputs": [
+      {
+        "name": "hookFeeBps",
+        "type": "uint16",
+        "indexed": false,
+        "internalType": "uint16"
+      },
+      {
+        "name": "ethHopBps",
+        "type": "uint16",
+        "indexed": false,
+        "internalType": "uint16"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "V4HookAllowedSet",
     "inputs": [
       {
@@ -1320,6 +1446,22 @@ export const bkrnFeeRouterAbi = [
         "name": "venue",
         "type": "uint8",
         "internalType": "uint8"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "BuybackPreview",
+    "inputs": [
+      {
+        "name": "usdcIn",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "bkrnOut",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ]
   },
@@ -1499,6 +1641,11 @@ export const bkrnFeeRouterAbi = [
         "internalType": "uint160"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "V4SwapNoReason",
+    "inputs": []
   },
   {
     "type": "error",

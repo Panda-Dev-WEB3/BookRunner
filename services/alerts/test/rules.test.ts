@@ -492,6 +492,16 @@ describe("buyback", () => {
     expect(keys(buyback(snap({ buybackSamples: [{ ts: NOW, value: 6000 }] }), rules()))).toEqual(["buyback_high"]);
     expect(buyback(snap({ buybackSamples: [] }), rules())).toEqual([]);
   });
+  test("rule: v4 buybacks stalled by a stale reference (a hop past its limit) with pending above the floor", () => {
+    const pending = [{ ts: NOW, value: 120 }];
+    const out = buyback(snap({ buybackSamples: pending, buybackV4BlockedHop: 2 }), rules());
+    expect(keys(out)).toEqual(["buyback_v4_reference_stale"]);
+    expect(out[0]?.forSec).toBe(3600);
+    expect(out[0]?.summary).toContain("ETH -> BKRN");
+    expect(keys(buyback(snap({ buybackSamples: pending, buybackV4BlockedHop: 0 }), rules()))).toEqual([]);
+    expect(keys(buyback(snap({ buybackSamples: [{ ts: NOW, value: 5 }], buybackV4BlockedHop: 1 }), rules()))).toEqual([]);
+    expect(keys(buyback(snap({ buybackSamples: pending, buybackV4BlockedHop: null }), rules()))).toEqual([]);
+  });
 });
 
 describe("api_health + infra", () => {

@@ -2,6 +2,7 @@
 pragma solidity 0.8.30;
 
 import {Test, Vm} from "forge-std/Test.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {BookrunnerConfig} from "../../src/BookrunnerConfig.sol";
 import {BkrnStaking} from "../../src/BkrnStaking.sol";
@@ -38,6 +39,52 @@ contract ReenterHook is IMockV4Hook {
         pure
         returns (int128)
     {
+        return 0;
+    }
+}
+
+/// @dev Hook that reverts with no data (like an out-of-gas).
+contract BareRevertHook is IMockV4Hook {
+    function beforeSwap(address, IV4PoolManager.PoolKey calldata, IV4PoolManager.SwapParams calldata, bytes calldata)
+        external
+        pure
+        returns (int128)
+    {
+        revert();
+    }
+
+    function afterSwap(address, IV4PoolManager.PoolKey calldata, IV4PoolManager.SwapParams calldata, int256, bytes calldata)
+        external
+        pure
+        returns (int128)
+    {
+        return 0;
+    }
+}
+
+/// @dev Hook that calls PoolManager.sync(token) from afterSwap (sync is global, not per locker).
+contract SyncingHook is IMockV4Hook {
+    MockV4PoolManager internal immutable pm;
+    address internal immutable token;
+
+    constructor(MockV4PoolManager pm_, address token_) {
+        pm = pm_;
+        token = token_;
+    }
+
+    function beforeSwap(address, IV4PoolManager.PoolKey calldata, IV4PoolManager.SwapParams calldata, bytes calldata)
+        external
+        pure
+        returns (int128)
+    {
+        return 0;
+    }
+
+    function afterSwap(address, IV4PoolManager.PoolKey calldata, IV4PoolManager.SwapParams calldata, int256, bytes calldata)
+        external
+        returns (int128)
+    {
+        pm.sync(token);
         return 0;
     }
 }
@@ -159,8 +206,11 @@ abstract contract BkrnFeeRouterV4Base is Test {
         return UniswapV4Lib.priceLimit(bkrnPerEth, 18, 18, true);
     }
 
+    /// @dev The direct hop's limit on `key` (0.3% LP fee, no hook): the gross price whose net is the floor price,
+    ///      plus 1 bp (BkrnFeeRouter._gross).
     function _directLimit() internal pure returns (uint160) {
-        return _sqrtDirect(REF * (10_000 - SLIP) / 10_000);
+        uint256 net = REF * (10_000 - SLIP) / 10_000;
+        return _sqrtDirect(Math.mulDiv(net, 1e6 * 10_001, 997_000 * 10_000, Math.Rounding.Ceil));
     }
 
     function _seed(uint256 amount) internal {
@@ -239,6 +289,165 @@ abstract contract BkrnFeeRouterV4Base is Test {
         (uint160 after_,) = pm.pools(UniswapV4Lib.poolId(key));
         assertEq(after_, _directLimit()); // stopped exactly at the slippage bound
         assertGe(out, spent * REF * (10_000 - SLIP) / 10_000 / 1e6);
+        _assertNoStuckBalances();
+    }
+
+    /// @dev Review M-1 regression: with a Pons-like hook taking 3% of the output and a matching allowance, a buyback
+    ///      too large for the pool stops at its (hook-aware) limit and still clears the floor: it partially fills,
+    ///      the rest stays pending, instead of reverting every time at the same size.
+    function test_hook_fee_allowance_makes_partial_fill_clear_the_floor() public {
+        _useDirect(hookKey);
+        hook.configure(0, 300, false);
+        _seed(300_000e6);
+        vm.prank(keeper); // no allowance: the stop at the plain limit fails the floor (whole-tx revert)
+        vm.expectPartialRevert(BkrnFeeRouter.InsufficientOutput.selector);
+        fr.executeBuyback(300_000e6, 0);
+        vm.expectEmit(false, false, false, true, address(fr));
+        emit BkrnFeeRouter.V4FeesSet(300, 0);
+        vm.prank(admin);
+        fr.setV4Fees(300, 0);
+        vm.prank(keeper);
+        uint256 out = fr.executeBuyback(300_000e6, 0);
+        uint256 spent = fr.totalBuybackUsdc();
+        assertGt(spent, 0);
+        assertLt(spent, 300_000e6); // partial fill
+        assertEq(fr.buybackPending(), 300_000e6 - spent);
+        assertGe(out, spent * REF * (10_000 - SLIP) / 10_000 / 1e6);
+        _assertNoStuckBalances();
+    }
+
+    function test_setV4Fees_bounds() public {
+        vm.startPrank(admin);
+        vm.expectRevert(BkrnFeeRouter.BadBuybackParams.selector);
+        fr.setV4Fees(1001, 0); // above MAX_V4_HOOK_FEE_BPS
+        vm.expectRevert(BkrnFeeRouter.BadBuybackParams.selector);
+        fr.setV4Fees(400, 0); // 400 + 500 / 4 >= 500
+        vm.expectRevert(BkrnFeeRouter.BadBuybackParams.selector);
+        fr.setV4Fees(200, 300); // 200 + 300 >= 500
+        fr.setV4Fees(300, 100);
+        assertEq(fr.v4HookFeeBps(), 300);
+        assertEq(fr.v4EthHopBps(), 100);
+        vm.expectRevert(BkrnFeeRouter.BadBuybackParams.selector);
+        fr.setBuybackParams(0, REF, 400, 1_000_000e6); // slippage no longer above the allowances
+        fr.setBuybackParams(0, REF, 1000, 1_000_000e6);
+        fr.setV4Fees(0, 0);
+        vm.stopPrank();
+        vm.expectRevert(abi.encodeWithSelector(BkrnFeeRouter.NotAdmin.selector, keeper));
+        vm.prank(keeper);
+        fr.setV4Fees(100, 0);
+    }
+
+    /// @dev Review M-2: previewBuyback simulates the exact swap and reverts BuybackPreview(spent, out).
+    function test_previewBuyback_reports_the_simulated_fill() public {
+        _useDirect(key);
+        _seed(300_000e6);
+        uint256 snap = vm.snapshotState();
+        vm.prank(keeper);
+        uint256 real = fr.executeBuyback(300_000e6, 0);
+        uint256 realSpent = fr.totalBuybackUsdc();
+        vm.revertToState(snap);
+        vm.prank(keeper);
+        vm.expectRevert(abi.encodeWithSelector(BkrnFeeRouter.BuybackPreview.selector, realSpent, real));
+        fr.previewBuyback(300_000e6);
+        assertEq(fr.buybackPending(), 300_000e6); // nothing persisted
+        vm.expectRevert(abi.encodeWithSelector(BkrnFeeRouter.NotKeeper.selector, alice));
+        vm.prank(alice);
+        fr.previewBuyback(1e6);
+        vm.prank(admin);
+        fr.setBuybackVenue(0);
+        vm.expectRevert(abi.encodeWithSelector(BkrnFeeRouter.BadVenue.selector, uint8(0)));
+        vm.prank(keeper);
+        fr.previewBuyback(1e6);
+    }
+
+    /// @dev A failing swap previews as (0, 0) (the keeper then sends nothing).
+    function test_previewBuyback_failed_swap_is_zero() public {
+        _useDirect(hookKey);
+        hook.configure(0, 0, true);
+        _seed(100e6);
+        vm.expectRevert(abi.encodeWithSelector(BkrnFeeRouter.BuybackPreview.selector, 0, 0));
+        vm.prank(keeper);
+        fr.previewBuyback(10e6);
+    }
+
+    /// @dev Review L-2: a swap that spends nothing (no liquidity up to the limit) emits BuybackNoFill.
+    function test_no_fill_is_reported() public {
+        IV4PoolManager.PoolKey memory k = _key(address(usdc), address(bkrn), 500, 10, address(0));
+        pm.initialize(k, _sqrtDirect(REF), 0); // initialized, no liquidity
+        _useDirect(k);
+        _seed(100e6);
+        vm.expectEmit(false, false, false, true, address(fr));
+        emit BkrnFeeRouter.BuybackNoFill(10e6);
+        vm.prank(keeper);
+        assertEq(fr.executeBuyback(10e6, 0), 0);
+        assertEq(fr.buybackPending(), 100e6);
+        _assertNoStuckBalances();
+    }
+
+    /// @dev Review L-1: a bare revert (no data) inside the swap is re-raised, never a "successful" no-swap tx.
+    function test_bare_revert_is_reraised() public {
+        BareRevertHook bare = new BareRevertHook();
+        IV4PoolManager.PoolKey memory k = _key(address(usdc), address(bkrn), 0, 200, address(bare));
+        pm.initialize(k, _sqrtDirect(REF), L_DIRECT);
+        _useDirect(k);
+        _seed(100e6);
+        vm.expectRevert(BkrnFeeRouter.V4SwapNoReason.selector);
+        vm.prank(keeper);
+        fr.executeBuyback(10e6, 0);
+    }
+
+    /// @dev Review L-1 regression: no gas window where executeBuyback succeeds without swapping (an inner out-of-
+    ///      gas is re-raised): the lowest non-reverting gas limit swaps.
+    function test_no_gas_window_without_swap() public {
+        _use(_route(V3_WETH, ethBkrnKey));
+        _seed(100e6);
+        uint256 a = 50_000;
+        uint256 b = 3_000_000;
+        while (a + 1 < b) {
+            uint256 m = (a + b) / 2;
+            (bool ok,) = _tryGas(m);
+            if (ok) b = m;
+            else a = m;
+        }
+        (bool okAt, bool swappedAt) = _tryGas(b);
+        assertTrue(okAt);
+        assertTrue(swappedAt, "a non-reverting gas limit landed without swapping");
+    }
+
+    function _tryGas(uint256 g) internal returns (bool ok, bool swapped) {
+        uint256 snap = vm.snapshotState();
+        vm.prank(keeper);
+        (ok,) = address(fr).call{gas: g}(abi.encodeCall(BkrnFeeRouter.executeBuyback, (10e6, 0)));
+        swapped = ok && fr.totalBuybackUsdc() > 0;
+        vm.revertToState(snap);
+    }
+
+    /// @dev Review L-3: v4BlockedHop names the hop a stale reference blocks (alerts read it).
+    function test_v4BlockedHop() public {
+        assertEq(fr.v4BlockedHop(), 0); // venue v3
+        _use(_route(V4_ETH, ethBkrnKey));
+        assertEq(fr.v4BlockedHop(), 0);
+        pm.setPrice(ethUsdcKey, _sqrtEthUsdc(2600e18)); // ETH up 8% vs the fixed reference
+        assertEq(fr.v4BlockedHop(), 1);
+        pm.setPrice(ethUsdcKey, _sqrtEthUsdc(ETH_USD));
+        pm.setPrice(ethBkrnKey, _sqrtEthBkrn(BKRN_ETH * 90 / 100)); // BKRN 10% dearer in ETH
+        assertEq(fr.v4BlockedHop(), 2);
+        vm.startPrank(admin); // references refreshed (BKRN now 18 per USDG): nothing blocked
+        fr.setEthReference(ETH_USD, BKRN_ETH * 90 / 100);
+        fr.setBuybackParams(0, 18e18, SLIP, 1_000_000e6);
+        vm.stopPrank();
+        assertEq(fr.v4BlockedHop(), 0);
+    }
+
+    /// @dev Review I-1 regression: a hook calling sync(token) during the BKRN hop no longer breaks the native settle.
+    function test_hook_sync_does_not_break_v3_weth_settle() public {
+        SyncingHook sh = new SyncingHook(pm, address(usdc));
+        IV4PoolManager.PoolKey memory k = _key(address(0), address(bkrn), 0, 200, address(sh));
+        pm.initialize(k, _sqrtEthBkrn(BKRN_ETH), L_ETH_BKRN);
+        _use(_route(V3_WETH, k));
+        _seed(100e6);
+        vm.prank(keeper);
+        assertGt(fr.executeBuyback(10e6, 0), 0);
         _assertNoStuckBalances();
     }
 
@@ -376,8 +585,8 @@ abstract contract BkrnFeeRouterV4Base is Test {
     ///      inside the unlock and the failure is caught.
     function test_v4_eth_route_partial_second_hop_reverts_safely() public {
         _use(_route(V4_ETH, ethBkrnKey));
-        // BKRN hop sits 0.5% above its limit: a 50k USDG buyback runs through it
-        pm.setPrice(ethBkrnKey, _sqrtEthBkrn(BKRN_ETH * 9550 / 10_000));
+        // BKRN hop sits ~0.3% above its limit (keep / (1 - s0) = 0.95 / 0.9875 ~ 0.962): 50k USDG runs through it
+        pm.setPrice(ethBkrnKey, _sqrtEthBkrn(BKRN_ETH * 9650 / 10_000));
         _seed(100_000e6);
         uint256 pmEth = address(pm).balance;
         vm.recordLogs();
@@ -389,7 +598,7 @@ abstract contract BkrnFeeRouterV4Base is Test {
         assertTrue(_logged(BkrnFeeRouter.BuybackV4Failed.selector));
     }
 
-    function _logged(bytes32 topic) internal returns (bool) {
+    function _logged(bytes32 topic) internal view returns (bool) {
         Vm.Log[] memory logs = vm.getRecordedLogs();
         for (uint256 i; i < logs.length; ++i) {
             if (logs[i].emitter == address(fr) && logs[i].topics[0] == topic) return true;

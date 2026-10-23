@@ -599,6 +599,19 @@ export function buyback(s: Snapshot, c: RuleConfig): Condition[] {
       summary: `buybackPending $${last.value.toFixed(2)} has only grown for ${dur((s.now - (st.since ?? s.now)) / 1000)}: the keeper's executeBuyback is not landing (waterfall logs: "buyback due but not sent")`,
     });
   }
+  // Uniswap v4 venue: a hop past its price limit stops every buyback until governance refreshes the fixed references
+  // (setEthReference / setBuybackParams, through the 48 h timelock): RUNBOOK "BKRN buybacks on Uniswap v4"
+  const hop = s.buybackV4BlockedHop ?? 0;
+  if (hop > 0 && last.value >= c.buybackMinUsd) {
+    const which = hop === 1 ? "the first hop (USDG -> ETH, or the direct BKRN pool)" : "the ETH -> BKRN hop";
+    out.push({
+      key: "buyback_v4_reference_stale",
+      rule: "buyback_v4_reference_stale",
+      severity: "warning",
+      forSec: 3600,
+      summary: `v4 buybacks stalled: ${which} sits past its price limit with $${last.value.toFixed(2)} pending; the fixed ETH / BKRN reference is stale (refresh setEthReference / setBuybackParams via the timelock; bun scripts/buyback-route.ts prints the values)`,
+    });
+  }
   if (c.buybackMaxUsd > 0 && last.value >= c.buybackMaxUsd) {
     out.push({ key: "buyback_high", rule: "buyback_high", severity: "warning", summary: `buybackPending is $${last.value.toFixed(2)} (limit $${c.buybackMaxUsd})` });
   }

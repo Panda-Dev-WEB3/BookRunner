@@ -146,6 +146,10 @@ abstract contract MainnetInput is Script {
         uint256 bkrnPerEthWad;
         // hooks allow-listed at deploy (e.g. the Pons hook, so graduation only needs setV4Route)
         address[] v4Hooks;
+        // BkrnFeeRouter.setV4Fees: hook fee allowance priced into hooked hops' limits (<= 1000 bps) and the via-ETH
+        // USDG -> ETH hop share of the slippage (0 = a quarter); hook fee + share < maxSlippageBps
+        uint256 v4HookFeeBps;
+        uint256 v4EthHopBps;
         // optional route set at deploy (after graduation; else later through the timelock)
         bool v4RouteSet;
         IBkrnV4Swapper.V4Route v4Route;
@@ -370,6 +374,8 @@ abstract contract MainnetInput is Script {
         bb.usdcPerEthWad = json.readUintOr(".buyback.ethReference.usdcPerEthWad", 0);
         bb.bkrnPerEthWad = json.readUintOr(".buyback.ethReference.bkrnPerEthWad", 0);
         bb.v4Hooks = json.readAddressArrayOr(".buyback.v4Hooks", new address[](0));
+        bb.v4HookFeeBps = json.readUintOr(".buyback.v4HookFeeBps", 0);
+        bb.v4EthHopBps = json.readUintOr(".buyback.v4EthHopBps", 0);
         _loadV4Route(json);
     }
 
@@ -390,7 +396,7 @@ abstract contract MainnetInput is Script {
         r.weth = json.readAddressOr(".buyback.v4Route.weth", address(0));
     }
 
-    function _readKey(string memory json, string memory k) private view returns (IV4PoolManager.PoolKey memory key) {
+    function _readKey(string memory json, string memory k) private pure returns (IV4PoolManager.PoolKey memory key) {
         key.currency0 = json.readAddress(string.concat(k, ".currency0"));
         key.currency1 = json.readAddress(string.concat(k, ".currency1"));
         uint256 fee = json.readUint(string.concat(k, ".fee"));
@@ -668,6 +674,12 @@ abstract contract MainnetInput is Script {
     function _validateBuybackV4() private view {
         _opt(ext.univ4PoolManager, "externals.uniswapV4PoolManager");
         for (uint256 i; i < bb.v4Hooks.length; ++i) _req(bb.v4Hooks[i], "buyback.v4Hooks");
+        require(bb.v4HookFeeBps <= 1000, "input: buyback.v4HookFeeBps > 1000");
+        uint256 s0 = bb.v4EthHopBps == 0 ? bb.maxSlippageBps / 4 : bb.v4EthHopBps;
+        require(
+            (bb.v4HookFeeBps == 0 && bb.v4EthHopBps == 0) || bb.v4HookFeeBps + s0 < bb.maxSlippageBps,
+            "input: buyback.v4HookFeeBps + v4EthHopBps must stay below maxSlippageBps"
+        );
         if (bb.venue == VENUE_UNIV4) {
             _req(ext.univ4PoolManager, "externals.uniswapV4PoolManager");
             require(bb.referenceSource != REF_TWAP, "input: buyback.venue univ4 cannot use referenceSource twap (no v4 TWAP)");

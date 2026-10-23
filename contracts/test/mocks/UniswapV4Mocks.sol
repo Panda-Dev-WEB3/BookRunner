@@ -209,6 +209,8 @@ contract MockV4PoolManager is IV4PoolManager {
         view
         returns (uint256 used, uint256 out, uint160 next)
     {
+        // no liquidity up to the limit: v4 moves the price to the limit and returns zero deltas
+        if (p.liquidity == 0) return (0, 0, params.sqrtPriceLimitX96);
         uint256 lessFee = Math.mulDiv(amountIn, 1e6 - fee, 1e6);
         uint256 need;
         uint256 n;

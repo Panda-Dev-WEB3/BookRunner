@@ -117,6 +117,7 @@ contract DeployMainnetTest is Test {
         uint256 usdcPerEthWad;
         uint256 bkrnPerEthWad;
         bool noAllocations; // bkrn.community / studio / liquidity / contributors left zero
+        uint256 v4HookFeeBps;
     }
 
     string internal constant CHAIN_CFG = "../config/chains/4663.json";
@@ -811,6 +812,7 @@ contract DeployMainnetTest is Test {
         o.v4Hook = address(h);
         o.usdcPerEthWad = 2400e18;
         o.bkrnPerEthWad = 48_000e18;
+        o.v4HookFeeBps = 300; // Pons-like hook fee allowance (300 + 500 / 4 < 500)
     }
 
     function _ethRouteJson(IV4PoolManager.PoolKey memory ethBkrn, IV4PoolManager.PoolKey memory ethUsdg)
@@ -837,7 +839,17 @@ contract DeployMainnetTest is Test {
         assertEq(fr.v4Route().kind, 1);
         assertEq(fr.referenceSource(), fr.REF_FIXED_ETH());
         assertEq(fr.referenceBkrnPerUsdc(), 20e18);
+        assertEq(fr.v4HookFeeBps(), 300);
         assertFalse(d.bkrnDeployed);
+    }
+
+    function test_refuses_v4_hook_fee_not_below_slippage() public {
+        MockERC20 t = _ponsBkrn();
+        (Opts memory o,,) = _v4World(address(t));
+        o.v4HookFeeBps = 400; // 400 + 500 / 4 >= 500
+        _expectValidateRevert(o, "input: buyback.v4HookFeeBps + v4EthHopBps must stay below maxSlippageBps");
+        o.v4HookFeeBps = 1001;
+        _expectValidateRevert(o, "input: buyback.v4HookFeeBps > 1000");
     }
 
     /// @dev Before graduation: venue univ4 + PoolManager + the Pons hook allow-listed, no route (buybacks defer).
@@ -1205,7 +1217,8 @@ contract DeployMainnetTest is Test {
                 "\"}"
             );
         string memory r = bytes(o.v4Route).length == 0 ? "" : string.concat(",\"v4Route\":", o.v4Route);
-        return string.concat(v, h, e, r);
+        string memory f = o.v4HookFeeBps == 0 ? "" : string.concat(",\"v4HookFeeBps\":", vm.toString(o.v4HookFeeBps));
+        return string.concat(v, h, e, r, f);
     }
 
     function _jsonKey(IV4PoolManager.PoolKey memory k) internal pure returns (string memory) {

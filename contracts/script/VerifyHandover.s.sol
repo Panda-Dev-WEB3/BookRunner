@@ -612,7 +612,15 @@ contract VerifyHandover is MainnetInput {
         bytes32 want = bb.v4RouteSet ? keccak256(abi.encode(bb.v4Route)) : keccak256(abi.encode(_noRoute()));
         _row(keccak256(abi.encode(fr.v4Route())) == want, "buyback v4 route == input (none before graduation)");
         if (bb.v4RouteSet) _row(fr.v4BuybackReady(), "buyback v4 route live (pools initialized)");
-        _row(BkrnV4Swapper(payable(address(fr.v4Swapper()))).feeRouter() == address(fr), "BkrnV4Swapper bound to this fee router");
+        BkrnV4Swapper sw = BkrnV4Swapper(payable(address(fr.v4Swapper())));
+        _row(sw.feeRouter() == address(fr) && address(sw.config()) == address(cfg), "BkrnV4Swapper bound to this fee router + config");
+        _row(
+            fr.v4HookFeeBps() == bb.v4HookFeeBps && fr.v4EthHopBps() == bb.v4EthHopBps,
+            "buyback v4 hook fee allowance / ETH hop share == input"
+        );
+        if (bb.v4Hooks.length > 0 && fr.maxSlippageBps() < fr.v4HookFeeBps() + 200) {
+            console2.log("  WARN  maxSlippageBps is not comfortably above the hook fee allowance (+200 bps)");
+        }
         _row(IERC20Min(cfg.bkrn()).decimals() == 18, "BKRN decimals == 18");
         (bool ok, bytes memory ret) = cfg.bkrn().staticcall(abi.encodeWithSignature("totalSupply()"));
         uint256 supply = ok && ret.length >= 32 ? abi.decode(ret, (uint256)) : 0;

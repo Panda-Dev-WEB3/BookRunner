@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { decodeFunctionData, encodeFunctionData, getAddress, zeroAddress } from "viem";
 import { bkrnFeeRouterAbi } from "../packages/shared/src/abi";
-import { type Candidate, PONS_HOOK, best, deployInputRoute, poolId, routeStruct, sortKey, spotWad } from "./buyback-route";
+import { type Candidate, PONS_HOOK, best, deployInputRoute, divergenceBps, median, poolId, routeStruct, sortKey, spotWad } from "./buyback-route";
 
 const USDG = getAddress("0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168");
 const WETH = getAddress("0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73");
@@ -45,5 +45,14 @@ describe("buyback-route (pure)", () => {
     expect(Number(spotWad(sqrt, true, 18, 6)) / 1e18).toBeCloseTo(2400, 3);
     expect(Number(spotWad(sqrt, false, 6, 18)) / 1e18).toBeCloseTo(1 / 2400, 9);
     expect(spotWad(0n, true, 18, 6)).toBe(0n);
+  });
+
+  test("references are never one sample: median of block samples, divergence in bps", () => {
+    expect(median([5n, 1n, 3n])).toBe(3n);
+    expect(median([4n, 1n, 3n, 2n])).toBe(2n); // lower middle
+    expect(median([])).toBe(0n);
+    expect(divergenceBps(101n, 100n)).toBe(100);
+    expect(divergenceBps(99n, 100n)).toBe(100);
+    expect(divergenceBps(1n, 0n)).toBe(Number.POSITIVE_INFINITY);
   });
 });

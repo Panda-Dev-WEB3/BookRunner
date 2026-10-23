@@ -53,8 +53,9 @@ import {UniswapV4Lib} from "./libraries/UniswapV4Lib.sol";
 ///         BKRN, inside the same unlock) or BKRN/USDG (ROUTE_DIRECT). The route is chosen off-chain
 ///         (scripts/buyback-route.ts). v4 has no TWAP oracle: VENUE_UNIV4 works with REF_FIXED / REF_ATTESTED /
 ///         REF_FIXED_ETH (REF_TWAP and VENUE_UNIV4 refuse each other). Every hop carries a `sqrtPriceLimitX96` at
-///         its reference minus `maxSlippageBps` (a moved pool or a sandwich fills less, never worse; the unspent
-///         input stays pending), the BKRN out must clear `buybackFloor(spent)` over the whole path, and
+///         the worst price whose net (LP fee, hook fee allowance `v4HookFeeBps`) meets the floor (a moved pool or a
+///         sandwich fills less, never worse; the unspent input stays pending; via ETH the slippage is split between
+///         the hops), the BKRN out must clear `buybackFloor(spent)` over the whole path, and
 ///         `maxBuybackPerCall` applies. While the route is unset or a pool uninitialized (before graduation) a v4
 ///         buyback is a no-op (`BuybackDeferred`): the settlement token waits in `buybackPending`. A revert inside
 ///         the unlock (a hook, a pool, a hop) is caught: `BuybackV4Failed`, nothing moves. Native ETH is accepted
@@ -146,6 +147,18 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
     uint256 public refUsdcPerEthWad;
     /// @notice Fixed BKRN/ETH reference: whole BKRN per whole ETH (WAD), read by REF_FIXED_ETH.
     uint256 public refBkrnPerEthWad;
+    /// @notice Hook fee allowance (bps) priced into the price limit of every hop through a hooked pool, so a swap
+    ///         stopped at its limit still clears the floor net of the hook's take (review M-1). Timelock-set,
+    ///         <= MAX_V4_HOOK_FEE_BPS and below `maxSlippageBps`. A dynamic-fee pool's LP fee belongs in it too.
+    uint16 public v4HookFeeBps;
+    /// @notice Share (bps) of `maxSlippageBps` given to the USDG -> ETH hop of a via-ETH route (0 = a quarter of
+    ///         it); the ETH -> BKRN hop gets the rest, so the two limits compose to the floor.
+    uint16 public v4EthHopBps;
+    /// @notice Upper bound of `v4HookFeeBps` (10%).
+    uint16 public constant MAX_V4_HOOK_FEE_BPS = 1000;
+    /// @dev Pips (1e6) and the LP fee flag of a dynamic-fee v4 pool (its LP fee is set by the hook).
+    uint256 private constant PIPS = 1e6;
+    uint24 private constant DYNAMIC_FEE_FLAG = 0x800000;
     address private constant NATIVE = address(0);
 
     /// @notice Lifetime carry received (USDC 6dp).
@@ -174,6 +187,11 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
     /// @notice migrate() while this contract is still config.feeRouter().
     error StillCurrent();
     error BadVenue(uint8 venue);
+    /// @notice previewBuyback's result (it always reverts: eth_call only): settlement token spent, BKRN out.
+    error BuybackPreview(uint256 usdcIn, uint256 bkrnOut);
+    /// @notice The v4 swap reverted without data or out of gas: re-raised, so a transaction never "succeeds"
+    ///         without swapping (review L-1).
+    error V4SwapNoReason();
     error BadV4Pool();
     /// @notice The pool's price is already past the slippage limit (moved pool / stale reference).
     error V4PriceBeyondLimit(uint160 sqrtPriceX96, uint160 limitX96);
@@ -208,6 +226,10 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
     event EthReferenceSet(uint256 usdcPerEthWad, uint256 bkrnPerEthWad);
     /// @notice VENUE_UNIV4 buyback with no initialized pool set (before graduation): nothing swapped.
     event BuybackDeferred(uint256 amountIn);
+    /// @notice A v4 swap ran but spent nothing (no liquidity between the price and the limit): nothing bought.
+    event BuybackNoFill(uint256 amountIn);
+    /// @notice v4 hook fee allowance / via-ETH hop split changed.
+    event V4FeesSet(uint16 hookFeeBps, uint16 ethHopBps);
     /// @notice The v4 unlock reverted (hook or pool): nothing swapped, `amountIn` stays pending.
     event BuybackV4Failed(uint256 amountIn, bytes reason);
 
@@ -387,23 +409,25 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
     ///      everything as it was. The keeper minimum is pro-rated to the input actually spent (the first hop's
     ///      price limit may stop it early) and the output must clear `buybackFloor(spent)` (the whole path).
     function _buybackV4(uint256 amountIn, uint256 minBkrnOut, uint256 pending) private returns (uint256 bkrnOut) {
-        uint256 maxPerCall = maxBuybackPerCall;
-        if (maxPerCall == 0) revert NotConfigured("buybackParams");
-        if (amountIn > maxPerCall) revert BuybackTooLarge(amountIn, maxPerCall);
-        address staking = config.staking();
-        if (staking == address(0)) revert NotConfigured("staking");
+        address staking = _v4Checks(amountIn);
         if (!_v4RouteLive()) {
             emit BuybackDeferred(amountIn);
             return 0;
         }
         uint256 ref = referenceBkrnPerUsdc();
-        IBkrnV4Swapper.V4Job memory job = _v4Job(amountIn, ref);
+        IBkrnV4Swapper.V4Job memory job = _checkedJob(amountIn, ref);
 
         buybackPending = pending - amountIn;
         uint256 spent;
-        (spent, bkrnOut) = _runV4(job);
+        bool failed;
+        (spent, bkrnOut, failed) = _runV4(job);
         if (spent < amountIn) buybackPending += amountIn - spent; // a caught failure spends nothing
-        if (spent == 0) return 0;
+        if (spent == 0) {
+            // a caught failure (BuybackV4Failed emitted) or no fill: zero liquidity up to the limit (review L-2)
+            if (bkrnOut != 0) revert V4DeltaNotSettled();
+            if (!failed) emit BuybackNoFill(amountIn);
+            return 0;
+        }
         uint256 minOut = Math.max(Math.mulDiv(minBkrnOut, spent, amountIn, Math.Rounding.Ceil), _floorAt(spent, ref));
         if (bkrnOut == 0 || bkrnOut < minOut) revert InsufficientOutput(bkrnOut, minOut);
 
@@ -415,14 +439,50 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
         IBkrnStaking(staking).notifyReward(bkrnOut);
     }
 
+    /// @dev Size and wiring checks shared by executeBuyback (v4) and previewBuyback; returns staking.
+    function _v4Checks(uint256 amountIn) private view returns (address staking) {
+        uint256 maxPerCall = maxBuybackPerCall;
+        if (maxPerCall == 0) revert NotConfigured("buybackParams");
+        if (amountIn > maxPerCall) revert BuybackTooLarge(amountIn, maxPerCall);
+        staking = config.staking();
+        if (staking == address(0)) revert NotConfigured("staking");
+    }
+
+    /// @notice KEEPER, eth_call only: runs the v4 swap `executeBuyback(amountIn, 0)` would run and always reverts
+    ///         `BuybackPreview(usdcIn, bkrnOut)` (both 0 when the swap fails inside the unlock), so the keeper sets
+    ///         its minimum from a simulated fill instead of the fixed floor alone (review M-2). VENUE_UNIV4 with a
+    ///         live route only; reverts like executeBuyback otherwise (V4PriceBeyondLimit, NotConfigured, ...).
+    function previewBuyback(uint256 amountIn) external returns (uint256, uint256) {
+        // always reverts (nothing persists); refused inside another entry point all the same
+        if (_reentrancyGuardEntered()) revert ReentrancyGuardReentrantCall();
+        if (!config.hasRole(KEEPER_ROLE, msg.sender)) revert NotKeeper(msg.sender);
+        if (buybackVenue != VENUE_UNIV4) revert BadVenue(buybackVenue);
+        if (amountIn == 0) revert ZeroAmount();
+        if (amountIn > buybackPending) revert InsufficientPending(buybackPending, amountIn);
+        _v4Checks(amountIn);
+        if (!_v4RouteLive()) revert NotConfigured("v4Route");
+        (uint256 spent, uint256 out,) = _runV4(_checkedJob(amountIn, referenceBkrnPerUsdc()));
+        revert BuybackPreview(spent, out);
+    }
+
+    /// @dev `_v4Job` with every v4 pool checked against its limit (V4PriceBeyondLimit when already past it).
+    function _checkedJob(uint256 amountIn, uint256 ref) private view returns (IBkrnV4Swapper.V4Job memory job) {
+        job = _v4Job(amountIn, ref);
+        (uint8 hop, uint160 p, uint160 limit) = _blocked(job);
+        if (hop != 0) revert V4PriceBeyondLimit(p, limit);
+    }
+
     /// @dev Runs `job` through `v4Swapper` (one PoolManager unlock; exact allowance of `amountIn`, reset after);
     ///      (settlement token spent, BKRN received), both measured by balance and required to match what the
-    ///      swapper reports. A revert inside the swap is caught: `BuybackV4Failed`, (0, 0), nothing moved.
-    function _runV4(IBkrnV4Swapper.V4Job memory job) private returns (uint256 spent, uint256 bkrnOut) {
+    ///      swapper reports. A revert inside the swap with data is caught: `BuybackV4Failed`, (0, 0), nothing
+    ///      moved; one without data (a bare revert) or that burnt the call's gas (out of gas at any depth) is
+    ///      re-raised (`V4SwapNoReason`), so a gas-starved call reverts instead of landing without a swap (L-1).
+    function _runV4(IBkrnV4Swapper.V4Job memory job) private returns (uint256 spent, uint256 bkrnOut, bool failed) {
         uint256 usdcBefore = usdc.balanceOf(address(this));
         uint256 bkrnBefore = bkrn.balanceOf(address(this));
         address swapper = address(v4Swapper);
         usdc.forceApprove(swapper, job.amountIn);
+        uint256 gasBefore = gasleft();
         try v4Swapper.swap(v4PoolManager, job) returns (uint256 paid, uint256 out) {
             usdc.forceApprove(swapper, 0);
             uint256 usdcAfter = usdc.balanceOf(address(this));
@@ -431,16 +491,24 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
             // the swapper paid exactly `paid` (<= amountIn, the allowance) and sent `out`; a mismatch = a broken venue
             if (spent != paid || bkrnOut != out) revert V4DeltaNotSettled();
         } catch (bytes memory reason) {
+            // out of gas (at any depth: v4 wraps a hook's revert, so the data may not be empty) leaves this frame
+            // with ~1/64 of its gas; a deliberate revert leaves most of it. Re-raise, never land without a swap.
+            if (reason.length == 0 || gasleft() < gasBefore / 32) revert V4SwapNoReason();
             usdc.forceApprove(swapper, 0);
             emit BuybackV4Failed(job.amountIn, reason);
-            return (0, 0);
+            return (0, 0, true);
         }
     }
 
-    /// @dev The swap job for `amountIn` at the reference `ref` (whole BKRN per whole settlement token): per-hop
-    ///      price limits at the reference minus `maxSlippageBps`, each v4 pool refused when already past its limit.
-    ///      Via ETH the reference is split with `refUsdcPerEthWad`: hop 0 at >= (1 / ethRef) ETH per settlement
-    ///      token, hop 1 at >= ref x ethRef BKRN per ETH (each less the slippage).
+    /// @dev The swap job for `amountIn` at the reference `ref` (whole BKRN per whole settlement token) with
+    ///      per-hop price limits (checked against the pools by `_blocked`).
+    ///      A limit is the worst MARGINAL gross price the hop may reach. It is set so that the hop's NET output
+    ///      at that price (less the pool's static LP fee and, for a hooked pool, `v4HookFeeBps`) still meets the
+    ///      floor, plus 1 bp for rounding (review M-1): a swap stopped at its limit clears the floor, so the
+    ///      unspent input simply stays pending. Via ETH the slippage budget is split so the limits compose:
+    ///      hop 0 >= (1 / ethRef) x (1 - s0) net ETH per USDG, hop 1 >= ref x ethRef x keep / (1 - s0) net BKRN
+    ///      per ETH, s0 = `v4EthHopBps` (0 = slippage / 4). A hook taking more than its allowance only makes the
+    ///      floor refuse (InsufficientOutput).
     function _v4Job(uint256 amountIn, uint256 ref) private view returns (IBkrnV4Swapper.V4Job memory job) {
         job.route = _route;
         job.amountIn = amountIn;
@@ -449,27 +517,64 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
         address u = address(usdc);
         if (job.route.kind == ROUTE_DIRECT) {
             bool zfo = job.route.bkrnPool.currency0 == u;
-            job.limit0 = UniswapV4Lib.priceLimit(Math.mulDiv(ref, keep, BPS), 6, 18, zfo);
-            _checkPoolPrice(job.route.bkrnPool, zfo, job.limit0);
+            job.limit0 = UniswapV4Lib.priceLimit(_gross(Math.mulDiv(ref, keep, BPS), _netPpm(job.route.bkrnPool)), 6, 18, zfo);
             return job;
         }
         uint256 ethRef = refUsdcPerEthWad;
         if (ethRef == 0) revert NotConfigured("ethReference");
-        uint256 minEthPerUsdc = Math.mulDiv(WAD * WAD, keep, ethRef * BPS);
+        uint256 s0 = v4EthHopBps == 0 ? maxSlippageBps / 4 : v4EthHopBps;
+        uint256 minEthPerUsdc = Math.mulDiv(WAD * WAD, BPS - s0, ethRef * BPS); // net
         if (job.route.kind == ROUTE_V4_ETH) {
             bool zfo0 = job.route.ethPool.currency0 == u;
-            job.limit0 = UniswapV4Lib.priceLimit(minEthPerUsdc, 6, 18, zfo0);
-            _checkPoolPrice(job.route.ethPool, zfo0, job.limit0);
+            job.limit0 = UniswapV4Lib.priceLimit(_gross(minEthPerUsdc, _netPpm(job.route.ethPool)), 6, 18, zfo0);
         } else {
-            job.limit0 = UniswapV4Lib.priceLimit(minEthPerUsdc, 6, 18, u < job.route.weth);
+            job.limit0 = UniswapV4Lib.priceLimit(_gross(minEthPerUsdc, PIPS - job.route.v3Fee), 6, 18, u < job.route.weth);
         }
-        job.limit1 = UniswapV4Lib.priceLimit(Math.mulDiv(ref, ethRef * keep, WAD * BPS), 18, 18, true);
-        _checkPoolPrice(job.route.bkrnPool, true, job.limit1);
+        uint256 minBkrnPerEth = Math.mulDiv(Math.mulDiv(ref, ethRef, WAD), keep, BPS - s0); // net
+        job.limit1 = UniswapV4Lib.priceLimit(_gross(minBkrnPerEth, _netPpm(job.route.bkrnPool)), 18, 18, true);
     }
 
-    function _checkPoolPrice(IV4PoolManager.PoolKey memory key, bool zeroForOne, uint160 limit) private view {
+    /// @dev Net output share (ppm) of a v4 pool's gross price: less its static LP fee and, if hooked, v4HookFeeBps.
+    function _netPpm(IV4PoolManager.PoolKey memory key) private view returns (uint256) {
+        uint256 lp = (key.fee & DYNAMIC_FEE_FLAG) != 0 || key.fee >= PIPS ? 0 : key.fee;
+        uint256 h = key.hooks == address(0) ? 0 : uint256(v4HookFeeBps) * 100;
+        return Math.mulDiv(PIPS - lp, PIPS - h, PIPS);
+    }
+
+    /// @dev The gross marginal price whose net (x netPpm) is `netPrice`, plus 1 bp for rounding.
+    function _gross(uint256 netPrice, uint256 netPpm) private pure returns (uint256) {
+        return Math.mulDiv(netPrice, PIPS * (BPS + 1), netPpm * BPS, Math.Rounding.Ceil);
+    }
+
+    /// @dev The first v4 pool of `job` already past its limit (no fill possible): (hop, its sqrtPrice, the limit);
+    ///      hop 1 = the first hop (direct pool or ETH/USDG), 2 = the ETH -> BKRN hop, 0 = none. The v3 hop of
+    ///      ROUTE_V3_WETH is not pre-checked (its pool reverts "SPL" inside the unlock: caught).
+    function _blocked(IBkrnV4Swapper.V4Job memory job) private view returns (uint8, uint160, uint160) {
+        address u = address(usdc);
+        if (job.route.kind == ROUTE_DIRECT) {
+            (bool past, uint160 p) = _past(job.route.bkrnPool, job.route.bkrnPool.currency0 == u, job.limit0);
+            return past ? (1, p, job.limit0) : (0, 0, 0);
+        }
+        if (job.route.kind == ROUTE_V4_ETH) {
+            (bool past0, uint160 p0) = _past(job.route.ethPool, job.route.ethPool.currency0 == u, job.limit0);
+            if (past0) return (1, p0, job.limit0);
+        }
+        (bool past1, uint160 p1) = _past(job.route.bkrnPool, true, job.limit1);
+        return past1 ? (2, p1, job.limit1) : (0, 0, 0);
+    }
+
+    function _past(IV4PoolManager.PoolKey memory key, bool zeroForOne, uint160 limit) private view returns (bool, uint160) {
         uint160 p = UniswapV4Lib.sqrtPriceX96(v4PoolManager, key);
-        if (zeroForOne ? p <= limit : p >= limit) revert V4PriceBeyondLimit(p, limit);
+        return (zeroForOne ? p <= limit : p >= limit, p);
+    }
+
+    /// @notice Which hop of the live v4 route sits past its price limit now: 0 none (or venue v3 / no live route),
+    ///         1 the first hop (USDG -> ETH, or the direct pool), 2 the ETH -> BKRN hop. Via ETH a blocked hop
+    ///         usually means a stale `setEthReference` (services/alerts `buyback_v4_reference_stale`). Reverts only
+    ///         when the reference does (stale oracle).
+    function v4BlockedHop() external view returns (uint8 hop) {
+        if (buybackVenue != VENUE_UNIV4 || !_v4RouteLive()) return 0;
+        (hop,,) = _blocked(_v4Job(0, referenceBkrnPerUsdc()));
     }
 
     /// @notice The v4 buyback route (bkrnPool.currency1 == 0: not set).
@@ -497,6 +602,23 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
         if (venue > VENUE_UNIV4 || (venue == VENUE_UNIV4 && referenceSource == REF_TWAP)) revert BadVenue(venue);
         buybackVenue = venue;
         emit BuybackVenueSet(venue);
+    }
+
+    /// @notice Sets the hook fee allowance priced into hooked hops' limits (<= MAX_V4_HOOK_FEE_BPS) and the via-ETH
+    ///         slippage split (USDG -> ETH hop share, 0 = a quarter of the slippage); together below
+    ///         `maxSlippageBps` so every limit stays feasible. Config admin (timelock) only.
+    function setV4Fees(uint16 hookFeeBps, uint16 ethHopBps) external {
+        _onlyAdmin();
+        if (hookFeeBps > MAX_V4_HOOK_FEE_BPS || !_feesFit(hookFeeBps, ethHopBps, maxSlippageBps)) revert BadBuybackParams();
+        v4HookFeeBps = hookFeeBps;
+        v4EthHopBps = ethHopBps;
+        emit V4FeesSet(hookFeeBps, ethHopBps);
+    }
+
+    /// @dev hook fee + the via-ETH hop share stay strictly below the slippage (a zero allowance always fits).
+    function _feesFit(uint16 hookFeeBps, uint16 ethHopBps, uint16 slippageBps) private pure returns (bool) {
+        uint256 s0 = ethHopBps == 0 ? slippageBps / 4 : ethHopBps;
+        return (hookFeeBps == 0 && ethHopBps == 0) || uint256(hookFeeBps) + s0 < slippageBps;
     }
 
     /// @notice Sets the Uniswap v4 PoolManager (must have code) and clears the route. Config admin only.
@@ -605,7 +727,10 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
         external
     {
         if (!config.hasRole(DEFAULT_ADMIN_ROLE, msg.sender)) revert NotAdmin(msg.sender);
-        if (refBkrnPerUsdcWad_ == 0 || maxSlippageBps_ > MAX_SLIPPAGE_BPS || maxPerCall == 0) {
+        if (
+            refBkrnPerUsdcWad_ == 0 || maxSlippageBps_ > MAX_SLIPPAGE_BPS || maxPerCall == 0
+                || !_feesFit(v4HookFeeBps, v4EthHopBps, maxSlippageBps_)
+        ) {
             revert BadBuybackParams();
         }
         buybackPoolFee = poolFee;

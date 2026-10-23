@@ -9,7 +9,9 @@
 //   v3Weth  USDG -> WETH -> BKRN    v3 factory getPool(USDG, WETH, fee) per tier + SwapRouter02, then the v4 {ETH, BKRN} pool
 // Each candidate is read with StateView getSlot0 / getLiquidity (v4) or the pool's slot0 / liquidity (v3) and quoted
 // for `--size` USDG with the v4 Quoter / v3 QuoterV2 (eth_call). Prints the best route by BKRN out, the deploy-input
-// values (`buyback.v4Route`, `buyback.ethReference`, `buyback.v4Hooks`) and the timelock calls with calldata.
+// values (`buyback.v4Route`, `buyback.ethReference`, `buyback.v4Hooks`) and the timelock calls with calldata. The ETH
+// reference is the v3 USDG/WETH TWAP (`--twap`, default 1800 s), the BKRN/ETH one the median of the picked pool's spot
+// over `--samples` blocks of that span (never a single-block spot; warnings when a source is thin).
 //
 //   bun scripts/buyback-route.ts --bkrn 0x... [--size 1000] [--hook 0x...] [--scan] [--json]
 //   RPC_URL (default https://rpc.mainnet.chain.robinhood.com). --scan: also list the v4 pools initialized with BKRN
@@ -192,6 +194,51 @@ async function scanPools(pc: PublicClient, manager: Address, token: Address): Pr
   return out;
 }
 
+/** |a - b| / b in bps. */
+export function divergenceBps(a: bigint, b: bigint): number {
+  if (b === 0n) return Number.POSITIVE_INFINITY;
+  const d = a > b ? a - b : b - a;
+  return Number((d * 10_000n) / b);
+}
+
+/** Median (lower middle) of a non-empty list; 0 for an empty one. */
+export function median(xs: bigint[]): bigint {
+  if (xs.length === 0) return 0n;
+  const s = xs.slice().sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  return s[Math.floor((s.length - 1) / 2)] as bigint;
+}
+
+/** v3 arithmetic-mean tick over `secs` -> whole USDG per whole WETH (WAD). */
+async function v3TwapUsdgPerEth(pc: PublicClient, pool: Address, weth: Address, usdg: Address, secs: number): Promise<bigint> {
+  const [ticks] = await pc.readContract({ address: pool, abi: uniswapV3PoolAbi, functionName: "observe", args: [[secs, 0]] });
+  const delta = (ticks[1] as bigint) - (ticks[0] as bigint);
+  let mean = delta / BigInt(secs);
+  if (delta < 0n && delta % BigInt(secs) !== 0n) mean -= 1n; // round toward -infinity like OracleLibrary
+  const raw1per0 = 1.0001 ** Number(mean); // token1 per token0, raw
+  const wethIs0 = BigInt(weth) < BigInt(usdg);
+  const usdgPerEth = wethIs0 ? (raw1per0 * 1e18) / 1e6 : 1e18 / 1e6 / raw1per0; // whole USDG per whole WETH
+  return BigInt(Math.round(usdgPerEth * 1e6)) * 10n ** 12n;
+}
+
+/** sqrtPriceX96 of `key` at up to `n` blocks spread over the last ~`secs` seconds (blocks the RPC lacks: skipped). */
+async function sampledSpots(pc: PublicClient, stateView: Address, key: PoolKey, n: number, secs: number): Promise<bigint[]> {
+  const head = await pc.getBlock();
+  const back = await pc.getBlock({ blockNumber: head.number > 1000n ? head.number - 1000n : 0n });
+  const perSec = Number(head.number - back.number) / Math.max(Number(head.timestamp - back.timestamp), 1);
+  const step = BigInt(Math.max(Math.floor((perSec * secs) / Math.max(n - 1, 1)), 1));
+  const out: bigint[] = [];
+  for (let i = 0; i < n; i++) {
+    const blockNumber = head.number - step * BigInt(i);
+    try {
+      const s0 = await pc.readContract({ address: stateView, abi: stateViewAbi, functionName: "getSlot0", args: [poolId(key)], blockNumber });
+      if (s0[0] > 0n) out.push(s0[0]);
+    } catch {
+      // state not available on this RPC (not an archive node)
+    }
+  }
+  return out;
+}
+
 // ------------------------------------------------------------------------------------------- main
 
 function arg(name: string): string | undefined {
@@ -272,12 +319,36 @@ async function main(): Promise<number> {
     }
   }
   const pick = best(cands);
+  // references (review 2026-10-23 L-3): never one block's spot. ETH/USD = the TWAP (`--twap` s, default 1800) of
+  // the deepest v3 USDG/WETH pool; BKRN/ETH = the median spot of the PICKED BKRN pool over a few recent blocks
+  // (`--samples`, spread over ~`--twap` s; a non-archive RPC keeps recent state only: missing blocks are skipped)
+  const twapSec = Number(arg("twap") ?? "1800");
   const deepestEth = v3Pools.slice().sort((a, b) => (b.liquidity > a.liquidity ? 1 : -1))[0];
-  const usdcPerEthWad = deepestEth?.usdgPerEth ?? (ethUsdg[0] ? spotWad(ethUsdg[0].state.sqrtPriceX96, true, 18, 6) : 0n);
-  const bkrnPerEthWad = ethBkrn[0] ? spotWad(ethBkrn[0].state.sqrtPriceX96, true, 18, 18) : 0n;
+  let usdcPerEthWad = 0n;
+  const warnings: string[] = [];
+  if (deepestEth) {
+    usdcPerEthWad = await v3TwapUsdgPerEth(pc, deepestEth.pool, weth, usdg, twapSec).catch(() => 0n);
+    if (usdcPerEthWad === 0n) {
+      warnings.push(`no ${twapSec}s TWAP on v3 ${deepestEth.pool}: ETH reference from its spot`);
+      usdcPerEthWad = deepestEth.usdgPerEth;
+    } else if (divergenceBps(usdcPerEthWad, deepestEth.usdgPerEth) > 100) {
+      warnings.push(`ETH spot ${formatUnits(deepestEth.usdgPerEth, 18)} is >1% off its TWAP ${formatUnits(usdcPerEthWad, 18)}: check before proposing`);
+    }
+  } else if (ethUsdg[0]) {
+    usdcPerEthWad = spotWad(ethUsdg[0].state.sqrtPriceX96, true, 18, 6);
+    warnings.push("no v3 USDG/WETH pool: ETH reference from a v4 spot (single source)");
+  }
+  const bkrnEthKey = pick && pick.kind !== "direct" ? pick.bkrnPool : ethBkrn[0]?.key;
+  let bkrnPerEthWad = 0n;
+  if (bkrnEthKey) {
+    const samples = await sampledSpots(pc, v4.stateView, bkrnEthKey, Number(arg("samples") ?? "5"), twapSec);
+    bkrnPerEthWad = median(samples.map((sp) => spotWad(sp, true, 18, 18)));
+    if (samples.length < 3) warnings.push(`BKRN/ETH reference from ${samples.length} block(s) only (RPC history): re-check before proposing`);
+  }
   const hooks = pick ? [pick.bkrnPool.hooks, pick.ethPool?.hooks ?? zeroAddress].filter((h) => h !== zeroAddress) : [];
 
   const report = {
+    warnings,
     chainId,
     bkrn,
     sizeUsdg: sizeUsd.toString(),
@@ -328,7 +399,9 @@ async function main(): Promise<number> {
       console.log(JSON.stringify(report.best.deployInput, null, 2));
       console.log("timelock calls on BkrnFeeRouter (schedule + execute through the TimelockController):");
       for (const t of report.best.timelockCalls) console.log(`  ${t.fn}\n    ${t.data}`);
-      console.log("Set maxSlippageBps above the hook's fee (Pons: ~1-3.5% observed on 2026-10-23) and refresh the ETH reference near market.");
+      for (const w of warnings) console.log(`WARN ${w}`);
+      console.log("Set setV4Fees(hookFeeBps, ...) to the hook's fee (Pons: ~1-3.5% observed on 2026-10-23), maxSlippageBps above it, and");
+      console.log("refresh setEthReference whenever ETH moves more than (maxSlippageBps / 4 - 5 bps) from it (RUNBOOK); alert buyback_v4_reference_stale.");
     } else {
       console.log("no candidate route quotes (BKRN not graduated yet, or no pool with liquidity)");
     }

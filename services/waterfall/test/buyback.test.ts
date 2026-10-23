@@ -61,7 +61,7 @@ describe("buyback decision (pure)", () => {
   });
 
   test("reference source names follow BkrnFeeRouter REF_FIXED / REF_TWAP / REF_ATTESTED", () => {
-    expect([0, 1, 2, 3].map(referenceSourceName)).toEqual(["fixed", "twap", "attested", "unknown"]);
+    expect([0, 1, 2, 3, 4].map(referenceSourceName)).toEqual(["fixed", "twap", "attested", "fixedEth", "unknown"]);
   });
 
   test("a quote that rounds minOut to zero is skipped (the contract rejects minBkrnOut == 0)", () => {
@@ -202,6 +202,95 @@ describe("BuybackRunner", () => {
     expect(await runner.tick()).toEqual({ status: "failed", error: "v4 swap failed (0xdeadbeef)" });
     expect(chain.pending).toBe(usd("50"));
     expect(await runner.tick()).toEqual({ status: "skipped", reason: "cooldown" });
+  });
+
+  function v4(now = { t: 1_000_000 }) {
+    const s = setup(now);
+    s.chain.venue = 1;
+    s.chain.v4Ready = true;
+    return s;
+  }
+
+  test("v4: minBkrnOut from the simulated fill, scaled by amountIn / spent (review M-2)", async () => {
+    const { chain, runner } = v4();
+    chain.pending = usd("100");
+    chain.v4SpentBps = 5000n; // the limit stops the swap at half the input
+    const out = await runner.tick();
+    expect(out.status).toBe("bought");
+    // simulated: 50 USDG -> 1000 BKRN; 1% keeper slippage -> 990; x 100 / 50 -> 1980 (the router pro-rates it back)
+    expect(chain.previews).toEqual([usd("100")]);
+    expect(chain.executed).toEqual([{ amountIn: usd("100"), minOut: bkrn(1980n) }]);
+  });
+
+  test("v4: size-dependent failures halve the size with a growing cooldown; a success resets (review M-1)", async () => {
+    const now = { t: 1_000_000 };
+    const { chain, runner } = v4(now);
+    chain.pending = usd("100");
+    chain.v4MaxSize = usd("30"); // the pool only absorbs 30 USDG within the limits
+    expect((await runner.tick()).status).toBe("failed"); // simulates 100: fails in the unlock, nothing sent
+    expect(runner.v4SizeCap).toBe(usd("50"));
+    expect(await runner.tick()).toEqual({ status: "skipped", reason: "cooldown" });
+    now.t += 30_001;
+    expect((await runner.tick()).status).toBe("failed"); // 50
+    expect(runner.v4SizeCap).toBe(usd("25"));
+    now.t += 30_001; // the second failure holds 2 x the cooldown
+    expect(await runner.tick()).toEqual({ status: "skipped", reason: "cooldown" });
+    now.t += 30_000;
+    expect((await runner.tick()).status).toBe("bought"); // 25 lands
+    expect(chain.executed).toEqual([{ amountIn: usd("25"), minOut: bkrn(495n) }]);
+    expect(runner.v4SizeCap).toBeNull();
+    expect(chain.previews).toEqual([usd("100"), usd("50"), usd("25")]);
+  });
+
+  test("v4: halving stops at the threshold; the cooldown grows to x16 at most", async () => {
+    const now = { t: 1_000_000 };
+    const { chain, runner } = v4(now);
+    chain.pending = usd("100");
+    chain.v4MaxSize = usd("1");
+    for (let i = 0; i < 8; i++) {
+      expect((await runner.tick()).status).toBe("failed");
+      now.t += 30_000 * 16 + 1;
+    }
+    expect(runner.v4SizeCap).toBe(usd("10")); // the buyback threshold
+    expect(chain.executed).toEqual([]);
+  });
+
+  test("v4: a landed tx that did not swap counts as failed and halves (BuybackV4Failed)", async () => {
+    const { chain, runner } = v4();
+    chain.pending = usd("100");
+    chain.v4Fails = true;
+    expect(await runner.tick()).toEqual({ status: "failed", error: "v4 swap failed (0xdeadbeef)" });
+    expect(runner.v4SizeCap).toBe(usd("50"));
+  });
+
+  test("v4: no fill (BuybackNoFill) is not bought, and does not halve (review L-2)", async () => {
+    const { chain, runner } = v4();
+    chain.pending = usd("100");
+    chain.v4NoFill = true;
+    const out = await runner.tick();
+    expect(out.status).toBe("failed");
+    expect(runner.v4SizeCap).toBeNull();
+  });
+
+  test("v4: simulated output below the floor is not sent and halves", async () => {
+    const { chain, runner } = v4();
+    chain.pending = usd("100");
+    chain.quoteWad = 15n * WAD; // pool far below the 19 BKRN/USDG floor
+    expect((await runner.tick()).status).toBe("failed");
+    expect(chain.executed).toEqual([]);
+    expect(runner.v4SizeCap).toBe(usd("50"));
+  });
+
+  test("v4: a size-independent simulation revert keeps the plain cooldown and the size", async () => {
+    const now = { t: 1_000_000 };
+    const { chain, runner } = v4(now);
+    chain.pending = usd("100");
+    chain.previewThrows = true;
+    expect((await runner.tick()).status).toBe("failed");
+    expect(runner.v4SizeCap).toBeNull();
+    now.t += 30_001;
+    chain.previewThrows = false;
+    expect((await runner.tick()).status).toBe("bought");
   });
 
   test("pending read fails: failed, cooled down (never throws into the loop)", async () => {

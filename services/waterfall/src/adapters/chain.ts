@@ -19,7 +19,7 @@ import { engineWithdrawableUsd } from "../domain/recall";
 import { type PremiumSplit, amountsToSplit } from "../domain/split";
 import { type BookRef, bookStateName } from "../kit/books";
 import { scanEvents } from "../kit/logs";
-import type { TxSender } from "../kit/tx";
+import { type TxSender, describeRevert } from "../kit/tx";
 import type { PoolQueueSnapshot } from "../domain/pool";
 import type { PoolKeeperChain } from "../poolKeeper";
 import type { BuybackChain, DistributedLog, FeeForwarding, KeeperChain, KeeperSnapshot, SettlementChain, SettlementReceivedLog, SplitParams } from "../ports";
@@ -457,6 +457,20 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain, Buyb
     }
   }
 
+  async previewBuyback(amountIn: bigint): Promise<{ usdcIn: bigint; bkrnOut: bigint }> {
+    try {
+      await this.o.sender.simulate({ address: this.feeRouter, abi: bkrnFeeRouterAbi, functionName: "previewBuyback", args: [amountIn], label: `previewBuyback(${amountIn})` });
+    } catch (err) {
+      const info = describeRevert(err, bkrnFeeRouterAbi);
+      if (info.errorName === "BuybackPreview" && info.args) {
+        const [usdcIn, bkrnOut] = info.args as readonly [bigint, bigint];
+        return { usdcIn, bkrnOut };
+      }
+      throw err;
+    }
+    throw new Error("previewBuyback returned instead of reverting BuybackPreview");
+  }
+
   async quoteBuyback(amountIn: bigint): Promise<bigint | null> {
     // the v4 route has no on-chain quote here (the v3 QuoterV2 would price another pool): fall back to the floor
     if (this.buybackVenue === 1) return null;
@@ -529,11 +543,12 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain, Buyb
     const l = mine(parseEventLogs({ abi: bkrnFeeRouterAbi, eventName: "BuybackExecuted", logs: out.receipt.logs }));
     const failed = legacy ? undefined : mine(parseEventLogs({ abi: bkrnFeeRouterAbi, eventName: "BuybackV4Failed", logs: out.receipt.logs }));
     const deferred = legacy ? undefined : mine(parseEventLogs({ abi: bkrnFeeRouterAbi, eventName: "BuybackDeferred", logs: out.receipt.logs }));
+    const nofill = legacy ? undefined : mine(parseEventLogs({ abi: bkrnFeeRouterAbi, eventName: "BuybackNoFill", logs: out.receipt.logs }));
     return {
       hash: out.hash,
       usdcIn: l?.args.usdcIn ?? null,
       bkrnOut: l?.args.bkrnOut ?? null,
-      v4Outcome: failed ? ("failed" as const) : deferred ? ("deferred" as const) : null,
+      v4Outcome: failed ? ("failed" as const) : deferred ? ("deferred" as const) : nofill ? ("nofill" as const) : null,
       v4Reason: failed?.args.reason ?? null,
     };
   }

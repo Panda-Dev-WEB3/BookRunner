@@ -108,8 +108,11 @@ contract BkrnV4Swapper is IBkrnV4Swapper, IV4UnlockCallback {
             if (used != ethIn) revert V4HopPartialFill(ethIn, used);
             out = o;
             // ROUTE_V4_ETH: hop 0's ETH credit (+ethIn) is closed by hop 1 (-ethIn); nothing moves
-            if (job.route.kind == ROUTE_V3_WETH && IV4PoolManager(m).settle{value: ethIn}() != ethIn) {
-                revert V4DeltaNotSettled();
+            if (job.route.kind == ROUTE_V3_WETH) {
+                // sync is global: reset it to native so a hook's sync(token) during hop 1 cannot turn this native
+                // settle into an ERC-20 one (review I-1)
+                IV4PoolManager(m).sync(NATIVE);
+                if (IV4PoolManager(m).settle{value: ethIn}() != ethIn) revert V4DeltaNotSettled();
             }
         }
         if (out > 0) IV4PoolManager(m).take(address(bkrn), feeRouter, out);
