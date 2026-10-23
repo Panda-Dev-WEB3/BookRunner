@@ -740,6 +740,30 @@ first-loss slice below its 10%. The indexer, api and app label the pool's loss o
 retired book's "written off". The **charter** service and api validators mirror `BAD_PREMIUM` /
 `NO_POOL`; new charters default to `ifFromPool`.
 
+Trading on the in-house engine (2026-10, §5.1) in the services: the **api** serves `trade.markets` / `market` /
+`position` / `quote` and the prepared `trade.deposit` / `withdraw` / `order` / `close` (chain reads: engine config,
+state, caps, funding, loss budget, the stored price, the split gate; the signed price from the oracle's Redis
+bundle). The **indexer** follows the PoolEngine (`Trade` / `MarginChanged` / `Liquidation` / `ClosedOut`) into
+`engine_positions` (market, trader, size after the newest event). The **waterfall** keeper runs the liquidation keeper
+(`liquidationKeeper.ts`, KEEPER role key, the keeper's serialised sender, its own cadence: 10 s while a market trades,
+60 s idle / off-hours). It reads the open positions from `engine_positions` and every market and position in ONE
+`aggregate3`, applies the engine's rule off-chain at the freshest signed price (maintenance; `min(2 x IM, 100 %)` while
+held; maintenance on a settled market, audit Task 7a), then sends `liquidate(marketId, trader, priceData)` for a
+liquidatable position and `forceClose(marketId, trader, priceData)` for the rest of a settled market or an open
+wind-down close-out. Races (`NotLiquidatable` / `NoPosition` at the estimate) are skipped. Gas policy (review I-3):
+candidates by what is at stake (max of reward, half the nominal fee, and bad debt); one that pays for itself always
+goes; dust above water is skipped; under water it goes when its cost stays below the bad debt at stake, whatever the
+hourly budget of loss-making gas when the bad debt is at least `WATERFALL_LIQ_BAD_DEBT_OVERRIDE_USD`; reverted gas
+counts. ETH/USD is configured (`WATERFALL_LIQ_ETH_USD`, required on mainnet). Positions are read in batches and paged
+across passes beyond `WATERFALL_LIQ_MAX_BATCHES`; every row is reconciled with `positionOf` every 10 min, and an index
+older than the engine watch backfills the engine's history once (`indexer:engine-backfill`). Its status (`KEYS.liquidationKeeper`: backlog with reasons, failure run) feeds the **alerts**
+(`liquidation_backlog`, `keeper_liquidation_failing`, `liquidation_coverage`) and the **api** `/health` `liquidationKeeper`. trader-sim keeps
+liquidating only its own sim positions. The api refuses an order above the leverage a position holds through a session
+close (`TRADE_REFUSE_UNHOLDABLE_LEVERAGE`, auto = on mainnet), and then also caps a margin withdrawal so the position stays
+at or below that leverage (review I-2); the web states the rule next to the order. The wallet reads `trade.quote` /
+`trade.position` are cached 2 s per (market, wallet), weigh 5 in a tRPC batch, travel unbatched from the web and have
+their own nginx zone (`bookrunner_wallet`, 3/s per IP); the signed price source is re-read at most once a second.
+
 Queues/channels/keys: `packages/shared/src/queues.ts`. Events: `packages/shared/src/events.ts`.
 Data model: `packages/db/src/schema.ts` (tables of Backend §4 plus extensions).
 
@@ -753,8 +777,63 @@ roots and "verify proof", one invest panel to deposit, withdraw and collect), In
 withdraw / cancel / collect, queue and epoch status, observed share price and premium history, exposure per market,
 first-loss slice, loss order), Charters (file form with mandate
 editor, status, jury verdict, committee votes), Committee (vote), Risk (all books' limit states,
-kill log), Docs/legal footer ("Bookrunner is software; not a fund, adviser, broker or venue operator
-of record"; "Not available to US persons"). Copy rules: §6.
+kill log), Trade (`/trade`, `/trade/:marketId`: §5.1), Docs/legal footer ("Bookrunner is software; not a fund,
+adviser, broker or venue operator of record"; "Not available to US persons"). Copy rules: §6.
+
+### 5.1 Trading on the in-house engine (2026-10, Plan B2)
+
+Single-stock perpetual markets (first NVDA) run on the `PoolEngine` (§2.8) instead of Orderly: one market per engine
+book, the book's MM capital is the pool, its IF absorbs bad debt first. No contract change; everything below is
+API + web over the existing trader surface (`depositMargin`, `withdrawMargin`, `trade(..., priceData)`).
+
+- **Markets** (`trade.markets`, optional procedure listed in `/health` `capabilities`; `trade.market`): the engine
+  books in state Live or Retiring, market id from `PoolEngineAdapter.marketId()`. Per market: price and its age, the
+  session, the 1-unit buy / sell fill, spread / skew / taker fee, funding per day (`fundingRatePerDayWad`), open
+  interest per side and the pool's net exposure, inventory cap (per-side OI cap) and quote cap with the room left
+  per side (`min(invCap - sideOI, quoteCap ∓ traders' net)`), insurance and pool cash, initial / maintenance /
+  off-hours margin and the leverage each allows. The page shows "No market open yet" while the list is empty
+  (mainnet before the first engine book goes live).
+- **Price** (pull oracle, LOW_GAS.md §1): a trade fills at the price it carries. The API takes the freshest signed
+  print of the market's underlying (= the adapter's price id) from the oracle's bundle (`KEYS.oracleBundle`, else the
+  per-key messages; a bundle for another chain / oracle is ignored), re-encodes it alone as `priceData`, and uses it
+  when it is newer than the stored price (`AttestedOracle.update` skips a not-newer entry). Quotes use the engine's
+  `_fillPrice` formula off-chain on that price (`quotePrice` would quote the stored price, old by design on a quiet
+  pull market); `services/api/src/domain/engine.ts` mirrors `PoolEngineMath` integer for integer (tests use vectors of
+  `PoolEngine.t.sol`). A carried price must satisfy `publishedAt >= block.timestamp - min(maxPriceAge, 60 s,
+  maxTradePriceAge)` (15 s on mainnet) when mined: the API refuses to prepare within 3 s of that bound and returns the
+  deadline (`tradableUntil`); the order panel counts it down and offers to prepare again once it has passed.
+- **Session** (strictest first): `closed` (book not Live / Retiring), `split_window` (audit N-1: the price predates a
+  multiplier change, no voluntary trade), `no_fresh_price`, `off_hours` (held price: no trade fills, closes
+  included; top-ups only), `split_close_only` (change pending: no new risk), `reduce_only` (engine reduce-only,
+  wind-down, a Retiring book, or the M-3 loss budget spent this period), `open`. The split gate is read at the carried
+  price's basis (`StockTokenRegistry.splitGate`; the list rounds the basis down to 30 s for one cached read).
+- **Checks before building** (`trade.quote`, `trade.order`, `trade.close`): the session gates above, then a
+  simulation of `PoolEngine._trade` (funding + realised PnL settled against margin, taker fee, pool net exposure
+  ≤ quote cap and side OI ≤ inventory cap for new risk, equity ≥ initial margin for new risk = maximum leverage
+  `1e4 / initialMarginBps`, a reduction must not be left liquidatable). Pool-level `PoolUndercollateralized` is not
+  simulated (the engine may still refuse; the web decodes the revert). A position above the holdable leverage
+  (`1e4 / min(2 × IM, 100 %)`, 5x by default) is refused on mainnet (`TRADE_REFUSE_UNHOLDABLE_LEVERAGE` auto; `UNHOLDABLE_LEVERAGE`)
+  and warned elsewhere: it is liquidatable at the closing price of the next session close.
+- **Position** (`trade.position`): valued at the trade price: entry, margin, equity (margin + PnL − unsettled
+  funding), margin ratio, leverage, liquidation price at maintenance and at the off-hours requirement. Liquidation
+  price: the closed form `long: (E·1e4 − (M − F)·1e34/s) / (1e4 − bps)`, `short: (E·1e4 + (M − F)·1e34/s) / (1e4 + bps)`
+  brackets it, a bisection on the engine's own predicate (`_isLiquidatable`, floor / ceil rounding) returns the
+  highest liquidatable price of a long, the lowest of a short.
+- **Prepared transactions** (as §4: the API encodes, the wallet signs): `trade.deposit` = [settlement-token approve of
+  exactly the amount to the engine when the allowance is short, `depositMargin`] (always allowed);
+  `trade.withdraw` = `withdrawMargin`, at most the margin when flat and, with a position, at most the safe maximum
+  (initial margin kept after a 1 % adverse move, funding settled first; refused off-hours or with a split pending /
+  in its window); with a position the signed price is relayed first (`AttestedOracle.update(priceData)`,
+  permissionless) because `withdrawMargin` has no `priceData` overload and needs a stored price at most 60 s old;
+  `trade.order` = `trade(marketId, sizeDelta, acceptablePriceWad, priceData)` with `acceptablePriceWad` = fill ±
+  the slippage (default 0.5 %, 0.01-5 %); `trade.close` = a trade of −size (or a portion), allowed reduce-only.
+- **Verification in the browser** (`@bookrunner/shared/preparedTx`, TxRunner): allowed are `depositMargin` /
+  `withdrawMargin` (exactly the entered amount), the 4-argument `trade` only (the entered signed size, a real price
+  limit: never `max uint` for a buy or `0` for a sell) and `AttestedOracle.update`; destinations are the PoolEngine an
+  engine book's adapter names on chain (`Book.components().adapter` → `engine()`) and the oracle of the
+  BookrunnerConfig, never addresses from the API. Engine reverts (`OffHours`, `StalePrice`, `PriceNotAcceptable`,
+  `ExposureCap`, `InsufficientMargin`, `SplitPending`, `SplitWindow`, ...) decode to plain reasons.
+- Not built: a price chart (the API serves no oracle price history yet).
 
 ## 6. Copy rules (Overview §10, enforced by `scripts/check-copy.ts`)
 

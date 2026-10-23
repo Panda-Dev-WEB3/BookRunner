@@ -476,6 +476,69 @@ can redo it during the timelock delay from the published quote.
 - Stored-multiplier mode (devnet / testnet): give engine markets a close-only period by calling
   `setNextMultiplierAnchor(token, new)` before `setMultiplier(token, new)`, and clear it afterwards.
 
+### Opening the first in-house engine market on mainnet (Plan B2: NVDA on the PoolEngine)
+
+The trading page (`/trade`, ARCHITECTURE §5.1) lists an engine market as soon as its book is Live; until then it
+shows "No market open yet". Guarded launch: small, insured, watched.
+
+1. [ ] **Liquidation keeper running.** It is a job of the waterfall service (`bookrunner@mainnet`, no extra unit): the
+       KEEPER role key (`KEEPER_PRIVATE_KEY` or KMS via roleSigner, the same serialised sender as the other keeper
+       duties; never a trader-sim key).
+       - **Trader set.** The indexer follows the engine's `Trade` / `MarginChanged` / `Liquidation` / `ClosedOut` into
+         `engine_positions` (migration `0003_engine_positions`, applied by update.sh). Run this indexer version before
+         the first market opens: an index that existed before backfills the engine's history once (cursor
+         `indexer:engine-backfill`, engine-only `eth_getLogs` from the deployment's start block, one batch per step;
+         the log says "engine positions backfill complete"). The keeper also reconciles every row (size 0 included)
+         with `positionOf` on chain at start and every `WATERFALL_LIQ_RECONCILE_SECONDS` (600 s), repairing a stale size.
+       - **Passes.** Every `WATERFALL_LIQ_INTERVAL_SECONDS` (10 s) while a market trades or closes out, every
+         `WATERFALL_LIQ_IDLE_INTERVAL_SECONDS` (60 s) with no open position or every market held / settled. Open
+         positions are read `WATERFALL_LIQ_BATCH_SIZE` (500) per Multicall3 `aggregate3`, at most
+         `WATERFALL_LIQ_MAX_BATCHES` (10) per pass; beyond that they are paged across passes (alert
+         `liquidation_coverage`). The engine's rule is applied off-chain at the freshest signed price (maintenance in
+         session, 2x initial margin while held, maintenance on a settled market); `liquidate(marketId, trader,
+         priceData)` goes out only for a position liquidatable there, `forceClose(marketId, trader, priceData)` for the
+         rest of a settled market or an open wind-down close-out. A revert at the estimate (`NotLiquidatable`,
+         `NoPosition`: someone else was first) is skipped; a stale or held price is retried next pass.
+       - **Gas policy** (candidates ordered by what is at stake, max of reward and bad debt): a liquidation that pays
+         for itself (cost <= reward) always goes out; **dust** (reward below the cost, not under water) is skipped
+         until it is under water; an under-water position goes out if its cost stays below the bad debt + reward at
+         stake + `WATERFALL_LIQ_GAS_MARGIN_USD` (0.50) and `WATERFALL_LIQ_MAX_TX_COST_ETH` (0.002), whatever the hourly
+         budget when its bad debt is at least `WATERFALL_LIQ_BAD_DEBT_OVERRIDE_USD` (50), else within the hourly budget
+         `WATERFALL_LIQ_HOURLY_GAS_ETH` (0.01) of loss-making gas (the cost above the reward; reverted transactions
+         count in full). Bound: the budget can only hold back under-water positions below 50 USD of bad debt each, for
+         the rest of the hour; the IF covers them. **`WATERFALL_LIQ_ETH_USD` is required** (USD per ETH): the mainnet
+         preflight and the waterfall refuse to start without it (the stack reads no ETH/USD feed; refresh it when ETH
+         moves by 2x). Keep the keeper address funded.
+       - **Check.** The waterfall log shows "liquidation keeper running"; `/health` `liquidationKeeper` (age, open
+         positions, backlog, failing attempts); alerts `liquidation_backlog` (a liquidatable position still open after
+         `ALERT_LIQ_BACKLOG_SECONDS` 60 s, critical at 5x; the summary says gas policy / dust / price / failing
+         transaction), `keeper_liquidation_failing` (`ALERT_LIQ_FAILURES` 3 failed attempts, or no / a stale status while
+         an engine book is live) and `liquidation_coverage`. On a page: read the waterfall log; if the gas policy holds a
+         position back, raise the budget or the override; anyone may also call `liquidate` by hand with the oracle's
+         bundle.
+2. [ ] **Charter with venue PoolEngine** (`venue` 1 = `BRTypes.VENUE_POOL_ENGINE`), as step 11 above: underlying the
+       NVDA Stock Token (`tokenUnderlying(NVDA)`), an engine symbol (e.g. `NVDA-PERP`, not Orderly's
+       `PERP_NVDA_USDC`), `takerFeeBps` ≤ 100 (`MAX_ENGINE_TAKER_FEE_BPS`), `ifTargetUsd` ≥ `venueMinIfUsd(1)` =
+       **10,000 USDG** (`IF_BELOW_VENUE_MIN` otherwise; size it so the IF covers a gap of the off-hours requirement on
+       the whole cap, i.e. ≥ 20 % of `maxInventoryUsd` with the default 10 % initial margin), and a **small
+       `mandate.maxInventoryUsd`** (e.g. 10,000-25,000 USDG): it becomes the engine's per-side open-interest cap and
+       funding normaliser (`inventoryCapUsd`), the desk's quote cap is clamped to it, so it bounds what the pool can
+       owe. `maxSkewBps` ≤ `minQuoteWidthBps / 2` (audit M-3); `killAtDrawdownBps` sets the per-period loss budget.
+       With `ifFromPool`, check `InsurancePool.maxAllocation(bookId, market) >= ifTargetUsd` before `subscriptionEnds`
+       (step 13b).
+3. [ ] After the window closes ops-venue deploys the IF and the MM capital to the engine (`depositToVenue`). Check on
+       `/trade` in session hours: the market is listed, "Open", the signed price under 15 s old
+       (`maxTradePriceAge`), room left = the cap, insurance fund = `ifTargetUsd`. Prepare a tiny order from a test
+       wallet and read the "you will sign" summary (PoolEngine address = `adapter.engine()`, the size you typed, a
+       slippage limit) before sending.
+4. [ ] **Audit N-1 (splits).** Positions are per share and never rebased. Before any NVDA split or multiplier change,
+       pre-approve it (`setNextMultiplierAnchor`): the market turns close-only ("Close-only (split pending)" on
+       `/trade`), and in the window no voluntary trade fills ("Paused (split)"). Re-anchor right after the first live
+       post-split print (Corporate actions above), or wind the market down first. A split announced while open
+       interest is large is a reason to lower the cap (re-mandate) beforehand.
+5. [ ] Raise `maxInventoryUsd` only through a re-mandate after a period of observed marks, IF stable, no
+       `LossBudgetBreached`, and the keeper proven (step 1).
+
 ## Operations
 
 - **Kill switch for new business**: `BookrunnerConfig.setNewBooksPaused(true)` (GUARDIAN or timelock)

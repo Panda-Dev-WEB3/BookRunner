@@ -102,6 +102,7 @@ export function busNames(ns: string = BUS_NS) {
       venueSymbolIssues: `${p}:ops-venue:symbol-issues`, // JSON VenueSymbolIssuesMsg (ops-venue, every book poll, TTL)
       oracleVenueFeed: `${p}:oracle:venue-feed`, // JSON OracleVenueFeedMsg (oracle, every tick, TTL; also PUBLISHed on the same name)
       builderFeedStatus: `${p}:ops-venue:builder-feed`, // JSON BuilderFeedStatusMsg (ops-venue live builder price push, TTL)
+      liquidationKeeper: `${p}:keeper:liquidations`, // JSON LiquidationKeeperStatus (waterfall liquidation keeper, every pass, TTL; alerts + api /health)
       venueEverListed: `${p}:ops-venue:ever-listed`, // SET of venue symbols ever seen listed (survives restarts: listed -> missing, never awaiting)
       supervisorStatus: `${p}:supervisor:status`, // JSON SupervisorStatus (scripts/dev.ts)
     },

@@ -38,4 +38,9 @@ export function loadIndexerEnv(source: Record<string, string | undefined> = proc
 export const CURSORS = {
   protocol: "indexer:protocol", // MarketCharter, RiskCommittee, BookFactory, MarkRegistry
   books: "indexer:books", // every book's Book, Senior, Junior, RevenueRouter, MMMandate
+  /**
+   * Review I-5: the PoolEngine's position events (engine_positions) from the deployment's start block up to the protocol
+   * cursor, for an index that existed before the engine was watched (engine-only eth_getLogs, one batch per step).
+   */
+  engineBackfill: "indexer:engine-backfill",
 } as const;

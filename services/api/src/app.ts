@@ -1,5 +1,6 @@
 // Hono app: /health (+ ops-venue's Orderly listing status), tRPC at /trpc, REST mirror at /v1, read-only MCP at /mcp, CORS for apps/web.
 import { KEYS, parseVenueMarkets, type VenueMarketMsg, venueMarketGate } from "@bookrunner/shared";
+import { parseLiquidationStatus } from "@bookrunner/shared/liquidationKeeper";
 import { trpcServer } from "@hono/trpc-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
@@ -32,8 +33,15 @@ export const MAX_TRPC_BATCH = 10;
 export const TRPC_HEAVY_PREFIXES = ["receipts."] as const;
 export const TRPC_HEAVY_WEIGHT = MAX_TRPC_BATCH;
 
+/**
+ * Review I-7: the wallet reads of the trading page (chain reads per wallet, cached 2 s) weigh this much, so a batch
+ * carries at most two of them; nginx also limits them per IP in their own zone (bookrunner_wallet).
+ */
+export const TRPC_WALLET_READS = ["trade.quote", "trade.position"] as const;
+export const TRPC_WALLET_WEIGHT = 5;
+
 export function trpcBatchWeight(paths: string[]): number {
-  return paths.reduce((w, p) => w + (TRPC_HEAVY_PREFIXES.some((h) => p.startsWith(h)) ? TRPC_HEAVY_WEIGHT : 1), 0);
+  return paths.reduce((w, p) => w + (TRPC_HEAVY_PREFIXES.some((h) => p.startsWith(h)) ? TRPC_HEAVY_WEIGHT : (TRPC_WALLET_READS as readonly string[]).includes(p) ? TRPC_WALLET_WEIGHT : 1), 0);
 }
 
 /**
@@ -58,7 +66,7 @@ export function pathAllowed(pathname: string, route: string | undefined): boolea
  * them this build serves as `capabilities`, so the web never probes one that is absent. The full
  * procedure list (and uptime) is only in `/health?verbose` with the admin bearer token.
  */
-export const OPTIONAL_PROCEDURES = ["book.fills", "book.hedges", "receipts.list", "pool.overview"] as const;
+export const OPTIONAL_PROCEDURES = ["book.fills", "book.hedges", "receipts.list", "pool.overview", "trade.markets"] as const;
 
 /** /status is computed at most this often per process (nginx micro-caches it too); public, so cheap. */
 export const STATUS_CACHE_MS = 15_000;
@@ -100,6 +108,39 @@ export async function orderlyListingHealth(kv: Kv, timeoutMs = 500): Promise<Ord
   }
 }
 
+/** /health `liquidationKeeper`: the waterfall liquidation keeper (KEYS.liquidationKeeper, in-house engine markets), counts only. */
+export interface LiquidationKeeperHealth {
+  ageSec: number;
+  enabled: boolean;
+  markets: Array<{ marketId: number; regime: string; openPositions: number }>;
+  openPositions: number;
+  backlog: number;
+  oldestBacklogSec: number | null;
+  /** consecutive failed attempts (errors stay in the waterfall logs and the alerts, never on this public endpoint) */
+  failingAttempts: number;
+  gasGuard: "reward" | "cap_only";
+  totals: { liquidations: number; forceCloses: number; raced: number };
+}
+
+export async function liquidationKeeperHealth(kv: Kv, nowMs: number, timeoutMs = 500): Promise<LiquidationKeeperHealth | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const raw = await Promise.race([kv.get(KEYS.liquidationKeeper).catch(() => null), new Promise<null>((r) => (timer = setTimeout(() => r(null), timeoutMs)))]).finally(() => clearTimeout(timer));
+  const s = parseLiquidationStatus(raw);
+  if (!s) return null;
+  const oldest = s.backlog.reduce<number | null>((m, b) => (m === null || b.since < m ? b.since : m), null);
+  return {
+    ageSec: Math.max(0, Math.round((nowMs - s.ts) / 1000)),
+    enabled: s.enabled,
+    markets: s.markets.map((m) => ({ marketId: m.marketId, regime: m.regime, openPositions: m.openPositions })),
+    openPositions: s.markets.reduce((n, m) => n + m.openPositions, 0),
+    backlog: s.backlog.length,
+    oldestBacklogSec: oldest === null ? null : Math.max(0, Math.round((nowMs - oldest) / 1000)),
+    failingAttempts: s.failures.consecutive,
+    gasGuard: s.gasGuard,
+    totals: { liquidations: s.totals.liquidations, forceCloses: s.totals.forceCloses, raced: s.totals.raced },
+  };
+}
+
 export function createApp(deps: ApiDeps, opts: AppOptions) {
   const app = new Hono();
   const started = deps.now();
@@ -125,7 +166,11 @@ export function createApp(deps: ApiDeps, opts: AppOptions) {
   );
 
   app.get("/health", async (c) => {
-    const [extra, orderlyListing] = await Promise.all([deps.health ? deps.health().catch((err) => ({ healthError: String(err) })) : {}, orderlyListingHealth(deps.kv)]);
+    const [extra, orderlyListing, liquidationKeeper] = await Promise.all([
+      deps.health ? deps.health().catch((err) => ({ healthError: String(err) })) : {},
+      orderlyListingHealth(deps.kv),
+      liquidationKeeperHealth(deps.kv, deps.now()),
+    ]);
     const token = deps.settings.adminToken;
     const verbose = c.req.query("verbose") !== undefined && !!token && bearerMatches(c.req.header("authorization"), token);
     return c.json({
@@ -136,6 +181,7 @@ export function createApp(deps: ApiDeps, opts: AppOptions) {
       capabilities,
       ...(verbose ? { uptimeSec: Math.floor((deps.now() - started) / 1000), procedures } : {}),
       ...(orderlyListing ? { orderlyListing } : {}),
+      ...(liquidationKeeper ? { liquidationKeeper } : {}),
       ...extra,
     });
   });
@@ -179,7 +225,7 @@ export function createApp(deps: ApiDeps, opts: AppOptions) {
     }
     if (paths.length > 1 && trpcBatchWeight(paths) > MAX_TRPC_BATCH) {
       return c.json(
-        { error: { json: { message: `Batch too heavy: receipts.* calls must be sent alone, others at most ${MAX_TRPC_BATCH} per batch`, code: -32600, data: { code: "BAD_REQUEST", httpStatus: 400 } } } },
+        { error: { json: { message: `Batch too heavy: receipts.* calls must be sent alone, trade.quote / trade.position at most 2 per batch, others at most ${MAX_TRPC_BATCH} per batch`, code: -32600, data: { code: "BAD_REQUEST", httpStatus: 400 } } } },
         400,
       );
     }

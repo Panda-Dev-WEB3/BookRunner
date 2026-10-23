@@ -35,6 +35,7 @@ export class WatchSet {
     add(c.factory, "factory");
     add(c.markRegistry, "markRegistry");
     add(c.insurancePool, "pool"); // 2026-10; absent in older deployment records
+    add(c.poolEngine, "engine"); // 2026-10 liquidation keeper: the trader set of the in-house markets (engine_positions)
   }
 
   /** Returns true when the book was not known before. */
@@ -60,6 +61,12 @@ export class WatchSet {
   /** The InsurancePool of the deployment, when it has one. */
   poolAddress(): Address | null {
     for (const [a, e] of this.protocol) if (e.kind === "pool") return a;
+    return null;
+  }
+
+  /** The PoolEngine of the deployment, when it has one. */
+  engineAddress(): Address | null {
+    for (const [a, e] of this.protocol) if (e.kind === "engine") return a;
     return null;
   }
 

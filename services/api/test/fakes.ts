@@ -8,6 +8,8 @@ import type {
   ChainGateway,
   CharterChainRecord,
   CommitteeState,
+  EngineMarketChainState,
+  EngineTraderChainState,
   MandateChainState,
   PoolChainState,
   PoolWalletState,
@@ -509,6 +511,28 @@ export class FakeChain implements ChainGateway {
       deposits: new Map(q.depositIds.map((id) => [id, this.poolDepositInfo.get(id) ?? zeroDeposit] as const)),
       epochs: new Map(q.epochs.map((e) => [e, this.poolEpochInfo.get(e) ?? zeroEpoch] as const)),
     };
+  }
+  /** PoolEngine markets by adapter (lowercase) and traders by `marketId|wallet` (lowercase) */
+  engineMarkets = new Map<string, EngineMarketChainState>();
+  engineTraders = new Map<string, EngineTraderChainState>();
+  split = { pending: false, window: false };
+  splitCalls: Array<{ priceId: Hex; basisAt: number }> = [];
+  async engineMarket(adapter: Address) {
+    this.guard();
+    return this.engineMarkets.get(adapter.toLowerCase()) ?? null;
+  }
+  engineTraderCalls = 0;
+  async engineTrader(marketId: number, wallet: Address) {
+    this.guard();
+    this.engineTraderCalls++;
+    return (
+      this.engineTraders.get(`${marketId}|${wallet.toLowerCase()}`) ?? { position: { size: 0n, entryPriceWad: 0n, marginUsd: 0n, fundingIndexAtEntry: 0n }, usdcBalance: 0n, usdcAllowance: 0n }
+    );
+  }
+  async splitGate(priceId: Hex, basisAt: number) {
+    this.guard();
+    this.splitCalls.push({ priceId, basisAt });
+    return this.split;
   }
   setWallet(tranche: Address, wallet: Address, w: Partial<TrancheWalletState>) {
     this.wallets.set(`${tranche.toLowerCase()}|${wallet.toLowerCase()}`, { ...emptyWallet(), ...w });

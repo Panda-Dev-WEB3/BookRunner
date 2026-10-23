@@ -515,3 +515,22 @@ export const killEvents = pgTable("kill_events", {
   actions: jsonb("actions").notNull(), // ["cancel_all", "flatten", "revoke_venue_key", "revoke_desk_keys", "mandate_kill"]
   txHashes: jsonb("tx_hashes").notNull(),
 });
+
+// ---------------------------------------------------------------- in-house engine (2026-10 liquidation keeper)
+/**
+ * One row per (PoolEngine market, trader) seen in the engine's Trade / MarginChanged / Liquidation / ClosedOut events
+ * (indexer): the liquidation keeper's trader set (no chain scan). `sizeRaw` = the position size after the newest such
+ * event (signed, 1e18 units; "0" = flat); the keeper re-reads every open one on chain each pass.
+ */
+export const enginePositions = pgTable(
+  "engine_positions",
+  {
+    marketId: integer("market_id").notNull(),
+    trader: text("trader").notNull(),
+    sizeRaw: numeric("size_raw", { precision: 78, scale: 0 }).notNull().default("0"),
+    lastBlock: bigint("last_block", { mode: "number" }).notNull(),
+    lastLogIndex: integer("last_log_index").notNull(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.marketId, t.trader] })],
+);

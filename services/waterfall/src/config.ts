@@ -44,6 +44,36 @@ export const waterfallEnvShape = {
   WATERFALL_BUYBACK_THRESHOLD_USD: zUsd("10.00"),
   /** Keeper (2026-10 insurance pool): InsurancePool.processEpoch once the oldest epoch is processable. */
   WATERFALL_POOL_EPOCH_ENABLED: zBool(true),
+  /**
+   * Keeper (2026-10 in-house engine markets): liquidation keeper (liquidationKeeper.ts). Liquidates positions that are
+   * liquidatable at the fresh signed price, closes out wind-down / settled markets (forceClose).
+   */
+  WATERFALL_LIQ_ENABLED: zBool(true),
+  /** Pass cadence while a market trades or closes out (mainnet profile 10 s). */
+  WATERFALL_LIQ_INTERVAL_SECONDS: z.coerce.number().positive().max(300).default(10),
+  /** Pass cadence with no open position or every market held / settled (off-hours: the held price does not move). */
+  WATERFALL_LIQ_IDLE_INTERVAL_SECONDS: z.coerce.number().positive().max(3_600).default(60),
+  /** Gas guard: a liquidation may cost at most its reward plus this (USD; a forceClose, which pays nothing, at most this). */
+  WATERFALL_LIQ_GAS_MARGIN_USD: zUsd("0.50"),
+  /** Gas guard: USD per ETH to compare cost and reward; 0 = WATERFALL_ETH_USD; both 0 = only the caps below apply. */
+  WATERFALL_LIQ_ETH_USD: zWad("0"),
+  /** Gas guard: most ETH one liquidation / close-out transaction may cost. */
+  WATERFALL_LIQ_MAX_TX_COST_ETH: zWad("0.002"),
+  /**
+   * Gas policy (domain/liquidation.ts gasDecision): rolling one-hour budget of the LOSS-MAKING part of liquidations
+   * (cost above the reward) and of reverted transactions. Liquidations that pay for themselves never use it.
+   */
+  WATERFALL_LIQ_HOURLY_GAS_ETH: zWad("0.01"),
+  /** Gas policy: an under-water position leaving at least this bad debt (USD) is liquidated whatever the hourly budget. */
+  WATERFALL_LIQ_BAD_DEBT_OVERRIDE_USD: zUsd("50"),
+  /** Transactions per pass at most (liquidations first, largest reward first). */
+  WATERFALL_LIQ_MAX_TX_PER_PASS: z.coerce.number().int().positive().max(100).default(10),
+  /** Open positions per aggregate3 read. */
+  WATERFALL_LIQ_BATCH_SIZE: z.coerce.number().int().positive().max(2_000).default(500),
+  /** aggregate3 reads per pass at most; beyond batch x this, positions are paged across passes (alert liquidation_coverage). */
+  WATERFALL_LIQ_MAX_BATCHES: z.coerce.number().int().positive().max(50).default(10),
+  /** On-chain reconciliation of every engine_positions row (size 0 included) this often; 0 = off. */
+  WATERFALL_LIQ_RECONCILE_SECONDS: z.coerce.number().int().min(0).max(86_400).default(600),
   /** Slippage tolerance below the buyback router's quote for minBkrnOut. */
   WATERFALL_BUYBACK_SLIPPAGE_BPS: z.coerce.number().int().min(0).max(9_999).default(100),
   /** Uniswap v3 fee tier passed ONLY to a legacy (pre-A5-02) BkrnFeeRouter; the current router pins it on-chain. */
@@ -68,3 +98,23 @@ export function loadWaterfallConfig(source: Record<string, string | undefined> =
 }
 
 export type WaterfallConfig = ReturnType<typeof loadWaterfallConfig>;
+
+/** Robinhood Chain mainnet (the liquidation keeper refuses to start there without an ETH/USD price). */
+const MAINNET_CHAIN_ID = 4663;
+
+/**
+ * Review I-4: ETH/USD (WAD) of the liquidation gas policy: WATERFALL_LIQ_ETH_USD, else WATERFALL_ETH_USD. On mainnet with
+ * the keeper on, neither set = refusal to start: the policy could not tell a liquidation that pays from one that does
+ * not (docs/RUNBOOK.md). The stack reads no ETH/USD feed today (the oracle signs stock prices; its DEX confirm pools are
+ * Stock Token / USDG), so the price is configured, not derived; outside 100..100,000 USD it is refused as a typo.
+ * Elsewhere 0 = caps only.
+ */
+export function liquidationEthUsd(cfg: Pick<WaterfallConfig, "CHAIN_ID" | "WATERFALL_LIQ_ETH_USD" | "WATERFALL_ETH_USD" | "WATERFALL_KEEPER_ENABLED" | "WATERFALL_LIQ_ENABLED">): bigint {
+  const v = cfg.WATERFALL_LIQ_ETH_USD > 0n ? cfg.WATERFALL_LIQ_ETH_USD : cfg.WATERFALL_ETH_USD;
+  if (!(cfg.WATERFALL_KEEPER_ENABLED && cfg.WATERFALL_LIQ_ENABLED)) return v;
+  if (v === 0n && cfg.CHAIN_ID === MAINNET_CHAIN_ID)
+    throw new Error("WATERFALL_LIQ_ETH_USD is required on mainnet (USD per ETH, e.g. 3000): the liquidation keeper's gas policy compares cost and reward with it (or set WATERFALL_LIQ_ENABLED=false)");
+  const WAD = 10n ** 18n;
+  if (v !== 0n && (v < 100n * WAD || v > 100_000n * WAD)) throw new Error("WATERFALL_LIQ_ETH_USD / WATERFALL_ETH_USD out of range (100..100000 USD per ETH)");
+  return v;
+}

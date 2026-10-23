@@ -1,7 +1,8 @@
 // Why a transaction would fail, in plain words. The testnet RPC returns custom errors without a
 // reason string ({"code":3,"message":"execution reverted","data":"0xfb8f41b2..."}), so the revert
 // data is found in the error chain and decoded against the custom errors the investor flows can hit
-// (ITranche, Tranche, BkrnStaking, OpenZeppelin ERC20). Pure (test/revert.test.ts).
+// (ITranche, Tranche, BkrnStaking, OpenZeppelin ERC20, and the PoolEngine / AttestedOracle errors a trade, a margin
+// withdrawal or a carried price can hit). Pure (test/revert.test.ts).
 import { type Hex, decodeErrorResult, parseAbi } from "viem";
 import { BKRN_DECIMALS, USDC_DECIMALS, formatAmountDisplay } from "./amount";
 import { fmtWhen } from "./format";
@@ -23,6 +24,20 @@ export const REVERT_ABI = parseAbi([
   "error ERC20InsufficientAllowance(address spender, uint256 allowance, uint256 needed)",
   "error ERC20InsufficientBalance(address sender, uint256 balance, uint256 needed)",
   "error EnforcedPause()",
+  // PoolEngine (trading page)
+  "error OffHours(uint256 marketId)",
+  "error StalePrice(bytes32 underlying, uint64 publishedAt)",
+  "error MarketReduceOnly(uint256 marketId)",
+  "error SplitPending(uint256 marketId)",
+  "error SplitWindow(uint256 marketId)",
+  "error PriceNotAcceptable(uint256 fillPriceWad, uint256 acceptablePriceWad)",
+  "error ExposureCap(uint256 exposureUsd, uint256 maxNetExposureUsd)",
+  "error InsufficientMargin(uint256 requiredUsd, int256 availableUsd)",
+  "error PoolUndercollateralized(int256 poolEquityUsd, uint256 requiredUsd)",
+  "error WouldBeLiquidatable()",
+  "error LossBudgetExceeded(uint256 marketId, int256 lossUsd, uint256 budgetUsd)",
+  "error BadSigner(address recovered)",
+  "error FuturePrice(uint64 publishedAt, uint256 nowTs)",
 ]);
 
 const isRevertData = (v: unknown): v is Hex => typeof v === "string" && /^0x[0-9a-fA-F]{8}/.test(v);
@@ -74,6 +89,32 @@ export function revertMessage(name: string, args: readonly unknown[] = []): stri
       return "The token allowance is too low for this amount. Run the approval step first, then this one.";
     case "ERC20InsufficientBalance":
       return "The wallet does not hold enough of the token for this amount.";
+    case "OffHours":
+      return "The stock's session is closed: no trade fills until it reopens, closes included. Margin top-ups still work.";
+    case "StalePrice":
+      return "The price this transaction carried was too old by the time it was mined. Prepare it again and sign promptly.";
+    case "MarketReduceOnly":
+      return "The market is reduce-only: only reductions and closes fill.";
+    case "SplitPending":
+      return "A stock split is pending: the market is close-only until it is done.";
+    case "SplitWindow":
+      return "A stock split took effect and the price is still in pre-split shares: no trade fills until the oracle reprices.";
+    case "PriceNotAcceptable":
+      return "The price moved past your slippage limit before the trade was mined. Nothing filled; review the order again.";
+    case "ExposureCap":
+      return `The market has no room for this size right now (cap ${usdc(args[1])}). Trade a smaller size.`;
+    case "InsufficientMargin":
+      return `Not enough margin for this: ${usdc(args[0])} needed. Add margin or trade a smaller size.`;
+    case "PoolUndercollateralized":
+      return "The market's pool cannot take this much more risk right now. Trade a smaller size or try later.";
+    case "WouldBeLiquidatable":
+      return "This would leave the rest of the position below its maintenance margin. Close it entirely or add margin first.";
+    case "LossBudgetExceeded":
+      return "The pool's loss budget for this period is spent: new risk is paused until the next period. Reductions and closes still fill.";
+    case "BadSigner":
+      return "The carried price was not signed by an active oracle signer (the signer may have rotated). Prepare it again.";
+    case "FuturePrice":
+      return "The carried price is stamped ahead of the chain's clock. Prepare it again in a few seconds.";
     case "Error":
       return typeof args[0] === "string" && args[0] ? `The transaction would fail on-chain: ${args[0]}.` : null;
     default:

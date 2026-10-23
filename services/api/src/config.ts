@@ -37,6 +37,12 @@ export const apiEnvShape = {
    * trees are kept for receipts.proof / receipts.root. 100,000 leaves ~ 70 MB.
    */
   API_RECEIPT_CACHE_LEAVES: z.coerce.number().int().min(1).default(100_000),
+  /**
+   * Trading page: refuse an order whose resulting position cannot be held through a session close (equity below the
+   * off-hours requirement, 2 x initial margin: above 5x with the default 10 % initial margin). auto = refuse on
+   * Robinhood Chain mainnet (4663), warn elsewhere; true / false force it.
+   */
+  TRADE_REFUSE_UNHOLDABLE_LEVERAGE: z.enum(["auto", "true", "false", "1", "0"]).default("auto"),
   /** Oracle staleness bound used for display when the chain is not reachable. */
   MAX_PRICE_AGE_SECONDS: z.coerce.number().int().min(1).default(300),
 };
@@ -75,4 +81,10 @@ export function webOrigins(webOrigin: string): string[] {
     .filter(Boolean);
   const isPublic = extra.some((o) => !isLoopbackOrigin(o));
   return [...new Set(isPublic ? extra : [...extra, ...defaults])];
+}
+
+/** TRADE_REFUSE_UNHOLDABLE_LEVERAGE -> on / off (auto: mainnet only). */
+export function refuseUnholdable(v: string, chainId: number): boolean {
+  if (v === "auto") return chainId === 4663;
+  return v === "true" || v === "1";
 }

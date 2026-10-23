@@ -80,6 +80,7 @@ ORDERLY_BASE_URL=https://api.orderly.org               # VERIFY: RHC endpoint
 ORDERLY_BROKER_ID=<builder broker id>                  # == deploy input externals.orderlyBrokerId
 ORDERLY_BUILDER_KEY_SECRET=<base58 ed25519 seed>
 ANTHROPIC_API_KEY=<key>                                # charter jury
+WATERFALL_LIQ_ETH_USD=<USD per ETH, e.g. 3000>         # liquidation keeper gas policy (required: the preflight and the waterfall refuse to start without it); refresh when ETH moves 2x
 # oracle (RUNBOOK "Real prices", VERIFY C6): primary + confirm. Chainlink feeds come from config/chains/4663.json in
 # the app tree (the DeployMainnet input was checked against it); ORACLE_CHAINLINK_FEEDS only overrides, and only in
 # the {"proxy","basis","token"} form (a plain address is refused). Chainlink alone signs (sourceCount 1); the DEX
@@ -179,6 +180,7 @@ liquidity, observe + the token's 4 views) every 1 s tick as separate calls (~44 
 | ops-venue | `bookIds()` every `OPS_BOOK_POLL_MS` 60 s; log / report / fee loops idle without an Orderly book | 0.4 |
 | risk | `bookIds()` every `RISK_BOOKS_REFRESH_MS` 60 s | 0.4 |
 | mark, waterfall | `bookIds()` every `BOOKS_REFRESH_SECONDS` 60 s each; no head read without a book; buyback / pool epoch every `WATERFALL_PROTOCOL_DUTY_SECONDS` 300 s | 1.0 |
+| waterfall, liquidation keeper | no open engine position: one DB query per `WATERFALL_LIQ_IDLE_INTERVAL_SECONDS` 60 s, no RPC; with open positions ONE `aggregate3` (every market + position) per pass every `WATERFALL_LIQ_INTERVAL_SECONDS` 10 s while a market trades (60 s off-hours), configs every 10 min; `eth_estimateGas` + `eth_gasPrice` + the transaction only for a liquidatable position | 0 [~2.6 per traded market] |
 | alerts | head + role balances (Multicall3 `getEthBalance`, one call) + buybackPending every 60 s; markInterval hourly | 1.1 |
 | charter | jury fallback scan every `JURY_POLL_MS` 60 s; committee sync every `COMMITTEE_SYNC_MS` 300 s | 0.6 |
 | **Total** | | **~6 [~15]** |

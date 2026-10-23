@@ -46,6 +46,7 @@ function goodEnv(): Env {
     ORDERLY_BROKER_ID: "bookrunner",
     ORDERLY_BUILDER_KEY_SECRET: "seed",
     ANTHROPIC_API_KEY: "sk",
+    WATERFALL_LIQ_ETH_USD: "3000",
     // overlays the chain config's NVDA feed (primary-confirm: Chainlink signs, the DEX TWAP of the config confirms)
     ORACLE_CHAINLINK_FEEDS: JSON.stringify({ NVDA: { proxy: "0x0000000000000000000000000000000000000f01", basis: "per-token" } }),
     MARK_SIGNER_KMS_KEY_ID: "alias/bkrn-mark",
