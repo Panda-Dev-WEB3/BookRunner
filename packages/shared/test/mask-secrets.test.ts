@@ -7,6 +7,9 @@ describe("maskSecrets: provider keys never reach a log line", () => {
     expect(maskSecrets(line)).toBe('{"err":"HTTP request failed.\n\nURL: https://robinhood-mainnet.g.alchemy.com/v2/<redacted>\nBody"}');
     expect(maskSecrets("wss://x.example/v3/0123456789abcdef0123 up")).toBe("wss://x.example/v3/<redacted> up");
     expect(maskSecrets('{"url":"https://rpc.x/?apikey=s3cr3t&chain=1"}')).toBe('{"url":"https://rpc.x/?apikey=<redacted>&chain=1"}');
+    expect(maskSecrets("POST https://api.telegram.org/bot8834448372:AAFakeTokenFakeTokenFakeTokenFake12/sendMessage failed")).toBe(
+      "POST https://api.telegram.org/bot<redacted>/sendMessage failed",
+    );
     expect(maskSecrets('{"msg":"mark committed","block":"140083892"}')).toBe('{"msg":"mark committed","block":"140083892"}');
   });
 });
