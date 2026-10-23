@@ -36,7 +36,7 @@ import {
 } from "../domain/trade";
 import { type PreparedTx, approveUsdcTx, engineDepositMarginTx, engineTradeTx, engineWithdrawMarginTx, oracleUpdateTx } from "../domain/txs";
 import { parseUsd, usdStr, wadStr } from "../format";
-import { parseJson } from "../kv";
+import { cached, parseJson } from "../kv";
 import { fail, hardChain, publicProcedure, requireChain, router } from "../trpc";
 import { intLike, walletInput } from "./common";
 
@@ -69,10 +69,21 @@ function loaded(book: BookRow, chain: EngineMarketChainState): LoadedMarket {
 }
 
 /** The signed prints the oracle publishes (one Redis read for the bundle, one scan for the per-key messages). */
-async function signedSource(deps: ApiDeps): Promise<{ bundle: unknown; messages: unknown[] }> {
-  const [bundleRaw, keys] = await Promise.all([deps.kv.get(KEYS.oracleBundle), deps.kv.scan(KEYS.oracleLast("*"), 500)]);
-  const messages = keys.length ? (await deps.kv.mget(keys)).map((r) => parseJson(r)) : [];
-  return { bundle: parseJson(bundleRaw), messages };
+/** Review I-7: the signed source is re-read at most once per SIGNED_SOURCE_TTL_MS per API process (the oracle signs every ~1 s). */
+export const SIGNED_SOURCE_TTL_MS = 1_000;
+const signedMemo = new WeakMap<ApiDeps, { at: number; v: Promise<{ bundle: unknown; messages: unknown[] }> }>();
+
+function signedSource(deps: ApiDeps): Promise<{ bundle: unknown; messages: unknown[] }> {
+  const hit = signedMemo.get(deps);
+  if (hit && deps.now() - hit.at < SIGNED_SOURCE_TTL_MS) return hit.v;
+  const v = (async () => {
+    const [bundleRaw, keys] = await Promise.all([deps.kv.get(KEYS.oracleBundle), deps.kv.scan(KEYS.oracleLast("*"), 500)]);
+    const messages = keys.length ? (await deps.kv.mget(keys)).map((r) => parseJson(r)) : [];
+    return { bundle: parseJson(bundleRaw), messages };
+  })();
+  signedMemo.set(deps, { at: deps.now(), v });
+  v.catch(() => signedMemo.delete(deps));
+  return v;
 }
 
 interface Priced {
@@ -122,7 +133,17 @@ async function loadPriced(deps: ApiDeps, marketId: number, exactBasis = true): P
   return hardChain(deps, "engine.splitGate", () => price(deps, m, src, exactBasis));
 }
 
+/** Fresh read of a wallet in a market: the prepared transactions (deposit / withdraw / order / close). */
 const traderOf = (deps: ApiDeps, marketId: number, wallet: Address) => hardChain(deps, "engine.trader", (g) => g.engineTrader(marketId, wallet));
+
+/**
+ * The same read for the public queries (trade.quote / trade.position), cached per (market, wallet) for
+ * TRADER_READ_CACHE_SECONDS (review I-7: random wallets must not drive paid RPC; the web polls these every few seconds).
+ * The three views are one Multicall3 aggregate3 on mainnet (the public client batches parallel reads).
+ */
+export const TRADER_READ_CACHE_SECONDS = 2;
+const traderOfCached = (deps: ApiDeps, marketId: number, wallet: Address) =>
+  cached(deps.kv, `trade:trader:${deps.settings.chainId}:${marketId}:${wallet.toLowerCase()}`, TRADER_READ_CACHE_SECONDS, () => traderOf(deps, marketId, wallet));
 
 const isoSec = (s: number) => new Date(s * 1000).toISOString();
 
@@ -250,9 +271,9 @@ export const tradeRouter = router({
   /** A wallet's position at the freshest price: size, entry, margin, equity, margin ratio, liquidation prices, PnL. */
   position: publicProcedure.input(z.object({ marketId: marketIdInput, wallet: walletInput })).query(async ({ ctx: { deps }, input }) => {
     const pr = await loadPriced(deps, input.marketId, false);
-    const t = await traderOf(deps, input.marketId, input.wallet);
+    const t = await traderOfCached(deps, input.marketId, input.wallet);
     const px = pr.price?.priceWad ?? 0n;
-    return { wallet: input.wallet, priceSource: pr.price?.source ?? null, ...positionView(pr.m.chain, t, px, px > 0n ? safeMaxWithdraw(pr.m.chain, t, px) : t.position.size === 0n ? t.position.marginUsd : 0n) };
+    return { wallet: input.wallet, priceSource: pr.price?.source ?? null, ...positionView(pr.m.chain, t, px, px > 0n ? safeMaxWithdraw(pr.m.chain, t, px, !!deps.settings.tradeRefuseUnholdable) : t.position.size === 0n ? t.position.marginUsd : 0n) };
   }),
 
   /** Fill price (spread / skew), price impact, fee and the resulting position for a signed size. */
@@ -260,7 +281,7 @@ export const tradeRouter = router({
     .input(z.object({ marketId: marketIdInput, sizeDelta: sizeDeltaInput, wallet: walletInput.optional(), slippageBps: slippageInput }))
     .query(async ({ ctx: { deps }, input }) => {
       const pr = await loadPriced(deps, input.marketId);
-      const t = input.wallet ? await traderOf(deps, input.marketId, input.wallet) : null;
+      const t = input.wallet ? await traderOfCached(deps, input.marketId, input.wallet) : null;
       return quoteOf(pr, t ? position(t) : null, input.sizeDelta, input.slippageBps, !!deps.settings.tradeRefuseUnholdable);
     }),
 
@@ -301,9 +322,9 @@ export const tradeRouter = router({
       if (pr.nowSec - px.publishedAt > withdrawMaxAge(m.chain) - WITHDRAW_PRICE_HEADROOM_SEC) fail("PRECONDITION_FAILED", "No signed price fresh enough to withdraw with an open position; retry in a few seconds");
       const split = await hardChain(deps, "engine.splitGate", (g) => g.splitGate(m.chain.config.underlying, px.publishedAt));
       if (split.window || split.pending) fail("PRECONDITION_FAILED", "A stock split is pending or in progress: margin cannot be withdrawn while a position is open (close it first)");
-      const max = safeMaxWithdraw(m.chain, t, px.priceWad);
+      const max = safeMaxWithdraw(m.chain, t, px.priceWad, !!deps.settings.tradeRefuseUnholdable);
       if (amount > max)
-        fail("PRECONDITION_FAILED", `At most ${usdStr(max)} can be withdrawn with this position open: the rest must stay as initial margin (with room for a 1% move). Reduce the position to free more.`);
+        fail("PRECONDITION_FAILED", `At most ${usdStr(max)} can be withdrawn with this position open: the rest must stay as margin (${deps.settings.tradeRefuseUnholdable ? `the off-hours requirement: the position stays at or below the leverage an order may reach here` : "initial margin"}, with room for a 1% move). Reduce the position to free more.`);
       if (px.source === "signed") {
         txs.push(oracleUpdateTx(gw.chainId, gw.deployment.contracts.oracle, px.priceData, m.label));
         warnings.push(
@@ -312,7 +333,7 @@ export const tradeRouter = router({
       }
     }
     txs.push(engineWithdrawMarginTx(gw.chainId, m.chain.engine, input.marketId, amount, m.label));
-    return { txs, warnings, maxWithdrawUsd: usdStr(p.size === 0n ? p.marginUsd : pr.price ? safeMaxWithdraw(m.chain, t, pr.price.priceWad) : 0n) };
+    return { txs, warnings, maxWithdrawUsd: usdStr(p.size === 0n ? p.marginUsd : pr.price ? safeMaxWithdraw(m.chain, t, pr.price.priceWad, !!deps.settings.tradeRefuseUnholdable) : 0n) };
   }),
 
   /** Prepared trade(marketId, sizeDelta, acceptablePrice, priceData) after every engine rule is checked. */

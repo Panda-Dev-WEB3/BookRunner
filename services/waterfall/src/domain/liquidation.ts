@@ -73,6 +73,8 @@ export type KeeperAction = {
   action: "liquidate" | "forceClose";
   /** what the liquidator earns (0 for a forceClose) */
   rewardUsd: bigint;
+  /** bad debt the close would leave for the IF now (margin short of loss + funding); 0 = above water */
+  badDebtUsd: bigint;
   equityUsd: bigint;
   requirementUsd: bigint;
   priceData: Hex;
@@ -103,10 +105,11 @@ export function decideMarket(m: MarketRead, positions: Array<{ trader: string; p
     const equityUsd = traderEquityUsd(position, px.priceWad, m.fundingIndex);
     const req = requirementUsd(position.size, px.priceWad, BigInt(bps));
     if (isLiquidatable(position, px.priceWad, m.fundingIndex, bps)) {
-      const { rewardUsd } = liquidationRewardUsd(position, px.priceWad, m.fundingIndex, m.cfg.liquidationFeeBps, m.insuranceUsd);
-      out.push({ marketId: m.marketId, trader, action: "liquidate", rewardUsd, equityUsd, requirementUsd: req, priceData: px.priceData });
+      const { rewardUsd, badDebtUsd } = liquidationRewardUsd(position, px.priceWad, m.fundingIndex, m.cfg.liquidationFeeBps, m.insuranceUsd);
+      out.push({ marketId: m.marketId, trader, action: "liquidate", rewardUsd, badDebtUsd, equityUsd, requirementUsd: req, priceData: px.priceData });
     } else if (closeOut) {
-      out.push({ marketId: m.marketId, trader, action: "forceClose", rewardUsd: 0n, equityUsd, requirementUsd: req, priceData: px.priceData });
+      const { badDebtUsd } = liquidationRewardUsd(position, px.priceWad, m.fundingIndex, 0, m.insuranceUsd);
+      out.push({ marketId: m.marketId, trader, action: "forceClose", rewardUsd: 0n, badDebtUsd, equityUsd, requirementUsd: req, priceData: px.priceData });
     }
   }
   return out;
@@ -115,29 +118,68 @@ export function decideMarket(m: MarketRead, positions: Array<{ trader: string; p
 /** USD (6 dp) -> wei at an ETH/USD price (WAD). */
 export const usdToWei = (usd6: bigint, ethUsdWad: bigint): bigint => (usd6 * 10n ** 30n) / ethUsdWad;
 
+/**
+ * Gas policy (review I-3). What a liquidation is worth is its reward (to the keeper) and, for a position under water,
+ * the bad debt it stops from growing (to the IF). The policy, per candidate (most at stake first):
+ *   - PAYS for itself (cost <= reward): sent; it never uses the hourly budget, so liquidations that pay can never be
+ *     starved by others;
+ *   - DUST (reward < cost) above water: skipped. It owes no bad debt yet; once its loss eats the margin it is under
+ *     water and qualifies below. A griefer opening many tiny positions therefore burns none of our gas;
+ *   - UNDER WATER (bad debt > 0, or a forceClose the protocol needs): the cost must stay below what is at stake (bad
+ *     debt + reward + margin) and the per-transaction cap; with bad debt >= `badDebtOverrideUsd` it is sent whatever the
+ *     hourly budget; below that, while the hourly budget of loss-making gas lasts (the part of the cost above the
+ *     reward); beyond it the position waits (backlog `gas_guard`, alerted after 60 s).
+ * Reverted transactions count in full against the hourly budget. Without an ETH/USD price (testnet only: mainnet
+ * refuses to start, config.ts) the reward cannot be compared: every transaction counts in full against the caps.
+ * Risk bound: what the budget can hold back is under-water positions of less than `badDebtOverrideUsd` bad debt each,
+ * for at most the rest of the hour; the IF covers them. Anything larger always goes out.
+ */
 export interface GasPolicy {
-  /** ETH/USD (WAD); 0 = unknown: only the caps apply */
+  /** ETH/USD (WAD); 0 = unknown (testnet): only the caps apply */
   ethUsdWad: bigint;
-  /** spend at most reward + this (USD 6 dp) */
+  /** a transaction may cost its reward plus this (USD 6 dp) */
   marginUsd: bigint;
   /** per-transaction cap (wei) */
   maxTxWei: bigint;
-  /** rolling one-hour cap (wei) */
+  /** rolling one-hour budget (wei) of the loss-making part of liquidations + reverted transactions */
   hourlyWei: bigint;
+  /** an under-water position with at least this bad debt (USD 6 dp) is liquidated whatever the hourly budget */
+  badDebtOverrideUsd: bigint;
 }
 
-/** The most a transaction of `rewardUsd` may cost (wei), given what the last hour already spent. */
-export function gasAllowanceWei(policy: GasPolicy, rewardUsd: bigint, spentLastHourWei: bigint): bigint {
+export type GasDecision = { send: true; lossWei: bigint } | { send: false; reason: "dust" | "gas_guard"; detail: string };
+
+/** Whether a liquidation / close-out of `a` may go out at `costWei`, given the loss budget already spent this hour. */
+export function gasDecision(policy: GasPolicy, a: Pick<KeeperAction, "rewardUsd" | "badDebtUsd"> & { action?: KeeperAction["action"] }, costWei: bigint, spentLastHourWei: bigint): GasDecision {
   const left = policy.hourlyWei > spentLastHourWei ? policy.hourlyWei - spentLastHourWei : 0n;
-  let cap = policy.maxTxWei < left ? policy.maxTxWei : left;
-  if (policy.ethUsdWad > 0n) {
-    const byReward = usdToWei(rewardUsd + policy.marginUsd, policy.ethUsdWad);
-    if (byReward < cap) cap = byReward;
+  const override = a.badDebtUsd > 0n && a.badDebtUsd >= policy.badDebtOverrideUsd;
+  if (costWei > policy.maxTxWei) return { send: false, reason: "gas_guard", detail: `cost ${costWei} wei > per-tx cap ${policy.maxTxWei} wei` };
+  if (policy.ethUsdWad === 0n) {
+    if (override) return { send: true, lossWei: costWei };
+    if (costWei > left) return { send: false, reason: "gas_guard", detail: `hourly budget left ${left} wei < cost ${costWei} wei` };
+    return { send: true, lossWei: costWei };
   }
-  return cap;
+  const rewardWei = usdToWei(a.rewardUsd, policy.ethUsdWad);
+  if (costWei <= rewardWei) return { send: true, lossWei: 0n };
+  const lossWei = costWei - rewardWei;
+  const underWater = a.badDebtUsd > 0n || a.action === "forceClose";
+  if (!underWater) return { send: false, reason: "dust", detail: `reward ${a.rewardUsd} usd6 below the cost ${costWei} wei, not under water` };
+  const atStake = usdToWei(a.badDebtUsd + a.rewardUsd + policy.marginUsd, policy.ethUsdWad);
+  if (costWei > atStake) return { send: false, reason: "gas_guard", detail: `cost ${costWei} wei above the ${a.badDebtUsd + a.rewardUsd} usd6 at stake + margin` };
+  if (override) return { send: true, lossWei };
+  if (lossWei > left) return { send: false, reason: "gas_guard", detail: `hourly loss budget left ${left} wei < ${lossWei} wei` };
+  return { send: true, lossWei };
 }
 
-/** Rolling one-hour sum of keeper gas spent on liquidations. */
+/** Candidate order: liquidations before close-outs, then the most at stake first (max of reward and bad debt). */
+export function byStake(a: KeeperAction, b: KeeperAction): number {
+  if (a.action !== b.action) return a.action === "liquidate" ? -1 : 1;
+  const sa = a.rewardUsd > a.badDebtUsd ? a.rewardUsd : a.badDebtUsd;
+  const sb = b.rewardUsd > b.badDebtUsd ? b.rewardUsd : b.badDebtUsd;
+  return sb > sa ? 1 : sb < sa ? -1 : 0;
+}
+
+/** Rolling one-hour sum of the loss-making gas of liquidations (and reverted transactions). */
 export class GasWindow {
   private entries: Array<{ at: number; wei: bigint }> = [];
   add(at: number, wei: bigint) {
@@ -173,6 +215,13 @@ export class Backlog {
       keep.set(k, prev && prev.action === a.action ? prev : { marketId: a.marketId, trader: a.trader.toLowerCase(), action: a.action, since: now, reason: "pending", detail: null });
     }
     this.items = keep;
+  }
+
+  /** A paged pass (review I-6): only the keys it read (`seen`) are re-observed; the other pages' items stay as they are. */
+  merge(actions: KeeperAction[], now: number, seen: Set<string>) {
+    const rest = [...this.items.entries()].filter(([k]) => !seen.has(k));
+    this.observe(actions, now);
+    for (const [k, v] of rest) if (!this.items.has(k)) this.items.set(k, v);
   }
 
   set(marketId: number, trader: string, reason: BacklogReason, detail: string | null) {

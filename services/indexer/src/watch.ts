@@ -64,6 +64,12 @@ export class WatchSet {
     return null;
   }
 
+  /** The PoolEngine of the deployment, when it has one. */
+  engineAddress(): Address | null {
+    for (const [a, e] of this.protocol) if (e.kind === "engine") return a;
+    return null;
+  }
+
   protocolAddresses(): Address[] {
     return [...this.protocol.keys()];
   }

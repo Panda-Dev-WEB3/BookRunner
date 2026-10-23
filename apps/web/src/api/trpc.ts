@@ -14,10 +14,11 @@ export const trpc = createTRPCReact<AppRouter>();
 export const TRPC_MAX_BATCH = 10;
 
 /**
- * Procedures the API counts as a full batch on their own (services/api TRPC_HEAVY_PREFIXES: Merkle proofs and
- * roots); nginx rate-limits them in a stricter per-IP zone. Sent unbatched.
+ * Procedures the API weighs above 1 in a batch and nginx limits in a stricter per-IP zone: receipts.* (Merkle proofs
+ * and roots, services/api TRPC_HEAVY_PREFIXES) and the trading page's wallet reads trade.quote / trade.position
+ * (TRPC_WALLET_READS, review I-7). Sent unbatched, so a batch of the others never exceeds the API's weight.
  */
-export const isHeavyProcedure = (path: string) => path.startsWith("receipts.");
+export const isHeavyProcedure = (path: string) => path.startsWith("receipts.") || path === "trade.quote" || path === "trade.position";
 
 /** Links of the typed client: receipts.* unbatched, everything else batched up to TRPC_MAX_BATCH. */
 export function trpcLinks() {

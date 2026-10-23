@@ -266,6 +266,15 @@ export function positionView(m: EngineMarketChainState, t: EngineTraderChainStat
 
 export type PositionView = ReturnType<typeof positionView>;
 
-export const safeMaxWithdraw = (m: EngineMarketChainState, t: EngineTraderChainState, priceWad: bigint) => maxWithdrawableUsd(mathOf(m), t.position, priceWad, WITHDRAW_BUFFER_BPS);
+/**
+ * The most margin a withdrawal may take now (1 % adverse-move buffer, funding settled first). The requirement kept is
+ * the initial margin, or, where orders above the holdable leverage are refused (review I-2, mainnet default), the
+ * off-hours requirement min(2 x IM, 100 %): a withdrawal never takes a position above the leverage an order may reach.
+ */
+export const safeMaxWithdraw = (m: EngineMarketChainState, t: EngineTraderChainState, priceWad: bigint, refuseUnholdable = false) => {
+  const math = mathOf(m);
+  const keepBps = refuseUnholdable ? offHoursMarginBps(m.config.initialMarginBps) : m.config.initialMarginBps;
+  return maxWithdrawableUsd({ ...math, initialMarginBps: keepBps }, t.position, priceWad, WITHDRAW_BUFFER_BPS);
+};
 
 export { lev, signedUsd };

@@ -750,12 +750,19 @@ bundle). The **indexer** follows the PoolEngine (`Trade` / `MarginChanged` / `Li
 `aggregate3`, applies the engine's rule off-chain at the freshest signed price (maintenance; `min(2 x IM, 100 %)` while
 held; maintenance on a settled market, audit Task 7a), then sends `liquidate(marketId, trader, priceData)` for a
 liquidatable position and `forceClose(marketId, trader, priceData)` for the rest of a settled market or an open
-wind-down close-out. Races (`NotLiquidatable` / `NoPosition` at the estimate) are skipped; a gas guard caps each
-transaction at its reward (half the nominal fee, from the IF when the margin is gone) plus a margin, per transaction and
-per hour. Its status (`KEYS.liquidationKeeper`: backlog with reasons, failure run) feeds the **alerts**
-(`liquidation_backlog`, `keeper_liquidation_failing`) and the **api** `/health` `liquidationKeeper`. trader-sim keeps
+wind-down close-out. Races (`NotLiquidatable` / `NoPosition` at the estimate) are skipped. Gas policy (review I-3):
+candidates by what is at stake (max of reward, half the nominal fee, and bad debt); one that pays for itself always
+goes; dust above water is skipped; under water it goes when its cost stays below the bad debt at stake, whatever the
+hourly budget of loss-making gas when the bad debt is at least `WATERFALL_LIQ_BAD_DEBT_OVERRIDE_USD`; reverted gas
+counts. ETH/USD is configured (`WATERFALL_LIQ_ETH_USD`, required on mainnet). Positions are read in batches and paged
+across passes beyond `WATERFALL_LIQ_MAX_BATCHES`; every row is reconciled with `positionOf` every 10 min, and an index
+older than the engine watch backfills the engine's history once (`indexer:engine-backfill`). Its status (`KEYS.liquidationKeeper`: backlog with reasons, failure run) feeds the **alerts**
+(`liquidation_backlog`, `keeper_liquidation_failing`, `liquidation_coverage`) and the **api** `/health` `liquidationKeeper`. trader-sim keeps
 liquidating only its own sim positions. The api refuses an order above the leverage a position holds through a session
-close (`TRADE_REFUSE_UNHOLDABLE_LEVERAGE`, auto = on mainnet); the web states the rule next to the order.
+close (`TRADE_REFUSE_UNHOLDABLE_LEVERAGE`, auto = on mainnet), and then also caps a margin withdrawal so the position stays
+at or below that leverage (review I-2); the web states the rule next to the order. The wallet reads `trade.quote` /
+`trade.position` are cached 2 s per (market, wallet), weigh 5 in a tRPC batch, travel unbatched from the web and have
+their own nginx zone (`bookrunner_wallet`, 3/s per IP); the signed price source is re-read at most once a second.
 
 Queues/channels/keys: `packages/shared/src/queues.ts`. Events: `packages/shared/src/events.ts`.
 Data model: `packages/db/src/schema.ts` (tables of Backend §4 plus extensions).

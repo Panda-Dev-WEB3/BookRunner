@@ -27,7 +27,9 @@ function recordFetch(): string[] {
 describe("tRPC client: receipts.* travel alone", () => {
   test("isHeavyProcedure matches the API's heavy prefix only", () => {
     for (const p of ["receipts.proof", "receipts.root", "receipts.list"]) expect(isHeavyProcedure(p)).toBe(true);
-    for (const p of ["book.get", "book.nav", "settlements.list"]) expect(isHeavyProcedure(p)).toBe(false);
+    for (const p of ["book.get", "book.nav", "settlements.list", "trade.market", "trade.markets"]) expect(isHeavyProcedure(p)).toBe(false);
+    // the trading page's wallet reads (API batch weight 5, nginx zone bookrunner_wallet): unbatched too
+    for (const p of ["trade.quote", "trade.position"]) expect(isHeavyProcedure(p)).toBe(true);
   });
 
   test("concurrent queries: receipts.* each in its own unbatched request, the rest batched", async () => {

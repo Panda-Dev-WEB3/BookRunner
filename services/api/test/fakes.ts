@@ -521,8 +521,10 @@ export class FakeChain implements ChainGateway {
     this.guard();
     return this.engineMarkets.get(adapter.toLowerCase()) ?? null;
   }
+  engineTraderCalls = 0;
   async engineTrader(marketId: number, wallet: Address) {
     this.guard();
+    this.engineTraderCalls++;
     return (
       this.engineTraders.get(`${marketId}|${wallet.toLowerCase()}`) ?? { position: { size: 0n, entryPriceWad: 0n, marginUsd: 0n, fundingIndexAtEntry: 0n }, usdcBalance: 0n, usdcAllowance: 0n }
     );

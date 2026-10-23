@@ -8,12 +8,12 @@ import { LIQUIDATION_STATUS_TTL_SEC, type LiquidationKeeperStatus } from "@bookr
 import { attestedOracleAbi, bookrunnerConfigAbi, poolEngineAbi } from "@bookrunner/shared/abi";
 import type { EnginePosition } from "@bookrunner/shared/engineMath";
 import { type SignedPrice, signedPriceFor } from "@bookrunner/shared/signedPrice";
-import { ne } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import type { Redis } from "ioredis";
 import { type Address, type Hex, type PublicClient, encodeFunctionData } from "viem";
 import type { EngineMarketCfg, MarketRead } from "../domain/liquidation";
 import type { TxSender } from "../kit/tx";
-import type { LiqCall, LiquidationChain } from "../liquidationKeeper";
+import type { LiqCall, LiquidationChain, PositionStore } from "../liquidationKeeper";
 
 const posKey = (marketId: number, trader: string) => `${marketId}|${trader.toLowerCase()}`;
 
@@ -121,10 +121,25 @@ export class ViemLiquidationChain implements LiquidationChain {
   }
 }
 
-/** Open (marketId, trader) rows of engine_positions (indexer). */
-export async function openEnginePositions(db: Db): Promise<Array<{ marketId: number; trader: string }>> {
-  const rows = await db.select({ marketId: enginePositions.marketId, trader: enginePositions.trader }).from(enginePositions).where(ne(enginePositions.sizeRaw, "0"));
-  return rows.map((r) => ({ marketId: r.marketId, trader: r.trader }));
+/** engine_positions (indexer): open rows each pass, every row for the reconciliation, and its size repair. */
+export function pgPositionStore(db: Db): PositionStore {
+  return {
+    async open() {
+      const rows = await db.select({ marketId: enginePositions.marketId, trader: enginePositions.trader }).from(enginePositions).where(ne(enginePositions.sizeRaw, "0"));
+      return rows.map((r) => ({ marketId: r.marketId, trader: r.trader }));
+    },
+    async all() {
+      const rows = await db.select({ marketId: enginePositions.marketId, trader: enginePositions.trader, sizeRaw: enginePositions.sizeRaw }).from(enginePositions);
+      return rows.map((r) => ({ marketId: r.marketId, trader: r.trader, sizeRaw: String(r.sizeRaw) }));
+    },
+    async repair(marketId, trader, sizeRaw) {
+      // the size only: the indexer's (block, logIndex) guard stays, its next event of the trader writes as usual
+      await db
+        .update(enginePositions)
+        .set({ sizeRaw, updatedAt: new Date() })
+        .where(and(eq(enginePositions.marketId, marketId), eq(enginePositions.trader, trader.toLowerCase())));
+    },
+  };
 }
 
 /** The freshest signed print per underlying from the oracle's bundle / per-key messages (KEYS.oracleBundle / oracleLast). */
@@ -144,7 +159,14 @@ export function redisSignedPrices(redis: Redis, domain: { chainId: number; oracl
     let messages: unknown[] = [];
     const missing = () => underlyings.some((u) => !signedPriceFor(bundle, [], u, domain));
     if (missing()) {
-      const keys = await redis.keys(KEYS.oracleLast("*"));
+      // SCAN, never KEYS (review M-8: KEYS blocks production Redis)
+      const keys: string[] = [];
+      let cursor = "0";
+      do {
+        const [next, batch] = await redis.scan(cursor, "MATCH", KEYS.oracleLast("*"), "COUNT", 200);
+        cursor = next;
+        keys.push(...batch);
+      } while (cursor !== "0" && keys.length < 1000);
       messages = keys.length ? (await redis.mget(keys)).map(parse) : [];
     }
     for (const u of underlyings) {

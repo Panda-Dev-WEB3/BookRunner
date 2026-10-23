@@ -68,3 +68,34 @@ describe("engine positions", () => {
     expect(store.s.enginePositions[`1|${ALICE.toLowerCase()}`]?.sizeRaw).toBe("0");
   });
 });
+
+describe("engine positions backfill (review I-5)", () => {
+  test("an index older than the engine watch backfills the engine's history up to the protocol cursor, engine logs only", async () => {
+    const { chain, store, make } = world();
+    chain.head = 6n;
+    // the index ran before this version: its protocol cursor is past the engine's events, no engine rows
+    await store.setCursor(CURSORS.protocol, 6);
+    await store.setCursor(CURSORS.books, 6);
+    const ix = make();
+    for (let i = 0; i < 5; i++) await ix.backfillEngine();
+    const k = (t: Address) => `1|${t.toLowerCase()}`;
+    expect(store.s.enginePositions[k(ALICE)]?.sizeRaw).toBe("0");
+    expect(store.s.enginePositions[k(BOB)]).toMatchObject({ sizeRaw: "0", lastBlock: 6 });
+    expect(await store.getCursor(CURSORS.engineBackfill)).toBe(6);
+    expect(chain.getLogsCalls.every((c) => c.addresses.length === 1 && c.addresses[0]!.toLowerCase() === ENGINE.toLowerCase())).toBe(true);
+    // caught up: nothing more is read
+    const calls = chain.getLogsCalls.length;
+    expect(await ix.backfillEngine()).toBeNull();
+    expect(chain.getLogsCalls.length).toBe(calls);
+  });
+
+  test("a fresh index covers the engine from its first range: no backfill scan", async () => {
+    const { chain, store, make } = world();
+    chain.head = 6n;
+    await drain(make());
+    expect(await store.getCursor(CURSORS.engineBackfill)).toBe(6);
+    const calls = chain.getLogsCalls.length;
+    expect(await make().backfillEngine()).toBeNull();
+    expect(chain.getLogsCalls.length).toBe(calls);
+  });
+});

@@ -11,8 +11,10 @@ import { type SignedPrice, signedPriceFor } from "@bookrunner/shared/signedPrice
 import { encodePriceData, type PriceUpdate } from "@bookrunner/shared/eip712";
 import { BaseError, type Hex, encodeErrorResult } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { type EngineMarketCfg, type GasPolicy, type MarketRead, classifyRevert, gasAllowanceWei, priceUsed, usdToWei } from "../src/domain/liquidation";
-import { type LiqCall, type LiquidationChain, LiquidationKeeper } from "../src/liquidationKeeper";
+import { liquidationEthUsd, loadWaterfallConfig } from "../src/config";
+import { type EngineMarketCfg, type GasPolicy, type KeeperAction, type MarketRead, byStake, classifyRevert, gasDecision, priceUsed, usdToWei } from "../src/domain/liquidation";
+import { TxRevertedError } from "../src/kit/tx";
+import { type LiqCall, type LiquidationChain, LiquidationKeeper, type TraderRef } from "../src/liquidationKeeper";
 
 const log = createLogger("liquidation-test", "silent");
 const WAD = 10n ** 18n;
@@ -63,6 +65,7 @@ class FakeEngine implements LiquidationChain {
   }
   async readPass(_m: unknown, traders: Array<{ marketId: number; trader: string }>) {
     this.reads++;
+    this.readPassSizes.push(traders.length);
     const positions = new Map<string, EnginePosition>();
     for (const t of traders) {
       const p = this.positions.get(t.trader.toLowerCase());
@@ -84,33 +87,47 @@ class FakeEngine implements LiquidationChain {
     expect(gas).toBe((this.gas * 13n) / 10n + 30_000n);
     return { hash: "0xabc" as Hex, costWei: this.gas * this.price };
   }
+  readPassSizes: number[] = [];
 }
 
-function keeper(o: { engine?: FakeEngine; signed?: SignedPrice | null; open?: string[]; gas?: Partial<GasPolicy>; now?: { ms: number } } = {}) {
+const POLICY: GasPolicy = { ethUsdWad: 3_000n * WAD, marginUsd: U(0.5), maxTxWei: 2n * 10n ** 15n, hourlyWei: 2n * 10n ** 16n, badDebtOverrideUsd: U(50) };
+
+function keeper(o: { engine?: FakeEngine; signed?: SignedPrice | null; open?: string[]; gas?: Partial<GasPolicy>; now?: { ms: number }; batchSize?: number; maxBatches?: number; reconcileMs?: number; rows?: Map<string, string> } = {}) {
   const engine = o.engine ?? new FakeEngine();
   const statuses: LiquidationKeeperStatus[] = [];
   const now = o.now ?? { ms: NOW };
+  const rows = o.rows ?? new Map<string, string>();
+  const repairs: Array<[number, string, string]> = [];
   let openCalls = 0;
   const k = new LiquidationKeeper({
     chain: engine,
-    openPositions: async () => {
-      openCalls++;
-      return (o.open ?? [ALICE, BOB]).map((trader) => ({ marketId: 1, trader }));
+    positions: {
+      open: async (): Promise<TraderRef[]> => {
+        openCalls++;
+        return (o.open ?? [ALICE, BOB]).map((trader) => ({ marketId: 1, trader }));
+      },
+      all: async () => [...rows.entries()].map(([trader, sizeRaw]) => ({ marketId: 1, trader, sizeRaw })),
+      repair: async (marketId, trader, sizeRaw) => {
+        repairs.push([marketId, trader, sizeRaw]);
+        rows.set(trader, sizeRaw);
+      },
     },
     signedPrices: async () => (o.signed ? new Map([[PID.toLowerCase(), o.signed]]) : new Map()),
     writeStatus: async (s) => {
       statuses.push(s);
     },
-    gas: { ethUsdWad: 3_000n * WAD, marginUsd: U(0.5), maxTxWei: 2n * 10n ** 15n, hourlyWei: 2n * 10n ** 16n, ...o.gas },
+    gas: { ...POLICY, ...o.gas },
     keeper: "0x000000000000000000000000000000000000beef",
     log,
     intervalMs: 10_000,
     idleIntervalMs: 60_000,
     maxTxPerPass: 10,
-    maxPositions: 1000,
+    batchSize: o.batchSize ?? 500,
+    maxBatches: o.maxBatches ?? 10,
+    reconcileMs: o.reconcileMs ?? 0,
     now: () => now.ms,
   });
-  return { k, engine, statuses, now, openCalls: () => openCalls };
+  return { k, engine, statuses, now, repairs, openCalls: () => openCalls };
 }
 
 describe("liquidation keeper: detection", () => {
@@ -255,33 +272,138 @@ describe("liquidation keeper: races, failures, gas guard", () => {
     expect(statuses[0]).toMatchObject({ failures: { consecutive: 0 }, backlog: [{ reason: "price" }] });
   });
 
-  test("gas guard: never more than reward + margin; per-tx and hourly caps; cap-only without ETH/USD", async () => {
-    // reward 2.325 + margin 0.5 at 3000 USD/ETH = 9.416...e14 wei
-    const allowance = usdToWei(U(2.825), 3_000n * WAD);
-    const pol: GasPolicy = { ethUsdWad: 3_000n * WAD, marginUsd: U(0.5), maxTxWei: 10n ** 16n, hourlyWei: 10n ** 17n };
-    expect(gasAllowanceWei(pol, U(2.325), 0n)).toBe(allowance);
-    expect(gasAllowanceWei({ ...pol, maxTxWei: 1000n }, U(2.325), 0n)).toBe(1000n);
-    expect(gasAllowanceWei(pol, U(2.325), 10n ** 17n)).toBe(0n); // hourly budget spent
-    expect(gasAllowanceWei({ ...pol, ethUsdWad: 0n }, U(2.325), 0n)).toBe(10n ** 16n);
+});
 
+// ------------------------------------------------------------------ review I-3: gas policy
+const act = (o: Partial<KeeperAction>): KeeperAction => ({ marketId: 1, trader: ALICE, action: "liquidate", rewardUsd: 0n, badDebtUsd: 0n, equityUsd: 0n, requirementUsd: 0n, priceData: "0x", ...o });
+// a dust long: 0.01 unit, margin 0.11 (liquidatable at 93, above water); a small and a large under-water long at 80
+const DUST: EnginePosition = { size: WAD / 100n, entryPriceWad: ALICE_110.entryPriceWad, marginUsd: 110_000n, fundingIndexAtEntry: 0n };
+const SMALL_UW: EnginePosition = { size: WAD / 10n, entryPriceWad: ALICE_110.entryPriceWad, marginUsd: 1_090_000n, fundingIndexAtEntry: 0n };
+const CAROL = "0x0000000000000000000000000000000000000ca1";
+const DAN = "0x0000000000000000000000000000000000000da1";
+
+describe("gas policy (review I-3)", () => {
+  const oneDollar = usdToWei(U(1), 3_000n * WAD);
+  test("pays for itself: sent, never budget-limited; reward below the cost above water: dust, skipped", () => {
+    expect(gasDecision(POLICY, act({ rewardUsd: U(2) }), oneDollar, POLICY.hourlyWei)).toEqual({ send: true, lossWei: 0n });
+    expect(gasDecision(POLICY, act({ rewardUsd: U(0.75) }), oneDollar, 0n)).toMatchObject({ send: false, reason: "dust" });
+    // a forceClose pays nothing but is a protocol duty: never dust, budget-limited
+    expect(gasDecision(POLICY, act({ action: "forceClose" }), oneDollar / 4n, 0n)).toEqual({ send: true, lossWei: oneDollar / 4n });
+    const dust = gasDecision(POLICY, act({ rewardUsd: U(0.01) }), oneDollar, 0n);
+    expect(dust).toMatchObject({ send: false, reason: "dust" });
+  });
+  test("under water: large bad debt goes out whatever the hourly budget; small bad debt only while it lasts; never above what is at stake", () => {
+    const spent = POLICY.hourlyWei; // budget gone
+    expect(gasDecision(POLICY, act({ rewardUsd: 0n, badDebtUsd: U(91) }), oneDollar, spent)).toMatchObject({ send: true });
+    expect(gasDecision(POLICY, act({ rewardUsd: 0n, badDebtUsd: U(1) }), oneDollar / 2n, spent)).toMatchObject({ send: false, reason: "gas_guard" });
+    expect(gasDecision(POLICY, act({ rewardUsd: 0n, badDebtUsd: U(1) }), oneDollar / 2n, 0n)).toMatchObject({ send: true });
+    expect(gasDecision(POLICY, act({ rewardUsd: 0n, badDebtUsd: U(0.1) }), oneDollar, 0n)).toMatchObject({ send: false, reason: "gas_guard" }); // costs more than at stake
+    expect(gasDecision(POLICY, act({ rewardUsd: U(100), badDebtUsd: U(1000) }), POLICY.maxTxWei + 1n, spent)).toMatchObject({ send: false });
+  });
+  test("no ETH/USD (testnet): caps only, the override still bypasses the hourly budget", () => {
+    const capOnly = { ...POLICY, ethUsdWad: 0n };
+    expect(gasDecision(capOnly, act({ rewardUsd: U(5) }), 10n, capOnly.hourlyWei)).toMatchObject({ send: false });
+    expect(gasDecision(capOnly, act({ badDebtUsd: U(60) }), 10n, capOnly.hourlyWei)).toMatchObject({ send: true });
+  });
+  test("candidates in order of what is at stake (max of reward and bad debt), liquidations before close-outs", () => {
+    const xs = [act({ trader: "a", rewardUsd: U(1) }), act({ trader: "b", badDebtUsd: U(90) }), act({ trader: "c", action: "forceClose", badDebtUsd: U(500) }), act({ trader: "d", rewardUsd: U(5) })];
+    expect(xs.sort(byStake).map((x) => x.trader)).toEqual(["b", "d", "a", "c"]);
+  });
+});
+
+describe("liquidation keeper: gas policy at work", () => {
+  test("dust is skipped (backlog reason dust) while the real liquidation of the pass goes out", async () => {
     const engine = new FakeEngine();
+    engine.price = 1_000_000_000n; // 1 gwei: 290k gas = 2.9e14 wei = ~0.87 USD
     engine.positions.set(ALICE, ALICE_110);
-    engine.price = allowance / engine.gas + 1n; // just above
-    const { k, statuses } = keeper({ engine, signed: await sign(93n * WAD, sec - 2), gas: { maxTxWei: 10n ** 16n } });
+    engine.positions.set(CAROL, DUST);
+    const { k, statuses } = keeper({ engine, open: [ALICE, CAROL], signed: await sign(93n * WAD, sec - 2) });
     await k.tick();
-    expect(engine.sent).toEqual([]);
-    expect(statuses[0]?.backlog[0]).toMatchObject({ reason: "gas_guard" });
-    engine.price = allowance / engine.gas; // within
-    await k.tick();
-    expect(engine.sent).toHaveLength(1);
+    expect(engine.sent.map((c) => c.trader)).toEqual([ALICE]);
+    expect(statuses[0]?.backlog).toMatchObject([{ trader: CAROL, reason: "dust" }]);
   });
 
-  test("the hourly budget counts what was spent", async () => {
+  test("an exhausted hourly budget never blocks a liquidation leaving bad debt above the override; the largest goes first", async () => {
+    const engine = new FakeEngine();
+    engine.price = 1_000_000_000n;
+    engine.positions.set(CAROL, SMALL_UW);
+    engine.positions.set(ALICE, ALICE_110); // under water at 80 by ~91 USD
+    const { k, statuses } = keeper({ engine, open: [CAROL, ALICE], signed: await sign(80n * WAD, sec - 2), gas: { hourlyWei: 0n } });
+    await k.tick();
+    expect(engine.sent.map((c) => c.trader)).toEqual([ALICE]);
+    expect(statuses[0]?.backlog).toMatchObject([{ trader: CAROL, reason: "gas_guard" }]);
+  });
+
+  test("a transaction that reverts on chain counts its gas against the hourly budget", async () => {
+    const engine = new FakeEngine();
+    engine.price = 1_000_000_000n;
+    engine.positions.set(CAROL, SMALL_UW);
+    engine.positions.set(DAN, { ...SMALL_UW });
+    const burnt = 2n * 10n ** 14n;
+    engine.sendError = new TxRevertedError("liquidate", "0xdead", burnt);
+    // the budget fits one small under-water liquidation's loss plus nothing more
+    const { k, statuses } = keeper({ engine, open: [CAROL, DAN], signed: await sign(80n * WAD, sec - 2), gas: { hourlyWei: 3n * 10n ** 14n } });
+    await k.tick();
+    const st = statuses[0]!;
+    expect(st.totals.gasWei).toBe(burnt.toString());
+    expect(st.backlog.map((b) => b.reason).sort()).toEqual(["failed", "gas_guard"]);
+  });
+});
+
+// ------------------------------------------------------------------ review I-6: paging
+describe("more open positions than one pass reads (review I-6)", () => {
+  test("batches of batchSize per aggregate3; beyond maxBatches the positions are paged across passes and reported", async () => {
+    const engine = new FakeEngine();
+    const traders = Array.from({ length: 7 }, (_, i) => `0x${(0x100 + i).toString(16).padStart(40, "0")}`);
+    for (const t of traders) engine.positions.set(t, BOB_300);
+    const { k, statuses } = keeper({ engine, open: traders, batchSize: 2, maxBatches: 2 });
+    await k.tick();
+    expect(engine.readPassSizes).toEqual([2, 2]);
+    expect(statuses[0]?.coverage).toMatchObject({ total: 7, checked: 4, truncated: true });
+    expect(statuses[0]?.coverage.rotationSec).toBeGreaterThan(0);
+    await k.tick();
+    expect(engine.readPassSizes.slice(2)).toEqual([2, 2]);
+    // every trader is read within two passes
+    expect(statuses.at(-1)?.lastPass.checked).toBe(4);
+    const all = keeper({ engine: new FakeEngine(), open: traders.slice(0, 3), batchSize: 2, maxBatches: 2 });
+    await all.k.tick();
+    expect(all.statuses[0]?.coverage).toMatchObject({ total: 3, checked: 3, truncated: false });
+  });
+});
+
+// ------------------------------------------------------------------ review I-5: reconciliation
+describe("reconciliation of the indexer's rows (review I-5)", () => {
+  test("every row (size 0 too) is read on chain and its size repaired when it differs; at start, then every reconcileMs", async () => {
     const engine = new FakeEngine();
     engine.positions.set(ALICE, ALICE_110);
-    engine.positions.set(BOB, { ...ALICE_110 });
-    const { k } = keeper({ engine, signed: await sign(93n * WAD, sec - 2), gas: { hourlyWei: engine.gas * engine.price } });
+    engine.positions.set(BOB, { ...BOB_300, size: 0n });
+    const rows = new Map([
+      [ALICE, "0"], // a closing trade orphaned by a reorg left it at 0: open on chain
+      [BOB, (-10n * WAD).toString()], // closed on chain
+    ]);
+    const now = { ms: NOW };
+    const { k, statuses, repairs } = keeper({ engine, open: [], rows, reconcileMs: 600_000, now });
     await k.tick();
-    expect(engine.sent).toHaveLength(1); // the second would exceed the hour's budget
+    expect(repairs).toEqual([
+      [1, ALICE, (10n * WAD).toString()],
+      [1, BOB, "0"],
+    ]);
+    expect(statuses[0]?.reconcile).toMatchObject({ checked: 2, repaired: 2, error: null });
+    now.ms += 60_000;
+    await k.tick();
+    expect(repairs).toHaveLength(2); // not again before the interval
+  });
+});
+
+// ------------------------------------------------------------------ review I-4: ETH/USD on mainnet
+describe("ETH/USD of the gas policy (review I-4)", () => {
+  test("mainnet with the keeper on refuses to start without it; a typo is refused; elsewhere 0 = caps only", () => {
+    const base = loadWaterfallConfig({});
+    expect(() => liquidationEthUsd({ ...base, CHAIN_ID: 4663 })).toThrow(/WATERFALL_LIQ_ETH_USD is required on mainnet/);
+    expect(liquidationEthUsd({ ...base, CHAIN_ID: 4663, WATERFALL_LIQ_ENABLED: false })).toBe(0n);
+    expect(liquidationEthUsd({ ...base, CHAIN_ID: 4663, WATERFALL_LIQ_ETH_USD: 3_000n * WAD })).toBe(3_000n * WAD);
+    expect(liquidationEthUsd({ ...base, CHAIN_ID: 4663, WATERFALL_ETH_USD: 2_500n * WAD })).toBe(2_500n * WAD);
+    expect(() => liquidationEthUsd({ ...base, CHAIN_ID: 4663, WATERFALL_LIQ_ETH_USD: 3n * WAD })).toThrow(/out of range/);
+    expect(liquidationEthUsd({ ...base, CHAIN_ID: 46630 })).toBe(0n);
   });
 });

@@ -17,13 +17,13 @@ import { Queue, Worker } from "bullmq";
 import { Redis } from "ioredis";
 import type { Address } from "viem";
 import { WaterfallChainAdapter } from "./adapters/chain";
-import { ViemLiquidationChain, openEnginePositions, redisSignedPrices, redisStatusSink } from "./adapters/liquidation";
+import { ViemLiquidationChain, pgPositionStore, redisSignedPrices, redisStatusSink } from "./adapters/liquidation";
 import { RedeemLogIndex, UnionCandidates } from "./adapters/redemptions";
 import { DbRedeemCandidates, PgSettlementStore } from "./adapters/store";
 import { BullVenueOps } from "./adapters/venue-ops";
 import { BuybackRunner } from "./buyback";
 import { PoolKeeperRunner } from "./poolKeeper";
-import { loadWaterfallConfig } from "./config";
+import { liquidationEthUsd, loadWaterfallConfig } from "./config";
 import { GasMeter, expensesRequested } from "./domain/expenses";
 import { Cooldowns, distributes } from "./domain/keeper";
 import { KeeperRunner } from "./keeper";
@@ -42,6 +42,8 @@ export const settleJobId = (bookId: number, period: number) => `settle-${bookId}
 
 export async function main() {
   const cfg = loadWaterfallConfig();
+  // review I-4: refuse to start on mainnet without an ETH/USD price for the liquidation gas policy
+  const liqEthUsd = liquidationEthUsd(cfg);
   const log = createLogger("waterfall", cfg.LOG_LEVEL);
   const ac = new AbortController();
   const cleanups: Array<() => Promise<unknown>> = [];
@@ -204,7 +206,7 @@ export async function main() {
     let marketsScannedAt = 0; // engine books -> market ids, re-scanned at most every 10 min (RPC budget)
     const liq = new LiquidationKeeper({
       chain: new ViemLiquidationChain(pc, sender, deployment),
-      openPositions: () => openEnginePositions(db),
+      positions: pgPositionStore(db),
       signedPrices: redisSignedPrices(redis, { chainId: cfg.CHAIN_ID, oracle: deployment.contracts.oracle }),
       writeStatus: redisStatusSink(redis),
       bookOf: async (marketId) => {
@@ -218,19 +220,22 @@ export async function main() {
         return marketBook.get(marketId) ?? null;
       },
       gas: {
-        ethUsdWad: cfg.WATERFALL_LIQ_ETH_USD > 0n ? cfg.WATERFALL_LIQ_ETH_USD : cfg.WATERFALL_ETH_USD,
+        ethUsdWad: liqEthUsd,
         marginUsd: cfg.WATERFALL_LIQ_GAS_MARGIN_USD,
         maxTxWei: cfg.WATERFALL_LIQ_MAX_TX_COST_ETH,
         hourlyWei: cfg.WATERFALL_LIQ_HOURLY_GAS_ETH,
+        badDebtOverrideUsd: cfg.WATERFALL_LIQ_BAD_DEBT_OVERRIDE_USD,
       },
       keeper: keeperAccount.address,
       log: log.child({ duty: "liquidation" }),
       intervalMs: cfg.WATERFALL_LIQ_INTERVAL_SECONDS * 1000,
       idleIntervalMs: cfg.WATERFALL_LIQ_IDLE_INTERVAL_SECONDS * 1000,
       maxTxPerPass: cfg.WATERFALL_LIQ_MAX_TX_PER_PASS,
-      maxPositions: cfg.WATERFALL_LIQ_MAX_POSITIONS,
+      batchSize: cfg.WATERFALL_LIQ_BATCH_SIZE,
+      maxBatches: cfg.WATERFALL_LIQ_MAX_BATCHES,
+      reconcileMs: cfg.WATERFALL_LIQ_RECONCILE_SECONDS * 1000,
     });
-    if (cfg.WATERFALL_LIQ_ETH_USD === 0n && cfg.WATERFALL_ETH_USD === 0n)
+    if (liqEthUsd === 0n)
       log.warn("liquidation gas guard: no ETH/USD configured (WATERFALL_LIQ_ETH_USD / WATERFALL_ETH_USD): only the per-tx and hourly caps apply");
     const liqDone = (async () => {
       while (!ac.signal.aborted) await sleep(await liq.tick(), ac.signal);

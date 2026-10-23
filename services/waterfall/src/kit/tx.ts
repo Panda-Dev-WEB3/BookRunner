@@ -41,6 +41,8 @@ export class TxRevertedError extends Error {
   constructor(
     readonly label: string,
     readonly hash: Hex,
+    /** gas the reverted transaction burnt (wei): callers that budget gas count it (liquidation keeper, review I-3) */
+    readonly costWei: bigint = 0n,
   ) {
     super(`${label}: transaction ${hash} reverted`);
   }
@@ -150,7 +152,7 @@ export class TxSender {
       for (const l of this.listeners) l({ label: call.label, bookId: call.bookId, gasUsed: receipt.gasUsed, costWei, hash });
       if (receipt.status !== "success") {
         this.log.error({ tx: call.label, hash, block: receipt.blockNumber }, "tx reverted");
-        throw new TxRevertedError(call.label, hash);
+        throw new TxRevertedError(call.label, hash, costWei);
       }
       this.log.info({ tx: call.label, hash, block: receipt.blockNumber, gasUsed: receipt.gasUsed.toString() }, "tx mined");
       return { hash, receipt, result };

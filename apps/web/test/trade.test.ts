@@ -3,11 +3,15 @@
 // client-side order checks, the close size, the engine revert messages, and the page's risk copy.
 import { describe, expect, test } from "bun:test";
 import { checkCopy } from "@bookrunner/shared/copy";
-import { encodeErrorResult } from "viem";
+import { poolEngineAbi } from "@bookrunner/shared/abi";
+import { encodeErrorResult, encodeFunctionData } from "viem";
 import {
   SESSION_BADGE,
   absUnitsText,
   closeDelta,
+  decodeTradeCall,
+  exactWad,
+  tradeCallText,
   fmtLeverage,
   fmtUnits,
   isNewRisk,
@@ -131,6 +135,30 @@ describe("session and price", () => {
   });
 });
 
+describe("you will sign: decoded from the calldata (review I-1 / M-3)", () => {
+  test("exact side, size and limit for 1, 10, 50, 100 and fractional sizes; not a trade: null", () => {
+    for (const [raw, text] of [
+      [WAD, "1"],
+      [10n * WAD, "10"],
+      [50n * WAD, "50"],
+      [100n * WAD, "100"],
+      [WAD / 2n, "0.5"],
+      [2_250_000_000_000_000_000n, "2.25"],
+      [1n, "0.000000000000000001"],
+    ] as const) {
+      for (const sign of [1n, -1n]) {
+        const data = encodeFunctionData({ abi: poolEngineAbi, functionName: "trade", args: [3n, sign * raw, 100_549_950_000_000_000_000n, "0x"] });
+        const c = decodeTradeCall(data)!;
+        expect(c).toEqual({ marketId: 3n, sizeDelta: sign * raw, acceptablePriceWad: 100_549_950_000_000_000_000n });
+        expect(tradeCallText(c)).toBe(`${sign > 0n ? "Buy" : "Sell"} ${text} units`);
+      }
+    }
+    expect(exactWad(100_549_950_000_000_000_000n)).toBe("100.54995");
+    expect(decodeTradeCall(encodeFunctionData({ abi: poolEngineAbi, functionName: "depositMargin", args: [1n, 5n] }))).toBeNull();
+    expect(decodeTradeCall("0xdeadbeef")).toBeNull();
+  });
+});
+
 describe("leverage rule", () => {
   const margin = { maxLeverage: 10, holdableLeverage: 5, offHoursMarginBps: 2000 };
   test("refused above the holdable leverage on this deployment (mainnet default), else a warning", () => {
@@ -150,7 +178,7 @@ describe("copy", () => {
     const lines = tradeRiskLines({ margin: { initialMarginBps: 1000, maintenanceMarginBps: 500, offHoursMarginBps: 2000, maxLeverage: 10, holdableLeverage: 5, refusesUnholdable: true, orderLeverageCap: 5 }, tradePriceMaxAgeSeconds: 15 });
     const text = lines.map((l) => `${l.title}. ${l.body}`).join("\n");
     expect(checkCopy(text)).toEqual([]);
-    expect(text).toContain("10x");
+    expect(text).toContain("The maximum is 5x here");
     expect(text).toContain("20% of notional");
     expect(text).toContain("above 5x");
     expect(text).toContain("15 s");

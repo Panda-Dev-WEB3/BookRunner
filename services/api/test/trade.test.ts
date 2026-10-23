@@ -339,6 +339,7 @@ describe("trade router: reads", () => {
     expect(q.acceptablePrice).toBe("100.55025");
     expect(q.warnings.join(" ")).toContain("session close");
     setTrader(w, flat(U(90)));
+    w.now.ms += 3_000; // past the 2 s wallet cache of the queries
     expect((await w.caller.trade.quote({ marketId: 1, wallet: ALICE, sizeDelta: UNITS(10).toString() })).refusal?.code).toBe("INITIAL_MARGIN");
     // no wallet: no margin check, the required margin is stated
     const anon = await w.caller.trade.quote({ marketId: 1, sizeDelta: (-UNITS(2)).toString() });
@@ -510,5 +511,81 @@ describe("leverage that survives a session close (TRADE_REFUSE_UNHOLDABLE_LEVERA
     // a reduction is never refused by it
     setTrader(w, opened(U(110), UNITS(10)));
     expect((await w.caller.trade.order({ marketId: 1, wallet: ALICE, sizeDelta: (-UNITS(1)).toString() })).txs).toHaveLength(1);
+  });
+});
+
+describe("review I-1: the signing headline is the exact size and side of the calldata", () => {
+  test("1, 10, 50, 100, 150 and fractional sizes; buy and sell; the exact price limit", async () => {
+    const { engineTradeTx, tradeDescription } = await import("../src/domain/txs");
+    for (const [units, text] of [
+      [1, "1"],
+      [10, "10"],
+      [50, "50"],
+      [100, "100"],
+      [150, "150"],
+      [0.5, "0.5"],
+      [2.25, "2.25"],
+      [0.000001, "0.000001"],
+    ] as const) {
+      const buy = engineTradeTx(31337, ENGINE, 1, UNITS(units), 100_549_950_000_000_000_000n, "0x", "NVDA perpetual", "open");
+      expect(buy.description).toStartWith(`Buy ${text} NVDA perpetual (open)`);
+      expect(buy.description).toContain("no more than 100.54995 per unit");
+      const sell = engineTradeTx(31337, ENGINE, 1, -UNITS(units), 99_450_250_000_000_000_000n, "0x", "NVDA perpetual", "close");
+      expect(sell.description).toStartWith(`Sell ${text} NVDA perpetual (close)`);
+      expect(sell.description).toContain("no less than 99.45025 per unit");
+      // the words are read back from the calldata itself
+      expect(tradeDescription(sell.data, "NVDA perpetual", "close")).toBe(sell.description);
+    }
+    expect(() => tradeDescription("0x12345678", "x", "y")).toThrow();
+  });
+
+  test("the prepared order's headline matches its calldata", async () => {
+    const w = await world();
+    setTrader(w, flat(U(10_000)));
+    for (const units of [1, 10, 50]) {
+      const r = await w.caller.trade.order({ marketId: 1, wallet: ALICE, sizeDelta: UNITS(units).toString() });
+      expect(r.txs[0]!.description).toStartWith(`Buy ${units} NVDA perpetual (open)`);
+    }
+  });
+});
+
+describe("review I-2: a margin withdrawal never takes a position above the order leverage cap", () => {
+  test("refuse-unholdable on: the safe max keeps 2x initial margin (<= 5x after a 1% move); beyond it refused server-side", async () => {
+    const w = await world();
+    const p = opened(U(500), UNITS(10)); // ~2x
+    setTrader(w, p);
+    const open = await w.caller.trade.position({ marketId: 1, wallet: ALICE });
+    w.deps.settings.tradeRefuseUnholdable = true;
+    w.now.ms += 3_000; // past the 2 s wallet cache
+    const capped = await w.caller.trade.position({ marketId: 1, wallet: ALICE });
+    const max = BigInt(capped.maxWithdrawUsd.replace(".", ""));
+    expect(max).toBeLessThan(BigInt(open.maxWithdrawUsd.replace(".", "")));
+    // after withdrawing the max, at a 1 % adverse move, equity still covers 20 % of notional (leverage <= 5x)
+    const adverse = 99n * WAD;
+    const after = { ...p, marginUsd: p.marginUsd - max };
+    expect(traderEquityUsd(after, adverse, 0n) >= requirementUsd(p.size, adverse, 2000n)).toBe(true);
+    expect(await code(w.caller.trade.withdraw({ marketId: 1, wallet: ALICE, amountUsd: (Number(max + 1_000_000n) / 1e6).toFixed(6) }))).toContain("off-hours requirement");
+    expect((await w.caller.trade.withdraw({ marketId: 1, wallet: ALICE, amountUsd: (Number(max) / 1e6).toFixed(6) })).txs.length).toBeGreaterThan(0);
+  });
+});
+
+describe("review I-7: wallet reads cannot drive paid RPC", () => {
+  test("quote / position of a wallet are cached 2 s; the batch weight of these reads is 5", async () => {
+    const w = await world();
+    setTrader(w, flat(U(500)));
+    w.chain.engineTraderCalls = 0;
+    await w.caller.trade.quote({ marketId: 1, wallet: ALICE, sizeDelta: UNITS(1).toString() });
+    await w.caller.trade.quote({ marketId: 1, wallet: ALICE, sizeDelta: UNITS(2).toString() });
+    await w.caller.trade.position({ marketId: 1, wallet: ALICE });
+    expect(w.chain.engineTraderCalls).toBe(1);
+    w.now.ms += 2_500;
+    await w.caller.trade.position({ marketId: 1, wallet: ALICE });
+    expect(w.chain.engineTraderCalls).toBe(2);
+    // prepared transactions always read fresh
+    await w.caller.trade.deposit({ marketId: 1, wallet: ALICE, amountUsd: "1" });
+    expect(w.chain.engineTraderCalls).toBe(3);
+    const { trpcBatchWeight, MAX_TRPC_BATCH } = await import("../src/app");
+    expect(trpcBatchWeight(["trade.quote", "trade.position"])).toBe(10);
+    expect(trpcBatchWeight(["trade.quote", "trade.position", "trade.market"]) > MAX_TRPC_BATCH).toBe(true);
   });
 });

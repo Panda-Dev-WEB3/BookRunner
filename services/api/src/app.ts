@@ -33,8 +33,15 @@ export const MAX_TRPC_BATCH = 10;
 export const TRPC_HEAVY_PREFIXES = ["receipts."] as const;
 export const TRPC_HEAVY_WEIGHT = MAX_TRPC_BATCH;
 
+/**
+ * Review I-7: the wallet reads of the trading page (chain reads per wallet, cached 2 s) weigh this much, so a batch
+ * carries at most two of them; nginx also limits them per IP in their own zone (bookrunner_wallet).
+ */
+export const TRPC_WALLET_READS = ["trade.quote", "trade.position"] as const;
+export const TRPC_WALLET_WEIGHT = 5;
+
 export function trpcBatchWeight(paths: string[]): number {
-  return paths.reduce((w, p) => w + (TRPC_HEAVY_PREFIXES.some((h) => p.startsWith(h)) ? TRPC_HEAVY_WEIGHT : 1), 0);
+  return paths.reduce((w, p) => w + (TRPC_HEAVY_PREFIXES.some((h) => p.startsWith(h)) ? TRPC_HEAVY_WEIGHT : (TRPC_WALLET_READS as readonly string[]).includes(p) ? TRPC_WALLET_WEIGHT : 1), 0);
 }
 
 /**
@@ -218,7 +225,7 @@ export function createApp(deps: ApiDeps, opts: AppOptions) {
     }
     if (paths.length > 1 && trpcBatchWeight(paths) > MAX_TRPC_BATCH) {
       return c.json(
-        { error: { json: { message: `Batch too heavy: receipts.* calls must be sent alone, others at most ${MAX_TRPC_BATCH} per batch`, code: -32600, data: { code: "BAD_REQUEST", httpStatus: 400 } } } },
+        { error: { json: { message: `Batch too heavy: receipts.* calls must be sent alone, trade.quote / trade.position at most 2 per batch, others at most ${MAX_TRPC_BATCH} per batch`, code: -32600, data: { code: "BAD_REQUEST", httpStatus: 400 } } } },
         400,
       );
     }

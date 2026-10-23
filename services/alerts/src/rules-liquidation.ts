@@ -9,6 +9,9 @@
 // - keeper_liquidation_failing — CRITICAL when the keeper's last ALERT_LIQ_FAILURES (3) attempts (transactions or
 //   passes, races excluded) failed, or when an engine book is Live / Retiring and the keeper's status is missing or
 //   older than ALERT_LIQ_STATUS_STALE_SECONDS (300): nobody liquidates its traders.
+// - liquidation_coverage — review I-6: more open positions than one pass reads (WATERFALL_LIQ_BATCH_SIZE x
+//   WATERFALL_LIQ_MAX_BATCHES): they are paged across passes, so a position may wait a full rotation. WARNING; CRITICAL
+//   when one rotation takes longer than ALERT_LIQ_ROTATION_SECONDS (120). Raise the batch count or the cadence.
 import type { RuleConfig } from "./config";
 import type { Condition, Snapshot } from "./types";
 
@@ -22,7 +25,8 @@ const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 
 const REASON: Record<string, string> = {
   pending: "not sent yet",
-  gas_guard: "held back by the gas guard (cost above reward + margin, or a gas cap)",
+  gas_guard: "held back by the gas policy (per-tx cap, more than the bad debt at stake, or the hourly loss budget)",
+  dust: "dust above water (reward below the gas cost, no bad debt yet)",
   price: "the price it needs is not usable now",
   failed: "its transaction fails",
 };
@@ -74,7 +78,21 @@ export function keeperLiquidationFailing(s: Snapshot, c: RuleConfig): Condition[
   ];
 }
 
+export function liquidationCoverage(s: Snapshot, c: RuleConfig): Condition[] {
+  const st = s.liquidationKeeper;
+  if (!st || !st.coverage.truncated) return [];
+  return [
+    {
+      key: "liquidation_coverage",
+      rule: "liquidation_coverage",
+      severity: st.coverage.rotationSec > c.liqRotationSec ? "critical" : "warning",
+      summary: `liquidation keeper reads ${st.coverage.checked} of ${st.coverage.total} open engine positions per pass: one full rotation takes ~${dur(st.coverage.rotationSec)} (limit ${dur(c.liqRotationSec)}); raise WATERFALL_LIQ_MAX_BATCHES or the cadence`,
+    },
+  ];
+}
+
 export const LIQUIDATION_RULES = {
+  liquidation_coverage: liquidationCoverage,
   liquidation_backlog: liquidationBacklog,
   keeper_liquidation_failing: keeperLiquidationFailing,
 } as const;

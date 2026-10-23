@@ -2,6 +2,8 @@
 // signed size, slippage, leverage, what the order does to the position, the session badge, the price age and the
 // countdown of a carried price, client-side order checks (the API repeats every engine rule before it prepares
 // anything), and the page's risk copy (checked against the copy rules).
+import { poolEngineAbi } from "@bookrunner/shared/abi";
+import { type Hex, decodeFunctionData, formatUnits } from "viem";
 import { parseAmount } from "../../lib/amount";
 import type { TradeMarket, TradeSession } from "../../lib/api-types";
 import type { Tone } from "../../lib/limits";
@@ -206,7 +208,7 @@ export function tradeRiskLines(m: Pick<TradeMarket, "margin" | "tradePriceMaxAge
     },
     {
       title: "Leverage cuts both ways",
-      body: `The maximum is ${(10_000 / im).toFixed(0)}x (initial margin ${pct(im)} of notional). A move against you of 1% costs about as many percent of your margin as your leverage.`,
+      body: `The maximum is ${m?.margin.orderLeverageCap ?? 10_000 / im}x here (initial margin ${pct(im)} of notional${m?.margin.refusesUnholdable ? "; capped at what a position can hold through a session close" : ""}). A move against you of 1% costs about as many percent of your margin as your leverage.`,
     },
     {
       title: "Liquidation can take all of your margin",
@@ -227,3 +229,21 @@ export function tradeRiskLines(m: Pick<TradeMarket, "margin" | "tradePriceMaxAge
   ];
 }
 
+
+/** A prepared PoolEngine.trade(marketId, sizeDelta, acceptablePriceWad, priceData) call, decoded; null when it is not one. */
+export function decodeTradeCall(data: string): { marketId: bigint; sizeDelta: bigint; acceptablePriceWad: bigint } | null {
+  try {
+    const d = decodeFunctionData({ abi: poolEngineAbi, data: data as Hex });
+    if (d.functionName !== "trade" || !d.args || d.args.length !== 4) return null;
+    const [marketId, sizeDelta, acceptablePriceWad] = d.args as readonly [bigint, bigint, bigint, Hex];
+    return { marketId, sizeDelta, acceptablePriceWad };
+  } catch {
+    return null;
+  }
+}
+
+/** Exact decimal of a 1e18 value ("100", "2.5", "100.54995"), never rounded. */
+export const exactWad = (raw: bigint): string => formatUnits(raw < 0n ? -raw : raw, 18);
+
+/** "Buy 100 units" / "Sell 2.5 units", from the decoded call. */
+export const tradeCallText = (c: { sizeDelta: bigint }): string => `${c.sizeDelta > 0n ? "Buy" : "Sell"} ${exactWad(c.sizeDelta)} units`;

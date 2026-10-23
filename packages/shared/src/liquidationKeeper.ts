@@ -6,8 +6,10 @@
 export type BacklogReason =
   /** found this pass, the transaction is next */
   | "pending"
-  /** the transaction would cost more than the reward plus the margin (or the per-tx / hourly gas cap) */
+  /** the transaction would cost more than the gas policy allows (per-tx cap, the bad debt at stake, the hourly loss budget) */
   | "gas_guard"
+  /** reward + margin below the gas cost and not under water (no bad debt yet): skipped until it is (review I-3) */
+  | "dust"
   /** the price it needs is not usable now (stale / off-hours for a close-out, a bad signature): retried next pass */
   | "price"
   /** the transaction failed (not a race): retried next pass */
@@ -49,6 +51,13 @@ export interface LiquidationKeeperStatus {
   totals: { liquidations: number; forceCloses: number; raced: number; rewardsUsd: string; gasWei: string };
   /** gas guard: whether the cost is compared with the reward (an ETH/USD price is configured) or only capped */
   gasGuard: "reward" | "cap_only";
+  /**
+   * Review I-6: open positions known (total) and read this pass (checked). truncated = a pass cannot cover them all: they
+   * are paged across passes, one full rotation every rotationSec.
+   */
+  coverage: { total: number; checked: number; truncated: boolean; rotationSec: number };
+  /** Review I-5: the last on-chain reconciliation of every known (market, trader): rows read, sizes repaired */
+  reconcile: { at: number | null; checked: number; repaired: number; error: string | null };
 }
 
 /** The keeper rewrites the status every pass; the TTL outlives a few slow passes so a stalled keeper leaves an old status. */
@@ -56,7 +65,7 @@ export const LIQUIDATION_STATUS_TTL_SEC = 900;
 
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
-const REASONS = new Set<BacklogReason>(["pending", "gas_guard", "price", "failed"]);
+const REASONS = new Set<BacklogReason>(["pending", "gas_guard", "dust", "price", "failed"]);
 const REGIMES = new Set(["open", "held", "settled", "closeout", "no_price"]);
 
 /** KEYS.liquidationKeeper JSON -> status; null when absent or malformed (malformed entries are dropped). */
@@ -98,6 +107,14 @@ export function parseLiquidationStatus(raw: string | null | undefined): Liquidat
       failures: { consecutive: num(f.consecutive) ?? 0, since: num(f.since), lastError: str(f.lastError), lastErrorAt: num(f.lastErrorAt) },
       totals: { liquidations: num(t.liquidations) ?? 0, forceCloses: num(t.forceCloses) ?? 0, raced: num(t.raced) ?? 0, rewardsUsd: str(t.rewardsUsd) ?? "0", gasWei: str(t.gasWei) ?? "0" },
       gasGuard: o.gasGuard === "cap_only" ? "cap_only" : "reward",
+      coverage: (() => {
+        const c = (o.coverage ?? {}) as Record<string, unknown>;
+        return { total: num(c.total) ?? 0, checked: num(c.checked) ?? 0, truncated: c.truncated === true, rotationSec: num(c.rotationSec) ?? 0 };
+      })(),
+      reconcile: (() => {
+        const r = (o.reconcile ?? {}) as Record<string, unknown>;
+        return { at: num(r.at), checked: num(r.checked) ?? 0, repaired: num(r.repaired) ?? 0, error: str(r.error) };
+      })(),
     };
   } catch {
     return null;

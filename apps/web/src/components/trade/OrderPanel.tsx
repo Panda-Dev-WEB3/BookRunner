@@ -18,6 +18,9 @@ import {
   EFFECT_LABEL,
   SLIPPAGE_PRESETS_BPS,
   absUnitsText,
+  decodeTradeCall,
+  exactWad,
+  tradeCallText,
   type Side,
   type SizeUnit,
   fmtLeverage,
@@ -58,17 +61,24 @@ function QuoteDetails({ q, sym }: { q: TradeQuoteOut; sym: string }) {
 }
 
 /** What the wallet will sign: the engine, the function and its arguments in words, and the price's deadline. */
-function SignSummary({ m, q, now }: { m: TradeMarket; q: TradeQuoteOut; now: number }) {
-  const left = secondsLeft(q.tradableUntil, now);
+/**
+ * What the wallet will sign, decoded from the prepared CALLDATA (review I-1 / M-3): the engine it goes to, the side,
+ * the exact size and the exact price limit of the encoded call (never the API's description or quote echo), and the
+ * carried price's deadline. An undecodable step shows nothing to sign (TxRunner refuses it too).
+ */
+function SignSummary({ to, data, tradableUntil, slippageBps, now }: { to: string; data: string; tradableUntil: string | null; slippageBps: number; now: number }) {
+  const left = secondsLeft(tradableUntil, now);
+  const call = decodeTradeCall(data);
+  if (!call) return <Callout tone="risk" compact title="This step is not a PoolEngine trade">Do not sign it; prepare the order again.</Callout>;
   return (
     <div className="rounded-card border border-line bg-surface-2 p-3">
       <div className="eyebrow mb-1 !text-ink">You will sign</div>
       <KV
         rows={[
-          ["Contract", <Hash key="c" value={m.engine} kind="address" />],
+          ["Contract", <Hash key="c" value={to} kind="address" />],
           ["Function", "PoolEngine.trade(marketId, sizeDelta, acceptablePrice, priceData)"],
-          ["Order", `${q.side === "buy" ? "Buy" : "Sell"} ${fmtUnits(BigInt(q.sizeDelta) < 0n ? -BigInt(q.sizeDelta) : BigInt(q.sizeDelta))} units in market #${q.marketId}`],
-          [q.side === "buy" ? "Pays at most" : "Receives at least", `${fmtPrice(toNum(q.acceptablePrice))} per unit (slippage ${fmtBps(q.slippageBps)})`],
+          ["Order", `${tradeCallText(call)} in market #${call.marketId}`],
+          [call.sizeDelta > 0n ? "Pays at most" : "Receives at least", `${exactWad(call.acceptablePriceWad)} per unit (slippage ${fmtBps(slippageBps)})`],
           ["Carried price", left === null ? "—" : left > 0 ? `valid for ${left} s more` : "expired: prepare again"],
         ]}
       />
@@ -226,7 +236,7 @@ export function OrderPanel(props: { m: TradeMarket; address: string | null; posi
             }}
             onBack={reset}
           >
-            <SignSummary m={m} q={order.data.quote} now={now} />
+            {order.data.txs[0] && <SignSummary to={order.data.txs[0].to} data={order.data.txs[0].data} tradableUntil={order.data.quote.tradableUntil} slippageBps={order.data.quote.slippageBps} now={now} />}
             {left === 0 && (
               <Callout
                 tone="warn"

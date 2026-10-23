@@ -106,7 +106,9 @@ function WithdrawTab(props: { m: TradeMarket; address: string | null; position: 
         disabled={wd.isPending || !!wd.data}
         help={
           open
-            ? "With a position open, initial margin stays (with room for a 1% move), the session must be open and no split pending. Reduce the position to free more."
+            ? props.m.margin.refusesUnholdable
+              ? `With a position open, enough margin stays to keep it at or below ${props.m.margin.orderLeverageCap}x, the leverage it can hold through a session close (with room for a 1% move); the session must be open and no split pending. Reduce the position to free more.`
+              : "With a position open, initial margin stays (with room for a 1% move), the session must be open and no split pending. Reduce the position to free more."
             : "With no position, all of your margin can be withdrawn at any time."
         }
       />

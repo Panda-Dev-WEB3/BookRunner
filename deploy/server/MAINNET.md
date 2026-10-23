@@ -80,6 +80,7 @@ ORDERLY_BASE_URL=https://api.orderly.org               # VERIFY: RHC endpoint
 ORDERLY_BROKER_ID=<builder broker id>                  # == deploy input externals.orderlyBrokerId
 ORDERLY_BUILDER_KEY_SECRET=<base58 ed25519 seed>
 ANTHROPIC_API_KEY=<key>                                # charter jury
+WATERFALL_LIQ_ETH_USD=<USD per ETH, e.g. 3000>         # liquidation keeper gas policy (required: the preflight and the waterfall refuse to start without it); refresh when ETH moves 2x
 # oracle (RUNBOOK "Real prices", VERIFY C6): primary + confirm. Chainlink feeds come from config/chains/4663.json in
 # the app tree (the DeployMainnet input was checked against it); ORACLE_CHAINLINK_FEEDS only overrides, and only in
 # the {"proxy","basis","token"} form (a plain address is refused). Chainlink alone signs (sourceCount 1); the DEX
