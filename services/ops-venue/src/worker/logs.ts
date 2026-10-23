@@ -79,7 +79,11 @@ export class LogWatcher {
     const max = this.ctx.settings.logMaxRange;
     for (let a = from; a <= to; a += max) {
       const b = a + max - 1n < to ? a + max - 1n : to;
-      const [al, ml] = await Promise.all([this.ctx.chain.adapterLogs(adapters, a, b), this.ctx.chain.mandateLogs(mandates, a, b)]);
+      // RPC budget: one eth_getLogs for both address sets when the chain port can split them
+      const chain = this.ctx.chain;
+      const { adapter: al, mandate: ml } = chain.bookLogs
+        ? await chain.bookLogs(adapters, mandates, a, b)
+        : await Promise.all([chain.adapterLogs(adapters, a, b), chain.mandateLogs(mandates, a, b)]).then(([adapter, mandate]) => ({ adapter, mandate }));
       await this.dispatch(al, ml);
     }
   }

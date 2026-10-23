@@ -4,6 +4,7 @@ import { type Deployment, type Logger, publicClientFor, tryLoadDeployment, walle
 import type { LocalAccount } from "viem";
 import { ViemChainReader, ViemOracleChain } from "./adapters/chain";
 import type { OracleConfig } from "./config";
+import type { HeadClock } from "./head";
 import { type DbReader, discoverUniverse } from "./discovery";
 import { DEFAULT_SESSIONS } from "./domain/hold";
 import type { OracleService } from "./service";
@@ -29,6 +30,8 @@ export class Runtime {
     private readonly db: DbReader | null,
     private readonly market: SyntheticMarket | null,
     private readonly loadDeployment: (file: string) => Deployment | null = tryLoadDeployment,
+    /** head clock shared with the sources (ORACLE_HEAD_READ_MS); null = the head is read every tick */
+    private readonly head: HeadClock | null = null,
   ) {}
 
   /** One discovery pass; returns the delay until the next one. */
@@ -97,7 +100,7 @@ export class Runtime {
     const wallet = walletClientFor(dep.chainId, this.cfg.RPC_URL, this.account);
     this.clients = {
       key,
-      chain: new ViemOracleChain(pub, wallet, dep.contracts.oracle, dep.chainId, this.log, this.cfg.ORACLE_RECEIPT_TIMEOUT_MS),
+      chain: new ViemOracleChain(pub, wallet, dep.contracts.oracle, dep.chainId, this.log, this.cfg.ORACLE_RECEIPT_TIMEOUT_MS, this.head),
       reader: new ViemChainReader(pub, dep.contracts.stockRegistry),
     };
     this.log.info({ chainId: dep.chainId, oracle: dep.contracts.oracle, registry: dep.contracts.stockRegistry }, "deployment loaded");

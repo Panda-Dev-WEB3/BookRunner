@@ -1,9 +1,10 @@
 // Source assembly from config: synthetic GBM (devnet; testnet with a secret seed; never on mainnet),
 // HTTP sources, Pyth Pro (ORACLE_PYTH + PYTH_API_KEY), Chainlink feeds (config/chains/<chainId>.json +
 // ORACLE_CHAINLINK_FEEDS) and the Uniswap v3 TWAP confirm source (chain config dexConfirm.pools, ORACLE_DEX_CONFIRM).
-import { type Logger, isMainnet, uniswapV3For } from "@bookrunner/shared";
+import { type Logger, chainFor, isMainnet, multicall3For, uniswapV3For } from "@bookrunner/shared";
 import { createPublicClient, http, type PublicClient } from "viem";
 import { type OracleConfig, syntheticSeedProblem } from "../config";
+import type { HeadClock } from "../head";
 import { csprngNormal } from "../domain/rng";
 import type { PriceSource } from "../domain/types";
 import { ChainlinkSource, viemAggregatorReader } from "./chainlink";
@@ -26,7 +27,8 @@ export function syntheticTicker(cfg: Pick<OracleConfig, "demoPrices" | "vols">, 
   return { s0: cfg.demoPrices[ticker] ?? DEFAULT_S0, vol: cfg.vols[ticker] ?? DEFAULT_VOL };
 }
 
-export function buildSources(cfg: OracleConfig, log: Logger, now: () => number = Date.now): BuiltSources {
+/** `head`: the process's head clock, fed with the block timestamp of every batched Chainlink / DEX pass. */
+export function buildSources(cfg: OracleConfig, log: Logger, now: () => number = Date.now, head: HeadClock | null = null): BuiltSources {
   const sources: PriceSource[] = [];
   let market: SyntheticMarket | null = null;
   let syntheticRefused: string | null = null;
@@ -91,24 +93,39 @@ export function buildSources(cfg: OracleConfig, log: Logger, now: () => number =
     } else log.warn("ORACLE_PYTH=1 but PYTH_API_KEY is not set; Pyth Pro source skipped");
   }
 
-  // concurrent reads of one tick (round + token state per feed, pool reads) share one JSON-RPC batch request
+  // RPC budget: on a chain with Multicall3 (mainnet) every pass of a source is ONE aggregate3 eth_call (the readers
+  // call multicall explicitly; no batch.multicall here, which would re-split it); elsewhere the per-call reads of a
+  // tick still share one JSON-RPC batch request
+  const multicall = multicall3For(cfg.CHAIN_ID);
   const clients = new Map<string, PublicClient>();
   const client = (url: string): PublicClient => {
     let c = clients.get(url);
     if (!c) {
-      c = createPublicClient({ transport: http(url, { batch: true }) }) as PublicClient;
+      c = createPublicClient({ ...(multicall ? { chain: chainFor(cfg.CHAIN_ID, url) } : {}), transport: http(url, { batch: true }) }) as PublicClient;
       clients.set(url, c);
     }
     return c;
   };
+  const onBlockTimestamp = head ? (ts: number) => head.observe(ts) : undefined;
   const feeds = cfg.chainlinkFeeds;
   if (Object.keys(feeds).length > 0) {
     const pub = client(cfg.ORACLE_CHAINLINK_RPC_URL ?? cfg.RPC_URL);
     sources.push(
-      new ChainlinkSource(feeds, viemAggregatorReader(pub), { sequencerFeed: cfg.sequencerUptimeFeed, sequencerGraceMs: cfg.ORACLE_SEQUENCER_GRACE_MS }),
+      new ChainlinkSource(feeds, viemAggregatorReader(pub, multicall), {
+        sequencerFeed: cfg.sequencerUptimeFeed,
+        sequencerGraceMs: cfg.ORACLE_SEQUENCER_GRACE_MS,
+        readIntervalMs: cfg.cadence.chainlinkReadMs,
+        tokenStateIntervalMs: cfg.cadence.tokenStateReadMs,
+        ...(onBlockTimestamp ? { onBlockTimestamp } : {}),
+      }),
     );
     log.info(
-      { feeds: Object.fromEntries(Object.entries(feeds).map(([t, f]) => [t, { proxy: f.proxy, basis: f.basis, token: f.token, maxAgeMs: f.maxAgeMs }])) },
+      {
+        feeds: Object.fromEntries(Object.entries(feeds).map(([t, f]) => [t, { proxy: f.proxy, basis: f.basis, token: f.token, maxAgeMs: f.maxAgeMs }])),
+        multicall: multicall ?? null,
+        readIntervalMs: cfg.cadence.chainlinkReadMs,
+        tokenStateIntervalMs: cfg.cadence.tokenStateReadMs,
+      },
       "Chainlink source enabled (per-token feeds divided by uiMultiplier; run source-check before mainnet)",
     );
   }
@@ -120,9 +137,20 @@ export function buildSources(cfg: OracleConfig, log: Logger, now: () => number =
   }
   if (Object.keys(pools).length > 0) {
     const pub = client(cfg.ORACLE_DEX_RPC_URL ?? cfg.ORACLE_CHAINLINK_RPC_URL ?? cfg.RPC_URL);
-    sources.push(new DexTwapSource(pools, viemDexReader(pub), { maxAgeMs: cfg.ORACLE_DEX_MAX_AGE_MS, factory: uniswapV3For(cfg.CHAIN_ID)?.factory ?? null }));
+    sources.push(
+      new DexTwapSource(pools, viemDexReader(pub, multicall), {
+        maxAgeMs: cfg.ORACLE_DEX_MAX_AGE_MS,
+        factory: uniswapV3For(cfg.CHAIN_ID)?.factory ?? null,
+        readIntervalMs: cfg.cadence.dexReadMs,
+        ...(onBlockTimestamp ? { onBlockTimestamp } : {}),
+      }),
+    );
     log.info(
-      { pools: Object.fromEntries(Object.entries(pools).map(([t, p]) => [t, { pool: p.pool, fee: p.fee, twapSec: p.twapSec, minDepthUsd: p.minDepthUsd }])) },
+      {
+        pools: Object.fromEntries(Object.entries(pools).map(([t, p]) => [t, { pool: p.pool, fee: p.fee, twapSec: p.twapSec, minDepthUsd: p.minDepthUsd }])),
+        readIntervalMs: cfg.cadence.dexReadMs,
+        maxAgeMs: cfg.ORACLE_DEX_MAX_AGE_MS,
+      },
       "DEX TWAP confirm source enabled (Uniswap v3; quote token assumed = $1: a USDG depeg shows up as confirm divergence)",
     );
   }

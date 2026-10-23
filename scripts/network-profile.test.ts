@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { privateKeyToAccount } from "viem/accounts";
-import { type Env, MAINNET_EXCLUDED, MAINNET_FIXED, MAINNET_REQUIRED_ENV, deskKeyEnvFor, mainnetProfile, watchedRoleAddresses } from "./network-profile";
+import { type Env, MAINNET_EXCLUDED, MAINNET_FIXED, MAINNET_REQUIRED_ENV, MAINNET_RPC_BOUNDS, MAINNET_RPC_DEFAULTS, deskKeyEnvFor, mainnetProfile, mainnetRpcCadence, watchedRoleAddresses } from "./network-profile";
 
 /** The repo's mainnet price config: a Chainlink feed and a DEX confirm pool per launch ticker. */
 const GOOD_CFG = JSON.parse(readFileSync(join(import.meta.dir, "../config/chains/4663.json"), "utf8")) as {
@@ -260,5 +260,57 @@ describe("mainnet profile (scripts/dev.ts --network mainnet)", () => {
     const env = { DESK_KEY_PRIVATE_KEY_7: keys[2], DESK_KEY_PRIVATE_KEY_8: keys[3] };
     expect(deskKeyEnvFor(env, 7)).toEqual({ DESK_KEY_PRIVATE_KEY: keys[2]! });
     expect(deskKeyEnvFor(env, 9)).toEqual({});
+  });
+});
+
+describe("mainnet RPC budget (deploy/server/MAINNET.md \"RPC budget\")", () => {
+  test("the profile applies the mainnet cadence defaults; an operator's value within bounds wins", () => {
+    const { env, errors } = mainnetProfile(goodEnv(), hostRoot(GOOD_DEP));
+    expect(errors).toEqual([]);
+    for (const [k, v] of Object.entries(MAINNET_RPC_DEFAULTS)) expect(env[k]).toBe(v);
+    expect(env.INDEXER_POLL_MS).toBe("12000");
+    expect(env.OPS_LOG_POLL_MS).toBe("30000");
+    expect(env.OPS_BOOK_POLL_MS).toBe("60000");
+    // safety-bound cadences are not slowed down by the profile (service defaults stay)
+    for (const k of ["RISK_INTERVAL_MS", "OPS_REPORT_INTERVAL_MS", "OPS_TX_POLL_MS", "ORACLE_TICK_MS"]) expect(env[k]).toBeUndefined();
+    // an explicit value is the operator's (not in the profile env: the inherited value stands)
+    const own = mainnetProfile({ ...goodEnv(), INDEXER_POLL_MS: "6000" }, hostRoot(GOOD_DEP));
+    expect(own.errors).toEqual([]);
+    expect(own.env.INDEXER_POLL_MS).toBeUndefined();
+    // every default lies within its own bound
+    for (const [k, v] of Object.entries(MAINNET_RPC_DEFAULTS)) {
+      const b = MAINNET_RPC_BOUNDS[k];
+      expect(b).toBeDefined();
+      expect(Number(v) >= b!.min && Number(v) <= b!.max).toBe(true);
+    }
+  });
+
+  test("a misconfiguration is refused on mainnet (a 100 ms oracle tick, hot pollers, broken relations)", () => {
+    const errs = (e: Env) => mainnetProfile({ ...goodEnv(), ...e }, hostRoot(GOOD_DEP)).errors;
+    expect(errs({ ORACLE_TICK_MS: "100" })).toEqual([expect.stringMatching(/^ORACLE_TICK_MS=100 must be within 1000-5000 on mainnet/)]);
+    expect(errs({ ORACLE_CHAINLINK_READ_MS: "100", ORACLE_TOKEN_STATE_READ_MS: "100" })).toEqual([
+      expect.stringMatching(/^ORACLE_CHAINLINK_READ_MS=100 must be within 2000-30000/),
+      expect.stringMatching(/^ORACLE_TOKEN_STATE_READ_MS=100 must be within 2000-60000/),
+    ]);
+    expect(errs({ INDEXER_POLL_MS: "500" })).toEqual([expect.stringMatching(/^INDEXER_POLL_MS=500 must be within 2000-60000/)]);
+    expect(errs({ OPS_LOG_POLL_MS: "abc" })).toEqual([expect.stringMatching(/^OPS_LOG_POLL_MS=abc must be within/)]);
+    expect(errs({ RISK_INTERVAL_MS: "30000" })).toEqual([expect.stringMatching(/^RISK_INTERVAL_MS=30000 must be within 1000-5000.*kill-path latency/)]);
+    expect(errs({ OPS_TX_POLL_MS: "50" })).toEqual([expect.stringMatching(/^OPS_TX_POLL_MS=50/)]);
+    expect(errs({ ORACLE_DEX_READ_MS: "120000" })).toEqual([
+      expect.stringMatching(/^ORACLE_DEX_READ_MS=120000 must be within 10000-60000/),
+      expect.stringMatching(/^ORACLE_DEX_READ_MS=120000 must be at most half ORACLE_DEX_MAX_AGE_MS/),
+    ]);
+    expect(errs({ ORACLE_DEX_MAX_AGE_MS: "100000" })).toEqual([expect.stringMatching(/^ORACLE_DEX_READ_MS=60000 must be at most half ORACLE_DEX_MAX_AGE_MS \(100000\)/)]);
+    expect(errs({ ORACLE_CHAINLINK_READ_MS: "20000", ORACLE_TOKEN_STATE_READ_MS: "10000" })).toEqual([expect.stringMatching(/^ORACLE_TOKEN_STATE_READ_MS=10000 below ORACLE_CHAINLINK_READ_MS \(20000\)/)]);
+    // the mark must still wait for the waterfall's distribution
+    expect(errs({ WATERFALL_TICK_SECONDS: "120", MARK_WAIT_SECONDS: "180" })).toEqual([expect.stringMatching(/^MARK_WAIT_SECONDS=180 must exceed WATERFALL_TICK_SECONDS/)]);
+    expect(errs({ WATERFALL_TICK_SECONDS: "120", MARK_WAIT_SECONDS: "300" })).toEqual([]);
+  });
+
+  test("mainnetRpcCadence is pure: defaults for the unset keys only", () => {
+    const r = mainnetRpcCadence({ MARK_TICK_SECONDS: "60" });
+    expect(r.errors).toEqual([]);
+    expect(r.env.MARK_TICK_SECONDS).toBeUndefined();
+    expect(r.env.INDEXER_POLL_MS).toBe("12000");
   });
 });

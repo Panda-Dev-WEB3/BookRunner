@@ -10,6 +10,7 @@ import { type AttestationDocument, loadAttestationDocument } from "./attestation
 import { RedisPricePublisher, createRedis } from "./adapters/redis";
 import { builderPriceClient } from "./adapters/venue";
 import { loadOracleConfig } from "./config";
+import { HeadClock } from "./head";
 import { MAX_SAFE_PUSH_DEVIATION_BPS, createApp, serveOptions } from "./http";
 import { startLoop } from "./loop";
 import { Runtime } from "./runtime";
@@ -38,7 +39,11 @@ process.on("unhandledRejection", (err) => log.error({ err: err instanceof Error 
 const redis = createRedis(cfg.REDIS_URL, log);
 const database = createDb(cfg.DATABASE_URL, 3);
 const store = new DrizzlePriceStore(database.db);
-const { sources, market, syntheticRefused } = buildSources(cfg, log);
+// one head clock per process (RPC budget): the batched source passes keep it fresh, the tick reads the head only
+// when no pass reported one within ORACLE_HEAD_READ_MS (0 off mainnet: read every tick, as before)
+const headClient = publicClientFor(cfg.CHAIN_ID, cfg.RPC_URL);
+const head = new HeadClock({ read: async () => Number((await headClient.getBlock({ blockTag: "latest" })).timestamp), maxAgeMs: cfg.cadence.headReadMs });
+const { sources, market, syntheticRefused } = buildSources(cfg, log, Date.now, cfg.cadence.headReadMs > 0 ? head : null);
 if (syntheticRefused) {
   // never sign predictable synthetic prices on a public chain: fail loudly instead of running source-less
   log.fatal({ chainId: cfg.CHAIN_ID }, `refusing to start: ${syntheticRefused}`);
@@ -117,7 +122,7 @@ const service = new OracleService({
   },
 });
 
-const runtime = new Runtime(cfg, log, service, account, store, market);
+const runtime = new Runtime(cfg, log, service, account, store, market, undefined, cfg.cadence.headReadMs > 0 ? head : null);
 const loops = [
   startLoop("universe", cfg.ORACLE_UNIVERSE_REFRESH_MS, () => runtime.refresh(), log),
   startLoop("tick", cfg.ORACLE_TICK_MS, async () => void (await service.tick()), log),
@@ -145,6 +150,7 @@ log.info(
     policy: cfg.ORACLE_POLICY,
     sessionsMode: cfg.SESSIONS_MODE,
     orderlyMode: cfg.ORDERLY_MODE,
+    rpcCadence: { tickMs: cfg.ORACLE_TICK_MS, ...cfg.cadence },
   },
   cfg.ORACLE_PUSH_MODE === "pull" ? "oracle service started (pull: no timer pushes, signed bundle in Redis + /prices/signed)" : "oracle service started (heartbeat pushes)",
 );

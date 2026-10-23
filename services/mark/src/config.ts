@@ -15,6 +15,8 @@ export const markEnvShape = {
    */
   MARK_COMMIT_MODE: z.enum(["auto", "legacy"]).default("auto"),
   MARK_TICK_SECONDS: z.coerce.number().positive().default(5),
+  /** RPC budget: BookFactory.bookIds() re-read at most this often (waterfall kit BookDirectory); 0 = every tick. */
+  BOOKS_REFRESH_SECONDS: z.coerce.number().min(0).max(3_600).default(0),
   /** Recompute + recommit attempts when flowNonce moves under the mark. */
   MARK_MAX_RETRIES: z.coerce.number().int().positive().default(3),
   /** Snapshot block = head - confirmations (0 on devnet). */

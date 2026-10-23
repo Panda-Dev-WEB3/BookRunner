@@ -15,6 +15,13 @@
 //     when it never saw the round before the change (e.g. right after a restart) or when the change is a
 //     split (a step beyond the band: the share unit changed, audit M-2; the registry independently refuses
 //     a price whose basis predates the change).
+// RPC budget (deploy/server/MAINNET.md "RPC budget"): every read of one pass — the sequencer feed, every feed's
+// latestRoundData, the decimals not cached yet and the Stock Token states that are due — goes into ONE Multicall3
+// aggregate3 eth_call at one block (viemAggregatorReader.read, allowFailure: an optional token view that reverts is
+// null), shared by every ticker of the tick. `readIntervalMs` (ORACLE_CHAINLINK_READ_MS) reuses a pass that recent;
+// `tokenStateIntervalMs` (ORACLE_TOKEN_STATE_READ_MS) re-reads a token's state on that cadence, but at every pass while
+// its effectiveAt is within SPLIT_WINDOW_REREAD_MS or its cached oraclePaused is set, and at once when a staged change
+// became active after the cached read (split windows fail closed: no per-share price from a pre-change token state).
 import { type FeedConfig, feedAnswerToWad, perSharePriceWad } from "@bookrunner/shared";
 import type { Address, PublicClient } from "viem";
 import type { PriceSource, SourceObservation } from "../domain/types";
@@ -60,12 +67,68 @@ export interface TokenState {
   oraclePaused: boolean | null;
 }
 
+/** A read that may have failed on its own (Multicall3 allowFailure). */
+export type Settled<T> = { ok: true; value: T } | { ok: false; error: Error };
+
+export const settledOk = <T>(value: T): Settled<T> => ({ ok: true, value });
+export const settledErr = <T>(e: unknown): Settled<T> => ({ ok: false, error: e instanceof Error ? e : new Error(String(e)) });
+const settle = <T>(p: Promise<T>): Promise<Settled<T>> => p.then(settledOk<T>, settledErr<T>);
+
+/** Everything one Chainlink pass reads. */
+export interface ChainlinkReadRequest {
+  sequencer: Address | null;
+  /** latestRoundData of each */
+  feeds: readonly Address[];
+  /** decimals() of each (feeds whose decimals are not cached yet) */
+  decimals: readonly Address[];
+  /** Stock Token states due this pass */
+  tokens: readonly Address[];
+}
+
+export interface ChainlinkRead {
+  /** timestamp (unix s) of the block the pass was read at; null when unknown (per-call reads) */
+  blockTimestamp: number | null;
+  sequencer: Settled<RoundData> | null;
+  rounds: ReadonlyMap<Address, Settled<RoundData>>;
+  decimals: ReadonlyMap<Address, Settled<number>>;
+  tokens: ReadonlyMap<Address, Settled<TokenState>>;
+}
+
 export interface AggregatorReader {
   decimals(feed: Address): Promise<number>;
   latestRoundData(feed: Address): Promise<RoundData>;
   /** `blockNumber`: read at that block (the DEX source pins every read of a tick to one block); default latest */
   tokenState(token: Address, blockNumber?: bigint): Promise<TokenState>;
+  /** One pass in one batched call at one block (Multicall3 aggregate3). Absent: per-call reads (readPerCall). */
+  read?(req: ChainlinkReadRequest): Promise<ChainlinkRead>;
 }
+
+/** A pass through the per-call reads (readers without a batched read: tests, chains without Multicall3). */
+export async function readPerCall(r: Pick<AggregatorReader, "decimals" | "latestRoundData" | "tokenState">, req: ChainlinkReadRequest): Promise<ChainlinkRead> {
+  const [sequencer, rounds, decimals, tokens] = await Promise.all([
+    req.sequencer ? settle(r.latestRoundData(req.sequencer)) : Promise.resolve(null),
+    Promise.all(req.feeds.map(async (f) => [f, await settle(r.latestRoundData(f))] as const)),
+    Promise.all(req.decimals.map(async (f) => [f, await settle(r.decimals(f))] as const)),
+    Promise.all(req.tokens.map(async (t) => [t, await settle(r.tokenState(t))] as const)),
+  ]);
+  return { blockTimestamp: null, sequencer, rounds: new Map(rounds), decimals: new Map(decimals), tokens: new Map(tokens) };
+}
+
+/** Multicall3: aggregate3 + the block-timestamp view (the rest of its ABI is not used). */
+export const multicall3Abi = [
+  { type: "function", name: "getCurrentBlockTimestamp", inputs: [], outputs: [{ name: "timestamp", type: "uint256" }], stateMutability: "view" },
+] as const;
+
+/** A Stock Token's four views as one result row (uiMultiplier required, the other three optional). */
+export function tokenStateFromViews(views: readonly Settled<unknown>[]): Settled<TokenState> {
+  const [ui, next, eff, paused] = views;
+  if (!ui?.ok) return settledErr(ui?.error ?? new Error("uiMultiplier() not read"));
+  const opt = <T>(s: Settled<unknown> | undefined): T | null => (s?.ok ? (s.value as T) : null);
+  return settledOk({ uiMultiplier: ui.value as bigint, newUIMultiplier: opt<bigint>(next), effectiveAt: opt<bigint>(eff), oraclePaused: opt<boolean>(paused) });
+}
+
+/** Stock Token views in the order tokenStateFromViews expects. */
+export const TOKEN_STATE_VIEWS = ["uiMultiplier", "newUIMultiplier", "effectiveAt", "oraclePaused"] as const;
 
 /**
  * Why a Stock Token's state forbids converting its per-token price to per share (null = usable). Shared by every
@@ -94,8 +157,43 @@ const optional = async <T>(p: Promise<T>): Promise<T | null> => {
   }
 };
 
-export function viemAggregatorReader(pub: PublicClient): AggregatorReader {
-  return {
+/**
+ * viem reader. `multicall` (Multicall3 address, shared multicall3For): every pass is ONE aggregate3 eth_call at one
+ * block (latest), with the block's timestamp; null: per-call reads (devnet / testnet, unchanged).
+ */
+export function viemAggregatorReader(pub: PublicClient, multicall: Address | null = null): AggregatorReader {
+  const self: AggregatorReader = {
+    async read(req) {
+      if (!multicall) return readPerCall(self, req);
+      const contracts = [
+        { address: multicall, abi: multicall3Abi, functionName: "getCurrentBlockTimestamp" as const },
+        ...(req.sequencer ? [{ address: req.sequencer, abi: aggregatorV3Abi, functionName: "latestRoundData" as const }] : []),
+        ...req.feeds.map((address) => ({ address, abi: aggregatorV3Abi, functionName: "latestRoundData" as const })),
+        ...req.decimals.map((address) => ({ address, abi: aggregatorV3Abi, functionName: "decimals" as const })),
+        ...req.tokens.flatMap((address) => TOKEN_STATE_VIEWS.map((functionName) => ({ address, abi: stockTokenAbi, functionName }))),
+      ];
+      // batchSize 0: never chunked, one aggregate3 whatever the size
+      const res = await pub.multicall({ contracts, allowFailure: true, multicallAddress: multicall, batchSize: 0 });
+      const rows: Settled<unknown>[] = res.map((r) => (r.status === "success" ? settledOk(r.result as unknown) : settledErr(r.error)));
+      let i = 0;
+      const next = () => rows[i++] ?? settledErr(new Error("multicall result missing"));
+      const ts = next();
+      const round = (s: Settled<unknown>): Settled<RoundData> => {
+        if (!s.ok) return s;
+        const [, answer, startedAt, updatedAt] = s.value as readonly [bigint, bigint, bigint, bigint, bigint];
+        return settledOk({ answer, startedAt, updatedAt });
+      };
+      const sequencer = req.sequencer ? round(next()) : null;
+      const rounds = new Map(req.feeds.map((f) => [f, round(next())] as const));
+      const decimals = new Map(
+        req.decimals.map((f) => {
+          const s = next();
+          return [f, s.ok ? settledOk(Number(s.value)) : s] as const;
+        }),
+      );
+      const tokens = new Map(req.tokens.map((t) => [t, tokenStateFromViews(TOKEN_STATE_VIEWS.map(() => next()))] as const));
+      return { blockTimestamp: ts.ok ? Number(ts.value) : null, sequencer, rounds, decimals, tokens };
+    },
     async decimals(feed) {
       return Number(await pub.readContract({ address: feed, abi: aggregatorV3Abi, functionName: "decimals" }));
     },
@@ -114,6 +212,7 @@ export function viemAggregatorReader(pub: PublicClient): AggregatorReader {
       return { uiMultiplier, newUIMultiplier, effectiveAt, oraclePaused };
     },
   };
+  return self;
 }
 
 /** A configured feed, resolved (token address + in-session max age). */
@@ -138,7 +237,53 @@ export interface ChainlinkOptions {
   maxFutureMs?: number;
   /** Initial split band (bps of the round's multiplier; default 500): the registry's governance band once {@link ChainlinkSource.setSplitBandBps} reads it. */
   splitBandBps?: number;
+  /** A pass started less than this ago is reused by every ticker (ORACLE_CHAINLINK_READ_MS; 0 = a pass per tick). */
+  readIntervalMs?: number;
+  /** A Stock Token's state is re-read on this cadence (ORACLE_TOKEN_STATE_READ_MS; 0 = every pass); see tokenStateDue. */
+  tokenStateIntervalMs?: number;
+  /** Every pass that knows its block timestamp reports it here (the oracle's HeadClock). */
+  onBlockTimestamp?: (tsSec: number) => void;
   now?: () => number;
+}
+
+/** A token whose effectiveAt is this close (either side) has its state read at every pass (audit M-2 split window). */
+export const SPLIT_WINDOW_REREAD_MS = 600_000;
+/** A failed pass is retried after at most this long (never later than the read interval). */
+export const READ_RETRY_MS = 2_000;
+
+/** A Stock Token's state as cached by the Chainlink source. */
+export interface CachedTokenState {
+  state: TokenState;
+  /** wall clock (ms) of the pass that read it */
+  readAtMs: number;
+  /** block timestamp (unix s) of that pass; null when unknown (per-call reads: the wall clock stands in) */
+  blockTs: number | null;
+}
+
+/** Chain time (ms) a cached token state describes. */
+const describedAtMs = (c: CachedTokenState): number => (c.blockTs !== null ? c.blockTs * 1000 : c.readAtMs);
+
+/**
+ * Whether a cached token state must be re-read at this pass (pure). Due when: never read; read `intervalMs` ago or
+ * more; its oraclePaused is set (resume as soon as the issuer clears it); its effectiveAt is within
+ * SPLIT_WINDOW_REREAD_MS of now on either side (the change and its aftermath are read at every pass); or a staged
+ * change became active after the cached read (tokenStatePredatesChange).
+ */
+export function tokenStateDue(c: CachedTokenState | undefined, nowMs: number, intervalMs: number): boolean {
+  if (!c) return true;
+  if (nowMs - c.readAtMs >= intervalMs) return true;
+  if (c.state.oraclePaused === true) return true;
+  const eff = c.state.effectiveAt;
+  if (eff !== null && eff > 0n && Math.abs(Number(eff) * 1000 - nowMs) <= SPLIT_WINDOW_REREAD_MS) return true;
+  return tokenStatePredatesChange(c, nowMs);
+}
+
+/** A multiplier change (effectiveAt) took effect after the cached state was read and by `nowMs`: that state no longer describes the active multiplier. */
+export function tokenStatePredatesChange(c: CachedTokenState, nowMs: number): boolean {
+  const eff = c.state.effectiveAt;
+  if (eff === null || eff <= 0n) return false;
+  const effMs = Number(eff) * 1000;
+  return effMs > describedAtMs(c) && effMs <= nowMs;
 }
 
 /**
@@ -179,6 +324,13 @@ export class ChainlinkSource implements PriceSource {
   private readonly now: () => number;
   /** audit M-2: StockTokenRegistry.multiplierBandBps (governance-settable), refreshed by the service */
   private splitBandBps: number;
+  private readonly tokenStates = new Map<Address, CachedTokenState>();
+  /** the current pass, shared by every ticker while in flight or younger than readIntervalMs */
+  private pass: { startedAt: number; promise: Promise<ChainlinkRead>; done: boolean; failed: boolean } | null = null;
+  private readonly readIntervalMs: number;
+  private readonly tokenStateIntervalMs: number;
+  /** completed passes (tests, /health diagnostics) */
+  passes = 0;
 
   constructor(
     private readonly feeds: Record<string, ResolvedFeed>,
@@ -187,6 +339,60 @@ export class ChainlinkSource implements PriceSource {
   ) {
     this.now = opts.now ?? Date.now;
     this.splitBandBps = opts.splitBandBps ?? MULTIPLIER_SPLIT_BAND_BPS;
+    this.readIntervalMs = Math.max(0, opts.readIntervalMs ?? 0);
+    this.tokenStateIntervalMs = Math.max(0, opts.tokenStateIntervalMs ?? 0);
+  }
+
+  /** The cached state of a Stock Token (null = never read). */
+  tokenState(token: Address): CachedTokenState | null {
+    return this.tokenStates.get(token) ?? null;
+  }
+
+  private perTokenFeeds(): Array<ResolvedFeed & { token: Address }> {
+    return Object.values(this.feeds).filter((f): f is ResolvedFeed & { token: Address } => f.basis === "per-token" && f.token !== null);
+  }
+
+  /** The pass this observation uses: the current one when in flight or fresh, else a new one (one batched read for every feed). */
+  private currentPass(nowMs: number): Promise<ChainlinkRead> {
+    const p = this.pass;
+    if (p && !p.done) return p.promise;
+    const reuseMs = p?.failed ? Math.min(this.readIntervalMs, READ_RETRY_MS) : this.readIntervalMs;
+    const stale = this.perTokenFeeds().some((f) => {
+      const c = this.tokenStates.get(f.token);
+      return !!c && tokenStatePredatesChange(c, nowMs);
+    });
+    if (p && nowMs - p.startedAt < reuseMs && !stale) return p.promise;
+
+    const feeds = Object.values(this.feeds);
+    const tokens = [...new Set(this.perTokenFeeds().map((f) => f.token))].filter((t) => tokenStateDue(this.tokenStates.get(t), nowMs, this.tokenStateIntervalMs));
+    const req: ChainlinkReadRequest = {
+      sequencer: this.opts.sequencerFeed ?? null,
+      feeds: [...new Set(feeds.map((f) => f.proxy))],
+      decimals: [...new Set(feeds.map((f) => f.proxy))].filter((a) => !this.decimalsCache.has(a)),
+      tokens,
+    };
+    const startedAt = nowMs;
+    const entry = { startedAt, promise: null as unknown as Promise<ChainlinkRead>, done: false, failed: false };
+    entry.promise = (this.reader.read ? this.reader.read(req) : readPerCall(this.reader, req)).then(
+      (r) => {
+        entry.done = true;
+        this.passes++;
+        for (const [a, d] of r.decimals) if (d.ok) this.decimalsCache.set(a, d.value);
+        for (const [t, s] of r.tokens) {
+          if (s.ok) this.tokenStates.set(t, { state: s.value, readAtMs: startedAt, blockTs: r.blockTimestamp });
+          else this.tokenStates.delete(t); // a failed read is never served from the cache
+        }
+        if (r.blockTimestamp !== null) this.opts.onBlockTimestamp?.(r.blockTimestamp);
+        return r;
+      },
+      (e: unknown) => {
+        entry.done = true;
+        entry.failed = true;
+        throw e;
+      },
+    );
+    this.pass = entry;
+    return entry.promise;
   }
 
   /** The registry's live-multiplier band (StockTokenRegistry.multiplierBandBps): a step beyond it is a split. */
@@ -216,26 +422,38 @@ export class ChainlinkSource implements PriceSource {
     const f = this.feeds[ticker];
     if (!f) return { ok: false, reason: "no feed configured" };
     const nowMs = this.now();
+    const pass = await this.currentPass(nowMs);
+    const value = <T>(s: Settled<T> | null | undefined, what: string): T => {
+      if (!s) throw new Error(`${what} not read`);
+      if (!s.ok) throw s.error;
+      return s.value;
+    };
 
     const seq = this.opts.sequencerFeed;
     if (seq) {
-      const s = await this.reader.latestRoundData(seq);
+      const s = value(pass.sequencer, "sequencer uptime feed");
       if (s.answer !== 0n) return { ok: false, reason: "L2 sequencer down" };
       const upForMs = nowMs - Number(s.startedAt) * 1000;
       if (upForMs < (this.opts.sequencerGraceMs ?? 3_600_000)) return { ok: false, reason: `L2 sequencer up for ${Math.round(upForMs / 1000)}s (< grace)` };
     }
 
-    let dec = this.decimalsCache.get(f.proxy);
-    if (dec === undefined) {
-      dec = await this.reader.decimals(f.proxy);
-      this.decimalsCache.set(f.proxy, dec);
-    }
+    const dec = this.decimalsCache.get(f.proxy) ?? value(pass.decimals.get(f.proxy), `decimals() of ${f.proxy}`);
     if (f.decimals !== undefined && dec !== f.decimals) return { ok: false, reason: `decimals() = ${dec}, configured ${f.decimals}` };
 
-    const [round, token] = await Promise.all([
-      this.reader.latestRoundData(f.proxy),
-      f.basis === "per-token" && f.token ? this.reader.tokenState(f.token) : Promise.resolve(null),
-    ]);
+    const round = value(pass.rounds.get(f.proxy), `latestRoundData() of ${f.proxy}`);
+    let token: TokenState | null = null;
+    if (f.basis === "per-token" && f.token) {
+      const read = pass.tokens.get(f.token);
+      if (read && !read.ok) throw read.error;
+      const cached = this.tokenStates.get(f.token);
+      if (!cached) throw new Error(`Stock Token ${f.token} state not read`);
+      // audit M-2: a staged change that became active after this state was read: the state no longer describes the
+      // active multiplier (split windows fail closed; the next pass re-reads it)
+      if (tokenStatePredatesChange(cached, nowMs)) {
+        return { ok: false, reason: `multiplier change at ${cached.state.effectiveAt} after the token state was read: no per-share price until it is read again` };
+      }
+      token = cached.state;
+    }
     if (round.answer <= 0n) return { ok: false, reason: `answer ${round.answer} <= 0` };
     if (round.updatedAt === 0n) return { ok: false, reason: "round not complete (updatedAt 0)" };
     const ts = Number(round.updatedAt) * 1000;

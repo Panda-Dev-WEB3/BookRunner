@@ -100,7 +100,9 @@ ANTHROPIC_API_KEY=<key>                                # charter jury
 # ORACLE_CHAINLINK_MAX_AGE_MS=3600000                   # feeds without heartbeatSec; at most 90000000 on mainnet
 # ORACLE_DEX_CONFIRM=1                                  # default; cannot be 0 on mainnet
 # ORACLE_DEX_TWAP_SEC=600                               # overrides every pool's twapSec; 300-3600 on mainnet
-# ORACLE_DEX_MAX_AGE_MS=60000                           # at most 120000 on mainnet
+# ORACLE_DEX_MAX_AGE_MS=120000                          # mainnet default; at most 120000, at least 2 x ORACLE_DEX_READ_MS
+# RPC cadence (section 5 "RPC budget"; mainnet defaults, bounded at startup):
+# ORACLE_CHAINLINK_READ_MS=10000 ORACLE_TOKEN_STATE_READ_MS=10000 ORACLE_DEX_READ_MS=60000 ORACLE_HEAD_READ_MS=30000
 # ALERT_ORACLE_PRIMARY_LAG_SECONDS=600                  # services/alerts: suspect-stale gap duration in session
 # ORACLE_DEX_RPC_URL=https://<rpc>                      # default ORACLE_CHAINLINK_RPC_URL, else RPC_URL
 # optional extra confirm source, only if bought (never counts for signing; licence VERIFY C6):
@@ -145,3 +147,59 @@ sudo sh -c '. /etc/bookrunner/mainnet.env; cd /opt/bookrunner/app && sudo -u boo
 dev.ts starts the new books' agents within seconds; archive the updated record. `update.sh` restarts
 `bookrunner.service`; on the mainnet host restart `bookrunner@mainnet` instead
 (`sudo systemctl restart bookrunner@mainnet`).
+
+## 5. RPC budget
+
+The mainnet RPC (Alchemy) bills every JSON-RPC call by compute units (CU), **each call inside an HTTP batch
+too**: eth_call 26, eth_getLogs 75, eth_getBlockByNumber 16, eth_blockNumber 10, eth_getBalance 20. What saves CU
+is fewer calls: Multicall3 `aggregate3` folds many views into ONE eth_call, and nothing is polled faster than it
+needs to be.
+
+| 0 books, 5 tickers | calls/s | CU/s |
+|---|---|---|
+| Before (measured 2026-10-23, 7 min) | ~49 | ~1,270 |
+| After (computed from the cadences below) | ~0.5 | ~15 |
+
+Before: the oracle read each ticker's Chainlink round and Stock Token state (4 views) and each DEX pool (slot0,
+liquidity, observe + the token's 4 views) every 1 s tick as separate calls (~44 calls/s, ~1,140 CU/s), plus a head
+`eth_getBlockByNumber` per tick, the indexer every 2 s, and `BookFactory.bookIds()` every 5 s in four services.
+
+| After, per service | Reads | calls/s | CU/s |
+|---|---|---|---|
+| oracle, Chainlink | ONE `aggregate3` per pass (sequencer, every round, decimals once, every token state, block timestamp), every `ORACLE_CHAINLINK_READ_MS` 10 s | 0.10 | 2.6 |
+| oracle, DEX TWAP | block + ONE `aggregate3` (every pool + its token at that block) + one for the rings that moved, every `ORACLE_DEX_READ_MS` 60 s | 0.03-0.05 | 0.7-1.1 |
+| oracle, head / universe | head clock fed by every pass (`ORACLE_HEAD_READ_MS` 30 s, never reached); signer + minSources every 60 s; band every 10 min | 0.02 | 0.5 |
+| indexer | `eth_blockNumber` + ONE `eth_getLogs` (protocol + every watched book) every `INDEXER_POLL_MS` 12 s | 0.17 | 7.1 |
+| ops-venue | `bookIds()` every `OPS_BOOK_POLL_MS` 60 s; log / report / fee loops idle without an Orderly book | 0.02 | 0.4 |
+| risk | `bookIds()` every `RISK_BOOKS_REFRESH_MS` 60 s | 0.02 | 0.4 |
+| mark, waterfall | `bookIds()` every `BOOKS_REFRESH_SECONDS` 60 s each; no head read without a book; buyback / pool epoch every `WATERFALL_PROTOCOL_DUTY_SECONDS` 300 s | 0.04 | 1.0 |
+| alerts | head + role balances (Multicall3 `getEthBalance`, one call) + buybackPending every 60 s; markInterval hourly | 0.05 | 1.1 |
+| charter | jury fallback scan every `JURY_POLL_MS` 60 s; committee sync every `COMMITTEE_SYNC_MS` 300 s | 0.02 | 0.6 |
+| **Total** | | **~0.5** | **~15** |
+
+The indexer is half of it: `INDEXER_POLL_MS` 20000 would save ~3 CU/s.
+
+**Per book (not in the totals above).** A book in Subscription adds ~8 CU/s (ops-venue state + IF binding every
+60 s and adapter / mandate logs every `OPS_LOG_POLL_MS` 30 s in ONE `eth_getLogs`; mark and waterfall snapshots
+every 60 s). A **Live** book adds ~40 CU/s more, deliberately not slowed down: risk ticks every `RISK_INTERVAL_MS`
+2 s (kill-path latency; its views share one `aggregate3` per round, 2-3 rounds per tick), the agent reads its mandate
+every `AGENT_STATE_REFRESH_MS` 5 s, and ops-venue signs a venue report every `OPS_REPORT_INTERVAL_MS` 15 s (risk
+values Orderly exposure with it). Lengthening any of these is an owner decision.
+
+**Freshness.** The oracle still signs every `ORACLE_TICK_MS` 1 s from the last pass (no RPC), so
+signed prices stay as fresh as before for risk (`RISK_QUOTE_PRICE_MAX_AGE_MS` 15 s), ops-venue's builder push
+(re-sends a price at most 3 ticks old, at least 1/s) and consumers (`maxTradePriceAge`). A new Chainlink round
+(0.5% deviation, 24 h heartbeat) is picked up within 10 s instead of 1 s. The DEX TWAP (1800 s window) confirms with
+a pass up to 60 s old (`ORACLE_DEX_MAX_AGE_MS` 120 s on mainnet). Stock Token state rides in every Chainlink
+`aggregate3` (no extra CU); with a longer `ORACLE_TOKEN_STATE_READ_MS` a token is still read at every pass while
+its `effectiveAt` is within 10 minutes or its `oraclePaused` is set, and a change that became active after the cached
+read forces a new pass and drops the observation until a post-change read (audit M-2: split windows fail closed).
+
+**Configuration.** `scripts/network-profile.ts` `MAINNET_RPC_DEFAULTS` sets the non-oracle cadences unless
+`mainnet.env` sets them, and the preflight refuses any value outside `MAINNET_RPC_BOUNDS` (e.g. `ORACLE_TICK_MS=100`,
+`INDEXER_POLL_MS=500`, `RISK_INTERVAL_MS` above 5 s) or a broken relation (`MARK_WAIT_SECONDS` must exceed
+`WATERFALL_TICK_SECONDS` + sweep wait + fee-forward wait). The oracle resolves its own cadence per network
+(`services/oracle/src/config.ts` `MAINNET_RPC_CADENCE`; devnet / testnet read every tick, as before) and refuses to
+start outside `MAINNET_RPC_BOUNDS` (`services/oracle/src/production.ts`). Multicall3 is
+`0xcA11bde05977b3631167028862bE2a173976CA11` (packages/shared chains.ts, listed on the mainnet chain only: every
+`publicClientFor(4663)` client batches the views of a round into one `aggregate3`).

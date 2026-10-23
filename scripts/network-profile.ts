@@ -41,6 +41,106 @@ export const MAINNET_FIXED: Readonly<Record<string, string>> = {
 };
 
 /**
+ * RPC budget (deploy/server/MAINNET.md "RPC budget"; the mainnet RPC bills per call, batched or not): mainnet
+ * defaults of the polling cadences, applied unless the operator's env sets the key (then the value must still lie
+ * within MAINNET_RPC_BOUNDS). Devnet / testnet keep the service defaults. Safety-bound cadences stay as they are:
+ * RISK_INTERVAL_MS 2 s (kill-path latency), OPS_REPORT_INTERVAL_MS 15 s (the signed venue report risk values Orderly
+ * exposure with), OPS_TX_POLL_MS 0.5 s (only while a transaction is pending), ORACLE_TICK_MS 1 s (the signing tick
+ * reads no RPC; the oracle's own read cadence is resolved per network by services/oracle config.ts MAINNET_RPC_CADENCE).
+ */
+export const MAINNET_RPC_DEFAULTS: Readonly<Record<string, string>> = {
+  // marks are daily: a range every 12 s is one eth_getLogs (protocol + every watched book) + one eth_blockNumber
+  INDEXER_POLL_MS: "12000",
+  // book discovery / state (a new book sits in Subscription for days); idle with no Orderly book
+  OPS_BOOK_POLL_MS: "60000",
+  // adapter + mandate logs, one eth_getLogs per poll (withdrawal requests; the on-chain Kill is a backup: risk's
+  // RISK-signed kill reaches ops-venue over Redis at once); idle with no Orderly book
+  OPS_LOG_POLL_MS: "30000",
+  RISK_BOOKS_REFRESH_MS: "60000",
+  // the scheduler enqueues a daily mark at most 60 s later
+  MARK_TICK_SECONDS: "60",
+  // keep WATERFALL_TICK + sweep wait + fee-forward wait (60 + 30 + 45) below it, so the mark still waits for the distribution
+  MARK_WAIT_SECONDS: "180",
+  // settlement of a daily period and the book keeper duties (window close, claims, recalls) within a minute
+  WATERFALL_TICK_SECONDS: "60",
+  // buyback threshold / insurance-pool epoch: fees accrue per daily mark
+  WATERFALL_PROTOCOL_DUTY_SECONDS: "300",
+  // BookFactory.bookIds() in mark + waterfall
+  BOOKS_REFRESH_SECONDS: "60",
+  // the jury is triggered by the charter.filed domain event; this is the fallback scan
+  JURY_POLL_MS: "60000",
+  // committee seats + finalisation of filed charters (deadline warnings 12 h ahead): two aggregate3 per sync
+  COMMITTEE_SYNC_MS: "300000",
+};
+
+/** Bounds of every RPC cadence knob on mainnet (inclusive; numbers in the knob's own unit). */
+export const MAINNET_RPC_BOUNDS: Readonly<Record<string, { min: number; max: number; why: string }>> = {
+  INDEXER_POLL_MS: { min: 2_000, max: 60_000, why: "one eth_getLogs per poll; indexed events (deposits, charters) must not lag a minute" },
+  OPS_BOOK_POLL_MS: { min: 5_000, max: 300_000, why: "book discovery / state changes" },
+  OPS_LOG_POLL_MS: { min: 3_000, max: 60_000, why: "withdrawal requests and the on-chain Kill backup path" },
+  OPS_FEE_POLL_MS: { min: 10_000, max: 600_000, why: "fee sweep sagas" },
+  OPS_REPORT_INTERVAL_MS: { min: 5_000, max: 60_000, why: "risk values Orderly exposure with the signed venue report" },
+  OPS_TX_POLL_MS: { min: 250, max: 5_000, why: "receipt polling while a transaction is pending" },
+  RISK_INTERVAL_MS: { min: 1_000, max: 5_000, why: "kill-path latency (RISK_BREACH_CONFIRM_TICKS ticks)" },
+  RISK_BOOKS_REFRESH_MS: { min: 15_000, max: 300_000, why: "a book going Live is monitored within this" },
+  MARK_TICK_SECONDS: { min: 5, max: 120, why: "mark scheduling delay" },
+  MARK_WAIT_SECONDS: { min: 90, max: 1_800, why: "the mark waits this long for the period's distribution" },
+  WATERFALL_TICK_SECONDS: { min: 5, max: 120, why: "settlement scheduling and keeper duties" },
+  WATERFALL_PROTOCOL_DUTY_SECONDS: { min: 0, max: 3_600, why: "buyback / pool epoch keeper duty" },
+  BOOKS_REFRESH_SECONDS: { min: 0, max: 300, why: "a chartered book is picked up within this" },
+  JURY_POLL_MS: { min: 15_000, max: 600_000, why: "fallback scan for filed charters" },
+  COMMITTEE_SYNC_MS: { min: 30_000, max: 600_000, why: "charter finalisation after the committee window" },
+  ALERT_INTERVAL_SECONDS: { min: 30, max: 300, why: "alert latency" },
+  // services/oracle production.ts MAINNET_RPC_BOUNDS (the oracle refuses to start outside them too)
+  ORACLE_TICK_MS: { min: 1_000, max: 5_000, why: "signing tick: RPC-free, but ops-venue re-sends a price at most 3 ticks old and risk wants one younger than 15 s" },
+  ORACLE_CHAINLINK_READ_MS: { min: 2_000, max: 30_000, why: "one aggregate3 per pass; a new Chainlink round must be seen within 30 s" },
+  ORACLE_TOKEN_STATE_READ_MS: { min: 2_000, max: 60_000, why: "audit M-2: Stock Token multiplier state at most 60 s old" },
+  ORACLE_DEX_READ_MS: { min: 10_000, max: 60_000, why: "at most half ORACLE_DEX_MAX_AGE_MS (120 s)" },
+  ORACLE_HEAD_READ_MS: { min: 1_000, max: 60_000, why: "publishedAt clamp: at most 60 s of extrapolation" },
+};
+
+/** services/waterfall config defaults the MARK_WAIT_SECONDS relation uses when they are not set */
+const WATERFALL_WAIT_DEFAULTS = { WATERFALL_SWEEP_WAIT_SECONDS: 30, WATERFALL_FEE_FORWARD_WAIT_SECONDS: 45 } as const;
+
+/**
+ * The mainnet RPC cadence: MAINNET_RPC_DEFAULTS for every key the operator did not set, and every problem with the
+ * effective values (outside MAINNET_RPC_BOUNDS, not a number, or a broken relation between knobs).
+ */
+export function mainnetRpcCadence(inherited: Env): { env: Record<string, string>; errors: string[] } {
+  const env: Record<string, string> = {};
+  const errors: string[] = [];
+  const set = (k: string) => (inherited[k] ?? "").trim() !== "";
+  for (const [k, v] of Object.entries(MAINNET_RPC_DEFAULTS)) if (!set(k)) env[k] = v;
+  const value = (k: string): number | undefined => {
+    const raw = set(k) ? (inherited[k] as string).trim() : env[k];
+    return raw === undefined ? undefined : Number(raw);
+  };
+  for (const [k, b] of Object.entries(MAINNET_RPC_BOUNDS)) {
+    const v = value(k);
+    if (v === undefined) continue;
+    if (!Number.isFinite(v) || v < b.min || v > b.max) errors.push(`${k}=${inherited[k] ?? env[k]} must be within ${b.min}-${b.max} on mainnet (RPC budget: ${b.why})`);
+  }
+  const tick = value("WATERFALL_TICK_SECONDS") ?? 5;
+  const sweep = value("WATERFALL_SWEEP_WAIT_SECONDS") ?? WATERFALL_WAIT_DEFAULTS.WATERFALL_SWEEP_WAIT_SECONDS;
+  const forward = value("WATERFALL_FEE_FORWARD_WAIT_SECONDS") ?? WATERFALL_WAIT_DEFAULTS.WATERFALL_FEE_FORWARD_WAIT_SECONDS;
+  const wait = value("MARK_WAIT_SECONDS") ?? 90;
+  if (tick + sweep + forward >= wait) {
+    errors.push(`MARK_WAIT_SECONDS=${wait} must exceed WATERFALL_TICK_SECONDS + WATERFALL_SWEEP_WAIT_SECONDS + WATERFALL_FEE_FORWARD_WAIT_SECONDS (${tick} + ${sweep} + ${forward}): the mark would not wait for the distribution`);
+  }
+  const dexRead = value("ORACLE_DEX_READ_MS") ?? 60_000;
+  const dexAge = value("ORACLE_DEX_MAX_AGE_MS") ?? MAINNET_DEX_MAX_AGE_MS;
+  if (Number.isFinite(dexAge) && dexRead > dexAge / 2) {
+    errors.push(`ORACLE_DEX_READ_MS=${dexRead} must be at most half ORACLE_DEX_MAX_AGE_MS (${dexAge}): a reused DEX pass would go stale before the next one`);
+  }
+  const chainlink = value("ORACLE_CHAINLINK_READ_MS");
+  const token = value("ORACLE_TOKEN_STATE_READ_MS");
+  if (token !== undefined && token < (chainlink ?? 10_000)) {
+    errors.push(`ORACLE_TOKEN_STATE_READ_MS=${token} below ORACLE_CHAINLINK_READ_MS (${chainlink ?? 10_000}): the token state is read inside the Chainlink pass`);
+  }
+  return { env, errors };
+}
+
+/**
  * Env the operator must provide (systemd EnvironmentFile, root-only; never a file in the app tree). Values are
  * never printed. Role signers are checked separately (one per service role: `<ROLE>_KMS_KEY_ID` or
  * `<ROLE>_PRIVATE_KEY`).
@@ -266,6 +366,8 @@ export function mainnetProfile(inherited: Env, root: string, only: readonly stri
     errors.push("ORDERLY_BASE_URL must be the live Orderly API (https, not the mock)");
   }
   errors.push(...oracleSourcesProblems(inherited, root));
+  const cadence = mainnetRpcCadence(inherited);
+  errors.push(...cadence.errors);
 
   const merged: Env = { ...inherited, ...MAINNET_FIXED };
   for (const role of SERVICE_ROLES) {
@@ -309,6 +411,7 @@ export function mainnetProfile(inherited: Env, root: string, only: readonly stri
   const pg = encodeURIComponent(inherited.POSTGRES_PASSWORD ?? "");
   const redis = encodeURIComponent(inherited.REDIS_PASSWORD ?? "");
   const env: Record<string, string> = {
+    ...cadence.env,
     ...MAINNET_FIXED,
     RPC_URL: rpc,
     DATABASE_URL: `postgres://bookrunner:${pg}@127.0.0.1:54400/bookrunner_mainnet`,

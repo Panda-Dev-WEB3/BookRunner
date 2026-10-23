@@ -177,11 +177,61 @@ export const oracleEnvShape = {
   ORACLE_DEX_CONFIRM: flag(true),
   /** Overrides every pool's twapSec (s). */
   ORACLE_DEX_TWAP_SEC: z.coerce.number().int().min(60).max(86_400).optional(),
-  /** A TWAP observation whose block is older than this (RPC / chain stalled) is ignored. */
-  ORACLE_DEX_MAX_AGE_MS: z.coerce.number().int().positive().default(60_000),
+  /**
+   * A TWAP observation whose block is older than this (RPC / chain stalled) is ignored. Default 60 s; mainnet 120 s
+   * (MAINNET_RPC_CADENCE: a pass is reused for ORACLE_DEX_READ_MS, its block ages meanwhile).
+   */
+  ORACLE_DEX_MAX_AGE_MS: z.coerce.number().int().positive().optional(),
   /** RPC of the DEX reads (default ORACLE_CHAINLINK_RPC_URL, else RPC_URL). */
   ORACLE_DEX_RPC_URL: z.string().optional(),
+
+  // ---- RPC cadence (deploy/server/MAINNET.md "RPC budget"): unset = the network default (rpcCadenceFor) ----
+  /** Chainlink pass (every feed + the due token states, one Multicall3 aggregate3) reused for this long; 0 = every tick. */
+  ORACLE_CHAINLINK_READ_MS: z.coerce.number().int().min(0).max(300_000).optional(),
+  /** Stock Token state (uiMultiplier, newUIMultiplier, effectiveAt, oraclePaused) re-read cadence; 0 = every Chainlink pass. */
+  ORACLE_TOKEN_STATE_READ_MS: z.coerce.number().int().min(0).max(300_000).optional(),
+  /** DEX TWAP pass (block + one aggregate3 for every pool) reused for this long; 0 = every tick. */
+  ORACLE_DEX_READ_MS: z.coerce.number().int().min(0).max(300_000).optional(),
+  /** Chain head (publishedAt clamp) reused, extrapolated, for this long; every batched pass also refreshes it. 0 = read every tick. */
+  ORACLE_HEAD_READ_MS: z.coerce.number().int().min(0).max(300_000).optional(),
 };
+
+/** The oracle's RPC cadence (ms) on one network. */
+export interface RpcCadence {
+  chainlinkReadMs: number;
+  tokenStateReadMs: number;
+  dexReadMs: number;
+  dexMaxAgeMs: number;
+  headReadMs: number;
+}
+
+/**
+ * Mainnet defaults (RPC budget, deploy/server/MAINNET.md). Chainlink every 10 s (feeds: 0.5% deviation / 24 h
+ * heartbeat). The token state rides in the same aggregate3 (no extra eth_call, so no extra CU), at every Chainlink
+ * pass: a longer ORACLE_TOKEN_STATE_READ_MS saves nothing billable and would widen the window in which a short-notice
+ * multiplier change goes unseen (audit M-2). DEX TWAP (1800 s window) every 60 s, its observations valid 120 s
+ * (MAINNET_DEX_MAX_AGE_MS). Head clock 30 s (refreshed for free by every Chainlink pass). The signing tick
+ * (ORACLE_TICK_MS) stays 1 s: signed-price freshness (risk 15 s, ops-venue 3 ticks, consumers' maxTradePriceAge)
+ * costs no RPC.
+ */
+export const MAINNET_RPC_CADENCE: Readonly<RpcCadence> = { chainlinkReadMs: 10_000, tokenStateReadMs: 10_000, dexReadMs: 60_000, dexMaxAgeMs: 120_000, headReadMs: 30_000 };
+/** Devnet / testnet: every read every tick, as before. */
+export const DEFAULT_RPC_CADENCE: Readonly<RpcCadence> = { chainlinkReadMs: 0, tokenStateReadMs: 0, dexReadMs: 0, dexMaxAgeMs: 60_000, headReadMs: 0 };
+
+/** The network's cadence with any explicit env value over it. */
+export function rpcCadenceFor(
+  chainId: number,
+  env: Partial<Record<"ORACLE_CHAINLINK_READ_MS" | "ORACLE_TOKEN_STATE_READ_MS" | "ORACLE_DEX_READ_MS" | "ORACLE_DEX_MAX_AGE_MS" | "ORACLE_HEAD_READ_MS", number | undefined>>,
+): RpcCadence {
+  const d = isMainnet(chainId) ? MAINNET_RPC_CADENCE : DEFAULT_RPC_CADENCE;
+  return {
+    chainlinkReadMs: env.ORACLE_CHAINLINK_READ_MS ?? d.chainlinkReadMs,
+    tokenStateReadMs: env.ORACLE_TOKEN_STATE_READ_MS ?? env.ORACLE_CHAINLINK_READ_MS ?? d.tokenStateReadMs,
+    dexReadMs: env.ORACLE_DEX_READ_MS ?? d.dexReadMs,
+    dexMaxAgeMs: env.ORACLE_DEX_MAX_AGE_MS ?? d.dexMaxAgeMs,
+    headReadMs: env.ORACLE_HEAD_READ_MS ?? d.headReadMs,
+  };
+}
 
 /**
  * Pyth Pro feed ids (pyth_lazer_id) of the US-equity feeds `Equity.US.<TICKER>/USD` (USD per share, exponent -5,
@@ -258,8 +308,12 @@ export function loadOracleConfig(source: Record<string, string | undefined> = pr
     heartbeatGraceMs: env.ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS,
   });
   const policy: OraclePolicy = env.ORACLE_POLICY ?? (isMainnet(env.CHAIN_ID) ? "primary-confirm" : "median");
+  const cadence = rpcCadenceFor(env.CHAIN_ID, env);
   return {
     ...env,
+    ORACLE_DEX_MAX_AGE_MS: cadence.dexMaxAgeMs,
+    /** resolved RPC cadence (network default + env) */
+    cadence,
     ORACLE_POLICY: policy,
     ORACLE_MIN_SOURCES: env.ORACLE_MIN_SOURCES ?? (policy === "primary-confirm" ? 1 : 3),
     tickers,

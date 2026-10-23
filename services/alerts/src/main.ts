@@ -5,12 +5,13 @@
 // Reads only: Postgres, Redis, the chain (no key, no transaction), the API's and the oracle's /health. Holds no
 // signing key.
 import { bkrnFeeRouterAbi, bookrunnerConfigAbi, insurancePoolAbi } from "@bookrunner/shared/abi";
+import { chainFor, multicall3For } from "@bookrunner/shared/chains";
 import { tryLoadDeployment } from "@bookrunner/shared/deployments";
 import { createLogger } from "@bookrunner/shared/logger";
 import { redactUrl } from "@bookrunner/shared/redact";
 import { Redis } from "ioredis";
 import postgres from "postgres";
-import { http, createPublicClient } from "viem";
+import { http, createPublicClient, parseAbi } from "viem";
 import { type ChainPort, type DbPort, collect, readPool } from "./collect";
 import { loadConfig } from "./config";
 import { createDeliverer, pingHeartbeat } from "./deliver";
@@ -62,22 +63,36 @@ redis.on("error", (err) => {
   lastRedisErr = Date.now();
 });
 
-const client = createPublicClient({ transport: http(cfg.rpcUrl, { timeout: 10_000, retryCount: 0 }) });
+// RPC budget (deploy/server/MAINNET.md): on a chain with Multicall3 (mainnet) the views of one pass are folded into
+// aggregate3 calls (batch.multicall) and the role balances are Multicall3.getEthBalance views, so every role's balance
+// is ONE eth_call instead of one eth_getBalance each; elsewhere unchanged
+const multicall = multicall3For(cfg.chainId);
+const client = createPublicClient({
+  ...(multicall ? { chain: chainFor(cfg.chainId, cfg.rpcUrl), batch: { multicall: true } } : {}),
+  transport: http(cfg.rpcUrl, { timeout: 10_000, retryCount: 0 }),
+});
+const getEthBalanceAbi = parseAbi(["function getEthBalance(address addr) view returns (uint256 balance)"]);
+/** config.markInterval() is timelock-set: re-read hourly, not every pass */
+const MARK_INTERVAL_TTL_MS = 3_600_000;
+let markIntervalRead: { value: number | null; at: number } | null = null;
 const chain: ChainPort = {
   head: async () => {
     const b = await client.getBlock({ blockTag: "latest" });
     return { number: Number(b.number), timestamp: Number(b.timestamp) };
   },
-  balance: (address) => client.getBalance({ address }),
+  balance: (address) => (multicall ? client.readContract({ address: multicall, abi: getEthBalanceAbi, functionName: "getEthBalance", args: [address] }) : client.getBalance({ address })),
   buybackPending: async () => {
     const dep = tryLoadDeployment(cfg.deploymentFile);
     if (!dep?.contracts.feeRouter) return null;
     return client.readContract({ address: dep.contracts.feeRouter, abi: bkrnFeeRouterAbi, functionName: "buybackPending" });
   },
   markInterval: async () => {
+    if (markIntervalRead && Date.now() - markIntervalRead.at < MARK_INTERVAL_TTL_MS) return markIntervalRead.value;
     const dep = tryLoadDeployment(cfg.deploymentFile);
     if (!dep?.contracts.config) return null;
-    return Number(await client.readContract({ address: dep.contracts.config, abi: bookrunnerConfigAbi, functionName: "markInterval" }));
+    const value = Number(await client.readContract({ address: dep.contracts.config, abi: bookrunnerConfigAbi, functionName: "markInterval" }));
+    markIntervalRead = { value, at: Date.now() };
+    return value;
   },
   pool: async (bookIds) => {
     const dep = tryLoadDeployment(cfg.deploymentFile);
