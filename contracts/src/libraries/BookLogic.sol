@@ -225,6 +225,9 @@ library BookLogic {
             revert Book.RetirementNotReady();
         }
         $.state = BRTypes.BookState.Retired;
+        // audit-B-verify2 hygiene: Senior's deferred IF share moves to the pool's claim before the Retired prices are set
+        // (never counted again in them, as B-L1)
+        if ($.insurancePool != address(0) && !$.poolClosed) BookPoolLogic.settleDeferred($);
         setRetiredPrice($, S, false);
         setRetiredPrice($, J, false);
         emit IBook.Retired($.bookId, $.nav[S] + $.nav[J]);
@@ -672,7 +675,6 @@ library BookLogic {
             $.poolDue = true;
             emit Book.InsuranceDue($.bookId, $.poolDebt);
         }
-        BookPoolLogic.settleDeferred($);
         fundClaims($);
         uint256 debt = $.poolDebt;
         uint256 claim = $.poolValue;

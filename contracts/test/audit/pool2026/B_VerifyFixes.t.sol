@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.30;
 
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {BRTypes} from "../../../src/interfaces/BRTypes.sol";
 import {PoolBookFixture} from "../../pool/utils/PoolBookFixture.sol";
 
@@ -48,6 +49,45 @@ contract B_VerifyFixesTest is PoolBookFixture {
         (s,) = book.trancheNav();
         assertEq(s, 50_000e6);
         assertEq(usdc.balanceOf(address(backstop)), bal0, "the Backstop whole");
+    }
+
+    /// @dev The Book's ERC-7201 slot of `seniorIfDeferred`: the field before `poolMinCapitalBps` (alone in the last
+    ///      slot of BookStorage, uint16 after a uint256); `coverHeld` is two fields before it.
+    function _deferredSlot() internal view returns (bytes32) {
+        bytes32 base = 0xafd306892a6154f35c973e251e6b4f2659d2ae19802986651fcc8ec3ae5c4c00;
+        for (uint256 i = 1; i < 256; ++i) {
+            if (uint256(vm.load(address(book), bytes32(uint256(base) + i))) == 5000) {
+                return bytes32(uint256(base) + i - 1);
+            }
+        }
+        revert("poolMinCapitalBps slot not found");
+    }
+
+    /// @notice audit-B-verify2 hygiene note: finalizeRetirement charged Senior's deferred IF share after the Retired
+    ///         prices were set, so a non-zero share at finalize was counted twice (B-L1 style). Every gain charges it at
+    ///         once, so only dust reaches finalize; the test forces 5k of own capital behind a deferred share (coverHeld
+    ///         lowered in storage) and checks that the Senior Retired price is set after the charge.
+    function test_B_verify2_finalize_chargesTheDeferredShare_beforeTheRetiredPrices() public {
+        _goLivePool();
+        usdc.mint(address(backstop), 1_000_000e6);
+        venue.setMmValue(0); // Junior gone, Senior 52.5k covered
+        _applyPoolMark();
+        venue.setIfEquity(0); // the IF drained: the pool's loss, Senior's 25k share deferred
+        _applyPoolMark();
+        bytes32 dSlot = _deferredSlot();
+        assertEq(uint256(vm.load(address(book), dSlot)), 25_000e6, "slot of seniorIfDeferred");
+        bytes32 cSlot = bytes32(uint256(dSlot) - 2);
+        assertEq(uint256(vm.load(address(book), cSlot)), 52_500e6, "slot of coverHeld");
+        charterC.retire(BOOK_ID);
+        vm.prank(keeper);
+        vault.recall(BRTypes.ACCOUNT_IF, 1);
+        _applyPoolMark(); // deployed 0
+        vm.store(address(book), cSlot, bytes32(uint256(47_500e6))); // 5k of Senior's NAV is now its own capital
+        book.finalizeRetirement();
+        (uint256 s,) = book.trancheNav();
+        assertEq(s, 47_500e6, "the deferred share charged: 5k to the pool");
+        (uint256 priceWad,) = book.retiredPrice(BRTypes.SENIOR);
+        assertApproxEqAbs(Math.mulDiv(priceWad, senior.totalSupply(), 1e18), s, 1, "the Retired price is set after the charge");
     }
 
     /// @notice V-2: was the due-branch IF draw (5k) inside a larger MM gain (+10k) netted into a 5k gain, the Backstop
