@@ -20,19 +20,6 @@ export const insurancePoolAbi = [
   },
   {
     "type": "function",
-    "name": "DUE_SCAN_EPOCHS",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "MAX_ACTIVE_BOOKS",
     "inputs": [],
     "outputs": [
@@ -124,6 +111,19 @@ export const insurancePoolAbi = [
   },
   {
     "type": "function",
+    "name": "PARAM_MIN_OWN_CAPITAL_BPS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "PARAM_PREMIUM_FLOOR_BPS",
     "inputs": [],
     "outputs": [
@@ -144,6 +144,32 @@ export const insurancePoolAbi = [
         "name": "",
         "type": "bytes32",
         "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "STALE_BOUND",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "STALE_HAIRCUT_BPS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -607,6 +633,19 @@ export const insurancePoolAbi = [
   },
   {
     "type": "function",
+    "name": "depositorLoss",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "epochEnd",
     "inputs": [
       {
@@ -788,6 +827,11 @@ export const insurancePoolAbi = [
         "name": "final_",
         "type": "bool",
         "internalType": "bool"
+      },
+      {
+        "name": "held",
+        "type": "bool",
+        "internalType": "bool"
       }
     ],
     "outputs": [],
@@ -911,6 +955,19 @@ export const insurancePoolAbi = [
       }
     ],
     "stateMutability": "pure"
+  },
+  {
+    "type": "function",
+    "name": "minOwnCapitalBps",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -1064,7 +1121,7 @@ export const insurancePoolAbi = [
     "name": "previewDeposit",
     "inputs": [
       {
-        "name": "assets",
+        "name": "",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -1076,14 +1133,14 @@ export const insurancePoolAbi = [
         "internalType": "uint256"
       }
     ],
-    "stateMutability": "view"
+    "stateMutability": "pure"
   },
   {
     "type": "function",
     "name": "previewMint",
     "inputs": [
       {
-        "name": "shares",
+        "name": "",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -1095,14 +1152,14 @@ export const insurancePoolAbi = [
         "internalType": "uint256"
       }
     ],
-    "stateMutability": "view"
+    "stateMutability": "pure"
   },
   {
     "type": "function",
     "name": "previewRedeem",
     "inputs": [
       {
-        "name": "shares",
+        "name": "",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -1114,14 +1171,14 @@ export const insurancePoolAbi = [
         "internalType": "uint256"
       }
     ],
-    "stateMutability": "view"
+    "stateMutability": "pure"
   },
   {
     "type": "function",
     "name": "previewWithdraw",
     "inputs": [
       {
-        "name": "assets",
+        "name": "",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -1133,7 +1190,7 @@ export const insurancePoolAbi = [
         "internalType": "uint256"
       }
     ],
-    "stateMutability": "view"
+    "stateMutability": "pure"
   },
   {
     "type": "function",
@@ -1222,6 +1279,19 @@ export const insurancePoolAbi = [
       }
     ],
     "stateMutability": "pure"
+  },
+  {
+    "type": "function",
+    "name": "refundsPending",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -1381,7 +1451,7 @@ export const insurancePoolAbi = [
     ],
     "outputs": [
       {
-        "name": "",
+        "name": "n",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -1784,6 +1854,25 @@ export const insurancePoolAbi = [
         "type": "uint64",
         "indexed": true,
         "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "EpochDepositsRefunded",
+    "inputs": [
+      {
+        "name": "epoch",
+        "type": "uint64",
+        "indexed": true,
+        "internalType": "uint64"
+      },
+      {
+        "name": "assets",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
       }
     ],
     "anonymous": false
@@ -2782,11 +2871,6 @@ export const insurancePoolAbi = [
         "internalType": "uint256"
       }
     ]
-  },
-  {
-    "type": "error",
-    "name": "WithdrawalsDue",
-    "inputs": []
   },
   {
     "type": "error",

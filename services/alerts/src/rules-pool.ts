@@ -36,6 +36,8 @@
 // - pool_first_loss_low — firstLossBps below params().firstLossTargetBps (10%) while poolAssets > 0: WARNING (new
 //   allocations are refused, so pool-funded books cannot close their window); CRITICAL when the slice is 0 while
 //   claims are outstanding (depleted: the next loss is the depositors'). forSec 5 min.
+// - pool_book_capital_short:<bookId> — a Live pool-funded book below the pool's minimum own capital (risk meta.capitalShort,
+//   fix round 2 Info 4): WARNING after 5 min; the book is reduce-only until restored.
 import type { RuleConfig } from "./config";
 import type { BookSnap, Condition, PoolBookSnap, PoolSnap, Snapshot } from "./types";
 
@@ -243,6 +245,28 @@ export function poolFinalMarkStuck(s: Snapshot, c: RuleConfig): Condition[] {
   return out;
 }
 
+// ------------------------------------------------------------------ own capital below the minimum (fix round 2, Info 4)
+/**
+ * pool_book_capital_short:<bookId> — risk reports a pool-funded Live book whose own capital (Senior + Junior - Backstop
+ * cover) is below the pool's minimum (Book.capitalShort(), meta.capitalShort): redemptions took it there (exits are never
+ * blocked). The book is held reduce-only by risk and its agent until the capital is back above the minimum (fee flow,
+ * gains or new Junior). WARNING after 5 min.
+ */
+export function poolBookCapitalShort(s: Snapshot, _c: RuleConfig): Condition[] {
+  const out: Condition[] = [];
+  for (const b of s.books ?? []) {
+    if (b.state !== "Live" || b.risk?.capitalShort !== true) continue;
+    out.push({
+      key: `pool_book_capital_short:${b.bookId}`,
+      rule: "pool_book_capital_short",
+      severity: "warning",
+      forSec: 300,
+      summary: `book ${b.bookId} ${b.name ?? b.symbol}: own capital below the insurance pool's minimum (Book.capitalShort()) after redemptions; held REDUCE-ONLY by risk and its agent until fee flow, gains or new Junior capital bring it back above the minimum. Exits stay open`,
+    });
+  }
+  return out;
+}
+
 export const POOL_RULES = {
   pool_final_mark_stuck: poolFinalMarkStuck,
   pool_utilisation: poolUtilisation,
@@ -250,4 +274,5 @@ export const POOL_RULES = {
   pool_epoch_overdue: poolEpochOverdue,
   pool_market_debt: poolMarketDebt,
   pool_first_loss_low: poolFirstLossLow,
+  pool_book_capital_short: poolBookCapitalShort,
 } as const;

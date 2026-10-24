@@ -114,6 +114,7 @@ export function runRuleChecks(c: Charter, ctx: RuleContext): RuleCheck[] {
     add("insurance_pool", "info", "the insurance pool funds the insurance fund as a senior debt of the book; the window raises only the MM inventory", {
       premiumBps: String(c.premiumBps),
       premiumRule: "max(charter premium, pool floor at filing)",
+      ifPoolFallback: c.ifPoolFallback ? "the tranches raise the IF if the pool cannot fund it" : "cancelled, refunds 1:1, if the pool cannot fund it",
     });
   } else {
     add("insurance_pool", "pass", "the tranches fund the insurance fund (no pool premium)");

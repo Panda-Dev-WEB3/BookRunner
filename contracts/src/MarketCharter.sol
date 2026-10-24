@@ -34,6 +34,11 @@ library CharterRules {
     bytes32 internal constant BAD_PREMIUM = "BAD_PREMIUM";
     /// @dev 2026-10 insurance pool: `ifFromPool` while config.insurancePool() is unset.
     bytes32 internal constant NO_POOL = "NO_POOL";
+    /// @dev pool audit 2026-10-23 B-M2: a pool-funded charter whose MM inventory (the planned tranche raise) is below
+    ///      the pool's minimum own capital (InsurancePool.minOwnCapitalBps of the IF, 50% by default).
+    bytes32 internal constant UNDERCAPITALISED = "UNDERCAPITALISED";
+    /// @dev pool audit 2026-10-23 fix round 2 (V-3): `ifPoolFallback` on a book-funded IF (it only applies to a pool-funded one).
+    bytes32 internal constant BAD_FALLBACK = "BAD_FALLBACK";
 
     // ---- bounds ----
     uint256 internal constant BPS = 1e4;
@@ -49,8 +54,15 @@ library CharterRules {
     /// @notice BAD_PREMIUM / NO_POOL rules of the 2026-10 insurance pool (0 when valid): a pool-funded IF needs a
     ///         configured pool and premiumBps <= MAX_PREMIUM_BPS (0 = the pool's floor); a book-funded IF pays no
     ///         premium (premiumBps == 0).
-    function poolReason(bool ifFromPool, uint16 premiumBps, address pool) internal pure returns (bytes32) {
-        if (!ifFromPool) return premiumBps == 0 ? bytes32(0) : BAD_PREMIUM;
+    function poolReason(bool ifFromPool, uint16 premiumBps, bool ifPoolFallback, address pool)
+        internal
+        pure
+        returns (bytes32)
+    {
+        if (!ifFromPool) {
+            if (premiumBps != 0) return BAD_PREMIUM;
+            return ifPoolFallback ? BAD_FALLBACK : bytes32(0);
+        }
         if (premiumBps > MAX_PREMIUM_BPS) return BAD_PREMIUM;
         if (pool == address(0)) return NO_POOL;
         return bytes32(0);
@@ -422,7 +434,14 @@ contract MarketCharter is IMarketCharter, ReentrancyGuardTransient {
         if (c.venue == BRTypes.VENUE_POOL_ENGINE && c.takerFeeBps > CharterRules.MAX_ENGINE_TAKER_FEE_BPS) {
             return CharterRules.BAD_FEES;
         }
-        return CharterRules.poolReason(c.ifFromPool, c.premiumBps, _insurancePool());
+        address pool = _insurancePool();
+        bytes32 poolReason = CharterRules.poolReason(c.ifFromPool, c.premiumBps, c.ifPoolFallback, pool);
+        if (poolReason != bytes32(0) || !c.ifFromPool) return poolReason;
+        // pool audit 2026-10-23 B-M2 (closeWindow checks the raise against the same rule)
+        if (!Waterfall.poolCapitalOk(c.mmInventoryUsd, c.ifTargetUsd, IInsurancePool(pool).minOwnCapitalBps())) {
+            return CharterRules.UNDERCAPITALISED;
+        }
+        return bytes32(0);
     }
 
     /// @dev config.insurancePool() (BookrunnerConfig extension); address(0) when unset or not exposed.

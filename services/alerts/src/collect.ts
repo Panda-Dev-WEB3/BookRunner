@@ -64,6 +64,8 @@ export interface ChainPort {
   balance(address: `0x${string}`): Promise<bigint>;
   /** BkrnFeeRouter.buybackPending (USDC 6dp); null when there is no fee router in the deployment */
   buybackPending(): Promise<bigint | null>;
+  /** BkrnFeeRouter.v4BlockedHop (0 none, 1 / 2 the blocked hop); null when unknown. Absent port = not read. */
+  buybackV4BlockedHop?(): Promise<number | null>;
   /** BookrunnerConfig.markInterval; null when unknown */
   markInterval(): Promise<number | null>;
   /**
@@ -222,6 +224,7 @@ export function parseRisk(raw: string | null): RiskSnap | null {
     killed: meta.killed === true,
     killReason: typeof meta.killReason === "string" ? meta.killReason : null,
     ...(meta.quoteUnverified === true ? { quoteUnverified: true } : {}),
+    ...(meta.capitalShort === true ? { capitalShort: true } : {}),
     journal: k
       ? {
           episodeId: String(k.episodeId ?? "?"),
@@ -700,6 +703,12 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
   } catch {
     // rpc problems are the rpc rule's business
   }
+  let buybackV4BlockedHop: number | null = null;
+  try {
+    buybackV4BlockedHop = d.chain.buybackV4BlockedHop ? await d.chain.buybackV4BlockedHop() : null;
+  } catch {
+    buybackV4BlockedHop = null; // an old router without the read, or a stale reference (the keeper logs that)
+  }
   let markIntervalSec = mem.markIntervalSec;
   try {
     markIntervalSec = (await d.chain.markInterval()) ?? markIntervalSec;
@@ -767,6 +776,7 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
     rpcSamples,
     indexer,
     buybackSamples,
+    buybackV4BlockedHop,
     api,
     oracle,
     backup,

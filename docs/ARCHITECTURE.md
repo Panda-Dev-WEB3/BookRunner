@@ -163,7 +163,40 @@ venueMinIf[PoolEngine] 10,000 USDC, tiers: entry 50k USD → 0, ≥50k → 25k B
   TWAP of the BKRN/settlement pool (`libraries/UniswapV3Twap.sol`: mean tick over `twapWindow` ∈
   [10 min, 2 days], refused with `TwapDeviation` while the spot tick is more than
   `twapMaxTickDeviation` ≤ 2,000 ticks away; "OLD" when the pool's history is shorter than the
-  window), REF_ATTESTED = AttestedOracle `bkrnPriceId`. Sends BKRN to staking and calls `notifyReward`.
+  window), REF_ATTESTED = AttestedOracle `bkrnPriceId`, REF_FIXED_ETH = fixed BKRN/ETH x ETH/USD
+  (`setEthReference`). Sends BKRN to staking and calls `notifyReward`.
+  **Venue** (`buybackVenue`, timelock): VENUE_UNIV3 (default, the SwapRouter02 path above) or VENUE_UNIV4 for a
+  BKRN launched on Pons (graduated into a locked Uniswap v4 pool, possibly hooked; BKRN/native ETH by default):
+  the router hands the swap to its own `BkrnV4Swapper` (created in its constructor, holds nothing between
+  calls), which calls `PoolManager.unlock` and, in `unlockCallback` (only that PoolManager, only during its own
+  swap), runs the timelock-set route exact-input: ROUTE_DIRECT USDG -> BKRN; ROUTE_V4_ETH USDG -> ETH (v4
+  ETH/USDG pool) -> BKRN in one unlock (the ETH deltas cancel, no ETH moves); ROUTE_V3_WETH USDG -> WETH
+  (SwapRouter02, inside the unlock) -> unwrap -> `settle{value:}` -> BKRN. USDG is paid with sync + transferFrom
+  (exact allowance of `amountIn`, reset after) + settle, BKRN is `take`n to the router, every delta of the
+  swapper must be closed and its ETH balance unchanged; native ETH is accepted only from WETH / the PoolManager
+  during a swap (`sweepNative` for forced ETH). Each hop carries a `sqrtPriceLimitX96`: the worst gross marginal
+  price whose net (less the pool's static LP fee and, for a hooked pool, the timelock-set `v4HookFeeBps` ≤ 10%)
+  still meets the floor, +1 bp. Via ETH the BKRN hop's limit is computed in the swapper from the ETH the first
+  hop really delivered (paid USDG -> ETH -> BKRN meets the floor price net of the BKRN pool's fees), and the first
+  hop is only bounded within `v4EthToleranceBps` (default 20%) of the fixed ETH reference, so ETH moves do not stall
+  buybacks. A swap stopped at its limit therefore clears the floor and partially fills (the unspent input stays
+  pending); a via-ETH buyback whose BKRN hop would stop early, or whose BKRN pool cannot meet the floor from the
+  real ETH fill, reverts inside the unlock (caught). The swap gets exactly `v4SwapGas` (default 1M; the call refuses
+  to start without it plus a 200k reserve, `V4SwapGasTooLow`), so what it catches never depends on the
+  transaction's gas limit. The output must clear `buybackFloor(spent)` (the keeper minimum is pro-rated to what was
+  spent), `maxBuybackPerCall` applies, and a revert inside the unlock with data (a hook, a pool) is caught:
+  `BuybackV4Failed`, nothing moves; one without data or that burnt the call's gas (out of gas) is re-raised
+  (`V4SwapNoReason`: also when it burnt more than 7/8 of the forwarded gas, i.e. `v4SwapGas` is too low), so a
+  transaction never lands without a swap. A swap that spends
+  nothing emits `BuybackNoFill`. `previewBuyback(amountIn)` (keeper, eth_call) runs the same swap and reverts
+  `BuybackPreview(usdcIn, bkrnOut)`; `v4BlockedHop()` names a hop already past its limit (alerts). No route / an uninitialized pool (before graduation) = `BuybackDeferred`,
+  the USDG waits. REF_TWAP and VENUE_UNIV4 refuse each other (v4 has no oracle). The route is chosen off-chain
+  (`scripts/buyback-route.ts`), never on-chain. Hooks are allow-listed (`setV4HookAllowed`); disallowing one, or
+  changing the PoolManager, clears the route.
+  **Staking rewards come only from buybacks**: `BkrnStaking.notifyReward` is callable only by
+  `config.feeRouter()`, whose only call is in `executeBuyback` with the BKRN it just bought and transferred; BKRN
+  sent to staking any other way is never distributed (it is not in `rewardReserve`), and a pre-existing (Pons)
+  BKRN has no protocol allocation to fund rewards from.
 - `Backstop`: holds USDC. `cover(bookId, shortfall)` only by `factory.bookOf(bookId) == msg.sender`;
   pays `min(shortfall, balance)` to the book's vault; emits `Covered`. Optional per-cover cap param
   (`maxCoverBps` of balance, default 10000).
@@ -237,35 +270,91 @@ Subscription --closeWindow ok--> Live --retire--> Retiring --finalizeRetirement-
 - **Pool-funded IF [2026-10, `charter.ifFromPool`]** (§2.10). `closeWindow` passes `ifTargetUsd = 0` to
   `allocateWindow` / `initialDeployment` (`Waterfall.windowIfTarget`): the tranches raise only `mmInventoryUsd`; the
   InsurancePool (`config.insurancePool()`, recorded as `book.insurancePool()`) sends `charter.ifTargetUsd` to the vault
-  (`pool.allocate`, reverts — and so does `closeWindow` — when the pool cannot fund it now: retried, or
-  `cancelStuckWindow` after the timeout; `ifTargetUsd == 0` reverts `InsuranceTargetZero`), deployed to the venue IF
-  account. **[review fix round 1, design change I-1]** The allocation is a **senior debt** of the book
+  (`pool.allocate`), deployed to the venue IF account. **[pool audit 2026-10-23 A-M2, B-M2]** The pool funds it only
+  when the raise is at least `pool.minOwnCapitalBps()` of the IF (default 5000 = 50%, timelocked, ≤ 20000;
+  `Waterfall.poolCapitalOk`; MarketCharter checks the charter's MM inventory against the same rule at filing,
+  `UNDERCAPITALISED`) and `pool.maxAllocation(bookId, underlying) ≥ ifTargetUsd` (decided on the pool's views, never on
+  a caught revert, so a caller starving the call of gas cannot force the fallback). **[fix round 2, V-3: no silent
+  switch]** A pool that cannot fund now (`POOL_UNFUNDED`: a queued exit, the cap, the slice) makes the window wait:
+  `closeWindow` reverts `InsurancePoolCannotFund(retryUntil)` until `subscriptionEnds + CLOSE_WINDOW_TIMEOUT`, and
+  `cancelStuckWindow` refuses while a close would succeed (`BookPoolLogic.windowCanClose`) until twice the timeout, so
+  the first caller cannot pick the outcome at an instant. Then (at once for `UNDERCAPITALISED`) the book is cancelled
+  (`BookCancelled("UNDERCAPITALISED" | "POOL_UNFUNDED")`, commitments refundable 1:1), unless the charter opted in
+  (`charter.ifPoolFallback`, default false, `BAD_FALLBACK` on a book-funded IF; same slot as `premiumBps`): then the
+  window is re-run the old way (IF + MM raised from the tranches, `InsuranceFallback(reason)`, no pool, no premium), and
+  cancelled if that fails too (`ifTargetUsd == 0` reverts `InsuranceTargetZero`; a venue deposit that keeps reverting
+  still ends in `cancelStuckWindow`). Why 50%: the
+  tranches then stand in front of at least half of a full IF drain, so the pool's loss-given-drain per book is at most
+  half its allocation (≤ 15% of the pool per market under the 30% cap, before the first-loss slice), which is what the
+  12% premium is priced for; every launch charter (IF 25,001–30,000, MM 75,000–100,000) passes with room.
+  **[review fix round 1, design change I-1]** The allocation is a **senior debt** of the book
   (`insuranceDebt()`: pool, debt, value, due, closed), netted from NAV like a liability (`navLiabilities = unfunded +
-  backstopPayable + debt`) at the same signed snapshot that values the IF in the mark's `deployedValueUsd` (the mark
-  service is unchanged; no live venue read, review I-3). Whatever draws the IF — traders' bad debt, or the MM's losses
-  paid from the IF once its own capital is gone — therefore lowers NAV and is absorbed by Junior then Senior.
-  **[owner ruling N-1] Backstop money never goes to the pool.** (1) At each mark, before valuing, the pool's claim is
-  set to the debt capped by the book's own capital — vault idle + deployed value minus the Backstop money in the book
-  (cover still held by Senior, `min(backstopDebt, S)`, plus a repayment owed to the Backstop)
-  (`Waterfall.poolClaimAtMark`) — and NAV nets that claim, so Backstop cash is never netted against the debt. **[review
-  N2-2]** The shortfall of an exhausted book is provisional: the pool's share price shows it at once (markBook), a later
-  mark with more own capital restores the claim first, before any tranche gain (so a dip timed by the sponsor moves
-  nothing to the tranches), and it is written off for good only at `finalizeRetirement` (`InsuranceWrittenOff`); the
-  nominal debt stays owed until then. **[review N2-1]** A due repayment (`fundClaims`) never uses the Backstop money in
-  the vault: it is capped at idle minus that money, in wind-down too. (2) Backstop cover is capped at what `applyMarkPnl` would cover at the NAV with the mark's IF draw added back
-  (`Waterfall.poolCoverNav`, from the signed `MarkInput.insuranceEquityUsd`, the IF equity inside `deployedValueUsd`;
-  EIP-712 `Mark` gains that field; **[pool follow-up m-6]** the mark signs the venue IF (a negative figure as 0) plus the
-  IF in transit, `OrderlyAdapter.insuranceInTransitUsd`, so an IF recall in flight is no IF draw; an IF deposit counts
-  as insurance from the adapter's deposit on): Senior keeps normal cover for losses other than the insurance debt (e.g. the MM's
-  own losses) and none, at any mark or cumulatively, for the insurance debt; a mark without the field (0) treats the
-  whole debt as drawn (no cover for it). After each mark the book reports the pool's claim (`pool.markBook`, never
-  blocking), which also stamps the book for the pool's epoch gate. An IF recall (vault, only once not Live)
-  first calls `book.onInsuranceRecall()`: the debt is **due** — part of `unfundedClaims()` (cash reserved) and repaid
-  from vault idle by `fundClaims` **before** tranche claims (`vault.repayInsurancePool`, never blocking). On Orderly the
-  debt becomes due at the recall *request*; a request the venue cancels leaves it due, so the pool is then repaid from
-  the book's other cash before the IF returns (safe for the pool). `finalizeRetirement` makes it due if no recall did,
-  values the claim on its own capital (Backstop money excluded), repays it, writes the rest of the debt off for good,
-  and sends the final mark. A failed final
+  backstopPayable + claim`) at the same signed snapshot that values the IF in the mark's `deployedValueUsd` (no live
+  venue read, review I-3). Whatever draws the IF — traders' bad debt, or the MM's losses paid from the IF once its own
+  capital is gone — therefore lowers NAV and is absorbed by Junior then Senior.
+  **[pool audit 2026-10-23: the explicit insurance ledger; owner ruling N-1, cumulative]** A pool-funded book keeps
+  persistent state, moved only by explicit events and never rebuilt from NAV (`insuranceLedger()`,
+  `Waterfall.applyPoolMarkPnl` / `applyPoolDistribution`, TS mirror and parity vectors `poolMark` / `poolCredit`):
+  `seniorIfImpairment` (the part of `seniorImpairment` that is insurance debt), `juniorIfLoss` (the IF draws Junior
+  absorbed: had the IF never been drawn Junior would still hold them in front of Senior), `coverHeld` (Backstop cover
+  Senior still holds, ≤ S and ≤ backstopDebt), `ifDrawAtMark` (the IF draw at the last mark: **[fix round 2, V-2]**
+  exact, `Waterfall.poolIfDraw` = IF deployed (`charter.ifTargetUsd`) − IF cash returned to the vault (the adapter's
+  cumulative `insuranceReturnedUsd()`, `IInsuranceReturns`) − min(signed IF equity, deployed), so repaying the debt or
+  recalling the IF never moves it) and `seniorIfDeferred` (fix round 2, V-1: below).
+  The pool's claim (`poolValue`) is a ledger value too: a mark allocates the change of the book's net assets (vault idle
+  + deployed − unfunded claims − a Backstop repayment owed) against what the tranches and the claim held.
+  - *IF draw* (growth of the draw since the last mark): Junior (→ `juniorIfLoss`), then Senior's own capital (S −
+    coverHeld → `seniorIfImpairment`), then the pool's claim (a provisional pool loss). Never the cover. The part the
+    pool takes only because Senior held cover is Senior's share deferred (`seniorIfDeferred`, ≤ the shortfall): it is
+    charged to Senior's own capital (→ `seniorIfImpairment`, the pool restored) at the first gain or distribution that
+    frees it, after the Backstop; no Senior top-up while it is owed; scaled on Senior burns; settled at retirement.
+  - *Order within one mark* (fix round 2, V-2): the IF recovery first, then the other P&L, then the IF draw, whatever
+    their signs, so a draw inside a larger gain of the same mark is still charged in the ledger order.
+  - *Other losses*: Junior first (within one mark Junior absorbs them before the IF draw: the conservative split, B-I5);
+    on Senior, up to `juniorIfLoss` they are insurance debt as above (Junior would have absorbed them); the rest
+    consumes `coverHeld` first (the cover is never own capital: an MM losing redeployed cover cash is re-covered, never
+    the pool's loss) and is coverable.
+  - *Cover*: only Senior's impairment other than its IF part (`seniorImpairment − seniorIfImpairment`), only while
+    Junior is empty, at every mark whatever the claim (B-H1a: repaying the debt never lifts it).
+  - *Gains*: a fall of the draw (an IF recovery, exact in every state since the draw is) reverses the IF losses (the
+    pool, Senior's, Junior's). The rest: on a book that is not exhausted, Senior's other impairment, then the Backstop
+    (`coverHeld` ≤ backstopDebt), then Senior's IF impairment (B-H1b: never before the Backstop), then Junior; on an
+    exhausted book (`poolValue < poolDebt`; **owner ruling, fix round 2 V-1**) the Backstop first, then the pool's
+    shortfall, then Senior's other impairment, Senior's IF impairment, Junior. What an other gain gives the pool's
+    shortfall or Senior's IF impairment is booked to `juniorIfLoss` (it would have been Junior's). Last, Senior's
+    deferred share is charged.
+  - *Fee flow* (B-L2): an exhausted book's distribution follows the same order (the residual repays the Backstop, then
+    the pool; Senior's hurdle share restores the pool's shortfall), then charges Senior's deferred share
+    (`InsuranceRestored`).
+  - *Redemptions* (B-L3): Senior burns scale `seniorImpairment`, `seniorIfImpairment`, `seniorIfDeferred` and
+    `coverHeld` (redeemers take their part of the cover; `backstopDebt` stays owed from later gains; a Senior top-up is
+    never cover); Junior burns scale `juniorIfLoss`. **[fix round 2, Info 4]** Exits are never blocked by the pool's
+    minimum own capital: once redemptions (or losses) take own capital (S + J − coverHeld) below
+    `poolMinCapitalBps` (snapshotted at closeWindow) of the debt, `Book.capitalShort()` reads true and risk and the agent
+    hold the book reduce-only (`POOL_CAPITAL_SHORT`; alert `pool_book_capital_short`) until it is back above it.
+  - *Own capital* (B-M1): settled-but-unfunded redemption cash, a Backstop repayment owed and `coverHeld` are never the
+    book's own capital. A due repayment (`fundClaims`, and before valuing at every mark so returned IF cash is never
+    read as a draw) is capped at vault idle minus all three: settled exits are final and rank ahead of the pool's
+    provisional claim, whatever made the debt due (B-I6).
+  Cumulative property (fuzzed through retirement, `testFuzz_N1_cumulative_*`): the Backstop never covers more than on
+  the same book whose IF was never drawn, its net recovery after retirement is never smaller than without the draw
+  (fix round 2, V-1: fuzzed with wind-down draws), and its cash never reaches the pool. The priority between the two
+  creditors of an exhausted book's later gains is the Backstop first (owner ruling, fix round 2 V-1; it was the pool
+  first under N2-2); the pool still loses only what the book cannot pay (POOL-9), because Senior's deferred share of
+  the draw is charged to Senior once its capital is its own again. The signed `MarkInput.insuranceEquityUsd` (the venue
+  IF, a negative figure as 0, plus the IF in transit, `OrderlyAdapter.insuranceInTransitUsd`, pool follow-up m-6) and
+  the adapter's `insuranceReturnedUsd()` drive the draw; a mark without the field
+  (0) treats the whole debt as drawn; a misread draw only ever errs low for the Backstop and, the ledger being
+  cumulative, stays booked (the trust in the mark signer is the same as for `deployedValueUsd`, B-I2). **[review N2-2]**
+  The shortfall is provisional: the pool's share price shows it at once (markBook) and it is written off for good only at
+  `finalizeRetirement` (`InsuranceWrittenOff`); the nominal debt stays owed until then. After each mark the book reports
+  the pool's claim (`pool.markBook(..., held)`, never blocking); a non-held mark stamps the book for the pool's epoch
+  gate (B-L4: a held mark does not). An IF recall (vault, only once not Live) first calls `book.onInsuranceRecall()`:
+  the debt is **due** — part of `unfundedClaims()` (cash reserved) and repaid from the book's own idle cash by
+  `fundClaims`. On Orderly the debt becomes due at the recall *request*; a request the venue cancels leaves it due.
+  `finalizeRetirement` makes it due if no recall did, repays the ledger's claim (B-L1: never a revaluation on live idle
+  that the Retired prices would count again; fee flow credited since the last mark already restored it), writes the
+  rest of the debt off for good, and sends the final mark. A failed final
   mark emits `InsuranceMarkFailed` and `settleInsurance()` (anyone, Retired) retries the repayment and the mark. A book with `ifFromPool == false` (and every book stored before: the two new charter fields share
   the slot of the fee fields, so they read false / 0) works exactly as before.
 - `applyMark(markId)` (anyone): mark must be for this book, not applied, newer than the last applied,
@@ -595,47 +684,112 @@ the premium; sponsors raise only the MM inventory.
 - **Value.** `poolAssets` T = free liquidity (tracked cash − cash reserved for filled withdrawals; queued deposits are
   held apart) + Σ book claims, a book's claim being what it can repay at its last mark (`markBook`, ≤ its allocation).
   T = first-loss slice FL (treasury, own accounting, no shares; `depositFirstLoss` anyone, `withdrawFirstLoss`
-  timelock, never while withdrawals are due, keeping FL ≥ `firstLossTargetBps` (10%) of T) + depositors' assets D =
-  `totalAssets()`. Premium p: FL += p·FL/T (same rate; all of it when no depositor shares exist). Loss (a claim marked
-  down: the book is exhausted): FL first, then D. Recovery: that book's depositor loss first, then FL. Cash is tracked,
+  timelock, from free cash above the buffer and the value of every queued withdrawal, keeping FL ≥
+  `firstLossTargetBps` (10%) of the book claims) + depositors' assets D = `totalAssets()`. Premium p: FL += p·FL/T
+  (same rate; all of it when no depositor holds more than dust). **[pool audit 2026-10-23 A-M1]** The slice is the
+  pool's junior tranche, accounted pool-wide: a loss (a claim marked down: the book is exhausted) hits FL first, then
+  D (`depositorLoss`, the depositors' outstanding net loss); a recovery from whichever book, and a slice top-up,
+  restore `depositorLoss` first, then FL, so `depositorLoss == 0 || FL == 0` after every step and the order of the
+  marks across books never moves value between the depositors and the treasury (the per-book `lossFirstLoss` /
+  `lossDepositors` are reporting only). Exits take their pro-rata part of `depositorLoss` with them (A-L4): a later
+  recovery restores only the holders left, the rest refills the slice. **[fix round 2, A-L4 residual: justified, not
+  changed]** Per-cohort loss tracking cannot be done with fungible shares (a share bought after the loss is
+  indistinguishable from one held through it), so the residual (a recovery shared by holders who entered during a
+  provisional shortfall) is bounded instead: such entries are priced at the marked value like any loss (POOL-10), a
+  stale epoch never mints at a stale value (NEW-1, below), and exits scale `depositorLoss` pro rata. Cash is tracked,
   never `balanceOf` (donations change nothing). Pool value changes only through book marks, repayments, retirements and
   premiums — never through a venue read anyone can trigger.
 - **Books.** `allocate(bookId, amount, market)` only `factory.bookOf(bookId)` (its `closeWindow`, `market` = the
-  charter's underlying), once per book, refused while allocations are paused, withdrawals are due, the slice is below
-  its target, or `MAX_ACTIVE_BOOKS` (64) are active; within `marketCapBps` (30%) of T **per market** (the active books
-  on one underlying share it) and the free liquidity above `bufferBps` (20%) of T. The book, vault and router are
+  charter's underlying), once per book, refused while allocations are paused or `MAX_ACTIVE_BOOKS` (64) are active;
+  within `marketCapBps` (30%) of T **per market** (the active books on one underlying share it), the free liquidity
+  that keeps the value of every queued withdrawal, due or not (A-L3), plus `bufferBps` (20%) of the assets that stay,
+  `20% × (T − queued) + queued` (**fix round 2, NEW-2**: a deposit whose exit is queued at once no longer shrinks the
+  room; the same buffer gates `withdrawFirstLoss`), and with FL covering `firstLossTargetBps` (10%) of the book claims
+  after it (**A-M2**: the slice covers the exposure, so idle depositor cash, which carries no risk, can never dilute it
+  below the gate) and `CONCENTRATION_BPS` (25%) of the largest single allocation (**fix round 2, NEW-3**: one book's
+  full write-down then puts at most 75% of its allocation on the depositors; with the 50% minimum own capital in front
+  of the IF the slice absorbs at least half of the pool's worst single-book loss; a 10k slice funds at most a 40k book,
+  not 100k). `maxAllocation` is exactly the largest allocation that passes. The book, vault and router are
   recorded and authenticate `markBook` (book), `repay` (vault, pulls; paying more than the claim is a recovery first)
   and `notifyPremium` (router, pulls). Per book: allocation − claim == lossFirstLoss + lossDepositors. A final mark
   (retirement) takes the book out of the epoch gate and frees its market room.
 - **Epochs (entry and exit).** Weekly (`epochLength`) on the Unix grid. `requestDeposit(assets)` queues assets for the
-  open epoch (cancellable only before the epoch ends; `claimDeposit` then hands over the shares, starting the owner's cooldown, 7
-  days from the deposit epoch's end). `requestWithdraw(shares)` is never refused: it escrows the shares into the first
+  open epoch (cancellable only before the epoch ends; `claimDeposit`, by the owner only (A-L6), then hands over the
+  shares, starting the owner's cooldown, 7 days from the hand-over (A-I1)). An epoch processed while deposits are
+  paused (or whose deposits would mint no share) mints nothing: its deposits are refunded by `claimDeposit`
+  (`EpochDepositsRefunded`, A-L5 / A-I2), so the guardian can stop minting at a price under investigation. `requestWithdraw(shares)` is never refused: it escrows the shares into the first
   epoch ending after now and after the cooldown. `processEpoch()` (anyone) processes the oldest ended epoch once every
-  active pool-funded book has reported a mark with `periodEnd ≥` the epoch end, or `processGrace` (24 h, 1 h..7 days)
-  after it (`EpochProcessedStale`: exits are never blocked): it mints the epoch's deposits and fills withdrawals oldest
-  epoch first from free liquidity, both at that share price (partially when cash is short; the rest stays escrowed and
-  exposed until the next processing). So an exit cannot dodge a loss marked after its epoch's end and a known recovery
-  cannot be bought cheaply. `claim(requestId)` (anyone, pays the owner) pays the filled part pro-rata. ERC-4626
-  `deposit` / `mint` / `withdraw` / `redeem` revert. Shares cannot be transferred out of an account in cooldown, nor into
+  active pool-funded book has reported a non-held mark (B-L4) with `periodEnd ≥` the epoch end, or `processGrace` (24 h,
+  1 h..7 days) after it (`EpochProcessedStale`: exits are never blocked): it mints the epoch's deposits and fills
+  withdrawals oldest epoch first from free liquidity, both at that share price (partially when cash is short; the rest
+  stays escrowed and exposed until the next processing). So an exit cannot dodge a loss marked after its epoch's end
+  and a known recovery cannot be bought cheaply. **[fix round 2, NEW-1, replacing the A-L1 valuation at 0]** A stale
+  processing never prices anything at a stale value, in either direction (a market holiday holding every mark over the
+  epoch end made the A-L1 haircut hand a 45k exit 25k): the depositors' exposure to the stale books is `exposure =
+  stale claims − FL` (the slice in front); exits fill only `shares × (D − exposure) / D` per epoch, the part backed by
+  fresh-marked books, at the normal price, and the rest stays queued and exposed until a fresh processing fills it at
+  the true price; deposits are not minted (the `depositEpoch` cursor defers them to the next fresh processing;
+  `claimDeposit` reverts `EpochNotProcessed` meanwhile). Bound: past `STALE_BOUND` (30 days after the epoch end, the
+  same span as the book's own held-mark deferral, `BookLogic.MAX_HELD_DEFERRAL`, after which the book settles its own
+  exits again) the rest fills at the last values with a `STALE_HAIRCUT_BPS` (50%) haircut on the exposure and deferred
+  deposits are refunded. A held book does **not** necessarily mark fresh by then (audit-A-verify2 R-2, correcting the
+  round-2 rationale): past `MAX_HELD_DEFERRAL` its marks still carry `held` and reach the pool as held, so a suspension
+  longer than 30 days keeps the book stale for the pool, with deposits refunded at every epoch and exits filling at the
+  bounded haircut, until a governance settle price (`AttestedOracle.settlePrice`) makes the mark service sign non-held
+  marks (at the latest `MAX_SETTLE_PRICE_DEFERRAL`, 60 days of hold, for the book itself). Why 50%: a book stale for
+  30 days has a true value somewhere in [0, claim]; the midpoint minimises the worst-case transfer between the exits and
+  the holders left (at most half the exposure either way), and refunding the deposits keeps entries out of that bet.
+  **Residual (audit-A-verify2 R-1, Low, accepted):** filling the fresh-backed part from fresh assets leaves the stale
+  book's risk on the holders who stay, so if the stale book later marks a loss L (≤ E, the exposure beyond the slice)
+  an exiter of fraction α of D escapes `α(1−α)(D−E) / ((1−α)D + αE)` of L, which is at most α·L (its own fair share; ≤
+  α·E) and only within `STALE_BOUND` (the auditor's case: book 2 stale then written to 0, Alice 42.86k and Bob 32.14k
+  against a fair 37.5k each, `PoolAuditAVerify2.t.sol` `test_v2_NEW1_residual_staleLossShiftsToStayers`). Before round 1
+  the exiter escaped all of α·L (A-L1). Any liquid partial fill of fungible shares has this effect; removing it would
+  need the unfilled shares escrowed as a claim on the stale books only, or the fresh-backed part filled at a fresh-only
+  price (owner decision, not implemented). `claim(requestId)` (anyone, pays the owner) pays the filled part pro-rata. ERC-4626
+  `deposit` / `mint` / `withdraw` / `redeem` and the `preview*` functions revert (A-I3: no quote; `convertTo*` and
+  `max*` are display only). Shares cannot be transferred out of an account in cooldown, nor into
   the pool. An idle queue jumps to the current epoch in one step; an epoch-length change waits for an idle queue (it
   never moves a queued request).
 - **Pauses.** GUARDIAN (or timelock) may pause new deposits and new allocations; only the timelock lifts a pause.
   Exits (withdraw requests, processing, claims, deposit cancellations) and book hooks are never paused.
 - **Parameters** (timelock, bounded): `premiumFloorBps` 1200 (≤ 5000; read at charter filing), `marketCapBps` 3000
-  (100..10000), `bufferBps` 2000 (≤ 9000), `firstLossTargetBps` 1000 (≤ 5000), `cooldown` 7 days (≤ 30 days),
-  `epochLength` 7 days (1..30 days), `processGrace` 1 day (1 h..7 days).
-- **Backstop (owner ruling N-1).** Backstop money never funds the pool: Junior and Senior absorb the insurance debt,
-  the Backstop covers only Senior losses other than it (§2.5), Backstop cash is neither netted against the debt nor used
-  to repay it, and once the book's own capital is exhausted the rest of the debt is the pool's loss — provisional until
-  retirement (restored first if the book recovers), final then: the tail risk the premium pays for.
+  (100..10000), `bufferBps` 2000 (≤ 9000), `firstLossTargetBps` 1000 (≤ 5000, of the book claims), `minOwnCapitalBps`
+  5000 (≤ 20000, of a pool-funded book's IF, read at filing and at closeWindow, §2.5), `cooldown` 7 days (≤ 30
+  days), `epochLength` 7 days (1..30 days), `processGrace` 1 day (1 h..7 days).
+- **Governance vs exit latency (A-L2, documented, not implemented).** Upgrades and parameters go through
+  `config.timelock()` (48 h on mainnet), while a depositor needs up to one epoch (7 days) + one grace (24 h) + free
+  liquidity to exit, so depositors cannot leave inside a hostile timelock window, and one multisig is proposer, executor,
+  canceller, guardian and treasury. Recommendation before the pool takes outside deposits: give the pool its own
+  TimelockController (or raise the protocol delay) to at least the maximum exit latency (≥ 9 days; 14 days
+  recommended) for upgrades and for the protection-weakening parameters (FL target, market cap, buffer, minimum own
+  capital), and separate the guardian from the proposer. The pool page states the trust assumption. Not implemented in
+  the pool itself (its runtime was 74 bytes under EIP-170 after round 1; 1,106 after fix round 2, PoolLogic split out).
+- **Backstop (owner ruling N-1, cumulative).** Backstop money never funds the pool: Junior and Senior absorb the
+  insurance debt, the Backstop covers only Senior losses other than it, on the book's explicit ledger (§2.5: never
+  Senior's IF impairment, never more than without the IF draws, repaid before Senior's IF impairment is restored),
+  Backstop cash is neither own capital nor used to repay the debt, and once the book's own capital is exhausted the rest
+  of the debt is the pool's loss — provisional until retirement (restored first if the book recovers), final then: the
+  tail risk the premium pays for.
 - **Accepted / deferred (re-audit focus).** Losses on the IF after its recall started are the book's (the debt is due).
-  Between marks the pool's claim follows the last mark only. The IF surplus above the debt is book value. Premium is
+  Between marks the pool's claim follows the last mark only (and fee flow credited to an exhausted book, which
+  restores it at once, §2.5). The IF surplus above the debt is book value. Premium is
   charged on every distribution of a pool-funded book, also after the IF was returned. No reduction / re-allocation of
   a live book's IF exists (exits beyond the buffer wait for repayments or retirements; deferred). The premium is cash in
   the pool at once: a deposit queued before a distribution shares it (bounded by the epoch queue). The signed IF equity
-  counts an IF recall in flight (m-6); IF cash already swept back into the vault but not yet repaid (until the
-  keeper's next `fundClaims`, or while a repayment fails) still reads as an IF draw at a mark: the conservative
-  direction (less Backstop cover at that mark, offered again at the next one; the pool's claim is unaffected).
+  counts an IF recall in flight (m-6); IF cash already swept back into the vault is repaid before every mark values the
+  book (pool audit 2026-10-23); while it cannot be (a failing repayment, or settled exits ranking ahead of it) it reads
+  as an IF draw within a net loss: the conservative direction, and, the ledger being cumulative, it stays booked (less
+  Backstop cover for good; the pool's claim is unaffected). Premium is charged on every distribution while the book has
+  `insurancePool() != 0`, after the IF was returned or written off too (B-I7, accepted: owner decision). A pool rotation
+  (`config.insurancePool()`) between a charter's filing and its close lends from the new pool at the premium fixed at
+  filing (B-I3: a governance action; rotate only with no window open). The asset is cached at `initialize` while books
+  read `config.usdc()`, positions are keyed by `bookId` while the factory is read live (A-I4: never repoint either with a
+  pool position open); a stuck book costs one `processGrace` per epoch, defers the exits it backs and the deposits, and
+  past `STALE_BOUND` its fills a 50% haircut on the exposure (A-I5, NEW-1); the cap
+  and buffer are enforced at allocation only (A-I7, monitoring); the premium is cash at once (A-I6: keepers distribute
+  often). A provisional shortfall moves the share price like a loss (A-L4): entries during it buy the possible recovery
+  and bear the possible write-off alike, bounded by POOL-10's epoch pricing (accepted).
 - **Stuck book (design note 2026-10-22, not implemented).** A pool-funded book left in Live with no mark for N days
   (mark key lost, venue unreadable) keeps its claim at its last mark, its market room and its active slot, and delays
   every epoch by `processGrace`. The committee can already `retire` it, but `finalizeRetirement` needs a mark applied
@@ -717,7 +871,7 @@ guarded by `process.env.BKRN_IT === "1"`.
 | `bookrunner-agent` | — | One process per book (`BOOK_ID`). Avellaneda-Stoikov quoting: reservation price `r = s − q·γ·σ²·τ`, spread `δ = γσ²τ + (2/γ)ln(1+γ/k)`, then clamp to mandate (width ≥ min, |skew| ≤ max, sides per `allowedSides`). Venues: `OrderlyVenue` or `EngineVenue` (desk SetQuote). Hedge planner: keep `hedgeRatioBps` in band using desk `Hedge`/`Flatten` (signed with the session key, direct `execute` tx on devnet; userOp path for bundlers). Kill logic: on `CHANNELS.kill` or mandate killed → cancel-all and stop. Writes quotes/fills/hedges to DB (+ receipts leaves), heartbeat in Redis. Includes `trader-sim` entry (`src/trader-sim.ts`) generating taker flow on the engine and mock venue. |
 | `risk` | — | Every few seconds per live book: read venue exposure (adapter / venue API), desk hedge, last quote, live NAV estimate → `classifyLimits` → write `limits` row + Redis state; transitions emit `limit.breached`; breach → kill sequence (§3.4) with `kill_events` row and `kill.executed`. Off-hours flags from oracle held/stale. Drawdown intra-mark from live NAV vs book high-water. Exports nothing; consumes `QuotingVenue`. |
 | `mark` | — | Per book per period: wait for distribution of the period (or timeout), recall-if-needed check, compute NAV components (vault idle, adapter equity/in-transit, desk USDC + hedge value via registry), inventory tree, receipts root over hourly roots of the period, `MarkPnl` JSON (canonical, hash), sign EIP-712, `commit`, `applyMark`, persist `marks`, emit `mark.committed`. Uses archive-style reads at a fixed block. |
-| `waterfall` | — | Per book per period: Orderly → enqueue ops-venue sweep, then wait (bounded, `WATERFALL_FEE_FORWARD_WAIT_SECONDS`) for the earmarked fees to reach the router via `forwardPendingFees`; engine → `adapter.sweepFees`; then `router.distribute(period, expenses)` with expenses from oracle/keeper gas accounting (devnet: fixed small amount, capped on-chain); persist `settlements`; emit `distribution.paid`. Also keeper duties: `closeWindow` when due, `fundClaims`, `finalizeRetirement`, and once per pass `BkrnFeeRouter.executeBuyback` when `buybackPending` ≥ `WATERFALL_BUYBACK_THRESHOLD_USD` (amountIn capped at `maxBuybackPerCall`; minBkrnOut = max(buyback router quote − `WATERFALL_BUYBACK_SLIPPAGE_BPS`, on-chain `buybackFloor`); a quote below the floor is skipped). |
+| `waterfall` | — | Per book per period: Orderly → enqueue ops-venue sweep, then wait (bounded, `WATERFALL_FEE_FORWARD_WAIT_SECONDS`) for the earmarked fees to reach the router via `forwardPendingFees`; engine → `adapter.sweepFees`; then `router.distribute(period, expenses)` with expenses from oracle/keeper gas accounting (devnet: fixed small amount, capped on-chain); persist `settlements`; emit `distribution.paid`. Also keeper duties: `closeWindow` when due, `fundClaims`, `finalizeRetirement`, and once per pass `BkrnFeeRouter.executeBuyback` when `buybackPending` ≥ `WATERFALL_BUYBACK_THRESHOLD_USD` (amountIn capped at `maxBuybackPerCall`; minBkrnOut = max(buyback router quote − `WATERFALL_BUYBACK_SLIPPAGE_BPS`, on-chain `buybackFloor`); a quote below the floor is skipped; Uniswap v4 venue: nothing is sent while `v4BuybackReady()` is false (BKRN not graduated); the size is capped by a halving cap and the minimum is `previewBuyback`'s simulated output less the slippage, scaled by amountIn / spent (a failed or below-floor simulation sends nothing); a size-dependent failure (InsufficientOutput, V4HopPartialFill, BuybackV4Failed, a failed simulation) halves the next size down to the threshold with a growing cooldown (x2 per failure, at most x16), other failures keep the plain cooldown, a success resets both; a landed tx without `BuybackExecuted` (`BuybackV4Failed` / `BuybackNoFill` / `BuybackDeferred`) is never counted as bought). |
 | `receipts` | — | Hourly (devnet: `RECEIPTS_INTERVAL_SECONDS`) per book: StandardMerkleTree over `receipts` leaves in the window → `receipt_roots`; proof API helpers. Leaves are written by agent (quotes, fills, hedges), risk (decisions), charter (decisions). |
 | `charter` | 4430 | Intake API (validated charter drafts → prepared tx), indexing of `CharterFiled`, model jury: N models (Claude via `@anthropic-ai/sdk` when `ANTHROPIC_API_KEY`, models from `JURY_MODELS`) each return structured `{vote, rationale, risks[]}` given the charter + rule checks; majority → recommendation; deterministic rule-based jury fallback without a key. Verdict JSON → CIDv1 (raw, sha2-256 via `multiformats`) → `postJuryVerdict(digest)`; committee notifications (`committee` table, events). |
 | `indexer` | — | Chain → DB: watches all protocol events from `deployment.startBlock` with a `chain_cursor` (reorg-safe with N confirmations on mainnet, 0 on devnet): charters, books, subscriptions, redemptions, marks, settlements, desk keys, kills, committee votes. Emits internal domain events. |

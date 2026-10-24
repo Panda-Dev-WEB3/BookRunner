@@ -24,6 +24,14 @@ describe("baseline", () => {
     expect(ev.snapshot.offHours).toBe(false);
   });
 
+  test("a pool-funded book below the pool's minimum own capital is held reduce-only (fix round 2, Info 4)", () => {
+    const ev = run({ capitalShort: true });
+    expect(ev.snapshot.state).toBe("reduce_only");
+    expect(ev.capitalShort).toBe(true);
+    expect(run({ capitalShort: true, ...exposure(usd(80_000)) }).snapshot.state).toBe("breach"); // a breach stays a breach
+    expect(run().capitalShort).toBe(false);
+  });
+
   test("killed mandate classifies as killed even with breaches", () => {
     const ev = run({ killed: true, ...exposure(usd(80_000)) });
     expect(ev.snapshot.state).toBe("killed");

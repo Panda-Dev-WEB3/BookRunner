@@ -17,6 +17,7 @@ import {IAttestedOracle} from "../interfaces/IAttestedOracle.sol";
 import {IStockTokenRegistry} from "../interfaces/IStockTokenRegistry.sol";
 import {IInsurancePool, IBookrunnerConfigPool} from "../interfaces/IInsurancePool.sol";
 import {Waterfall} from "./Waterfall.sol";
+import {BookPoolLogic} from "./BookPoolLogic.sol";
 import {Book, IVaultBackstopRepay} from "../Book.sol";
 
 /// @dev UnderwritingVault's InsurancePool repayment (book only), not part of the frozen IUnderwritingVault.
@@ -86,21 +87,41 @@ library BookLogic {
         uint256 sCommitted = senior.totalCommitted();
         uint256 jCommitted = junior.totalCommitted();
         // [2026-10 insurance pool] a pool-funded IF is not raised from the tranches (0 here, funded below)
-        uint256 ifTarget = Waterfall.windowIfTarget($.charter.ifTargetUsd, $.charter.ifFromPool);
-        Waterfall.WindowResult memory r = Waterfall.allocateWindow(
-            Waterfall.WindowInput({
-                ifTargetUsd: ifTarget,
-                mmInventoryUsd: $.charter.mmInventoryUsd,
-                seniorCapBps: $.charter.seniorCapBps,
-                seniorCommitted: sCommitted,
-                juniorCommitted: jCommitted,
-                sponsorJuniorCommitted: junior.committedOf($.charter.sponsor)
-            })
-        );
+        Waterfall.WindowInput memory w = Waterfall.WindowInput({
+            ifTargetUsd: Waterfall.windowIfTarget($.charter.ifTargetUsd, $.charter.ifFromPool),
+            mmInventoryUsd: $.charter.mmInventoryUsd,
+            seniorCapBps: $.charter.seniorCapBps,
+            seniorCommitted: sCommitted,
+            juniorCommitted: jCommitted,
+            sponsorJuniorCommitted: junior.committedOf($.charter.sponsor)
+        });
+        Waterfall.WindowResult memory r = Waterfall.allocateWindow(w);
+        // [pool audit 2026-10-23 A-M2, B-M2; fix round 2 V-3] the pool funds the IF only for a raise of at least its
+        // minimum own capital and only within what it can allocate. A shortage of the pool (POOL_UNFUNDED) makes the
+        // window wait (revert, retried) until CLOSE_WINDOW_TIMEOUT, so no caller picks the outcome at an instant; then,
+        // as for UNDERCAPITALISED at once, the book is cancelled (refunds 1:1), or, only if the charter opted in
+        // (ifPoolFallback), the IF is raised from the tranches (the window re-run the old way)
+        address pool = address(0);
+        bytes32 poolReason = bytes32(0);
+        if (r.ok && $.charter.ifFromPool) {
+            (pool, poolReason) = BookPoolLogic.poolFunding($, r.seniorAllocated + r.juniorAllocated);
+            if (pool == address(0)) {
+                uint256 until = uint256($.subscriptionEnds) + CLOSE_WINDOW_TIMEOUT;
+                if (poolReason == "POOL_UNFUNDED" && block.timestamp < until) {
+                    revert Book.InsurancePoolCannotFund(uint64(until));
+                }
+                if ($.charter.ifPoolFallback) {
+                    w.ifTargetUsd = $.charter.ifTargetUsd;
+                    r = Waterfall.allocateWindow(w);
+                } else {
+                    r.ok = false;
+                }
+            }
+        }
 
         if (!r.ok) {
             $.state = BRTypes.BookState.Cancelled;
-            emit IBook.BookCancelled($.bookId, _reasonCode(r.reason));
+            emit IBook.BookCancelled($.bookId, poolReason != bytes32(0) ? poolReason : _reasonCode(r.reason));
             senior.markCancelled();
             junior.markCancelled();
             return;
@@ -108,27 +129,35 @@ library BookLogic {
 
         $.nav = [r.seniorAllocated, r.juniorAllocated];
         $.state = BRTypes.BookState.Live;
+        if (poolReason != bytes32(0)) emit Book.InsuranceFallback($.bookId, poolReason);
         emit IBook.WindowClosed($.bookId, r.seniorAllocated, r.juniorAllocated, sCommitted, jCommitted);
 
         address vault = $.components.vault;
         senior.settleWindow(r.seniorAllocated, vault);
         junior.settleWindow(r.juniorAllocated, vault);
 
-        (uint256 ifAmount, uint256 mmAmount,) =
-            Waterfall.initialDeployment(r.seniorAllocated + r.juniorAllocated, ifTarget, $.charter.mmInventoryUsd);
+        (uint256 ifAmount, uint256 mmAmount,) = Waterfall.initialDeployment(
+            r.seniorAllocated + r.juniorAllocated, w.ifTargetUsd, $.charter.mmInventoryUsd
+        );
         // [2026-10 insurance pool] the pool sends the IF to the vault; it is deployed to the IF account below
-        if ($.charter.ifFromPool) ifAmount = _drawInsurance($);
+        if (pool != address(0)) ifAmount = BookPoolLogic.drawInsurance($, pool);
         emit IBook.CapitalDeployed($.bookId, ifAmount, mmAmount);
         if (ifAmount > 0) IUnderwritingVault(vault).deployToVenue(BRTypes.ACCOUNT_IF, ifAmount);
         if (mmAmount > 0) IUnderwritingVault(vault).deployToVenue(BRTypes.ACCOUNT_MM, mmAmount);
     }
 
     /// @dev Book.cancelStuckWindow (Task 7 lead "unconfirmed deposits"): a window closeWindow could not close for
-    ///      CLOSE_WINDOW_TIMEOUT (its venue deposit keeps reverting) is cancelled; commitments refundable 1:1.
+    ///      CLOSE_WINDOW_TIMEOUT (its venue deposit keeps reverting) is cancelled; commitments refundable 1:1. Fix round 2
+    ///      (V-3): a pool-funded charter that can close now (the pool funds it, or its opted-in fallback) is closed by
+    ///      closeWindow only, until twice the timeout (a venue deposit that keeps reverting still ends in a cancel).
     function cancelStuckWindow(Book.BookStorage storage $) external {
         if ($.state != BRTypes.BookState.Subscription) revert Book.BadState($.state);
         uint256 at = uint256($.subscriptionEnds) + CLOSE_WINDOW_TIMEOUT;
         if (block.timestamp < at) revert Book.WindowNotStuck(uint64(at));
+        if (
+            $.charter.ifFromPool && block.timestamp < at + CLOSE_WINDOW_TIMEOUT
+                && BookPoolLogic.windowCanClose($)
+        ) revert Book.WindowNotStuck(uint64(at + CLOSE_WINDOW_TIMEOUT));
         $.state = BRTypes.BookState.Cancelled;
         emit IBook.BookCancelled($.bookId, "CLOSE_TIMEOUT");
         ITranche($.components.senior).markCancelled();
@@ -158,7 +187,12 @@ library BookLogic {
         sum.deployedValueUsd = m.input.deployedValueUsd;
         sum.insuranceEquityUsd = m.input.insuranceEquityUsd;
 
-        int256 pnl = _applyPnl($, cfg, sum);
+        // [pool audit 2026-10-23] a due debt is repaid from the book's own idle cash before valuing, so IF cash a recall
+        // brought back into the vault is never read as an IF draw (the snapshot's IF equity no longer holds it)
+        if ($.poolDue) BookPoolLogic.repayPoolDue($, IUnderwritingVault($.components.vault).idle());
+        int256 pnl;
+        if ($.insurancePool != address(0) && !$.poolClosed) (pnl, sum) = BookPoolLogic.applyPoolPnl($, cfg, sum);
+        else pnl = _applyPnl($, cfg, sum);
         _maybeDrawdownKill($);
         if (_settles($, m.input.held, markId, sum.periodEnd)) _settleAtMark($, sum);
         else _setPrices($, sum);
@@ -173,8 +207,9 @@ library BookLogic {
         });
         if (st == BRTypes.BookState.Retiring) $.markAppliedWhileRetiring = true;
         fundClaims($);
-        // [2026-10 insurance pool] what the book can repay, from this mark's snapshot, to the pool
-        _markInsurance($, sum.periodEnd, false);
+        // [2026-10 insurance pool] the pool's claim on the book's own capital, to the pool (a held mark is not fresh
+        // for its epoch gate, pool audit 2026-10-23 B-L4)
+        BookPoolLogic.markInsurance($, sum.periodEnd, false, m.input.held);
         registry.markApplied(markId);
         emit Book.MarkSettled($.bookId, markId, sum.backstopCovered, sum.navPostPnl, sum.owed, sum.topUp);
         emit IBook.MarkApplied(
@@ -190,6 +225,9 @@ library BookLogic {
             revert Book.RetirementNotReady();
         }
         $.state = BRTypes.BookState.Retired;
+        // audit-B-verify2 hygiene: Senior's deferred IF share moves to the pool's claim before the Retired prices are set
+        // (never counted again in them, as B-L1)
+        if ($.insurancePool != address(0) && !$.poolClosed) BookPoolLogic.settleDeferred($);
         setRetiredPrice($, S, false);
         setRetiredPrice($, J, false);
         emit IBook.Retired($.bookId, $.nav[S] + $.nav[J]);
@@ -211,7 +249,9 @@ library BookLogic {
         else if (msg.sender == $.components.junior) k = J;
         else revert Book.NotTranche();
         if ($.state != BRTypes.BookState.Retired) revert Book.BadState($.state);
-        if (k == S) _scaleImpairment($, sharesBurned, IERC20(msg.sender).totalSupply() + sharesBurned);
+        uint256 supplyBefore = IERC20(msg.sender).totalSupply() + sharesBurned;
+        if (k == S) _scaleImpairment($, sharesBurned, supplyBefore);
+        else _scaleJuniorIfLoss($, sharesBurned, supplyBefore);
         $.nav[k] -= assetsOwed;
         $.unfunded[k] += assetsOwed;
         emit Book.RetiredRedemption($.bookId, k, assetsOwed);
@@ -228,36 +268,48 @@ library BookLogic {
         if (msg.sender != $.components.router) revert Book.NotRouter();
         BRTypes.BookState st = $.state;
         if (st == BRTypes.BookState.Subscription || st == BRTypes.BookState.Cancelled) revert Book.BadState(st);
-        Waterfall.DistributionResult memory r = Waterfall.applyDistribution(
-            Waterfall.DistributionInput({
-                senior: seniorAmount,
-                junior: juniorAmount,
-                juniorSupply: IERC20($.components.junior).totalSupply(),
-                seniorImpairment: $.seniorImpairment,
-                backstopDebt: $.backstopDebt
-            })
-        );
-        $.nav[S] += r.seniorCredit;
-        $.nav[J] += r.juniorCredit;
-        emit IBook.DistributionCredited($.bookId, r.seniorCredit, r.juniorCredit);
-        if (r.seniorRestored > 0 || r.backstopRepaid > 0) {
+        uint256 jSupply = IERC20($.components.junior).totalSupply();
+        uint256 sc;
+        uint256 jc;
+        uint256 restored;
+        uint256 repaid;
+        if ($.insurancePool != address(0)) {
+            (sc, jc, restored, repaid) = BookPoolLogic.creditPool($, seniorAmount, juniorAmount, jSupply);
+        } else {
+            Waterfall.DistributionResult memory r = Waterfall.applyDistribution(
+                Waterfall.DistributionInput({
+                    senior: seniorAmount,
+                    junior: juniorAmount,
+                    juniorSupply: jSupply,
+                    seniorImpairment: $.seniorImpairment,
+                    backstopDebt: $.backstopDebt
+                })
+            );
             $.seniorImpairment = r.seniorImpairment;
             $.backstopDebt = r.backstopDebt;
-            $.backstopPayable += r.backstopRepaid;
-            emit Book.DistributionRepaid($.bookId, r.seniorRestored, r.backstopRepaid);
+            (sc, jc, restored, repaid) = (r.seniorCredit, r.juniorCredit, r.seniorRestored, r.backstopRepaid);
+            $.nav[S] += sc;
+            $.nav[J] += jc;
+        }
+        emit IBook.DistributionCredited($.bookId, sc, jc);
+        if (restored > 0 || repaid > 0) {
+            $.backstopPayable += repaid;
+            emit Book.DistributionRepaid($.bookId, restored, repaid);
         }
         if (st == BRTypes.BookState.Retired) {
             // late fee flow raises the immediate-settlement price for the remaining holders
-            if (r.seniorCredit > 0) setRetiredPrice($, S, true);
-            if (r.juniorCredit > 0) setRetiredPrice($, J, true);
+            if (sc > 0) setRetiredPrice($, S, true);
+            if (jc > 0) setRetiredPrice($, J, true);
         }
     }
 
     /// @dev Pays unfunded claims from vault idle, Senior first, then the backstop repayment owed (A5-01).
     ///      The repayment never blocks the caller: a vault that cannot pay it (e.g. a vault clone older
     ///      than repayBackstop) leaves it owed and reserved. [2026-10 insurance pool] A due pool claim is repaid
-    ///      first (the pool is senior to the tranches for the IF it funded, which was never tranche value); a
-    ///      failed repayment leaves it owed and its cash reserved, never blocking the caller.
+    ///      first, but only from the book's own idle cash (pool audit 2026-10-23 B-M1 / B-I6, whatever made the debt
+    ///      due): never the cash owed to settled redemptions (they are final and rank ahead of the pool's provisional
+    ///      claim), a repayment owed to the Backstop, or the Backstop cover Senior holds; a failed repayment leaves it
+    ///      owed and its cash reserved, never blocking the caller.
     function fundClaims(Book.BookStorage storage $) public returns (uint256 funded) {
         uint256 us = $.unfunded[S];
         uint256 uj = $.unfunded[J];
@@ -266,11 +318,7 @@ library BookLogic {
         if (us == 0 && uj == 0 && owed == 0 && pc == 0) return 0;
         IUnderwritingVault vault = IUnderwritingVault($.components.vault);
         uint256 idle = vault.idle();
-        if (pc > 0) {
-            // review N2-1: never with the Backstop money in the vault (cover held by Senior, a repayment owed back)
-            uint256 bm = _backstopMoney($);
-            idle -= _repayInsurance($, address(vault), Math.min(idle > bm ? idle - bm : 0, pc));
-        }
+        if (pc > 0) idle -= BookPoolLogic.repayPoolDue($, idle);
         uint256 ps = Math.min(idle, us);
         uint256 pj = Math.min(idle - ps, uj);
         funded = ps + pj;
@@ -349,15 +397,27 @@ library BookLogic {
     {
         address vault = $.components.vault;
         address backstop = cfg.backstop();
-        (Waterfall.MarkState memory ms, Waterfall.MarkInputs memory mi, uint256 coverCap) =
-            _markInputs($, sum, vault, backstop);
-        Waterfall.MarkResult memory r = Waterfall.applyMarkPnl(ms, mi);
-        uint256 nav = mi.nav;
+        uint256 nav = Waterfall.markedNavNet(IUnderwritingVault(vault).idle(), navLiabilities($), sum.deployedValueUsd);
+        Waterfall.MarkResult memory r = Waterfall.applyMarkPnl(
+            Waterfall.MarkState({
+                seniorNav: $.nav[S],
+                juniorNav: $.nav[J],
+                seniorImpairment: $.seniorImpairment,
+                perfIndex: $.perfIndex,
+                highWater: $.highWater,
+                backstopDebt: $.backstopDebt
+            }),
+            Waterfall.MarkInputs({
+                nav: nav,
+                juniorSupply: IERC20($.components.junior).totalSupply(),
+                backstopAvailable: _backstopBalance(backstop)
+            })
+        );
 
         uint256 covered;
         if (r.backstopCovered > 0) {
             uint256 shortfall = r.seniorImpairment + r.backstopCovered; // impairment before cover
-            covered = _pullBackstop($.bookId, cfg, backstop, vault, Math.min(shortfall, coverCap));
+            covered = _pullBackstop($.bookId, cfg, backstop, vault, shortfall);
             // replace the modelled cover with the USDC actually received
             r.seniorNav = r.seniorNav - r.backstopCovered + covered;
             r.seniorImpairment = shortfall - covered;
@@ -447,14 +507,14 @@ library BookLogic {
         } catch {}
     }
 
-    /// @dev Share prices from the post-P&L NAVs, before any settlement; returns the Senior supply.
+    /// @dev Share prices from the post-P&L NAVs, before any settlement; returns the supplies.
     function _setPrices(Book.BookStorage storage $, MarkSummary memory sum)
         private
-        returns (uint256 seniorSupply)
+        returns (uint256[2] memory supplies)
     {
         for (uint8 k = 0; k < 2; k++) {
             uint256 supply = IERC20(tranche($, k)).totalSupply();
-            if (k == S) seniorSupply = supply;
+            supplies[k] = supply;
             uint256 p = Waterfall.sharePriceWad($.nav[k], supply);
             $.price[k] = p;
             sum.priceWad[k] = p;
@@ -465,14 +525,14 @@ library BookLogic {
         uint256 interval = $.markInterval;
         uint256 upTo = Waterfall.settlesUpTo(sum.periodEnd, interval);
         bool topUpDue = $.topUpOpen && upTo * interval >= $.topUpEndsAt;
-        uint256 seniorSupply = _setPrices($, sum);
+        uint256[2] memory supplies = _setPrices($, sum);
         // Junior first so the Senior top-up cap sees the final Junior NAV
-        _settleTranche($, sum, J, upTo, topUpDue ? $.topUpCapacity[J] : 0);
+        _scaleJuniorIfLoss($, _settleTranche($, sum, J, upTo, topUpDue ? $.topUpCapacity[J] : 0), supplies[J]);
         // no Senior top-up while impaired: new shares would share the restoration owed to the old ones
-        uint256 seniorCap = topUpDue && $.seniorImpairment == 0
+        uint256 seniorCap = topUpDue && $.seniorImpairment == 0 && $.seniorIfDeferred == 0
             ? _seniorTopUpRoom($.nav[S], $.nav[J], $.charter.seniorCapBps, $.topUpCapacity[S])
             : 0;
-        _scaleImpairment($, _settleTranche($, sum, S, upTo, seniorCap), seniorSupply);
+        _scaleImpairment($, _settleTranche($, sum, S, upTo, seniorCap), supplies[S]);
 
         if (topUpDue) {
             $.topUpOpen = false;
@@ -520,6 +580,7 @@ library BookLogic {
             (burned, owed[k],,) =
                 ITranche(t).settleAtMark(RETIRED_SETTLE_INDEX, $.price[k], 0, $.components.vault);
             if (k == S) _scaleImpairment($, burned, supply);
+            else _scaleJuniorIfLoss($, burned, supply);
             $.nav[k] -= owed[k];
             $.unfunded[k] += owed[k];
         }
@@ -530,11 +591,30 @@ library BookLogic {
     /// @dev Senior shares burned at a settlement (marks, Retired backlog / immediate redemptions) take their
     ///      pro-rata part of the impairment with them: imp' = floor(imp * (supply - burned) / supply), i.e.
     ///      0 once no Senior share is left. Restoration and backstop cover (the backstop is shared across
-    ///      books) then only ever restore the remaining shares' loss.
+    ///      books) then only ever restore the remaining shares' loss. [pool audit 2026-10-23 B-L3] Its IF part and the
+    ///      Backstop cover Senior holds scale the same way: redeemers take their part of the cover with them (backstopDebt,
+    ///      owed from later gains, is unchanged; a Senior top-up never counts as cover).
     function _scaleImpairment(Book.BookStorage storage $, uint256 burned, uint256 supplyBefore) private {
+        if (burned == 0) return;
+        uint256 left = supplyBefore - burned;
         uint256 imp = $.seniorImpairment;
-        if (burned == 0 || imp == 0) return;
-        $.seniorImpairment = Math.mulDiv(imp, supplyBefore - burned, supplyBefore);
+        if (imp != 0) {
+            $.seniorImpairment = Math.mulDiv(imp, left, supplyBefore);
+            uint256 impIf = $.seniorIfImpairment;
+            if (impIf != 0) $.seniorIfImpairment = Math.mulDiv(impIf, left, supplyBefore);
+        }
+        uint256 c = $.coverHeld;
+        if (c != 0) $.coverHeld = Math.mulDiv(c, left, supplyBefore);
+        uint256 d = $.seniorIfDeferred;
+        if (d != 0) $.seniorIfDeferred = Math.mulDiv(d, left, supplyBefore);
+    }
+
+    /// @dev Junior shares burned at a settlement take their pro-rata part of Junior's IF losses (the counterfactual Junior
+    ///      capital in front of Senior's other losses) with them.
+    function _scaleJuniorIfLoss(Book.BookStorage storage $, uint256 burned, uint256 supplyBefore) private {
+        uint256 l = $.juniorIfLoss;
+        if (burned == 0 || l == 0) return;
+        $.juniorIfLoss = Math.mulDiv(l, supplyBefore - burned, supplyBefore);
     }
 
     function _maybeDrawdownKill(Book.BookStorage storage $) private {
@@ -584,127 +664,17 @@ library BookLogic {
         }
     }
 
-    /// @dev closeWindow of a pool-funded book: the pool sends `charter.ifTargetUsd` to the vault (reverts, and so
-    ///      does closeWindow, when the pool cannot fund it now: retried, or cancelled by cancelStuckWindow after
-    ///      CLOSE_WINDOW_TIMEOUT). Returns the IF amount to deploy.
-    function _drawInsurance(Book.BookStorage storage $) private returns (uint256 amount) {
-        address pool = IBookrunnerConfigPool($.config).insurancePool();
-        if (pool == address(0)) revert Book.InsurancePoolUnset();
-        amount = $.charter.ifTargetUsd;
-        if (amount == 0) revert Book.InsuranceTargetZero();
-        $.insurancePool = pool;
-        $.poolDebt = amount;
-        $.poolValue = amount;
-        emit Book.InsuranceFunded($.bookId, pool, amount);
-        IInsurancePool(pool).allocate($.bookId, amount, $.charter.underlying);
-    }
-
-    /// @dev Repays `amount` of the due debt from vault idle; returns the cash reserved for it (== amount, whether or
-    ///      not the vault managed to pay).
-    function _repayInsurance(Book.BookStorage storage $, address vault, uint256 amount) private returns (uint256) {
-        if (amount == 0) return 0;
-        try IVaultPoolRepay(vault).repayInsurancePool(amount) {
-            uint256 left = $.poolDebt - amount;
-            $.poolDebt = left;
-            $.poolValue -= amount; // amount <= poolValue (fundClaims)
-            emit Book.InsuranceRepaid($.bookId, amount, left);
-        } catch {
-            emit Book.InsuranceRepayFailed($.bookId, amount);
-        }
-        return amount;
-    }
-
-    /// @dev The waterfall inputs of a mark. [2026-10 insurance pool, owner ruling N-1] For a pool-funded book an
-    ///      exhausted book's debt is written down first (the pool's loss), the NAV nets the debt, and the Backstop is
-    ///      offered at most what covers the losses other than the insurance debt (`coverCap`; no cap otherwise).
-    function _markInputs(Book.BookStorage storage $, MarkSummary memory sum, address vault, address backstop)
-        private
-        returns (Waterfall.MarkState memory ms, Waterfall.MarkInputs memory mi, uint256 coverCap)
-    {
-        uint256 idle = IUnderwritingVault(vault).idle();
-        bool poolBook = $.insurancePool != address(0) && !$.poolClosed;
-        if (poolBook) _valueInsurance($, idle, sum.deployedValueUsd);
-        ms = Waterfall.MarkState({
-            seniorNav: $.nav[S],
-            juniorNav: $.nav[J],
-            seniorImpairment: $.seniorImpairment,
-            perfIndex: $.perfIndex,
-            highWater: $.highWater,
-            backstopDebt: $.backstopDebt
-        });
-        mi = Waterfall.MarkInputs({
-            nav: Waterfall.markedNavNet(idle, navLiabilities($), sum.deployedValueUsd),
-            juniorSupply: IERC20($.components.junior).totalSupply(),
-            backstopAvailable: _backstopBalance(backstop)
-        });
-        coverCap = type(uint256).max;
-        if (poolBook) {
-            coverCap = _insuranceCoverCap($, ms, mi, sum, idle);
-            if (coverCap < mi.backstopAvailable) mi.backstopAvailable = coverCap;
-        }
-    }
-
-    /// @dev Owner rulings N-1 / N2-2: the pool's claim at this mark is the debt capped by the book's own capital (idle +
-    ///      deployed, less the Backstop money in it), Waterfall.poolClaimAtMark. NAV nets that claim, so Backstop cash is
-    ///      never netted against the debt; a shortfall (an exhausted book) is provisional: a later mark with more own
-    ///      capital restores the claim first, before any tranche gain; it becomes final only at retirement.
-    function _valueInsurance(Book.BookStorage storage $, uint256 idle, uint256 deployed) private {
-        (uint256 claim, uint256 shortfall) = Waterfall.poolClaimAtMark($.poolDebt, idle, deployed, _backstopMoney($));
-        $.poolValue = claim;
-        if (shortfall > 0) emit Book.InsuranceShortfall($.bookId, shortfall);
-    }
-
-    /// @dev The Backstop money in the book: cover still held by Senior (min(backstopDebt, Senior NAV)) plus a repayment
-    ///      owed to the Backstop. Never the pool's (owner ruling N-1).
-    function _backstopMoney(Book.BookStorage storage $) private view returns (uint256) {
-        return Math.min($.backstopDebt, $.nav[S]) + $.backstopPayable;
-    }
-
-    /// @dev Owner ruling N-1: the Backstop covers Senior impairment only for losses other than the insurance debt. The
-    ///      cap is what applyMarkPnl would cover at the NAV with the mark's IF draw added back (Waterfall.poolCoverNav,
-    ///      from the signed MarkInput.insuranceEquityUsd); no IF draw: no cap.
-    function _insuranceCoverCap(
-        Book.BookStorage storage $,
-        Waterfall.MarkState memory ms,
-        Waterfall.MarkInputs memory mi,
-        MarkSummary memory sum,
-        uint256 idle
-    ) private view returns (uint256) {
-        uint256 navH = Waterfall.poolCoverNav(
-            idle, navLiabilities($), sum.deployedValueUsd, $.poolValue, sum.insuranceEquityUsd
-        );
-        if (navH <= mi.nav) return type(uint256).max; // no IF draw (navH >= nav always)
-        return Waterfall.applyMarkPnl(
-            ms, Waterfall.MarkInputs({nav: navH, juniorSupply: mi.juniorSupply, backstopAvailable: mi.backstopAvailable})
-        ).backstopCovered;
-    }
-
-    /// @dev After each applied mark (and the retirement mark): the pool's claim (`poolValue`) to the pool, which values
-    ///      its position at it (a provisional loss while the book is exhausted, recovered when it is not) and counts the
-    ///      mark for its epoch gate. Never reverts; a failed report is retried by the next mark (absolute value).
-    function _markInsurance(Book.BookStorage storage $, uint64 periodEnd, bool final_) private {
-        address pool = $.insurancePool;
-        if (pool == address(0) || $.poolClosed) return;
-        uint256 value = $.poolValue;
-        try IInsurancePool(pool).markBook($.bookId, value, periodEnd, final_) {
-            emit Book.InsuranceMarked($.bookId, $.poolDebt, value, periodEnd, final_);
-            if (final_) $.poolClosed = true;
-        } catch {
-            emit Book.InsuranceMarkFailed($.bookId, value, final_);
-        }
-    }
-
     /// @dev finalizeRetirement of a pool-funded book: everything is back in the vault (deployedValueUsd == 0). The claim
-    ///      is the debt capped by the book's own capital (Backstop money excluded), due, repaid from idle first; the rest
-    ///      of the debt is written off for good (the pool's loss) and the retirement mark reports what is left (0 unless
-    ///      the repayment failed). Never reverts.
+    ///      is the ledger's (the last mark's, plus fee flow credited since: never a revaluation on live idle that the
+    ///      Retired prices would count again, pool audit 2026-10-23 B-L1), due, repaid from the book's own idle first; the
+    ///      rest of the debt is written off for good (the pool's loss) and the retirement mark reports what is left (0
+    ///      unless the repayment failed). Never reverts.
     function _closeInsurance(Book.BookStorage storage $) private {
         if ($.insurancePool == address(0) || $.poolClosed) return;
         if (!$.poolDue) {
             $.poolDue = true;
             emit Book.InsuranceDue($.bookId, $.poolDebt);
         }
-        _valueInsurance($, IUnderwritingVault($.components.vault).idle(), 0);
         fundClaims($);
         uint256 debt = $.poolDebt;
         uint256 claim = $.poolValue;
@@ -712,7 +682,7 @@ library BookLogic {
             $.poolDebt = claim;
             emit Book.InsuranceWrittenOff($.bookId, debt - claim);
         }
-        _markInsurance($, $.lastMark.periodEnd, true);
+        BookPoolLogic.markInsurance($, $.lastMark.periodEnd, true, false);
     }
 
     function _reasonCode(uint8 reason) private pure returns (bytes32) {

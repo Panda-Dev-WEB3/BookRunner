@@ -11,7 +11,10 @@ pragma solidity ^0.8.24;
 ///         is processed, which waits until every active book has applied a mark after the epoch end (or a bounded
 ///         grace period has passed, so exits are never blocked). See docs/ARCHITECTURE.md §2.10.
 interface IInsurancePool {
-    /// @notice A book's position. Identity: allocation - claim == lossFirstLoss + lossDepositors.
+    /// @notice A book's position. Identity: allocation - claim == lossFirstLoss + lossDepositors. The split is reporting
+    ///         only (how the book's loss was absorbed when it was marked, reversed depositors first by its recoveries):
+    ///         the value split is pool-wide (audit 2026-10-23 A-M1: `depositorLoss`, the slice absorbs first and is
+    ///         refilled last across every book).
     struct BookPosition {
         address book; // recorded at allocate (the factory's book for the id)
         address vault; // the book's UnderwritingVault (receives the allocation, repays the debt)
@@ -33,9 +36,11 @@ interface IInsurancePool {
     ///         due.
     function allocate(uint256 bookId, uint256 amount, bytes32 market) external;
     /// @notice Only the recorded book, at each applied mark (and its final one at retirement): `value` (<= allocation)
-    ///         is what the book can repay (min(debt, vault idle + marked deployed value)). A fall below the pool's
-    ///         claim is a pool loss (slice first), a rise a recovery. `final` ends the book's freshness obligation.
-    function markBook(uint256 bookId, uint256 value, uint64 periodEnd, bool final_) external;
+    ///         is the pool's claim on the book's own capital (the book's ledger). A fall below the pool's claim is a pool
+    ///         loss (slice first, pool-wide), a rise a recovery (depositors first, pool-wide). `final` ends the book's
+    ///         freshness obligation; a `held` mark (valued at a held price, audit 2026-10-23 B-L4) moves the claim but
+    ///         does not count as fresh for the epoch gate.
+    function markBook(uint256 bookId, uint256 value, uint64 periodEnd, bool final_, bool held) external;
     /// @notice Only the recorded vault: repays `amount` (<= allocation) of the book's debt, pulled from the vault.
     function repay(uint256 bookId, uint256 amount) external;
     /// @notice Only the recorded router: the book's premium, pulled from the router.
@@ -62,6 +67,11 @@ interface IInsurancePool {
     // ---- views ----
 
     function premiumFloorBps() external view returns (uint16);
+    /// @notice Minimum tranche capital of a pool-funded book, bps of its IF (audit 2026-10-23 B-M2; default 5000):
+    ///         checked by MarketCharter at filing (MM inventory) and by Book.closeWindow (the raise).
+    function minOwnCapitalBps() external view returns (uint16);
+    /// @notice The depositors' outstanding net loss across all books (the first-loss slice is empty while it is > 0).
+    function depositorLoss() external view returns (uint256);
     function bookPosition(uint256 bookId) external view returns (BookPosition memory);
     /// @notice Largest allocation `bookId` on `market` could draw now.
     function maxAllocation(uint256 bookId, bytes32 market) external view returns (uint256);
@@ -91,6 +101,10 @@ interface IInsurancePool {
     event EpochProcessed(uint64 indexed epoch, uint256 depositAssets, uint256 depositShares, bool stale);
     /// @notice The epoch was processed after the grace period with `staleBooks` books not marked since its end.
     event EpochProcessedStale(uint64 indexed epoch, uint256 staleBooks);
+    /// @notice Audit 2026-10-23 A-L5 / A-I2: the epoch was processed while deposits were paused (or its deposits would
+    ///         mint no share): nothing was minted, every deposit of the epoch is refunded by claimDeposit
+    ///         (DepositCancelled).
+    event EpochDepositsRefunded(uint64 indexed epoch, uint256 assets);
     event EpochFilled(uint64 indexed epoch, uint256 shares, uint256 assets, bool complete);
     event Claimed(uint256 indexed requestId, address indexed owner, uint256 assets);
     event FirstLossDeposited(address indexed from, uint256 amount);
@@ -98,6 +112,13 @@ interface IInsurancePool {
     event PoolParamSet(bytes32 indexed key, uint256 value);
     event EpochLengthApplied(uint256 epochLength, uint64 nextEpochEndsAt);
     event PausedSet(bool deposits, bool allocations, address indexed by);
+}
+
+/// @notice Venue adapter extension (pool audit 2026-10-23 fix round 2): the IF cash returned to the vault so far
+///         (cumulative). With the signed IF equity it makes a pool-funded book's IF draw exact, whatever repays the
+///         debt: IF lost = IF deployed - returned - IF equity (venue + in transit).
+interface IInsuranceReturns {
+    function insuranceReturnedUsd() external view returns (uint256);
 }
 
 /// @notice BookrunnerConfig getter of the pool address (not in the frozen IBookrunnerConfig).

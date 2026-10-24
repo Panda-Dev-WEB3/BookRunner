@@ -36,6 +36,7 @@ export interface CharterJson {
   makerFeeBps: number;
   ifFromPool: boolean;
   premiumBps: number;
+  ifPoolFallback: boolean;
 }
 
 const lower = <T extends string>(s: T): T => s.toLowerCase() as T;
@@ -74,6 +75,7 @@ export function charterToJson(c: Charter): CharterJson {
     makerFeeBps: c.makerFeeBps,
     ifFromPool: c.ifFromPool,
     premiumBps: c.premiumBps,
+    ifPoolFallback: c.ifPoolFallback ?? false,
   };
 }
 
@@ -113,6 +115,8 @@ const charterSchema = z.object({
   // 2026-10 insurance pool; absent in charters stored before: a book-funded IF, no premium (the contract's reading)
   ifFromPool: z.boolean().default(false),
   premiumBps: int.default(0),
+  // fix round 2 (V-3); absent before: no opt-in (a pool that cannot fund cancels the book)
+  ifPoolFallback: z.boolean().default(false),
 });
 
 /** Parses struct_json (or any JSON-ish Charter, e.g. a viem read result) back into a Charter. */

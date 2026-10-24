@@ -67,6 +67,7 @@ export const CHARTER_JSON = {
   makerFeeBps: 0,
   ifFromPool: false,
   premiumBps: 0,
+  ifPoolFallback: false,
 };
 
 /** Builds the scenario; returns the fake chain with head at the last block. */

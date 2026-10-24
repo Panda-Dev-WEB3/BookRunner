@@ -54,6 +54,7 @@ export function charterArg(c: Charter) {
     makerFeeBps: c.makerFeeBps,
     ifFromPool: c.ifFromPool,
     premiumBps: c.premiumBps,
+    ifPoolFallback: c.ifPoolFallback ?? false,
   } as const;
 }
 

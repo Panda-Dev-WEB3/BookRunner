@@ -46,6 +46,8 @@ export interface Evaluation {
   /** No fresh attested price (or not yet for releaseTicks ticks): quotes unverifiable, book held reduce-only. */
   quoteUnverified: boolean;
   quoteHold: QuoteHoldState;
+  /** Book.capitalShort() (pool audit 2026-10-23 fix round 2 Info 4): held reduce-only until the capital is restored. */
+  capitalShort: boolean;
 }
 
 export function evaluate(
@@ -91,6 +93,10 @@ export function evaluate(
   // fail safe (audit M-3): without a fresh attested price no quote can be verified; hold the book reduce-only (the
   // off-hours convention: the agent stops new risk) until one has been seen for releaseTicks consecutive ticks
   if (hold.held && (snapshot.state === "ok" || snapshot.state === "warn")) snapshot.state = "reduce_only";
+  // pool audit 2026-10-23 fix round 2 (Info 4): redemptions took a pool-funded book's own capital below the pool's
+  // minimum (exits are never blocked): no new risk until the capital is back above it
+  const capitalShort = obs.capitalShort === true;
+  if (capitalShort && (snapshot.state === "ok" || snapshot.state === "warn")) snapshot.state = "reduce_only";
   return {
     snapshot,
     nav,
@@ -101,6 +107,7 @@ export function evaluate(
     quote: quote.info,
     quoteUnverified: hold.held,
     quoteHold: hold.state,
+    capitalShort,
   };
 }
 

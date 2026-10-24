@@ -135,12 +135,13 @@ describe("requests", () => {
 });
 
 describe("first-loss slice and exposure", () => {
-  test("against the 10% level", () => {
-    expect(firstLossView(1000, 1000)).toMatchObject({ below: false, fill: 1 });
-    const low = firstLossView(650, 1000);
+  test("against the 10% level of what the books hold (pool audit 2026-10-23 A-M2)", () => {
+    expect(firstLossView(1000, 1000, 10_000)).toMatchObject({ below: false, fill: 1 });
+    expect(firstLossView(650, 1000, 5000)).toMatchObject({ below: false }); // 13% of the claims
+    const low = firstLossView(650, 1000, 8000);
     expect(low.below).toBe(true);
-    expect(low.text).toContain("6.5% of the pool, below the 10% level");
-    expect(firstLossView(500, null).levelBps).toBe(1000);
+    expect(low.text).toContain("8.1% of what the books hold, below the 10% level");
+    expect(firstLossView(500, null, 0)).toMatchObject({ levelBps: 1000, below: false });
   });
   test("market cap use", () => {
     expect(capFill(5000)).toBe(0.5);
@@ -182,7 +183,8 @@ describe("copy", () => {
       phaseSentence({ epoch: 1, endsAt: END, ended: true, phase: "awaiting_marks", hasWork: true, staleBooks: 2, graceEndsAt: END, nextEpochEndsAt: END }),
       depositStatus(dep(), 0, "USDC").detail,
       withdrawalStatus(wd({ status: "filling" }), "USDC").detail,
-      firstLossView(500, 1000).text,
+      firstLossView(500, 1000, 8000).text,
+      firstLossView(500, 1000, 0).text,
       cooldownLine({ cooldownEnds: END, inCooldown: true }, 0),
     ];
     for (const l of lines) expect(checkCopy(l)).toEqual([]);

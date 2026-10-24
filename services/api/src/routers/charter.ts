@@ -33,6 +33,7 @@ export const REASON_TEXT: Record<string, string> = {
   BAD_SYMBOL: "Venue symbol is required",
   BAD_FEES: "In-house taker fee must be at most 100 bps",
   BAD_PREMIUM: "Pool premium must be at most 5000 bps of gross fee flow, and 0 for a book-funded insurance fund",
+  BAD_FALLBACK: "The pool fallback only applies to an insurance fund funded by the pool",
   NO_POOL: "No insurance pool is configured on this deployment: fund the insurance fund from the tranches",
 };
 

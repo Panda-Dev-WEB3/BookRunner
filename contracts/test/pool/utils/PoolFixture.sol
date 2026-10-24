@@ -84,7 +84,7 @@ abstract contract PoolFixture is Test {
         for (uint256 i; i < ids.length; ++i) {
             IInsurancePool.BookPosition memory p = pool.bookPosition(ids[i]);
             vm.prank(p.book);
-            pool.markBook(ids[i], p.claim, uint64(block.timestamp), false);
+            pool.markBook(ids[i], p.claim, uint64(block.timestamp), false, false);
         }
     }
 
@@ -103,6 +103,12 @@ abstract contract PoolFixture is Test {
         for (uint256 i; i < 16 && !pool.epochInfo(e).processed; ++i) {
             _process();
         }
+        shares = _claimDeposit(id);
+    }
+
+    /// @dev The owner claims a processed deposit (audit 2026-10-23 A-L6: only the owner may).
+    function _claimDeposit(uint256 id) internal returns (uint256 shares) {
+        vm.prank(pool.depositInfo(id).owner);
         shares = pool.claimDeposit(id);
     }
 
@@ -145,7 +151,7 @@ abstract contract PoolFixture is Test {
     function _markValue(uint256 id, uint256 value) internal {
         (address book,,) = _bookAddrs(id);
         vm.prank(book);
-        pool.markBook(id, value, uint64(block.timestamp), false);
+        pool.markBook(id, value, uint64(block.timestamp), false, false);
     }
 
     function _bookAddrs(uint256 id) internal view returns (address book, address vault, address router) {

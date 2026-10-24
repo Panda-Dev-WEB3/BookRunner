@@ -3,6 +3,7 @@ export { bookrunnerConfigAbi } from "./BookrunnerConfig";
 export { bkrnTokenAbi } from "./BkrnToken";
 export { bkrnStakingAbi } from "./BkrnStaking";
 export { bkrnFeeRouterAbi } from "./BkrnFeeRouter";
+export { bkrnV4SwapperAbi } from "./BkrnV4Swapper";
 export { backstopAbi } from "./Backstop";
 export { markRegistryAbi } from "./MarkRegistry";
 export { revenueRouterAbi } from "./RevenueRouter";

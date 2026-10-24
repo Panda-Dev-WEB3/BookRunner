@@ -123,6 +123,19 @@ export const bookAbi = [
   },
   {
     "type": "function",
+    "name": "capitalShort",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "closeWindow",
     "inputs": [],
     "outputs": [],
@@ -406,6 +419,11 @@ export const bookAbi = [
             "name": "premiumBps",
             "type": "uint16",
             "internalType": "uint16"
+          },
+          {
+            "name": "ifPoolFallback",
+            "type": "bool",
+            "internalType": "bool"
           }
         ]
       }
@@ -580,6 +598,11 @@ export const bookAbi = [
             "name": "premiumBps",
             "type": "uint16",
             "internalType": "uint16"
+          },
+          {
+            "name": "ifPoolFallback",
+            "type": "bool",
+            "internalType": "bool"
           }
         ]
       },
@@ -663,6 +686,34 @@ export const bookAbi = [
         "name": "closed",
         "type": "bool",
         "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "insuranceLedger",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "seniorIfImpairment_",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "juniorIfLoss",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "coverHeld",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "ifDraw",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -940,6 +991,19 @@ export const bookAbi = [
         "name": "epoch",
         "type": "uint64",
         "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "seniorIfDeferred",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -1385,6 +1449,25 @@ export const bookAbi = [
   },
   {
     "type": "event",
+    "name": "InsuranceFallback",
+    "inputs": [
+      {
+        "name": "bookId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "reason",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "InsuranceFunded",
     "inputs": [
       {
@@ -1507,6 +1590,31 @@ export const bookAbi = [
       },
       {
         "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "InsuranceRestored",
+    "inputs": [
+      {
+        "name": "bookId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "value",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
@@ -2099,8 +2207,14 @@ export const bookAbi = [
   },
   {
     "type": "error",
-    "name": "InsurancePoolUnset",
-    "inputs": []
+    "name": "InsurancePoolCannotFund",
+    "inputs": [
+      {
+        "name": "retryUntil",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
   },
   {
     "type": "error",

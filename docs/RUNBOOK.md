@@ -153,12 +153,21 @@ only (it deploys mocks and refuses 4663). Tick every box in order; two people fo
         `InsurancePool.depositFirstLoss(seed)`, with `seed = scripts/launch-plan.ts poolSeedUsd(launch sizes)` (≈ 91,671
         USDG for NVDA / TSLA at 25,001 and RHX5 at 10,000). Queued deposits count only after their epoch is processed,
         so at launch the slice alone funds every pool-funded IF. Each IF must fit 30% of the pool (`marketCapBps`; the
-        books on one underlying share it), and all of them together must fit the free cash above the 20% buffer.
+        books on one underlying share it), and all of them together must fit the free cash above the buffer (20% of the assets that stay plus the queued exits); the slice must also cover 25% of the largest single IF (NEW-3: the seed covers up to about 366k).
         Check `maxAllocation(bookId, market) >= ifTargetUsd` per book before `subscriptionEnds`, otherwise
-        `closeWindow` reverts (retry after a top-up). Premiums go wholly to the slice until depositor shares exist.
-        Withdrawing from the slice is timelock-only (48 h), from free cash, never while withdrawals are due, and never
-        below 10% of the pool. Once depositors exceed about 9× the slice, new allocations stop until the treasury tops
-        it up (alert `pool_first_loss_low`). Do NOT apply the devnet demo parameters (`epochLength` / `cooldown` /
+        `closeWindow` reverts `InsurancePoolCannotFund` and is retried until `CLOSE_WINDOW_TIMEOUT` after `subscriptionEnds`, then
+        cancels the book (`POOL_UNFUNDED`, refunds 1:1), unless the charter opted in to `ifPoolFallback` (the tranches then
+        raise the IF, `InsuranceFallback`; fix round 2 V-3). A pool-funded window also needs a raise of at
+        least `minOwnCapitalBps` (50%) of the IF (`UNDERCAPITALISED` otherwise, B-M2). Premiums go wholly to the slice
+        until depositor shares exist. Withdrawing from the slice is timelock-only (48 h), from free cash above the buffer
+        and the value of every queued withdrawal, and never below 10% of the book claims nor 25% of the largest single allocation. The 10% gate covers the
+        exposure (claims), so deposits can no longer dilute it and block allocations; the slice still absorbs losses
+        first, pool-wide (a recovery restores the depositors first). Pause deposits (guardian) during an incident: an
+        epoch processed while paused mints nothing and refunds its queued deposits. A stale processing (a book not marked by
+        the grace end) fills only the part of each exit backed by fresh books and defers deposits; the rest fills at the
+        next fresh processing, or after 30 days at a 50% haircut on the stale exposure (deposits refunded): fix the marks.
+        A pool-funded book whose own capital falls below the pool's minimum after redemptions is held reduce-only
+        (`Book.capitalShort()`, alert `pool_book_capital_short`) until it is restored; exits stay open. Do NOT apply the devnet demo parameters (`epochLength` / `cooldown` /
         `processGrace`): mainnet keeps 7 d / 7 d / 24 h.
         Ordering when depositors' money should count at launch: open deposits (`requestDeposit`) at least one full
         epoch before the books' `subscriptionEnds`, so that epoch ends and is processed first (`processEpoch` waits for
@@ -192,6 +201,44 @@ the same wiring against the VERIFY-ed external addresses of the input and keeps 
   `increaseObservationCardinalityNext` on the pool first, e.g. >= window / average block spacing of swaps;
   window 10 min–2 days, deviation <= 2,000 ticks), or `setBkrnPriceId` (REF_ATTESTED, once the oracle prices
   BKRN);
+- **BKRN launched on Pons (Uniswap v4 venue, owner decision 2026-10-23)**: input `bkrn.token` = the Pons token
+  (code, 18 decimals; `totalSupply` other than 1e9 x 1e18 only warns; no allocation recipients needed),
+  `externals.uniswapV4PoolManager` (VERIFY U2), `buyback.venue = "univ4"`, `buyback.v4Hooks` = the
+  PonsV2MemeHook (VERIFY U6), `buyback.ethReference` (USDG per ETH, BKRN per ETH, near market), `referenceSource`
+  `fixed` / `attested` / `fixedEth` (never `twap`: v4 has no oracle), `poolFee` may be 0 (no v3 BKRN pool),
+  `buyback.v4HookFeeBps` = the hook's fee (1.2–3.5% observed on Pons pools 2026-10-23, VERIFY U6; at most 1,000
+  bps; `setV4Fees`): it is priced into every hooked hop's price limit, so a buyback stopped at its limit still
+  clears the floor and partially fills (review 2026-10-23 M-1); `maxSlippageBps` above the hook fee, e.g.
+  1,000 bps with a 300 bps hook. Via ETH the ETH -> BKRN hop's limit is set from the ETH the first hop really
+  delivered (review 2 M-A), so the fixed ETH reference only bounds the USDG -> ETH hop within the wide
+  `buyback.v4EthToleranceBps` (default 2,000 = 20%, at most 5,000). `buyback.v4SwapGas` (default 1,000,000, within
+  200,000..5,000,000) is the gas forwarded to every v4 swap: `executeBuyback` refuses to start without it plus a
+  200k reserve (`V4SwapGasTooLow`; the keeper's eth_estimateGas converges on ~1.3M), so the swap behaves the same
+  whatever the transaction's gas limit (review 2 L-1); keep it well above the route's swap gas (fork: well under
+  0.5M for a Pons-hooked V3_WETH swap). `maxPerCall` sized to
+  the graduated pool's depth: a via-ETH buyback whose ETH -> BKRN hop hits its limit fails safe as a whole
+  (`BuybackV4Failed`); the keeper then halves the next size (down to `WATERFALL_BUYBACK_THRESHOLD_USD`) with a
+  growing cooldown (x2 per failure, at most x16), sets its minimum from `previewBuyback` (a simulated fill, minus
+  `WATERFALL_BUYBACK_SLIPPAGE_BPS`) and sends nothing when the simulation fails or is below the floor. Before
+  graduation leave `buyback.v4Route` out: buybacks defer (`BuybackDeferred`,
+  the keeper sends nothing while `v4BuybackReady()` is false) and the USDG waits in `buybackPending`. After
+  graduation run `bun scripts/buyback-route.ts --bkrn <token>` (read-only; ranks USDG -> BKRN direct,
+  USDG -> ETH -> BKRN via the v4 ETH/USDG pool, USDG -> WETH (v3) -> ETH -> BKRN, prints the deploy-input values
+  and the timelock calldata) and schedule `setEthReference` (via-ETH) + `setV4Route` through the timelock;
+- **refreshing the fixed references (via-ETH routes)**: since review 2 M-A, ETH moves no longer stall buybacks
+  with REF_FIXED / REF_ATTESTED: the floor is in USDG, the BKRN hop follows the real ETH fill, and
+  `refUsdcPerEthWad` only gates the USDG -> ETH hop within `v4EthToleranceBps` (20%): refresh it (`setEthReference`,
+  48 h timelock) when ETH/USD has moved ~10% from it, at least monthly. REF_FIXED_ETH (BKRN/ETH x ETH/USD) still
+  derives the BKRN floor from it: with that source refresh both values whenever ETH or BKRN/ETH moves ~half of
+  `maxSlippageBps`. The BKRN reference itself (REF_FIXED `refBkrnPerUsdcWad`) must track BKRN/USDG within the
+  slippage: refresh from `bun scripts/buyback-route.ts` (ETH = v3 30-min TWAP, BKRN/ETH = median over recent blocks
+  of the picked pool). `services/alerts` raises `buyback_v4_reference_stale` after 1 h with a hop blocked
+  (`BkrnFeeRouter.v4BlockedHop()`: 1 = the direct pool, or ETH/USDG beyond the ETH tolerance; 2 = the ETH -> BKRN
+  pool cannot meet the floor: BKRN reference stale or BKRN fell) and pending above `ALERT_BUYBACK_MIN_USD`;
+- **manual BKRN transfer check (fee-on-transfer cannot be proven read-only)**: before the deploy, move a small
+  amount of the Pons BKRN between two treasury-controlled addresses and confirm the receiver got exactly the
+  amount sent (no tax / reflection / rebase); a fee-on-transfer BKRN breaks the staking accounting
+  (`notifyReward` checks the balance) and must not be used;
 - `HedgeExecutor` with the real SwapRouter02 (`0xcaf6…5cb2`, VERIFY U1), `setV3Factory(UniswapV3Factory)` and
   one `setRoute("UNIV3", stockToken, fee, hop, hopFee)` per hedge asset (direct USDG pool, or a two-pool route
   through WETH). With the factory set, `setRoute` reverts unless every pool exists. Agents / risk send

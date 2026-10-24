@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { type ChainPort, type DbPort, type Memory, type PoolRead, collect, emptyMemory, poolPositionSettled, readPool } from "../src/collect";
 import { loadConfig } from "../src/config";
 import { evaluate } from "../src/rules";
-import { POOL_RULES, poolEpochInGrace, poolEpochOverdue, poolFinalMarkStuck, poolFirstLossLow, poolMarketDebt, poolUtilisation } from "../src/rules-pool";
+import { POOL_RULES, poolBookCapitalShort, poolEpochInGrace, poolEpochOverdue, poolFinalMarkStuck, poolFirstLossLow, poolMarketDebt, poolUtilisation } from "../src/rules-pool";
 import type { Condition, PoolBookSnap, PoolSnap } from "../src/types";
 import { NOW, NOW_S, NVDA_MKT, TSLA_MKT, book, pool, poolBook, rules, snap } from "./fixtures";
 
@@ -194,6 +194,25 @@ describe("pool_first_loss_low", () => {
     expect(c[0]!.summary).toContain("EMPTY with $300,000.00 of claims outstanding");
     expect(ks(poolFirstLossLow(snap({ pool: pool({ firstLossBps: 0, firstLossUsd: 0, claimsUsd: 0 }) }), rules()))).toEqual([["pool_first_loss_low", "warning"]]);
     expect(poolFirstLossLow(snap({ pool: pool({ poolAssetsUsd: 0, firstLossBps: 0, firstLossUsd: 0 }) }), rules())).toEqual([]);
+  });
+});
+
+describe("pool_book_capital_short (fix round 2, Info 4)", () => {
+  const short = (over: Parameters<typeof book>[0] = {}) =>
+    book({ risk: { state: "reduce_only", breaches: [], ts: NOW - 5_000, killed: false, killReason: null, journal: null, capitalShort: true }, ...over });
+  test("a Live book risk reports below the pool's minimum own capital: one warning per book, reduce-only named", () => {
+    const c = poolBookCapitalShort(snap({ books: [short()] }), rules());
+    expect(ks(c)).toEqual([["pool_book_capital_short:3", "warning"]]);
+    expect(c[0]?.summary).toContain("REDUCE-ONLY");
+    expect(c[0]?.forSec).toBe(300);
+  });
+  test("quiet when not short, not Live, or no risk state", () => {
+    expect(poolBookCapitalShort(snap(), rules())).toEqual([]);
+    expect(poolBookCapitalShort(snap({ books: [short({ state: "Retiring" })] }), rules())).toEqual([]);
+    expect(poolBookCapitalShort(snap({ books: [book({ risk: null })] }), rules())).toEqual([]);
+  });
+  test("registered: evaluate raises it", () => {
+    expect(evaluate(snap({ books: [short()] }), rules()).map((c) => c.rule)).toContain("pool_book_capital_short");
   });
 });
 

@@ -203,6 +203,16 @@
     },
     {
       "check": "unused-return",
+      "target": "BookLogic.applyMark",
+      "reason": "BookPoolLogic.repayPoolDue returns the amount repaid; at a mark only its storage effect matters (the debt, poolDue and the vault idle it pulled), the amount is used where idle is budgeted (_fundClaims)"
+    },
+    {
+      "check": "unused-return",
+      "target": "InsurancePool.staleBooks",
+      "reason": "the view returns only the count of stale books; PoolLogic.staleBooks also returns their claims, which only processEpoch needs (fix round 2 NEW-1 exposure)"
+    },
+    {
+      "check": "unused-return",
       "target": "AttestedOracle._verify",
       "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
     },
@@ -360,6 +370,46 @@
       "check": "unused-return",
       "target": "BookLogic._governanceSettlePrice",
       "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
+    },
+    {
+      "check": "arbitrary-send-eth",
+      "target": "BkrnV4Swapper.sweepNative",
+      "reason": "config admin (timelock) only: sends ETH that was forced into the swapper (selfdestruct / coinbase) to a governance-chosen address; a swap never leaves ETH"
+    },
+    {
+      "check": "incorrect-equality",
+      "target": "BkrnFeeRouter._buybackV4",
+      "reason": "zero checks on amounts measured by balance that only refuse or end the call (a caught v4 failure spends 0; a 0 output is refused); spent must also equal what the swapper reports, so a donation cannot steer them"
+    },
+    {
+      "check": "incorrect-equality",
+      "target": "BkrnFeeRouter.executeBuyback",
+      "reason": "zero-amount guard on the keeper / floor minimum (refuses a zero minimum), not a balance equality"
+    },
+    {
+      "check": "incorrect-equality",
+      "target": "BkrnV4Swapper._settleFromRouter",
+      "reason": "zero-amount early return (nothing owed to the PoolManager), the amount comes from the swap delta"
+    },
+    {
+      "check": "incorrect-equality",
+      "target": "BkrnV4Swapper._bkrnLimit",
+      "reason": "ethIn == 0 is a zero guard before dividing by the first hop's real ETH fill (v4 re-review 2 M-A): a hop that delivered no ETH reverts V4HopPartialFill (caught by the fee router, nothing moves); not a balance equality an attacker can steer"
+    },
+    {
+      "check": "reentrancy-balance",
+      "target": "BkrnFeeRouter._runV4",
+      "reason": "the balances around v4Swapper.swap are the measured spend / output by design and must equal what the swapper reports (else V4DeltaNotSettled); the swapper is this router's own immutable executor, only it can call swap, and executeBuyback is nonReentrant"
+    },
+    {
+      "check": "reentrancy-balance",
+      "target": "BkrnV4Swapper.unlockCallback",
+      "reason": "the ETH balance read before the hops is compared after them on purpose (no ETH may stay behind); the callback only runs for the PoolManager of the swap in progress, once, and the fee router entry point is nonReentrant"
+    },
+    {
+      "check": "unused-return",
+      "target": "BkrnV4Swapper._v3WethHop",
+      "reason": "the v3 router's amountOut is not used: the WETH received and the USDG spent are measured by balance difference"
     }
   ]
 }

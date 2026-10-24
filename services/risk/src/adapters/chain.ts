@@ -161,6 +161,7 @@ export class ViemChain implements ChainPort, DiscoveryPort {
       unfundedClaimsUsd,
       perf,
       nav,
+      capitalShort,
     ] = await Promise.all([
       p.readContract({ address: k.book, abi: bookAbi, functionName: "state" }),
       p.readContract({ address: k.mandate, abi: mMMandateAbi, functionName: "getMandate" }),
@@ -180,6 +181,8 @@ export class ViemChain implements ChainPort, DiscoveryPort {
       p.readContract({ address: k.book, abi: bookAbi, functionName: "unfundedClaims" }),
       p.readContract({ address: k.book, abi: bookAbi, functionName: "perfIndex" }),
       p.readContract({ address: k.book, abi: bookAbi, functionName: "trancheNav" }),
+      // fix round 2 (Info 4): false on a book without the view (older deployment) or a failed read
+      p.readContract({ address: k.book, abi: bookAbi, functionName: "capitalShort" }).catch(() => false),
     ]);
     const [chainOracle, maxPriceAgeSec] = await oracleRead;
     const nowSec = Math.floor(this.now() / 1000);
@@ -225,6 +228,7 @@ export class ViemChain implements ChainPort, DiscoveryPort {
       oracle,
       maxPriceAgeSec,
       ...(lossBudget !== undefined ? { lossBudget } : {}),
+      ...(capitalShort ? { capitalShort: true } : {}),
     };
   }
 

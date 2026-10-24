@@ -3,7 +3,7 @@
 // (InvalidCharter(reason)) — plus every failing reason for UI feedback.
 // VERIFY: check order and boundaries against contracts/src/MarketCharter.sol once it lands
 // (the charter API also cross-checks with an eth_call to validate() when the chain is reachable).
-import { type Charter, MAX_PREMIUM_BPS, ORACLE, VENUE, bytes32ToStr, isTokenUnderlying, poolCharterReason, strToBytes32, underlyingToToken } from "@bookrunner/shared";
+import { type Charter, DEFAULT_MIN_OWN_CAPITAL_BPS, MAX_PREMIUM_BPS, ORACLE, VENUE, bytes32ToStr, isTokenUnderlying, poolCharterReason, strToBytes32, underlyingToToken } from "@bookrunner/shared";
 import { type Address, type Hex, zeroHash } from "viem";
 
 export const REASON_CODES = [
@@ -18,7 +18,9 @@ export const REASON_CODES = [
   "BAD_SYMBOL",
   "BAD_FEES",
   "BAD_PREMIUM",
+  "BAD_FALLBACK",
   "NO_POOL",
+  "UNDERCAPITALISED",
 ] as const;
 export type ReasonCode = (typeof REASON_CODES)[number];
 
@@ -37,6 +39,8 @@ export interface ValidationContext {
   isIndex(underlying: Hex): boolean;
   /** config.insurancePool() != 0 (NO_POOL). Absent = not checked (chain unknown). */
   poolConfigured?: boolean;
+  /** pool.minOwnCapitalBps() (UNDERCAPITALISED, pool audit 2026-10-23 B-M2). Absent = the deployment default. */
+  minOwnCapitalBps?: number;
 }
 
 export interface ValidationResult {
@@ -106,11 +110,15 @@ export function validateCharter(c: Charter, ctx: ValidationContext): ValidationR
   }
 
   // 2026-10 insurance pool (CharterRules.poolReason, checked after BAD_FEES)
-  const pool = poolCharterReason(c, ctx.poolConfigured ?? true);
+  const pool = poolCharterReason(c, ctx.poolConfigured ?? true, ctx.minOwnCapitalBps);
   if (pool === "BAD_PREMIUM") {
     fail("BAD_PREMIUM", c.ifFromPool ? `premiumBps ${c.premiumBps} > ${MAX_PREMIUM_BPS}` : `premiumBps ${c.premiumBps} on a book-funded insurance fund (must be 0)`);
+  } else if (pool === "BAD_FALLBACK") {
+    fail("BAD_FALLBACK", "ifPoolFallback only applies to a pool-funded insurance fund");
   } else if (pool === "NO_POOL") {
     fail("NO_POOL", "ifFromPool is set but no insurance pool is configured");
+  } else if (pool === "UNDERCAPITALISED") {
+    fail("UNDERCAPITALISED", `MM inventory ${c.mmInventoryUsd} below ${(ctx.minOwnCapitalBps ?? DEFAULT_MIN_OWN_CAPITAL_BPS) / 100}% of the pool-funded insurance fund ${c.ifTargetUsd} (6dp)`);
   }
 
   // order reasons as the contract checks them
@@ -134,6 +142,7 @@ export function staticValidationContext(p: {
   indexIds: Iterable<string>;
   markInterval?: number;
   poolConfigured?: boolean;
+  minOwnCapitalBps?: number;
 }): ValidationContext {
   const tokens = new Set([...p.canonicalTokens].map((t) => t.toLowerCase()));
   const indexes = new Set([...p.indexIds].map((t) => t.toLowerCase()));
@@ -143,6 +152,7 @@ export function staticValidationContext(p: {
     isIndex: (u) => indexes.has(u.toLowerCase()),
     ...(p.markInterval !== undefined ? { markInterval: p.markInterval } : {}),
     ...(p.poolConfigured !== undefined ? { poolConfigured: p.poolConfigured } : {}),
+    ...(p.minOwnCapitalBps !== undefined ? { minOwnCapitalBps: p.minOwnCapitalBps } : {}),
   };
 }
 

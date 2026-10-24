@@ -18,6 +18,7 @@ import {
   attestedOracleAbi,
   bkrnStakingAbi,
   bookrunnerConfigAbi,
+  insurancePoolAbi,
   marketCharterAbi,
   riskCommitteeAbi,
   stockTokenRegistryAbi,
@@ -89,12 +90,21 @@ export class CharterChain {
       const ok = await this.pub.readContract({ address: this.c.stockRegistry, abi: stockTokenRegistryAbi, functionName: "isIndex", args: [ch.underlying] });
       if (ok) indexes = [ch.underlying];
     }
+    // pool.minOwnCapitalBps() (pool audit 2026-10-23 B-M2); a pool without the getter: the deployment default
+    let minOwnCapitalBps: number | undefined;
+    if (pool !== zeroAddress && ch.ifFromPool) {
+      minOwnCapitalBps = await this.pub
+        .readContract({ address: pool, abi: insurancePoolAbi, functionName: "minOwnCapitalBps" })
+        .then(Number)
+        .catch(() => undefined);
+    }
     return staticValidationContext({
       venueMinIfUsd: { [ch.venue]: venueMin },
       canonicalTokens: canonical,
       indexIds: indexes,
       markInterval: Number(markInterval),
       poolConfigured: pool !== zeroAddress,
+      ...(minOwnCapitalBps !== undefined ? { minOwnCapitalBps } : {}),
     });
   }
 

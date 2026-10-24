@@ -58,15 +58,15 @@ export function PoolLossOrder() {
 export function FirstLossExplainer({ overview }: { overview: PoolOverviewOut | undefined }) {
   const sym = useSettlementSymbol();
   const level = overview?.params?.firstLossTargetBps ?? DEFAULT_FIRST_LOSS_LEVEL_BPS;
-  const fl = overview ? firstLossView(overview.firstLossBps, level) : null;
+  const fl = overview ? firstLossView(overview.firstLossBps, level, overview.utilisationBps) : null;
   return (
     <Card title="The first-loss slice" padding="md">
       <div className="space-y-3 text-[13px] text-ink-2">
         <p>
-          The treasury keeps its own money inside the pool, at least {bpsPct(level)} of the pool's value. It holds no shares: it is kept apart, receives premiums at the same rate as depositors, and takes any
-          pool loss before depositors do. A recovery repays depositors first, then the slice.
+          The treasury keeps its own money inside the pool, at least {bpsPct(level)} of what the books hold from it. It holds no shares: it is kept apart, receives premiums at the same rate as depositors, and takes any
+          pool loss before depositors do. A recovery, from whichever book, repays depositors first, then the slice.
         </p>
-        <p>While the slice is below its required size, the pool lends to no new book. The treasury can take money out of it only through the timelock, never while withdrawals are due, and never below {bpsPct(level)}.</p>
+        <p>While the slice is below its required size, the pool lends to no new book. The treasury can take money out of it only through the timelock, never from the cash queued withdrawals need, and never below {bpsPct(level)} of what the books hold.</p>
         {overview && fl && (
           <div className="rounded-control border border-line bg-surface-2/70 p-3">
             <div className="flex items-baseline justify-between gap-3 text-[12.5px]">

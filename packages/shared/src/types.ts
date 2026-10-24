@@ -62,6 +62,11 @@ export interface Charter {
   ifFromPool: boolean;
   /** Pool premium, bps of gross fee flow; effective = max(premiumBps, pool floor) (waterfall.ts effectivePremiumBps). */
   premiumBps: number;
+  /**
+   * Pool audit 2026-10-23 fix round 2 (V-3): the sponsor opts in to having the IF raised from the tranches when the pool
+   * cannot fund it at closeWindow; default false (the window is then cancelled, refunds 1:1). Only for a pool-funded IF.
+   */
+  ifPoolFallback?: boolean;
 }
 
 export interface BookComponents {

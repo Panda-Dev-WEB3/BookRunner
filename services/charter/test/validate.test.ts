@@ -48,6 +48,7 @@ describe("validateCharter (MarketCharter.validate mirror)", () => {
     ],
     ["pool premium > 50%", nvdaCharter({ premiumBps: 5001 }), "BAD_PREMIUM"],
     ["premium on a book-funded IF", nvdaCharter({ ifFromPool: false, premiumBps: 1200 }), "BAD_PREMIUM"],
+    ["pool fallback on a book-funded IF (fix round 2, V-3)", nvdaCharter({ ifFromPool: false, ifPoolFallback: true }), "BAD_FALLBACK"],
   ];
 
   for (const [name, c, reason] of cases) {
@@ -59,6 +60,14 @@ describe("validateCharter (MarketCharter.validate mirror)", () => {
       expect(r.reasons).toEqual([reason]);
     });
   }
+
+  test("pool audit 2026-10-23 B-M2: UNDERCAPITALISED below the pool's minimum own capital", () => {
+    const c = nvdaCharter();
+    const half = (c.ifTargetUsd * 5000n) / 10_000n;
+    expect(validateCharter(nvdaCharter({ mmInventoryUsd: half }), devValidationContext).ok).toBe(true);
+    expect(validateCharter(nvdaCharter({ mmInventoryUsd: half - 1n }), devValidationContext).reason).toBe("UNDERCAPITALISED");
+    expect(validateCharter(nvdaCharter({ mmInventoryUsd: half - 1n }), { ...devValidationContext, minOwnCapitalBps: 0 }).ok).toBe(true);
+  });
 
   test("2026-10 insurance pool: NO_POOL when ifFromPool and no pool is configured (absent = not checked)", () => {
     expect(validateCharter(nvdaCharter(), { ...devValidationContext, poolConfigured: false }).reason).toBe("NO_POOL");

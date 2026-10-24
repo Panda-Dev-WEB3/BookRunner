@@ -51,6 +51,8 @@ export interface RiskSnap {
   lossBudgetUnreadable?: true;
   /** meta.quoteUnverified (audit M-3): the book is held reduce-only, its live quote has no fresh attested price to check against */
   quoteUnverified?: boolean;
+  /** meta.capitalShort (pool audit 2026-10-23 fix round 2 Info 4): a pool-funded book's own capital is below the pool's minimum */
+  capitalShort?: boolean;
 }
 
 export interface BookSnap {
@@ -314,6 +316,11 @@ export interface Snapshot {
   indexer: IndexerCursorSnap[] | null;
   /** rolling buybackPending in USD (null samples are skipped) */
   buybackSamples: Sample[];
+  /**
+   * BkrnFeeRouter.v4BlockedHop(): the v4 buyback hop sitting past its price limit (1 the first hop / direct pool,
+   * 2 the ETH -> BKRN hop), 0 none / venue v3; null = not read (no fee router, an old router, a read failure).
+   */
+  buybackV4BlockedHop?: number | null;
   api: ApiProbe;
   /** the oracle's /health (per-source health); null = not probed (no oracle URL) */
   oracle: OracleProbe | null;

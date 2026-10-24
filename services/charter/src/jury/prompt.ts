@@ -71,6 +71,7 @@ export function charterForPrompt(c: Charter) {
     makerFeeBps: c.makerFeeBps,
     insuranceFundFundedBy: c.ifFromPool ? "insurance pool (senior debt of the book)" : "tranches",
     poolPremiumBpsOfGrossFeeFlow: c.ifFromPool ? c.premiumBps : 0,
+    ifPoolCannotFund: c.ifFromPool ? (c.ifPoolFallback ? "tranches raise the IF" : "book cancelled, refunds 1:1") : "n/a",
   };
 }
 

@@ -57,6 +57,8 @@ export interface AgentChain {
   venueValuationAt?(): Promise<number>;
   /** MMMandate.isActiveKey(the agent's desk session key); absent = the agent has no desk key */
   deskKeyActive?(): Promise<boolean>;
+  /** Book.capitalShort() (pool audit 2026-10-23 fix round 2 Info 4); absent = not read (treated as false) */
+  capitalShort?(): Promise<boolean>;
 }
 
 export interface BookAgentConfig {
@@ -148,6 +150,8 @@ export class BookAgent {
   private mandateKilled = false;
   private chainOffHours = false;
   private bookState: BookState | null = null;
+  /** Book.capitalShort() at the last refresh; a failed read keeps the previous value */
+  private capitalShort = false;
   private riskState: LimitState | null = null;
   private killMsg: KillMsg | null = null;
   private venueGate: { reason: string; symbol: string } | null = null;
@@ -377,6 +381,11 @@ export class BookAgent {
       this.mandateKilled = killed.value;
       if (killed.value) void this.halt("MANDATE_KILLED");
     }
+    if (this.d.chain.capitalShort) {
+      const short = await this.d.chain.capitalShort().catch(() => this.capitalShort);
+      if (short !== this.capitalShort) this.d.log.warn({ capitalShort: short }, short ? "pool-funded book's own capital below the pool's minimum: reduce-only" : "book capital back above the pool's minimum");
+      this.capitalShort = short;
+    }
     const failed = [m, killed, off, st].filter((r) => r.status === "rejected") as PromiseRejectedResult[];
     if (failed.length > 0 && failed.length < 4) this.d.log.debug({ failed: failed.length, err: errMsg(failed[0]?.reason) }, "partial chain state refresh");
 
@@ -547,6 +556,7 @@ export class BookAgent {
       bookState: this.bookState,
       venueGate: this.venueGate,
       riskUnverified: this.riskUnverified(now),
+      capitalShort: this.capitalShort,
       ...(this.cfg.requireDeskKey ? { deskKeyActive: this.deskKeyActiveForMode() } : {}),
     });
   }

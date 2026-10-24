@@ -20,6 +20,8 @@ import {PoolEngineAdapter} from "../src/PoolEngineAdapter.sol";
 import {InsurancePool} from "../src/InsurancePool.sol";
 import {BRTypes} from "../src/interfaces/BRTypes.sol";
 import {IStockTokenRegistry} from "../src/interfaces/IStockTokenRegistry.sol";
+import {IBkrnV4Swapper} from "../src/interfaces/IBkrnV4Swapper.sol";
+import {BkrnV4Swapper} from "../src/BkrnV4Swapper.sol";
 
 interface IHasConfig {
     function config() external view returns (address);
@@ -92,6 +94,7 @@ contract VerifyHandover is MainnetInput {
         _checkParams();
         _checkInsurancePool(deploymentJson);
         _checkEconomics();
+        _checkBuybackV4();
         _checkOracleAndMarkets();
         _checkHedgeRoutes();
         _checkLiveMultipliers();
@@ -332,7 +335,12 @@ contract VerifyHandover is MainnetInput {
         _row(all, "factory: all 8 implementations set (with code)");
         address bookImpl = f.implementation(f.BOOK());
         address logic = bookImpl.code.length > 0 ? linkedBookLogic(bookImpl) : address(0);
-        _row(logic != address(0), "Book implementation linked to a deployed BookLogic library");
+        _row(logic != address(0), "Book implementation linked to a deployed BookLogic library (code == build)");
+        // pool audit 2026-10-23 verify2: the libraries linked into BookLogic and the pool implementation match the build
+        _row(
+            logic != address(0) && linkedLibrary(logic, "BookLogic", "BookPoolLogic", "") != address(0),
+            "BookLogic linked to a deployed BookPoolLogic library (code == build)"
+        );
         OrderlyAdapter oa = OrderlyAdapter(payable(f.implementation(f.ORDERLY_ADAPTER())));
         _row(
             address(oa).code.length > 0 && oa.DEFAULT_BROKER_HASH() == brokerHash() && oa.DEFAULT_TOKEN_HASH() == tokenHash(),
@@ -408,6 +416,16 @@ contract VerifyHandover is MainnetInput {
                 && flTarget == poolIn.firstLossTargetBps && cooldown == poolIn.cooldown
                 && (pendingLen != 0 ? pendingLen : len) == poolIn.epochLength && grace == poolIn.processGrace,
             "insurance pool params == input"
+        );
+        _row(ip.minOwnCapitalBps() == poolIn.minOwnCapitalBps, "insurance pool minOwnCapitalBps == input");
+        // pool audit 2026-10-23 A-I8: the implementation can never be initialized (OZ Initializable, ERC-7201 slot)
+        uint64 implInit = uint64(
+            uint256(vm.load(impl, 0xf0c57e16840df040f15088dc2f81fe391c3923bec73e23a9662efc9c229c6a00))
+        );
+        _row(implInit == type(uint64).max, "insurance pool implementation: initializers disabled");
+        _row(
+            linkedLibrary(impl, "InsurancePool", "PoolLogic", "") != address(0),
+            "insurance pool implementation linked to a deployed PoolLogic library (code == build)"
         );
         (bool dp, bool ap) = ip.paused();
         _row(!dp && !ap, "insurance pool not paused (launch-ready)");
@@ -586,6 +604,47 @@ contract VerifyHandover is MainnetInput {
         }
         _row(ok, what);
     }
+
+    /// @dev BkrnFeeRouter Uniswap v4 venue as input (Pons BKRN): venue, PoolManager (code), hooks, ETH references,
+    ///      route (or none), the swapper bound to this router; the BKRN token's decimals / supply (supply only warns).
+    function _checkBuybackV4() internal {
+        BkrnFeeRouter fr = BkrnFeeRouter(cfg.feeRouter());
+        _row(fr.buybackVenue() == bb.venue, "buyback venue == input (0 univ3, 1 univ4)");
+        _row(
+            fr.v4PoolManager() == ext.univ4PoolManager
+                && (ext.univ4PoolManager == address(0) || ext.univ4PoolManager.code.length > 0),
+            "buyback v4PoolManager == input (has code)"
+        );
+        bool hooksOk = true;
+        for (uint256 i; i < bb.v4Hooks.length; ++i) {
+            if (!fr.v4HookAllowed(bb.v4Hooks[i])) hooksOk = false;
+        }
+        _row(hooksOk, "buyback v4 hooks allow-listed as input");
+        _row(
+            fr.refUsdcPerEthWad() == bb.usdcPerEthWad && fr.refBkrnPerEthWad() == bb.bkrnPerEthWad,
+            "buyback ETH references == input"
+        );
+        bytes32 want = bb.v4RouteSet ? keccak256(abi.encode(bb.v4Route)) : keccak256(abi.encode(_noRoute()));
+        _row(keccak256(abi.encode(fr.v4Route())) == want, "buyback v4 route == input (none before graduation)");
+        if (bb.v4RouteSet) _row(fr.v4BuybackReady(), "buyback v4 route live (pools initialized)");
+        BkrnV4Swapper sw = BkrnV4Swapper(payable(address(fr.v4Swapper())));
+        _row(sw.feeRouter() == address(fr) && address(sw.config()) == address(cfg), "BkrnV4Swapper bound to this fee router + config");
+        _row(
+            fr.v4HookFeeBps() == bb.v4HookFeeBps && fr.v4EthToleranceBps() == bb.v4EthToleranceBps
+                && fr.v4SwapGas() == bb.v4SwapGas,
+            "buyback v4 hook fee allowance / ETH tolerance / swap gas == input"
+        );
+        if (bb.v4Hooks.length > 0 && fr.maxSlippageBps() < fr.v4HookFeeBps() + 200) {
+            console2.log("  WARN  maxSlippageBps is not comfortably above the hook fee allowance (+200 bps)");
+        }
+        _row(IERC20Min(cfg.bkrn()).decimals() == 18, "BKRN decimals == 18");
+        (bool ok, bytes memory ret) = cfg.bkrn().staticcall(abi.encodeWithSignature("totalSupply()"));
+        uint256 supply = ok && ret.length >= 32 ? abi.decode(ret, (uint256)) : 0;
+        if (supply == PONS_TOTAL_SUPPLY) console2.log("  PASS  BKRN totalSupply == 1e9 x 1e18");
+        else console2.log("  WARN  BKRN totalSupply != 1e9 x 1e18 (not a failure):", supply);
+    }
+
+    function _noRoute() internal pure returns (IBkrnV4Swapper.V4Route memory r) {}
 
     function _row(bool ok, string memory what) internal {
         if (ok) {

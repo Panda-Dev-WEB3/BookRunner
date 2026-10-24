@@ -44,11 +44,12 @@ Numbers above 2^53 are decimal strings (`"100000000000000000000000"`); small one
 | `externals.uniswapV3SwapRouter02` | address | code; HedgeExecutor `UNIV3` + BKRN buyback router (verify) | VERIFY U1 |
 | `externals.uniswapV3Factory` | address | **required on mainnet**; code; `HedgeExecutor.setV3Factory` (then `setRoute` reverts `PoolNotFound` for a missing pool) (verify) | VERIFY U1 |
 | `externals.uniswapV4Router` | address | optional (0 = `UNIV4` not configured) | VERIFY U2/U3 |
+| `externals.uniswapV4PoolManager` | address | optional; required with `buyback.venue` `univ4` (code; `BkrnFeeRouter.setV4PoolManager`) | VERIFY U2 |
 | `externals.entryPoint` | address | code; `config.entryPoint()` | VERIFY A1 |
 | `externals.chainlinkFeeds[]` | `{symbol, feed}` | code + `latestRoundData()` (externals); must equal `chainPriceConfig`'s `chainlink.feeds.<symbol>.proxy` (validate, verify); copied to the deployment record | VERIFY C1/C4 |
 | `externals.chainPriceConfig` | path | **required on mainnet**: the oracle's chain price config (`../config/chains/4663.json`, relative to `contracts/`; the oracle loads it by default on 4663, `ORACLE_CHAIN_CONFIG` overrides). Every input Stock Token / feed must be the same address there (validate, verify); recorded as `chainPriceConfig` | VERIFY T3/C4 |
-| `bkrn.token` | address | 0 = deploy `BkrnToken`; else pre-existing BKRN (code, 18 decimals) | — |
-| `bkrn.community` / `studio` / `liquidity` / `contributors` | address | required when deploying BKRN; never the deployer (80/10/5/5) | owners / vesting |
+| `bkrn.token` | address | 0 = deploy `BkrnToken`; else pre-existing BKRN, e.g. the Pons launch (code, 18 decimals required; `totalSupply` != 1e9 x 1e18 only warns; fee-on-transfer: RUNBOOK manual check) | VERIFY U6 |
+| `bkrn.community` / `studio` / `liquidity` / `contributors` | address | required only when deploying BKRN (ignored, may be omitted, with `bkrn.token`); never the deployer (80/10/5/5) | owners / vesting |
 | `stockTokens[]` | `{symbol, token, priceId, multiplierSource, multiplierWad, floatCapRaw, nextMultiplierAnchorWad?}` | code, decimals <= 18; registered (verify); token == `chainPriceConfig` | VERIFY T1-T3 |
 | `stockTokens[].multiplierSource` | `uiMultiplier` \| `stored` | **`uiMultiplier` on mainnet** (validate): `setMultiplierSource(token, true)`, the registry reads the token's ERC-8056 `uiMultiplier()`; `multiplierWad` is the anchor = the current `uiMultiplier()` (externals: within the band, else the deploy would revert) | VERIFY T2 |
 | `stockTokens[].nextMultiplierAnchorWad` | uint (WAD) | optional pre-approved anchor of a staged corporate action (`setNextMultiplierAnchor`; live mode only) | RUNBOOK "Corporate actions" |
@@ -67,10 +68,18 @@ Numbers above 2^53 are decimal strings (`"100000000000000000000000"`); small one
 | `params.oracleMinSources` | uint | `AttestedOracle.setMinSources` at deploy; > 0; **mainnet: exactly 1** (primary-confirm: the Chainlink primary signs alone with sourceCount 1; the DEX TWAP / Pyth only confirm; the oracle refuses to start unless `AttestedOracle.minSources() == 1`) | VERIFY C6 |
 | `buyback.poolFee` / `refBkrnPerUsdcWad` / `maxSlippageBps` / `maxPerCall` | uint | fee tier of the BKRN/USDG pool, reference price near market, slippage <= 2000 | VERIFY U1 + market |
 | `buyback.bkrnPriceId` | string | optional oracle price id of BKRN ("" = governance price) | — |
-| `buyback.referenceSource` | `fixed` \| `twap` \| `attested` | `BkrnFeeRouter.setReferenceSource` (default: `attested` with a `bkrnPriceId`, else `fixed`); `attested` needs `bkrnPriceId` (verify: source == input; `referenceBkrnPerUsdc()` reads for fixed / twap) | VERIFY U5 |
+| `buyback.referenceSource` | `fixed` \| `twap` \| `attested` \| `fixedEth` | `BkrnFeeRouter.setReferenceSource` (default: `attested` with a `bkrnPriceId`, else `fixed`); `attested` needs `bkrnPriceId` (verify: source == input; `referenceBkrnPerUsdc()` reads for fixed / twap) | VERIFY U5 |
 | `buyback.twap` | `{pool, window, maxTickDeviation}` | `twap` only, and only with a pre-existing `bkrn.token` (a BKRN deployed here has no pool yet: start `fixed`, switch through the timelock): pool = the BKRN/USDG v3 pool (code; observation cardinality must cover the window), window 600..172800 s, deviation 1..2000 ticks (`setTwapParams`) | VERIFY U5 |
+| `buyback.poolFee` (univ4) | uint | may be 0 with `buyback.venue` `univ4` (no v3 BKRN pool; the v4 route carries its fee) | — |
+| `buyback.venue` | `univ3` \| `univ4` | default `univ3` (SwapRouter02); `univ4` = direct Uniswap v4 PoolManager swaps for a Pons BKRN (`setBuybackVenue`); refuses `twap` | VERIFY U2/U6 |
+| `buyback.v4Hooks` | address[] | hooks allow-listed at deploy (`setV4HookAllowed`; the PonsV2MemeHook), each with code; every hook of `v4Route` must be listed | VERIFY U6 |
+| `buyback.v4HookFeeBps` / `buyback.v4EthToleranceBps` | uint | `setV4Fees`: hook fee allowance priced into hooked hops' limits (<= 1000 and < `maxSlippageBps`; Pons ~120-350 observed) and the via-ETH USDG -> ETH hop's sanity tolerance around `ethReference.usdcPerEthWad` (0 = 2000, <= 5000) | VERIFY U6 |
+| `buyback.v4SwapGas` | uint | `setV4SwapGas`: gas forwarded to every v4 swap (0 = 1,000,000; else 200,000..5,000,000) | — |
+| `buyback.ethReference` | `{usdcPerEthWad, bkrnPerEthWad}` | fixed ETH references (`setEthReference`): USDG per ETH required by a via-ETH route and by `fixedEth`, BKRN per ETH read by `fixedEth` | VERIFY U7 |
+| `buyback.v4Route` | `{kind, bkrnPool, ethPool?, v3Fee?, weth?}` | optional, only once BKRN has graduated (else set later through the timelock): `kind` `direct` (bkrnPool {USDG, BKRN}) \| `v4Eth` (bkrnPool {ETH, BKRN} + ethPool {ETH, USDG}) \| `v3Weth` (bkrnPool {ETH, BKRN} + `v3Fee` + `weth`); PoolKey = `{currency0, currency1, fee, tickSpacing, hooks}` (native ETH = 0x0, v4 order); pools must be initialized (checked on-chain); values from `bun scripts/buyback-route.ts --bkrn <token>` | VERIFY U6/U7 |
 | `insurancePool.premiumFloorBps` / `marketCapBps` / `bufferBps` / `firstLossTargetBps` | uint (bps) | optional (2026-10 InsurancePool; omitted = the defaults 1200 / 3000 / 2000 / 1000, the owner-approved design); bounds <= 5000 / 100..10000 / <= 9000 / <= 5000 (`InsurancePool.setParam`; verify: params == input) | — |
 | `insurancePool.cooldown` / `epochLength` / `processGrace` | uint (s) | optional (default 604800 / 604800 / 86400); cooldown <= 30 days, epoch 1..30 days (set only when it differs from 7 days; pending until the queue rolls), grace 1 h..7 days (an epoch waits for every pool-funded book's mark at most this long) | — |
+| `insurancePool.minOwnCapitalBps` | uint (bps) | optional (default 5000; pool audit 2026-10-23 B-M2): a pool-funded book must raise at least this share of its IF (MarketCharter at filing, closeWindow at the close); <= 20000 (verify: == input) | — |
 
 ## Pending inputs (owners)
 

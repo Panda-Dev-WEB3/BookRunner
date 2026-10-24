@@ -254,7 +254,7 @@ export function FileCharterPage() {
           <Segmented
             value={form.ifFromPool ? "pool" : "tranches"}
             onChange={(v) => {
-              setForm((f) => ({ ...f, ifFromPool: v === "pool", premiumBps: v === "pool" ? f.premiumBps : "0" }));
+              setForm((f) => ({ ...f, ifFromPool: v === "pool", premiumBps: v === "pool" ? f.premiumBps : "0", ifPoolFallback: v === "pool" ? f.ifPoolFallback : false }));
               file.reset();
             }}
             ariaLabel="Insurance fund funded by"
@@ -273,6 +273,14 @@ export function FileCharterPage() {
         {form.ifFromPool && (
           <Field label="Pool premium (bps of gross fee flow)" help={`${FIELD_HELP.premiumBps}: ${premiumText(Number(form.premiumBps) || 0, premiumFloorBps)}`} error={err("premiumBps")} htmlFor="f-premium">
             <input id="f-premium" className="field num" inputMode="numeric" value={form.premiumBps} aria-invalid={!!err("premiumBps")} onChange={(e) => set("premiumBps", e.currentTarget.value.replace(/[^\d]/g, ""))} />
+          </Field>
+        )}
+        {form.ifFromPool && (
+          <Field label="If the pool cannot lend" help={FIELD_HELP.ifPoolFallback} error={err("ifPoolFallback")}>
+            <label className="flex h-[34px] items-center gap-2 text-[13px]">
+              <input type="checkbox" checked={form.ifPoolFallback} onChange={(e) => set("ifPoolFallback", e.currentTarget.checked)} className="size-4 accent-[var(--accent)]" />
+              Fund the insurance fund from the tranches instead of cancelling
+            </label>
           </Field>
         )}
         <div className="rounded-card border border-line bg-surface-2 p-3 md:col-span-2">
@@ -435,6 +443,7 @@ export function FileCharterPage() {
               ["Oracle · sessions", `${form.oracle} · ${SESSION_PRESETS.find((p) => p.id === form.sessions)?.label}`],
               ["IF size · MM inventory", `${fmtUsd(d.ifTargetUsd as string, { compact: true, symbol: true })} · ${fmtUsd(d.mmInventoryUsd as string, { compact: true, symbol: true })}`],
               ["IF funded by · pool premium", d.ifFromPool ? `Insurance pool · ${premiumText(d.premiumBps ?? 0, premiumFloorBps)}` : "The tranches · none"],
+              ...(d.ifFromPool ? [["If the pool cannot lend", d.ifPoolFallback ? "The tranches fund the insurance fund" : "The window is cancelled, refunds 1:1"] as [string, string]] : []),
               ["Senior cap · Senior share", `${bpsPct(d.seniorCapBps)} · ${bpsPct(d.seniorHurdleBps)}`],
               ["Window · Junior notice", `${fmtDuration(d.subscriptionWindowSeconds)} · ${fmtDuration(d.juniorNoticeSeconds)}`],
             ]}

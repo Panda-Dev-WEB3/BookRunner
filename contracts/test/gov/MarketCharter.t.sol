@@ -386,7 +386,8 @@ contract MarketCharterTest is GovBase {
         c.premiumBps = 0;
         c.ifFromPool = true;
         assertEq(_reason(c), bytes32("NO_POOL"));
-        cfg.setInsurancePool(makeAddr("pool"));
+        PoolFloorStub stub = new PoolFloorStub();
+        cfg.setInsurancePool(address(stub));
         assertEq(_reason(c), bytes32(0), "0 = the pool's floor");
         c.premiumBps = 5000;
         assertEq(_reason(c), bytes32(0));
@@ -395,6 +396,25 @@ contract MarketCharterTest is GovBase {
         c.premiumBps = 2000;
         c.ifTargetUsd = 1;
         assertEq(_reason(c), bytes32("IF_BELOW_VENUE_MIN"), "the venue minimum still applies");
+    }
+
+    /// @notice Pool audit 2026-10-23 B-M2: a pool-funded charter's MM inventory (the planned tranche raise) must be at
+    ///         least the pool's minimum own capital (50% of the IF by default); a book-funded IF is not concerned.
+    function test_validate_poolMinimumOwnCapital() public {
+        PoolFloorStub stub = new PoolFloorStub();
+        cfg.setInsurancePool(address(stub));
+        BRTypes.Charter memory c = _charter();
+        c.ifTargetUsd = 30_000e6;
+        c.mmInventoryUsd = 15_000e6; // exactly 50%
+        c.ifFromPool = true;
+        assertEq(_reason(c), bytes32(0));
+        c.mmInventoryUsd = 15_000e6 - 1;
+        assertEq(_reason(c), bytes32("UNDERCAPITALISED"));
+        stub.setMinOwnCapital(0);
+        assertEq(_reason(c), bytes32(0), "the pool's parameter, read at filing");
+        stub.setMinOwnCapital(5000);
+        c.ifFromPool = false;
+        assertEq(_reason(c), bytes32(0), "a book-funded IF raises the IF itself");
     }
 
     /// @notice Minor m-4: a pool-funded charter's premium is fixed at filing to max(sponsor, the pool floor then), so a
@@ -853,11 +873,16 @@ contract MarketCharterTest is GovBase {
     }
 }
 
-/// @dev InsurancePool.premiumFloorBps stand-in.
+/// @dev InsurancePool.premiumFloorBps / minOwnCapitalBps stand-in.
 contract PoolFloorStub {
     uint16 public premiumFloorBps = 1200;
+    uint16 public minOwnCapitalBps = 5000;
 
     function setFloor(uint16 v) external {
         premiumFloorBps = v;
+    }
+
+    function setMinOwnCapital(uint16 v) external {
+        minOwnCapitalBps = v;
     }
 }

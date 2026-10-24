@@ -39,7 +39,8 @@ import {IStockTokenRegistry} from "../src/interfaces/IStockTokenRegistry.sol";
 ///         enumerable role holders, audit 2026-10 D) (proposer = executor
 ///         = canceller = multisig, NO admin: self-administered) -> core + venues + governance wired as
 ///         Deploy.s.sol does (HedgeExecutor SwapRouter02 + v3 factory + one route per Stock Token; BkrnFeeRouter
-///         buyback params + reference source FIXED / TWAP / ATTESTED) -> params (venueMinIf[Orderly] > 25,000e6),
+///         buyback params + reference source FIXED / TWAP / ATTESTED / FIXED_ETH + optional Uniswap v4 venue:
+///         PoolManager, hooks, route) -> params (venueMinIf[Orderly] > 25,000e6),
 ///         oracle (measurement allow-list, attested TEE signers, requireAttestations), Stock Tokens (live
 ///         uiMultiplier mode + anchors), indexes, implementations (Book linked to BookLogic; OrderlyAdapter v3
 ///         with the input's broker / token hashes) -> service
@@ -207,9 +208,24 @@ contract DeployMainnet is MainnetInput {
         if (bb.referenceSource == REF_TWAP) {
             feeRouter.setTwapParams(bb.twapPool, uint32(bb.twapWindow), uint24(bb.twapMaxTickDeviation));
         }
+        if (bb.usdcPerEthWad != 0) feeRouter.setEthReference(bb.usdcPerEthWad, bb.bkrnPerEthWad);
         if (feeRouter.referenceSource() != bb.referenceSource) feeRouter.setReferenceSource(bb.referenceSource);
+        _wireBuybackV4(feeRouter);
 
         Backstop(d.backstop).setMaxCoverBps(uint16(prm.backstopMaxCoverBps));
+    }
+
+    /// @dev Uniswap v4 venue (BKRN launched on Pons): PoolManager, allow-listed hooks, the route when the pool
+    ///      already exists (else governance sets it after graduation), then the venue.
+    function _wireBuybackV4(BkrnFeeRouter feeRouter) internal {
+        if (ext.univ4PoolManager != address(0)) feeRouter.setV4PoolManager(ext.univ4PoolManager);
+        for (uint256 i; i < bb.v4Hooks.length; ++i) feeRouter.setV4HookAllowed(bb.v4Hooks[i], true);
+        if (bb.v4HookFeeBps != 0 || bb.v4EthToleranceBps != 0) {
+            feeRouter.setV4Fees(uint16(bb.v4HookFeeBps), uint16(bb.v4EthToleranceBps));
+        }
+        if (bb.v4SwapGas != 0) feeRouter.setV4SwapGas(uint32(bb.v4SwapGas));
+        if (bb.v4RouteSet) feeRouter.setV4Route(bb.v4Route);
+        if (bb.venue != VENUE_UNIV3) feeRouter.setBuybackVenue(bb.venue);
     }
 
     /// @dev InsurancePool (2026-10; new, needs the focused re-audit before mainnet): UUPS proxy bound to this config,
@@ -229,6 +245,7 @@ contract DeployMainnet is MainnetInput {
         p.setParam(p.PARAM_FIRST_LOSS_TARGET_BPS(), poolIn.firstLossTargetBps);
         p.setParam(p.PARAM_COOLDOWN(), poolIn.cooldown);
         p.setParam(p.PARAM_PROCESS_GRACE(), poolIn.processGrace);
+        p.setParam(p.PARAM_MIN_OWN_CAPITAL_BPS(), poolIn.minOwnCapitalBps);
         // a new length is pending until the (empty) queue next rolls; only set it when it differs
         if (poolIn.epochLength != 7 days) p.setParam(p.PARAM_EPOCH_LENGTH(), poolIn.epochLength);
     }
@@ -387,6 +404,7 @@ contract DeployMainnet is MainnetInput {
         vm.serializeAddress(c, "bkrn", d.bkrn);
         vm.serializeAddress(c, "staking", d.staking);
         vm.serializeAddress(c, "feeRouter", d.feeRouter);
+        vm.serializeAddress(c, "bkrnV4Swapper", address(BkrnFeeRouter(d.feeRouter).v4Swapper()));
         vm.serializeAddress(c, "backstop", d.backstop);
         vm.serializeAddress(c, "markRegistry", d.markRegistry);
         vm.serializeAddress(c, "oracle", d.oracle);

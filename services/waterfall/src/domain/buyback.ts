@@ -40,10 +40,38 @@ export type BuybackPlan =
   | { kind: "buy"; amountIn: bigint; quote: bigint; minOut: bigint; floor: bigint; priceSource: "router" | "config" | "reference" };
 
 /** BkrnFeeRouter.referenceSource (REF_FIXED 0 / REF_TWAP 1 / REF_ATTESTED 2); "legacy" = a router without it. */
-export type BuybackReferenceSource = "fixed" | "twap" | "attested" | "legacy" | "unknown";
+export type BuybackReferenceSource = "fixed" | "twap" | "attested" | "fixedEth" | "legacy" | "unknown";
 
 export function referenceSourceName(source: number): BuybackReferenceSource {
-  return source === 0 ? "fixed" : source === 1 ? "twap" : source === 2 ? "attested" : "unknown";
+  return source === 0 ? "fixed" : source === 1 ? "twap" : source === 2 ? "attested" : source === 3 ? "fixedEth" : "unknown";
+}
+
+// ------------------------------------------------------------------ Uniswap v4 venue (review 2026-10-23 M-1 / M-2)
+
+/**
+ * Keeper minimum on the v4 venue from a simulated fill (BkrnFeeRouter.previewBuyback): the simulated BKRN less the
+ * keeper slippage, scaled by amountIn / spent because the router pro-rates the minimum by spent / amountIn (a
+ * partial fill would otherwise dilute it). Rounded up. Never 0 for a non-zero simulation.
+ */
+export function v4MinOut(simBkrnOut: bigint, simSpent: bigint, amountIn: bigint, slippageBps: bigint): bigint {
+  if (simSpent <= 0n || simBkrnOut <= 0n) throw new Error("v4MinOut: empty simulation");
+  const net = minOutAfterSlippage(simBkrnOut, slippageBps);
+  const num = net * amountIn;
+  return (num + simSpent - 1n) / simSpent;
+}
+
+/** Errors / outcomes that a smaller buyback can avoid (the size-independent ones keep the plain cooldown). */
+export const V4_SIZE_DEPENDENT = new Set(["InsufficientOutput", "V4HopPartialFill", "BuybackV4Failed", "simulation"]);
+
+/** Next size after a size-dependent failure: half, never below `floor` (the buyback threshold). */
+export function halveSize(amountIn: bigint, floor: bigint): bigint {
+  const half = amountIn / 2n;
+  return half > floor ? half : floor;
+}
+
+/** Cooldown after `failures` consecutive v4 failures: base x 2^min(failures - 1, 4) (at most x16). */
+export function backoffMs(baseMs: number, failures: number): number {
+  return baseMs * 2 ** Math.min(Math.max(failures - 1, 0), 4);
 }
 
 export function buybackDue(pending: bigint, thresholdUsd: bigint): boolean {

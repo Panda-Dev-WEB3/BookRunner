@@ -69,6 +69,8 @@ contract PoolEngineAdapter is IPoolEngineAdapter, Initializable, UUPSUpgradeable
         /// @dev Set by a re-mandate (market held reduce-only); the next in-mandate SetQuote lifts it. Any
         ///      later reduce-only request (RISK, kill, retire) clears it, so a kill is never undone by a quote.
         bool liftOnQuote;
+        // appended [pool audit 2026-10-23 fix round 2]: IF withdrawn to the vault so far (IInsuranceReturns)
+        uint256 insuranceReturnedUsd;
     }
 
     // keccak256(abi.encode(uint256(keccak256("bookrunner.storage.PoolEngineAdapter")) - 1)) & ~bytes32(uint256(0xff))
@@ -233,7 +235,10 @@ contract PoolEngineAdapter is IPoolEngineAdapter, Initializable, UUPSUpgradeable
         if (account > BRTypes.ACCOUNT_MM) revert BadAccount(account);
         uint256 nonce = ++$.withdrawNonce;
         emit WithdrawRequested(account, amount, nonce);
-        if (account == BRTypes.ACCOUNT_IF) $.engine.withdrawInsurance($.marketId, amount, vault_);
+        if (account == BRTypes.ACCOUNT_IF) {
+            $.insuranceReturnedUsd += amount;
+            $.engine.withdrawInsurance($.marketId, amount, vault_);
+        }
         else $.engine.withdrawLiquidity($.marketId, amount, vault_);
         emit WithdrawSettled(account, amount, nonce);
     }
@@ -424,6 +429,11 @@ contract PoolEngineAdapter is IPoolEngineAdapter, Initializable, UUPSUpgradeable
     /// @notice Number of synchronous withdrawals executed.
     function withdrawNonce() external view returns (uint256) {
         return _s().withdrawNonce;
+    }
+
+    /// @notice IF withdrawn to the vault so far (IInsuranceReturns; synchronous withdrawals).
+    function insuranceReturnedUsd() external view returns (uint256) {
+        return _s().insuranceReturnedUsd;
     }
 
     /// @inheritdoc IVenueAdapter

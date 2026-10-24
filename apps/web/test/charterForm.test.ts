@@ -95,6 +95,11 @@ describe("charter form", () => {
 
   test("2026-10 insurance pool: new charters default to a pool-funded IF at the pool's floor", () => {
     expect(DEFAULT_FORM.ifFromPool).toBe(true);
+    // pool audit 2026-10-23 B-M2: the MM inventory must be at least half the pool-funded insurance fund
+    const under = formIssues({ ...DEFAULT_FORM, sponsor: SPONSOR, ifSizeUsd: "30000", mmInventoryUsd: "14999" }).find((i) => i.field === "mmInventoryUsd");
+    expect(under?.message).toContain("at least 50% of its insurance fund");
+    expect(formIssues({ ...DEFAULT_FORM, sponsor: SPONSOR, ifSizeUsd: "30000", mmInventoryUsd: "15000" }).find((i) => i.field === "mmInventoryUsd")).toBeUndefined();
+    expect(formIssues({ ...DEFAULT_FORM, sponsor: SPONSOR, ifFromPool: false, premiumBps: "0", ifSizeUsd: "30000", mmInventoryUsd: "1" }).find((i) => i.field === "mmInventoryUsd")).toBeUndefined();
     expect(DEFAULT_FORM.premiumBps).toBe("0");
     expect(formToDraft({ ...DEFAULT_FORM, sponsor: SPONSOR })).toMatchObject({ ifFromPool: true, premiumBps: 0 });
     expect(formToDraft({ ...DEFAULT_FORM, sponsor: SPONSOR, premiumBps: "1500" })).toMatchObject({ ifFromPool: true, premiumBps: 1500 });
@@ -116,6 +121,13 @@ describe("charter form", () => {
     expect(noPool(false, false)).toEqual([]);
     expect(noPool(null)).toEqual([]); // unknown: the API and the chain decide
     expect(noPool(true)).toEqual([]);
+  });
+
+  test("the pool fallback is off by default and only sent for a pool-funded IF (fix round 2, V-3)", () => {
+    expect(DEFAULT_FORM.ifPoolFallback).toBe(false);
+    expect(formToDraft({ ...DEFAULT_FORM, sponsor: SPONSOR }).ifPoolFallback).toBe(false);
+    expect(formToDraft({ ...DEFAULT_FORM, sponsor: SPONSOR, ifPoolFallback: true }).ifPoolFallback).toBe(true);
+    expect(formToDraft({ ...DEFAULT_FORM, sponsor: SPONSOR, ifFromPool: false, ifPoolFallback: true }).ifPoolFallback).toBe(false);
   });
 
   test("with the pool the window raises only the MM inventory; the IF still meets the venue minimum", () => {

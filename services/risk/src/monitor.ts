@@ -296,6 +296,7 @@ export class BookMonitor {
       oracle,
       quote,
       ...(c.lossBudget !== undefined ? { lossBudget: c.lossBudget } : {}),
+      ...(c.capitalShort ? { capitalShort: true } : {}),
     };
   }
 
@@ -375,6 +376,7 @@ export class BookMonitor {
       },
       quote: ev.quote,
       quoteUnverified: ev.quoteUnverified,
+      capitalShort: ev.capitalShort,
       lossBudget: obs.lossBudget
         ? {
             budgetBps: obs.lossBudget.budgetBps,

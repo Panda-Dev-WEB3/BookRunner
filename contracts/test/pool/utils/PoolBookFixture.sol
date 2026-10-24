@@ -63,6 +63,7 @@ abstract contract PoolBookFixture is BookFixture {
             (, uint64 ends,,,) = pool.queue();
             vm.warp(ends);
             pool.processEpoch();
+            vm.prank(poolDepositor);
             pool.claimDeposit(id);
         }
         if (firstLoss > 0) {
