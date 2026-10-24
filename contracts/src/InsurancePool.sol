@@ -81,8 +81,9 @@ contract InsurancePool is
     bytes32 public constant PARAM_PROCESS_GRACE = PoolLogic.PARAM_PROCESS_GRACE;
     bytes32 public constant PARAM_MIN_OWN_CAPITAL_BPS = PoolLogic.PARAM_MIN_OWN_CAPITAL_BPS;
     /// @notice Fix round 2 (NEW-1): how long an epoch's exits and deposits wait for its stale books (books with no
-    ///         fresh, non-held mark since the epoch end). == BookLogic.MAX_HELD_DEFERRAL: past 30 days of held marks a book
-    ///         itself settles its exits at the held valuation, and the pool does too (exits are never blocked for good).
+    ///         fresh, non-held mark since the epoch end). The same span as BookLogic.MAX_HELD_DEFERRAL, past which a book
+    ///         settles its own exits again; a book held longer stays stale here until a governance settle price makes its
+    ///         marks non-held, and the pool then fills at STALE_HAIRCUT_BPS (exits are never blocked for good).
     uint256 public constant STALE_BOUND = 30 days;
     /// @notice Past STALE_BOUND, the haircut on the depositors' exposure to the stale books for the remaining fills:
     ///         with nothing known after 30 days without a fresh mark, 50% halves the worst transfer either way between

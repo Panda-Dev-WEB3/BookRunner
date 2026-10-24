@@ -267,6 +267,33 @@ contract DeployMainnetTest is Test {
         assertEq(s.linkedBookLogic(d.config), address(0));
     }
 
+    /// @notice Pool audit 2026-10-23 verify2: VerifyHandover checks the code of every linked library against the build
+    ///         (link operands and a library's self-address masked): BookLogic -> BookPoolLogic, InsurancePool ->
+    ///         PoolLogic; a library whose code differs by one byte is refused.
+    function test_linkedLibraries_codeMatchesTheBuild_tamperedRefused() public {
+        DeployMainnetHarness s = new DeployMainnetHarness();
+        s.loadInput(_json(_mainnetOpts()));
+        s.validateInput();
+        s.checkExternals();
+        DeployMainnet.Deployed memory d = s.deploy();
+
+        address bpl = s.linkedLibrary(d.bookLogic, "BookLogic", "BookPoolLogic", "");
+        assertGt(bpl.code.length, 0, "BookLogic -> BookPoolLogic");
+        address pl = s.linkedLibrary(d.insurancePoolImpl, "InsurancePool", "PoolLogic", "");
+        assertGt(pl.code.length, 0, "InsurancePool -> PoolLogic");
+        assertEq(s.linkedLibrary(d.config, "InsurancePool", "PoolLogic", ""), address(0), "not a pool implementation");
+
+        bytes memory c = pl.code;
+        c[c.length - 40] = c[c.length - 40] ^ 0x01;
+        vm.etch(pl, c);
+        assertEq(s.linkedLibrary(d.insurancePoolImpl, "InsurancePool", "PoolLogic", ""), address(0), "tampered PoolLogic");
+        bytes memory b = bpl.code;
+        b[b.length - 40] = b[b.length - 40] ^ 0x01;
+        vm.etch(bpl, b);
+        assertEq(s.linkedLibrary(d.bookLogic, "BookLogic", "BookPoolLogic", ""), address(0), "tampered BookPoolLogic");
+        assertEq(s.linkedBookLogic(d.bookImpl), d.bookLogic, "BookLogic itself unchanged (its link operands are masked)");
+    }
+
     function test_deployer_has_no_power_after_handover_and_timelock_does() public {
         (DeployMainnet.Deployed memory d,) = _deployAndVerify(_mainnetOpts(), "power");
         BookrunnerConfig config = BookrunnerConfig(d.config);

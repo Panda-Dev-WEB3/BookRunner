@@ -335,7 +335,12 @@ contract VerifyHandover is MainnetInput {
         _row(all, "factory: all 8 implementations set (with code)");
         address bookImpl = f.implementation(f.BOOK());
         address logic = bookImpl.code.length > 0 ? linkedBookLogic(bookImpl) : address(0);
-        _row(logic != address(0), "Book implementation linked to a deployed BookLogic library");
+        _row(logic != address(0), "Book implementation linked to a deployed BookLogic library (code == build)");
+        // pool audit 2026-10-23 verify2: the libraries linked into BookLogic and the pool implementation match the build
+        _row(
+            logic != address(0) && linkedLibrary(logic, "BookLogic", "BookPoolLogic", "") != address(0),
+            "BookLogic linked to a deployed BookPoolLogic library (code == build)"
+        );
         OrderlyAdapter oa = OrderlyAdapter(payable(f.implementation(f.ORDERLY_ADAPTER())));
         _row(
             address(oa).code.length > 0 && oa.DEFAULT_BROKER_HASH() == brokerHash() && oa.DEFAULT_TOKEN_HASH() == tokenHash(),
@@ -418,6 +423,10 @@ contract VerifyHandover is MainnetInput {
             uint256(vm.load(impl, 0xf0c57e16840df040f15088dc2f81fe391c3923bec73e23a9662efc9c229c6a00))
         );
         _row(implInit == type(uint64).max, "insurance pool implementation: initializers disabled");
+        _row(
+            linkedLibrary(impl, "InsurancePool", "PoolLogic", "") != address(0),
+            "insurance pool implementation linked to a deployed PoolLogic library (code == build)"
+        );
         (bool dp, bool ap) = ip.paused();
         _row(!dp && !ap, "insurance pool not paused (launch-ready)");
     }

@@ -891,31 +891,69 @@ abstract contract MainnetInput is Script {
         return keccak256(bytes(ext.orderlyTokenSymbol));
     }
 
-    /// @notice The BookLogic library linked into `bookImpl` (Book DELEGATECALLs its state transitions there),
-    ///         found by scanning the runtime for PUSH20 operands whose code is the BookLogic artifact (a
-    ///         library's runtime starts with PUSH20 <its own address>, so bytes [21:] are compared).
-    ///         address(0) = not linked / library missing. forge deploys and links it on every `new Book()`.
-    function linkedBookLogic(address bookImpl) public view returns (address) {
-        bytes memory code = bookImpl.code;
-        bytes memory want = vm.getDeployedCode("BookLogic.sol:BookLogic");
-        bytes32 wantTail = _tailHash(want);
-        for (uint256 i; i + 21 <= code.length; ++i) {
-            if (code[i] != 0x73) continue; // PUSH20
-            address a;
-            assembly {
-                a := shr(96, mload(add(add(code, 33), i)))
-            }
-            if (a.code.length != want.length) continue;
-            if (_tailHash(a.code) == wantTail) return a;
-        }
-        return address(0);
+    /// @dev One link reference of a build artifact (out/<file>/<name>.json deployedBytecode.linkReferences; the JSON
+    ///      object's fields in alphabetical order, as vm.parseJson encodes them).
+    struct LinkRef {
+        uint256 length;
+        uint256 start;
     }
 
-    function _tailHash(bytes memory b) private pure returns (bytes32 h) {
-        if (b.length <= 21) return bytes32(0);
-        assembly {
-            h := keccak256(add(b, 53), sub(mload(b), 21))
+    /// @notice The BookLogic library linked into `bookImpl` (Book DELEGATECALLs its state transitions there), provided
+    ///         its runtime is the BookLogic build (linkedLibrary). address(0) = not linked / library missing or
+    ///         different. forge deploys and links it on every `new Book()`.
+    function linkedBookLogic(address bookImpl) public view returns (address) {
+        return linkedLibrary(bookImpl, "Book", "BookLogic", "BookPoolLogic");
+    }
+
+    /// @notice The library `lib` (src/libraries/<lib>.sol) linked into `host`, built as out/<hostName>.sol/<hostName>.json:
+    ///         the address at the host artifact's link offsets (all of them must agree), provided the code there is the
+    ///         build of `lib` byte for byte except its own PUSH20 self-address and the operands linking its own library
+    ///         `libLink` ("" = none) (pool audit 2026-10-23 verify2: the code hash of every linked library is checked).
+    ///         address(0) = not linked, inconsistent, or the code differs from the build.
+    function linkedLibrary(address host, string memory hostName, string memory lib, string memory libLink)
+        public
+        view
+        returns (address a)
+    {
+        LinkRef[] memory refs = _linkRefs(hostName, lib);
+        bytes memory code = host.code;
+        if (refs.length == 0) return address(0);
+        for (uint256 i; i < refs.length; ++i) {
+            if (refs[i].length != 20 || refs[i].start + 20 > code.length) return address(0);
+            address x;
+            uint256 at = refs[i].start;
+            assembly {
+                x := shr(96, mload(add(add(code, 32), at)))
+            }
+            if (i == 0) a = x;
+            else if (x != a) return address(0);
         }
+        bytes memory want = vm.getDeployedCode(string.concat(lib, ".sol:", lib));
+        bytes memory got = a.code;
+        if (got.length != want.length || got.length <= 21) return address(0);
+        LinkRef[] memory own = bytes(libLink).length == 0 ? new LinkRef[](0) : _linkRefs(lib, libLink);
+        if (_maskedHash(got, own) != _maskedHash(want, own)) return address(0);
+    }
+
+    function _linkRefs(string memory name, string memory lib) internal view returns (LinkRef[] memory) {
+        string memory j = vm.readFile(string.concat("out/", name, ".sol/", name, ".json"));
+        string memory path = string.concat(".deployedBytecode.linkReferences['src/libraries/", lib, ".sol'].", lib);
+        if (!vm.keyExistsJson(j, path)) return new LinkRef[](0);
+        return abi.decode(vm.parseJson(j, path), (LinkRef[]));
+    }
+
+    /// @dev keccak256 of `b` with bytes [1, 21) (a library's PUSH20 self-address) and every 20-byte link operand zeroed.
+    function _maskedHash(bytes memory b, LinkRef[] memory refs) internal pure returns (bytes32) {
+        bytes memory c = bytes.concat(b);
+        for (uint256 i = 1; i < 21 && i < c.length; ++i) {
+            c[i] = 0;
+        }
+        for (uint256 r; r < refs.length; ++r) {
+            for (uint256 i = refs[r].start; i < refs[r].start + refs[r].length && i < c.length; ++i) {
+                c[i] = 0;
+            }
+        }
+        return keccak256(c);
     }
 
     function _routeIndex(string memory symbol) internal view returns (uint256) {

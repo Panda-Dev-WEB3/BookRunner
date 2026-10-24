@@ -729,12 +729,24 @@ the premium; sponsors raise only the MM inventory.
   stale claims − FL` (the slice in front); exits fill only `shares × (D − exposure) / D` per epoch, the part backed by
   fresh-marked books, at the normal price, and the rest stays queued and exposed until a fresh processing fills it at
   the true price; deposits are not minted (the `depositEpoch` cursor defers them to the next fresh processing;
-  `claimDeposit` reverts `EpochNotProcessed` meanwhile). Bound: past `STALE_BOUND` (30 days after the epoch end, equal
-  to the book's maximum held-mark deferral, `BookLogic.MAX_HELD_DEFERRAL`, so a book that is merely held has marked by
-  then) the rest fills at the last values with a `STALE_HAIRCUT_BPS` (50%) haircut on the exposure and deferred deposits
-  are refunded. Why 50%: a book silent for 30 days is a stuck book whose true value is unknown in [0, claim]; the
-  midpoint minimises the worst-case transfer between the exits and the holders left (at most half the exposure either
-  way), and refunding the deposits keeps entries out of that bet. `claim(requestId)` (anyone, pays the owner) pays the filled part pro-rata. ERC-4626
+  `claimDeposit` reverts `EpochNotProcessed` meanwhile). Bound: past `STALE_BOUND` (30 days after the epoch end, the
+  same span as the book's own held-mark deferral, `BookLogic.MAX_HELD_DEFERRAL`, after which the book settles its own
+  exits again) the rest fills at the last values with a `STALE_HAIRCUT_BPS` (50%) haircut on the exposure and deferred
+  deposits are refunded. A held book does **not** necessarily mark fresh by then (audit-A-verify2 R-2, correcting the
+  round-2 rationale): past `MAX_HELD_DEFERRAL` its marks still carry `held` and reach the pool as held, so a suspension
+  longer than 30 days keeps the book stale for the pool, with deposits refunded at every epoch and exits filling at the
+  bounded haircut, until a governance settle price (`AttestedOracle.settlePrice`) makes the mark service sign non-held
+  marks (at the latest `MAX_SETTLE_PRICE_DEFERRAL`, 60 days of hold, for the book itself). Why 50%: a book stale for
+  30 days has a true value somewhere in [0, claim]; the midpoint minimises the worst-case transfer between the exits and
+  the holders left (at most half the exposure either way), and refunding the deposits keeps entries out of that bet.
+  **Residual (audit-A-verify2 R-1, Low, accepted):** filling the fresh-backed part from fresh assets leaves the stale
+  book's risk on the holders who stay, so if the stale book later marks a loss L (≤ E, the exposure beyond the slice)
+  an exiter of fraction α of D escapes `α(1−α)(D−E) / ((1−α)D + αE)` of L, which is at most α·L (its own fair share; ≤
+  α·E) and only within `STALE_BOUND` (the auditor's case: book 2 stale then written to 0, Alice 42.86k and Bob 32.14k
+  against a fair 37.5k each, `PoolAuditAVerify2.t.sol` `test_v2_NEW1_residual_staleLossShiftsToStayers`). Before round 1
+  the exiter escaped all of α·L (A-L1). Any liquid partial fill of fungible shares has this effect; removing it would
+  need the unfilled shares escrowed as a claim on the stale books only, or the fresh-backed part filled at a fresh-only
+  price (owner decision, not implemented). `claim(requestId)` (anyone, pays the owner) pays the filled part pro-rata. ERC-4626
   `deposit` / `mint` / `withdraw` / `redeem` and the `preview*` functions revert (A-I3: no quote; `convertTo*` and
   `max*` are display only). Shares cannot be transferred out of an account in cooldown, nor into
   the pool. An idle queue jumps to the current epoch in one step; an epoch-length change waits for an idle queue (it

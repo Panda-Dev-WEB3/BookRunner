@@ -392,6 +392,11 @@
       "reason": "zero-amount early return (nothing owed to the PoolManager), the amount comes from the swap delta"
     },
     {
+      "check": "incorrect-equality",
+      "target": "BkrnV4Swapper._bkrnLimit",
+      "reason": "ethIn == 0 is a zero guard before dividing by the first hop's real ETH fill (v4 re-review 2 M-A): a hop that delivered no ETH reverts V4HopPartialFill (caught by the fee router, nothing moves); not a balance equality an attacker can steer"
+    },
+    {
       "check": "reentrancy-balance",
       "target": "BkrnFeeRouter._runV4",
       "reason": "the balances around v4Swapper.swap are the measured spend / output by design and must equal what the swapper reports (else V4DeltaNotSettled); the swapper is this router's own immutable executor, only it can call swap, and executeBuyback is nonReentrant"
@@ -405,16 +410,6 @@
       "check": "unused-return",
       "target": "BkrnV4Swapper._v3WethHop",
       "reason": "the v3 router's amountOut is not used: the WETH received and the USDG spent are measured by balance difference"
-    },
-    {
-      "check": "uninitialized-local",
-      "target": "BkrnFeeRouter._runV4.paid",
-      "reason": "a try-statement return variable (v4Swapper.swap returns (paid, out)): assigned by the successful call, Slither reports try returns as uninitialized locals"
-    },
-    {
-      "check": "uninitialized-local",
-      "target": "BkrnFeeRouter._runV4.out",
-      "reason": "a try-statement return variable (v4Swapper.swap returns (paid, out)): assigned by the successful call, Slither reports try returns as uninitialized locals"
     }
   ]
 }
