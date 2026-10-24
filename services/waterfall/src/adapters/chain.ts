@@ -19,7 +19,7 @@ import { engineWithdrawableUsd } from "../domain/recall";
 import { type PremiumSplit, amountsToSplit } from "../domain/split";
 import { type BookRef, bookStateName } from "../kit/books";
 import { scanEvents } from "../kit/logs";
-import type { TxSender } from "../kit/tx";
+import { type TxSender, describeRevert } from "../kit/tx";
 import type { PoolQueueSnapshot } from "../domain/pool";
 import type { PoolKeeperChain } from "../poolKeeper";
 import type { BuybackChain, DistributedLog, FeeForwarding, KeeperChain, KeeperSnapshot, SettlementChain, SettlementReceivedLog, SplitParams } from "../ports";
@@ -54,6 +54,8 @@ export function premiumIn(ref: BookRef, logs: TransactionReceipt["logs"]): bigin
 export class WaterfallChainAdapter implements SettlementChain, KeeperChain, BuybackChain, PoolKeeperChain {
   private markInterval: number | null = null;
   private buybackTokens: { usdc: Address; bkrn: Address } | null = null;
+  /** Last buybackV4State().venue read this pass (0 = v3). */
+  private buybackVenue = 0;
   private legacyFeeRouter: boolean | null = null;
   private distributedCache = new Map<string, DistributedLog>();
   private blockTs = new Map<bigint, Date>();
@@ -440,7 +442,38 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain, Buyb
     return this.pc.readContract({ address: this.feeRouter, abi: bkrnFeeRouterAbi, functionName: "buybackPending" });
   }
 
+  async buybackV4State(): Promise<{ venue: number; ready: boolean }> {
+    try {
+      const [venue, ready] = await Promise.all([
+        this.pc.readContract({ address: this.feeRouter, abi: bkrnFeeRouterAbi, functionName: "buybackVenue" }),
+        this.pc.readContract({ address: this.feeRouter, abi: bkrnFeeRouterAbi, functionName: "v4BuybackReady" }),
+      ]);
+      this.buybackVenue = Number(venue);
+      return { venue: this.buybackVenue, ready };
+    } catch (err) {
+      // a router deployed before the v4 venue has neither read: Uniswap v3
+      if (!isOnChainRevert(err)) throw err;
+      return { venue: 0, ready: false };
+    }
+  }
+
+  async previewBuyback(amountIn: bigint): Promise<{ usdcIn: bigint; bkrnOut: bigint }> {
+    try {
+      await this.o.sender.simulate({ address: this.feeRouter, abi: bkrnFeeRouterAbi, functionName: "previewBuyback", args: [amountIn], label: `previewBuyback(${amountIn})` });
+    } catch (err) {
+      const info = describeRevert(err, bkrnFeeRouterAbi);
+      if (info.errorName === "BuybackPreview" && info.args) {
+        const [usdcIn, bkrnOut] = info.args as readonly [bigint, bigint];
+        return { usdcIn, bkrnOut };
+      }
+      throw err;
+    }
+    throw new Error("previewBuyback returned instead of reverting BuybackPreview");
+  }
+
   async quoteBuyback(amountIn: bigint): Promise<bigint | null> {
+    // the v4 route has no on-chain quote here (the v3 QuoterV2 would price another pool): fall back to the floor
+    if (this.buybackVenue === 1) return null;
     const router = await this.pc.readContract({ address: this.feeRouter, abi: bkrnFeeRouterAbi, functionName: "buybackRouter" });
     if (isAddressEqual(router, zeroAddress)) return null;
     if (!this.buybackTokens) {
@@ -506,7 +539,17 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain, Buyb
         ? { address: this.feeRouter, abi: legacyFeeRouterAbi, functionName: "executeBuyback", args: [amountIn, minBkrnOut, legacyPoolFee], label: `executeBuyback(${amountIn}, min=${minBkrnOut}, fee=${legacyPoolFee}) [legacy router]` }
         : { address: this.feeRouter, abi: bkrnFeeRouterAbi, functionName: "executeBuyback", args: [amountIn, minBkrnOut], label: `executeBuyback(${amountIn}, min=${minBkrnOut})` },
     );
-    const l = parseEventLogs({ abi: bkrnFeeRouterAbi, eventName: "BuybackExecuted", logs: out.receipt.logs }).find((x) => isAddressEqual(x.address, this.feeRouter));
-    return { hash: out.hash, usdcIn: l?.args.usdcIn ?? null, bkrnOut: l?.args.bkrnOut ?? null };
+    const mine = <T extends { address: Address }>(xs: T[]) => xs.find((x) => isAddressEqual(x.address, this.feeRouter));
+    const l = mine(parseEventLogs({ abi: bkrnFeeRouterAbi, eventName: "BuybackExecuted", logs: out.receipt.logs }));
+    const failed = legacy ? undefined : mine(parseEventLogs({ abi: bkrnFeeRouterAbi, eventName: "BuybackV4Failed", logs: out.receipt.logs }));
+    const deferred = legacy ? undefined : mine(parseEventLogs({ abi: bkrnFeeRouterAbi, eventName: "BuybackDeferred", logs: out.receipt.logs }));
+    const nofill = legacy ? undefined : mine(parseEventLogs({ abi: bkrnFeeRouterAbi, eventName: "BuybackNoFill", logs: out.receipt.logs }));
+    return {
+      hash: out.hash,
+      usdcIn: l?.args.usdcIn ?? null,
+      bkrnOut: l?.args.bkrnOut ?? null,
+      v4Outcome: failed ? ("failed" as const) : deferred ? ("deferred" as const) : nofill ? ("nofill" as const) : null,
+      v4Reason: failed?.args.reason ?? null,
+    };
   }
 }

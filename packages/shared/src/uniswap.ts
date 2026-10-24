@@ -30,7 +30,7 @@ export const UNISWAP_V3: Readonly<Record<number, UniswapV3Deployment>> = {
   },
 };
 
-/** VERIFY U2 (Uniswap v4 deployments page). Not wired: HedgeExecutor UNIV4 stays NotConfigured (U3). */
+/** VERIFY U2 (Uniswap v4 deployments page). BKRN buybacks swap on the PoolManager directly (BkrnV4Swapper); HedgeExecutor UNIV4 stays NotConfigured (U3). */
 export const UNISWAP_V4: Readonly<Record<number, UniswapV4Deployment>> = {
   4663: {
     poolManager: getAddress("0x8366a39cc670b4001a1121b8f6a443a643e40951"),

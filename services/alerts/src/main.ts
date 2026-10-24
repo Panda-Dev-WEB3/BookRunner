@@ -86,6 +86,11 @@ const chain: ChainPort = {
     if (!dep?.contracts.feeRouter) return null;
     return client.readContract({ address: dep.contracts.feeRouter, abi: bkrnFeeRouterAbi, functionName: "buybackPending" });
   },
+  buybackV4BlockedHop: async () => {
+    const dep = tryLoadDeployment(cfg.deploymentFile);
+    if (!dep?.contracts.feeRouter) return null;
+    return Number(await client.readContract({ address: dep.contracts.feeRouter, abi: bkrnFeeRouterAbi, functionName: "v4BlockedHop" }));
+  },
   markInterval: async () => {
     if (markIntervalRead && Date.now() - markIntervalRead.at < MARK_INTERVAL_TTL_MS) return markIntervalRead.value;
     const dep = tryLoadDeployment(cfg.deploymentFile);

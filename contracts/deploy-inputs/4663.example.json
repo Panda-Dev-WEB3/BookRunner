@@ -44,6 +44,7 @@
     "uniswapV3SwapRouter02": "0xcaf681a66d020601342297493863e78c959e5cb2",
     "uniswapV3Factory": "0x1f7d7550b1b028f7571e69a784071f0205fd2efa",
     "uniswapV4Router": "0x0000000000000000000000000000000000000000",
+    "uniswapV4PoolManager": "0x8366a39cc670b4001a1121b8f6a443a643e40951",
     "entryPoint": "0x0000000071727de22e5e9d8baf0edac6f37da032",
     "chainPriceConfig": "../config/chains/4663.json",
     "chainlinkFeeds": [

@@ -199,12 +199,44 @@ export class FakeBuybackChain implements BuybackChain {
     if (this.failQuote) throw new Error("quote reverted");
     return this.quoteWad === null ? null : (amountIn * this.quoteWad) / 10n ** 6n;
   }
+  /** BkrnFeeRouter venue (0 v3, 1 v4) and v4BuybackReady(); `v4Fails` = the v4 swap reverts on-chain (caught). */
+  venue = 0;
+  v4Ready = false;
+  v4Fails = false;
+  /** v4 pool depth stand-in: a preview / buyback larger than this fails inside the unlock (null = any size). */
+  v4MaxSize: bigint | null = null;
+  /** Share of amountIn a v4 swap spends (partial fill at the limit), bps. */
+  v4SpentBps = 10_000n;
+  /** previewBuyback throws (a size-independent revert such as V4PriceBeyondLimit). */
+  previewThrows = false;
+  /** the landed v4 tx emits BuybackNoFill. */
+  v4NoFill = false;
+  previews: bigint[] = [];
+  async buybackV4State() {
+    return { venue: this.venue, ready: this.v4Ready };
+  }
+  async previewBuyback(amountIn: bigint) {
+    this.previews.push(amountIn);
+    if (this.previewThrows) throw new Error("execution reverted: V4PriceBeyondLimit");
+    if (this.v4MaxSize !== null && amountIn > this.v4MaxSize) return { usdcIn: 0n, bkrnOut: 0n };
+    const usdcIn = (amountIn * this.v4SpentBps) / 10_000n;
+    return { usdcIn, bkrnOut: ((this.quoteWad ?? this.refWad) * usdcIn) / 10n ** 6n };
+  }
   async executeBuyback(amountIn: bigint, minOut: bigint, poolFee?: number) {
     if (this.failExecute) throw new Error("execution reverted: InsufficientOutput");
     this.executed.push(poolFee === undefined ? { amountIn, minOut } : { amountIn, minOut, poolFee });
+    if (this.venue === 1 && (this.v4Fails || (this.v4MaxSize !== null && amountIn > this.v4MaxSize))) {
+      return { hash: fakeHash(), usdcIn: null, bkrnOut: null, v4Outcome: "failed" as const, v4Reason: "0xdeadbeef" as const };
+    }
+    if (this.venue === 1 && this.v4NoFill) return { hash: fakeHash(), usdcIn: null, bkrnOut: null, v4Outcome: "nofill" as const };
+    if (this.venue === 1) {
+      const usdcIn = (amountIn * this.v4SpentBps) / 10_000n;
+      this.pending -= usdcIn;
+      return { hash: fakeHash(), usdcIn, bkrnOut: ((this.quoteWad ?? this.refWad) * usdcIn) / 10n ** 6n, v4Outcome: null };
+    }
     const bkrnOut = this.quoteWad === null ? minOut : (amountIn * this.quoteWad) / 10n ** 6n;
     this.pending -= amountIn;
-    return { hash: fakeHash(), usdcIn: amountIn, bkrnOut };
+    return { hash: fakeHash(), usdcIn: amountIn, bkrnOut, v4Outcome: null };
   }
 }
 

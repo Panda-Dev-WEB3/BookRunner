@@ -21,6 +21,9 @@ import {MockStockToken} from "../../src/mocks/MockStockToken.sol";
 import {MockOrderlyVault} from "../../src/mocks/MockOrderlyVault.sol";
 import {MockSwapRouter} from "../../src/mocks/MockSwapRouter.sol";
 import {UniV3MockFactory, UniV3MockPool} from "../mocks/UniswapV3Mocks.sol";
+import {MockV4Hook, MockV4PoolManager} from "../mocks/UniswapV4Mocks.sol";
+import {IV4PoolManager} from "../../src/interfaces/external/IUniswapV4.sol";
+import {UniswapV4Lib} from "../../src/libraries/UniswapV4Lib.sol";
 
 /// @dev Stand-ins for externals that only need code (a Safe, the EntryPoint) or one view (a Chainlink feed).
 contract CodeStub {
@@ -106,6 +109,15 @@ contract DeployMainnetTest is Test {
         uint256 nRoutes;
         address univ3Factory;
         uint256 oracleMinSources;
+        // Uniswap v4 buyback venue (Pons BKRN)
+        string venue; // "" = omitted (univ3)
+        address v4PoolManager;
+        address v4Hook; // listed in buyback.v4Hooks when set
+        string v4Route; // raw JSON of buyback.v4Route ("" = none)
+        uint256 usdcPerEthWad;
+        uint256 bkrnPerEthWad;
+        bool noAllocations; // bkrn.community / studio / liquidity / contributors left zero
+        uint256 v4HookFeeBps;
     }
 
     string internal constant CHAIN_CFG = "../config/chains/4663.json";
@@ -771,6 +783,183 @@ contract DeployMainnetTest is Test {
         s.checkExternals();
     }
 
+    // ------------------------------------------------------------------------------------------- Uniswap v4 / Pons
+
+    /// @dev A Pons launch: 1e9 x 1e18 supply, 18 decimals, already distributed (no allocation recipients).
+    function _ponsBkrn() internal returns (MockERC20 t) {
+        t = new MockERC20("Bookrunner", "BKRN", 18);
+        t.mint(liquidity, 1e9 * 1e18);
+    }
+
+    /// @dev PoolManager + Pons-like hook + the graduated ETH/BKRN pool and an ETH/USDG pool, initialized.
+    function _v4World(address bkrnToken)
+        internal
+        returns (Opts memory o, IV4PoolManager.PoolKey memory ethBkrn, IV4PoolManager.PoolKey memory ethUsdg)
+    {
+        MockV4PoolManager m = new MockV4PoolManager();
+        MockV4Hook h = new MockV4Hook(IV4PoolManager(address(m)));
+        ethBkrn = IV4PoolManager.PoolKey(address(0), bkrnToken, 0, 200, address(h));
+        ethUsdg = IV4PoolManager.PoolKey(address(0), address(usdg), 500, 10, address(0));
+        m.initialize(ethBkrn, UniswapV4Lib.priceLimit(48_000e18, 18, 18, true), 1e20);
+        m.initialize(ethUsdg, UniswapV4Lib.priceLimit(2400e18, 18, 6, true), 1e16);
+        o = _mainnetOpts();
+        o.bkrnToken = bkrnToken;
+        o.noAllocations = true;
+        o.bkrnPriceId = "";
+        o.refSource = "fixedEth";
+        o.venue = "univ4";
+        o.v4PoolManager = address(m);
+        o.v4Hook = address(h);
+        o.usdcPerEthWad = 2400e18;
+        o.bkrnPerEthWad = 48_000e18;
+        o.v4HookFeeBps = 300; // Pons-like hook fee allowance (< the 500 bps slippage)
+    }
+
+    function _ethRouteJson(IV4PoolManager.PoolKey memory ethBkrn, IV4PoolManager.PoolKey memory ethUsdg)
+        internal
+        pure
+        returns (string memory)
+    {
+        return string.concat("{\"kind\":\"v4Eth\",\"bkrnPool\":", _jsonKey(ethBkrn), ",\"ethPool\":", _jsonKey(ethUsdg), "}");
+    }
+
+    /// @dev Pons BKRN graduated into ETH/BKRN: venue univ4, route USDG -> ETH -> BKRN, REF_FIXED_ETH, all verified.
+    function test_v4_pons_eth_route_deployed_and_verified() public {
+        MockERC20 t = _ponsBkrn();
+        (Opts memory o, IV4PoolManager.PoolKey memory ethBkrn, IV4PoolManager.PoolKey memory ethUsdg) =
+            _v4World(address(t));
+        o.v4Route = _ethRouteJson(ethBkrn, ethUsdg);
+        (DeployMainnet.Deployed memory d, uint256 failures) = _deployAndVerify(o, "v4eth");
+        assertEq(failures, 0);
+        BkrnFeeRouter fr = BkrnFeeRouter(d.feeRouter);
+        assertEq(fr.buybackVenue(), 1);
+        assertEq(fr.v4PoolManager(), o.v4PoolManager);
+        assertTrue(fr.v4HookAllowed(o.v4Hook));
+        assertTrue(fr.v4BuybackReady());
+        assertEq(fr.v4Route().kind, 1);
+        assertEq(fr.referenceSource(), fr.REF_FIXED_ETH());
+        assertEq(fr.referenceBkrnPerUsdc(), 20e18);
+        assertEq(fr.v4HookFeeBps(), 300);
+        assertFalse(d.bkrnDeployed);
+    }
+
+    function test_refuses_v4_hook_fee_not_below_slippage() public {
+        MockERC20 t = _ponsBkrn();
+        (Opts memory o,,) = _v4World(address(t));
+        o.v4HookFeeBps = 500; // not below the 500 bps slippage
+        _expectValidateRevert(o, "input: buyback.v4HookFeeBps must stay below maxSlippageBps");
+        o.v4HookFeeBps = 1001;
+        _expectValidateRevert(o, "input: buyback.v4HookFeeBps > 1000");
+    }
+
+    /// @dev Before graduation: venue univ4 + PoolManager + the Pons hook allow-listed, no route (buybacks defer).
+    function test_v4_before_graduation_deployed_and_verified() public {
+        MockERC20 t = _ponsBkrn();
+        (Opts memory o,,) = _v4World(address(t));
+        (DeployMainnet.Deployed memory d, uint256 failures) = _deployAndVerify(o, "v4pre");
+        assertEq(failures, 0);
+        BkrnFeeRouter fr = BkrnFeeRouter(d.feeRouter);
+        assertFalse(fr.v4BuybackReady());
+        assertEq(fr.v4Route().bkrnPool.currency1, address(0));
+    }
+
+    function test_verify_flags_v4_route_drift() public {
+        MockERC20 t = _ponsBkrn();
+        (Opts memory o, IV4PoolManager.PoolKey memory ethBkrn, IV4PoolManager.PoolKey memory ethUsdg) =
+            _v4World(address(t));
+        o.v4Route = _ethRouteJson(ethBkrn, ethUsdg);
+        DeployMainnet s = new DeployMainnet();
+        s.loadInput(_json(o));
+        s.validateInput();
+        s.checkExternals();
+        DeployMainnet.Deployed memory d = s.deploy();
+        // governance changed the route after the deploy: the input no longer matches
+        BookrunnerConfig cfg = BookrunnerConfig(d.config);
+        vm.prank(cfg.timelock());
+        BkrnFeeRouter(d.feeRouter).setV4HookAllowed(o.v4Hook, false); // clears the route
+        assertEq(_verify(o, d) > 0, true);
+    }
+
+    function test_refuses_v4_venue_without_pool_manager() public {
+        MockERC20 t = _ponsBkrn();
+        (Opts memory o,,) = _v4World(address(t));
+        o.v4PoolManager = address(0);
+        _expectValidateRevert(o, "input: externals.uniswapV4PoolManager is zero");
+    }
+
+    function test_refuses_v4_venue_with_twap() public {
+        MockERC20 t = _ponsBkrn();
+        (Opts memory o,,) = _v4World(address(t));
+        o.refSource = "twap";
+        o.twapPool = address(new CodeStub());
+        _expectValidateRevert(o, "input: buyback.venue univ4 cannot use referenceSource twap (no v4 TWAP)");
+    }
+
+    function test_refuses_v4_route_with_unlisted_hook_or_wrong_venue() public {
+        MockERC20 t = _ponsBkrn();
+        (Opts memory o, IV4PoolManager.PoolKey memory ethBkrn, IV4PoolManager.PoolKey memory ethUsdg) =
+            _v4World(address(t));
+        o.v4Route = _ethRouteJson(ethBkrn, ethUsdg);
+        o.v4Hook = address(0);
+        _expectValidateRevert(o, "input: buyback.v4Route hook not in buyback.v4Hooks");
+        (o,,) = _v4World(address(t));
+        o.v4Route = _ethRouteJson(ethBkrn, ethUsdg);
+        o.venue = "univ3";
+        o.refSource = "fixed";
+        _expectValidateRevert(o, "input: buyback.v4Route needs buyback.venue univ4");
+    }
+
+    function test_refuses_fixed_eth_without_references() public {
+        MockERC20 t = _ponsBkrn();
+        (Opts memory o,,) = _v4World(address(t));
+        o.bkrnPerEthWad = 0;
+        _expectValidateRevert(o, "input: buyback.referenceSource fixedEth needs ethReference");
+    }
+
+    function test_externals_v4_route_pool_must_be_initialized() public {
+        MockERC20 t = _ponsBkrn();
+        (Opts memory o, IV4PoolManager.PoolKey memory ethBkrn, IV4PoolManager.PoolKey memory ethUsdg) =
+            _v4World(address(t));
+        ethBkrn.tickSpacing = 60; // no such pool
+        o.v4Route = _ethRouteJson(ethBkrn, ethUsdg);
+        DeployMainnet s = new DeployMainnet();
+        s.loadInput(_json(o));
+        s.validateInput();
+        vm.expectRevert(bytes("externals: buyback.v4Route.bkrnPool is not initialized on the PoolManager"));
+        s.checkExternals();
+    }
+
+    /// @dev A pre-existing BKRN must have 18 decimals (refused otherwise); another supply only warns.
+    function test_externals_preexisting_bkrn_decimals_and_supply() public {
+        Opts memory o = _mainnetOpts();
+        o.bkrnToken = address(new MockERC20("Six", "SIX", 6));
+        o.noAllocations = true;
+        DeployMainnet s = new DeployMainnet();
+        s.loadInput(_json(o));
+        s.validateInput();
+        vm.expectRevert(bytes("externals: bkrn.token decimals != 18"));
+        s.checkExternals();
+
+        MockERC20 big = new MockERC20("Big", "BIG", 18);
+        big.mint(liquidity, 2e9 * 1e18);
+        o.bkrnToken = address(big);
+        DeployMainnet s2 = new DeployMainnet();
+        s2.loadInput(_json(o));
+        s2.validateInput();
+        s2.checkExternals(); // warns, does not refuse
+    }
+
+    /// @dev With a pre-existing BKRN the allocation recipients are not needed (nothing is minted).
+    function test_preexisting_bkrn_needs_no_allocation_recipients() public {
+        Opts memory o = _mainnetOpts();
+        o.bkrnToken = address(_ponsBkrn());
+        o.noAllocations = true;
+        (, uint256 failures) = _deployAndVerify(o, "noalloc");
+        assertEq(failures, 0);
+        o.bkrnToken = address(0);
+        _expectValidateRevert(o, "input: bkrn.community is zero");
+    }
+
     // ------------------------------------------------------------------------------------------- helpers
 
     function _mainnetOpts() internal view returns (Opts memory o) {
@@ -921,7 +1110,10 @@ contract DeployMainnetTest is Test {
             ",\"uniswapV3Factory\":", _a(o.univ3Factory)
         );
         string memory c = string.concat(
-            ",\"uniswapV4Router\":\"0x0000000000000000000000000000000000000000\",\"entryPoint\":", _a(entryPoint),
+            ",\"uniswapV4Router\":\"0x0000000000000000000000000000000000000000\",\"uniswapV4PoolManager\":",
+            _a(o.v4PoolManager),
+            ",\"entryPoint\":",
+            _a(entryPoint),
             ",\"chainPriceConfig\":\"", o.withPriceConfig ? CHAIN_CFG : "", "\",\"chainlinkFeeds\":["
         );
         string memory f;
@@ -933,6 +1125,7 @@ contract DeployMainnetTest is Test {
     }
 
     function _jsonBkrn(Opts memory o) internal view returns (string memory) {
+        if (o.noAllocations) return string.concat("\"bkrn\":{\"token\":", _a(o.bkrnToken), "},");
         string memory a = string.concat("\"bkrn\":{\"token\":", _a(o.bkrnToken), ",\"community\":", _a(community));
         string memory b = string.concat(
             ",\"studio\":", _a(studio), ",\"liquidity\":", _a(liquidity), ",\"contributors\":", _a(contributors), "},"
@@ -1008,6 +1201,39 @@ contract DeployMainnetTest is Test {
         string memory c = o.twapPool == address(0)
             ? ""
             : string.concat(",\"twap\":{\"pool\":", _a(o.twapPool), ",\"window\":1800,\"maxTickDeviation\":200}");
-        return string.concat(a, b, c, "}");
+        return string.concat(a, b, c, _jsonBuybackV4(o), "}");
+    }
+
+    function _jsonBuybackV4(Opts memory o) internal pure returns (string memory) {
+        string memory v = bytes(o.venue).length == 0 ? "" : string.concat(",\"venue\":\"", o.venue, "\"");
+        string memory h = o.v4Hook == address(0) ? "" : string.concat(",\"v4Hooks\":[", _a(o.v4Hook), "]");
+        string memory e = o.usdcPerEthWad == 0
+            ? ""
+            : string.concat(
+                ",\"ethReference\":{\"usdcPerEthWad\":\"",
+                vm.toString(o.usdcPerEthWad),
+                "\",\"bkrnPerEthWad\":\"",
+                vm.toString(o.bkrnPerEthWad),
+                "\"}"
+            );
+        string memory r = bytes(o.v4Route).length == 0 ? "" : string.concat(",\"v4Route\":", o.v4Route);
+        string memory f = o.v4HookFeeBps == 0 ? "" : string.concat(",\"v4HookFeeBps\":", vm.toString(o.v4HookFeeBps));
+        return string.concat(v, h, e, r, f);
+    }
+
+    function _jsonKey(IV4PoolManager.PoolKey memory k) internal pure returns (string memory) {
+        return string.concat(
+            "{\"currency0\":",
+            _a(k.currency0),
+            ",\"currency1\":",
+            _a(k.currency1),
+            ",\"fee\":",
+            vm.toString(uint256(k.fee)),
+            ",\"tickSpacing\":",
+            vm.toString(int256(k.tickSpacing)),
+            ",\"hooks\":",
+            _a(k.hooks),
+            "}"
+        );
     }
 }

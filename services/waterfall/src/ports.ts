@@ -141,8 +141,28 @@ export interface BuybackChain {
   buybackFloor(amountIn: bigint): Promise<bigint>;
   /** BkrnFeeRouter.referenceSource (fixed / twap / attested); optional, for logs and receipts. */
   buybackReferenceSource?(): Promise<BuybackReferenceSource>;
-  /** BkrnFeeRouter.executeBuyback(amountIn, minBkrnOut) (KEEPER); `legacyPoolFee` only for a legacy router. */
-  executeBuyback(amountIn: bigint, minBkrnOut: bigint, legacyPoolFee?: number): Promise<{ hash: Hex; usdcIn: bigint | null; bkrnOut: bigint | null }>;
+  /**
+   * BkrnFeeRouter venue: `venue` 0 = Uniswap v3 router, 1 = Uniswap v4 route; `ready` = v4BuybackReady() (route set,
+   * pools initialized). Optional; a router without the reads is v3. With venue 1 and !ready (BKRN not graduated
+   * yet) a buyback would be a no-op: the keeper skips it.
+   */
+  buybackV4State?(): Promise<{ venue: number; ready: boolean }>;
+  /**
+   * BkrnFeeRouter.previewBuyback(amountIn) (eth_call from the keeper): the v4 swap executeBuyback(amountIn, 0) would
+   * run, decoded from its BuybackPreview(usdcIn, bkrnOut) revert; (0, 0) = the swap fails inside the unlock. Throws
+   * any other revert (V4PriceBeyondLimit, a stale reference, ...).
+   */
+  previewBuyback?(amountIn: bigint): Promise<{ usdcIn: bigint; bkrnOut: bigint }>;
+  /**
+   * BkrnFeeRouter.executeBuyback(amountIn, minBkrnOut) (KEEPER); `legacyPoolFee` only for a legacy router.
+   * `v4Outcome`: "deferred" (BuybackDeferred) / "failed" (BuybackV4Failed: a hook / pool revert, nothing moved) /
+   * "nofill" (BuybackNoFill: no liquidity up to the limit) when the v4 venue did not swap; null otherwise.
+   */
+  executeBuyback(
+    amountIn: bigint,
+    minBkrnOut: bigint,
+    legacyPoolFee?: number,
+  ): Promise<{ hash: Hex; usdcIn: bigint | null; bkrnOut: bigint | null; v4Outcome?: "deferred" | "failed" | "nofill" | null; v4Reason?: Hex | null }>;
 }
 
 export interface BookLookup {
