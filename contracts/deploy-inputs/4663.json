@@ -202,8 +202,8 @@
     "carryBps": 1000,
     "expenseCapBps": 2000,
     "charterFeeUsd": "5000000000",
-    "sponsorBondBkrn": "100000000000000000000000",
-    "committeeBondBkrn": "250000000000000000000000",
+    "sponsorBondBkrn": "25000000000000000000000",
+    "committeeBondBkrn": "50000000000000000000000",
     "venueMinIfOrderly": "25001000000",
     "venueMinIfPoolEngine": "10000000000",
     "tiers": {
