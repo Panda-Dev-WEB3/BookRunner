@@ -108,6 +108,10 @@ const shape = {
   ALERT_ORACLE_CONFIRM_DIVERGENCE_SECONDS: int(120),
   /** primary-confirm: an in-session ticker with no fresh confirm source this long alerts (published unconfirmed) */
   ALERT_ORACLE_CONFIRM_UNAVAILABLE_SECONDS: int(600),
+  /** comma-separated tickers for oracle_confirm_unavailable (empty = every ticker). A quiet DEX pool on a ticker no
+   *  market uses only means "published unconfirmed": list the tickers of the live markets (e.g. NVDA). Divergence
+   *  alerts stay on for every ticker. */
+  ALERT_ORACLE_CONFIRM_TICKERS: z.string().default(""),
   /** primary-confirm: this many tickers diverged at once makes every divergence alert critical */
   ALERT_ORACLE_CONFIRM_CRITICAL_TICKERS: z.coerce.number().int().min(1).default(3),
   /**
@@ -281,6 +285,8 @@ export interface RuleConfig {
   oracleConfirmDivergenceSec: number;
   /** primary-confirm: "unavailable" this long alerts */
   oracleConfirmUnavailableSec: number;
+  /** tickers oracle_confirm_unavailable applies to (empty = all) */
+  oracleConfirmTickers?: string[];
   /** primary-confirm: this many tickers diverged at once = critical */
   oracleConfirmCriticalTickers: number;
   /** primary-confirm: stalled-feed gap duration (s) for oracle_primary_suspect_stale */
@@ -431,6 +437,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       oraclePriceMissingSec: e.ALERT_ORACLE_PRICE_MISSING_SECONDS,
       oracleConfirmDivergenceSec: e.ALERT_ORACLE_CONFIRM_DIVERGENCE_SECONDS,
       oracleConfirmUnavailableSec: e.ALERT_ORACLE_CONFIRM_UNAVAILABLE_SECONDS,
+      oracleConfirmTickers: e.ALERT_ORACLE_CONFIRM_TICKERS.split(",").map((t) => t.trim().toUpperCase()).filter(Boolean),
       oracleConfirmCriticalTickers: e.ALERT_ORACLE_CONFIRM_CRITICAL_TICKERS,
       oraclePrimaryLagSec: e.ALERT_ORACLE_PRIMARY_LAG_SECONDS,
       backupExpected: e.ALERT_BACKUP_EXPECTED === undefined || e.ALERT_BACKUP_EXPECTED === "" ? network !== "devnet" : e.ALERT_BACKUP_EXPECTED === "1" || e.ALERT_BACKUP_EXPECTED.toLowerCase() === "true",

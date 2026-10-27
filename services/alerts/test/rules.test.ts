@@ -668,6 +668,9 @@ describe("oracle primary-confirm (mainnet: Chainlink signs, DEX TWAP / Pyth conf
     // every failing ticker is "unavailable": no source condition, the unavailable alert covers it
     const allGone = oracle(pc({ sources: sources(700_000), confirm: [cf("NVDA", "unavailable", 700_000), cf("TSLA", "unavailable", 700_000)] }), rules());
     expect(keys(allGone)).toEqual(["oracle_confirm_unavailable:NVDA", "oracle_confirm_unavailable:TSLA"]);
+    // ALERT_ORACLE_CONFIRM_TICKERS: only the tickers of the live markets raise the unavailable alert
+    const onlyNvda = oracle(pc({ sources: sources(700_000), confirm: [cf("NVDA", "unavailable", 700_000), cf("TSLA", "unavailable", 700_000)] }), { ...rules(), oracleConfirmTickers: ["NVDA"] });
+    expect(keys(onlyNvda)).toEqual(["oracle_confirm_unavailable:NVDA"]);
     // tickers without a Chainlink price (no-primary) are the primary alert's, not the confirm source's
     const noPrimary = oracle(pc({ sources: sources(700_000), confirm: [cf("NVDA", "no-primary", 700_000), cf("TSLA", "no-primary", 700_000)] }), rules());
     expect(keys(noPrimary)).toEqual([]);

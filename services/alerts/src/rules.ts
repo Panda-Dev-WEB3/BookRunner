@@ -822,6 +822,7 @@ function oraclePrimaryConfirm(o: OracleProbe, s: Snapshot, c: RuleConfig): Condi
   for (const x of o.confirm) {
     const age = runAge(x);
     if (x.status !== "unavailable" || age === null || age < c.oracleConfirmUnavailableSec) continue;
+    if (c.oracleConfirmTickers?.length && !c.oracleConfirmTickers.includes(x.priceId.toUpperCase())) continue;
     const onIt = confirmFailing.filter((src) => src.failingTickers.includes(x.priceId));
     const why = (onIt.length ? onIt : confirmFailing).map((src) => `${src.name}: ${src.lastError ?? "?"}`);
     out.push({
