@@ -254,7 +254,7 @@ describe("dexConfirm config", () => {
       tokenDecimals: 18,
       quoteToken: USDG,
       twapSec: 1_800,
-      minDepthUsd: 25_000,
+      minDepthUsd: 15_000, // NVDA lowered 2026-11-05 (in-range liquidity ~22-24k at 2%)
       fee: 500,
     });
     expect(cfg.dexConfirm?.readAt).toBe("2026-10-17");
