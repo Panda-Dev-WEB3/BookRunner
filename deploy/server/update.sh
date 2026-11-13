@@ -9,7 +9,10 @@
 # the systemd units, docker-compose.yml) comes from /usr/local/lib/bookrunner-src, a root-owned clone of
 # the repo, copied to /usr/local/lib/bookrunner-deploy. The app checkout (/opt/bookrunner/app, owned by
 # bookrunner) is only fast-forwarded to the SAME commit and built as the bookrunner user.
-# BOOKRUNNER_REQUIRE_SIGNED=1: refuse a commit whose signature `git verify-commit` does not accept.
+# Deploy gate (deploy-gate.sh, owner rule 2026-11-13): every commit since the last deploy must be signed by a trusted
+# key (/etc/bookrunner/allowed_signers, root-owned) or named in a trusted-signed "Security-Reviewed: <sha>" commit;
+# anything else is refused before any of its code is installed or run. The INSTALLED copy of the gate is used, never
+# the one in the commit being checked. BOOKRUNNER_GATE_BASELINE=1 records the current commit without checking.
 #
 # Layout under /var/www/bookrunner (nginx: nginx-bookrunner-locations.conf):
 #   /       apps/site/dist   public site (multi-page static tree)
@@ -38,8 +41,21 @@ if [ -z "${BOOKRUNNER_UPDATE_REEXEC:-}" ]; then
   git -C "$SRC" fetch -q origin main
   git -C "$SRC" checkout -q --detach FETCH_HEAD
   WANT="$(git -C "$SRC" rev-parse HEAD)"
-  if [ "${BOOKRUNNER_REQUIRE_SIGNED:-0}" = 1 ]; then
-    git -C "$SRC" verify-commit "$WANT" || { echo "!! $WANT is not signed by a trusted key: refusing" >&2; exit 1; }
+  # deploy gate: checked with the installed (previous) gate script, before the new commit's files are installed
+  GATE_STATE=/var/lib/bookrunner-deploy/deployed-commit
+  GATE_SIGNERS=/etc/bookrunner/allowed_signers
+  if [ "${BOOKRUNNER_GATE_BASELINE:-0}" != 1 ]; then
+    if [ -f "$DEPLOY/deploy-gate.sh" ]; then
+      # shellcheck source=deploy-gate.sh
+      . "$DEPLOY/deploy-gate.sh"
+      LAST=""; [ -f "$GATE_STATE" ] && LAST="$(tr -d ' 
+' < "$GATE_STATE")"
+      deploy_gate "$SRC" "$LAST" "$WANT" "$GATE_SIGNERS" || exit 1
+    else
+      echo "==> deploy gate not installed yet (first deploy with it): installed by this run, enforced from the next one"
+    fi
+  else
+    echo "==> deploy gate: baseline requested, $WANT recorded without checking"
   fi
   # ---- 2. root-owned deploy copy (.env.infra is local state, kept); re-run when this script changed
   before="$(sha256sum "$SELF" | cut -d' ' -f1)"
@@ -74,7 +90,8 @@ echo "==> at $("${AS[@]}" git log --oneline -1)"
 HOST_NET=testnet
 if [ -f /etc/bookrunner/host-network ] && [ "$(stat -c %u /etc/bookrunner/host-network)" = 0 ]; then
   case "$(tr -d ' 
-' < /etc/bookrunner/host-network)" in mainnet) HOST_NET=mainnet ;; testnet) ;; *) echo "!! /etc/bookrunner/host-network must be mainnet or testnet" >&2; exit 1 ;; esac
+
+' < /etc/bookrunner/host-network)" in mainnet) HOST_NET=mainnet ;; testnet) ;; *) echo "!! /etc/bookrunner/host-network must be mainnet or testnet" >&2; exit 1 ;; esac
 fi
 echo "==> host network: $HOST_NET"
 
@@ -207,4 +224,8 @@ if [ "${1:-}" != "--web-only" ]; then
   # the live-Orderly rehearsal stack (if running) follows the same code
   if systemctl is-active --quiet bookrunner@testnet-live; then echo "==> restart bookrunner@testnet-live"; systemctl restart bookrunner@testnet-live; fi
 fi
+# the deploy gate's baseline: the commit now deployed
+install -d -o root -g root -m 0755 /var/lib/bookrunner-deploy
+printf '%s
+' "$WANT" > /var/lib/bookrunner-deploy/deployed-commit
 echo "==> done ($WANT)"

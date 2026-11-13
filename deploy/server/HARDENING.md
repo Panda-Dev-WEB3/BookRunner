@@ -98,7 +98,13 @@ Values never appear in these commands' output: every secret is generated into a 
 8. **From now on**: `sudo /usr/local/lib/bookrunner-deploy/update.sh` (refuses to run from the app tree). It
    fetches into the root clone, refreshes the deploy copy (re-running itself when update.sh changed),
    fast-forwards the app to the same commit, refuses local modifications, builds as `bookrunner`, installs
-   nginx/units from the root copy. `BOOKRUNNER_REQUIRE_SIGNED=1` additionally requires `git verify-commit`.
+   nginx/units from the root copy. **Deploy gate** (owner rule 2026-11-13, `deploy-gate.sh`): before anything of a new commit is installed or run, the
+installed gate checks every commit since the last deploy (`/var/lib/bookrunner-deploy/deployed-commit`). Each must be signed
+by a key in the root-owned `/etc/bookrunner/allowed_signers` (the owner's machine signs every commit: `git config
+commit.gpgsign true`, ssh format), or be named in a trusted-signed `Security-Reviewed: <sha>` commit created by
+`scripts/approve-commits.sh` after a security review of that commit. Anything else (a collaborator's push, a commit made on
+GitHub's web UI) refuses the deploy and lists the commits. `BOOKRUNNER_GATE_BASELINE=1` records the current commit without
+checking (first install only).
 
 ## Notes and residual risk
 
