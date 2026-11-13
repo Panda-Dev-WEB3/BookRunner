@@ -29,12 +29,13 @@ export class ViemEngineChain implements EngineChain {
   }
 
   async readState(): Promise<EngineState> {
-    const [netExposureUsd, marginEquityUsd, insuranceEquityUsd, poolEquityUsd, st] = await Promise.all([
+    const [netExposureUsd, marginEquityUsd, insuranceEquityUsd, poolEquityUsd, st, unitWad] = await Promise.all([
       this.pub.readContract({ address: this.adapter, abi: poolEngineAdapterAbi, functionName: "netExposureUsd" }),
       this.pub.readContract({ address: this.adapter, abi: poolEngineAdapterAbi, functionName: "marginEquityUsd" }),
       this.pub.readContract({ address: this.adapter, abi: poolEngineAdapterAbi, functionName: "insuranceEquityUsd" }),
       this.pub.readContract({ address: this.engine, abi: poolEngineAbi, functionName: "poolEquityUsd", args: [this.marketId] }),
       this.pub.readContract({ address: this.engine, abi: poolEngineAbi, functionName: "state", args: [this.marketId] }),
+      this.pub.readContract({ address: this.engine, abi: poolEngineAbi, functionName: "unitOf", args: [this.marketId] }),
     ]);
     return {
       netExposureUsd,
@@ -44,6 +45,7 @@ export class ViemEngineChain implements EngineChain {
       poolCashUsd: st.poolCashUsd,
       netSize: -(st.longSize + st.shortSize),
       reduceOnly: st.reduceOnly,
+      unitWad,
     };
   }
 

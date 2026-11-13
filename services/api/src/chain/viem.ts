@@ -4,6 +4,7 @@
 // so explicit client.multicall() would fail on devnet).
 import type { Charter, Deployment, Mandate } from "@bookrunner/shared";
 import { charterArg, isTokenUnderlying, underlyingToToken } from "@bookrunner/shared";
+import { unitFromRevert } from "@bookrunner/shared/engineMath";
 import {
   attestedOracleAbi,
   bkrnStakingAbi,
@@ -19,7 +20,7 @@ import {
   trancheAbi,
   underwritingVaultAbi,
 } from "@bookrunner/shared/abi";
-import { type Address, type Hex, type PublicClient, erc20Abi, getAddress, zeroAddress } from "viem";
+import { type Address, BaseError, ContractFunctionRevertedError, type Hex, type PublicClient, erc20Abi, getAddress, zeroAddress } from "viem";
 import { type Kv, cached } from "../kv";
 import type {
   BookChainState,
@@ -28,6 +29,7 @@ import type {
   CommitteeState,
   EngineMarketChainState,
   EngineTraderChainState,
+  EngineUnit,
   MandateChainState,
   PoolChainState,
   PoolWalletState,
@@ -37,6 +39,13 @@ import type {
 
 /** One whole pool share (12 decimals: settlement token 6 + the pool's virtual offset 6). */
 export const POOL_SHARE_UNIT = 10n ** 12n;
+
+/** The custom error a read reverted with (decoded with the called contract's ABI), if any. */
+function revertName(err: unknown): string | undefined {
+  if (!(err instanceof BaseError)) return undefined;
+  const r = err.walk((e) => e instanceof ContractFunctionRevertedError);
+  return r instanceof ContractFunctionRevertedError ? r.data?.errorName : undefined;
+}
 
 /** Value of a read that may revert (e.g. a view not valid in the current book state). */
 async function orDefault<T>(p: Promise<T>, fallback: T): Promise<{ ok: boolean; v: T }> {
@@ -406,7 +415,10 @@ export class ViemChainGateway implements ChainGateway {
         // an older config without the getter: the engine default (15 s)
         orDefault(r.readContract({ address: cfgAddr, abi: bookrunnerConfigAbi, functionName: "maxTradePriceAge" }), 15),
       ]);
-      const latest = await r.readContract({ address: this.c.oracle, abi: attestedOracleAbi, functionName: "latest", args: [cfg.underlying] });
+      const [latest, lastLiveAt] = await Promise.all([
+        r.readContract({ address: this.c.oracle, abi: attestedOracleAbi, functionName: "latest", args: [cfg.underlying] }),
+        r.readContract({ address: this.c.oracle, abi: attestedOracleAbi, functionName: "lastLiveAt", args: [cfg.underlying] }),
+      ]);
       return {
         engine: getAddress(engine),
         adapter: getAddress(adapter),
@@ -438,6 +450,7 @@ export class ViemChainGateway implements ChainGateway {
         fundingRatePerDayWad: funding.v,
         lossBudgetBlocked: budget.v ? budget.v[5] : false,
         stored: latest.priceWad > 0n && latest.publishedAt > 0n ? { priceWad: latest.priceWad, publishedAt: Number(latest.publishedAt), held: latest.held } : null,
+        lastLiveAt: Number(lastLiveAt),
         maxPriceAge: Number(maxPriceAge),
         maxTradePriceAge: Number(maxTradePriceAge.v),
       };
@@ -455,12 +468,18 @@ export class ViemChainGateway implements ChainGateway {
     return { position: { size: p.size, entryPriceWad: p.entryPriceWad, marginUsd: p.marginUsd, fundingIndexAtEntry: p.fundingIndexAtEntry }, usdcBalance, usdcAllowance };
   }
 
-  async splitGate(priceId: Hex, basisAt: number): Promise<{ pending: boolean; window: boolean }> {
-    const reg = this.c.stockRegistry;
-    if (!reg || reg === zeroAddress) return { pending: false, window: false };
-    return cached(this.kv, this.key("split-gate", priceId.toLowerCase(), basisAt), this.ttlSeconds, async () => {
-      const [pending, window] = await this.client.readContract({ address: reg, abi: stockTokenRegistryAbi, functionName: "splitGate", args: [priceId, BigInt(basisAt)] });
-      return { pending, window };
+  async engineUnit(marketId: number, basisAt: number): Promise<EngineUnit> {
+    const engine = this.c.poolEngine;
+    return cached(this.kv, this.key("engine-unit", marketId, basisAt), this.ttlSeconds, async () => {
+      try {
+        const unitWad = await this.client.readContract({ address: engine, abi: poolEngineAbi, functionName: "unitAt", args: [BigInt(marketId), BigInt(basisAt)] });
+        return { kind: "ok" as const, unitWad };
+      } catch (err) {
+        const u = unitFromRevert(revertName(err));
+        if (u) return u;
+        throw err;
+      }
     });
   }
+
 }

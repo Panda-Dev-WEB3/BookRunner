@@ -1,10 +1,12 @@
 // Trading page (2026-10, Plan B2: single-stock markets on the in-house PoolEngine). Which price a trade fills at
 // (pull oracle: the trade carries the freshest signed print, docs/LOW_GAS.md §1), the market's session state
-// (open / reduce-only / split close-only / off-hours / split window / no fresh price / closed), and the views of a
+// (open / reduce-only / off-hours / split unrecorded / split repricing / no fresh price / closed), and the views of a
 // market and a trader's position. Every rule mirrors PoolEngine.sol; the math is in ./engine.ts. Pure.
+// Audit N-1: sizes are market units (one share until a split) and every price below is PER UNIT: the oracle's
+// per-share print times the shares per unit at its share basis (PoolEngine.unitAt), as the engine prices it.
 import type { SignedPrice } from "@bookrunner/shared/signedPrice";
 import type { Hex } from "viem";
-import type { EngineMarketChainState, EngineTraderChainState } from "../chain/gateway";
+import type { EngineMarketChainState, EngineTraderChainState, EngineUnit } from "../chain/gateway";
 import { usdStr, wadStr } from "../format";
 import {
   BPS,
@@ -23,6 +25,7 @@ import {
   offHoursMarginBps,
   pnlUsd,
   traderEquityUsd,
+  unitPriceWad,
 } from "./engine";
 
 /** A trade carries a price at least this many seconds younger than the engine's bound (it is mined a block or two later). */
@@ -37,7 +40,12 @@ export { type SignedPrice, signedPriceFor } from "@bookrunner/shared/signedPrice
 
 /** The price a trade fills at: the carried signed print when it is newer than the stored one (AttestedOracle.update skips a not-newer entry). */
 export interface TradePrice {
+  /** per market unit (the engine's price): perSharePriceWad x unitWad / 1e18 in the pool's favour */
   priceWad: bigint;
+  /** the oracle's signed per-share print */
+  perSharePriceWad: bigint;
+  /** shares per market unit at the print's share basis (1e18 until a split) */
+  unitWad: bigint;
   publishedAt: number;
   held: boolean;
   source: "signed" | "stored";
@@ -48,9 +56,18 @@ export interface TradePrice {
 export function tradePrice(m: Pick<EngineMarketChainState, "stored">, signed: SignedPrice | null): TradePrice | null {
   const s = m.stored;
   if (signed && (!s || Number(signed.update.publishedAt) > s.publishedAt)) {
-    return { priceWad: signed.update.priceWad, publishedAt: Number(signed.update.publishedAt), held: signed.update.held, source: "signed", priceData: signed.priceData };
+    const px = signed.update.priceWad;
+    return { priceWad: px, perSharePriceWad: px, unitWad: WAD, publishedAt: Number(signed.update.publishedAt), held: signed.update.held, source: "signed", priceData: signed.priceData };
   }
-  return s ? { priceWad: s.priceWad, publishedAt: s.publishedAt, held: s.held, source: "stored", priceData: "0x" } : null;
+  return s ? { priceWad: s.priceWad, perSharePriceWad: s.priceWad, unitWad: WAD, publishedAt: s.publishedAt, held: s.held, source: "stored", priceData: "0x" } : null;
+}
+
+/** Share basis of the price a trade uses (audit M-2): its publishedAt, the oracle's lastLiveAt when held. */
+export const priceBasis = (p: Pick<TradePrice, "held" | "publishedAt">, lastLiveAt: number): number => (p.held ? lastLiveAt : p.publishedAt);
+
+/** Audit N-1: the price per market unit at `unit` (PoolEngine._unitPrice; rounded against the traders' net side). */
+export function atUnit(p: TradePrice, unitWad: bigint, netSize: bigint): TradePrice {
+  return { ...p, unitWad, priceWad: unitPriceWad(p.perSharePriceWad, unitWad, netSize) };
 }
 
 /** PoolEngine._tradeStale bound: min(maxPriceAge, NEW_RISK_MAX_PRICE_AGE, maxTradePriceAge). */
@@ -58,7 +75,7 @@ export const tradeMaxAge = (m: Pick<EngineMarketChainState, "maxPriceAge" | "max
 /** PoolEngine._newRiskStale bound (margin withdrawal with a position): min(maxPriceAge, NEW_RISK_MAX_PRICE_AGE). */
 export const withdrawMaxAge = (m: Pick<EngineMarketChainState, "maxPriceAge">) => Math.min(m.maxPriceAge, NEW_RISK_MAX_PRICE_AGE);
 
-export type Session = "open" | "reduce_only" | "split_close_only" | "off_hours" | "split_window" | "no_fresh_price" | "closed";
+export type Session = "open" | "reduce_only" | "off_hours" | "split_unrecorded" | "split_repricing" | "no_fresh_price" | "closed";
 
 export interface SessionState {
   session: Session;
@@ -78,26 +95,34 @@ export interface SessionInput {
   reduceOnly: boolean;
   closeOutAfter: number;
   lossBudgetBlocked: boolean;
-  split: { pending: boolean; window: boolean };
+  /** PoolEngine.unitAt at the price's basis (null: no price) */
+  unit: EngineUnit | null;
 }
 
 /** Session of a market, strictest first, as PoolEngine._trade gates a trade. */
 export function sessionOf(i: SessionInput): SessionState {
   const live = i.bookState === "Live" || i.bookState === "Retiring";
   if (!live) return { session: "closed", canTrade: false, newRisk: false, reasons: [`The book is ${i.bookState}: its market is not open.`] };
-  if (i.split.window) return { session: "split_window", canTrade: false, newRisk: false, reasons: ["A stock split took effect and the price is still in pre-split shares: no trade fills until the oracle reprices."] };
+  if (i.unit?.kind === "unrecorded")
+    return {
+      session: "split_unrecorded",
+      canTrade: false,
+      newRisk: false,
+      reasons: ["A stock split took effect that is not recorded on chain: the market is paused, closes and liquidations included, until governance records it. Margin top-ups still work."],
+    };
+  if (i.unit?.kind === "pending")
+    return { session: "split_repricing", canTrade: false, newRisk: false, reasons: ["A stock in the index split: the market's unit is being updated from the oracle's next signed round. Retry in a few seconds."] };
   if (!i.price) return { session: "no_fresh_price", canTrade: false, newRisk: false, reasons: ["The market has no price yet."] };
   if (i.price.held) return { session: "off_hours", canTrade: false, newRisk: false, reasons: ["The stock's session is closed (off-hours): no trade fills, closes included, until it reopens. Margin top-ups still work."] };
   if (i.nowSec - i.price.publishedAt > i.maxAgeSec - TRADE_PRICE_HEADROOM_SEC)
     return { session: "no_fresh_price", canTrade: false, newRisk: false, reasons: [`No signed price fresh enough to trade (a trade needs one at most ${i.maxAgeSec} s old). Retry in a few seconds.`] };
   const reasons: string[] = [];
-  if (i.split.pending) reasons.push("A stock split is pending: close-only until it is done (positions are per share and are never rebased).");
   if (i.reduceOnly)
     reasons.push(i.closeOutAfter > 0 ? `The book is winding down: reduce-only, and from ${new Date(i.closeOutAfter * 1000).toISOString()} anyone may close remaining positions at the oracle price.` : "The market is reduce-only: only reductions and closes fill.");
   if (i.bookState === "Retiring" && !i.reduceOnly) reasons.push("The book is retiring: reduce-only.");
   if (i.lossBudgetBlocked) reasons.push("The pool's loss budget for this period is spent: new risk is paused until the next period, reductions and closes fill.");
   if (reasons.length === 0) return { session: "open", canTrade: true, newRisk: true, reasons };
-  return { session: i.split.pending ? "split_close_only" : "reduce_only", canTrade: true, newRisk: false, reasons };
+  return { session: "reduce_only", canTrade: true, newRisk: false, reasons };
 }
 
 export const mathOf = (m: EngineMarketChainState): EngineMarketMath => ({
@@ -164,8 +189,13 @@ export function marketView(meta: MarketMeta, m: EngineMarketChainState, price: T
     reasons: s.reasons,
     price: price
       ? {
+          /** per market unit (what fills and positions are valued at) */
           price: wadStr(price.priceWad),
           priceWad: price.priceWad.toString(),
+          /** the oracle's per-share print */
+          perSharePrice: wadStr(price.perSharePriceWad),
+          /** shares per market unit (audit N-1: "1" until a split) */
+          sharesPerUnit: wadStr(price.unitWad),
           publishedAt: new Date(price.publishedAt * 1000).toISOString(),
           publishedAtSec: price.publishedAt,
           ageSeconds: Math.max(0, nowSec - price.publishedAt),

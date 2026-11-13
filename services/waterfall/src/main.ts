@@ -17,7 +17,7 @@ import { Queue, Worker } from "bullmq";
 import { Redis } from "ioredis";
 import type { Address } from "viem";
 import { WaterfallChainAdapter } from "./adapters/chain";
-import { ViemLiquidationChain, pgPositionStore, redisSignedPrices, redisStatusSink } from "./adapters/liquidation";
+import { ViemLiquidationChain, pgPositionStore, redisSignedBundle, redisSignedPrices, redisStatusSink } from "./adapters/liquidation";
 import { RedeemLogIndex, UnionCandidates } from "./adapters/redemptions";
 import { DbRedeemCandidates, PgSettlementStore } from "./adapters/store";
 import { BullVenueOps } from "./adapters/venue-ops";
@@ -208,6 +208,7 @@ export async function main() {
       chain: new ViemLiquidationChain(pc, sender, deployment),
       positions: pgPositionStore(db),
       signedPrices: redisSignedPrices(redis, { chainId: cfg.CHAIN_ID, oracle: deployment.contracts.oracle }),
+      signedBundle: redisSignedBundle(redis, { chainId: cfg.CHAIN_ID, oracle: deployment.contracts.oracle }),
       writeStatus: redisStatusSink(redis),
       bookOf: async (marketId) => {
         if (!marketBook.has(marketId) && Date.now() - marketsScannedAt > 600_000) {

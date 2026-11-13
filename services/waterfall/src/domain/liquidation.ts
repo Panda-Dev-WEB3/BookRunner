@@ -7,9 +7,20 @@
 //     maintenance on a settled market (audit Task 7a);
 //   - forceClose (no fee, no reward) where it is the engine's path for the rest: a settled market (any position, any
 //     price), or a wind-down close-out that is open (closeOutAfter passed) with a live price within the trade bound.
+//   - audit N-1: positions are in market units; the per-share price is priced per unit (unitPriceWad) at the shares per
+//     unit of its share basis (PoolEngine.unitAt at publishedAt, or lastLiveAt when held / settled), as the engine does.
 // Gas guard: a transaction may cost at most its reward plus a margin (reward converted at the configured ETH/USD), and
 // never more than the per-transaction or the hourly cap.
-import { type EnginePosition, NEW_RISK_MAX_PRICE_AGE, isLiquidatable, liquidationRequirementBps, liquidationRewardUsd, requirementUsd, traderEquityUsd } from "@bookrunner/shared/engineMath";
+import {
+  type EnginePosition,
+  NEW_RISK_MAX_PRICE_AGE,
+  isLiquidatable,
+  liquidationRequirementBps,
+  liquidationRewardUsd,
+  requirementUsd,
+  traderEquityUsd,
+  unitPriceWad,
+} from "@bookrunner/shared/engineMath";
 import type { BacklogReason, LiquidationBacklogItem, LiquidationMarketStatus } from "@bookrunner/shared/liquidationKeeper";
 import type { SignedPrice } from "@bookrunner/shared/signedPrice";
 import type { Hex } from "viem";
@@ -33,6 +44,10 @@ export interface MarketRead {
   stored: { priceWad: bigint; publishedAt: number; held: boolean } | null;
   /** AttestedOracle.settlePrice(underlying); null = unreadable (an older oracle) or none */
   settle: { priceWad: bigint; effective: boolean } | null;
+  /** AttestedOracle.lastLiveAt(underlying): the share basis of a held (or settle) price */
+  lastLiveAt: number;
+  /** traders' net size (longSize + shortSize, market units): the rounding side of the unit price */
+  netSize: bigint;
 }
 
 export interface ProtocolParams {
@@ -66,6 +81,12 @@ export function priceUsed(m: MarketRead, signed: SignedPrice | null, nowSec: num
   }
   return { ...px, settled: false };
 }
+
+/** Share basis of the price a transaction would use (audit M-2): publishedAt; lastLiveAt when held or settled. */
+export const priceBasis = (m: Pick<MarketRead, "lastLiveAt">, px: PriceUsed): number => (px.held ? m.lastLiveAt : px.publishedAt);
+
+/** Audit N-1: the per-share price priced per market unit at `unitWad` (PoolEngine._unitPrice). */
+export const atUnit = (m: Pick<MarketRead, "netSize">, px: PriceUsed, unitWad: bigint): PriceUsed => ({ ...px, priceWad: unitPriceWad(px.priceWad, unitWad, m.netSize) });
 
 export type KeeperAction = {
   marketId: number;
@@ -197,7 +218,7 @@ export type SendOutcome = "sent" | "raced" | "price" | "gas_guard" | "failed";
 export function classifyRevert(errorName: string | undefined, message: string): Exclude<SendOutcome, "sent" | "gas_guard"> {
   const s = `${errorName ?? ""} ${message}`;
   if (/NotLiquidatable|NoPosition/.test(s)) return "raced";
-  if (/StalePrice|OffHours|BadSigner|FuturePrice|CloseOutNotOpen|NoPrice|SplitWindow/.test(s)) return "price";
+  if (/StalePrice|OffHours|BadSigner|FuturePrice|CloseOutNotOpen|NoPrice|SplitUnrecorded|IndexSnapshot|PriceBeforeSplit/.test(s)) return "price";
   return "failed";
 }
 

@@ -265,6 +265,14 @@ describe("EngineVenue", () => {
     expect(desk.actions.length).toBe(2);
   });
 
+  test("account() after a 10:1 split (audit N-1): the per-share oracle is priced per market unit", async () => {
+    const { chain, venue } = setup();
+    chain.state = { ...chain.state, netExposureUsd: usd(-1_000), netSize: -(10n ** 19n), unitWad: 10n * 10n ** 18n };
+    const acct = await venue.account();
+    expect(acct.position?.netQty).toBe(-10);
+    expect(acct.position?.markPx).toBe(1_000); // oracle 100 per share x 10 shares per unit
+  });
+
   test("account() maps PoolEngineAdapter views; fills are from the book's perspective", async () => {
     const { chain, venue } = setup();
     chain.state = { ...chain.state, netExposureUsd: usd(-1_000), netSize: -(10n ** 19n) };

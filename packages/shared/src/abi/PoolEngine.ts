@@ -998,6 +998,24 @@ export const poolEngineAbi = [
   },
   {
     "type": "function",
+    "name": "syncUnit",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "priceData",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "totalMarginUsd",
     "inputs": [
       {
@@ -1108,6 +1126,49 @@ export const poolEngineAbi = [
         "name": "",
         "type": "int256",
         "internalType": "int256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "unitAt",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "basisAt",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "unitOf",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -1732,6 +1793,31 @@ export const poolEngineAbi = [
     "anonymous": false
   },
   {
+    "type": "event",
+    "name": "UnitUpdated",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "unitWad",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "basisAt",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
     "type": "error",
     "name": "AdapterHasMarket",
     "inputs": [
@@ -1787,6 +1873,17 @@ export const poolEngineAbi = [
         "name": "maxNetExposureUsd",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "IndexSnapshot",
+    "inputs": [
+      {
+        "name": "indexPriceId",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ]
   },
@@ -1997,6 +2094,22 @@ export const poolEngineAbi = [
   },
   {
     "type": "error",
+    "name": "PriceBeforeSplit",
+    "inputs": [
+      {
+        "name": "basisAt",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "appliedAt",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "PriceNotAcceptable",
     "inputs": [
       {
@@ -2061,21 +2174,15 @@ export const poolEngineAbi = [
   },
   {
     "type": "error",
-    "name": "SplitPending",
+    "name": "SplitUnrecorded",
     "inputs": [
       {
-        "name": "marketId",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "SplitWindow",
-    "inputs": [
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
       {
-        "name": "marketId",
+        "name": "from",
         "type": "uint256",
         "internalType": "uint256"
       }

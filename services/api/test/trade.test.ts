@@ -1,7 +1,8 @@
 // Trading page (2026-10): the PoolEngine math off-chain against vectors of contracts/test/engine/PoolEngine.t.sol
 // (fill price, fee, margin after the fee, liquidation and off-hours requirement, margin ratio), the liquidation
 // price against the engine predicate, the signed price a trade carries, the session states, the quote, the input
-// refusals (reduce-only, off-hours, caps, split window / pending, leverage), and the prepared transactions (decoded
+// refusals (reduce-only, off-hours, caps, a split unrecorded / repricing, leverage), the market units across a split
+// (audit N-1: per-share prints priced per unit), and the prepared transactions (decoded
 // and verified like the web does, tampered variants refused).
 import { describe, expect, test } from "bun:test";
 import { devAccount, priceTypedData, strToBytes32 } from "@bookrunner/shared";
@@ -207,16 +208,16 @@ describe("signed price and session", () => {
     expect(tradePrice({ stored: null }, null)).toBeNull();
   });
 
-  test("session: closed > split window > no price > off-hours > stale > close-only states > open", () => {
-    const price = { priceWad: PX, publishedAt: sec - 2, held: false, source: "signed" as const, priceData: "0x" as Hex };
-    const base = { bookState: "Live", price, nowSec: sec, maxAgeSec: 15, reduceOnly: false, closeOutAfter: 0, lossBudgetBlocked: false, split: { pending: false, window: false } };
+  test("session: closed > split unrecorded / repricing > no price > off-hours > stale > reduce-only > open", () => {
+    const price = { priceWad: PX, perSharePriceWad: PX, unitWad: WAD, publishedAt: sec - 2, held: false, source: "signed" as const, priceData: "0x" as Hex };
+    const base = { bookState: "Live", price, nowSec: sec, maxAgeSec: 15, reduceOnly: false, closeOutAfter: 0, lossBudgetBlocked: false, unit: { kind: "ok" as const, unitWad: WAD } };
     expect(sessionOf(base)).toMatchObject({ session: "open", canTrade: true, newRisk: true });
     expect(sessionOf({ ...base, bookState: "Subscription" }).session).toBe("closed");
-    expect(sessionOf({ ...base, split: { pending: true, window: true } }).session).toBe("split_window");
+    expect(sessionOf({ ...base, unit: { kind: "unrecorded" } })).toMatchObject({ session: "split_unrecorded", canTrade: false });
+    expect(sessionOf({ ...base, unit: { kind: "pending" } })).toMatchObject({ session: "split_repricing", canTrade: false });
     expect(sessionOf({ ...base, price: { ...price, held: true } })).toMatchObject({ session: "off_hours", canTrade: false });
     expect(sessionOf({ ...base, price: { ...price, publishedAt: sec - 13 } }).session).toBe("no_fresh_price"); // 13 > 15 - 3 headroom
     expect(sessionOf({ ...base, reduceOnly: true })).toMatchObject({ session: "reduce_only", canTrade: true, newRisk: false });
-    expect(sessionOf({ ...base, split: { pending: true, window: false } })).toMatchObject({ session: "split_close_only", newRisk: false });
     expect(sessionOf({ ...base, lossBudgetBlocked: true }).session).toBe("reduce_only");
     expect(sessionOf({ ...base, bookState: "Retiring" }).newRisk).toBe(false);
   });
@@ -246,6 +247,7 @@ function engineMarket(o: Partial<EngineMarketChainState> = {}, st: Partial<Engin
     fundingRatePerDayWad: 0n,
     lossBudgetBlocked: false,
     stored: { priceWad: PX, publishedAt: sec - 100, held: false },
+    lastLiveAt: sec - 100,
     maxPriceAge: 300,
     maxTradePriceAge: 15,
     ...o,
@@ -301,8 +303,9 @@ describe("trade router: reads", () => {
     expect(m.openInterest).toMatchObject({ longUsd: "10000.000000", shortUsd: "4000.000000", poolNetExposureUsd: "-6000.000000" });
     // buy room = min(75k - 10k, 75k - 6k), sell room = min(75k - 4k, 75k + 6k)
     expect(m.caps).toMatchObject({ buyRoomUsd: "65000.000000", sellRoomUsd: "71000.000000" });
-    // the list reads the split gate at a basis rounded down to 30 s
-    expect(w.chain.splitCalls[0]!.basisAt % 30).toBe(0);
+    expect(m.price).toMatchObject({ perSharePrice: "100.0", sharesPerUnit: "1.0" });
+    // the list reads the unit at a basis rounded down to 30 s
+    expect(w.chain.unitCalls[0]!.basisAt % 30).toBe(0);
   });
 
   test("no market open yet: engine books not live are not listed; the chain down is not an error", async () => {
@@ -381,16 +384,32 @@ describe("trade router: refusals before anything is built", () => {
     expect(await code(order(w2, UNITS(10)))).toContain("inventory cap");
   });
 
-  test("split: window refuses every trade, pending refuses new risk only (audit N-1)", async () => {
+  test("split (audit N-1): no gate while recorded; unrecorded pauses every trade; an index repricing waits", async () => {
     const w = await world({ state: { longSize: UNITS(1) } });
     setTrader(w, opened(U(500), UNITS(1)));
-    w.chain.split = { pending: false, window: true };
-    expect(await code(w.caller.trade.close({ marketId: 1, wallet: ALICE }))).toContain("pre-split");
-    w.chain.split = { pending: true, window: false };
-    expect(await code(order(w, UNITS(1)))).toContain("split is pending");
-    expect((await w.caller.trade.close({ marketId: 1, wallet: ALICE })).txs).toHaveLength(1);
-    // the order reads the gate at the carried price's exact basis
-    expect(w.chain.splitCalls.at(-1)!.basisAt).toBe(sec - 2);
+    expect((await order(w, UNITS(1))).txs).toHaveLength(1); // a split staged or done: nothing to gate
+    // the order reads the unit at the carried price's exact basis
+    expect(w.chain.unitCalls.at(-1)!).toEqual({ marketId: 1, basisAt: sec - 2 });
+    w.chain.unit = { kind: "unrecorded" };
+    expect(await code(w.caller.trade.close({ marketId: 1, wallet: ALICE }))).toContain("not recorded on chain");
+    expect(await code(w.caller.trade.withdraw({ marketId: 1, wallet: ALICE, amountUsd: "1" }))).toContain("not recorded on chain");
+    w.chain.unit = { kind: "pending" };
+    expect(await code(order(w, -UNITS(1)))).toContain("unit is being updated");
+  });
+
+  test("after a 10:1 split: the per-share print is priced per unit, positions keep their units and value", async () => {
+    // the oracle prints 10 per share; one unit is now 10 shares: the unit price is 100, nothing else moves
+    const w = await world({ state: { longSize: UNITS(10) } });
+    w.kv.put(KEYS.oracleBundle, bundleOf([await signed(sec - 2, { price: PX / 10n })]));
+    w.chain.unit = { kind: "ok", unitWad: 10n * WAD };
+    const p = opened(U(110), UNITS(10));
+    setTrader(w, p);
+    const r = await w.caller.trade.position({ marketId: 1, wallet: ALICE });
+    expect(r).toMatchObject({ size: "10.0", entryPrice: "100.05", markPrice: "100.0", equityUsd: "108.499500" });
+    const m = await w.caller.trade.market({ marketId: 1 });
+    expect(m.price).toMatchObject({ price: "100.0", perSharePrice: "10.0", sharesPerUnit: "10.0" });
+    const q = await w.caller.trade.quote({ marketId: 1, wallet: ALICE, sizeDelta: (-UNITS(10)).toString() });
+    expect(q).toMatchObject({ fillPrice: "99.95", refusal: null });
   });
 
   test("leverage over the maximum, and a closed book", async () => {

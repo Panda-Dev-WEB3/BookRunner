@@ -12,6 +12,11 @@
 // - liquidation_coverage — review I-6: more open positions than one pass reads (WATERFALL_LIQ_BATCH_SIZE x
 //   WATERFALL_LIQ_MAX_BATCHES): they are paged across passes, so a position may wait a full rotation. WARNING; CRITICAL
 //   when one rotation takes longer than ALERT_LIQ_ROTATION_SECONDS (120). Raise the batch count or the cadence.
+// - engine_split_unrecorded:<marketId>:<token> — audit N-1: a live stock split of a token behind an engine market (its
+//   Stock Token, or an index component) has no recorded ratio (the keeper's split recorder could not record it before
+//   effectiveAt). CRITICAL at once: every price-dependent call of the market (trades, margin withdrawals with a
+//   position, liquidations) reverts SplitUnrecorded for prices from that basis on, until governance records it with
+//   StockTokenRegistry.recordSplitAt(token, effectiveAt, old, new) from the token's UIMultiplierUpdated event.
 import type { RuleConfig } from "./config";
 import type { Condition, Snapshot } from "./types";
 
@@ -91,7 +96,19 @@ export function liquidationCoverage(s: Snapshot, c: RuleConfig): Condition[] {
   ];
 }
 
+export function engineSplitUnrecorded(s: Snapshot, _c: RuleConfig): Condition[] {
+  const st = s.liquidationKeeper;
+  if (!st) return [];
+  return st.splits.unrecorded.map((u) => ({
+    key: `engine_split_unrecorded:${u.marketId}:${u.token.toLowerCase()}`,
+    rule: "engine_split_unrecorded",
+    severity: "critical" as const,
+    summary: `engine market ${u.marketId}: a live stock split of ${short(u.token)} ${u.from > 1 ? `effective ${new Date(u.from * 1000).toISOString()} ` : ""}has no recorded ratio: trades, withdrawals with a position and liquidations revert (SplitUnrecorded) until governance StockTokenRegistry.recordSplitAt(token, effectiveAt, old, new) from the token's UIMultiplierUpdated event (RUNBOOK "Corporate actions")`,
+  }));
+}
+
 export const LIQUIDATION_RULES = {
+  engine_split_unrecorded: engineSplitUnrecorded,
   liquidation_coverage: liquidationCoverage,
   liquidation_backlog: liquidationBacklog,
   keeper_liquidation_failing: keeperLiquidationFailing,

@@ -1,5 +1,6 @@
 // Chain read port. Only views the DB does not hold (live wallet positions, protocol params, committee
 // tallies, authoritative charter validation). Implemented with viem in `viem.ts`; faked in tests.
+import type { EngineUnit } from "@bookrunner/shared/engineMath";
 import type { Charter, Deployment, Mandate } from "@bookrunner/shared/types";
 import type { Address, Hex } from "viem";
 
@@ -117,7 +118,10 @@ export interface PoolWalletState {
   epochs: Map<number, { shares: bigint; filledShares: bigint; assets: bigint; depositAssets: bigint; depositShares: bigint; endsAt: number; processed: boolean }>;
 }
 
-/** PoolEngine market of an in-house book (2026-10 trading page). Sizes 1e18, prices WAD, USD 6dp. */
+/**
+ * PoolEngine market of an in-house book (2026-10 trading page). Sizes 1e18 MARKET UNITS (audit N-1: one share until a
+ * split; `engineUnit` gives the shares per unit at a price's basis), prices WAD, USD 6dp. `stored` is per share.
+ */
 export interface EngineMarketChainState {
   engine: Address;
   adapter: Address;
@@ -147,6 +151,8 @@ export interface EngineMarketChainState {
   lossBudgetBlocked: boolean;
   /** AttestedOracle.latest(underlying): the STORED price (old by design on a quiet pull-oracle market); null when never priced */
   stored: { priceWad: bigint; publishedAt: number; held: boolean } | null;
+  /** AttestedOracle.lastLiveAt(underlying): the share basis of a held price (audit M-2 / N-1) */
+  lastLiveAt: number;
   maxPriceAge: number;
   maxTradePriceAge: number;
 }
@@ -190,9 +196,12 @@ export interface ChainGateway {
   engineMarket(adapter: Address): Promise<EngineMarketChainState | null>;
   /** A wallet in a market (uncached: read right after the wallet's own transactions). */
   engineTrader(marketId: number, wallet: Address): Promise<EngineTraderChainState>;
-  /** StockTokenRegistry.splitGate(priceId, basisAt) (audit N-1); no registry: no gate. */
-  splitGate(priceId: Hex, basisAt: number): Promise<{ pending: boolean; window: boolean }>;
+  /** PoolEngine.unitAt(marketId, basisAt) (audit N-1): shares per market unit for a price of that share basis. */
+  engineUnit(marketId: number, basisAt: number): Promise<EngineUnit>;
 }
+
+/** Audit N-1, PoolEngine.unitAt (shared with the liquidation keeper). */
+export type { EngineUnit };
 
 /** Provides the gateway when the deployment file is present; null while it is missing. */
 export type ChainProvider = () => ChainGateway | null;

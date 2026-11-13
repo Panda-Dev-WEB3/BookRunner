@@ -23,6 +23,8 @@ export interface PoolView {
   skewBps: number;
   initialMarginBps: number;
   maintenanceMarginBps: number;
+  /** traders' net size (long + short, market units): the rounding side of the unit price (audit N-1) */
+  netSize: bigint;
 }
 
 export interface EnginePosition {
@@ -88,7 +90,13 @@ export class EngineTrader {
       skewBps: Number(st.skewBps),
       initialMarginBps: Number(cfg.initialMarginBps),
       maintenanceMarginBps: Number(cfg.maintenanceMarginBps),
+      netSize: st.longSize + st.shortSize,
     };
+  }
+
+  /** Audit N-1: shares per market unit for a price of this share basis (reverts while a split is unrecorded). */
+  unitAt(marketId: bigint, basisAt: number): Promise<bigint> {
+    return this.pub.readContract({ address: this.engine, abi: poolEngineAbi, functionName: "unitAt", args: [marketId, BigInt(basisAt)] });
   }
 
   quotePrice(marketId: bigint, sizeDelta: bigint): Promise<bigint> {

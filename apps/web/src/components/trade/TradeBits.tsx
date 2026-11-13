@@ -52,6 +52,7 @@ export function MarketHeader({ m }: { m: TradeMarket }) {
           <div className="num text-[12px] text-ink-2">
             <PriceAge m={m} />
             {m.price?.held ? " · session closed" : ""}
+            {m.price && m.price.sharesPerUnit !== "1.0" ? ` · per unit of ${m.price.sharesPerUnit} shares (${fmtPrice(toNum(m.price.perSharePrice))} per share)` : ""}
           </div>
         </div>
       </div>

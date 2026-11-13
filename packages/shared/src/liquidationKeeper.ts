@@ -1,6 +1,7 @@
 // Status of the waterfall liquidation keeper (2026-10, in-house engine markets), written to KEYS.liquidationKeeper every
 // pass: what it watched, what is liquidatable and not liquidated yet (the backlog, with why), and its failure run. Read
-// by the alerts service (liquidation_backlog, keeper_liquidation_failing) and the API's /health. Tolerant parser.
+// by the alerts service (liquidation_backlog, keeper_liquidation_failing, engine_split_unrecorded) and the API's /health.
+// Tolerant parser.
 
 /** Why a liquidatable position is still open after a pass. */
 export type BacklogReason =
@@ -29,8 +30,12 @@ export interface LiquidationBacklogItem {
 export interface LiquidationMarketStatus {
   marketId: number;
   bookId: number | null;
-  /** open: live price; held: session closed (off-hours requirement); settled: governance settle price; closeout: wind-down open */
-  regime: "open" | "held" | "settled" | "closeout" | "no_price";
+  /**
+   * open: live price; held: session closed (off-hours requirement); settled: governance settle price; closeout: wind-down
+   * open; split_unrecorded (audit N-1): a live split at the price's basis has no recorded ratio, the market is frozen;
+   * split_repricing: an index market's unit moves at a component split, the keeper sends syncUnit with the signed round
+   */
+  regime: "open" | "held" | "settled" | "closeout" | "no_price" | "split_unrecorded" | "split_repricing";
   openPositions: number;
   /** age (s) of the price the pass used */
   priceAgeSec: number | null;
@@ -58,6 +63,12 @@ export interface LiquidationKeeperStatus {
   coverage: { total: number; checked: number; truncated: boolean; rotationSec: number };
   /** Review I-5: the last on-chain reconciliation of every known (market, trader): rows read, sizes repaired */
   reconcile: { at: number | null; checked: number; repaired: number; error: string | null };
+  /**
+   * Audit N-1 split recorder (every engine market's Stock Tokens, index components included): when it last checked,
+   * the recordSplit transactions it sent, and every token with a live split that has no recorded ratio (`from`: the
+   * share basis from which the market is frozen; 1 = any) until governance recordSplitAt.
+   */
+  splits: { checkedAt: number | null; recorded: number; unrecorded: Array<{ marketId: number; token: string; from: number }>; error: string | null };
 }
 
 /** The keeper rewrites the status every pass; the TTL outlives a few slow passes so a stalled keeper leaves an old status. */
@@ -66,7 +77,7 @@ export const LIQUIDATION_STATUS_TTL_SEC = 900;
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
 const REASONS = new Set<BacklogReason>(["pending", "gas_guard", "dust", "price", "failed"]);
-const REGIMES = new Set(["open", "held", "settled", "closeout", "no_price"]);
+const REGIMES = new Set(["open", "held", "settled", "closeout", "no_price", "split_unrecorded", "split_repricing"]);
 
 /** KEYS.liquidationKeeper JSON -> status; null when absent or malformed (malformed entries are dropped). */
 export function parseLiquidationStatus(raw: string | null | undefined): LiquidationKeeperStatus | null {
@@ -114,6 +125,13 @@ export function parseLiquidationStatus(raw: string | null | undefined): Liquidat
       reconcile: (() => {
         const r = (o.reconcile ?? {}) as Record<string, unknown>;
         return { at: num(r.at), checked: num(r.checked) ?? 0, repaired: num(r.repaired) ?? 0, error: str(r.error) };
+      })(),
+      splits: (() => {
+        const r = (o.splits ?? {}) as Record<string, unknown>;
+        const unrecorded = arr(r.unrecorded)
+          .filter((u) => num(u.marketId) !== null && typeof u.token === "string")
+          .map((u) => ({ marketId: num(u.marketId) as number, token: u.token as string, from: num(u.from) ?? 1 }));
+        return { checkedAt: num(r.checkedAt), recorded: num(r.recorded) ?? 0, unrecorded, error: str(r.error) };
       })(),
     };
   } catch {

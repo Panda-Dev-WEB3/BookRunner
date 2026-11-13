@@ -137,7 +137,7 @@ export function OrderPanel(props: { m: TradeMarket; address: string | null; posi
             { value: "sell", label: posSize > 0n ? "Sell (reduce long)" : "Short / sell" },
           ]}
         />
-        <Field label="Size" htmlFor="trade-size" help={unit === "usd" ? `In ${sym} of notional, converted to units at the oracle price.` : "In units of the underlying (one unit follows one share)."}>
+        <Field label="Size" htmlFor="trade-size" help={unit === "usd" ? `In ${sym} of notional, converted to units at the oracle price.` : m.price && m.price.sharesPerUnit !== "1.0" ? `In market units: one unit is ${m.price.sharesPerUnit} shares since a stock split.` : "In units of the underlying (one unit follows one share)."}>
           <div className="flex gap-2">
             <input
               id="trade-size"

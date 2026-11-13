@@ -1,20 +1,21 @@
 // Liquidation keeper (2026-10 in-house engine markets) against a fake engine: detection at the fresh signed price with
 // its priceData attached, the race (someone else liquidated first), the off-hours requirement (2 x initial margin while
 // held) and the settled-market rule (maintenance), forceClose for settled / wind-down markets, the gas guard (reward +
-// margin, per-tx and hourly caps), failures, the status written for alerts and the cadence.
+// margin, per-tx and hourly caps), failures, the status written for alerts and the cadence; audit N-1: the per-share
+// print priced per market unit across a split, a frozen (unrecorded) market, an index market's syncUnit, the split recorder.
 import { describe, expect, test } from "bun:test";
 import { createLogger, priceTypedData, strToBytes32 } from "@bookrunner/shared";
 import { poolEngineAbi } from "@bookrunner/shared/abi";
-import type { EnginePosition } from "@bookrunner/shared/engineMath";
+import type { EnginePosition, EngineUnit } from "@bookrunner/shared/engineMath";
 import type { LiquidationKeeperStatus } from "@bookrunner/shared/liquidationKeeper";
 import { type SignedPrice, signedPriceFor } from "@bookrunner/shared/signedPrice";
 import { encodePriceData, type PriceUpdate } from "@bookrunner/shared/eip712";
-import { BaseError, type Hex, encodeErrorResult } from "viem";
+import { type Address, BaseError, type Hex, encodeErrorResult } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { liquidationEthUsd, loadWaterfallConfig } from "../src/config";
 import { type EngineMarketCfg, type GasPolicy, type KeeperAction, type MarketRead, byStake, classifyRevert, gasDecision, priceUsed, usdToWei } from "../src/domain/liquidation";
 import { TxRevertedError } from "../src/kit/tx";
-import { type LiqCall, type LiquidationChain, LiquidationKeeper, type TraderRef } from "../src/liquidationKeeper";
+import { type LiqCall, type LiquidationChain, LiquidationKeeper, type SplitTokenState, type TraderRef } from "../src/liquidationKeeper";
 
 const log = createLogger("liquidation-test", "silent");
 const WAD = 10n ** 18n;
@@ -49,7 +50,14 @@ class Revert extends BaseError {
 }
 
 class FakeEngine implements LiquidationChain {
-  market: Omit<MarketRead, "cfg"> = { marketId: 1, fundingIndex: 0n, insuranceUsd: U(25_000), closeOutAfter: 0, stored: { priceWad: 100n * WAD, publishedAt: sec - 100, held: false }, settle: null };
+  market: Omit<MarketRead, "cfg"> = { marketId: 1, fundingIndex: 0n, insuranceUsd: U(25_000), closeOutAfter: 0, stored: { priceWad: 100n * WAD, publishedAt: sec - 100, held: false }, settle: null, lastLiveAt: sec - 100, netSize: 0n };
+  /** audit N-1: PoolEngine.unitAt answer, and the bases asked */
+  unit: EngineUnit = { kind: "ok", unitWad: WAD };
+  unitReads: Array<{ marketId: number; basisAt: number }> = [];
+  synced: Array<{ marketId: number; priceData: Hex }> = [];
+  tokens: Address[] = [];
+  splitState: SplitTokenState[] = [];
+  recorded: Address[] = [];
   positions = new Map<string, EnginePosition>();
   reads = 0;
   configReads = 0;
@@ -88,11 +96,32 @@ class FakeEngine implements LiquidationChain {
     return { hash: "0xabc" as Hex, costWei: this.gas * this.price };
   }
   readPassSizes: number[] = [];
+  async readUnits(reqs: Array<{ marketId: number; basisAt: number }>) {
+    this.unitReads.push(...reqs);
+    return new Map(reqs.map((r) => [r.marketId, this.unit] as const));
+  }
+  async syncUnit(marketId: number, priceData: Hex) {
+    this.synced.push({ marketId, priceData });
+    return { hash: "0xdef" as Hex, costWei: 0n };
+  }
+  async listMarkets() {
+    return [{ marketId: 1, underlying: PID }];
+  }
+  async splitTokens() {
+    return this.tokens;
+  }
+  async splitStates(tokens: Address[]) {
+    return this.splitState.filter((st) => tokens.includes(st.token));
+  }
+  async recordSplit(token: Address) {
+    this.recorded.push(token);
+    return { hash: "0x5b1" as Hex, costWei: 0n };
+  }
 }
 
 const POLICY: GasPolicy = { ethUsdWad: 3_000n * WAD, marginUsd: U(0.5), maxTxWei: 2n * 10n ** 15n, hourlyWei: 2n * 10n ** 16n, badDebtOverrideUsd: U(50) };
 
-function keeper(o: { engine?: FakeEngine; signed?: SignedPrice | null; open?: string[]; gas?: Partial<GasPolicy>; now?: { ms: number }; batchSize?: number; maxBatches?: number; reconcileMs?: number; rows?: Map<string, string> } = {}) {
+function keeper(o: { engine?: FakeEngine; signed?: SignedPrice | null; open?: string[]; gas?: Partial<GasPolicy>; now?: { ms: number }; batchSize?: number; maxBatches?: number; reconcileMs?: number; rows?: Map<string, string>; bundle?: Hex | null } = {}) {
   const engine = o.engine ?? new FakeEngine();
   const statuses: LiquidationKeeperStatus[] = [];
   const now = o.now ?? { ms: NOW };
@@ -113,6 +142,7 @@ function keeper(o: { engine?: FakeEngine; signed?: SignedPrice | null; open?: st
       },
     },
     signedPrices: async () => (o.signed ? new Map([[PID.toLowerCase(), o.signed]]) : new Map()),
+    signedBundle: async () => o.bundle ?? null,
     writeStatus: async (s) => {
       statuses.push(s);
     },
@@ -165,7 +195,7 @@ describe("liquidation keeper: detection", () => {
     expect(priceUsed(m, await sign(93n * WAD, sec - 301), sec, { maxPriceAge: 300, maxTradePriceAge: 15 })?.priceData).toBe("0x");
   });
 
-  test("no open position: no chain read at all, idle cadence", async () => {
+  test("no open position: no position read, idle cadence", async () => {
     const { k, engine, statuses } = keeper({ open: [] });
     expect(await k.tick()).toBe(60_000);
     expect(engine.reads + engine.configReads).toBe(0);
@@ -232,6 +262,71 @@ describe("liquidation keeper: the engine's rule", () => {
     const held = keeper({ engine: heldEngine, signed: await sign(100n * WAD, sec - 2, true) });
     await held.k.tick();
     expect(heldEngine.sent).toEqual([]);
+  });
+});
+
+describe("liquidation keeper: splits (audit N-1)", () => {
+  test("after a 10:1 split the per-share print (9.30) is priced per unit (93.0): the same liquidation as at 93 without it", async () => {
+    const signed = await sign(9_300_000_000_000_000_000n, sec - 2);
+    const { k, engine, statuses } = keeper({ signed });
+    engine.unit = { kind: "ok", unitWad: 10n * WAD };
+    engine.positions.set(ALICE, ALICE_110);
+    engine.positions.set(BOB, BOB_300);
+    await k.tick();
+    expect(engine.unitReads).toEqual([{ marketId: 1, basisAt: sec - 2 }]);
+    expect(engine.sent).toEqual([{ functionName: "liquidate", marketId: 1, trader: ALICE, priceData: signed.priceData }]);
+    expect(statuses.at(-1)!.totals.rewardsUsd).toBe("2.325000");
+  });
+
+  test("a held price is valued at the unit of its basis (lastLiveAt)", async () => {
+    const engine = new FakeEngine();
+    engine.market = { ...engine.market, lastLiveAt: sec - 7_200 };
+    const { k } = keeper({ engine, signed: await sign(100n * WAD, sec - 2, true) });
+    engine.positions.set(BOB, BOB_300);
+    await k.tick();
+    expect(engine.unitReads).toEqual([{ marketId: 1, basisAt: sec - 7_200 }]);
+  });
+
+  test("unrecorded split: nothing is decided or sent for the frozen market", async () => {
+    const { k, engine, statuses } = keeper({ signed: await sign(9_300_000_000_000_000_000n, sec - 2) });
+    engine.unit = { kind: "unrecorded" };
+    engine.positions.set(ALICE, ALICE_110);
+    await k.tick();
+    expect(engine.estimates).toEqual([]);
+    expect(statuses.at(-1)!.markets[0]).toMatchObject({ regime: "split_unrecorded", openPositions: 2 });
+  });
+
+  test("index market repricing: syncUnit carrying the oracle's whole signed round, then nothing else this pass", async () => {
+    const bundle = "0xb0b0" as Hex;
+    const { k, engine, statuses } = keeper({ signed: await sign(93n * WAD, sec - 2), bundle });
+    engine.unit = { kind: "pending" };
+    engine.positions.set(ALICE, ALICE_110);
+    expect(await k.tick()).toBe(10_000);
+    expect(engine.synced).toEqual([{ marketId: 1, priceData: bundle }]);
+    expect(engine.sent).toEqual([]);
+    expect(statuses.at(-1)!.markets[0]?.regime).toBe("split_repricing");
+  });
+
+  test("split recorder: recordSplit for a staged split, the unrecorded tokens in the status; every 60 s, positions or not", async () => {
+    const T1 = "0x00000000000000000000000000000000000000a1" as Address;
+    const T2 = "0x00000000000000000000000000000000000000a2" as Address;
+    const now = { ms: NOW };
+    const { k, engine, statuses } = keeper({ open: [], now });
+    engine.tokens = [T1, T2];
+    engine.splitState = [
+      { token: T1, syncNeeded: true, unrecordedFrom: 0 },
+      { token: T2, syncNeeded: false, unrecordedFrom: sec - 50 },
+    ];
+    await k.tick();
+    expect(engine.recorded).toEqual([T1]);
+    expect(statuses.at(-1)!.splits).toEqual({ checkedAt: NOW, recorded: 1, unrecorded: [{ marketId: 1, token: T2.toLowerCase(), from: sec - 50 }], error: null });
+    now.ms += 30_000;
+    await k.tick();
+    expect(engine.recorded).toEqual([T1]); // not before 60 s
+    now.ms += 30_000;
+    engine.splitState = [];
+    await k.tick();
+    expect(statuses.at(-1)!.splits.unrecorded).toEqual([]);
   });
 });
 

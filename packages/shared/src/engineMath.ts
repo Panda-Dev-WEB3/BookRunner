@@ -1,6 +1,7 @@
 // PoolEngine math off-chain (contracts/src/PoolEngine.sol, PoolEngineMath): the same integer formulas and the
 // same rounding, so a quote, a margin requirement or a liquidation price shown by the trading page is what the
-// engine computes. Units: size 1e18 = 1 unit (share) of the underlying, prices WAD, USD 6 decimals.
+// engine computes. Units: size 1e18 = 1 market unit (one share of the underlying until a split, audit N-1 below),
+// prices WAD per market unit, USD 6 decimals.
 // Pure (services/api/test/trade.test.ts checks it against vectors of contracts/test/engine/PoolEngine.t.sol); shared by
 // the API (trading page) and the waterfall liquidation keeper.
 
@@ -15,6 +16,68 @@ export const OFF_HOURS_MARGIN_MULTIPLE = 2n;
 export const NEW_RISK_MAX_PRICE_AGE = 60;
 
 export const abs = (x: bigint): bigint => (x < 0n ? -x : x);
+
+// ------------------------------------------------------------------ audit N-1: market units across a split
+// Positions, open interest, entry prices and the funding index are in MARKET UNITS, fixed for the market's life (one
+// share, or one index level, when the market was created). A split changes the shares per unit (`unitWad`,
+// PoolEngine.unitOf / unitAt at the price's share basis), never a position: every formula below takes the price PER
+// UNIT, i.e. the oracle's per-share price through unitPriceWad. With no split (unitWad = 1e18) nothing changes.
+
+/**
+ * PoolEngine.unitAt read off-chain: `ok` the shares per unit (WAD); `unrecorded` a live split at that basis has no
+ * recorded ratio (SplitUnrecorded: every price-dependent call reverts until governance records it); `pending` an index
+ * market's unit moves at that basis and the stored component prices are not that signed round yet (IndexSnapshot /
+ * PriceBeforeSplit: syncUnit with the round applies it).
+ */
+export type EngineUnit = { kind: "ok"; unitWad: bigint } | { kind: "unrecorded" } | { kind: "pending" };
+
+/** The unitAt revert names -> EngineUnit (undefined: another error). */
+export function unitFromRevert(errorName: string | undefined): EngineUnit | undefined {
+  if (errorName === "SplitUnrecorded") return { kind: "unrecorded" };
+  if (errorName === "IndexSnapshot" || errorName === "PriceBeforeSplit") return { kind: "pending" };
+  return undefined;
+}
+
+/** PoolEngine._unitPrice: per-share price x unitWad / 1e18, in the pool's favour (down while traders are net long, up otherwise). */
+export function unitPriceWad(priceWad: bigint, unitWad: bigint, netSize: bigint): bigint {
+  if (unitWad === WAD) return priceWad;
+  const num = priceWad * unitWad;
+  return netSize > 0n ? num / WAD : (num + WAD - 1n) / WAD;
+}
+
+/** Shares of the underlying in `size` market units (display; toward zero). */
+export const sharesOf = (size: bigint, unitWad: bigint): bigint => (size * unitWad) / WAD;
+
+/** A per-unit price as a per-share price (display; toward zero). */
+export const perSharePriceWad = (unitPrice: bigint, unitWad: bigint): bigint => (unitPrice * WAD) / unitWad;
+
+export interface IndexSplitComponent {
+  /** the component's stored per-share price, from the index price's signed round */
+  priceWad: bigint;
+  weightBps: bigint;
+  /** share factor already in the unit, and the one at the price's basis (StockTokenRegistry.shareFactor) */
+  appliedWad: bigint;
+  factorWad: bigint;
+}
+
+/**
+ * PoolEngineUnit's index move at a component split: unit x (L + sum_k w_k q_k (f_k - a_k) / (a_k 1e4)) / L, each term
+ * floored, the result rounded in the pool's favour. Components with appliedWad 0 (not seen yet) or no change count 0.
+ */
+export function indexUnitWad(unitWad: bigint, levelWad: bigint, comps: readonly IndexSplitComponent[], netSize: bigint): bigint {
+  let delta = 0n;
+  for (const c of comps) {
+    if (c.appliedWad === 0n || c.appliedWad === c.factorWad) continue;
+    const diff = c.factorWad > c.appliedWad ? c.factorWad - c.appliedWad : c.appliedWad - c.factorWad;
+    const term = (c.priceWad * c.weightBps * diff) / (c.appliedWad * BPS);
+    delta += c.factorWad > c.appliedWad ? term : -term;
+  }
+  if (delta === 0n) return unitWad;
+  const num = levelWad + delta;
+  if (num <= 0n) throw new Error("BadIndexLevel");
+  const x = unitWad * num;
+  return netSize > 0n ? x / levelWad : (x + levelWad - 1n) / levelWad;
+}
 const min = (a: bigint, b: bigint): bigint => (a < b ? a : b);
 
 /** floor(a / b), b > 0 (toward -inf). */

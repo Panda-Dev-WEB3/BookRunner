@@ -398,6 +398,47 @@ export const stockTokenRegistryAbi = [
   },
   {
     "type": "function",
+    "name": "recordSplit",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "recordSplitAt",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "at",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "multBefore",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "multAfter",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "register",
     "inputs": [
       {
@@ -584,7 +625,7 @@ export const stockTokenRegistryAbi = [
   },
   {
     "type": "function",
-    "name": "splitGate",
+    "name": "shareFactor",
     "inputs": [
       {
         "name": "priceId",
@@ -599,14 +640,112 @@ export const stockTokenRegistryAbi = [
     ],
     "outputs": [
       {
-        "name": "pending",
-        "type": "bool",
-        "internalType": "bool"
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "splitFactors",
+    "inputs": [
+      {
+        "name": "priceId",
+        "type": "bytes32",
+        "internalType": "bytes32"
       },
       {
-        "name": "window",
+        "name": "basisAt",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "factorWad",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "components",
+        "type": "tuple[]",
+        "internalType": "struct IStockTokenRegistry.SplitComponent[]",
+        "components": [
+          {
+            "name": "priceId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "weightBps",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "factorWad",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "splitSyncNeeded",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
         "type": "bool",
         "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "splitTokens",
+    "inputs": [
+      {
+        "name": "priceId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "type": "address[]",
+        "internalType": "address[]"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "splitUnrecorded",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "from",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -806,6 +945,68 @@ export const stockTokenRegistryAbi = [
   },
   {
     "type": "event",
+    "name": "SplitRecorded",
+    "inputs": [
+      {
+        "name": "priceId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "token",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "at",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "ratioWad",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "staged",
+        "type": "bool",
+        "indexed": false,
+        "internalType": "bool"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "StagedSplitCleared",
+    "inputs": [
+      {
+        "name": "priceId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "token",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "at",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "TokenActiveSet",
     "inputs": [
       {
@@ -909,6 +1110,11 @@ export const stockTokenRegistryAbi = [
   },
   {
     "type": "error",
+    "name": "BadSplit",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "BadWeights",
     "inputs": [
       {
@@ -922,6 +1128,22 @@ export const stockTokenRegistryAbi = [
     "type": "error",
     "name": "DuplicateComponent",
     "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "LiveTokenExists",
+    "inputs": [
+      {
+        "name": "priceId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
       {
         "name": "token",
         "type": "address",
@@ -984,12 +1206,61 @@ export const stockTokenRegistryAbi = [
   },
   {
     "type": "error",
+    "name": "NotLiveMultiplier",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "NotRegistered",
     "inputs": [
       {
         "name": "token",
         "type": "address",
         "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "NothingToRecord",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "SplitNotRecorded",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "SplitUnrecorded",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "from",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ]
   },

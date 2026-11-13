@@ -5,19 +5,26 @@
 import { type Db, enginePositions } from "@bookrunner/db";
 import { KEYS, type Deployment, multicall3For } from "@bookrunner/shared";
 import { LIQUIDATION_STATUS_TTL_SEC, type LiquidationKeeperStatus } from "@bookrunner/shared/liquidationKeeper";
-import { attestedOracleAbi, bookrunnerConfigAbi, poolEngineAbi } from "@bookrunner/shared/abi";
-import type { EnginePosition } from "@bookrunner/shared/engineMath";
+import { attestedOracleAbi, bookrunnerConfigAbi, poolEngineAbi, stockTokenRegistryAbi } from "@bookrunner/shared/abi";
+import { type EnginePosition, type EngineUnit, unitFromRevert } from "@bookrunner/shared/engineMath";
 import { type SignedPrice, signedPriceFor } from "@bookrunner/shared/signedPrice";
 import { and, eq, ne } from "drizzle-orm";
 import type { Redis } from "ioredis";
-import { type Address, type Hex, type PublicClient, encodeFunctionData } from "viem";
+import { type Address, BaseError, ContractFunctionRevertedError, type Hex, type PublicClient, encodeFunctionData, zeroAddress } from "viem";
 import type { EngineMarketCfg, MarketRead } from "../domain/liquidation";
 import type { TxSender } from "../kit/tx";
-import type { LiqCall, LiquidationChain, PositionStore } from "../liquidationKeeper";
+import type { LiqCall, LiquidationChain, PositionStore, SplitTokenState } from "../liquidationKeeper";
 
 const posKey = (marketId: number, trader: string) => `${marketId}|${trader.toLowerCase()}`;
 
-type Read = { address: Address; abi: typeof poolEngineAbi | typeof attestedOracleAbi | typeof bookrunnerConfigAbi; functionName: string; args?: readonly unknown[] };
+type Read = { address: Address; abi: typeof poolEngineAbi | typeof attestedOracleAbi | typeof bookrunnerConfigAbi | typeof stockTokenRegistryAbi; functionName: string; args?: readonly unknown[] };
+
+/** The custom error a read reverted with, decoded with the engine's ABI (it names the split errors, audit N-1). */
+function revertName(err: unknown): string | undefined {
+  if (!(err instanceof BaseError)) return undefined;
+  const r = err.walk((e) => e instanceof ContractFunctionRevertedError);
+  return r instanceof ContractFunctionRevertedError ? r.data?.errorName : undefined;
+}
 
 export class ViemLiquidationChain implements LiquidationChain {
   private readonly multicall: Address | null;
@@ -68,17 +75,20 @@ export class ViemLiquidationChain implements LiquidationChain {
         { address: this.engine, abi: poolEngineAbi, functionName: "closeOutAfter", args: [BigInt(marketId)] },
         { address: oracle, abi: attestedOracleAbi, functionName: "latest", args: [underlying] },
         { address: oracle, abi: attestedOracleAbi, functionName: "settlePrice", args: [underlying] },
+        { address: oracle, abi: attestedOracleAbi, functionName: "lastLiveAt", args: [underlying] },
       ]),
       ...traders.map((t) => ({ address: this.engine, abi: poolEngineAbi, functionName: "positionOf", args: [BigInt(t.marketId), t.trader as Address] })),
     ];
     const res = await this.batch(calls);
     const out = new Map<number, Omit<MarketRead, "cfg">>();
     markets.forEach(({ marketId }, i) => {
-      const st = res[i * 4] as { fundingIndex: bigint; insuranceUsd: bigint } | null;
-      const co = res[i * 4 + 1] as bigint | null;
-      const lt = res[i * 4 + 2] as { priceWad: bigint; publishedAt: bigint; held: boolean } | null;
-      const sp = res[i * 4 + 3] as readonly [bigint, bigint, bigint, bigint, boolean] | null;
-      if (!st || co === null || !lt) return; // unreadable this pass: skipped, retried next pass
+      const st = res[i * 5] as { fundingIndex: bigint; insuranceUsd: bigint; longSize: bigint; shortSize: bigint } | null;
+      const co = res[i * 5 + 1] as bigint | null;
+      const lt = res[i * 5 + 2] as { priceWad: bigint; publishedAt: bigint; held: boolean } | null;
+      const sp = res[i * 5 + 3] as readonly [bigint, bigint, bigint, bigint, boolean] | null;
+      const ll = res[i * 5 + 4] as bigint | null;
+      // unreadable this pass (audit N-1: a frozen market's state() reverts too): skipped, retried next pass
+      if (!st || co === null || !lt || ll === null) return;
       out.set(marketId, {
         marketId,
         fundingIndex: st.fundingIndex,
@@ -86,14 +96,82 @@ export class ViemLiquidationChain implements LiquidationChain {
         closeOutAfter: Number(co),
         stored: lt.priceWad > 0n && lt.publishedAt > 0n ? { priceWad: lt.priceWad, publishedAt: Number(lt.publishedAt), held: lt.held } : null,
         settle: sp ? { priceWad: sp[0], effective: sp[4] } : null,
+        lastLiveAt: Number(ll),
+        netSize: st.longSize + st.shortSize,
       });
     });
     const positions = new Map<string, EnginePosition>();
     traders.forEach((t, i) => {
-      const p = res[markets.length * 4 + i] as EnginePosition | null;
+      const p = res[markets.length * 5 + i] as EnginePosition | null;
       if (p) positions.set(posKey(t.marketId, t.trader), { size: p.size, entryPriceWad: p.entryPriceWad, marginUsd: p.marginUsd, fundingIndexAtEntry: p.fundingIndexAtEntry });
     });
     return { markets: out, positions };
+  }
+
+  async readUnits(reqs: Array<{ marketId: number; basisAt: number }>): Promise<Map<number, EngineUnit>> {
+    const out = new Map<number, EngineUnit>();
+    // one read each: a revert names the split state (aggregate3 would hide the error name)
+    await Promise.all(
+      reqs.map(async ({ marketId, basisAt }) => {
+        try {
+          const unitWad = await this.pc.readContract({ address: this.engine, abi: poolEngineAbi, functionName: "unitAt", args: [BigInt(marketId), BigInt(basisAt)] });
+          out.set(marketId, { kind: "ok", unitWad });
+        } catch (err) {
+          const u = unitFromRevert(revertName(err));
+          if (u) out.set(marketId, u);
+        }
+      }),
+    );
+    return out;
+  }
+
+  async syncUnit(marketId: number, priceData: Hex) {
+    const out = await this.sender.send({ address: this.engine, abi: poolEngineAbi as never, functionName: "syncUnit", args: [BigInt(marketId), priceData], label: `syncUnit(market=${marketId})` });
+    return { hash: out.hash, costWei: out.receipt.gasUsed * (out.receipt.effectiveGasPrice ?? 0n) };
+  }
+
+  async listMarkets() {
+    const n = Number(await this.pc.readContract({ address: this.engine, abi: poolEngineAbi, functionName: "marketCount" }));
+    const ids = Array.from({ length: n }, (_, i) => i + 1);
+    const res = await this.batch(ids.map((id) => ({ address: this.engine, abi: poolEngineAbi, functionName: "config", args: [BigInt(id)] })));
+    return ids.flatMap((marketId, i) => {
+      const c = res[i] as { underlying: Hex } | null;
+      return c ? [{ marketId, underlying: c.underlying }] : [];
+    });
+  }
+
+  private get registry(): Address | null {
+    const r = this.d.contracts.stockRegistry;
+    return r && r !== zeroAddress ? r : null;
+  }
+
+  async splitTokens(underlying: Hex): Promise<Address[]> {
+    const reg = this.registry;
+    if (!reg) return [];
+    return [...(await this.pc.readContract({ address: reg, abi: stockTokenRegistryAbi, functionName: "splitTokens", args: [underlying] }))];
+  }
+
+  async splitStates(tokens: Address[]): Promise<SplitTokenState[]> {
+    const reg = this.registry;
+    if (!reg || tokens.length === 0) return [];
+    const res = await this.batch(
+      tokens.flatMap((t) => [
+        { address: reg, abi: stockTokenRegistryAbi, functionName: "splitSyncNeeded", args: [t] },
+        { address: reg, abi: stockTokenRegistryAbi, functionName: "splitUnrecorded", args: [t] },
+      ]),
+    );
+    return tokens.map((token, i) => {
+      const sync = res[i * 2] as boolean | null;
+      const from = res[i * 2 + 1] as bigint | null;
+      return { token, syncNeeded: sync === true, unrecordedFrom: from === null ? null : Number(from) };
+    });
+  }
+
+  async recordSplit(token: Address) {
+    const reg = this.registry;
+    if (!reg) throw new Error("no StockTokenRegistry in the deployment");
+    const out = await this.sender.send({ address: reg, abi: stockTokenRegistryAbi as never, functionName: "recordSplit", args: [token], label: `recordSplit(${token})` });
+    return { hash: out.hash, costWei: out.receipt.gasUsed * (out.receipt.effectiveGasPrice ?? 0n) };
   }
 
   private data(call: LiqCall): Hex {
@@ -174,6 +252,22 @@ export function redisSignedPrices(redis: Redis, domain: { chainId: number; oracl
       if (s) out.set(u.toLowerCase(), s);
     }
     return out;
+  };
+}
+
+/** The oracle's whole signed bundle (one round of every price id it publishes): what syncUnit carries (audit N-1). */
+export function redisSignedBundle(redis: Redis, domain: { chainId: number; oracle: Address }) {
+  return async (): Promise<Hex | null> => {
+    try {
+      const raw = await redis.get(KEYS.oracleBundle);
+      const b = raw ? (JSON.parse(raw) as { priceData?: unknown; chainId?: unknown; oracle?: unknown }) : null;
+      if (!b || typeof b.priceData !== "string" || !b.priceData.startsWith("0x") || b.priceData === "0x") return null;
+      if (b.chainId !== undefined && b.chainId !== domain.chainId) return null;
+      if (typeof b.oracle === "string" && b.oracle.toLowerCase() !== domain.oracle.toLowerCase()) return null;
+      return b.priceData as Hex;
+    } catch {
+      return null;
+    }
   };
 }
 

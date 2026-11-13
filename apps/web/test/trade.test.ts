@@ -118,7 +118,7 @@ describe("what an order does", () => {
 
 describe("session and price", () => {
   test("badges for every session", () => {
-    expect(Object.keys(SESSION_BADGE).sort()).toEqual(["closed", "no_fresh_price", "off_hours", "open", "reduce_only", "split_close_only", "split_window"]);
+    expect(Object.keys(SESSION_BADGE).sort()).toEqual(["closed", "no_fresh_price", "off_hours", "open", "reduce_only", "split_repricing", "split_unrecorded"]);
     expect(SESSION_BADGE.open.tone).toBe("good");
     expect(SESSION_BADGE.off_hours.label).toBe("Off-hours");
   });

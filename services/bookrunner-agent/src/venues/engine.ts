@@ -170,8 +170,10 @@ export interface EngineState {
   insuranceEquityUsd: bigint;
   poolEquityUsd: bigint;
   poolCashUsd: bigint;
-  netSize: bigint; // pool net size, 1e18 units (= -(long + short))
+  netSize: bigint; // pool net size, 1e18 market units (= -(long + short))
   reduceOnly: boolean;
+  /** audit N-1: shares per market unit (PoolEngine.unitOf; 1e18 until a split); absent = 1e18 */
+  unitWad?: bigint;
 }
 
 export interface EngineTrade {
@@ -305,8 +307,10 @@ export class EngineVenue implements QuotingVenue {
   async account(): Promise<VenueAccount> {
     const st = await this.deps.chain.readState();
     const netQty = Number(st.netSize) / 1e18;
+    // audit N-1: netQty is in market units; the oracle quotes per share: priced per unit (x shares per unit)
     const oracle = this.deps.oraclePx();
-    const markPx = oracle && oracle > 0 ? oracle : netQty !== 0 ? Math.abs(Number(st.netExposureUsd) / 1e6 / netQty) : 0;
+    const perUnit = oracle && oracle > 0 ? (oracle * Number(st.unitWad ?? 10n ** 18n)) / 1e18 : null;
+    const markPx = perUnit ?? (netQty !== 0 ? Math.abs(Number(st.netExposureUsd) / 1e6 / netQty) : 0);
     return {
       equityUsd: st.marginEquityUsd,
       freeCollateralUsd: st.marginEquityUsd > 0n ? st.marginEquityUsd : 0n,

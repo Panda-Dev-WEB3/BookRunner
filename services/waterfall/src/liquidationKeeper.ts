@@ -16,14 +16,21 @@
 //   5. every `reconcileMs` (and at start) one pass over EVERY known (market, trader) row, size 0 included, reading
 //      positionOf on chain and repairing the row's size when the indexer's differs (review I-5);
 //   6. the status (backlog with reasons, failure run, coverage, reconciliation, totals) to KEYS.liquidationKeeper.
+// Audit N-1 (splits): positions are in market units; step 3 prices the per-share print per unit at the shares per unit
+// of its share basis (PoolEngine.unitAt). A market whose unit cannot be read is not decided: `split_unrecorded` (a live
+// split with no recorded ratio: frozen until governance, alert engine_split_unrecorded) or `split_repricing` (an index
+// market's unit moves at a component split: syncUnit carrying the oracle's whole signed round, once per pass). And every
+// `splitCheckMs`, whatever the open positions, the split recorder: each engine market's Stock Tokens (index components
+// included) are checked and `StockTokenRegistry.recordSplit(token)` is sent for a split staged on a token and not
+// recorded as staged, so the ratio is on chain before effectiveAt.
 // The next pass comes after `intervalMs` while a market trades (or closes out), `idleIntervalMs` otherwise (off-hours:
 // the held price does not move; a session close is caught by the first pass after it).
 import type { Logger } from "@bookrunner/shared";
 import { attestedOracleAbi, poolEngineAbi } from "@bookrunner/shared/abi";
-import type { EnginePosition } from "@bookrunner/shared/engineMath";
+import type { EnginePosition, EngineUnit } from "@bookrunner/shared/engineMath";
 import type { LiquidationKeeperStatus, LiquidationMarketStatus } from "@bookrunner/shared/liquidationKeeper";
 import type { SignedPrice } from "@bookrunner/shared/signedPrice";
-import type { Abi, Hex } from "viem";
+import type { Abi, Address, Hex } from "viem";
 import {
   Backlog,
   type EngineMarketCfg,
@@ -32,10 +39,12 @@ import {
   type KeeperAction,
   type MarketRead,
   type ProtocolParams,
+  atUnit,
   byStake,
   classifyRevert,
   decideMarket,
   gasDecision,
+  priceBasis,
   priceUsed,
   regimeOf,
 } from "./domain/liquidation";
@@ -46,6 +55,15 @@ export interface LiqCall {
   marketId: number;
   trader: string;
   priceData: Hex;
+}
+
+/** Audit N-1: a Stock Token behind an engine market, as the split recorder reads it. */
+export interface SplitTokenState {
+  token: Address;
+  /** StockTokenRegistry.splitSyncNeeded: recordSplit would change its record */
+  syncNeeded: boolean;
+  /** StockTokenRegistry.splitUnrecorded: 0 = none, else the basis from which the market is frozen (1 = any); null = unreadable */
+  unrecordedFrom: number | null;
 }
 
 export interface TraderRef {
@@ -66,6 +84,17 @@ export interface LiquidationChain {
   gasPrice(): Promise<bigint>;
   /** Sends through the serialised sender with this gas limit; the mined receipt's cost (a revert throws TxRevertedError with its cost). */
   send(call: LiqCall, gas: bigint): Promise<{ hash: Hex; costWei: bigint }>;
+  /** Audit N-1: PoolEngine.unitAt per market at a share basis (a market missing from the map: unreadable this pass). */
+  readUnits(reqs: Array<{ marketId: number; basisAt: number }>): Promise<Map<number, EngineUnit>>;
+  /** Audit N-1: PoolEngine.syncUnit(marketId, priceData) through the sender. */
+  syncUnit(marketId: number, priceData: Hex): Promise<{ hash: Hex; costWei: bigint }>;
+  /** Every engine market (marketCount, config.underlying). */
+  listMarkets(): Promise<Array<{ marketId: number; underlying: Hex }>>;
+  /** StockTokenRegistry.splitTokens(underlying). */
+  splitTokens(underlying: Hex): Promise<Address[]>;
+  splitStates(tokens: Address[]): Promise<SplitTokenState[]>;
+  /** StockTokenRegistry.recordSplit(token) through the sender. */
+  recordSplit(token: Address): Promise<{ hash: Hex; costWei: bigint }>;
 }
 
 export interface PositionStore {
@@ -82,6 +111,8 @@ export interface LiquidationDeps {
   positions: PositionStore;
   /** the freshest signed print per underlying (one Redis read per pass) */
   signedPrices(underlyings: Hex[]): Promise<Map<string, SignedPrice>>;
+  /** the oracle's whole signed bundle (one round of every price id): what syncUnit carries; null = none */
+  signedBundle?(): Promise<Hex | null>;
   writeStatus(s: LiquidationKeeperStatus): Promise<void>;
   /** marketId -> bookId, for the status (best effort) */
   bookOf?(marketId: number): Promise<number | null>;
@@ -99,6 +130,8 @@ export interface LiquidationDeps {
   reconcileMs: number;
   /** configs re-read at most this often (ms) */
   configTtlMs?: number;
+  /** audit N-1 split recorder cadence (ms); 0 = off. Default 60 s. */
+  splitCheckMs?: number;
   now?: () => number;
 }
 
@@ -124,6 +157,8 @@ export class LiquidationKeeper {
   private coverage: LiquidationKeeperStatus["coverage"] = { total: 0, checked: 0, truncated: false, rotationSec: 0 };
   private failures: LiquidationKeeperStatus["failures"] = { consecutive: 0, since: null, lastError: null, lastErrorAt: null };
   private totals = { liquidations: 0, forceCloses: 0, raced: 0, rewardsUsd: 0n, gasWei: 0n };
+  private splits: LiquidationKeeperStatus["splits"] = { checkedAt: null, recorded: 0, unrecorded: [], error: null };
+  private splitTokensOf = new Map<string, { at: number; tokens: Address[] }>();
 
   constructor(private readonly d: LiquidationDeps) {}
 
@@ -148,6 +183,8 @@ export class LiquidationKeeper {
     let busy = false;
     try {
       if (this.d.reconcileMs > 0 && (this.reconciledAt === null || started - this.reconciledAt >= this.d.reconcileMs)) await this.reconcileAll();
+      const splitEvery = this.d.splitCheckMs ?? 60_000;
+      if (splitEvery > 0 && (this.splits.checkedAt === null || started - this.splits.checkedAt >= splitEvery)) await this.checkSplits();
       const open = sortRefs(await this.d.positions.open());
       if (open.length === 0) {
         this.backlog.observe([], started);
@@ -179,6 +216,7 @@ export class LiquidationKeeper {
         gasGuard: this.d.gas.ethUsdWad > 0n ? "reward" : "cap_only",
         coverage: this.coverage,
         reconcile: this.reconcile,
+        splits: this.splits,
       })
       .catch((err) => this.d.log.warn({ err: errText(err) }, "liquidation status write failed"));
     return delay;
@@ -214,6 +252,23 @@ export class LiquidationKeeper {
   }
 
   /** Review I-5: positionOf of every known row (size 0 too) on chain; the row's size is repaired where it differs. */
+  /** Audit N-1: an index market's unit move, carried by the oracle's whole signed round (one transaction per pass). */
+  private async syncIndexUnit(marketId: number) {
+    const bundle = this.d.signedBundle ? await this.d.signedBundle().catch(() => null) : null;
+    if (!bundle) {
+      this.d.log.warn({ marketId }, "index market unit pending and no signed bundle to carry; retrying next pass");
+      return;
+    }
+    try {
+      const sent = await this.d.chain.syncUnit(marketId, bundle);
+      this.totals.gasWei += sent.costWei;
+      this.d.log.info({ marketId, tx: sent.hash }, "index market unit applied at a component split (syncUnit)");
+    } catch (err) {
+      const info = describeRevert(err, REVERT_ABI);
+      this.d.log.warn({ marketId, revert: info.errorName ?? info.message }, "syncUnit failed (the stored round may still be mixed); retrying next pass");
+    }
+  }
+
   private async reconcileAll() {
     const at = this.now();
     this.reconciledAt = at;
@@ -239,6 +294,57 @@ export class LiquidationKeeper {
       this.reconcile = { ...this.reconcile, at, error: errText(err) };
       this.fail(`reconcile: ${errText(err)}`);
       this.d.log.warn({ err: errText(err) }, "engine position reconciliation failed; retrying next interval");
+    }
+  }
+
+  /**
+   * Audit N-1 split recorder: every engine market's tokens (cached for the config TTL); recordSplit for each token whose
+   * staged split is not recorded as staged; the tokens with an unrecorded live split go to the status (alert
+   * engine_split_unrecorded). Never throws: a failure is counted and reported.
+   */
+  private async checkSplits() {
+    const at = this.now();
+    try {
+      const markets = await this.d.chain.listMarkets();
+      const ttl = this.d.configTtlMs ?? 600_000;
+      const byToken = new Map<string, { token: Address; marketIds: number[] }>();
+      for (const m of markets) {
+        const key = m.underlying.toLowerCase();
+        let hit = this.splitTokensOf.get(key);
+        if (!hit || at - hit.at > ttl) {
+          hit = { at, tokens: await this.d.chain.splitTokens(m.underlying) };
+          this.splitTokensOf.set(key, hit);
+        }
+        for (const t of hit.tokens) {
+          const e = byToken.get(t.toLowerCase()) ?? { token: t, marketIds: [] };
+          e.marketIds.push(m.marketId);
+          byToken.set(t.toLowerCase(), e);
+        }
+      }
+      const states = await this.d.chain.splitStates([...byToken.values()].map((e) => e.token));
+      const unrecorded: LiquidationKeeperStatus["splits"]["unrecorded"] = [];
+      let recorded = this.splits.recorded;
+      for (const st of states) {
+        const marketIds = byToken.get(st.token.toLowerCase())?.marketIds ?? [];
+        if (st.syncNeeded) {
+          try {
+            const sent = await this.d.chain.recordSplit(st.token);
+            recorded++;
+            this.totals.gasWei += sent.costWei;
+            this.d.log.warn({ token: st.token, tx: sent.hash, marketIds }, "stock split staged on the token: ratio recorded on chain (StockTokenRegistry.recordSplit)");
+          } catch (err) {
+            this.fail(`recordSplit(${st.token}): ${errText(err)}`);
+            this.d.log.warn({ token: st.token, err: errText(err) }, "recordSplit failed; retrying next check");
+          }
+        }
+        if (st.unrecordedFrom !== null && st.unrecordedFrom > 0) for (const marketId of marketIds) unrecorded.push({ marketId, token: st.token.toLowerCase(), from: st.unrecordedFrom });
+      }
+      if (unrecorded.length > 0) this.d.log.error({ unrecorded }, "a live stock split has no recorded ratio: the engine market is frozen until governance recordSplitAt (RUNBOOK)");
+      this.splits = { checkedAt: at, recorded, unrecorded, error: null };
+    } catch (err) {
+      this.splits = { ...this.splits, checkedAt: at, error: errText(err) };
+      this.fail(`split check: ${errText(err)}`);
+      this.d.log.warn({ err: errText(err) }, "split check failed; retrying next interval");
     }
   }
 
@@ -270,12 +376,38 @@ export class LiquidationKeeper {
     const actions: KeeperAction[] = [];
     const markets: LiquidationMarketStatus[] = [];
     let busy = false;
+    // audit N-1: the shares per unit at each market's price basis (one read per market)
+    const perShare = new Map<number, ReturnType<typeof priceUsed>>();
     for (const { marketId, underlying } of list) {
+      const raw = read.markets.get(marketId);
+      const cfg = this.cfgs.get(marketId);
+      if (raw && cfg) perShare.set(marketId, priceUsed({ ...raw, cfg }, signed.get(underlying.toLowerCase()) ?? null, nowSec, params));
+    }
+    const units = await this.d.chain.readUnits(
+      [...perShare.entries()].flatMap(([marketId, px]) => {
+        const raw = read.markets.get(marketId);
+        return px && raw ? [{ marketId, basisAt: priceBasis(raw, px) }] : [];
+      }),
+    );
+    for (const { marketId } of list) {
       const raw = read.markets.get(marketId);
       const cfg = this.cfgs.get(marketId);
       if (!raw || !cfg) continue;
       const m: MarketRead = { ...raw, cfg };
-      const px = priceUsed(m, signed.get(underlying.toLowerCase()) ?? null, nowSec, params);
+      const shareP = perShare.get(marketId) ?? null;
+      const unit = shareP ? units.get(marketId) : undefined;
+      if (shareP && unit?.kind !== "ok") {
+        const openHere = open.filter((o) => o.marketId === marketId).length;
+        pass.checked += openHere;
+        const regime = unit?.kind === "unrecorded" ? "split_unrecorded" : unit?.kind === "pending" ? "split_repricing" : "no_price";
+        markets.push({ marketId, bookId: (await this.d.bookOf?.(marketId).catch(() => null)) ?? null, regime, openPositions: openHere, priceAgeSec: Math.max(0, nowSec - shareP.publishedAt) });
+        if (unit?.kind === "pending") {
+          busy = true;
+          await this.syncIndexUnit(marketId);
+        }
+        continue;
+      }
+      const px = shareP && unit?.kind === "ok" ? atUnit(m, shareP, unit.unitWad) : shareP;
       const positions = open
         .filter((o) => o.marketId === marketId)
         .map((o) => ({ trader: o.trader, position: read.positions.get(posKey(marketId, o.trader)) }))
@@ -363,7 +495,7 @@ export class LiquidationKeeper {
         log.warn({ revert: info, cls }, "liquidation transaction failed; retrying next pass");
       }
     }
-    if (!failed && this.reconcile.error === null) this.ok();
+    if (!failed && this.reconcile.error === null && this.splits.error === null) this.ok();
     if (queue.length > 0) busy = true;
     return { markets, busy };
   }

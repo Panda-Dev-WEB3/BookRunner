@@ -28,8 +28,9 @@ export const REVERT_ABI = parseAbi([
   "error OffHours(uint256 marketId)",
   "error StalePrice(bytes32 underlying, uint64 publishedAt)",
   "error MarketReduceOnly(uint256 marketId)",
-  "error SplitPending(uint256 marketId)",
-  "error SplitWindow(uint256 marketId)",
+  "error SplitUnrecorded(address token, uint256 from)",
+  "error IndexSnapshot(bytes32 indexPriceId)",
+  "error PriceBeforeSplit(uint64 basisAt, uint64 appliedAt)",
   "error PriceNotAcceptable(uint256 fillPriceWad, uint256 acceptablePriceWad)",
   "error ExposureCap(uint256 exposureUsd, uint256 maxNetExposureUsd)",
   "error InsufficientMargin(uint256 requiredUsd, int256 availableUsd)",
@@ -95,10 +96,11 @@ export function revertMessage(name: string, args: readonly unknown[] = []): stri
       return "The price this transaction carried was too old by the time it was mined. Prepare it again and sign promptly.";
     case "MarketReduceOnly":
       return "The market is reduce-only: only reductions and closes fill.";
-    case "SplitPending":
-      return "A stock split is pending: the market is close-only until it is done.";
-    case "SplitWindow":
-      return "A stock split took effect and the price is still in pre-split shares: no trade fills until the oracle reprices.";
+    case "SplitUnrecorded":
+      return "A stock split took effect that is not recorded on chain: the market is paused until governance records it. Margin top-ups still work.";
+    case "IndexSnapshot":
+    case "PriceBeforeSplit":
+      return "A stock in the index split and the market's unit is being updated. Prepare the order again in a few seconds.";
     case "PriceNotAcceptable":
       return "The price moved past your slippage limit before the trade was mined. Nothing filled; review the order again.";
     case "ExposureCap":

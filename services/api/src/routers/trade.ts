@@ -21,10 +21,12 @@ import {
   type SessionState,
   type SignedPrice,
   type TradePrice,
+  atUnit,
   lev,
   marketView,
   mathOf,
   positionView,
+  priceBasis,
   safeMaxWithdraw,
   sessionOf,
   signedPriceFor,
@@ -46,7 +48,7 @@ const WITHDRAW_PRICE_HEADROOM_SEC = 20;
 
 const marketIdInput = intLike(1);
 const slippageInput = intLike(1, MAX_SLIPPAGE_BPS).default(DEFAULT_SLIPPAGE_BPS);
-/** Signed size in 1e18 units of the underlying (positive: buy / long). */
+/** Signed size in 1e18 market units (positive: buy / long; audit N-1: one unit is one share until a split). */
 const sizeDeltaInput = z
   .string()
   .regex(/^-?\d{1,40}$/, "expected a signed integer size in 1e18 units")
@@ -97,12 +99,13 @@ interface Priced {
 async function price(deps: ApiDeps, m: LoadedMarket, src: { bundle: unknown; messages: unknown[] }, exactBasis: boolean): Promise<Priced> {
   const gw = requireChain(deps);
   const signed = signedPriceFor(src.bundle, src.messages, m.chain.config.underlying, { chainId: gw.chainId, oracle: gw.deployment.contracts.oracle });
-  const p = tradePrice(m.chain, signed);
+  const perShare = tradePrice(m.chain, signed);
   const nowSec = Math.floor(deps.now() / 1000);
-  // the split gate is read at the share basis of the price the trade uses (its publishedAt); the list rounds it
-  // down to 30 s (one cached read per market and half-minute; conservative: an earlier basis can only open a window)
-  const basis = p ? (exactBasis ? p.publishedAt : p.publishedAt - (p.publishedAt % 30)) : 0;
-  const split = p ? await gw.splitGate(m.chain.config.underlying, basis) : { pending: false, window: false };
+  // audit N-1: the shares per market unit at the share basis of the price the trade uses (publishedAt; lastLiveAt when
+  // held); the list rounds the basis down to 30 s (one cached read per market and half-minute; display only)
+  const b = perShare ? priceBasis(perShare, m.chain.lastLiveAt) : 0;
+  const unit = perShare ? await gw.engineUnit(m.chain.marketId, exactBasis ? b : b - (b % 30)) : null;
+  const p = perShare && unit?.kind === "ok" ? atUnit(perShare, unit.unitWad, m.chain.state.longSize + m.chain.state.shortSize) : perShare;
   const session = sessionOf({
     bookState: m.book.state,
     price: p,
@@ -111,7 +114,7 @@ async function price(deps: ApiDeps, m: LoadedMarket, src: { bundle: unknown; mes
     reduceOnly: m.chain.state.reduceOnly,
     closeOutAfter: m.chain.closeOutAfter,
     lossBudgetBlocked: m.chain.lossBudgetBlocked,
-    split,
+    unit,
   });
   return { m, signed, price: p, session, nowSec };
 }
@@ -130,7 +133,7 @@ async function loadMarket(deps: ApiDeps, marketId: number): Promise<LoadedMarket
 async function loadPriced(deps: ApiDeps, marketId: number, exactBasis = true): Promise<Priced> {
   const m = await loadMarket(deps, marketId);
   const src = await signedSource(deps);
-  return hardChain(deps, "engine.splitGate", () => price(deps, m, src, exactBasis));
+  return hardChain(deps, "engine.unitAt", () => price(deps, m, src, exactBasis));
 }
 
 /** Fresh read of a wallet in a market: the prepared transactions (deposit / withdraw / order / close). */
@@ -247,7 +250,19 @@ export const tradeRouter = router({
     if (!gw) return { asOf: new Date(deps.now()).toISOString(), chainReadable: false, markets: [] };
     try {
       const books = await engineBooks(deps);
-      const chains = await Promise.all(books.map((b) => gw.engineMarket(b.adapterAddr as Address)));
+      // one market whose views revert (audit N-1: a split with no recorded ratio freezes it) does not hide the others;
+      // every read failing is the chain being down
+      const errors: unknown[] = [];
+      const chains = await Promise.all(
+        books.map((b) =>
+          gw.engineMarket(b.adapterAddr as Address).catch((err: unknown) => {
+            errors.push(err);
+            deps.log.warn({ err, what: "trade.markets", book: b.id }, "engine market unreadable");
+            return null;
+          }),
+        ),
+      );
+      if (books.length > 0 && errors.length === books.length) throw errors[0];
       const src = await signedSource(deps);
       const markets = await Promise.all(
         books.flatMap((b, i) => {
@@ -314,14 +329,13 @@ export const tradeRouter = router({
     const txs: PreparedTx[] = [];
     const warnings: string[] = [];
     if (p.size !== 0n) {
-      // PoolEngine.withdrawMargin with a position: a live price at most min(maxPriceAge, 60 s) old, the split gate
-      // (pending or window), funding settled first, then equity >= initial margin
+      // PoolEngine.withdrawMargin with a position: a live price at most min(maxPriceAge, 60 s) old, valued at the
+      // shares per unit of its basis (audit N-1), funding settled first, then equity >= initial margin
       const px = pr.price;
       if (!px) fail("PRECONDITION_FAILED", "The market has no price yet");
       if (px.held) fail("PRECONDITION_FAILED", "The stock's session is closed: with an open position, margin cannot be withdrawn until it reopens (close the position first, after the reopen)");
       if (pr.nowSec - px.publishedAt > withdrawMaxAge(m.chain) - WITHDRAW_PRICE_HEADROOM_SEC) fail("PRECONDITION_FAILED", "No signed price fresh enough to withdraw with an open position; retry in a few seconds");
-      const split = await hardChain(deps, "engine.splitGate", (g) => g.splitGate(m.chain.config.underlying, px.publishedAt));
-      if (split.window || split.pending) fail("PRECONDITION_FAILED", "A stock split is pending or in progress: margin cannot be withdrawn while a position is open (close it first)");
+      if (!pr.session.canTrade && (pr.session.session === "split_unrecorded" || pr.session.session === "split_repricing")) fail("PRECONDITION_FAILED", pr.session.reasons[0] ?? "A stock split is being applied");
       const max = safeMaxWithdraw(m.chain, t, px.priceWad, !!deps.settings.tradeRefuseUnholdable);
       if (amount > max)
         fail("PRECONDITION_FAILED", `At most ${usdStr(max)} can be withdrawn with this position open: the rest must stay as margin (${deps.settings.tradeRefuseUnholdable ? `the off-hours requirement: the position stays at or below the leverage an order may reach here` : "initial margin"}, with room for a 1% move). Reduce the position to free more.`);

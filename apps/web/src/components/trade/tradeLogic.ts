@@ -128,9 +128,9 @@ export const fmtLeverage = (x: number | null | undefined): string =>
 export const SESSION_BADGE: Record<TradeSession, { label: string; tone: Tone }> = {
   open: { label: "Open", tone: "good" },
   reduce_only: { label: "Reduce-only", tone: "warn" },
-  split_close_only: { label: "Close-only (split pending)", tone: "warn" },
   off_hours: { label: "Off-hours", tone: "neutral" },
-  split_window: { label: "Paused (split)", tone: "critical" },
+  split_unrecorded: { label: "Paused (split not recorded)", tone: "critical" },
+  split_repricing: { label: "Updating (index split)", tone: "warn" },
   no_fresh_price: { label: "Waiting for a price", tone: "neutral" },
   closed: { label: "Closed", tone: "neutral" },
 };
@@ -224,7 +224,7 @@ export function tradeRiskLines(m: Pick<TradeMarket, "margin" | "tradePriceMaxAge
     },
     {
       title: "A guarded launch",
-      body: "The first in-house markets open with a small inventory cap and an insurance fund that absorbs bad debt first. Caps can stop new orders, a stock split makes a market close-only, and the market can be set to reduce-only. This is new software on a new chain.",
+      body: "The first in-house markets open with a small inventory cap and an insurance fund that absorbs bad debt first. Caps can stop new orders and the market can be set to reduce-only. A stock split changes how many shares one unit holds, never your position or its value. This is new software on a new chain.",
     },
   ];
 }

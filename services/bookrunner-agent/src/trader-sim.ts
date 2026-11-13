@@ -28,7 +28,8 @@ import {
   walletClientFor,
   type DevRole,
 } from "@bookrunner/shared";
-import { bookrunnerConfigAbi, poolEngineAdapterAbi } from "@bookrunner/shared/abi";
+import { attestedOracleAbi, bookrunnerConfigAbi, poolEngineAdapterAbi } from "@bookrunner/shared/abi";
+import { unitPriceWad } from "@bookrunner/shared/engineMath";
 import { Redis } from "ioredis";
 import type { Hex, PublicClient } from "viem";
 import { BookChain, type OraclePoint } from "./chain/book-chain";
@@ -158,7 +159,10 @@ async function engineLoop(
         trader.poolView(marketId),
         signed ? Promise.resolve(null) : chain.oracleLatest(priceIdHex),
       ]);
-      const px: OraclePoint = signed ? pointOf(signed.update) : (stored as OraclePoint);
+      const perShare: OraclePoint = signed ? pointOf(signed.update) : (stored as OraclePoint);
+      // audit N-1: positions are in market units; the per-share print is priced per unit at its share basis
+      const basis = perShare.held ? Number(await pub.readContract({ address: dep.contracts.oracle, abi: attestedOracleAbi, functionName: "lastLiveAt", args: [priceIdHex] })) : perShare.publishedAt;
+      const px: OraclePoint = { ...perShare, priceWad: unitPriceWad(perShare.priceWad, await trader.unitAt(marketId, basis), pool.netSize) };
       const priceData = signed ? toPriceData([signed]) : null;
       // without a carried price the stored one must be recent: maxTradePriceAge on a pull engine
       const staleAfter = trader.pullTrade ? prices.maxTradePriceAgeSec : prices.maxPriceAgeSec;

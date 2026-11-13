@@ -55,6 +55,14 @@ describe("engine positions", () => {
     expect(store.s.enginePositions[k(BOB)]).toMatchObject({ sizeRaw: "0", lastBlock: 6, lastLogIndex: 1 });
   });
 
+  test("audit N-1: a split changes no row (sizes are market units); UnitUpdated is not a position event", async () => {
+    const { chain, store, make } = world();
+    chain.logs.push(makeLog(poolEngineAbi, "UnitUpdated", { marketId: 1n, unitWad: 10n * UNIT, basisAt: 1_790_000_000n }, { address: ENGINE, block: 3, logIndex: 2, tx: 4 }));
+    chain.head = 4n;
+    await drain(make());
+    expect(store.s.enginePositions[`1|${BOB.toLowerCase()}`]).toMatchObject({ sizeRaw: (-2n * UNIT).toString(), lastBlock: 3, lastLogIndex: 0 });
+  });
+
   test("idempotent: a re-applied range and an older log change nothing", async () => {
     const { chain, store, make } = world();
     chain.head = 6n;

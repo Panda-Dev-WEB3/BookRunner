@@ -3,6 +3,9 @@
 // Trade with newSize 0), Liquidation closes the whole position, ClosedOut is a wind-down / settle close-out, and
 // MarginChanged registers a trader before the first trade (size unchanged). Idempotent: a row is only replaced by a
 // later log (block, logIndex), so a re-applied range changes nothing.
+// Audit N-1: sizes are MARKET UNITS (one share until a split). A split changes the shares per unit (PoolEngine.unitOf;
+// an index market's UnitUpdated), never a position, so no row is ever rebased here: the size stored is the engine's
+// own, before and after any number of splits (the keeper's positionOf reconciliation compares like with like).
 import { arg } from "./convert";
 import type { Handler } from "./handlers";
 

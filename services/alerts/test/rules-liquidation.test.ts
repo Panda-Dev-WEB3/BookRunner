@@ -3,7 +3,7 @@
 import { describe, expect, test } from "bun:test";
 import { type LiquidationKeeperStatus, parseLiquidationStatus } from "@bookrunner/shared/liquidationKeeper";
 import { evaluate } from "../src/rules";
-import { LIQUIDATION_RULES, keeperLiquidationFailing, liquidationBacklog, liquidationCoverage } from "../src/rules-liquidation";
+import { LIQUIDATION_RULES, engineSplitUnrecorded, keeperLiquidationFailing, liquidationBacklog, liquidationCoverage } from "../src/rules-liquidation";
 import type { Condition } from "../src/types";
 import { NOW, book, rules, snap } from "./fixtures";
 
@@ -24,6 +24,7 @@ function status(o: Partial<LiquidationKeeperStatus> = {}): LiquidationKeeperStat
     gasGuard: "reward",
     coverage: { total: 3, checked: 3, truncated: false, rotationSec: 0 },
     reconcile: { at: NOW - 60_000, checked: 3, repaired: 0, error: null },
+    splits: { checkedAt: NOW - 30_000, recorded: 0, unrecorded: [], error: null },
     ...o,
   };
 }
@@ -94,9 +95,24 @@ describe("liquidation_coverage (review I-6)", () => {
   });
 });
 
+describe("engine_split_unrecorded (audit N-1)", () => {
+  test("quiet with every split recorded; critical per market and token with the governance fix named", () => {
+    expect(engineSplitUnrecorded(snap({ liquidationKeeper: status() }), rules())).toEqual([]);
+    const T = "0x00000000000000000000000000000000000000A1";
+    const c = engineSplitUnrecorded(snap({ liquidationKeeper: status({ splits: { checkedAt: NOW, recorded: 0, unrecorded: [{ marketId: 2, token: T, from: 1_790_000_000 }], error: null } }) }), rules());
+    expect(ks(c)).toEqual([[`engine_split_unrecorded:2:${T.toLowerCase()}`, "critical"]]);
+    expect(c[0]!.summary).toContain("recordSplitAt");
+    expect(engineSplitUnrecorded(snap({ liquidationKeeper: null }), rules())).toEqual([]);
+  });
+});
+
 describe("status parsing", () => {
   test("round trip; malformed entries dropped; garbage is null", () => {
-    const s = status({ backlog: [{ marketId: 1, trader: TRADER, action: "forceClose", since: NOW, reason: "price", detail: null }] });
+    const s = status({
+      backlog: [{ marketId: 1, trader: TRADER, action: "forceClose", since: NOW, reason: "price", detail: null }],
+      markets: [{ marketId: 1, bookId: 7, regime: "split_repricing", openPositions: 3, priceAgeSec: 2 }],
+      splits: { checkedAt: NOW, recorded: 2, unrecorded: [{ marketId: 1, token: TRADER, from: 1 }], error: null },
+    });
     expect(parseLiquidationStatus(JSON.stringify(s))).toEqual(s);
     const bad = { ...s, backlog: [...s.backlog, { trader: 3 }], markets: [{ regime: "x" }] };
     const p = parseLiquidationStatus(JSON.stringify(bad))!;
