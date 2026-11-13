@@ -43,7 +43,8 @@ if [ -z "${BOOKRUNNER_UPDATE_REEXEC:-}" ]; then
   fi
   # ---- 2. root-owned deploy copy (.env.infra is local state, kept); re-run when this script changed
   before="$(sha256sum "$SELF" | cut -d' ' -f1)"
-  rsync -a --delete --exclude=/.env.infra "$SRC/deploy/server/" "$DEPLOY/"
+  # .env.infra and site-manifest.json are local state (kept); the manifest is rewritten after the publish below
+  rsync -a --delete --exclude=/.env.infra --exclude=/site-manifest.json "$SRC/deploy/server/" "$DEPLOY/"
   chown -R root:root "$DEPLOY"
   chmod -R go-w "$DEPLOY"
   if [ "$before" != "$(sha256sum "$DEPLOY/update.sh" | cut -d' ' -f1)" ]; then
@@ -89,6 +90,10 @@ if [ -f apps/site/package.json ]; then
   echo "==> site build (apps/site)"
   ( cd apps/site && "${AS[@]}" ../../node_modules/.bin/bun run build >/dev/null )
   [ -f apps/site/dist/index.html ] || { echo "!! apps/site/dist/index.html missing after the build"; exit 1; }
+  # /official-links/ is built from contracts/deployments/4663.json: on the mainnet host its absence is a mistake
+  if [ "$HOST_NET" = mainnet ] && grep -q "Published here after the mainnet deployment" apps/site/dist/official-links/index.html 2>/dev/null; then
+    echo "!! /official-links/ shows placeholders: contracts/deployments/4663.json is missing or unreadable in $APP" >&2
+  fi
   SITE_BUILT=1
 else
   echo "==> apps/site/package.json not found: skipping the public site (the web root keeps its current files)"
@@ -105,6 +110,23 @@ fi
 chown -R bookrunner:bookrunner "$WWW"
 echo "==> published: site $([ "$SITE_BUILT" = 1 ] && echo "-> $WWW/" || echo "unchanged"), app -> $WWW/app/"
 
+# ---- published-file manifest (services/alerts site_files_changed / site_manifest_missing; HARDENING.md): sha256 of every
+# file under $WWW, computed AS bookrunner (root runs no app-tree code; that user owns the files anyway) and written by root
+# to a root-owned file OUTSIDE the web root, so nothing running as bookrunner can bless a later change. Written right after
+# the publish: the alert waits 2 minutes before paging, longer than this gap. A failure leaves the previous manifest
+# (the alert then names this deploy's changes: re-run update.sh --web-only).
+SITE_MANIFEST="$DEPLOY/site-manifest.json"
+tmp="$(mktemp "$DEPLOY/.site-manifest.XXXXXX")"
+if "${AS[@]}" node_modules/.bin/bun scripts/site-manifest.ts "$WWW" --commit "$WANT" > "$tmp" && [ "$(head -c 1 "$tmp")" = "{" ]; then
+  chown root:root "$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$SITE_MANIFEST"
+  echo "==> site manifest: $SITE_MANIFEST ($(grep -c '"[0-9a-f]\{64\}"' "$SITE_MANIFEST") files)"
+else
+  rm -f "$tmp"
+  echo "!! site manifest NOT written: services/alerts keeps comparing against the previous one" >&2
+fi
+
 # ---- nginx: rate-limit zones (http level) first, then the locations that use them (validated; rolled back if nginx -t fails)
 NGINX_SNIPPET_SRC="$DEPLOY/nginx-bookrunner-locations.conf"
 NGINX_HTTP_SRC="$DEPLOY/nginx-bookrunner-http.conf"
@@ -115,6 +137,9 @@ nginx_install_snippet || echo "!! nginx snippet NOT updated (see the nginx -t ou
 nginx_patch_site_hsts || echo "!! nginx site HSTS NOT updated (see the nginx -t output above)" >&2
 NGINX_WILDCARD_SRC="$DEPLOY/nginx-bookrunner-wildcard.conf"
 nginx_install_wildcard_site || echo "!! nginx wildcard site NOT installed (see the nginx -t output above); unknown *.bookrunner.tech names keep the host's default" >&2
+NGINX_MTA_STS_SRC="$DEPLOY/nginx-bookrunner-mta-sts.conf"
+NGINX_MTA_STS_SNIPPET_SRC="$DEPLOY/nginx-bookrunner-mta-sts-locations.conf"
+nginx_install_mta_sts_site || echo "!! nginx MTA-STS site / policy NOT updated (see the nginx -t output above)" >&2
 if ! nginx_site_uses_snippet; then
   echo "!! $(nginx_site_file) does not include $NGINX_SNIPPET_DST yet: /app/ is not routed." >&2
   echo "!! run once: sudo bash $DEPLOY/patch-nginx.sh --dry-run   then   sudo bash $DEPLOY/patch-nginx.sh" >&2

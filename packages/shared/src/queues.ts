@@ -105,6 +105,7 @@ export function busNames(ns: string = BUS_NS) {
       liquidationKeeper: `${p}:keeper:liquidations`, // JSON LiquidationKeeperStatus (waterfall liquidation keeper, every pass, TTL; alerts + api /health)
       venueEverListed: `${p}:ops-venue:ever-listed`, // SET of venue symbols ever seen listed (survives restarts: listed -> missing, never awaiting)
       supervisorStatus: `${p}:supervisor:status`, // JSON SupervisorStatus (scripts/dev.ts)
+      cspReports: (bucketStartSec: number) => `${p}:csp:reports:${bucketStartSec}`, // HASH cspField -> count (api /csp-report, TTL; alerts csp_violations)
     },
   };
 }

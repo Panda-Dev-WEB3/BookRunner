@@ -23,10 +23,12 @@ import {
 import { TrancheChoice } from "../../components/invest/TrancheChoice";
 import { useProtocolParams, useTrancheRounds } from "../../components/invest/useInvestChain";
 import { WithdrawPanel } from "../../components/invest/WithdrawPanel";
+import { useInvestGate } from "../../components/GuardedLaunchBanner";
 import { IconArrowRight } from "../../components/icons";
 import { Badge, Callout, Card, Tabs } from "../../components/ui";
 import type { BookDetail } from "../../lib/api-types";
 import { venueLabel } from "../../lib/copy";
+import { GUARDED_COPY } from "../../lib/guardedLaunch";
 import { isoToSec, tickerOf, usdRaw } from "../../lib/format";
 import { nextMarkLabel } from "../../lib/lowgas";
 import type { TopUpRound } from "../../lib/topup";
@@ -137,11 +139,14 @@ function BookInvest({ book, now }: { book: BookDetail; now: number }) {
     advanced.current = true;
     setStep(s);
   };
-  const effectiveStep: FlowStep = step === "review" && !me ? "amount" : step;
+  // guarded launch with no book in Subscription / Live: the deposit flow stays on the tranche comparison, Continue disabled
+  const gate = useInvestGate();
+  const depositsClosed = gate.status !== "open";
+  const effectiveStep: FlowStep = depositsClosed ? "tranche" : step === "review" && !me ? "amount" : step;
   const ctx = tranche
     ? { book, ticker, addrs, tranche, window: windows[tranche], room: rooms[tranche], seniorRoom: tranche === "senior" ? seniorRoom : null }
     : null;
-  const selectedOpen = tranche ? windows[tranche].status === "open" : false;
+  const selectedOpen = tranche ? windows[tranche].status === "open" && !depositsClosed : false;
 
   const deposit = (
     <div className="space-y-5">
@@ -151,7 +156,11 @@ function BookInvest({ book, now }: { book: BookDetail; now: number }) {
           {killedDepositNote(bookWindow)} Withdrawals and claims are never blocked by a kill.
         </Callout>
       )}
-      {bookWindow.status === "open" ? (
+      {gate.status === "closed" ? (
+        <Callout tone="warn" title={GUARDED_COPY.gateTitle}>
+          {GUARDED_COPY.gateBody} You can still compare the two tranches below.
+        </Callout>
+      ) : bookWindow.status === "open" ? (
         <p className="max-w-3xl text-[14px] text-ink-2">{windowSentence(bookWindow)}</p>
       ) : (
         <Callout tone={bookWindow.status === "paused" || bookWindow.status === "settling" ? "warn" : "neutral"} title={bookWindow.status === "loading" ? "Checking the deposit round" : bookWindow.status === "paused" ? "Deposits are paused" : bookWindow.status === "settling" ? "This round has ended" : "Deposits are closed right now"}>
@@ -173,7 +182,9 @@ function BookInvest({ book, now }: { book: BookDetail; now: number }) {
                 {tranche ? `Continue with ${TRANCHE_NAME[tranche]}` : "Choose a tranche to continue"}
                 <IconArrowRight size={15} />
               </button>
-              {tranche && !selectedOpen && bookWindow.status !== "loading" && <span className="text-[12.5px] text-muted">Deposits into {TRANCHE_NAME[tranche]} are not open right now.</span>}
+              {tranche && !selectedOpen && bookWindow.status !== "loading" && gate.status !== "loading" && (
+                <span className="text-[12.5px] text-muted">Deposits into {TRANCHE_NAME[tranche]} are not open right now.</span>
+              )}
             </div>
           </div>
         )}

@@ -65,6 +65,21 @@ describe("nginx Content-Security-Policy", () => {
     }
   });
 
+  test("reports violations to /csp-report (report-uri for every browser, report-to through Reporting-Endpoints)", () => {
+    expect(directive("report-uri")).toBe("report-uri /csp-report");
+    expect(directive("report-to")).toBe("report-to csp-endpoint");
+    expect(locations).toContain(`add_header Reporting-Endpoints 'csp-endpoint="https://bookrunner.tech/csp-report"' always;`);
+  });
+
+  test("connect-src allows the RPC of every chain a page reads from the browser (the desk at /dashboard/ is a testnet build)", () => {
+    const connect = directive("connect-src").split(/\s+/);
+    const desk = readFileSync(resolve(ROOT, "apps/site/src/dashboard/config.ts"), "utf8").match(/rpcUrl: "(https:\/\/[^"]+)"/)?.[1];
+    expect(desk).toBeDefined();
+    expect(connect).toContain(desk!);
+    const mainnet = readFileSync(resolve(ROOT, "apps/web/.env.mainnet"), "utf8").match(/^VITE_RPC_URL=(\S+)$/m)?.[1];
+    expect(connect).toContain(mainnet!);
+  });
+
   test("locks down the rest: objects, base, framing, forms", () => {
     for (const d of ["object-src 'none'", "base-uri 'self'", "frame-ancestors 'none'", "form-action 'self'"]) expect(csp).toContain(d);
   });
@@ -99,8 +114,8 @@ describe("nginx Content-Security-Policy", () => {
 });
 
 describe("nginx rate limits", () => {
-  test("/trpc/ and /health use zones defined in the http-level conf", () => {
-    for (const zone of ["bookrunner_trpc", "bookrunner_health"]) {
+  test("/trpc/, /health and /csp-report use zones defined in the http-level conf", () => {
+    for (const zone of ["bookrunner_trpc", "bookrunner_health", "bookrunner_csp"]) {
       expect(locations).toContain(`limit_req zone=${zone} `);
       expect(httpConf).toMatch(new RegExp(`limit_req_zone \\$binary_remote_addr zone=${zone}:\\d+m rate=\\d+r/s;`));
     }

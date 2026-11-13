@@ -560,6 +560,8 @@ export const TESTNET_LIVE_PINNED: Readonly<Record<string, string>> = {
   // alerts mail says which stack; the daily backup (both stacks in one set) is recorded in the public stack's Redis db
   ALERT_LABEL: "BookRunner testnet-live (Orderly rehearsal)",
   ALERT_BACKUP_EXPECTED: "0",
+  // the host's web root and its manifest are watched by the public stack's alerts (one site per host)
+  ALERT_SITE_EXPECTED: "0",
 };
 
 /** Processes the live variant never starts. */

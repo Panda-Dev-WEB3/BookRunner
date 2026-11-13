@@ -6,6 +6,7 @@ import type { RuleConfig } from "./config";
 import { HOLD_RULES } from "./rules-holds";
 import { LIQUIDATION_RULES } from "./rules-liquidation";
 import { POOL_RULES } from "./rules-pool";
+import { SECURITY_RULES } from "./rules-security";
 import type { BookSnap, Condition, OracleConfirmSnap, OracleProbe, OracleSourceSnap, Sample, Snapshot } from "./types";
 
 /** States in which a book is marked every period (Book.sol: Live and Retiring). */
@@ -869,6 +870,7 @@ export const RULES = {
   api_health: apiHealth,
   oracle,
   backup,
+  ...SECURITY_RULES,
   infra,
 } as const;
 

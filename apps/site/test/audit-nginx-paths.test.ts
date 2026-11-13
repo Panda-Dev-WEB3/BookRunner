@@ -45,7 +45,8 @@ describe("audit L-3: nginx /trpc/ path confusion", () => {
 
   test("every proxied API location passes a fixed URI and its own stamp", () => {
     const proxies = [...code(locations).matchAll(/proxy_pass ([^;]+);/g)].map((m) => m[1]);
-    expect(proxies.sort()).toEqual(["http://127.0.0.1:4400/health", "http://127.0.0.1:4400/status", "http://127.0.0.1:4400/trpc/"]);
+    expect(proxies.sort()).toEqual(["http://127.0.0.1:4400/csp-report", "http://127.0.0.1:4400/health", "http://127.0.0.1:4400/status", "http://127.0.0.1:4400/trpc/"]);
+    expect(block(locations, "location = /csp-report")).toContain("proxy_set_header X-Bookrunner-Route /csp-report;");
     expect(block(locations, "location = /health")).toContain("proxy_set_header X-Bookrunner-Route /health;");
     expect(block(locations, "location = /status.json")).toContain("proxy_set_header X-Bookrunner-Route /status;");
   });

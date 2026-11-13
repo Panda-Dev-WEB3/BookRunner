@@ -8,11 +8,13 @@ import { useHealth } from "../api/hooks";
 import { navSection } from "../lib/navSection";
 import { config } from "../lib/config";
 import { LEGAL, STRAPLINE } from "../lib/copy";
+import { OFFICIAL_LINKS_URL } from "../lib/guardedLaunch";
 import { appChain, chainName } from "../wallet/chains";
 import { isTestChain } from "../wallet/network";
 import { WalletButton } from "../wallet/WalletButton";
 import { WrongNetworkBanner } from "../wallet/WrongNetworkBanner";
 import { cx } from "./cx";
+import { GuardedLaunchBanner } from "./GuardedLaunchBanner";
 import { IconChevronDown, IconExternal, IconGithub, IconMenu, LogoMark } from "./icons";
 import { Container, Drawer } from "./ui";
 
@@ -279,7 +281,7 @@ function Header() {
   );
 }
 
-function FooterLinks({ title, links }: { title: string; links: Array<{ label: string; to?: string; href?: string }> }) {
+function FooterLinks({ title, links }: { title: string; links: Array<{ label: string; to?: string; href?: string; sameTab?: boolean }> }) {
   return (
     <div>
       <h2 className="text-[12px] font-semibold tracking-[0.06em] text-ink uppercase">{title}</h2>
@@ -290,6 +292,11 @@ function FooterLinks({ title, links }: { title: string; links: Array<{ label: st
               <Link to={l.to} className="text-ink-2 hover:text-ink">
                 {l.label}
               </Link>
+            ) : l.sameTab ? (
+              // a page of the public site on this origin (outside the app's router)
+              <a href={l.href} className="text-ink-2 hover:text-ink">
+                {l.label}
+              </a>
             ) : (
               <a href={l.href} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 text-ink-2 hover:text-ink">
                 {l.label}
@@ -306,6 +313,7 @@ function FooterLinks({ title, links }: { title: string; links: Array<{ label: st
 
 function Footer() {
   const resources = [
+    { label: "Official links", href: OFFICIAL_LINKS_URL, sameTab: true },
     { label: "Docs", href: config.docsUrl },
     { label: "GitHub", href: config.repoUrl },
     ...(config.explorerUrl ? [{ label: "Block explorer", href: config.explorerUrl }] : []),
@@ -430,6 +438,7 @@ export function Layout() {
         Skip to content
       </a>
       <Header />
+      <GuardedLaunchBanner />
       <WrongNetworkBanner />
       <ChainMismatch />
       <main id="main" tabIndex={-1} className="flex-1 focus:outline-none">

@@ -1,7 +1,9 @@
 // Snapshot collection: Postgres (books, newest marks, kill journal, indexer cursors), Redis (risk state,
 // signed venue reports, supervisor heartbeat), the chain (head, role key balances, buybackPending,
 // markInterval, the InsurancePool) and the API's /health. Each source fails independently: a failed source becomes an
-// infra / rpc / api condition instead of blinding the other rules.
+// infra / rpc / api condition instead of blinding the other rules. Also: the CSP violation counts the API keeps in Redis
+// and the published-file check (siteFiles.ts), both for rules-security.ts.
+import { CSP_REPORT_BUCKET_SEC, CSP_REPORT_OVERFLOW_FIELD, cspBucket, parseCspField } from "@bookrunner/shared/cspReports";
 import { parseLiquidationStatus } from "@bookrunner/shared/liquidationKeeper";
 import { KEYS } from "@bookrunner/shared/queues";
 import { SESSIONS_24X7, type Sessions, effectiveSessions } from "@bookrunner/shared/sessions";
@@ -11,6 +13,8 @@ import type {
   BackupSnap,
   BookSnap,
   BuilderFeedSnap,
+  CspSnap,
+  SiteFilesSnap,
   VenueOpsSnap,
   IndexerCursorSnap,
   KillEventSnap,
@@ -57,6 +61,8 @@ export interface DbPort {
 export interface KvPort {
   get(key: string): Promise<string | null>;
   mget(keys: string[]): Promise<Array<string | null>>;
+  /** HGETALL (the CSP report buckets); absent = csp_violations is not evaluated */
+  hgetall?(key: string): Promise<Record<string, string>>;
 }
 
 export interface ChainPort {
@@ -153,6 +159,8 @@ export interface CollectDeps {
   chain: ChainPort;
   fetch: typeof fetch;
   now: () => number;
+  /** the published-file check (siteFiles.ts SiteFilesChecker.check); absent = not configured on this host */
+  siteFiles?: () => SiteFilesSnap;
 }
 
 export interface CollectSettings {
@@ -169,6 +177,8 @@ export interface CollectSettings {
   killLookbackSec?: number;
   /** SESSIONS_MODE (24x7 overrides every charter's sessions) */
   sessionsMode?: string | undefined;
+  /** csp_violations window (s): which CSP report buckets are read */
+  cspWindowSec?: number;
 }
 
 /** State carried between passes (rolling samples), persisted next to the dedupe state. */
@@ -442,6 +452,30 @@ export function parseVenueAsOf(raw: string | null): number | null {
   }
 }
 
+/** One CSP report bucket (HGETALL of KEYS.cspReports(start)): sanitized fields and their counts; malformed entries skipped. */
+export function parseCspBucket(start: number, h: Record<string, string> | null | undefined): CspSnap["buckets"][number] {
+  const counts: CspSnap["buckets"][number]["counts"] = [];
+  let overflow = 0;
+  for (const [field, raw] of Object.entries(h ?? {})) {
+    const n = Number(raw);
+    if (!Number.isSafeInteger(n) || n <= 0) continue;
+    if (field === CSP_REPORT_OVERFLOW_FIELD) {
+      overflow += n;
+      continue;
+    }
+    const v = parseCspField(field);
+    if (v) counts.push({ ...v, count: n });
+  }
+  return { start, counts, overflow };
+}
+
+/** Bucket starts (unix s) covering the last `windowSec` up to now, oldest first. */
+export function cspBucketStarts(nowMs: number, windowSec: number): number[] {
+  const out: number[] = [];
+  for (let b = cspBucket(nowMs - windowSec * 1000); b <= cspBucket(nowMs); b += CSP_REPORT_BUCKET_SEC) out.push(b);
+  return out;
+}
+
 /** BACKUP_STATUS_KEY JSON written by backup.sh. */
 export function parseBackup(raw: string | null): BackupSnap | null {
   if (!raw) return null;
@@ -652,6 +686,26 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
     liquidationKeeper = undefined;
     infraErrors.push({ source: "redis", error: errMsg(err) });
   }
+  // CSP violation reports (api POST /csp-report): read on their own, a failure only blinds csp_violations this pass
+  let csp: CspSnap | undefined;
+  if (d.kv.hgetall && !infraErrors.some((e) => e.source === "redis")) {
+    try {
+      const starts = cspBucketStarts(now, st.cspWindowSec ?? 900);
+      const hs = await Promise.all(starts.map((b) => d.kv.hgetall!(KEYS.cspReports(b))));
+      csp = { buckets: starts.map((b, i) => parseCspBucket(b, hs[i])) };
+    } catch {
+      csp = undefined;
+    }
+  }
+  // the published-file check (local disk); the checker reports its own I/O failures in the snapshot
+  let siteFiles: SiteFilesSnap | undefined;
+  if (d.siteFiles) {
+    try {
+      siteFiles = d.siteFiles();
+    } catch (err) {
+      siteFiles = { status: "ok", manifestPath: "", root: "", commit: null, generatedAt: null, added: [], removed: [], modified: [], checkedAt: now, error: errMsg(err) };
+    }
+  }
   if (!infraErrors.some((e) => e.source === "db")) {
     books = bookRows.map((b, i) => ({
       bookId: Number(b.id),
@@ -785,6 +839,8 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
     busForged,
     pool,
     liquidationKeeper,
+    ...(csp ? { csp } : {}),
+    ...(siteFiles ? { siteFiles } : {}),
     infraErrors,
   };
   return { snapshot, memory: { rpcSamples, buybackSamples, markIntervalSec, poolSettled: [...poolSettled.values()] } };

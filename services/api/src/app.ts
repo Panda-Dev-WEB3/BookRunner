@@ -1,4 +1,5 @@
-// Hono app: /health (+ ops-venue's Orderly listing status), tRPC at /trpc, REST mirror at /v1, read-only MCP at /mcp, CORS for apps/web.
+// Hono app: /health (+ ops-venue's Orderly listing status), tRPC at /trpc, REST mirror at /v1, read-only MCP at /mcp, CSP
+// violation reports at /csp-report, CORS for apps/web.
 import { KEYS, parseVenueMarkets, type VenueMarketMsg, venueMarketGate } from "@bookrunner/shared";
 import { parseLiquidationStatus } from "@bookrunner/shared/liquidationKeeper";
 import { trpcServer } from "@hono/trpc-server";
@@ -6,6 +7,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { ApiDeps } from "./deps";
 import type { Kv } from "./kv";
+import { handleCspReport } from "./cspReport";
 import { type StatusView, buildStatus } from "./domain/status";
 import { handleMcpRequest } from "./mcp";
 import { restRoutes } from "./rest";
@@ -45,7 +47,7 @@ export function trpcBatchWeight(paths: string[]): number {
 }
 
 /**
- * Path confusion (audit L-3). nginx exposes only /health, /status.json and /trpc/ of this API; a request
+ * Path confusion (audit L-3). nginx exposes only /health, /status.json, /csp-report and /trpc/ of this API; a request
  * like `/trpc/..\v1\books` used to reach the REST mirror, /v1/webhooks and /mcp because Bun resolves
  * backslashes and dot-segments before the app sees the URL. nginx now forwards a normalized path and
  * stamps each proxied location in ROUTE_HEADER; the API refuses a request whose path is outside the
@@ -213,6 +215,10 @@ export function createApp(deps: ApiDeps, opts: AppOptions) {
     c.header("Cache-Control", STATUS_CACHE_CONTROL);
     return c.json(statusCache.body);
   });
+
+  // CSP violation reports (nginx /csp-report: own rate-limit zone, 16 KB body cap). Outside /v1 on purpose: the REST
+  // mirror stays loopback-only, and this route reads no data and returns none.
+  app.post("/csp-report", (c) => handleCspReport(c.req.raw, deps.cspReports, deps.now()));
 
   // weighted batch cap (receipts.* fill a batch): checked before tRPC parses inputs or runs anything
   app.use("/trpc/*", async (c, next) => {

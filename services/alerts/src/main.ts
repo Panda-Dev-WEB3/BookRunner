@@ -16,6 +16,7 @@ import { type ChainPort, type DbPort, collect, readPool } from "./collect";
 import { loadConfig } from "./config";
 import { createDeliverer, pingHeartbeat } from "./deliver";
 import { renderBatch } from "./format";
+import { SiteFilesChecker } from "./siteFiles";
 import { evaluate } from "./rules";
 import { AlertService } from "./service";
 
@@ -110,10 +111,30 @@ const chain: ChainPort = {
   },
 };
 
+// published-file integrity (site_files_changed): the web root vs the root-owned manifest update.sh writes
+const siteChecker = cfg.site ? new SiteFilesChecker({ root: cfg.site.root, manifestPath: cfg.site.manifestPath, everyMs: cfg.site.everySec * 1000, now: Date.now }) : null;
+
 const collectFn = (mem: Parameters<typeof collect>[2]) =>
   collect(
-    { db, kv: { get: (k) => redis.get(k), mget: (ks) => redis.mget(...ks) }, chain, fetch, now: Date.now },
-    { network: cfg.network, chainId: cfg.chainId, apiUrl: cfg.apiUrl, oracleUrl: cfg.oracleUrl, markIntervalSec: cfg.markIntervalSec, roles: cfg.roles, rpcWindowSec: cfg.rpcWindowSec, sessionsMode: cfg.sessionsMode },
+    {
+      db,
+      kv: { get: (k) => redis.get(k), mget: (ks) => redis.mget(...ks), hgetall: (k) => redis.hgetall(k) },
+      chain,
+      fetch,
+      now: Date.now,
+      ...(siteChecker ? { siteFiles: () => siteChecker.check() } : {}),
+    },
+    {
+      network: cfg.network,
+      chainId: cfg.chainId,
+      apiUrl: cfg.apiUrl,
+      oracleUrl: cfg.oracleUrl,
+      markIntervalSec: cfg.markIntervalSec,
+      roles: cfg.roles,
+      rpcWindowSec: cfg.rpcWindowSec,
+      sessionsMode: cfg.sessionsMode,
+      cspWindowSec: cfg.rules.cspWindowSec,
+    },
     mem,
     cfg.rules.buybackGrowSec * 2 + 86_400,
   );
@@ -150,6 +171,7 @@ log.info(
     disabled: [...cfg.rules.disabled],
     deadMansSwitch: cfg.delivery.heartbeatUrl !== null,
     digestHourUtc: cfg.delivery.digestHourUtc,
+    siteCheck: cfg.site ? `${cfg.site.root} vs ${cfg.site.manifestPath} every ${cfg.site.everySec}s` : "off",
   },
   deliverer.channels.length ? "alerts service started" : "alerts service started WITHOUT a delivery channel (log only): set ALERT_EMAIL_TO + ALERT_SMTP_USER/PASS or ALERT_WEBHOOK_URL",
 );
