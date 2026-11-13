@@ -5,6 +5,9 @@
 // its lstat identity (inode, size, mtime, ctime) changed since the last check; ctime cannot be set back from user space,
 // so a rewrite that restores mtime is still re-hashed. A dirty or missing result is re-checked every pass, so a deploy's
 // few seconds between the publish and the new manifest clear before the alert's anti-flap delay ends.
+// update.sh's `chown -R` changes every ctime, so the first check after a deploy (or an alerts restart) re-hashes the whole
+// web root once (well under a second; readFileSync holds one file at a time). The manifest itself is hashed at deploy
+// time, after the publish, by the bookrunner user: what it does not cover is in HARDENING.md "Notes and residual risk".
 import { readFileSync, statSync } from "node:fs";
 import { diffSiteFiles, entryDigest, parseSiteManifest, walkTree } from "@bookrunner/shared/siteManifest";
 import type { SiteFilesSnap } from "./types";

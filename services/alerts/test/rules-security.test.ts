@@ -10,7 +10,8 @@ import { buildSiteManifest } from "@bookrunner/shared/siteManifest";
 import { cspBucketStarts, collect, emptyMemory, parseCspBucket } from "../src/collect";
 import { loadConfig } from "../src/config";
 import { evaluate } from "../src/rules";
-import { cspIgnored, cspViolations, siteFiles } from "../src/rules-security";
+import { cspIgnored, cspViolations, defang, plain, siteFiles } from "../src/rules-security";
+import { MemoryCspReportSink, handleCspReport } from "../../api/src/cspReport";
 import { SiteFilesChecker } from "../src/siteFiles";
 import type { Condition, CspSnap, SiteFilesSnap } from "../src/types";
 import { NOW, rules, snap } from "./fixtures";
@@ -21,23 +22,28 @@ const row = (blocked: string, count: number, directive = "script-src-elem", path
 const csp = (...buckets: CspSnap["buckets"]): CspSnap => ({ buckets });
 
 describe("csp_violations", () => {
-  test("quiet below the threshold; warning at it; critical at the burst; per blocked origin", () => {
+  test("one warning (never critical) when one origin reaches the threshold; the top 3 origins are named, defanged", () => {
     const c = rules();
-    expect(c.cspViolations).toBe(5);
-    expect(c.cspWindowSec).toBe(900);
-    expect(c.cspBurst).toBe(50);
-    expect(cspViolations(snap({ csp: csp({ start: B, counts: [row("https://evil.example", 4)], overflow: 0 }) }), c)).toEqual([]);
+    expect([c.cspViolations, c.cspWindowSec]).toEqual([5, 900]);
+    expect(cspViolations(snap({ csp: csp({ start: B, counts: [row("https://evil.example", 4), row("inline", 4)], overflow: 0 }) }), c)).toEqual([]);
     expect(ks(cspViolations(snap({ csp: csp({ start: B, counts: [row("https://evil.example", 3)], overflow: 0 }, { start: B - 300, counts: [row("https://evil.example", 2)], overflow: 0 }) }), c))).toEqual([
-      ["csp_violations:https://evil.example", "warning"],
+      ["csp_violations", "warning"],
     ]);
-    const burst = cspViolations(snap({ csp: csp({ start: B, counts: [row("https://evil.example", 49), row("https://evil.example", 1, "connect-src", "/dashboard/"), row("inline", 6)], overflow: 0 }) }), c);
-    expect(ks(burst)).toEqual([
-      ["csp_violations:https://evil.example", "critical"],
-      ["csp_violations:inline", "warning"],
-    ]);
-    expect(burst[0]!.summary).toContain("50 violations blocking https://evil.example in 15m");
-    expect(burst[0]!.summary).toContain("script-src-elem ×49, connect-src ×1");
-    expect(burst[0]!.summary).toContain("/app/ ×49, /dashboard/ ×1");
+    const many = cspViolations(
+      snap({
+        csp: csp({
+          start: B,
+          counts: [row("https://evil.example", 4900), row("https://evil.example", 100, "connect-src", "/dashboard/"), row("inline", 6), row("https://b.example", 3), row("https://c.example", 2)],
+          overflow: 0,
+        }),
+      }),
+      c,
+    );
+    expect(ks(many)).toEqual([["csp_violations", "warning"]]);
+    const t = many[0]!.summary;
+    expect(t).toContain("blocked origins (requests): https[:]//evil[.]example ×5000, inline ×6, https[:]//b[.]example ×3 and 1 more");
+    expect(t).toContain("directives: script-src-elem ×4911, connect-src ×100");
+    expect(t).not.toMatch(/https:\/\//); // nothing a chat client turns into a link
   });
 
   test("buckets outside the window do not count", () => {
@@ -53,18 +59,51 @@ describe("csp_violations", () => {
     const noisy = csp({ start: B, counts: [row("chrome-extension:", 500), row("moz-extension:", 80), row("https://framer.com", 900, "script-src-elem", "/")], overflow: 0 });
     expect(cspViolations(snap({ csp: noisy }), c)).toEqual([]);
     const custom = { ...c, cspIgnore: ["https://translate.googleapis.com"] };
-    expect(ks(cspViolations(snap({ csp: noisy }), custom))).toEqual([["csp_violations:https://framer.com", "critical"]]);
+    expect(ks(cspViolations(snap({ csp: noisy }), custom))).toEqual([["csp_violations", "warning"]]);
   });
 
-  test("an overflowing bucket (a flood of distinct reports) alerts on its own", () => {
+  test("requests beyond the per-bucket caps raise the same single warning", () => {
     const out = cspViolations(snap({ csp: csp({ start: B, counts: [], overflow: 60 }) }), rules());
-    expect(ks(out)).toEqual([["csp_violations:(too many distinct reports)", "critical"]]);
+    expect(ks(out)).toEqual([["csp_violations", "warning"]]);
+    expect(out[0]!.summary).toContain("60 requests beyond the per-bucket caps");
+  });
+
+  test("a forged flood (100 requests x 20 reports, many origins) is ONE warning", async () => {
+    const sink = new MemoryCspReportSink();
+    const origins = Array.from({ length: 20 }, (_, i) => `https://forged${i}.example/x.js`);
+    for (let r = 0; r < 100; r++) {
+      const body = JSON.stringify(origins.map((u, i) => ({ type: "csp-violation", body: { blockedURL: u, effectiveDirective: "script-src-elem", documentURL: `https://bookrunner.tech/p${(r * 20 + i) % 700}` } })));
+      const req = new Request("http://127.0.0.1:4400/csp-report", { method: "POST", body, headers: { "content-type": "application/reports+json" } });
+      expect((await handleCspReport(req, sink, NOW)).status).toBe(204);
+    }
+    const h = sink.buckets.get(B)!;
+    // counted per request: 3 distinct fields at most per request, never more than the 50-origin cap
+    expect([...h.values()].reduce((a, n) => a + n, 0)).toBeLessThanOrEqual(100 * 3 + 100);
+    expect(sink.origins.get(B)!.size).toBeLessThanOrEqual(50);
+    const snapCsp = { buckets: [parseCspBucket(B, Object.fromEntries([...h].map(([k, v]) => [k, String(v)])))] };
+    const out = evaluate(snap({ csp: snapCsp }), rules()).filter((x) => x.rule === "csp_violations");
+    expect(ks(out)).toEqual([["csp_violations", "warning"]]);
   });
 
   test("not read (Redis failed, no port): quiet; env thresholds apply", () => {
     expect(cspViolations(snap(), rules())).toEqual([]);
-    const c = loadConfig({ NETWORK: "mainnet", ALERT_CSP_VIOLATIONS: "2", ALERT_CSP_WINDOW_MINUTES: "30", ALERT_CSP_BURST: "1", ALERT_CSP_IGNORE: "https://Framer.com, inline" }).rules;
-    expect([c.cspViolations, c.cspWindowSec, c.cspBurst, c.cspIgnore]).toEqual([2, 1800, 2, ["https://framer.com", "inline"]]);
+    const c = loadConfig({ NETWORK: "mainnet", ALERT_CSP_VIOLATIONS: "2", ALERT_CSP_WINDOW_MINUTES: "30", ALERT_CSP_IGNORE: "https://Framer.com, inline" }).rules;
+    expect([c.cspViolations, c.cspWindowSec, c.cspIgnore]).toEqual([2, 1800, ["https://framer.com", "inline"]]);
+  });
+});
+
+describe("attacker-chosen text in summaries", () => {
+  test("plain: control characters and line breaks neutralised, length capped; defang: no clickable URL", () => {
+    expect(plain("a\nRESOLVED: all clear\r\u0000\u2028b")).toBe("a?RESOLVED: all clear???b");
+    expect(plain("x".repeat(300)).length).toBe(120);
+    expect(defang("https://evil.example:8443")).toBe("https[:]//evil[.]example:8443");
+    expect(defang("/evil.com/x")).toBe("/evil[.]com/x");
+  });
+
+  test("site_files_changed quotes each file name with its control characters neutralised", () => {
+    const out = siteFiles(snap({ siteFiles: site({ added: ["evil.js\n\u2705 RESOLVED site_files_changed"] }) }), rules());
+    expect(out[0]!.summary).toContain('added "evil.js?\u2705 RESOLVED site_files_changed"');
+    expect(out[0]!.summary).not.toContain("\n");
   });
 });
 
@@ -95,7 +134,7 @@ describe("CSP buckets in the collector", () => {
     const { snapshot } = await collect({ db, kv, chain, fetch, now: () => NOW }, settings, emptyMemory(), 86_400);
     expect(asked).toEqual(cspBucketStarts(NOW, 900).map((b) => KEYS.cspReports(b)));
     expect(snapshot.csp!.buckets.at(-1)).toEqual({ start: B, counts: [{ blocked: "inline", directive: "script-src", path: "/", count: 9 }], overflow: 0 });
-    expect(ks(evaluate(snapshot, rules()).filter((c) => c.rule === "csp_violations"))).toEqual([["csp_violations:inline", "warning"]]);
+    expect(ks(evaluate(snapshot, rules()).filter((c) => c.rule === "csp_violations"))).toEqual([["csp_violations", "warning"]]);
   });
 });
 
@@ -123,7 +162,7 @@ describe("site_files_changed / site_manifest_missing", () => {
     expect(ks(out)).toEqual([["site_files_changed", "critical"]]);
     expect(out[0]!.forSec).toBe(120);
     expect(out[0]!.summary).toContain("3 files changed since the deploy of bbbf520");
-    expect(out[0]!.summary).toContain("modified app/index.html; added evil.js; removed status/index.html");
+    expect(out[0]!.summary).toContain('modified "app/index.html"; added "evil.js"; removed "status/index.html"');
     const many = siteFiles(snap({ siteFiles: site({ added: Array.from({ length: 12 }, (_, i) => `x${i}.js`) }) }), rules());
     expect(many[0]!.summary).toContain("; and 4 more");
   });

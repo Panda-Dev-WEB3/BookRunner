@@ -1,11 +1,11 @@
 // POST /csp-report (nginx /csp-report, deploy/server): both report formats, the 16 KB cap, sanitized fields only (origin
 // of the blocked resource, directive name, document path), counted per 5-minute bucket under bkrn:<ns>:csp:reports:*.
 import { describe, expect, test } from "bun:test";
-import { CSP_REPORT_MAX_FIELDS, CSP_REPORT_OVERFLOW_FIELD, cspBucket, parseCspField } from "@bookrunner/shared/cspReports";
+import { CSP_REPORT_MAX_FIELDS, CSP_REPORT_MAX_ORIGINS, CSP_REPORT_OVERFLOW_FIELD, cspBucket, parseCspField } from "@bookrunner/shared/cspReports";
 import { busNames } from "@bookrunner/shared/queues";
 import { ROUTE_HEADER, createApp } from "../src/app";
 import { webOrigins } from "../src/config";
-import { CSP_COUNT_SCRIPT, CSP_REPORT_MAX_BYTES, MemoryCspReportSink, RedisCspReportSink, blockedOrigin, directiveName, documentPath, parseCspReports } from "../src/cspReport";
+import { CSP_COUNT_SCRIPT, CSP_REPORT_MAX_BYTES, MemoryCspReportSink, RedisCspReportSink, blockedOrigin, requestFields, directiveName, documentPath, parseCspReports } from "../src/cspReport";
 import { makeWorld } from "./fixtures";
 
 const NOW = Date.UTC(2026, 10, 13, 12, 3, 0);
@@ -119,25 +119,42 @@ describe("POST /csp-report", () => {
     expect((await a.fetch(other)).status).toBe(400);
   });
 
-  test("a flood of distinct fields is capped per bucket (overflow field)", async () => {
+  test("counted per request: a batch of identical reports counts once, at most 3 distinct fields per request", async () => {
     const sink = new MemoryCspReportSink();
-    const many = Array.from({ length: CSP_REPORT_MAX_FIELDS + 5 }, (_, i) => ({ blocked: "inline", directive: "script-src", path: `/p${i}` }));
-    await sink.record(many, NOW);
-    const h = sink.buckets.get(cspBucket(NOW))!;
+    const v = (blocked: string, path = "/") => ({ blocked, directive: "script-src", path });
+    await sink.record(Array.from({ length: 20 }, () => v("https://a.example")), NOW);
+    await sink.record([v("https://a.example"), v("https://b.example"), v("https://c.example"), v("https://d.example")], NOW);
+    expect(requestFields([v("x"), v("x"), v("y")])).toEqual(["x|script-src|/", "y|script-src|/"]);
+    expect([...sink.buckets.get(cspBucket(NOW))!]).toEqual([
+      ["https://a.example|script-src|/", 2],
+      ["https://b.example|script-src|/", 1],
+      ["https://c.example|script-src|/", 1],
+    ]);
+  });
+
+  test("per-bucket caps: distinct origins and distinct fields; the rest of a request counts once as overflow", async () => {
+    const sink = new MemoryCspReportSink();
+    for (let i = 0; i < CSP_REPORT_MAX_ORIGINS + 5; i++) await sink.record([{ blocked: `https://o${i}.example`, directive: "script-src", path: "/" }], NOW);
+    expect(sink.origins.get(cspBucket(NOW))!.size).toBe(CSP_REPORT_MAX_ORIGINS);
+    expect(sink.buckets.get(cspBucket(NOW))!.get(CSP_REPORT_OVERFLOW_FIELD)).toBe(5);
+    const paths = new MemoryCspReportSink();
+    for (let i = 0; i < CSP_REPORT_MAX_FIELDS + 5; i++) await paths.record([{ blocked: "inline", directive: "script-src", path: `/p${i}` }], NOW);
+    const h = paths.buckets.get(cspBucket(NOW))!;
     expect(h.size).toBe(CSP_REPORT_MAX_FIELDS + 1);
     expect(h.get(CSP_REPORT_OVERFLOW_FIELD)).toBe(5);
   });
 });
 
 describe("Redis sink", () => {
-  test("one EVAL per request on the namespaced bucket key, with TTL, field cap and the fields", async () => {
+  test("one EVAL per request on the namespaced bucket hash + origin set, with TTL, caps and the request's distinct fields", async () => {
     const calls: unknown[][] = [];
     const key = busNames("mainnet").KEYS.cspReports;
     const sink = new RedisCspReportSink({ eval: async (...a) => void calls.push(a) }, key);
-    await sink.record([{ blocked: "inline", directive: "script-src", path: "/" }], NOW);
+    await sink.record([{ blocked: "inline", directive: "script-src", path: "/" }, { blocked: "inline", directive: "script-src", path: "/" }], NOW);
     await sink.record([], NOW);
     expect(calls.length).toBe(1);
-    expect(calls[0]).toEqual([CSP_COUNT_SCRIPT, 1, `bkrn:mainnet:csp:reports:${cspBucket(NOW)}`, 7200, CSP_REPORT_MAX_FIELDS, CSP_REPORT_OVERFLOW_FIELD, "inline|script-src|/"]);
+    const k = `bkrn:mainnet:csp:reports:${cspBucket(NOW)}`;
+    expect(calls[0]).toEqual([CSP_COUNT_SCRIPT, 2, k, `${k}:origins`, 7200, CSP_REPORT_MAX_FIELDS, CSP_REPORT_OVERFLOW_FIELD, CSP_REPORT_MAX_ORIGINS, "inline|script-src|/"]);
   });
 
   test("a Redis failure is reported, never thrown", async () => {

@@ -210,12 +210,10 @@ const shape = {
   /** default: on for testnet / mainnet (deploy/server backup timer), off on devnet */
   ALERT_BACKUP_EXPECTED: z.string().optional(),
   // ---- site security (rules-security.ts)
-  /** csp_violations: this many CSP violations blocking one origin within the window alert (warning) */
+  /** csp_violations: this many REQUESTS reporting one blocked origin within the window alert (warning only) */
   ALERT_CSP_VIOLATIONS: z.coerce.number().int().min(1).default(5),
   /** csp_violations: window (minutes; the API keeps 2 h of 5-minute buckets) */
   ALERT_CSP_WINDOW_MINUTES: z.coerce.number().int().min(5).max(60).default(15),
-  /** csp_violations: this many within the window is critical */
-  ALERT_CSP_BURST: z.coerce.number().int().min(1).default(50),
   /** csp_violations: blocked origins (or schemes / keywords) never alerted, comma-separated. Default: Framer's on-page
    *  editing bar, blocked on purpose on every Framer page view (deploy/server nginx CSP notes) */
   ALERT_CSP_IGNORE: z.string().default("https://framer.com"),
@@ -333,11 +331,9 @@ export interface RuleConfig {
   poolFinalMarkStuckSec: number;
   /** pool_debt_written_off: seconds after the final mark the one-off page stays reported */
   poolWriteOffNotifySec: number;
-  /** csp_violations: reports per blocked origin within the window (warning) */
+  /** csp_violations: requests reporting one blocked origin within the window (warning) */
   cspViolations: number;
   cspWindowSec: number;
-  /** csp_violations: reports per blocked origin within the window (critical) */
-  cspBurst: number;
   /** csp_violations: blocked origins / schemes never alerted (besides the browser-extension schemes) */
   cspIgnore: string[];
   supervisorExpected: boolean;
@@ -482,7 +478,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       poolWriteOffNotifySec: e.ALERT_POOL_WRITE_OFF_NOTIFY_SECONDS,
       cspViolations: e.ALERT_CSP_VIOLATIONS,
       cspWindowSec: e.ALERT_CSP_WINDOW_MINUTES * 60,
-      cspBurst: Math.max(e.ALERT_CSP_BURST, e.ALERT_CSP_VIOLATIONS),
       cspIgnore: e.ALERT_CSP_IGNORE.split(/[,\s]+/)
         .map((x) => x.trim().toLowerCase())
         .filter(Boolean),

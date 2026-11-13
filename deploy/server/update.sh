@@ -90,6 +90,10 @@ if [ -f apps/site/package.json ]; then
   echo "==> site build (apps/site)"
   ( cd apps/site && "${AS[@]}" ../../node_modules/.bin/bun run build >/dev/null )
   [ -f apps/site/dist/index.html ] || { echo "!! apps/site/dist/index.html missing after the build"; exit 1; }
+  # /official-links/ is built from contracts/deployments/4663.json: on the mainnet host its absence is a mistake
+  if [ "$HOST_NET" = mainnet ] && grep -q "Published here after the mainnet deployment" apps/site/dist/official-links/index.html 2>/dev/null; then
+    echo "!! /official-links/ shows placeholders: contracts/deployments/4663.json is missing or unreadable in $APP" >&2
+  fi
   SITE_BUILT=1
 else
   echo "==> apps/site/package.json not found: skipping the public site (the web root keeps its current files)"

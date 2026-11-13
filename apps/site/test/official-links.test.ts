@@ -79,6 +79,17 @@ describe("rendered page", () => {
     expect(template).toContain("The app only asks your wallet to sign transactions to the addresses listed here.");
   });
 
+  test("says it lists the books recorded at build time, and that each book's contracts are on its page in the app", () => {
+    expect(template).toContain("the books recorded in the deployment when the site was built");
+    expect(template).toContain("every book's own contracts (its tranches and mandate) are shown in the app on that book's page");
+  });
+
+  test("update.sh warns when the mainnet build shows placeholders (record missing on the host)", () => {
+    const update = read("deploy/server/update.sh");
+    expect(update).toContain(`grep -q "${PENDING}" apps/site/dist/official-links/index.html`);
+    expect(update).toMatch(/if \[ "\$HOST_NET" = mainnet \] && grep -q/);
+  });
+
   test("no inline script, no inline handler (the CSP allows none for this page)", () => {
     for (const html of [template, page, empty]) {
       expect(html).not.toMatch(/<script/i);

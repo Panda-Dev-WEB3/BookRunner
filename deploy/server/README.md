@@ -100,7 +100,9 @@ root, never under `/app/`. The dev server (`bun run dev`) still serves the app a
   site (port 80, exact name, so the wildcard redirect does not take it) and its policy snippet. `update.sh` /
   `install.sh` (`nginx_install_mta_sts_site`) install the snippet to `/etc/nginx/snippets/bookrunner-mta-sts.conf`
   on every run, and the site file to `/etc/nginx/sites-available/bookrunner-mta-sts` + its `sites-enabled` link
-  only the first time (certbot rewrites it in place afterwards, like the main site).
+  only the first time (certbot rewrites it in place afterwards, like the main site). Once the site file exists it
+  is left alone, link included: if its `sites-enabled` link is removed by hand, re-create it by hand
+  (`sudo ln -s /etc/nginx/sites-available/bookrunner-mta-sts /etc/nginx/sites-enabled/ && sudo nginx -t && sudo systemctl reload nginx`).
 - `nginx-lib.sh` — the shared install/validate/rollback helpers.
 - `db-migrate.sh` — `db_migrate`, used by `update.sh`: the `packages/db` migrations as `bookrunner`, the Postgres
   password parsed from `.env.infra` (`env-parse.sh`, never sourced) and passed through the environment only.
@@ -179,14 +181,19 @@ curl -sI http://leveret.bookrunner.tech/ | head -1                              
   `ALERT_TELEGRAM_CHAT_ID` / generic JSON); optional `ALERT_HEARTBEAT_URL` (dead-man's switch) and
   `ALERT_DIGEST_HOUR_UTC`. Thresholds: `services/alerts/src/config.ts`. Test the channels:
   `sudo -u bookrunner HOME=/opt/bookrunner sh -c 'cd /opt/bookrunner/app/services/alerts && set -a && . ../../.env.testnet && set +a && NETWORK=testnet ../../node_modules/.bin/bun src/main.ts --test'`.
-- **Site security alerts** (`services/alerts/src/rules-security.ts`): `csp_violations` — 5+ CSP violations blocking
-  one origin within 15 min (warning; 50+: critical; `ALERT_CSP_VIOLATIONS`, `ALERT_CSP_WINDOW_MINUTES`,
-  `ALERT_CSP_BURST`), browser-extension schemes ignored and `ALERT_CSP_IGNORE` (default `https://framer.com`, the
-  Framer editing bar the policy blocks on purpose); `site_files_changed` (critical) — a file under
+- **Site security alerts** (`services/alerts/src/rules-security.ts`): `csp_violations` — ONE warning (never
+  critical: reports are unauthenticated) when 5+ requests reported the same blocked origin within 15 min
+  (`ALERT_CSP_VIOLATIONS`, `ALERT_CSP_WINDOW_MINUTES`), naming the top 3 origins (defanged, `https[:]//x[.]y`). The
+  API counts requests, not reports (each distinct field of a request once, at most 3 per request, at most 50 origins
+  and 500 entries per 5-minute bucket, the rest as overflow). Browser-extension schemes are ignored, and
+  `ALERT_CSP_IGNORE` (default `https://framer.com`, the Framer editing bar the policy blocks on purpose); `site_files_changed` (critical) — a file under
   `/var/www/bookrunner` added, removed or modified since the deploy's manifest, with the paths;
   `site_manifest_missing` (warning) — no readable manifest at `/usr/local/lib/bookrunner-deploy/site-manifest.json`.
   The web root is re-hashed every 5 min (`ALERT_SITE_CHECK_SECONDS`; only files whose inode / size / mtime / ctime
-  changed are read again). Off on devnet and on `bookrunner@testnet-live` (`ALERT_SITE_EXPECTED=0`).
+  changed are read again; `chown -R` at each deploy changes every ctime, so the first check after a deploy or an
+  alerts restart re-hashes the whole web root once, under a second). File names in the alert are quoted with control
+  characters neutralised. Off on devnet and on `bookrunner@testnet-live` (`ALERT_SITE_EXPECTED=0`). What the
+  manifest does and does not cover: HARDENING.md "Notes and residual risk".
 - **Backups**: `bookrunner-backup.timer` (daily, root, `backup.sh` from the root-owned copy) — see
   [RESTORE.md](RESTORE.md) for contents, the restore drill (`backup.sh --verify`) and the restore procedure.
 - **Status**: `/status/` (site page) reads `/status.json` (nginx -> API `GET /status`: per book the latest mark

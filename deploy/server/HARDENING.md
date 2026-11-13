@@ -122,6 +122,13 @@ Values never appear in these commands' output: every secret is generated into a 
 - The web root is owned by `bookrunner`, so a compromise of that user could rewrite the published pages that build
   wallet transactions. `update.sh` records a root-owned manifest of the published files after each deploy and the
   alerts service pages `site_files_changed` (critical) on any difference; `update.sh --web-only` restores the files.
+  What it covers: a write to the web root by anything OUTSIDE the stack (the stack's own processes cannot write there
+  at all: `ProtectSystem=strict`), e.g. a stray shell as `bookrunner`, a leaked deploy credential, a tool run in the
+  wrong directory. What it does not: a full compromise of the `bookrunner` user. That user runs the checker (it can
+  stop or alter the alerts service; only the dead-man's switch, `ALERT_HEARTBEAT_URL`, would notice) and owns
+  `node_modules`, whose `bun` computes the hashes at the next deploy (a tampered toolchain or build gets blessed
+  then). Hashing at deploy time, after the publish, is deliberate: the manifest describes exactly what was
+  published, and root runs no app-tree code; the residual is the mainnet per-user split below.
 - HSTS carries `includeSubDomains` (no `preload`). The certbot-managed site file keeps its own server-level
   HSTS line (it is what the www → apex redirect carries); `update.sh` updates that one line in place
   (`nginx-lib.sh` `nginx_patch_site_hsts`, `nginx -t` + rollback). Every `*.bookrunner.tech` name opened in a

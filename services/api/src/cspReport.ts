@@ -3,15 +3,26 @@
 // report-to). Accepts both wire formats:
 //   application/csp-report    report-uri: {"csp-report": {"blocked-uri", "effective-directive", "document-uri", ...}}
 //   application/reports+json  report-to:  [{"type": "csp-violation", "body": {"blockedURL", "effectiveDirective", "documentURL", ...}}]
-// Keeps three sanitized fields per report and counts them in Redis (KEYS.cspReports, 5-minute buckets, TTL 2 h;
+// Keeps three sanitized fields per report and counts them PER REQUEST in Redis (each distinct field of a request once, at
+// most 3 per request, at most 50 blocked origins per bucket; KEYS.cspReports, 5-minute buckets, TTL 2 h;
 // @bookrunner/shared/cspReports): the blocked resource's origin (scheme or CSP keyword when it has none), the directive's
 // name, the document's path. Never a query string, a fragment, an IP address or a user agent; the raw report is
 // neither stored nor logged. services/alerts raises csp_violations from the counts.
-import { CSP_REPORT_MAX_FIELDS, CSP_REPORT_OVERFLOW_FIELD, CSP_REPORT_TTL_SEC, type CspViolation, cspBucket, cspField } from "@bookrunner/shared/cspReports";
+import {
+  CSP_REPORT_FIELDS_PER_REQUEST,
+  CSP_REPORT_MAX_FIELDS,
+  CSP_REPORT_MAX_ORIGINS,
+  CSP_REPORT_OVERFLOW_FIELD,
+  CSP_REPORT_TTL_SEC,
+  type CspViolation,
+  cspBucket,
+  cspField,
+  cspOriginsKey,
+} from "@bookrunner/shared/cspReports";
 
 export const CSP_REPORT_MAX_BYTES = 16 * 1024;
 export const CSP_REPORT_TYPES = ["application/csp-report", "application/reports+json"] as const;
-/** Reports kept from one request (a report-to batch); the rest are dropped. */
+/** Reports parsed from one request (a report-to batch); the rest are dropped. Counting is per request (requestFields). */
 export const CSP_REPORT_MAX_PER_REQUEST = 20;
 
 /** CSP source keywords a browser puts in place of a URL (report-uri `blocked-uri`, report-to `blockedURL`). */
@@ -96,9 +107,17 @@ export function parseCspReports(contentType: string, body: string): CspViolation
     .map((x) => sanitize(x.body as Record<string, unknown>, "blockedURL", ["effectiveDirective", "violatedDirective"], "documentURL", "sourceFile"));
 }
 
-/** Where the counts go (Redis in production, memory in tests). */
+/** Where the counts go (Redis in production, memory in tests). One call per request. */
 export interface CspReportSink {
   record(violations: CspViolation[], nowMs: number): Promise<void>;
+}
+
+/**
+ * The fields one request counts: its distinct fields, at most CSP_REPORT_FIELDS_PER_REQUEST of them (in report order).
+ * Counts are per request (review I-1): a report-to batch of 20 identical or varied reports weighs what one report does.
+ */
+export function requestFields(violations: CspViolation[]): string[] {
+  return [...new Set(violations.map(cspField))].slice(0, CSP_REPORT_FIELDS_PER_REQUEST);
 }
 
 /** Structural subset of an ioredis client (EVAL), keeping the tests free of Redis. */
@@ -107,21 +126,30 @@ export interface RedisEval {
 }
 
 /**
- * One atomic step per request: HINCRBY each field of the bucket's hash (a NEW field only while the hash holds fewer
- * than CSP_REPORT_MAX_FIELDS, else the overflow field: a flood of distinct paths cannot grow it without bound), then
- * EXPIRE. ARGV: ttl, max fields, overflow field, fields...
+ * One atomic step per request. KEYS: the bucket's hash, its origin set. ARGV: ttl, max fields, overflow field, max
+ * origins, fields... Each field is counted once (HINCRBY 1) when its origin is already in the set or the set holds
+ * fewer than `max origins` (then added), and the field already exists or the hash holds fewer than `max fields`;
+ * otherwise the request counts once under the overflow field. A flood of distinct origins or paths cannot grow either
+ * key without bound. Both keys expire with the bucket.
  */
 export const CSP_COUNT_SCRIPT = `local ttl = tonumber(ARGV[1])
-local max = tonumber(ARGV[2])
-for i = 4, #ARGV do
+local maxFields = tonumber(ARGV[2])
+local maxOrigins = tonumber(ARGV[4])
+local overflow = false
+for i = 5, #ARGV do
   local f = ARGV[i]
-  if redis.call('HEXISTS', KEYS[1], f) == 1 or redis.call('HLEN', KEYS[1]) < max then
+  local origin = string.match(f, '^[^|]+')
+  local knownOrigin = redis.call('SISMEMBER', KEYS[2], origin) == 1
+  if (knownOrigin or redis.call('SCARD', KEYS[2]) < maxOrigins) and (redis.call('HEXISTS', KEYS[1], f) == 1 or redis.call('HLEN', KEYS[1]) < maxFields) then
+    if not knownOrigin then redis.call('SADD', KEYS[2], origin) end
     redis.call('HINCRBY', KEYS[1], f, 1)
   else
-    redis.call('HINCRBY', KEYS[1], ARGV[3], 1)
+    overflow = true
   end
 end
+if overflow then redis.call('HINCRBY', KEYS[1], ARGV[3], 1) end
 redis.call('EXPIRE', KEYS[1], ttl)
+redis.call('EXPIRE', KEYS[2], ttl)
 return 1`;
 
 export class RedisCspReportSink implements CspReportSink {
@@ -132,27 +160,38 @@ export class RedisCspReportSink implements CspReportSink {
   ) {}
 
   async record(violations: CspViolation[], nowMs: number): Promise<void> {
-    if (violations.length === 0) return;
+    const fields = requestFields(violations);
+    if (fields.length === 0) return;
+    const key = this.key(cspBucket(nowMs));
     try {
-      await this.redis.eval(CSP_COUNT_SCRIPT, 1, this.key(cspBucket(nowMs)), CSP_REPORT_TTL_SEC, CSP_REPORT_MAX_FIELDS, CSP_REPORT_OVERFLOW_FIELD, ...violations.map(cspField));
+      await this.redis.eval(CSP_COUNT_SCRIPT, 2, key, cspOriginsKey(key), CSP_REPORT_TTL_SEC, CSP_REPORT_MAX_FIELDS, CSP_REPORT_OVERFLOW_FIELD, CSP_REPORT_MAX_ORIGINS, ...fields);
     } catch (err) {
       this.onError(err);
     }
   }
 }
 
-/** In-memory sink (tests; an API without Redis). Same field cap as the Redis script. */
+/** In-memory sink (tests; an API without Redis). Same rules as the Redis script. */
 export class MemoryCspReportSink implements CspReportSink {
   readonly buckets = new Map<number, Map<string, number>>();
+  readonly origins = new Map<number, Set<string>>();
   async record(violations: CspViolation[], nowMs: number): Promise<void> {
+    const fields = requestFields(violations);
+    if (fields.length === 0) return;
     const b = cspBucket(nowMs);
     const h = this.buckets.get(b) ?? new Map<string, number>();
+    const o = this.origins.get(b) ?? new Set<string>();
     this.buckets.set(b, h);
-    for (const v of violations) {
-      const f = cspField(v);
-      const key = h.has(f) || h.size < CSP_REPORT_MAX_FIELDS ? f : CSP_REPORT_OVERFLOW_FIELD;
-      h.set(key, (h.get(key) ?? 0) + 1);
+    this.origins.set(b, o);
+    let overflow = false;
+    for (const f of fields) {
+      const origin = f.split("|")[0]!;
+      if ((o.has(origin) || o.size < CSP_REPORT_MAX_ORIGINS) && (h.has(f) || h.size < CSP_REPORT_MAX_FIELDS)) {
+        o.add(origin);
+        h.set(f, (h.get(f) ?? 0) + 1);
+      } else overflow = true;
     }
+    if (overflow) h.set(CSP_REPORT_OVERFLOW_FIELD, (h.get(CSP_REPORT_OVERFLOW_FIELD) ?? 0) + 1);
   }
 }
 

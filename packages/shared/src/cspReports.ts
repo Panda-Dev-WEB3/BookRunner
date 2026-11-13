@@ -10,7 +10,18 @@ export const CSP_REPORT_BUCKET_SEC = 300;
 export const CSP_REPORT_TTL_SEC = 7_200;
 /** Distinct (blocked, directive, path) fields per bucket; reports beyond it count under CSP_REPORT_OVERFLOW_FIELD. */
 export const CSP_REPORT_MAX_FIELDS = 500;
+/** Distinct blocked origins per bucket (a set next to the hash); a field of a new origin beyond it counts as overflow. */
+export const CSP_REPORT_MAX_ORIGINS = 50;
 export const CSP_REPORT_OVERFLOW_FIELD = "overflow";
+/**
+ * Counting is per REQUEST, not per report: one report-to request may carry many reports (a forger's or a real
+ * batch), so the API counts each distinct field of a request once, and at most CSP_REPORT_FIELDS_PER_REQUEST of them.
+ * A field's count is therefore the number of requests that reported it.
+ */
+export const CSP_REPORT_FIELDS_PER_REQUEST = 3;
+
+/** The origin-set key next to a bucket's hash. */
+export const cspOriginsKey = (bucketKey: string): string => `${bucketKey}:origins`;
 
 /** Start (unix s) of the bucket holding `nowMs`. */
 export const cspBucket = (nowMs: number): number => Math.floor(nowMs / 1000 / CSP_REPORT_BUCKET_SEC) * CSP_REPORT_BUCKET_SEC;
