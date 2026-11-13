@@ -4,7 +4,9 @@
 // price computed like the engine), a quote for a size. Mutations return prepared transactions (the wallet signs):
 // [approve, depositMargin], withdrawMargin (with the oracle relay when a position is open), trade carrying the
 // freshest signed price, close. Every input is checked against the engine's rules before anything is built, so a
-// trade the engine would refuse is refused here with the reason.
+// trade the engine would refuse is refused here with the reason. Trading page v2 (2026-11): the market's price history
+// (trade.history, one-minute OHLC recorded by src/priceRecorder.ts) and a wallet's trade and PnL history (trade.fills,
+// from the indexed engine events).
 import { bytes32ToStr } from "@bookrunner/shared/bytes32";
 import { KEYS } from "@bookrunner/shared/queues";
 import { VENUE } from "@bookrunner/shared/types";
@@ -34,6 +36,7 @@ import {
   unitsStr,
   withdrawMaxAge,
 } from "../domain/trade";
+import { HISTORY_RANGES, HISTORY_SPEC, MAX_TRADER_EVENTS, aggregateCandles, buildFills, historyFrom, minuteRowsFor } from "../domain/tradeHistory";
 import { type PreparedTx, approveUsdcTx, engineDepositMarginTx, engineTradeTx, engineWithdrawMarginTx, oracleUpdateTx } from "../domain/txs";
 import { parseUsd, usdStr, wadStr } from "../format";
 import { cached, parseJson } from "../kv";
@@ -60,7 +63,7 @@ interface LoadedMarket {
   label: string;
 }
 
-const engineBooks = async (deps: ApiDeps) => (await deps.data.listBooks()).filter((b) => b.venue === VENUE.POOL_ENGINE && LIVE_STATES.has(b.state));
+export const engineBooks = async (deps: ApiDeps) => (await deps.data.listBooks()).filter((b) => b.venue === VENUE.POOL_ENGINE && LIVE_STATES.has(b.state));
 
 function loaded(book: BookRow, chain: EngineMarketChainState): LoadedMarket {
   const symbol = bytes32ToStr(chain.config.symbol) || book.symbol;
@@ -73,7 +76,7 @@ function loaded(book: BookRow, chain: EngineMarketChainState): LoadedMarket {
 export const SIGNED_SOURCE_TTL_MS = 1_000;
 const signedMemo = new WeakMap<ApiDeps, { at: number; v: Promise<{ bundle: unknown; messages: unknown[] }> }>();
 
-function signedSource(deps: ApiDeps): Promise<{ bundle: unknown; messages: unknown[] }> {
+export function signedSource(deps: ApiDeps): Promise<{ bundle: unknown; messages: unknown[] }> {
   const hit = signedMemo.get(deps);
   if (hit && deps.now() - hit.at < SIGNED_SOURCE_TTL_MS) return hit.v;
   const v = (async () => {
@@ -144,6 +147,10 @@ const traderOf = (deps: ApiDeps, marketId: number, wallet: Address) => hardChain
 export const TRADER_READ_CACHE_SECONDS = 2;
 const traderOfCached = (deps: ApiDeps, marketId: number, wallet: Address) =>
   cached(deps.kv, `trade:trader:${deps.settings.chainId}:${marketId}:${wallet.toLowerCase()}`, TRADER_READ_CACHE_SECONDS, () => traderOf(deps, marketId, wallet));
+
+/** trade.fills: the built history of a (wallet, market or all) is cached this long (the CSV export reads it page by page). */
+export const FILLS_CACHE_SECONDS = 2;
+export const MAX_FILLS_PAGE = 500;
 
 const isoSec = (s: number) => new Date(s * 1000).toISOString();
 
@@ -283,6 +290,43 @@ export const tradeRouter = router({
       const pr = await loadPriced(deps, input.marketId);
       const t = input.wallet ? await traderOfCached(deps, input.marketId, input.wallet) : null;
       return quoteOf(pr, t ? position(t) : null, input.sizeDelta, input.slippageBps, !!deps.settings.tradeRefuseUnholdable);
+    }),
+
+  /**
+   * The market's oracle price over 1D / 1W / 1M: one-minute OHLC of the signed price (API price recorder) downsampled
+   * to at most MAX_HISTORY_POINTS steps. Cached per (market, range) for the range's cacheSec (DB read only on a miss).
+   */
+  history: publicProcedure.input(z.object({ marketId: marketIdInput, range: z.enum(HISTORY_RANGES).default("1D") })).query(async ({ ctx: { deps }, input }) => {
+    const spec = HISTORY_SPEC[input.range];
+    return cached(deps.kv, `trade:history:${deps.settings.chainId}:${input.marketId}:${input.range}`, spec.cacheSec, async () => {
+      const m = await loadMarket(deps, input.marketId);
+      const nowSec = Math.floor(deps.now() / 1000);
+      const from = historyFrom(input.range, nowSec);
+      const rows = await deps.data.enginePriceMinutes(input.marketId, m.chain.config.underlying, new Date(from * 1000), minuteRowsFor(input.range));
+      return {
+        marketId: input.marketId,
+        range: input.range,
+        stepSeconds: spec.stepSec,
+        from: isoSec(from),
+        to: isoSec(nowSec),
+        points: aggregateCandles(rows, spec.stepSec, from, nowSec),
+      };
+    });
+  }),
+
+  /**
+   * A wallet's trades, liquidations, wind-down close-outs, margin deposits / withdrawals and funding in one market (or
+   * all), newest first, with realised PnL, fees and funding totals: from the indexed engine events (engine_trader_events),
+   * never Redis. Paged by offset (at most MAX_FILLS_PAGE rows); totals cover every row.
+   */
+  fills: publicProcedure
+    .input(z.object({ wallet: walletInput, marketId: marketIdInput.optional(), offset: intLike(0, MAX_TRADER_EVENTS).default(0), limit: intLike(1, MAX_FILLS_PAGE).default(50) }))
+    .query(async ({ ctx: { deps }, input }) => {
+      const all = await cached(deps.kv, `trade:fills:${deps.settings.chainId}:${input.wallet.toLowerCase()}:${input.marketId ?? "all"}`, FILLS_CACHE_SECONDS, async () => {
+        const events = await deps.data.engineTraderEvents(input.wallet, { marketId: input.marketId, limit: MAX_TRADER_EVENTS });
+        return { ...buildFills(events), truncated: events.length >= MAX_TRADER_EVENTS };
+      });
+      return { wallet: input.wallet, marketId: input.marketId ?? null, total: all.rows.length, offset: input.offset, rows: all.rows.slice(input.offset, input.offset + input.limit), totals: all.totals, truncated: all.truncated };
     }),
 
   /** Prepared [settlement-token approve (if needed), depositMargin]: always allowed, off-hours and reduce-only too. */

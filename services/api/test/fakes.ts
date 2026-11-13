@@ -22,6 +22,8 @@ import type {
   CharterRow,
   CommitteeRow,
   DeliveryUpdate,
+  EnginePriceMinuteRow,
+  EngineTraderEventRow,
   EventRow,
   FillCursor,
   FillRow,
@@ -40,6 +42,8 @@ import type {
   PoolFlowDay,
   PoolSnapshotRow,
   PoolWithdrawalRow,
+  PriceHistoryStore,
+  PriceSample,
   ReadModel,
   ReceiptLinkField,
   ReceiptRootRow,
@@ -90,6 +94,10 @@ export class FakeReadModel implements ReadModel {
   poolBookRows: PoolBookRow[] = [];
   poolSnapshotRows: PoolSnapshotRow[] = [];
   poolFlowDayRows: PoolFlowDay[] = [];
+  engineEventRows: EngineTraderEventRow[] = [];
+  priceMinuteRows: EnginePriceMinuteRow[] = [];
+  /** Counts the candle reads (cache tests). */
+  priceMinuteReads = 0;
   failPing = false;
   /** Makes receiptLinks throw (feeds must still be served, without receipt ids). */
   failReceiptLinks = false;
@@ -255,6 +263,50 @@ export class FakeReadModel implements ReadModel {
   }
   async poolFlowDays(from: Date) {
     return this.poolFlowDayRows.filter((d) => d.day >= new Date(Math.floor(from.getTime() / 86_400_000) * 86_400_000));
+  }
+  async engineTraderEvents(trader: string, q: { marketId?: number; limit: number }) {
+    return this.engineEventRows
+      .filter((r) => r.trader === trader.toLowerCase() && (q.marketId === undefined || r.marketId === q.marketId))
+      .sort((a, b) => a.block - b.block || a.logIndex - b.logIndex)
+      .slice(0, q.limit);
+  }
+  async enginePriceMinutes(marketId: number, underlying: string, since: Date, limit: number) {
+    this.priceMinuteReads++;
+    return this.priceMinuteRows
+      .filter((r) => r.marketId === marketId && r.underlying === underlying.toLowerCase() && r.bucket.getTime() >= since.getTime())
+      .sort((a, b) => a.bucket.getTime() - b.bucket.getTime())
+      .slice(0, limit);
+  }
+}
+
+/** Mirrors DrizzlePriceHistoryStore's commutative upsert on the fake read model's rows. */
+export class FakePriceHistoryStore implements PriceHistoryStore {
+  samples: PriceSample[] = [];
+  constructor(private readonly data: FakeReadModel) {}
+  async recordPrice(s: PriceSample) {
+    this.samples.push(s);
+    const bucket = new Date(Math.floor(s.publishedAt / 60) * 60_000);
+    const u = s.underlying.toLowerCase();
+    const px = s.priceWad.toString();
+    const r = this.data.priceMinuteRows.find((x) => x.marketId === s.marketId && x.underlying === u && x.bucket.getTime() === bucket.getTime());
+    if (!r) {
+      this.data.priceMinuteRows.push({ marketId: s.marketId, underlying: u, bucket, openWad: px, highWad: px, lowWad: px, closeWad: px, firstAt: s.publishedAt, lastAt: s.publishedAt, held: s.held });
+      return;
+    }
+    if (s.publishedAt < r.firstAt) r.openWad = px;
+    r.firstAt = Math.min(r.firstAt, s.publishedAt);
+    if (s.priceWad > BigInt(r.highWad)) r.highWad = px;
+    if (s.priceWad < BigInt(r.lowWad)) r.lowWad = px;
+    if (s.publishedAt >= r.lastAt) {
+      r.closeWad = px;
+      r.held = s.held;
+    }
+    r.lastAt = Math.max(r.lastAt, s.publishedAt);
+  }
+  async prunePrices(before: Date) {
+    const n = this.data.priceMinuteRows.length;
+    this.data.priceMinuteRows = this.data.priceMinuteRows.filter((r) => r.bucket.getTime() >= before.getTime());
+    return n - this.data.priceMinuteRows.length;
   }
 }
 

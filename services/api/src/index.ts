@@ -9,9 +9,10 @@ import { DeploymentWatcher } from "./chain/deployment";
 import { HttpCharterServiceClient } from "./charterService";
 import { RedisCspReportSink } from "./cspReport";
 import { type ApiConfig, loadApiConfig, refuseUnholdable } from "./config";
-import { DrizzleReadModel, DrizzleWebhookStore } from "./data/drizzle";
+import { DrizzlePriceHistoryStore, DrizzleReadModel, DrizzleWebhookStore } from "./data/drizzle";
 import type { ApiDeps } from "./deps";
 import { RedisKv } from "./kv";
+import { PriceRecorder } from "./priceRecorder";
 import { WebhookDispatcher } from "./webhooks/dispatcher";
 import { createWebhookQueue, createWebhookWorker } from "./webhooks/queue";
 import { dnsResolveHost, parseAllowHosts } from "./webhooks/target";
@@ -89,6 +90,12 @@ export async function startApi(env: ApiConfig = loadApiConfig()) {
   const server = Bun.serve({ port: env.API_PORT, hostname: env.API_HOST, fetch: app.fetch, idleTimeout: 120 });
   log.info({ url: `http://${env.API_HOST}:${env.API_PORT}`, origins: env.webOrigins, chainId: env.CHAIN_ID }, "api listening (/trpc, /v1, /mcp, /health, /csp-report)");
   closers.unshift({ name: "http", close: () => server.stop() });
+
+  // Trading page price history: one-minute candles of each open engine market's signed price (trade.history).
+  const recorder = new PriceRecorder({ deps, store: new DrizzlePriceHistoryStore(db), sampleMs: env.API_PRICE_HISTORY_SAMPLE_MS, retentionDays: env.API_PRICE_HISTORY_RETENTION_DAYS });
+  recorder.start();
+  if (env.API_PRICE_HISTORY_SAMPLE_MS > 0) closers.push({ name: "price-recorder", close: () => recorder.stop() });
+  else log.info("price history recording disabled (API_PRICE_HISTORY_SAMPLE_MS=0)");
 
   // Webhooks: dispatcher (pub/sub + events-table sweep) -> BullMQ -> worker (signed HTTP POST).
   if (env.WEBHOOKS_ENABLED) {
