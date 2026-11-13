@@ -7,7 +7,8 @@ import { CHANNELS, type Deployment, type Logger, busJson } from "@bookrunner/sha
 import type { IndexerChain } from "./chain";
 import { CURSORS } from "./config";
 import { type DecodeSkip, type DecodedLog, decodeLog, orderLogs } from "./decode";
-import { type HandlerCtx, booksCreatedIn, handlerFor } from "./handlers";
+import { type Handler, type HandlerCtx, booksCreatedIn, handlerFor } from "./handlers";
+import { ENGINE_EVENT_HANDLERS } from "./engineEvents";
 import { ENGINE_HANDLERS } from "./engineHandlers";
 import { backfillPool } from "./poolHandlers";
 import { type Range, planRange } from "./range";
@@ -65,8 +66,12 @@ export class Indexer {
     const range = planRange(cursors, config.startBlock, head, config.confirmations, config.batchBlocks);
     // the engine is indexed with the protocol group: a fresh index (no cursor yet) from the start, and an index whose
     // engine backfill caught up stays in sync; only an older index has a backfill to run (backfillEngine)
-    const engineCur = await store.getCursor(CURSORS.engineBackfill);
-    const freshEngine = (cursors.protocol === null && engineCur === null) || (engineCur !== null && cursors.protocol !== null && engineCur >= cursors.protocol);
+    const fresh = async (name: string) => {
+      const cur = await store.getCursor(name);
+      return (cursors.protocol === null && cur === null) || (cur !== null && cursors.protocol !== null && cur >= cursors.protocol);
+    };
+    const freshEngine = await fresh(CURSORS.engineBackfill);
+    const freshEvents = await fresh(CURSORS.engineEventsBackfill);
     if (!range) {
       await this.backfill(BigInt(cursors.protocol ?? 0));
       return { status: "idle", head };
@@ -78,7 +83,7 @@ export class Indexer {
     const key = `${range.from}-${range.to}`;
     const isolated = this.failure.key === key && this.failure.count >= config.poisonAttempts;
     try {
-      const r = await this.apply(range, logs, isolated, freshEngine);
+      const r = await this.apply(range, logs, isolated, freshEngine, freshEvents);
       this.failure = { key: "", count: 0 };
       await this.publish(r.events);
       await this.backfill(range.to);
@@ -116,7 +121,7 @@ export class Indexer {
     return { logs: orderLogs([...first, ...newBookLogs]), skips };
   }
 
-  async apply(range: Range, logs: DecodedLog[], isolated: boolean, freshEngine = false): Promise<{ applied: number; skipped: number; events: PublishedEvent[] }> {
+  async apply(range: Range, logs: DecodedLog[], isolated: boolean, freshEngine = false, freshEvents = false): Promise<{ applied: number; skipped: number; events: PublishedEvent[] }> {
     const { chain, watch, deployment, logger } = this.d;
     const published: PublishedEvent[] = [];
     let applied = 0;
@@ -170,6 +175,7 @@ export class Indexer {
       await tx.setCursor(CURSORS.protocol, Math.max(to, Number(range.done.protocol)));
       await tx.setCursor(CURSORS.books, Math.max(to, Number(range.done.books)));
       if (freshEngine) await tx.setCursor(CURSORS.engineBackfill, Math.max(to, Number(range.done.protocol)));
+      if (freshEvents) await tx.setCursor(CURSORS.engineEventsBackfill, Math.max(to, Number(range.done.protocol)));
     });
     return { applied, skipped, events: published };
   }
@@ -179,17 +185,29 @@ export class Indexer {
    * before. One batch per step: the engine's logs only (engine-only eth_getLogs), position handlers only (idempotent:
    * a row is only replaced by a later log), from the deployment's start block up to the protocol cursor. Never throws.
    */
-  async backfillEngine(): Promise<{ from: number; to: number; logs: number } | null> {
+  backfillEngine(): Promise<{ from: number; to: number; logs: number } | null> {
+    return this.backfillEngineLogs(CURSORS.engineBackfill, ENGINE_HANDLERS, false, "engine positions backfill");
+  }
+
+  /**
+   * Trading page v2: the same for engine_trader_events (an index older than those rows), with each log's block
+   * timestamp (one cached block read per block holding engine events). Inserts are idempotent per (tx, logIndex).
+   */
+  backfillEngineEvents(): Promise<{ from: number; to: number; logs: number } | null> {
+    return this.backfillEngineLogs(CURSORS.engineEventsBackfill, ENGINE_EVENT_HANDLERS, true, "engine trader events backfill");
+  }
+
+  private async backfillEngineLogs(cursor: string, handlers: Record<string, Handler>, blockTime: boolean, what: string): Promise<{ from: number; to: number; logs: number } | null> {
     const { store, chain, watch, config, logger } = this.d;
     const engine = watch.engineAddress();
     if (!engine) return null;
     try {
       const target = await store.getCursor(CURSORS.protocol);
       if (target === null) return null;
-      let cur = await store.getCursor(CURSORS.engineBackfill);
+      let cur = await store.getCursor(cursor);
       if (cur === null) {
         cur = config.startBlock - 1;
-        logger.info({ from: config.startBlock, to: target }, "engine positions backfill: indexing the PoolEngine's history");
+        logger.info({ from: config.startBlock, to: target }, `${what}: indexing the PoolEngine's history`);
       }
       if (cur >= target) return null;
       const from = cur + 1;
@@ -199,20 +217,22 @@ export class Indexer {
         raws.flatMap((raw) => {
           if (raw.removed) return [];
           const d = decodeLog(raw, "engine", null);
-          return d.ok && ENGINE_HANDLERS[`engine.${d.log.eventName}`] ? [d.log] : [];
+          return d.ok && handlers[`engine.${d.log.eventName}`] ? [d.log] : [];
         }),
       );
+      const times = new Map<bigint, Date>();
+      if (blockTime) for (const log of logs) if (!times.has(log.blockNumber)) times.set(log.blockNumber, new Date((await chain.blockTimestamp(log.blockNumber)) * 1000));
       await store.transaction(async (tx) => {
         for (const log of logs) {
-          const ctx = { log, ts: new Date(0), store: tx, chain, watch, deployment: this.d.deployment, batch: logs, logger, emit: async () => undefined } as unknown as HandlerCtx;
-          await ENGINE_HANDLERS[`engine.${log.eventName}`]!(ctx);
+          const ctx = { log, ts: times.get(log.blockNumber) ?? new Date(0), store: tx, chain, watch, deployment: this.d.deployment, batch: logs, logger, emit: async () => undefined } as unknown as HandlerCtx;
+          await handlers[`engine.${log.eventName}`]!(ctx);
         }
-        await tx.setCursor(CURSORS.engineBackfill, to);
+        await tx.setCursor(cursor, to);
       });
-      if (to >= target) logger.info({ to }, "engine positions backfill complete");
+      if (to >= target) logger.info({ to }, `${what} complete`);
       return { from, to, logs: logs.length };
     } catch (err) {
-      logger.warn({ err: (err as Error).message }, "engine positions backfill failed (retrying next pass)");
+      logger.warn({ err: (err as Error).message }, `${what} failed (retrying next pass)`);
       return null;
     }
   }
@@ -220,6 +240,7 @@ export class Indexer {
   /** Review I-3: re-reads pool rows a failed read left stale (best effort, every pass; never throws). */
   private async backfill(head: bigint): Promise<void> {
     await this.backfillEngine();
+    await this.backfillEngineEvents();
     const pool = this.d.watch.poolAddress();
     if (!pool || head <= 0n) return;
     try {

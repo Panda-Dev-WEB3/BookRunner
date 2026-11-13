@@ -34,6 +34,7 @@ function world() {
   L("Liquidation", { marketId: 1n, trader: ALICE, liquidator: KEEPER, size: 10n * UNIT, priceWad: 93n * UNIT, feeUsd: 1n, badDebtUsd: 0n }, 5, 0, 6);
   L("Trade", { marketId: 1n, trader: BOB, sizeDelta: 2n * UNIT, fillPriceWad: 100n * UNIT, feeUsd: 0n, realizedPnlUsd: 0n, newSize: 0n }, 6, 0, 7);
   L("ClosedOut", { marketId: 1n, trader: BOB, by: KEEPER, size: -2n * UNIT, priceWad: 100n * UNIT, badDebtUsd: 0n }, 6, 1, 7);
+  L("FundingSettled", { marketId: 1n, trader: BOB, owedUsd: -3n }, 6, 2, 7);
   return { chain, store, make };
 }
 
@@ -97,5 +98,59 @@ describe("engine positions backfill (review I-5)", () => {
     const calls = chain.getLogsCalls.length;
     expect(await make().backfillEngine()).toBeNull();
     expect(chain.getLogsCalls.length).toBe(calls);
+  });
+});
+
+describe("engine trader events (trading page v2)", () => {
+  const byKey = (store: MemoryIndexerStore) => Object.values(store.s.engineEvents).sort((a, b) => a.block - b.block || a.logIndex - b.logIndex);
+
+  test("every trader-side engine event is one raw row, with its block time", async () => {
+    const { chain, store, make } = world();
+    chain.head = 6n;
+    await drain(make());
+    const rows = byKey(store);
+    expect(rows.map((r) => r.kind)).toEqual(["margin", "trade", "margin", "trade", "margin", "liquidation", "trade", "closed_out", "funding"]);
+    expect(rows[1]).toMatchObject({ trader: ALICE.toLowerCase(), marketId: 1, sizeRaw: (10n * UNIT).toString(), newSizeRaw: (10n * UNIT).toString(), priceWad: (100n * UNIT).toString(), feeRaw: "1", pnlRaw: "0", block: 2 });
+    expect(new Date(rows[1]!.ts).getTime()).toBe((1_790_000_000 + 2 * 2) * 1000);
+    expect(rows[5]).toMatchObject({ kind: "liquidation", sizeRaw: (10n * UNIT).toString(), priceWad: (93n * UNIT).toString(), feeRaw: "1", badDebtRaw: "0", counterparty: KEEPER.toLowerCase() });
+    expect(rows[7]).toMatchObject({ kind: "closed_out", sizeRaw: (-2n * UNIT).toString(), counterparty: KEEPER.toLowerCase() });
+    expect(rows[8]).toMatchObject({ kind: "funding", fundingRaw: "-3", trader: BOB.toLowerCase() });
+    expect(rows[0]).toMatchObject({ kind: "margin", marginDeltaRaw: "110000000" });
+    // the position handlers still run (and ignore FundingSettled)
+    expect(store.s.enginePositions[`1|${BOB.toLowerCase()}`]).toMatchObject({ sizeRaw: "0", lastBlock: 6, lastLogIndex: 1 });
+  });
+
+  test("idempotent: a re-applied range adds no row", async () => {
+    const { chain, store, make } = world();
+    chain.head = 6n;
+    await drain(make());
+    const before = JSON.stringify(byKey(store));
+    await store.setCursor(CURSORS.protocol, 0);
+    await store.setCursor(CURSORS.books, 0);
+    await drain(make());
+    expect(JSON.stringify(byKey(store))).toBe(before);
+  });
+
+  test("an index older than these rows backfills them with block times; positions untouched; a fresh index needs none", async () => {
+    const { chain, store, make } = world();
+    chain.head = 6n;
+    await store.setCursor(CURSORS.protocol, 6);
+    await store.setCursor(CURSORS.books, 6);
+    await store.setCursor(CURSORS.engineBackfill, 6); // the positions backfill is done already
+    const ix = make();
+    for (let i = 0; i < 5; i++) await ix.backfillEngineEvents();
+    expect(byKey(store)).toHaveLength(9);
+    expect(byKey(store).every((r) => new Date(r.ts).getTime() === (1_790_000_000 + r.block * 2) * 1000)).toBe(true);
+    expect(Object.keys(store.s.enginePositions)).toHaveLength(0);
+    expect(await store.getCursor(CURSORS.engineEventsBackfill)).toBe(6);
+    expect(await ix.backfillEngineEvents()).toBeNull();
+
+    const w2 = world();
+    w2.chain.head = 6n;
+    await drain(w2.make());
+    expect(await w2.store.getCursor(CURSORS.engineEventsBackfill)).toBe(6);
+    const calls = w2.chain.getLogsCalls.length;
+    expect(await w2.make().backfillEngineEvents()).toBeNull();
+    expect(w2.chain.getLogsCalls.length).toBe(calls);
   });
 });
