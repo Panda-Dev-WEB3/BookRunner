@@ -36,6 +36,7 @@ contract StockTokenRegistry is IStockTokenRegistry {
     /// @notice Largest token decimals accepted (keeps 10**decimals * 1e30 far from overflow).
     uint8 public constant MAX_DECIMALS = 30;
     uint256 internal constant BPS = 10_000;
+    uint256 internal constant WAD = 1e18;
     /// @dev 1e18 (multiplier WAD) * 1e12 (WAD USD -> 6dp USD).
     uint256 internal constant SCALE = 1e30;
     /// @notice Default live-multiplier band around the anchor (5%: years of reinvested dividends).
@@ -67,7 +68,7 @@ contract StockTokenRegistry is IStockTokenRegistry {
     /// @notice Registry-side change of the effective multiplier (unix seconds, 0 = none): `setMultiplier` while
     ///         the stored value is the effective one, and every `setMultiplierSource` (audit M-2).
     mapping(address token => uint64) public multiplierSetAt;
-    /// @dev Reverse indexes for {splitGate}: an engine market is keyed by its price id.
+    /// @dev Reverse indexes for the engine split factor ({splitFactors}): an engine market is keyed by its price id.
     mapping(bytes32 priceId => address[]) internal _tokensOfPriceId;
     mapping(bytes32 priceId => bytes32 indexId) internal _indexOfPriceId;
     /// @dev One registry-side change ({multiplierSetAt}): its time and the multiplier in force before it (stored
@@ -80,6 +81,35 @@ contract StockTokenRegistry is IStockTokenRegistry {
     /// @dev Every registry-side change of a token, oldest first (Task 7, the full history behind {basisMultiplier}:
     ///      fix round 2 N-I1 kept only the last one, so two changes after a basis read as unknown).
     mapping(address token => MultiplierChange[]) internal _changes;
+
+    /// @dev Audit N-1: a stock split of a share price id, the unit of PoolEngine's split factor. `at` is the first
+    ///      share basis in post-split shares (the token's `effectiveAt`, live mode; the `setMultiplier` block, stored
+    ///      mode); `cumWad` the shares per share-at-registration after it (WAD); `multAfter` (live mode only) the
+    ///      token's multiplier right after it, checked until governance re-anchors.
+    struct Split {
+        uint64 at;
+        address token;
+        uint256 cumWad;
+        uint256 multAfter;
+    }
+
+    /// @custom:storage-location erc7201:bookrunner.storage.StockTokenRegistrySplits
+    struct SplitStorage {
+        /// @dev Final splits of a price id, `at` ascending.
+        mapping(bytes32 priceId => Split[]) splits;
+        /// @dev Live mode: the split staged on the token ({recordSplit}); `cumWad` holds its RATIO (WAD) until it is
+        ///      appended to `splits`. It applies to every basis >= `at`, appended or not.
+        mapping(bytes32 priceId => Split) staged;
+    }
+
+    // keccak256(abi.encode(uint256(keccak256("bookrunner.storage.StockTokenRegistrySplits")) - 1)) & ~bytes32(uint256(0xff))
+    bytes32 private constant SPLITS_LOCATION = 0xcd763581cbccffbca42f53025e7c303fbcc54f95578518e124a37135f9588100;
+
+    function _ss() private pure returns (SplitStorage storage $) {
+        assembly {
+            $.slot := SPLITS_LOCATION
+        }
+    }
 
     error Unauthorized(address caller);
     error ZeroAddress();
@@ -97,6 +127,19 @@ contract StockTokenRegistry is IStockTokenRegistry {
     error MultiplierOutOfBand(address token, uint256 live, uint256 anchor);
     error BadBand(uint16 bandBps);
     error MultiplierChangedSincePrice(address token, uint64 priceBasisAt, uint256 multiplierChangedAt);
+    /// @notice Audit N-1: an out-of-band multiplier change of a live token is active (or a recorded one did not happen
+    ///         as recorded) with no matching split record: no split factor for a basis from `from` on (fail closed).
+    error SplitUnrecorded(address token, uint256 from);
+    /// @notice A live re-anchor beyond the band needs the split recorded first ({recordSplit} / {recordSplitAt}).
+    error SplitNotRecorded(address token);
+    error NotLiveMultiplier(address token);
+    error NothingToRecord(address token);
+    error BadSplit();
+    /// @notice Audit N-1: a price id's splits are recorded from its one live-mode token.
+    error LiveTokenExists(bytes32 priceId, address token);
+
+    event SplitRecorded(bytes32 indexed priceId, address indexed token, uint64 at, uint256 ratioWad, bool staged);
+    event StagedSplitCleared(bytes32 indexed priceId, address indexed token, uint64 at);
 
     event AdminSet(address indexed admin);
     event TokenActiveSet(address indexed token, bool active);
@@ -158,21 +201,40 @@ contract StockTokenRegistry is IStockTokenRegistry {
         StockToken storage t = _registered(token);
         if (multiplierWad == 0) revert BadMultiplier();
         uint256 old = t.multiplierWad;
+        bool live = multiplierFromToken[token];
+        // audit N-1: a stored change beyond the band IS a split (recorded now); a live re-anchor beyond the band
+        // follows one, which must be recorded first (re-anchoring would hide an unrecorded split from {shareFactor})
+        if (!_inBand(multiplierWad, old)) {
+            if (live) {
+                (bool has,, uint256 after_) = _lastApplied(t.priceId, token);
+                if (!has || !_inBand(multiplierWad, after_)) revert SplitNotRecorded(token);
+            } else {
+                _recordFinal(t.priceId, token, uint64(block.timestamp), old, multiplierWad, 0);
+            }
+        }
         t.multiplierWad = multiplierWad;
         // audit M-2. Stored mode: this IS the valuation multiplier, a price observed before it must not meet
         // it. Live mode: an anchor moved beyond the band re-anchors a split; stamping it keeps the guard on
         // when the token later stops reporting that split's effectiveAt (a newer change staged).
-        if (multiplierFromToken[token] ? !_inBand(multiplierWad, old) : multiplierWad != old) _stamp(token, old);
+        if (live ? !_inBand(multiplierWad, old) : multiplierWad != old) _stamp(token, old);
         emit MultiplierSet(token, multiplierWad);
     }
 
     /// @notice Multiplier source: true = the token's live ERC-8056 `uiMultiplier()` (mainnet Stock Tokens),
     ///         false = the stored value. Enabling reads the token once: it must implement `uiMultiplier()`
     ///         and Robinhood's `effectiveAt()` (the change time the M-2 guard needs) and be within the band of
-    ///         the anchor (else MultiplierOutOfBand / a revert), plus `newUIMultiplier()` ({splitGate}). An
-    ///         actual switch counts as a change; a no-op re-call does not.
+    ///         the anchor (else MultiplierOutOfBand / a revert), plus `newUIMultiplier()` ({recordSplit}). An
+    ///         actual switch counts as a change; a no-op re-call does not. At most one live token per price id
+    ///         (audit N-1: its split records are checked against it).
     function setMultiplierSource(address token, bool fromToken) external onlyGov {
         StockToken storage t = _registered(token);
+        if (fromToken) {
+            // audit N-1: the split records of a price id are checked against its one live token
+            address[] storage toks = _tokensOfPriceId[t.priceId];
+            for (uint256 i; i < toks.length; ++i) {
+                if (toks[i] != token && multiplierFromToken[toks[i]]) revert LiveTokenExists(t.priceId, toks[i]);
+            }
+        }
         if (multiplierFromToken[token] != fromToken) _stamp(token, t.multiplierWad);
         multiplierFromToken[token] = fromToken;
         if (fromToken) {
@@ -185,10 +247,44 @@ contract StockTokenRegistry is IStockTokenRegistry {
     /// @notice Pre-approve the anchor of a scheduled corporate action (e.g. a split staged on the token with
     ///         `updateMultiplier(m, effectiveAt)`), so live valuation does not fail closed between the
     ///         activation and the governance re-anchor. 0 clears it.
+    ///         Audit N-1: a live token's out-of-band change staged on the token is recorded too ({recordSplit}).
     function setNextMultiplierAnchor(address token, uint256 multiplierWad) external onlyGov {
-        _registered(token);
+        StockToken storage t = _registered(token);
         nextMultiplierAnchor[token] = multiplierWad;
         emit NextMultiplierAnchorSet(token, multiplierWad);
+        if (multiplierFromToken[token]) _syncStaged(t);
+    }
+
+    /// @notice Audit N-1, anyone (the waterfall keeper does it every pass): records the out-of-band multiplier change
+    ///         (a split) staged on a live token, read from the token itself: effective at `effectiveAt()`, ratio
+    ///         `newUIMultiplier() / uiMultiplier()` (the per-share price steps by its inverse). Re-callable until
+    ///         `effectiveAt` (the issuer may re-stage); drops this token's staged record once the token no longer
+    ///         stages an out-of-band change. Reverts NothingToRecord when the record already matches the token.
+    function recordSplit(address token) external {
+        StockToken storage t = _registered(token);
+        if (!multiplierFromToken[token]) revert NotLiveMultiplier(token);
+        if (!_syncStaged(t)) revert NothingToRecord(token);
+    }
+
+    /// @notice Audit N-1 fallback, governance: records a split nobody recorded before it took effect, or corrects a
+    ///         staged record the token did not follow, from the token's `UIMultiplierUpdated(old, new, effectiveAt)`
+    ///         event (`at` = effectiveAt). An active staged record at the same time, or a last final record at the
+    ///         same time, is replaced; otherwise the split is appended (`at` >= the last record and <= now).
+    function recordSplitAt(address token, uint64 at, uint256 multBefore, uint256 multAfter) external onlyGov {
+        StockToken storage t = _registered(token);
+        if (at == 0 || at > block.timestamp || multBefore == 0 || multAfter == 0 || _inBand(multAfter, multBefore)) {
+            revert BadSplit();
+        }
+        bytes32 pid = t.priceId;
+        if (_ss().staged[pid].at == at) delete _ss().staged[pid];
+        _popLastAt(pid, at);
+        _recordFinal(pid, token, at, multBefore, multAfter, multiplierFromToken[token] ? multAfter : 0);
+    }
+
+    function _popLastAt(bytes32 pid, uint64 at) internal {
+        Split[] storage fs = _ss().splits[pid];
+        uint256 n = fs.length;
+        if (n != 0 && fs[n - 1].at == at) fs.pop();
     }
 
     /// @notice Band (bps, 1..MAX_MULTIPLIER_BAND_BPS) a live multiplier may drift from its anchor.
@@ -334,29 +430,72 @@ contract StockTokenRegistry is IStockTokenRegistry {
         if (changedAt > basis) revert MultiplierChangedSincePrice(token, basis, changedAt);
     }
 
-    /// @notice Engine gate for a market keyed by `priceId` (a Stock Token's price id, or an index level's;
-    ///         audit N-1). `pending`: a token behind it (a component, for an index) has an out-of-band change
-    ///         pre-approved (`nextMultiplierAnchor` beyond the band of the anchor) or staged on the token
-    ///         (`newUIMultiplier()` beyond the band of the active one, `effectiveAt()` ahead): close-only.
-    ///         `window`: a token's {multiplierChangedAt} is after `basisAt` (the share basis of the engine's
-    ///         price): the price is in pre-change shares, every voluntary trade reverts. Reverts like a
-    ///         valuation when a live multiplier is out of band (fail closed).
-    function splitGate(bytes32 priceId, uint64 basisAt) external view override returns (bool pending, bool window) {
-        address[] storage toks = _tokensOfPriceId[priceId];
-        for (uint256 i; i < toks.length; ++i) {
-            (bool p, bool w) = _tokenGate(_tokens[toks[i]], basisAt);
-            pending = pending || p;
-            window = window || w;
-        }
+    /// @notice Audit N-1: cumulative split factor of a share price id at a price basis (shares per share at
+    ///         registration, WAD; 1e18 = no split): the product of the recorded splits with `at <= basisAt`. Reverts
+    ///         SplitUnrecorded when a live token of the price id has an out-of-band change active at that basis with
+    ///         no matching record (fail closed).
+    function shareFactor(bytes32 priceId, uint64 basisAt) external view override returns (uint256) {
+        return _shareFactorChecked(priceId, basisAt);
+    }
+
+    /// @notice Audit N-1, PoolEngine's input for a market keyed by `priceId`: a share price id gives its
+    ///         {shareFactor} and no components; an index level's price id gives 1e18 and, per component, its share
+    ///         price id, weight and {shareFactor} at `basisAt`.
+    function splitFactors(bytes32 priceId, uint64 basisAt)
+        external
+        view
+        override
+        returns (uint256 factorWad, SplitComponent[] memory components)
+    {
         bytes32 idx = _indexOfPriceId[priceId];
-        if (idx != bytes32(0)) {
-            IndexComponent[] storage cs = _indexes[idx].components;
-            for (uint256 i; i < cs.length; ++i) {
-                (bool p, bool w) = _tokenGate(_tokens[cs[i].token], basisAt);
-                pending = pending || p;
-                window = window || w;
-            }
+        if (idx == bytes32(0)) return (_shareFactorChecked(priceId, basisAt), components);
+        IndexComponent[] storage cs = _indexes[idx].components;
+        components = new SplitComponent[](cs.length);
+        for (uint256 i; i < cs.length; ++i) {
+            bytes32 pid = _tokens[cs[i].token].priceId;
+            components[i] = SplitComponent({
+                priceId: pid, weightBps: cs[i].weightBps, factorWad: _shareFactorChecked(pid, basisAt)
+            });
         }
+        return (WAD, components);
+    }
+
+    /// @notice Audit N-1, off-chain: the registered tokens behind a market's price id (its tokens, or an index's
+    ///         components): the ones {recordSplit}, {splitSyncNeeded} and {splitUnrecorded} take.
+    function splitTokens(bytes32 priceId) external view returns (address[] memory out) {
+        address[] storage own = _tokensOfPriceId[priceId];
+        bytes32 idx = _indexOfPriceId[priceId];
+        uint256 nc = idx == bytes32(0) ? 0 : _indexes[idx].components.length;
+        out = new address[](own.length + nc);
+        for (uint256 i; i < own.length; ++i) {
+            out[i] = own[i];
+        }
+        for (uint256 i; i < nc; ++i) {
+            out[own.length + i] = _indexes[idx].components[i].token;
+        }
+    }
+
+    /// @notice Audit N-1, off-chain: true when {recordSplit} would change the record of `token` (a live token stages
+    ///         an out-of-band change that is not recorded as staged, or its staged record is one the token dropped).
+    function splitSyncNeeded(address token) external view returns (bool) {
+        StockToken storage t = _registered(token);
+        if (!multiplierFromToken[token]) return false;
+        (bool onToken, uint64 at, uint256 ratio, uint256 nu) = _tokenStaged(token);
+        Split storage st = _ss().staged[t.priceId];
+        if (_stagedFailed(token, st)) return true;
+        if (onToken) return st.at != at || st.token != token || st.cumWad != ratio || st.multAfter != nu;
+        return st.token == token && st.at > block.timestamp;
+    }
+
+    /// @notice Audit N-1, off-chain (alert `engine_split_unrecorded`): the basis from which `token` has no split
+    ///         factor (0 = none: recorded or no split; 1 = from any basis). Engine markets on its price id (or an
+    ///         index containing it) freeze for prices from that basis on, until governance {recordSplitAt}.
+    function splitUnrecorded(address token) external view returns (uint256 from) {
+        StockToken storage t = _registered(token);
+        if (!multiplierFromToken[token]) return 0;
+        from = _unrecordedFrom(t);
+        if (from == type(uint256).max) return 0;
+        if (from == 0) from = 1;
     }
 
     /// @inheritdoc IStockTokenRegistry
@@ -506,16 +645,135 @@ contract StockTokenRegistry is IStockTokenRegistry {
         basis = d.held ? o.lastLiveAt(t.priceId) : d.publishedAt;
     }
 
-    /// @dev {splitGate} for one token.
-    function _tokenGate(StockToken storage t, uint64 basisAt) internal view returns (bool pending, bool window) {
-        if (t.token == address(0)) return (false, false);
-        uint256 next = nextMultiplierAnchor[t.token];
-        pending = next != 0 && !_inBand(next, t.multiplierWad);
-        (uint256 mult, uint256 changedAt, uint256 eff) = _effective(t);
-        if (eff > block.timestamp && !_inBand(IScaledUIAmountPending(t.token).newUIMultiplier(), mult)) {
-            pending = true;
+    /// @dev {shareFactor}: the recorded factor at `basisAt`, after the unrecorded check of every live token.
+    function _shareFactorChecked(bytes32 pid, uint64 basisAt) internal view returns (uint256 f) {
+        address[] storage toks = _tokensOfPriceId[pid];
+        for (uint256 i; i < toks.length; ++i) {
+            address tk = toks[i];
+            if (!multiplierFromToken[tk]) continue;
+            uint256 from = _unrecordedFrom(_tokens[tk]);
+            if (basisAt >= from) revert SplitUnrecorded(tk, from);
         }
-        window = changedAt > basisAt;
+        Split[] storage fs = _ss().splits[pid];
+        uint256 lo = 0;
+        uint256 hi = fs.length;
+        while (lo < hi) {
+            uint256 mid = (lo + hi) / 2;
+            if (fs[mid].at > basisAt) hi = mid;
+            else lo = mid + 1;
+        }
+        f = lo == 0 ? WAD : fs[lo - 1].cumWad;
+        Split storage st = _ss().staged[pid];
+        if (st.at != 0 && st.at <= basisAt) f = Math.mulDiv(f, st.cumWad, WAD);
+    }
+
+    /// @dev Basis from which a live token has no split factor (type(uint256).max: consistent). The token's active
+    ///      multiplier must match the records: while the last split in force, recorded from this token, is not
+    ///      re-anchored yet, its `multAfter` (exactly while the token still reports that split's effectiveAt, else
+    ///      within the band); otherwise the anchor's band. A mismatch is an unrecorded out-of-band change (from its
+    ///      effectiveAt when active and known, else from any basis: 0) or a recorded split that did not happen as
+    ///      recorded (from its `at`).
+    function _unrecordedFrom(StockToken storage t) internal view returns (uint256 from) {
+        address token = t.token;
+        uint256 live = IScaledUIAmount(token).uiMultiplier();
+        uint256 eff = IScaledUIAmountPending(token).effectiveAt();
+        (bool has, uint64 at, uint256 after_) = _lastApplied(t.priceId, token);
+        from = type(uint256).max;
+        if (has && !_inBand(t.multiplierWad, after_)) {
+            if (eff == at ? live == after_ : _inBand(live, after_)) return from;
+            if (_inBand(live, t.multiplierWad)) return at; // recorded, did not happen (re-staged unsynced)
+            from = at;
+        } else if (_inBand(live, t.multiplierWad)) {
+            return from;
+        }
+        uint256 activated = eff <= block.timestamp ? eff : 0;
+        if (activated < from) from = activated;
+    }
+
+    /// @dev The last split of `pid` in force now (the staged one once active, else the last final one), when it was
+    ///      recorded from live token `token`: its time and the token's multiplier after it.
+    function _lastApplied(bytes32 pid, address token) internal view returns (bool has, uint64 at, uint256 after_) {
+        Split storage s = _ss().staged[pid];
+        if (s.at == 0 || s.at > block.timestamp) {
+            Split[] storage fs = _ss().splits[pid];
+            uint256 n = fs.length;
+            if (n == 0) return (false, 0, 0);
+            s = fs[n - 1];
+        }
+        if (s.token != token || s.multAfter == 0) return (false, 0, 0);
+        return (true, s.at, s.multAfter);
+    }
+
+    /// @dev The out-of-band change a live token stages (effectiveAt ahead): its time, ratio (WAD), new multiplier.
+    function _tokenStaged(address token) internal view returns (bool staged, uint64 at, uint256 ratio, uint256 nu) {
+        uint256 eff = IScaledUIAmountPending(token).effectiveAt();
+        if (eff <= block.timestamp) return (false, 0, 0, 0);
+        uint256 cur = IScaledUIAmount(token).uiMultiplier();
+        nu = IScaledUIAmountPending(token).newUIMultiplier();
+        if (cur == 0 || nu == 0 || _inBand(nu, cur)) return (false, 0, 0, 0);
+        return (true, uint64(eff), Math.mulDiv(nu, WAD, cur), nu);
+    }
+
+    /// @dev {recordSplit}: aligns the staged record of the token's price id with the token; true when it changed.
+    function _syncStaged(StockToken storage t) internal returns (bool) {
+        address token = t.token;
+        bytes32 pid = t.priceId;
+        Split storage st = _ss().staged[pid];
+        bool changed = false;
+        if (_stagedFailed(token, st)) {
+            // the token did not do what was recorded (re-staged after the last sync): drop it, never finalise it
+            emit StagedSplitCleared(pid, token, st.at);
+            delete _ss().staged[pid];
+            changed = true;
+        }
+        _finalizeStaged(pid);
+        (bool onToken, uint64 at, uint256 ratio, uint256 nu) = _tokenStaged(token);
+        if (onToken) {
+            if (st.at == at && st.token == token && st.cumWad == ratio && st.multAfter == nu) return changed;
+            _ss().staged[pid] = Split({at: at, token: token, cumWad: ratio, multAfter: nu});
+            emit SplitRecorded(pid, token, at, ratio, true);
+            return true;
+        }
+        if (st.at == 0 || st.token != token) return changed;
+        emit StagedSplitCleared(pid, token, st.at);
+        delete _ss().staged[pid];
+        return true;
+    }
+
+    /// @dev A staged record of `token` in force now that the token did not follow: its multiplier is not the recorded
+    ///      one (exactly, while it still reports that effectiveAt; within the band after a later change was staged).
+    function _stagedFailed(address token, Split storage st) internal view returns (bool) {
+        uint64 at = st.at;
+        if (at == 0 || at > block.timestamp || st.token != token) return false;
+        uint256 live = IScaledUIAmount(token).uiMultiplier();
+        return IScaledUIAmountPending(token).effectiveAt() == at ? live != st.multAfter : !_inBand(live, st.multAfter);
+    }
+
+    /// @dev Appends an active staged record to the final list (its ratio times the factor before it).
+    function _finalizeStaged(bytes32 pid) internal {
+        Split storage st = _ss().staged[pid];
+        uint64 at = st.at;
+        if (at == 0 || at > block.timestamp) return;
+        Split[] storage fs = _ss().splits[pid];
+        uint256 n = fs.length;
+        uint256 prev = n == 0 ? WAD : fs[n - 1].cumWad;
+        fs.push(Split({at: at, token: st.token, cumWad: Math.mulDiv(prev, st.cumWad, WAD), multAfter: st.multAfter}));
+        delete _ss().staged[pid];
+    }
+
+    /// @dev Appends a final split (`at` >= the last one, <= now; an active staged record is appended first; a staged
+    ///      record still ahead stays after it).
+    function _recordFinal(bytes32 pid, address token, uint64 at, uint256 before, uint256 after_, uint256 multAfter)
+        internal
+    {
+        _finalizeStaged(pid);
+        Split[] storage fs = _ss().splits[pid];
+        uint256 n = fs.length;
+        if (n != 0 && fs[n - 1].at > at) revert BadSplit();
+        uint256 ratio = Math.mulDiv(after_, WAD, before);
+        uint256 prev = n == 0 ? WAD : fs[n - 1].cumWad;
+        fs.push(Split({at: at, token: token, cumWad: Math.mulDiv(prev, ratio, WAD), multAfter: multAfter}));
+        emit SplitRecorded(pid, token, at, ratio, false);
     }
 
     function _inBand(uint256 live, uint256 anchor) internal view returns (bool) {

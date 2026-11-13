@@ -410,6 +410,41 @@
       "check": "unused-return",
       "target": "BkrnV4Swapper._v3WethHop",
       "reason": "the v3 router's amountOut is not used: the WETH received and the USDG spent are measured by balance difference"
+    },
+    {
+      "check": "incorrect-equality",
+      "target": "PoolEngineUnit.init",
+      "reason": "cs.length == 0 tells a share price id from an index level (StockTokenRegistry.splitFactors returns no components for a share): a structural test on a returned array, no balance or manipulable amount (audit N-1, 2026-11-13)"
+    },
+    {
+      "check": "incorrect-equality",
+      "target": "PoolEngine._unitPrice",
+      "reason": "unit == 1e18 is the no-split fast path (the identity conversion) and p == 0 rejects a price that rounds to zero; both are exact by intent on values the registry and the signed oracle supply, not balances (audit N-1, 2026-11-13)"
+    },
+    {
+      "check": "unused-return",
+      "target": "PoolEngineUnit._compute",
+      "reason": "the second splitFactors call is for a share price id, whose components array is always empty: only the factor now is compared with the factor at basis 0 (audit N-1, 2026-11-13)"
+    },
+    {
+      "check": "uninitialized-local",
+      "target": "StockTokenRegistry._shareFactorChecked.lo",
+      "reason": "intended zero local (an accumulator, a loop bound or a flag starting at 0 / false), set explicitly; slither reports it whatever the initialiser (audit N-1, 2026-11-13)"
+    },
+    {
+      "check": "uninitialized-local",
+      "target": "StockTokenRegistry._syncStaged.changed",
+      "reason": "intended zero local (an accumulator, a loop bound or a flag starting at 0 / false), set explicitly; slither reports it whatever the initialiser (audit N-1, 2026-11-13)"
+    },
+    {
+      "check": "uninitialized-local",
+      "target": "PoolEngineUnit._compute.level",
+      "reason": "intended zero local (an accumulator, a loop bound or a flag starting at 0 / false), set explicitly; slither reports it whatever the initialiser (audit N-1, 2026-11-13)"
+    },
+    {
+      "check": "uninitialized-local",
+      "target": "PoolEngineUnit._compute.delta",
+      "reason": "intended zero local (an accumulator, a loop bound or a flag starting at 0 / false), set explicitly; slither reports it whatever the initialiser (audit N-1, 2026-11-13)"
     }
   ]
 }

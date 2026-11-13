@@ -223,6 +223,8 @@ contract M2SplitHeldPriceTest is MandateBase {
         registry.setMultiplier(address(nvda), 1.02e18); // in-band re-anchor
         assertEq(registry.multiplierSetAt(address(nvda)), before);
         registry.setNextMultiplierAnchor(address(nvda), 10e18);
+        // audit N-1: a live re-anchor beyond the band needs the split recorded first (here by governance)
+        registry.recordSplitAt(address(nvda), uint64(block.timestamp), 1.02e18, 10e18);
         registry.setMultiplier(address(nvda), 10e18); // out-of-band re-anchor (a split)
         assertEq(registry.multiplierSetAt(address(nvda)), block.timestamp);
         vm.stopPrank();

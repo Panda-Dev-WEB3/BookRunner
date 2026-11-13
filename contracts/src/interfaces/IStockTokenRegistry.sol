@@ -48,10 +48,23 @@ interface IStockTokenRegistry {
     /// @notice When the effective multiplier last changed (unix seconds; 0 = never or unknown). Audit M-2:
     ///         `valueUsd` refuses a price whose share basis predates it.
     function multiplierChangedAt(address token) external view returns (uint256);
-    /// @notice Engine split gate for a market's price id (audit N-1): `pending` = close-only (an out-of-band
-    ///         change is pre-approved or staged), `window` = the price's share basis `basisAt` predates a change
-    ///         (no voluntary trade).
-    function splitGate(bytes32 priceId, uint64 basisAt) external view returns (bool pending, bool window);
+    /// @notice Audit N-1: an index component's split factor for PoolEngine (`priceId` = the component's share price id).
+    struct SplitComponent {
+        bytes32 priceId;
+        uint256 weightBps;
+        uint256 factorWad;
+    }
+
+    /// @notice Audit N-1: cumulative split factor (shares per share at registration, WAD) of a share price id for a
+    ///         price whose share basis is `basisAt`: the product of the recorded splits with `at <= basisAt`. Reverts
+    ///         SplitUnrecorded while a live token's out-of-band change is active at that basis with no record.
+    function shareFactor(bytes32 priceId, uint64 basisAt) external view returns (uint256);
+    /// @notice Audit N-1, PoolEngine's split input for a market keyed by `priceId`: a share price id's
+    ///         {shareFactor}, or (index level) 1e18 and every component's share price id, weight and factor.
+    function splitFactors(bytes32 priceId, uint64 basisAt)
+        external
+        view
+        returns (uint256 factorWad, SplitComponent[] memory components);
     /// @notice Multiplier in force at a price basis `basisAt` (0 = unknown): the on-chain source off-chain
     ///         valuations use in the split window.
     function basisMultiplier(address token, uint64 basisAt) external view returns (uint256);

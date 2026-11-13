@@ -74,10 +74,12 @@ contract LeadMultiplierHistoryTest is Test {
         vm.warp(block.timestamp + 10);
         vm.prank(timelock);
         registry.setNextMultiplierAnchor(address(token), 10e18);
-        token.updateMultiplier(10e18); // token-side split at t0 + 20
+        token.updateMultiplier(10e18); // token-side split at t0 + 20 (immediate: nobody could record it while staged)
         vm.warp(block.timestamp + 10);
-        vm.prank(timelock);
+        vm.startPrank(timelock);
+        registry.recordSplitAt(address(token), uint64(t0 + 20), 1e18, 10e18); // audit N-1: required before the re-anchor
         registry.setMultiplier(address(token), 10e18); // stamped re-anchor at t0 + 30, before = anchor 1
+        vm.stopPrank();
         vm.warp(block.timestamp + 10);
         vm.prank(timelock);
         registry.setMultiplierSource(address(token), false); // t0 + 40, before = anchor 10

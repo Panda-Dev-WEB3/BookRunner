@@ -11,7 +11,7 @@ import {IPoolEngine} from "./interfaces/IPoolEngine.sol";
 import {IAttestedOracle} from "./interfaces/IAttestedOracle.sol";
 import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 import {IBookFactory} from "./interfaces/IBookFactory.sol";
-import {IStockTokenRegistry} from "./interfaces/IStockTokenRegistry.sol";
+import {PoolEngineUnit} from "./libraries/PoolEngineUnit.sol";
 
 /// @title IBookrunnerConfigTradeAge — LOW_GAS.md §1 parameter read by the engine.
 /// @dev Implemented by BookrunnerConfig; kept off IBookrunnerConfig so existing config stand-ins compile.
@@ -149,6 +149,12 @@ library PoolEngineMath {
 ///         Settled market (Task 7 lead "no settle path"): once the timelock's settle price for the underlying is in
 ///         force (AttestedOracle.settlePrice), the market is priced at it as held (no voluntary trade) and anyone may
 ///         {forceClose} any position at it, so margins and the IF are released without a final live print.
+///         Splits (audit N-1): positions, open interest, entry prices and the funding index are in MARKET UNITS fixed
+///         for the market's life (one share, or one index level, at creation); every oracle price is converted to a
+///         price per unit at the shares per unit of its share basis (PoolEngineUnit; ratios recorded by
+///         StockTokenRegistry), so a split or reverse split moves no value between traders and the pool and needs no
+///         gate. A live split with no recorded ratio reverts every price-dependent call (StockTokenRegistry
+///         SplitUnrecorded) until governance records it.
 contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
 
@@ -225,6 +231,7 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
 
     mapping(uint256 marketId => Market) internal _markets;
     mapping(uint256 marketId => mapping(address trader => Position)) internal _positions;
+    // Audit N-1: the per-market split state lives in PoolEngineUnit's ERC-7201 namespace (bookrunner.storage.PoolEngineUnit).
 
     // ------------------------------------------------------------------------------------------------
     // Errors / events (beyond IPoolEngine)
@@ -244,10 +251,6 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     error SizeTooLarge();
     error MarketReduceOnly(uint256 marketId);
     error OffHours(uint256 marketId);
-    /// @notice Audit N-1: an out-of-band multiplier change (split) of the market's token is pending: close-only.
-    error SplitPending(uint256 marketId);
-    /// @notice Audit N-1: the price is in pre-change shares (split window): no voluntary trade until repriced.
-    error SplitWindow(uint256 marketId);
     error StalePrice(bytes32 underlying, uint64 publishedAt);
     error PriceNotAcceptable(uint256 fillPriceWad, uint256 acceptablePriceWad);
     error ExposureCap(uint256 exposureUsd, uint256 maxNetExposureUsd);
@@ -337,6 +340,7 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         m.inventoryCapUsd = cfg.maxNetExposureUsd;
         m.lossBudgetBps = DEFAULT_LOSS_BUDGET_BPS;
         marketOf[msg.sender] = marketId;
+        PoolEngineUnit.init(marketId, protocolConfig.stockRegistry(), cfg.underlying);
         emit MarketCreated(marketId, msg.sender, cfg.underlying, cfg.symbol);
         emit QuoteSet(marketId, 0, 0, cfg.maxNetExposureUsd);
         emit LossBudgetSet(marketId, DEFAULT_LOSS_BUDGET_BPS);
@@ -358,7 +362,7 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
             revert InvalidQuote(spreadBps, skewBps);
         }
         Market storage m = _markets[marketId];
-        _accrue(marketId, m, _netSize(m) == 0 ? 0 : _latestPrice(m));
+        _accrue(marketId, m, _netSize(m) == 0 ? 0 : _syncedPrice(marketId, m));
         m.spreadBps = spreadBps;
         m.skewBps = skewBps;
         m.cfg.maxNetExposureUsd = maxNetExposureUsd;
@@ -379,7 +383,7 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     ///         normalises funding. The live quote cap is clamped to it. Funding is accrued first.
     function setInventoryCap(uint256 marketId, uint128 capUsd) external onlyAdapter(marketId) {
         Market storage m = _markets[marketId];
-        _accrue(marketId, m, _netSize(m) == 0 ? 0 : _latestPrice(m));
+        _accrue(marketId, m, _netSize(m) == 0 ? 0 : _syncedPrice(marketId, m));
         m.inventoryCapUsd = capUsd;
         if (m.cfg.maxNetExposureUsd > capUsd) {
             m.cfg.maxNetExposureUsd = capUsd;
@@ -447,7 +451,7 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         uint256 price;
         if (_hasOpenInterest(m)) {
             uint64 publishedAt;
-            (price,, publishedAt) = _oracle(m);
+            (price,, publishedAt,) = _price(marketId, m);
             if (_stale(publishedAt, protocolConfig.maxPriceAge())) {
                 revert StalePrice(m.cfg.underlying, publishedAt);
             }
@@ -525,10 +529,9 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         if (p.size != 0) {
             bool held;
             uint64 publishedAt;
-            (price, held, publishedAt) = _oracle(m);
+            (price, held, publishedAt,) = _price(marketId, m);
             if (held) revert OffHours(marketId);
             if (_newRiskStale(publishedAt)) revert StalePrice(m.cfg.underlying, publishedAt);
-            _splitGate(marketId, m, publishedAt, true);
             _accrue(marketId, m, price);
             _settleFunding(marketId, m, p);
         }
@@ -599,7 +602,7 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         {
             bool held;
             uint64 publishedAt;
-            (c.price, held, publishedAt) = _oracle(m);
+            (c.price, held, publishedAt,) = _price(marketId, m);
             c.oldSize = p.size;
             c.newSize = c.oldSize + sizeDelta;
             if (PoolEngineMath.abs(c.newSize) > MAX_SIZE) revert SizeTooLarge();
@@ -610,7 +613,6 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
             // leg and the real one for another (audit A2-01 / A2-03).
             if (held) revert OffHours(marketId);
             if (_tradeStale(publishedAt)) revert StalePrice(m.cfg.underlying, publishedAt);
-            _splitGate(marketId, m, publishedAt, c.newRisk);
         }
         _accrue(marketId, m, c.price);
         _anchorLossPeriod(marketId, m, c.price);
@@ -682,7 +684,7 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         Market storage m = _market(marketId);
         Position storage p = _positions[marketId][trader];
         if (p.size == 0) revert NoPosition(trader);
-        (uint256 price, bool held,, bool settled) = _oracleOrSettle(m);
+        (uint256 price, bool held,, bool settled) = _price(marketId, m);
         _accrue(marketId, m, price);
         // a settled market has no reopen gap (its price is final): the maintenance requirement applies, not the
         // off-hours one, so solvent positions are force-closed fee-free instead of liquidated for a fee
@@ -739,7 +741,7 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
 
     function _forceClose(uint256 marketId, address trader) internal {
         Market storage m = _market(marketId);
-        (uint256 price, bool held, uint64 publishedAt, bool settled) = _oracleOrSettle(m);
+        (uint256 price, bool held, uint64 publishedAt, bool settled) = _price(marketId, m);
         if (!settled) {
             uint64 at = m.closeOutAfter;
             if (at == 0 || block.timestamp < at) revert CloseOutNotOpen(marketId, at);
@@ -784,7 +786,7 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
             poolCashUsd: m.poolCashUsd,
             insuranceUsd: m.insuranceUsd,
             feesAccruedUsd: m.feesAccruedUsd,
-            fundingIndex: _pendingIndex(m, _viewPrice(m))
+            fundingIndex: _pendingIndex(m, _viewPrice(marketId, m))
         });
     }
 
@@ -798,13 +800,13 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     function quotePrice(uint256 marketId, int256 sizeDelta) external view returns (uint256) {
         if (sizeDelta == 0) revert ZeroSize();
         Market storage m = _market(marketId);
-        return _fillPrice(m, _latestPrice(m), sizeDelta);
+        return _fillPrice(m, _latestPrice(marketId, m), sizeDelta);
     }
 
     /// @inheritdoc IPoolEngine
     function poolEquityUsd(uint256 marketId) external view returns (int256) {
         Market storage m = _market(marketId);
-        uint256 price = _viewPrice(m);
+        uint256 price = _viewPrice(marketId, m);
         return _poolEquity(m, price, _pendingIndex(m, price));
     }
 
@@ -813,7 +815,7 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         Market storage m = _market(marketId);
         int256 net = _netSize(m);
         if (net == 0) return 0;
-        return -(net * int256(_latestPrice(m))) / int256(PoolEngineMath.SIZE_PRICE_TO_USD);
+        return -(net * int256(_latestPrice(marketId, m))) / int256(PoolEngineMath.SIZE_PRICE_TO_USD);
     }
 
     /// @inheritdoc IPoolEngine
@@ -822,7 +824,7 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         Market storage m = _market(marketId);
         Position storage p = _positions[marketId][trader];
         if (p.size == 0) return type(uint256).max;
-        uint256 price = _latestPrice(m);
+        uint256 price = _latestPrice(marketId, m);
         int256 equity = _traderEquity(p, price, _pendingIndex(m, price));
         uint256 notional = PoolEngineMath.notionalUsd(p.size, price);
         if (notional == 0) return type(uint256).max;
@@ -835,7 +837,7 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         Market storage m = _market(marketId);
         Position storage p = _positions[marketId][trader];
         if (p.size == 0) return false;
-        (uint256 price, bool held,, bool settled) = _oracleOrSettle(m);
+        (uint256 price, bool held,, bool settled) = _priceView(marketId, m);
         return _isLiquidatable(m, p, price, _pendingIndex(m, price), held && !settled);
     }
 
@@ -844,21 +846,21 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         Market storage m = _market(marketId);
         Position storage p = _positions[marketId][trader];
         if (p.size == 0) return int256(p.marginUsd);
-        uint256 price = _latestPrice(m);
+        uint256 price = _latestPrice(marketId, m);
         return _traderEquity(p, price, _pendingIndex(m, price));
     }
 
     /// @notice Pool margin the pool must keep against its net exposure (|exposure| * initialMarginBps).
     function requiredPoolMarginUsd(uint256 marketId) external view returns (uint256) {
         Market storage m = _market(marketId);
-        return _requiredPoolMargin(m, _viewPrice(m));
+        return _requiredPoolMargin(m, _viewPrice(marketId, m));
     }
 
     /// @notice MM liquidity {withdrawLiquidity} would release now: min(poolCash, poolEquity - gross pool
     ///         margin) at the latest price (the call itself also needs a non-stale price with open interest).
     function withdrawableLiquidityUsd(uint256 marketId) external view returns (uint256) {
         Market storage m = _market(marketId);
-        uint256 price = _hasOpenInterest(m) ? _latestPrice(m) : 0;
+        uint256 price = _hasOpenInterest(m) ? _latestPrice(marketId, m) : 0;
         int256 free = _poolEquity(m, price, _pendingIndex(m, price)) - int256(_requiredGrossMargin(m, price));
         if (free <= 0) return 0;
         return Math.min(uint256(free), m.poolCashUsd);
@@ -884,7 +886,7 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         Market storage m = _market(marketId);
         int256 net = _netSize(m);
         if (net == 0) return 0;
-        uint256 r = _fundingRateWad(m, PoolEngineMath.abs(net), _latestPrice(m));
+        uint256 r = _fundingRateWad(m, PoolEngineMath.abs(net), _latestPrice(marketId, m));
         return net > 0 ? int256(r) : -int256(r);
     }
 
@@ -905,7 +907,7 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         )
     {
         Market storage m = _market(marketId);
-        uint256 price = _viewPrice(m);
+        uint256 price = _viewPrice(marketId, m);
         int256 equity = _poolEquity(m, price, _pendingIndex(m, price));
         budgetBps = m.lossBudgetBps;
         period = _lossPeriodNow();
@@ -919,13 +921,31 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     ///         {lossBudget}) is over its budget and it was not reported yet for this period.
     function pokeLossBudget(uint256 marketId) external {
         Market storage m = _market(marketId);
-        uint256 price = _viewPrice(m);
+        uint256 price = _viewPrice(marketId, m);
         _noteLossBudget(marketId, m, _poolEquity(m, price, _pendingIndex(m, price)));
     }
 
     /// @notice Timestamp of the last funding accrual for the market.
     function lastFundingTime(uint256 marketId) external view returns (uint64) {
         return _market(marketId).lastFundingTime;
+    }
+
+    /// @inheritdoc IPoolEngine
+    function unitOf(uint256 marketId) external view returns (uint256) {
+        Market storage m = _market(marketId);
+        (, bool held, uint64 publishedAt,) = _oracleOrSettle(m);
+        return _viewUnit(marketId, m, _basis(m, held, publishedAt));
+    }
+
+    /// @inheritdoc IPoolEngine
+    function unitAt(uint256 marketId, uint64 basisAt) external view returns (uint256) {
+        return _viewUnit(marketId, _market(marketId), basisAt);
+    }
+
+    /// @inheritdoc IPoolEngine
+    function syncUnit(uint256 marketId, bytes calldata priceData) external nonReentrant {
+        _pull(priceData);
+        _price(marketId, _market(marketId));
     }
 
     // ------------------------------------------------------------------------------------------------
@@ -937,12 +957,8 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         if (m.adapter == address(0)) revert UnknownMarket(marketId);
     }
 
-    /// @dev Latest attested price, held flag and publication time. Reverts when the underlying was never priced.
-    function _oracle(Market storage m) internal view returns (uint256 price, bool held, uint64 publishedAt) {
-        (price, held, publishedAt,) = _oracleOrSettle(m);
-    }
-
-    /// @dev {_oracle}, or the governance settle price once in force (Task 7 lead "no settle path": a delisted /
+    /// @dev Latest attested price (per share), held flag and publication time (reverts when never priced), or the
+    ///      governance settle price once in force (Task 7 lead "no settle path": a delisted /
     ///      permanently held market): the market is then priced at it as held (no voluntary trade), `publishedAt`
     ///      is now (views and withdrawals do not go stale) and `settled` lets {forceClose} close at it and
     ///      {liquidate} use the maintenance requirement (a final price has no reopen gap). Looked up only when the
@@ -967,18 +983,51 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         if (price > MAX_PRICE_WAD) revert PriceOutOfRange(price);
     }
 
-    /// @dev Audit N-1: positions are in units of the price id (shares) and are never rebased, so a split's
-    ///      per-share step at the reopen would be booked as trader P&L (a short opened before a 10:1 split takes
-    ///      ~90% of notional from the pool). While an out-of-band change of the market's token (any component,
-    ///      for an index) is pre-approved or staged, new risk reverts SplitPending (close-only); while the price
-    ///      (a live one here: `basisAt` = its publishedAt) predates the change, every voluntary trade reverts
-    ///      SplitWindow. Liquidations and the wind-down forceClose are not gated. No registry: no gate.
-    function _splitGate(uint256 marketId, Market storage m, uint64 basisAt, bool newRisk) internal view {
+    /// @dev Audit N-1: {_oracleOrSettle} with the price converted to a price per market unit (positions never move at
+    ///      a split; the unit is taken at the price's share basis, PoolEngineUnit), applying an index market's unit
+    ///      move. No registry: the per-share price. Reverts (StockTokenRegistry.SplitUnrecorded) while a live split at
+    ///      that basis has no recorded ratio: no position can be valued until it is recorded.
+    function _price(uint256 marketId, Market storage m)
+        internal
+        returns (uint256 price, bool held, uint64 publishedAt, bool settled)
+    {
+        (price, held, publishedAt, settled) = _oracleOrSettle(m);
         address reg = protocolConfig.stockRegistry();
-        if (reg == address(0)) return;
-        (bool pending, bool window) = IStockTokenRegistry(reg).splitGate(m.cfg.underlying, basisAt);
-        if (window) revert SplitWindow(marketId);
-        if (pending && newRisk) revert SplitPending(marketId);
+        if (reg == address(0)) return (price, held, publishedAt, settled);
+        int256 net = _netSize(m);
+        uint256 unit = PoolEngineUnit.syncUnit(
+            marketId, reg, protocolConfig.oracle(), m.cfg.underlying, _basis(m, held, publishedAt), net
+        );
+        price = _unitPrice(price, unit, net);
+    }
+
+    /// @dev {_price} for views (an index market's pending move is computed, not stored).
+    function _priceView(uint256 marketId, Market storage m)
+        internal
+        view
+        returns (uint256 price, bool held, uint64 publishedAt, bool settled)
+    {
+        (price, held, publishedAt, settled) = _oracleOrSettle(m);
+        if (protocolConfig.stockRegistry() == address(0)) return (price, held, publishedAt, settled);
+        price = _unitPrice(price, _viewUnit(marketId, m, _basis(m, held, publishedAt)), _netSize(m));
+    }
+
+    function _viewUnit(uint256 marketId, Market storage m, uint64 basisAt) internal view returns (uint256) {
+        return PoolEngineUnit.viewUnit(
+            marketId, protocolConfig.stockRegistry(), protocolConfig.oracle(), m.cfg.underlying, basisAt, _netSize(m)
+        );
+    }
+
+    /// @dev Share basis of the stored price (audit M-2): publishedAt, or lastLiveAt when held (a settle price too).
+    function _basis(Market storage m, bool held, uint64 publishedAt) internal view returns (uint64) {
+        return held ? IAttestedOracle(protocolConfig.oracle()).lastLiveAt(m.cfg.underlying) : publishedAt;
+    }
+
+    /// @dev price x unit / 1e18, in the pool's favour (down while traders are net long, up while net short).
+    function _unitPrice(uint256 price, uint256 unit, int256 net) internal pure returns (uint256 p) {
+        if (unit == PoolEngineMath.WAD) return price;
+        p = Math.mulDiv(price, unit, PoolEngineMath.WAD, net > 0 ? Math.Rounding.Floor : Math.Rounding.Ceil);
+        if (p == 0 || p > MAX_PRICE_WAD) revert PriceOutOfRange(p);
     }
 
     function _stale(uint64 publishedAt, uint256 maxAge) internal view returns (bool) {
@@ -1004,13 +1053,17 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         if (priceData.length != 0) IAttestedOracle(protocolConfig.oracle()).update(priceData);
     }
 
-    function _latestPrice(Market storage m) internal view returns (uint256 price) {
-        (price,,) = _oracle(m);
+    function _latestPrice(uint256 marketId, Market storage m) internal view returns (uint256 price) {
+        (price,,,) = _priceView(marketId, m);
+    }
+
+    function _syncedPrice(uint256 marketId, Market storage m) internal returns (uint256 price) {
+        (price,,,) = _price(marketId, m);
     }
 
     /// @dev Price for views: not needed (0) when the market is net-flat (aggregates are price-independent).
-    function _viewPrice(Market storage m) internal view returns (uint256) {
-        return _netSize(m) == 0 ? 0 : _latestPrice(m);
+    function _viewPrice(uint256 marketId, Market storage m) internal view returns (uint256) {
+        return _netSize(m) == 0 ? 0 : _latestPrice(marketId, m);
     }
 
     // ------------------------------------------------------------------------------------------------

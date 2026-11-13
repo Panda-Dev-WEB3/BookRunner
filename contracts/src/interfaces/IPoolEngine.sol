@@ -9,7 +9,9 @@ pragma solidity ^0.8.24;
 ///         margin top-ups and liquidations allowed (off-hours maintenance = 2x initial margin).
 ///         Pull oracle (LOW_GAS.md §1): the `priceData` overloads of trade / liquidate carry the signed
 ///         prices the transaction needs; staleness is judged on the price after that in-tx update.
-///         Sizes: 1e18 = 1 unit of underlying. Prices WAD. USD 6 decimals.
+///         Sizes: 1e18 = 1 market unit (audit N-1: one share of the underlying, or one index level, when the
+///         market was created; a split changes the shares per unit, `unitOf`, never a position). Prices WAD per
+///         market unit (the oracle's per-share price x unitOf / 1e18). USD 6 decimals.
 interface IPoolEngine {
     struct MarketConfig {
         bytes32 underlying;
@@ -83,6 +85,24 @@ interface IPoolEngine {
     function netExposureUsd(uint256 marketId) external view returns (int256);
     function marginRatioBps(uint256 marketId, address trader) external view returns (uint256);
     function isLiquidatable(uint256 marketId, address trader) external view returns (bool);
+    /// @notice Audit N-1: shares of the underlying per market unit (WAD; 1e18 until the first split) at the share
+    ///         basis of the stored price. Shares = size x unit / 1e18; a per-share price x unit / 1e18 is per unit.
+    function unitOf(uint256 marketId) external view returns (uint256 unitWad);
+    /// @notice {unitOf} for a price whose share basis is `basisAt` (publishedAt; lastLiveAt when held). An index market
+    ///         whose unit moves at that basis needs the stored prices to be that basis' signed round.
+    function unitAt(uint256 marketId, uint64 basisAt) external view returns (uint256 unitWad);
+    /// @notice Anyone: relays `priceData` and applies an index market's unit move (any other touch does it too).
+    function syncUnit(uint256 marketId, bytes calldata priceData) external;
+
+    /// @notice Audit N-1 (StockTokenRegistry's, bubbled; declared here so the engine's ABI names it): a live split at
+    ///         the price's share basis has no recorded ratio. Every price-dependent call of the market reverts until
+    ///         it is recorded (`recordSplit` while staged, governance `recordSplitAt` after).
+    error SplitUnrecorded(address token, uint256 from);
+    /// @notice Audit N-1 (PoolEngineUnit): an index market's unit moves at this basis and the stored component prices
+    ///         are not the index price's signed round (carry the round, or `syncUnit` with it).
+    error IndexSnapshot(bytes32 indexPriceId);
+    /// @notice Audit N-1 (PoolEngineUnit): the price's share basis predates a split already in the index market's unit.
+    error PriceBeforeSplit(uint64 basisAt, uint64 appliedAt);
 
     event MarketCreated(uint256 indexed marketId, address indexed adapter, bytes32 underlying, bytes32 symbol);
     event QuoteSet(uint256 indexed marketId, uint16 spreadBps, int16 skewBps, uint128 maxNetExposureUsd);
@@ -100,4 +120,6 @@ interface IPoolEngine {
     event MarginChanged(uint256 indexed marketId, address indexed trader, int256 delta);
     event LiquidityChanged(uint256 indexed marketId, int256 liquidityDelta, int256 insuranceDelta);
     event FeesClaimed(uint256 indexed marketId, address to, uint256 amount);
+    /// @notice Audit N-1: an index market's shares-per-unit moved at a component's split (at share basis `basisAt`).
+    event UnitUpdated(uint256 indexed marketId, uint256 unitWad, uint64 basisAt);
 }
