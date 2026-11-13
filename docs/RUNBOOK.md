@@ -586,6 +586,24 @@ shows "No market open yet". Guarded launch: small, insured, watched.
 5. [ ] Raise `maxInventoryUsd` only through a re-mandate after a period of observed marks, IF stable, no
        `LossBudgetBreached`, and the keeper proven (step 1).
 
+### Trading page history (price chart, trade history)
+
+Migration `0004_trade_history` (applied by update.sh) adds two tables (ARCHITECTURE §5.1):
+
+- **`engine_price_1m`** (price chart): written by the **api** (one row per market and minute, from the oracle's signed
+  prints it already reads). **Retention: `API_PRICE_HISTORY_RETENTION_DAYS` (default 35, minimum 31: the 1M chart),
+  pruned hourly by the api** ("price history pruned" in its log). Size: about 1,440 rows per market per day, ~50,000 per
+  market at 35 days. Set `API_PRICE_HISTORY_SAMPLE_MS=0` on a second api replica (one recorder is enough; two are
+  harmless). Nothing is recorded while the api is down: the chart shows a gap. Check: `select market_id, max(bucket)
+  from engine_price_1m group by 1;` is within the last minute or two while a market is open.
+- **`engine_trader_events`** (trade and PnL history): written by the **indexer** from the PoolEngine's events, kept
+  indefinitely (a row per trade, liquidation, margin change or funding settlement; small). An index older than this
+  version backfills it once (cursor `indexer:engine-events-backfill`, engine-only `eth_getLogs` from the deployment's
+  start block plus one block read per block holding engine events; the log says "engine trader events backfill
+  complete"). The positions backfill and the liquidation keeper are unchanged.
+- nginx: the `bookrunner_history` zone (2/s per IP, bursts of 20) limits `trade.history` / `trade.fills`; it is in
+  `deploy/server/nginx-bookrunner-http.conf`, installed with the locations snippet by update.sh.
+
 ## Operations
 
 - **Kill switch for new business**: `BookrunnerConfig.setNewBooksPaused(true)` (GUARDIAN or timelock)
