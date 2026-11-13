@@ -502,12 +502,29 @@ can redo it during the timelock delay from the published quote.
   before a split until the feed's next round. A dividend update during a hold has the same effect until the
   open. In stored-multiplier mode (devnet / testnet), a `setMultiplier` that changes the value counts as the
   change.
-- Engine markets (audit N-1): from the moment a split is pre-approved (`setNextMultiplierAnchor`) or staged on the
-  token, PoolEngine markets on that price id (or an index containing the token) are close-only (`SplitPending`).
-  In the window, every voluntary trade reverts (`SplitWindow`); liquidations still run. The market reopens for
-  new risk only after the reprice **and** the cleanup: `setMultiplier(token, new)` and
-  `setNextMultiplierAnchor(token, 0)`. Do the cleanup right after the first live post-split print. Existing
-  positions are not rebased: wind down or cap engine markets before a split.
+- Engine markets (audit N-1, split procedure): positions are in market units and a recorded split moves no value;
+  nothing is close-only and nothing pauses. What has to happen is that the split's ratio is **recorded on chain before
+  `effectiveAt`**:
+  1. **Staged on the token** (live mode): the waterfall keeper's split recorder sees it within 60 s
+     (`splitSyncNeeded`) and sends `StockTokenRegistry.recordSplit(token)` (log "stock split staged on the token:
+     ratio recorded on chain"). Anyone may send it too; it reads the ratio from the token
+     (`newUIMultiplier / uiMultiplier`, at `effectiveAt`). Your `setNextMultiplierAnchor(token, newUIMultiplier)` also
+     records it when it executes while the change is staged. Check: `shareFactor(priceId, effectiveAt)` = the old
+     factor x the ratio. If the issuer re-stages, the next keeper pass re-records (a stale record is never used).
+  2. **At `effectiveAt`**: prices with a basis from then on are valued at the new unit (the per-share price x the
+     shares per unit); the last pre-split print and the held weekend price keep the old unit. `/trade` shows
+     "per unit of N shares". Index markets on a component: the first full signed round after the split moves the
+     unit once (`UnitUpdated`; the keeper sends `syncUnit` with the oracle's whole round if no trade did; the market
+     shows "Updating (index split)" for at most a pass).
+  3. **After the first live post-split print**: the usual cleanup, `setMultiplier(token, new)` (it now requires the
+     split recorded: `SplitNotRecorded` otherwise) and `setNextMultiplierAnchor(token, 0)`.
+  **If the alert `engine_split_unrecorded` fires** (the split activated with no record: the keeper was down, or the
+  issuer staged less than a pass before activation): every price-dependent call of that market reverts
+  `SplitUnrecorded`, liquidations included, from `effectiveAt`; top-ups and flat withdrawals still work, and so do
+  liquidations at the held pre-split price. Fix: read the token's `UIMultiplierUpdated(old, new, effectiveAt)` event
+  and propose `recordSplitAt(token, effectiveAt, old, new)` (timelock on mainnet; the admin on testnet). Positions
+  resume at exactly their pre-split value. The mark and risk services fail their reads for that book until then
+  (expect `mark_overdue`).
 - If the issuer stages another change before you re-anchor a split, valuations of the token stop until your
   re-anchor plus the next live print, and so does every voluntary engine trade on its markets (closes and margin
   withdrawals too; liquidations still run): re-anchor promptly.
@@ -520,8 +537,9 @@ can redo it during the timelock delay from the published quote.
     live-mode token's flatten waits for its first live print on the new oracle, because enabling live mode stamps
     a change. Cut a new oracle over in session, and push a live price for every token before relying on the RISK
     flatten.
-- Stored-multiplier mode (devnet / testnet): give engine markets a close-only period by calling
-  `setNextMultiplierAnchor(token, new)` before `setMultiplier(token, new)`, and clear it afterwards.
+- Stored-multiplier mode (devnet / testnet): the `setMultiplier(token, new)` beyond the band IS the split, recorded at
+  its block for the engine. Call it while the session is closed (before the oracle signs the first post-split price),
+  so no live price published after it is still in pre-split shares.
 
 ### Opening the first in-house engine market on mainnet (Plan B2: NVDA on the PoolEngine)
 
@@ -560,7 +578,9 @@ shows "No market open yet". Guarded launch: small, insured, watched.
          positions, backlog, failing attempts); alerts `liquidation_backlog` (a liquidatable position still open after
          `ALERT_LIQ_BACKLOG_SECONDS` 60 s, critical at 5x; the summary says gas policy / dust / price / failing
          transaction), `keeper_liquidation_failing` (`ALERT_LIQ_FAILURES` 3 failed attempts, or no / a stale status while
-         an engine book is live) and `liquidation_coverage`. On a page: read the waterfall log; if the gas policy holds a
+         an engine book is live), `liquidation_coverage` and `engine_split_unrecorded` (audit N-1: the keeper's split recorder,
+         every 60 s, sends `recordSplit` for a split staged on any engine market's token; the alert means one activated
+         unrecorded: Corporate actions, "Engine markets"). On a page: read the waterfall log; if the gas policy holds a
          position back, raise the budget or the override; anyone may also call `liquidate` by hand with the oracle's
          bundle.
 2. [ ] **Charter with venue PoolEngine** (`venue` 1 = `BRTypes.VENUE_POOL_ENGINE`), as step 11 above: underlying the
@@ -578,11 +598,10 @@ shows "No market open yet". Guarded launch: small, insured, watched.
        (`maxTradePriceAge`), room left = the cap, insurance fund = `ifTargetUsd`. Prepare a tiny order from a test
        wallet and read the "you will sign" summary (PoolEngine address = `adapter.engine()`, the size you typed, a
        slippage limit) before sending.
-4. [ ] **Audit N-1 (splits).** Positions are per share and never rebased. Before any NVDA split or multiplier change,
-       pre-approve it (`setNextMultiplierAnchor`): the market turns close-only ("Close-only (split pending)" on
-       `/trade`), and in the window no voluntary trade fills ("Paused (split)"). Re-anchor right after the first live
-       post-split print (Corporate actions above), or wind the market down first. A split announced while open
-       interest is large is a reason to lower the cap (re-mandate) beforehand.
+4. [ ] **Audit N-1 (splits).** Positions are in market units and a recorded split moves no value (Corporate actions,
+       "Engine markets"). Before any NVDA split: confirm the keeper recorded it (`shareFactor(priceId, effectiveAt)`, the
+       waterfall log) well before `effectiveAt`, pre-approve the anchor (`setNextMultiplierAnchor`), and keep the
+       `engine_split_unrecorded` alert routed to a pager.
 5. [ ] Raise `maxInventoryUsd` only through a re-mandate after a period of observed marks, IF stable, no
        `LossBudgetBreached`, and the keeper proven (step 1).
 

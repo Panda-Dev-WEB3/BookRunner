@@ -113,14 +113,13 @@ a way to exceed the stated bound is in scope.
   orders) while the engine starts with small caps or off (owner decision); the bound above is the accepted residual.
   Desk keys are held to the same freshness rule for their own swaps (audit lead "old prints"): a key's Hedge or
   Flatten needs the token's price within `min(maxPriceAge, maxTradePriceAge)`.
-- **Engine positions across a stock split** (audit 2026-10 remediation finding N-1). PoolEngine positions are sized in
-  shares and are not rebased by the token multiplier. Bounds:
-  - the market is close-only from the split's pre-approval or staging until governance clears it;
-  - every voluntary trade reverts in the split window until the market is repriced;
-  - the per-period loss budget refuses new risk once the pool has lost its budget.
-
-  What remains is the per-share step on positions opened before the announcement. Rebasing (or settling at the
-  pre-split price) is required before the engine runs with meaningful caps; it starts with small caps or off.
+- **Engine positions across a stock split** (audit 2026-10 remediation finding N-1, fixed 2026-11-13). PoolEngine
+  positions are in market units fixed for the market's life and every price is converted at the shares per unit of
+  its share basis, from split ratios StockTokenRegistry records (stored `setMultiplier`, live `recordSplit` while
+  staged, sent by the waterfall keeper every 60 s; governance `recordSplitAt` as the fallback): a split moves no value
+  and gates nothing. What remains: a live split that activates with no recorded ratio freezes its engine markets
+  (every price-dependent call reverts `SplitUnrecorded`, liquidations included) until governance records it; alert
+  `engine_split_unrecorded`.
 - **Redis write access** (audit 2026-10 lead, see "Off-chain trust boundaries"). A Redis writer can deny service:
   withhold prices (the agent stops quoting), delete the risk state (the agents go reduce-only after 30 s), drop or
   delay jobs, blank the status keys the alerts read (including the forged-message counts and the agents' status).

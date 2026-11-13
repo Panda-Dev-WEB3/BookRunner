@@ -573,8 +573,12 @@ price's share basis (its `publishedAt`, or `AttestedOracle.lastLiveAt` for a hel
 `multiplierChangedAt(token)` (live mode: the token's passed `effectiveAt()`; stored mode: the last
 `setMultiplier` / source switch), until the oracle signs a live price after the change; the mark service
 values such a position at the multiplier of the price's basis (or 0): it refuses the mark for at most one interval,
-then commits it held. `valueUsdAt` is the pure valuation at a given price. `splitGate(priceId, basisAt)` gates the
-engine (audit N-1, below).
+then commits it held. `valueUsdAt` is the pure valuation at a given price. Split records (audit N-1): per share price
+id, `(at, cumulative factor)` from `setMultiplier` beyond the band (stored mode, at its block), permissionless
+`recordSplit(token)` while a split is staged on a live token (`at = effectiveAt`, ratio `newUIMultiplier /
+uiMultiplier`; also from `setNextMultiplierAnchor`), or governance `recordSplitAt` (fallback); `shareFactor(priceId,
+basisAt)` and `splitFactors` (index components) feed the engine and revert `SplitUnrecorded` while a live token's
+out-of-band change is active with no matching record; a live re-anchor beyond the band needs the record first.
 
 ### 2.8 AttestedOracle, PoolEngine, PoolEngineAdapter [A-engine]
 
@@ -599,10 +603,15 @@ engine (audit N-1, below).
     config read per trade, one SSTORE per period. View `lossBudget(marketId)`; `LossBudgetBreached` once per
     period from the first successful reduction / close / liquidation / close-out that sees the budget spent, or
     the permissionless `pokeLossBudget(marketId)` (Task 7).
-  - split gate (audit N-1): positions are per share and never rebased, so while an out-of-band multiplier
-    change of the market's token (any component, for an index) is pre-approved or staged, new risk (and margin
-    withdrawal with a position) reverts `SplitPending` (close-only); while the price predates the change every
-    voluntary trade reverts `SplitWindow` (`StockTokenRegistry.splitGate`). Liquidations / `forceClose` stay open.
+  - market units (audit N-1): sizes, open interest, entry prices and the funding index are in units fixed for the
+    market's life (one share, or one index level, at creation). Every oracle price is converted to a price per unit,
+    `price x unitWad / 1e18` rounded in the pool's favour, with `unitWad` (shares per unit) at the price's share basis
+    (publishedAt; lastLiveAt when held / settled): a share market's `shareFactor(basis) / shareFactor at creation`;
+    an index market's stored unit, moved once per component split by `R = (L + sum w_k q_k (r_k - 1) / 1e4) / L`
+    from one signed round (`IndexSnapshot` otherwise; `PriceBeforeSplit` for a basis older than an applied move;
+    `syncUnit(marketId, priceData)`, event `UnitUpdated`). Library `PoolEngineUnit` (external, linked). A split moves
+    no value and gates nothing; views `unitOf`, `unitAt`. A live split with no record reverts every price-dependent
+    call (`SplitUnrecorded`) until governance records it.
   - taker fee `takerFeeBps` of notional → `feesAccruedUsd` (claimed by the adapter → RevenueRouter).
   - every voluntary trade (open, increase, reduce, close, flip) needs a live price: none fills while
     the oracle is `held` (off-hours) or older than `min(maxPriceAge, 60 s, maxTradePriceAge)` (audit
@@ -896,12 +905,14 @@ retired book's "written off". The **charter** service and api validators mirror 
 
 Trading on the in-house engine (2026-10, §5.1) in the services: the **api** serves `trade.markets` / `market` /
 `position` / `quote` and the prepared `trade.deposit` / `withdraw` / `order` / `close` (chain reads: engine config,
-state, caps, funding, loss budget, the stored price, the split gate; the signed price from the oracle's Redis
-bundle). The **indexer** follows the PoolEngine (`Trade` / `MarginChanged` / `Liquidation` / `ClosedOut`) into
-`engine_positions` (market, trader, size after the newest event). The **waterfall** keeper runs the liquidation keeper
+state, caps, funding, loss budget, the stored price, the shares per unit at the price's basis (`unitAt`); the signed
+price from the oracle's Redis bundle, priced per unit as the engine does). The **indexer** follows the PoolEngine (`Trade` / `MarginChanged` / `Liquidation` / `ClosedOut`) into
+`engine_positions` (market, trader, size after the newest event, in market units: never rebased at a split). The **waterfall** keeper runs the liquidation keeper
 (`liquidationKeeper.ts`, KEEPER role key, the keeper's serialised sender, its own cadence: 10 s while a market trades,
 60 s idle / off-hours). It reads the open positions from `engine_positions` and every market and position in ONE
-`aggregate3`, applies the engine's rule off-chain at the freshest signed price (maintenance; `min(2 x IM, 100 %)` while
+`aggregate3`, applies the engine's rule off-chain at the freshest signed price priced per unit (`unitAt` at its basis; a market whose
+unit is unknown is skipped: `split_unrecorded`, or `split_repricing` with a `syncUnit` carrying the whole signed round)
+(maintenance; `min(2 x IM, 100 %)` while
 held; maintenance on a settled market, audit Task 7a), then sends `liquidate(marketId, trader, priceData)` for a
 liquidatable position and `forceClose(marketId, trader, priceData)` for the rest of a settled market or an open
 wind-down close-out. Races (`NotLiquidatable` / `NoPosition` at the estimate) are skipped. Gas policy (review I-3):
@@ -910,8 +921,11 @@ goes; dust above water is skipped; under water it goes when its cost stays below
 hourly budget of loss-making gas when the bad debt is at least `WATERFALL_LIQ_BAD_DEBT_OVERRIDE_USD`; reverted gas
 counts. ETH/USD is configured (`WATERFALL_LIQ_ETH_USD`, required on mainnet). Positions are read in batches and paged
 across passes beyond `WATERFALL_LIQ_MAX_BATCHES`; every row is reconciled with `positionOf` every 10 min, and an index
-older than the engine watch backfills the engine's history once (`indexer:engine-backfill`). Its status (`KEYS.liquidationKeeper`: backlog with reasons, failure run) feeds the **alerts**
-(`liquidation_backlog`, `keeper_liquidation_failing`, `liquidation_coverage`) and the **api** `/health` `liquidationKeeper`. trader-sim keeps
+older than the engine watch backfills the engine's history once (`indexer:engine-backfill`). Every 60 s, positions or
+not, the keeper's split recorder reads every engine market's Stock Tokens (`splitTokens`, index components included)
+and sends `recordSplit(token)` for a split staged on a token and not recorded as staged (audit N-1). Its status (`KEYS.liquidationKeeper`: backlog with reasons, failure run) feeds the **alerts**
+(`liquidation_backlog`, `keeper_liquidation_failing`, `liquidation_coverage`, `engine_split_unrecorded`) and the **api**
+`/health` `liquidationKeeper`. trader-sim keeps
 liquidating only its own sim positions. The api refuses an order above the leverage a position holds through a session
 close (`TRADE_REFUSE_UNHOLDABLE_LEVERAGE`, auto = on mainnet), and then also caps a margin withdrawal so the position stays
 at or below that leverage (review I-2); the web states the rule next to the order. The wallet reads `trade.quote` /
@@ -956,11 +970,13 @@ API + web over the existing trader surface (`depositMargin`, `withdrawMargin`, `
   `PoolEngine.t.sol`). A carried price must satisfy `publishedAt >= block.timestamp - min(maxPriceAge, 60 s,
   maxTradePriceAge)` (15 s on mainnet) when mined: the API refuses to prepare within 3 s of that bound and returns the
   deadline (`tradableUntil`); the order panel counts it down and offers to prepare again once it has passed.
-- **Session** (strictest first): `closed` (book not Live / Retiring), `split_window` (audit N-1: the price predates a
-  multiplier change, no voluntary trade), `no_fresh_price`, `off_hours` (held price: no trade fills, closes
-  included; top-ups only), `split_close_only` (change pending: no new risk), `reduce_only` (engine reduce-only,
-  wind-down, a Retiring book, or the M-3 loss budget spent this period), `open`. The split gate is read at the carried
-  price's basis (`StockTokenRegistry.splitGate`; the list rounds the basis down to 30 s for one cached read).
+- **Session** (strictest first): `closed` (book not Live / Retiring), `split_unrecorded` (audit N-1: a live split at
+  the price's basis has no recorded ratio, the market is frozen), `split_repricing` (an index market's unit moves at
+  a component split and the stored round is not complete yet), `no_fresh_price`, `off_hours` (held price: no trade
+  fills, closes included; top-ups only), `reduce_only` (engine reduce-only, wind-down, a Retiring book, or the M-3
+  loss budget spent this period), `open`. The unit is read at the carried price's basis (`PoolEngine.unitAt`; the list
+  rounds the basis down to 30 s for one cached read); sizes are market units, prices per unit, and the market view
+  shows `perSharePrice` and `sharesPerUnit`.
 - **Checks before building** (`trade.quote`, `trade.order`, `trade.close`): the session gates above, then a
   simulation of `PoolEngine._trade` (funding + realised PnL settled against margin, taker fee, pool net exposure
   ≤ quote cap and side OI ≤ inventory cap for new risk, equity ≥ initial margin for new risk = maximum leverage
@@ -976,8 +992,8 @@ API + web over the existing trader surface (`depositMargin`, `withdrawMargin`, `
 - **Prepared transactions** (as §4: the API encodes, the wallet signs): `trade.deposit` = [settlement-token approve of
   exactly the amount to the engine when the allowance is short, `depositMargin`] (always allowed);
   `trade.withdraw` = `withdrawMargin`, at most the margin when flat and, with a position, at most the safe maximum
-  (initial margin kept after a 1 % adverse move, funding settled first; refused off-hours or with a split pending /
-  in its window); with a position the signed price is relayed first (`AttestedOracle.update(priceData)`,
+  (initial margin kept after a 1 % adverse move, funding settled first; refused off-hours, or while the unit is unknown:
+  a split unrecorded / an index repricing); with a position the signed price is relayed first (`AttestedOracle.update(priceData)`,
   permissionless) because `withdrawMargin` has no `priceData` overload and needs a stored price at most 60 s old;
   `trade.order` = `trade(marketId, sizeDelta, acceptablePriceWad, priceData)` with `acceptablePriceWad` = fill ±
   the slippage (default 0.5 %, 0.01-5 %); `trade.close` = a trade of −size (or a portion), allowed reduce-only.
@@ -986,7 +1002,7 @@ API + web over the existing trader surface (`depositMargin`, `withdrawMargin`, `
   limit: never `max uint` for a buy or `0` for a sell) and `AttestedOracle.update`; destinations are the PoolEngine an
   engine book's adapter names on chain (`Book.components().adapter` → `engine()`) and the oracle of the
   BookrunnerConfig, never addresses from the API. Engine reverts (`OffHours`, `StalePrice`, `PriceNotAcceptable`,
-  `ExposureCap`, `InsufficientMargin`, `SplitPending`, `SplitWindow`, ...) decode to plain reasons.
+  `ExposureCap`, `InsufficientMargin`, `SplitUnrecorded`, `IndexSnapshot`, ...) decode to plain reasons.
 - Not built: a price chart (the API serves no oracle price history yet).
 
 ## 6. Copy rules (Overview §10, enforced by `scripts/check-copy.ts`)
