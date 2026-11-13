@@ -14,9 +14,11 @@ import { FeesNote } from "../components/invest/TrancheChoice";
 import { useProtocolParams, useTrancheRounds } from "../components/invest/useInvestChain";
 import { FeeFlowDiagram, LossOrderDiagram } from "../components/invest/WaterfallDiagram";
 import { IconArrowRight } from "../components/icons";
+import { useInvestGate } from "../components/GuardedLaunchBanner";
 import { SetupChecklist } from "../components/SetupChecklist";
-import { Accordion, Card, EmptyState, ErrorState, Section, Skeleton, Term, TrancheBadge, cx } from "../components/ui";
+import { Accordion, Callout, Card, EmptyState, ErrorState, Section, Skeleton, Term, TrancheBadge, cx } from "../components/ui";
 import { TESTNET_MOCKS_LINE } from "../lib/copy";
+import { GUARDED_COPY } from "../lib/guardedLaunch";
 import { termAnchor } from "../lib/glossary";
 import { cadenceTitle } from "../lib/lowgas";
 import { appChain } from "../wallet/chains";
@@ -36,6 +38,7 @@ export function InvestPage() {
   const rounds = useTrancheRounds(books);
   const w = useWallet();
   const ob = useOnboarding();
+  const gate = useInvestGate();
   const sym = useSettlementSymbol();
   const carry = proto.data?.carryBps != null ? pctOfBps(proto.data.carryBps) : null;
   const cadence = list.data?.[0]?.markSchedule.cadence ?? null;
@@ -157,6 +160,11 @@ export function InvestPage() {
             <h2 className="text-[20px] font-semibold tracking-[-0.02em]">Books</h2>
             <span className="text-[12.5px] text-muted">{cadenceLine}</span>
           </div>
+          {gate.status === "closed" && (
+            <Callout tone="warn" title={GUARDED_COPY.gateTitle}>
+              {GUARDED_COPY.gateBody}
+            </Callout>
+          )}
           {list.data === undefined ? (
             listError ? (
               <ErrorState error={listError} onRetry={() => list.refetch()} />
@@ -190,6 +198,7 @@ export function InvestPage() {
                 rounds={rounds.data?.[b.bookId]}
                 guardianPaused={proto.data?.guardianPaused ?? null}
                 now={now}
+                depositsClosed={gate.status !== "open"}
               />
             ))
           )}

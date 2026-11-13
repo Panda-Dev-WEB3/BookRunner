@@ -19,7 +19,7 @@ export function memoryStorage(): KeyValueStorage {
   };
 }
 
-type WindowLike = { localStorage?: KeyValueStorage | null };
+type WindowLike = { localStorage?: KeyValueStorage | null; sessionStorage?: KeyValueStorage | null };
 
 /**
  * window.localStorage behind try/catch: reading the property, and every call. When the property
@@ -27,10 +27,19 @@ type WindowLike = { localStorage?: KeyValueStorage | null };
  * that call falls back to memory too.
  */
 export function safeLocalStorage(win: WindowLike | undefined = (globalThis as { window?: WindowLike }).window): KeyValueStorage {
+  return guardedStorage(win, "localStorage");
+}
+
+/** window.sessionStorage with the same guards (per-tab state such as a dismissed notice). */
+export function safeSessionStorage(win: WindowLike | undefined = (globalThis as { window?: WindowLike }).window): KeyValueStorage {
+  return guardedStorage(win, "sessionStorage");
+}
+
+function guardedStorage(win: WindowLike | undefined, which: "localStorage" | "sessionStorage"): KeyValueStorage {
   const memory = memoryStorage();
   let ls: KeyValueStorage | null = null;
   try {
-    ls = win?.localStorage ?? null;
+    ls = win?.[which] ?? null;
   } catch {
     ls = null;
   }

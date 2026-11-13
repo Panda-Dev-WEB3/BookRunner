@@ -25,6 +25,8 @@ export function BookInvestCard(props: {
   rounds: BookRounds | undefined;
   guardianPaused: boolean | null;
   now: number;
+  /** guarded launch with no book in Subscription / Live (lib/guardedLaunch.ts): never offer to invest */
+  depositsClosed?: boolean;
 }) {
   const b = props.item;
   const sym = useSettlementSymbol();
@@ -55,6 +57,7 @@ export function BookInvestCard(props: {
   const cap = usdRaw(c?.perWalletCapUsd ?? null);
   const kind = c?.underlyingKind === "index" ? "Index perp" : "Stock perp";
   const href = `/books/${b.bookId}`;
+  const canInvest = w.status === "open" && !props.depositsClosed;
 
   return (
     <Card as="article" padding="none" className="overflow-hidden" aria-label={`${ticker} book`}>
@@ -145,8 +148,8 @@ export function BookInvestCard(props: {
         <span className="text-[12.5px] text-muted">
           {b.markSchedule.cadence === "hourly" ? "Marked every hour" : b.markSchedule.cadence === "daily" ? "Marked every day" : `Marked ${b.markSchedule.cadence}`}
         </span>
-        <Link to={`${href}#invest`} className={cx("btn btn-sm", w.status === "open" ? "btn-primary" : "btn-secondary")}>
-          {w.status === "open" ? `Invest in ${ticker}` : `View ${ticker}`}
+        <Link to={`${href}#invest`} className={cx("btn btn-sm", canInvest ? "btn-primary" : "btn-secondary")}>
+          {canInvest ? `Invest in ${ticker}` : `View ${ticker}`}
           <IconArrowRight size={14} />
         </Link>
       </div>

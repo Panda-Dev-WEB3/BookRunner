@@ -1,3 +1,6 @@
 // Per-build feature switches (vite env). The Insurance Pool is off on mainnet until its audit fixes are deployed and
 // re-audited (owner decision 2026-10-23): VITE_POOL_ENABLED=false in .env.mainnet hides the page and its links.
 export const POOL_ENABLED = String(import.meta.env.VITE_POOL_ENABLED ?? "true") !== "false";
+// Guarded launch (mainnet, 2026-10-23 on): VITE_GUARDED_LAUNCH=true in .env.mainnet shows the launch-phase banner and
+// keeps deposits closed while no book is in Subscription or Live (lib/guardedLaunch.ts). Off unless set to "true".
+export const GUARDED_LAUNCH = String(import.meta.env.VITE_GUARDED_LAUNCH ?? "false") === "true";
