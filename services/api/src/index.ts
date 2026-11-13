@@ -2,10 +2,12 @@
 // Run: `bun run start` (this file is the entry when executed directly).
 import { createDb } from "@bookrunner/db";
 import { type Logger, createLogger } from "@bookrunner/shared";
+import { KEYS } from "@bookrunner/shared/queues";
 import { Redis } from "ioredis";
 import { createApp } from "./app";
 import { DeploymentWatcher } from "./chain/deployment";
 import { HttpCharterServiceClient } from "./charterService";
+import { RedisCspReportSink } from "./cspReport";
 import { type ApiConfig, loadApiConfig, refuseUnholdable } from "./config";
 import { DrizzleReadModel, DrizzleWebhookStore } from "./data/drizzle";
 import type { ApiDeps } from "./deps";
@@ -77,6 +79,7 @@ export async function startApi(env: ApiConfig = loadApiConfig()) {
       redis: redis.status,
       webhooks: env.WEBHOOKS_ENABLED,
     }),
+    cspReports: new RedisCspReportSink(redis, KEYS.cspReports, (err) => log.debug({ err }, "csp report not counted (redis)")),
   };
 
   if (!env.API_ADMIN_TOKEN) log.warn("API_ADMIN_TOKEN is unset: webhook management (/v1/webhooks) is disabled");
@@ -84,7 +87,7 @@ export async function startApi(env: ApiConfig = loadApiConfig()) {
   // HTTP first: serving DB-backed reads never waits on Redis, the chain or the webhook pipeline.
   const app = createApp(deps, { origins: env.webOrigins });
   const server = Bun.serve({ port: env.API_PORT, hostname: env.API_HOST, fetch: app.fetch, idleTimeout: 120 });
-  log.info({ url: `http://${env.API_HOST}:${env.API_PORT}`, origins: env.webOrigins, chainId: env.CHAIN_ID }, "api listening (/trpc, /v1, /mcp, /health)");
+  log.info({ url: `http://${env.API_HOST}:${env.API_PORT}`, origins: env.webOrigins, chainId: env.CHAIN_ID }, "api listening (/trpc, /v1, /mcp, /health, /csp-report)");
   closers.unshift({ name: "http", close: () => server.stop() });
 
   // Webhooks: dispatcher (pub/sub + events-table sweep) -> BullMQ -> worker (signed HTTP POST).

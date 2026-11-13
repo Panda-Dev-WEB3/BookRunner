@@ -339,6 +339,39 @@ export interface Snapshot {
   pool?: PoolSnap | null;
   /** the waterfall liquidation keeper (KEYS.liquidationKeeper): null = no status, undefined = the Redis read failed */
   liquidationKeeper?: LiquidationKeeperStatus | null;
+  /** CSP violation reports counted by the API (KEYS.cspReports buckets of the alert window); undefined = not read (Redis failed / no port) */
+  csp?: CspSnap;
+  /** the published-file integrity check (siteFiles.ts); undefined = not configured on this host */
+  siteFiles?: SiteFilesSnap;
   /** collection failures that are themselves worth an alert (db / redis unreachable) */
   infraErrors: Array<{ source: "db" | "redis"; error: string }>;
+}
+
+/** CSP violation counts of the last buckets (services/api POST /csp-report; @bookrunner/shared/cspReports). */
+export interface CspSnap {
+  buckets: Array<{
+    /** unix s: bucket start */
+    start: number;
+    counts: Array<{ blocked: string; directive: string; path: string; count: number }>;
+    /** reports beyond the bucket's distinct-field cap */
+    overflow: number;
+  }>;
+}
+
+/** The web root compared with the root-owned manifest update.sh writes after each publish. */
+export interface SiteFilesSnap {
+  /** ok: compared; missing: no manifest file; invalid: unreadable / not a manifest; no_root: the web root is missing */
+  status: "ok" | "missing" | "invalid" | "no_root";
+  manifestPath: string;
+  root: string;
+  /** the deploy the manifest belongs to (update.sh $WANT) */
+  commit: string | null;
+  generatedAt: string | null;
+  added: string[];
+  removed: string[];
+  modified: string[];
+  /** unix ms of the comparison */
+  checkedAt: number;
+  /** the comparison failed (I/O error) */
+  error?: string;
 }

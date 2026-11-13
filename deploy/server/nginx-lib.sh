@@ -11,6 +11,13 @@ NGINX_HTTP_DST="${NGINX_HTTP_DST:-/etc/nginx/conf.d/bookrunner-ratelimit.conf}"
 NGINX_WILDCARD_SRC="${NGINX_WILDCARD_SRC:-$(dirname "$NGINX_SNIPPET_SRC")/nginx-bookrunner-wildcard.conf}"
 NGINX_WILDCARD_DST="${NGINX_WILDCARD_DST:-/etc/nginx/sites-available/bookrunner-wildcard}"
 NGINX_WILDCARD_LINK="${NGINX_WILDCARD_LINK:-/etc/nginx/sites-enabled/bookrunner-wildcard}"
+# mta-sts.bookrunner.tech (MTA-STS policy host): its site file is installed once (certbot rewrites it in place), the policy
+# snippet it includes on every update
+NGINX_MTA_STS_SRC="${NGINX_MTA_STS_SRC:-$(dirname "$NGINX_SNIPPET_SRC")/nginx-bookrunner-mta-sts.conf}"
+NGINX_MTA_STS_DST="${NGINX_MTA_STS_DST:-/etc/nginx/sites-available/bookrunner-mta-sts}"
+NGINX_MTA_STS_LINK="${NGINX_MTA_STS_LINK:-/etc/nginx/sites-enabled/bookrunner-mta-sts}"
+NGINX_MTA_STS_SNIPPET_SRC="${NGINX_MTA_STS_SNIPPET_SRC:-$(dirname "$NGINX_SNIPPET_SRC")/nginx-bookrunner-mta-sts-locations.conf}"
+NGINX_MTA_STS_SNIPPET_DST="${NGINX_MTA_STS_SNIPPET_DST:-/etc/nginx/snippets/bookrunner-mta-sts.conf}"
 
 # The site file nginx actually loads (certbot edits it in place; sites-enabled links to it).
 nginx_site_file() {
@@ -80,6 +87,29 @@ nginx_install_wildcard_site() {
   echo "!! nginx -t failed with the new $label: rolling it back" >&2
   rm -f "$NGINX_WILDCARD_LINK"
   if [ -n "$bak" ]; then cp -p "$bak" "$NGINX_WILDCARD_DST"; rm -f "$bak"; else rm -f "$NGINX_WILDCARD_DST"; fi
+  nginx -t -q || echo "!! nginx -t still fails after the rollback: fix it before the next reload" >&2
+  return 1
+}
+
+# mta-sts.bookrunner.tech: the policy snippet (changed -> nginx_install_file), then the site file the first time only
+# (file + sites-enabled link added together, `nginx -t`, both removed again on failure). An existing site file is never
+# touched: `certbot --nginx -d mta-sts.bookrunner.tech` rewrites it in place (README.md "Mail anti-spoofing records").
+nginx_install_mta_sts_site() {
+  nginx_install_file "$NGINX_MTA_STS_SNIPPET_SRC" "$NGINX_MTA_STS_SNIPPET_DST" "MTA-STS policy snippet" || return 1
+  if [ -e "$NGINX_MTA_STS_DST" ] || [ -L "$NGINX_MTA_STS_LINK" ] || [ -e "$NGINX_MTA_STS_LINK" ]; then
+    echo "==> nginx MTA-STS site present ($NGINX_MTA_STS_DST, certbot-managed once issued): left as is"
+    return 0
+  fi
+  install -d -m 0755 "$(dirname "$NGINX_MTA_STS_DST")" "$(dirname "$NGINX_MTA_STS_LINK")"
+  install -m 0644 "$NGINX_MTA_STS_SRC" "$NGINX_MTA_STS_DST"
+  ln -s "$NGINX_MTA_STS_DST" "$NGINX_MTA_STS_LINK"
+  if nginx -t -q; then
+    systemctl reload nginx
+    echo "==> nginx MTA-STS site installed and enabled (port 80 until: sudo certbot --nginx -d mta-sts.bookrunner.tech)"
+    return 0
+  fi
+  echo "!! nginx -t failed with the new MTA-STS site: rolling it back" >&2
+  rm -f "$NGINX_MTA_STS_LINK" "$NGINX_MTA_STS_DST"
   nginx -t -q || echo "!! nginx -t still fails after the rollback: fix it before the next reload" >&2
   return 1
 }

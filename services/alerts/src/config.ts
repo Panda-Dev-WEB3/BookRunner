@@ -209,6 +209,23 @@ const shape = {
   ALERT_POOL_WRITE_OFF_NOTIFY_SECONDS: int(604_800),
   /** default: on for testnet / mainnet (deploy/server backup timer), off on devnet */
   ALERT_BACKUP_EXPECTED: z.string().optional(),
+  // ---- site security (rules-security.ts)
+  /** csp_violations: this many CSP violations blocking one origin within the window alert (warning) */
+  ALERT_CSP_VIOLATIONS: z.coerce.number().int().min(1).default(5),
+  /** csp_violations: window (minutes; the API keeps 2 h of 5-minute buckets) */
+  ALERT_CSP_WINDOW_MINUTES: z.coerce.number().int().min(5).max(60).default(15),
+  /** csp_violations: this many within the window is critical */
+  ALERT_CSP_BURST: z.coerce.number().int().min(1).default(50),
+  /** csp_violations: blocked origins (or schemes / keywords) never alerted, comma-separated. Default: Framer's on-page
+   *  editing bar, blocked on purpose on every Framer page view (deploy/server nginx CSP notes) */
+  ALERT_CSP_IGNORE: z.string().default("https://framer.com"),
+  /** published-file check (site_files_changed / site_manifest_missing); default: on for testnet / mainnet, off on devnet */
+  ALERT_SITE_EXPECTED: z.string().optional(),
+  ALERT_SITE_ROOT: z.string().default("/var/www/bookrunner"),
+  /** written by deploy/server update.sh (root-owned, outside the web root) */
+  ALERT_SITE_MANIFEST: z.string().default("/usr/local/lib/bookrunner-deploy/site-manifest.json"),
+  /** a clean web root is re-hashed this often (changed files only; a dirty result is re-checked every pass) */
+  ALERT_SITE_CHECK_SECONDS: z.coerce.number().int().min(60).default(300),
 
   // ---- delivery
   ALERT_EMAIL_TO: z.string().default(""),
@@ -316,6 +333,13 @@ export interface RuleConfig {
   poolFinalMarkStuckSec: number;
   /** pool_debt_written_off: seconds after the final mark the one-off page stays reported */
   poolWriteOffNotifySec: number;
+  /** csp_violations: reports per blocked origin within the window (warning) */
+  cspViolations: number;
+  cspWindowSec: number;
+  /** csp_violations: reports per blocked origin within the window (critical) */
+  cspBurst: number;
+  /** csp_violations: blocked origins / schemes never alerted (besides the browser-extension schemes) */
+  cspIgnore: string[];
   supervisorExpected: boolean;
   disabled: Set<string>;
 }
@@ -349,6 +373,8 @@ export interface AlertsConfig {
   roles: Array<{ role: string; address: `0x${string}` }>;
   rules: RuleConfig;
   delivery: DeliveryConfig;
+  /** the published-file check; null = off (devnet, ALERT_SITE_EXPECTED=0) */
+  site: { root: string; manifestPath: string; everySec: number } | null;
 }
 
 /** ETH decimal string -> wei (no float rounding). */
@@ -454,6 +480,12 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       poolUnrepaidSec: e.ALERT_POOL_UNREPAID_SECONDS,
       poolFinalMarkStuckSec: e.ALERT_POOL_FINAL_MARK_STUCK_SECONDS,
       poolWriteOffNotifySec: e.ALERT_POOL_WRITE_OFF_NOTIFY_SECONDS,
+      cspViolations: e.ALERT_CSP_VIOLATIONS,
+      cspWindowSec: e.ALERT_CSP_WINDOW_MINUTES * 60,
+      cspBurst: Math.max(e.ALERT_CSP_BURST, e.ALERT_CSP_VIOLATIONS),
+      cspIgnore: e.ALERT_CSP_IGNORE.split(/[,\s]+/)
+        .map((x) => x.trim().toLowerCase())
+        .filter(Boolean),
       supervisorExpected: true,
       disabled: new Set(e.ALERT_DISABLE.split(/[,\s]+/).filter(Boolean)),
     },
@@ -467,5 +499,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       clearSec: e.ALERT_CLEAR_SECONDS,
       digestHourUtc: e.ALERT_DIGEST_HOUR_UTC ?? null,
     },
+    site: (e.ALERT_SITE_EXPECTED === undefined || e.ALERT_SITE_EXPECTED === "" ? network !== "devnet" : e.ALERT_SITE_EXPECTED === "1" || e.ALERT_SITE_EXPECTED.toLowerCase() === "true")
+      ? { root: e.ALERT_SITE_ROOT, manifestPath: e.ALERT_SITE_MANIFEST, everySec: e.ALERT_SITE_CHECK_SECONDS }
+      : null,
   };
 }

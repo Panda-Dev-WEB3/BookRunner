@@ -23,7 +23,7 @@ fi
 # ---- root-owned deploy copy: what root runs (update.sh) and installs (units, nginx conf, compose file)
 install -d -o root -g root -m 0755 "$DEPLOY"
 if [ "$HERE" != "$DEPLOY" ]; then
-  rsync -a --delete --exclude=/.env.infra "$HERE/" "$DEPLOY/"
+  rsync -a --delete --exclude=/.env.infra --exclude=/site-manifest.json "$HERE/" "$DEPLOY/"
   chown -R root:root "$DEPLOY"
   chmod -R go-w "$DEPLOY"
 fi
@@ -86,6 +86,10 @@ nginx_patch_site_hsts || echo "!! nginx site HSTS NOT updated (see the nginx -t 
 # other *.bookrunner.tech names (port 80) -> https://bookrunner.tech/ (own site file + link)
 NGINX_WILDCARD_SRC="$DEPLOY/nginx-bookrunner-wildcard.conf"
 nginx_install_wildcard_site || echo "!! nginx wildcard site NOT installed (see the nginx -t output above)" >&2
+# mta-sts.bookrunner.tech (MTA-STS policy; port 80 until `certbot --nginx -d mta-sts.bookrunner.tech`, README.md)
+NGINX_MTA_STS_SRC="$DEPLOY/nginx-bookrunner-mta-sts.conf"
+NGINX_MTA_STS_SNIPPET_SRC="$DEPLOY/nginx-bookrunner-mta-sts-locations.conf"
+nginx_install_mta_sts_site || echo "!! nginx MTA-STS site NOT installed (see the nginx -t output above)" >&2
 install -d -o bookrunner -g bookrunner -m 0755 /var/www/bookrunner /var/www/bookrunner/app
 install -d -o bookrunner -g bookrunner -m 0750 "$APP/.data" "$APP/.data/testnet" "$APP/.data/testnet-live"
 systemctl daemon-reload

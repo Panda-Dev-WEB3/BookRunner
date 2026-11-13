@@ -4,6 +4,7 @@ import type { Charter } from "@bookrunner/shared/types";
 import type { ChainGateway } from "./chain/gateway";
 import type { ReadModel, WebhookStore } from "./data/types";
 import type { CharterIssue, CharterDraftInput } from "./domain/charter";
+import type { CspReportSink } from "./cspReport";
 import type { Kv } from "./kv";
 
 export interface CharterServiceClient {
@@ -44,4 +45,6 @@ export interface ApiDeps {
   now: () => number; // unix ms
   /** Liveness of the runtime pieces, for /health. */
   health?: () => Promise<Record<string, unknown>>;
+  /** Where POST /csp-report counts sanitized CSP violations (absent: reports are accepted and dropped). */
+  cspReports?: CspReportSink;
 }

@@ -113,6 +113,15 @@ Values never appear in these commands' output: every secret is generated into a 
   `nginx-bookrunner-locations.conf`. JSON-LD (`type="application/ld+json"`) is a data block and needs none.
   The same test fails when a page or Framer chunk references an image on a host outside `img-src` (the
   export's template avatars on a third-party media host were removed rather than allowed).
+- CSP violations are reported (`report-uri` / `report-to` → nginx `POST /csp-report` → the API, which keeps only
+  the blocked origin, the directive and the page path in Redis, no address or query string) and alerted on
+  (`csp_violations`). If a policy change breaks a page, the report-only fallback above still works: reports keep
+  arriving, nothing is blocked. Next to the CSP: `Cross-Origin-Opener-Policy` (`same-origin-allow-popups` on `/app/`
+  for the wallet popups, `same-origin` on the site) and `Cross-Origin-Resource-Policy: same-site` (reasons in the
+  locations conf).
+- The web root is owned by `bookrunner`, so a compromise of that user could rewrite the published pages that build
+  wallet transactions. `update.sh` records a root-owned manifest of the published files after each deploy and the
+  alerts service pages `site_files_changed` (critical) on any difference; `update.sh --web-only` restores the files.
 - HSTS carries `includeSubDomains` (no `preload`). The certbot-managed site file keeps its own server-level
   HSTS line (it is what the www → apex redirect carries); `update.sh` updates that one line in place
   (`nginx-lib.sh` `nginx_patch_site_hsts`, `nginx -t` + rollback). Every `*.bookrunner.tech` name opened in a
@@ -138,11 +147,13 @@ differs, then `systemctl daemon-reload`):
 | `bookrunner.service`, `bookrunner-infra.service`, `bookrunner-backup.service`, `bookrunner-backup.timer` | `/etc/systemd/system/` (0644) | daemon-reload; unless `--web-only`: `systemctl enable --now bookrunner-infra`, `systemctl reload bookrunner-infra`, `systemctl restart bookrunner` |
 | `bookrunner@.service` and the drop-in `bookrunner@testnet-live.service.d/override.conf` (the live-Orderly rehearsal stack) | `/etc/systemd/system/` (0644; the drop-in dir 0755) | daemon-reload; never enabled or started by `update.sh` / `install.sh`; unless `--web-only`, `systemctl restart bookrunner@testnet-live` only if it is already running |
 | `logrotate-bookrunner` | `/etc/logrotate.d/bookrunner` | — |
-| nginx http conf, locations snippet, site HSTS line, wildcard site (`nginx-lib.sh`) | `/etc/nginx/...` | `nginx -t`, rollback on failure, reload |
+| nginx http conf, locations snippet, site HSTS line, wildcard site, MTA-STS policy snippet + site (site file once only) (`nginx-lib.sh`) | `/etc/nginx/...` | `nginx -t`, rollback on failure, reload |
 | `/var/backups/bookrunner` | root 0700 | enables `bookrunner-backup.timer` once |
 | the web app and the site | `/var/www/bookrunner` (+ `/app`), owner `bookrunner` | — |
+| the published-file manifest: stdout of `scripts/site-manifest.ts` run **as `bookrunner`** (sha256 of every file under `/var/www/bookrunner`), written by root | `/usr/local/lib/bookrunner-deploy/site-manifest.json`, root 0644, outside the web root | services/alerts compares the web root with it every 5 min (`site_files_changed`, critical) |
 
-It also refreshes `/usr/local/lib/bookrunner-deploy` itself (rsync from the root clone, `.env.infra` kept),
+It also refreshes `/usr/local/lib/bookrunner-deploy` itself (rsync from the root clone, `.env.infra` and
+`site-manifest.json` kept),
 fast-forwards `/opt/bookrunner/app` and runs `bun install --frozen-lockfile` and the two builds **as `bookrunner`**
 (outside any unit: they write `node_modules/`, `apps/*/dist` and bun's cache under `HOME=/opt/bookrunner`). Unless
 `--web-only`, it then applies the `packages/db` migrations **as `bookrunner`** before the restart (`db-migrate.sh`): root
