@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "dark-glow",
+        "value": "*",
+        "files": [
+          "apps/site/public/official-links/index.html"
+        ],
+        "createdAt": "2026-11-13T09:29:03.728Z",
+        "reason": "Agent: the only shadows come from the shared desk stylesheet /dashboard/dashboard.css (dialog and toast, light paper page); this page uses neither"
+      }
+    ]
+  }
+}
