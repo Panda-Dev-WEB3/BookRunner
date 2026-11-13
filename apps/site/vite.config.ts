@@ -2,7 +2,8 @@
 // live book desk at /dashboard/ and the public status page at /status/, whose scripts are the only
 // bundled code (src/dashboard/main.ts -> dist/dashboard/app.js, src/status/main.ts -> dist/status/app.js).
 // `vite build` copies public/ verbatim into dist/ and adds the bundles, so dist/ is a plain static tree:
-// index.html, research/, jobs/, documents/, dashboard/, status/, assets/...
+// index.html, research/, jobs/, documents/, dashboard/, status/, official-links/, assets/... The official-links page's
+// contract tables are generated from the mainnet deployment record at build time (scripts/official-links.ts).
 //
 // Dev: `bun run dev` serves the same tree and proxies /trpc, /health and /status.json to SITE_API_ORIGIN
 // (default https://bookrunner.tech, the live testnet API; read-only queries are safe).
@@ -11,8 +12,10 @@ import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Plugin, defineConfig } from "vite";
+import { loadOfficialLinks, renderOfficialLinks } from "./scripts/official-links";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
+const repoRoot = join(root, "..", "..");
 const publicDir = join(root, "public");
 const apiOrigin = process.env.SITE_API_ORIGIN ?? "https://bookrunner.tech";
 const port = Number(process.env.SITE_PORT ?? 5191);
@@ -46,6 +49,7 @@ function staticTree(): Plugin {
         }
         if (file && existsSync(file)) {
           res.setHeader("Content-Type", "text/html; charset=utf-8");
+          if (url.pathname === OFFICIAL_LINKS_PAGE) return res.end(renderOfficialLinks(readFileSync(file, "utf8"), loadOfficialLinks(repoRoot)));
           return res.end(readFileSync(file));
         }
         next();
@@ -71,10 +75,25 @@ function versionedBundle(): Plugin {
   };
 }
 
+/** The official-links page: its contract tables come from the deployment record (scripts/official-links.ts). */
+const OFFICIAL_LINKS_PAGE = "/official-links/";
+
+/** Build only: fills dist/official-links/index.html from contracts/deployments/4663.json (placeholders without it). */
+function officialLinksPage(): Plugin {
+  return {
+    name: "bookrunner-official-links",
+    apply: "build",
+    closeBundle() {
+      const page = join(root, "dist", "official-links", "index.html");
+      writeFileSync(page, renderOfficialLinks(readFileSync(page, "utf8"), loadOfficialLinks(repoRoot)));
+    },
+  };
+}
+
 export default defineConfig({
   root,
   publicDir,
-  plugins: [staticTree(), versionedBundle()],
+  plugins: [staticTree(), versionedBundle(), officialLinksPage()],
   server: {
     host: "127.0.0.1",
     port,

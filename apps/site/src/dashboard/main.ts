@@ -134,7 +134,7 @@ function sidebar(view: ViewKey): string {
     ] as const
   )
     .map(([key, label]) => `<a href="#${key}" class="${view === key ? "active" : ""}"><span class="side-icon" aria-hidden="true">${deskIcon(key)}</span>${label}</a>`)
-    .join("")}<a href="${OPERATOR_APP_URL}" class="operator-link"><span class="side-icon" aria-hidden="true">${deskIcon("settings")}</span>Operator app ↗</a></div></nav><div class="book-switcher"><label for="book-switch">Selected book</label><select id="book-switch">${books.map((b) => `<option value="${b.bookId}" ${b.bookId === sel?.bookId ? "selected" : ""}>${esc(bookTicker(b.symbol))}</option>`).join("") || "<option>Reading…</option>"}</select></div><div class="side-bottom">${esc(CHAIN.name)} · ${CHAIN.id}<br><a href="/documents/">Read the specifications ↗</a><br><a href="${OPERATOR_APP_URL}">Operator app ↗</a><br><span class="hash">${s.address ? esc(s.address) : "Wallet not connected"}</span></div></aside>`;
+    .join("")}<a href="${OPERATOR_APP_URL}" class="operator-link"><span class="side-icon" aria-hidden="true">${deskIcon("settings")}</span>Operator app ↗</a></div></nav><div class="book-switcher"><label for="book-switch">Selected book</label><select id="book-switch">${books.map((b) => `<option value="${b.bookId}" ${b.bookId === sel?.bookId ? "selected" : ""}>${esc(bookTicker(b.symbol))}</option>`).join("") || "<option>Reading…</option>"}</select></div><div class="side-bottom">${esc(CHAIN.name)} · ${CHAIN.id}<br><a href="/documents/">Read the specifications ↗</a><br><a href="${OPERATOR_APP_URL}">Operator app ↗</a><br><a href="/official-links/">Official links ↗</a><br><span class="hash">${s.address ? esc(s.address) : "Wallet not connected"}</span></div></aside>`;
 }
 
 function titleAction(view: ViewKey): string {
