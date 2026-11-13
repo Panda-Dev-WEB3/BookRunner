@@ -198,15 +198,20 @@ const isLocal = (url: string) => /(^|\/\/|@)(127\.0\.0\.1|localhost|0\.0\.0\.0|\
  * extra confirmers. So, for every ticker (ORACLE_TICKERS, default the five launch tickers): a Chainlink feed in the
  * chain price config the oracle loads on 4663 (ORACLE_CHAIN_CONFIG, else config/chains/4663.json under `root`) or
  * ORACLE_CHAINLINK_FEEDS (entries must state their basis, {"proxy","basis","token"}: a plain address is refused,
- * VERIFY C2), and a DEX confirm pool in that config's dexConfirm.pools with a liquidity floor of at least
- * MAINNET_DEX_MIN_FLOOR_USD (the floor itself is checked live by source-check and every tick). ORACLE_POLICY and
- * ORACLE_MIN_SOURCES are pinned (MAINNET_FIXED); an inherited value contradicting them is refused rather than silently
- * overridden. Optional confirmers keep their rules: Pyth needs its key and https; HTTP specs their own timestamp
+ * VERIFY C2), and at least one DEX confirm pool in that config's dexConfirm.pools, every pool of a ticker (and the
+ * dexConfirm.ethUsd leg of the WETH-quoted ones) with a liquidity floor of at least MAINNET_DEX_MIN_FLOOR_USD and a
+ * TWAP window of 300-3600 s (the floors themselves, and each pool's factory getPool, are checked live by source-check
+ * and the oracle). ORACLE_POLICY and ORACLE_MIN_SOURCES are pinned (MAINNET_FIXED); an inherited value contradicting
+ * them is refused rather than silently overridden. Optional confirmers keep their rules: Pyth needs its key and https; HTTP specs their own timestamp
  * (tsPath) and maxAgeMs <= MAINNET_HTTP_MAX_AGE_MS; the Finnhub preset is refused. The oracle itself also refuses to
  * start unless the on-chain AttestedOracle.minSources() is exactly 1.
  */
 export const MAINNET_ORACLE_MIN_SOURCES = 1;
 export const MAINNET_ORACLE_POLICY = "primary-confirm";
+/** One raw dexConfirm pool entry of the chain price config (validated by packages/shared chainPriceConfigSchema in the oracle). */
+type RawDexPool = { pool?: unknown; minDepthUsd?: unknown; twapSec?: unknown; quoteToken?: unknown } | null;
+/** packages/shared uniswap.ts RHC_TOKENS.WETH: a pool quoted in it is priced through dexConfirm.ethUsd */
+export const RHC_WETH = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73";
 /** services/oracle production.ts MAINNET_DEX_MIN_FLOOR_USD (the configured 2% depth floor, minDepthUsd) */
 export const MAINNET_DEX_MIN_FLOOR_USD = 10_000;
 /** services/oracle production.ts MAINNET_DEX_TWAP_SEC / MAINNET_DEX_MAX_AGE_MS / MAINNET_CHAINLINK_MAX_GRACE_MS */
@@ -244,18 +249,20 @@ function oracleSourcesProblems(env: Env, root: string): string[] {
   const cfgName = env.ORACLE_CHAIN_CONFIG?.trim() || "config/chains/4663.json";
   const cfgPath = isAbsolute(cfgName) ? cfgName : resolve(root, cfgName);
   let cfgFeeds: Record<string, { heartbeatSec?: unknown; maxAgeSec?: unknown } | undefined> = {};
-  let cfgPools: Record<string, { pool?: unknown; minDepthUsd?: unknown; twapSec?: unknown }> = {};
+  let cfgPools: Record<string, RawDexPool | RawDexPool[]> = {};
+  let cfgEthUsd: { pool?: unknown; weth?: unknown; minDepthUsd?: unknown } | undefined;
   if (existsSync(cfgPath)) {
     try {
       const c = JSON.parse(readFileSync(cfgPath, "utf8")) as {
         chainId?: number;
         chainlink?: { feeds?: Record<string, { heartbeatSec?: unknown; maxAgeSec?: unknown } | undefined> };
-        dexConfirm?: { pools?: Record<string, { pool?: unknown; minDepthUsd?: unknown; twapSec?: unknown }> };
+        dexConfirm?: { pools?: Record<string, RawDexPool | RawDexPool[]>; ethUsd?: { pool?: unknown; weth?: unknown; minDepthUsd?: unknown } };
       };
       if (c.chainId !== MAINNET_CHAIN_ID) problems.push(`${cfgName} is for chain ${c.chainId}, not 4663`);
       else {
         cfgFeeds = c.chainlink?.feeds ?? {};
         cfgPools = c.dexConfirm?.pools ?? {};
+        cfgEthUsd = c.dexConfirm?.ethUsd;
       }
     } catch {
       problems.push(`${cfgName} is not valid JSON`);
@@ -276,22 +283,40 @@ function oracleSourcesProblems(env: Env, root: string): string[] {
   if (env.ORACLE_DEX_CONFIRM !== undefined && env.ORACLE_DEX_CONFIRM.trim() !== "" && !isOn(env.ORACLE_DEX_CONFIRM)) {
     problems.push("ORACLE_DEX_CONFIRM is off: mainnet requires the Uniswap v3 TWAP confirm source (a DEX confirm pool per ticker)");
   }
-  const noPool = tickers.filter((t) => typeof cfgPools[t]?.pool !== "string");
+  // a ticker's pools: a list (several confirm pools) or, in an older config, one pool object
+  const poolsOf = (t: string): RawDexPool[] => {
+    const v = cfgPools[t];
+    return v === undefined || v === null ? [] : Array.isArray(v) ? v : [v];
+  };
+  const noPool = tickers.filter((t) => !poolsOf(t).some((p) => typeof p?.pool === "string"));
   if (noPool.length > 0) problems.push(`no DEX confirm pool for ${noPool.join(", ")} (${cfgName} dexConfirm.pools)`);
   const twapOverride = env.ORACLE_DEX_TWAP_SEC?.trim() ? Number(env.ORACLE_DEX_TWAP_SEC) : undefined;
   if (twapOverride !== undefined && !(twapOverride >= MAINNET_DEX_TWAP_SEC.min && twapOverride <= MAINNET_DEX_TWAP_SEC.max)) {
     problems.push(`ORACLE_DEX_TWAP_SEC=${env.ORACLE_DEX_TWAP_SEC} outside ${MAINNET_DEX_TWAP_SEC.min}-${MAINNET_DEX_TWAP_SEC.max} s on mainnet (a short window is cheap to push)`);
   }
+  // every pool of a ticker gets the same bounds; a WETH-quoted pool needs the ETH/USD leg, which has a floor too
+  const weth = (typeof cfgEthUsd?.weth === "string" ? cfgEthUsd.weth : RHC_WETH).toLowerCase();
+  let wethPools = 0;
   for (const t of tickers) {
-    const pool = cfgPools[t];
-    if (typeof pool?.pool !== "string") continue;
-    const floor = pool.minDepthUsd;
-    if (typeof floor !== "number" || floor < MAINNET_DEX_MIN_FLOOR_USD) {
-      problems.push(`dexConfirm.pools.${t}.minDepthUsd must be >= ${MAINNET_DEX_MIN_FLOOR_USD} (got ${String(floor)})`);
-    }
-    const twap = twapOverride ?? (typeof pool.twapSec === "number" ? pool.twapSec : 600);
-    if (twapOverride === undefined && !(twap >= MAINNET_DEX_TWAP_SEC.min && twap <= MAINNET_DEX_TWAP_SEC.max)) {
-      problems.push(`dexConfirm.pools.${t}.twapSec=${twap} outside ${MAINNET_DEX_TWAP_SEC.min}-${MAINNET_DEX_TWAP_SEC.max} s on mainnet`);
+    const list = Array.isArray(cfgPools[t]);
+    poolsOf(t).forEach((pool, i) => {
+      if (typeof pool?.pool !== "string") return;
+      const at = `dexConfirm.pools.${t}${list ? `[${i}]` : ""}`;
+      const floor = pool.minDepthUsd;
+      if (typeof floor !== "number" || floor < MAINNET_DEX_MIN_FLOOR_USD) {
+        problems.push(`${at}.minDepthUsd must be >= ${MAINNET_DEX_MIN_FLOOR_USD} (got ${String(floor)})`);
+      }
+      const twap = twapOverride ?? (typeof pool.twapSec === "number" ? pool.twapSec : 600);
+      if (twapOverride === undefined && !(twap >= MAINNET_DEX_TWAP_SEC.min && twap <= MAINNET_DEX_TWAP_SEC.max)) {
+        problems.push(`${at}.twapSec=${twap} outside ${MAINNET_DEX_TWAP_SEC.min}-${MAINNET_DEX_TWAP_SEC.max} s on mainnet`);
+      }
+      if (typeof pool.quoteToken === "string" && pool.quoteToken.toLowerCase() === weth) wethPools++;
+    });
+  }
+  if (wethPools > 0) {
+    if (typeof cfgEthUsd?.pool !== "string") problems.push(`${wethPools} WETH-quoted DEX confirm pool(s) but no dexConfirm.ethUsd (the WETH / USD leg) in ${cfgName}`);
+    else if (typeof cfgEthUsd.minDepthUsd !== "number" || cfgEthUsd.minDepthUsd < MAINNET_DEX_MIN_FLOOR_USD) {
+      problems.push(`dexConfirm.ethUsd.minDepthUsd must be >= ${MAINNET_DEX_MIN_FLOOR_USD} (got ${String(cfgEthUsd.minDepthUsd)})`);
     }
   }
   const dexAge = env.ORACLE_DEX_MAX_AGE_MS?.trim();

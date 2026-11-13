@@ -1,28 +1,36 @@
-// Uniswap v3 TWAP confirm source (kind "dex", name "dex-twap"): for each ticker the deepest Stock-Token / USDG pool
-// of config/chains/<chainId>.json `dexConfirm.pools`. It CONFIRMS the Chainlink price under the primary-confirm
-// policy (domain/confirm.ts) and is never a signing source: a manipulated pool can raise alerts, never move a price.
-// Per observation, all reads pinned to one block (the latest, shared by every ticker of a tick):
+// Uniswap v3 TWAP confirm source (kind "dex", name "dex-twap"): for each ticker the confirm pools of
+// config/chains/<chainId>.json `dexConfirm.pools` (Stock-Token / USDG, and Stock-Token / WETH through the
+// `dexConfirm.ethUsd` WETH / USDG leg). It CONFIRMS the Chainlink price under the primary-confirm policy
+// (domain/confirm.ts) and is never a signing source: a manipulated pool can raise alerts, never move a price.
+// Per pool, all reads pinned to one block (the latest, shared by every ticker of a tick):
 //   - authenticity (once per pool, cached): factory.getPool(stockToken, quoteToken, fee) == pool (Uniswap's v3
 //     factory for the chain, packages/shared uniswap.ts), and token0 / token1 are the Stock Token and the quote token;
+//     the ETH/USD leg the same way (getPool(WETH, USDG, fee), its tokens WETH and USDG);
 //   - depth floor: the quote amount that moves the pool price 2% (DEPTH_MOVE_BPS) up or down within the active range,
-//     from in-range liquidity() and sqrtPriceX96 (depth2PctQuote; the smaller direction), >= minDepthUsd (USDG
-//     assumed = $1). Not balanceOf(pool): out-of-range positions, uncollected fees and donations would count there;
+//     from in-range liquidity() and sqrtPriceX96 (depthQuote; the smaller direction), in USD (USDG assumed = $1; a WETH
+//     amount valued at the leg's TWAP) >= minDepthUsd. Not balanceOf(pool): out-of-range positions, uncollected fees
+//     and donations would count there;
 //   - observation history: the oldest observation (slot0 observationIndex + 1 mod cardinality, else index 0) must
 //     be at least twapSec old, i.e. the ring buffer covers the window (otherwise observe() would revert "OLD");
 //   - activity: the newest observation (written by the first swap of a block) must lie inside the window: a pool
 //     with no swap in the window would return an old traded tick as a fresh TWAP;
 //   - observe([twapSec, 0]) -> arithmetic-mean tick (rounded toward -inf, Uniswap OracleLibrary.consult) ->
 //     price of one whole Stock Token in whole quote tokens (orientation from token0, decimals: token config, quote
-//     decimals() read on-chain and cached);
+//     decimals() read on-chain and cached); a WETH quote times the leg's WETH / USD TWAP over the SAME window (both
+//     geometric means, so the product is the TWAP of the stock / USD cross); the leg must pass its own depth floor,
+//     history and last-swap checks;
 //   - per share: divided by the token's uiMultiplier (read at the same block) exactly like the Chainlink per-token
-//     feeds (tokenStateProblem, perSharePriceWad); no observation while oraclePaused() or when the multiplier changed
-//     inside the window;
+//     feeds (tokenStateProblem, perSharePriceWad), whatever the quote; no observation while oraclePaused() or when the
+//     multiplier changed inside the window;
 //   - ts = the block's timestamp (never the receive time).
+// Several pools per ticker (combineDexPools): the confirm value is the depth-weighted median of the USABLE pools
+// (every check above passed), so a pool holding less than half the usable depth can neither raise nor suppress a
+// divergence while deeper pools say otherwise; the confirm is available while at least one pool is usable.
 // RPC budget (deploy/server/MAINNET.md "RPC budget"): one pass reads every pool of the tick: the block, then ONE
-// Multicall3 aggregate3 at that block (slot0, liquidity, observe, the token's four views, per pool; allowFailure), and
-// a second one only for the pools whose observation index moved (ring buffer timestamps). `readIntervalMs`
-// (ORACLE_DEX_READ_MS) reuses a pass that recent; its observations keep their block timestamp, so maxAgeMs
-// (ORACLE_DEX_MAX_AGE_MS) must exceed it.
+// Multicall3 aggregate3 at that block (slot0, liquidity, observe per pool and the leg; the four token views once per
+// Stock Token; allowFailure), and a second one only for the pools whose observation index moved (ring buffer
+// timestamps). `readIntervalMs` (ORACLE_DEX_READ_MS) reuses a pass that recent; its observations keep their block
+// timestamp, so maxAgeMs (ORACLE_DEX_MAX_AGE_MS) must exceed it.
 import { perSharePriceWad, tickToPrice } from "@bookrunner/shared";
 import { type Address, type PublicClient, erc20Abi, getAddress, parseAbi } from "viem";
 import type { PriceSource, SourceObservation } from "../domain/types";
@@ -32,6 +40,9 @@ export const DEX_SOURCE_NAME = "dex-twap";
 /** Price move the depth floor is measured at (bps). */
 export const DEPTH_MOVE_BPS = 200;
 
+/** usd: the quote token is the USD stable (USDG, assumed $1); eth: WETH, priced through the ETH/USD leg. */
+export type DexQuote = "usd" | "eth";
+
 /** A configured confirm pool, resolved (config.ts resolveDexPools). */
 export interface ResolvedDexPool {
   pool: Address;
@@ -39,9 +50,22 @@ export interface ResolvedDexPool {
   token: Address;
   tokenDecimals: number;
   quoteToken: Address;
+  /** how the quote token converts to USD */
+  quote: DexQuote;
   fee: number;
   twapSec: number;
-  /** depth floor: whole quote tokens (USD at the USDG = $1 assumption) moving the price DEPTH_MOVE_BPS */
+  /** depth floor: USD moving the price DEPTH_MOVE_BPS (USDG = $1; WETH at the ETH/USD leg's TWAP) */
+  minDepthUsd: number;
+}
+
+/** The WETH / USD leg of the WETH-quoted pools (config.ts resolveDexEthUsd). */
+export interface ResolvedEthUsdLeg {
+  pool: Address;
+  weth: Address;
+  /** USD quote token (USDG, assumed $1) */
+  quoteToken: Address;
+  fee: number;
+  /** 2% depth floor of the leg (USD) */
   minDepthUsd: number;
 }
 
@@ -71,42 +95,46 @@ export interface DexReader {
   /** tickCumulatives for `secondsAgos` (reverts "OLD" when the history does not reach that far) */
   observe(pool: Address, secondsAgos: readonly number[], blockNumber: bigint): Promise<readonly bigint[]>;
   tokenState(token: Address, blockNumber: bigint): Promise<TokenState>;
-  /** Every pool read of a pass in one batched call at `blockNumber`. Absent: per-call reads (readPoolsPerCall). */
-  readPools?(pools: readonly DexPoolRequest[], blockNumber: bigint): Promise<Map<Address, DexPoolRead>>;
+  /** Every pool and token read of a pass in one batched call at `blockNumber`. Absent: per-call reads (readPassPerCall). */
+  readPass?(pools: readonly DexPoolRequest[], tokens: readonly Address[], blockNumber: bigint): Promise<DexPassReads>;
   /** Ring-buffer observations of a pass in one batched call at `blockNumber`, keyed `${pool}:${index}` (lowercase pool). */
   readObservations?(reqs: readonly { pool: Address; index: number }[], blockNumber: bigint): Promise<Map<string, Settled<{ blockTimestamp: number; initialized: boolean }>>>;
 }
 
 export interface DexPoolRequest {
   pool: Address;
-  token: Address;
-  twapSec: number;
+  /** observe(secondsAgos): [twapSec, 0] for a Stock Token pool, [every window of the WETH pools..., 0] for the leg */
+  secondsAgos: readonly number[];
 }
 
 export interface DexPoolRead {
   slot0: Settled<Slot0>;
   liquidity: Settled<bigint>;
-  /** observe([twapSec, 0]) tickCumulatives */
+  /** observe(secondsAgos) tickCumulatives */
   observe: Settled<readonly bigint[]>;
-  tokenState: Settled<TokenState>;
+}
+
+/** One pass's reads: per pool (lowercase address) and per Stock Token (lowercase address; once per token). */
+export interface DexPassReads {
+  pools: Map<string, DexPoolRead>;
+  tokens: Map<string, Settled<TokenState>>;
 }
 
 const settle = <T>(p: Promise<T>): Promise<Settled<T>> => p.then(settledOk<T>, settledErr<T>);
+const lc = (a: Address) => a.toLowerCase();
 
-/** The pool reads of a pass through the per-call reads (tests, chains without Multicall3). */
-export async function readPoolsPerCall(r: DexReader, pools: readonly DexPoolRequest[], blockNumber: bigint): Promise<Map<Address, DexPoolRead>> {
-  const rows = await Promise.all(
-    pools.map(async (p) => {
-      const [slot0, liquidity, observe, tokenState] = await Promise.all([
-        settle(r.slot0(p.pool, blockNumber)),
-        settle(r.liquidity(p.pool, blockNumber)),
-        settle(r.observe(p.pool, [p.twapSec, 0], blockNumber)),
-        settle(r.tokenState(p.token, blockNumber)),
-      ]);
-      return [p.pool, { slot0, liquidity, observe, tokenState }] as const;
-    }),
-  );
-  return new Map(rows);
+/** The reads of a pass through the per-call reads (tests, chains without Multicall3). */
+export async function readPassPerCall(r: DexReader, pools: readonly DexPoolRequest[], tokens: readonly Address[], blockNumber: bigint): Promise<DexPassReads> {
+  const [poolRows, tokenRows] = await Promise.all([
+    Promise.all(
+      pools.map(async (p) => {
+        const [slot0, liquidity, observe] = await Promise.all([settle(r.slot0(p.pool, blockNumber)), settle(r.liquidity(p.pool, blockNumber)), settle(r.observe(p.pool, p.secondsAgos, blockNumber))]);
+        return [lc(p.pool), { slot0, liquidity, observe }] as const;
+      }),
+    ),
+    Promise.all(tokens.map(async (t) => [lc(t), await settle(r.tokenState(t, blockNumber))] as const)),
+  ]);
+  return { pools: new Map(poolRows), tokens: new Map(tokenRows) };
 }
 
 const obsKey = (pool: Address, index: number) => `${pool.toLowerCase()}:${index}`;
@@ -123,8 +151,8 @@ export const uniswapV3OracleAbi = parseAbi([
 
 /**
  * Reads through viem; every pool read pinned to the block of the tick. `multicall` (Multicall3 address, shared
- * multicall3For): the pool reads of a pass are one aggregate3 eth_call (and the moved ring observations a second);
- * null: per-call reads (devnet / testnet, unchanged).
+ * multicall3For): the pool and token reads of a pass are one aggregate3 eth_call (and the moved ring observations a
+ * second); null: per-call reads (devnet / testnet, unchanged).
  */
 export function viemDexReader(pub: PublicClient, multicall: Address | null = null): DexReader {
   const tokens = viemAggregatorReader(pub);
@@ -132,39 +160,40 @@ export function viemDexReader(pub: PublicClient, multicall: Address | null = nul
     const res = await pub.multicall({ contracts, allowFailure: true, blockNumber, multicallAddress: multicall as Address, batchSize: 0 });
     return res.map((r) => (r.status === "success" ? settledOk(r.result as unknown) : settledErr(r.error)));
   };
-  const multicalled: Pick<DexReader, "readPools" | "readObservations"> = multicall
+  const multicalled: Pick<DexReader, "readPass" | "readObservations"> = multicall
     ? {
-        async readPools(pools, blockNumber) {
-          const out = new Map<Address, DexPoolRead>();
+        async readPass(pools, toks, blockNumber) {
           const res = await rows(
-            pools.flatMap((p) => [
-              { address: p.pool, abi: uniswapV3OracleAbi, functionName: "slot0" },
-              { address: p.pool, abi: uniswapV3OracleAbi, functionName: "liquidity" },
-              { address: p.pool, abi: uniswapV3OracleAbi, functionName: "observe", args: [[p.twapSec, 0]] },
-              ...TOKEN_STATE_VIEWS.map((functionName) => ({ address: p.token, abi: stockTokenAbi, functionName })),
-            ]),
+            [
+              ...pools.flatMap((p) => [
+                { address: p.pool, abi: uniswapV3OracleAbi, functionName: "slot0" },
+                { address: p.pool, abi: uniswapV3OracleAbi, functionName: "liquidity" },
+                { address: p.pool, abi: uniswapV3OracleAbi, functionName: "observe", args: [p.secondsAgos.map(Number)] },
+              ]),
+              ...toks.flatMap((t) => TOKEN_STATE_VIEWS.map((functionName) => ({ address: t, abi: stockTokenAbi, functionName }))),
+            ],
             blockNumber,
           );
           let i = 0;
           const next = () => res[i++] ?? settledErr<unknown>(new Error("multicall result missing"));
+          const out: DexPassReads = { pools: new Map(), tokens: new Map() };
           for (const p of pools) {
             const s0 = next();
             const liq = next();
             const obs = next();
-            const tokenState = tokenStateFromViews(TOKEN_STATE_VIEWS.map(() => next()));
             const slot0: Settled<Slot0> = s0.ok
               ? (() => {
                   const s = s0.value as readonly [bigint, number, number, number];
                   return settledOk({ sqrtPriceX96: s[0], tick: Number(s[1]), observationIndex: Number(s[2]), observationCardinality: Number(s[3]) });
                 })()
               : s0;
-            out.set(p.pool, {
+            out.pools.set(lc(p.pool), {
               slot0,
               liquidity: liq.ok ? settledOk(liq.value as bigint) : liq,
               observe: obs.ok ? settledOk((obs.value as readonly [readonly bigint[], unknown])[0]) : obs,
-              tokenState,
             });
           }
+          for (const t of toks) out.tokens.set(lc(t), tokenStateFromViews(TOKEN_STATE_VIEWS.map(() => next())));
           return out;
         },
         async readObservations(reqs, blockNumber) {
@@ -263,8 +292,10 @@ export function perSharePrice(tokenPrice: number, uiMultiplier: bigint): number 
 
 /** Diagnostics carried by every observation, usable or not (source-check, /health errors). */
 export interface DexDiagnostics {
-  /** quote tokens moving the price DEPTH_MOVE_BPS within the active range */
+  /** quote tokens moving the price DEPTH_MOVE_BPS within the active range (WETH for a WETH-quoted pool) */
   depthQuote?: number;
+  /** the same in USD (USDG = $1; WETH at the ETH/USD leg's TWAP, or its spot when the leg is unusable) */
+  depthUsd?: number;
   cardinality?: number;
   /** age of the oldest observation (s): how far back observe() can reach */
   historySec?: number;
@@ -272,14 +303,21 @@ export interface DexDiagnostics {
   lastSwapAgeSec?: number;
 }
 
-export type DexObservation =
-  | ({
+/** Which pool an observation comes from: `label` e.g. "NVDA/WETH 500 0x62AB..6b6C" (alerts, /health, source-check). */
+export interface DexPoolId {
+  pool: Address;
+  label: string;
+  quote: DexQuote;
+}
+
+export type DexPoolObservation =
+  | (DexPoolId & {
       ok: true;
-      /** USD per SHARE (TWAP token price / uiMultiplier) */
+      /** USD per SHARE (TWAP token price in USD / uiMultiplier) */
       price: number;
-      /** USD (quote tokens) per Stock Token over the window */
+      /** USD per Stock Token over the window (a WETH quote times the leg's TWAP) */
       tokenPrice: number;
-      /** spot (slot0) token price, display only */
+      /** spot (slot0) token price in USD, display only */
       spotTokenPrice: number;
       meanTick: number;
       twapSec: number;
@@ -287,13 +325,61 @@ export type DexObservation =
       ts: number;
       uiMultiplier: bigint;
     } & Required<DexDiagnostics>)
-  | ({ ok: false; reason: string } & DexDiagnostics);
+  | (DexPoolId & { ok: false; reason: string } & DexDiagnostics);
+
+/**
+ * A ticker's confirm observation: usable = the reference pool's observation (combineDexPools) plus every pool's;
+ * not usable = why (one pool: its reason and diagnostics; several: every pool's reason).
+ */
+export type DexObservation =
+  | (Extract<DexPoolObservation, { ok: true }> & { pools: DexPoolObservation[] })
+  | ({ ok: false; reason: string; pools?: DexPoolObservation[] } & DexDiagnostics & Partial<DexPoolId>);
+
+/** The ETH/USD leg as seen by the latest pass (source-check, notes). */
+export type DexLegObservation =
+  | ({ ok: true; label: string; spotPrice: number } & Required<Omit<DexDiagnostics, "depthQuote">>)
+  | ({ ok: false; label: string; reason: string; spotPrice?: number } & Omit<DexDiagnostics, "depthQuote">);
+
+/**
+ * The value a ticker's usable pools confirm with: the depth-weighted (lower) median of their per-share prices. Sorted
+ * by price, the first pool at which the cumulative USD depth reaches half the total. It is always one of the pools,
+ * so when every usable pool diverges it diverges too, and a pool holding less than half the usable depth decides
+ * nothing while the deeper pools agree among themselves: it can neither raise a false divergence nor hide a real one
+ * (with two pools the deeper one decides). Empty input throws.
+ */
+export function depthWeightedMedian<T extends { price: number; depthUsd: number }>(xs: readonly T[]): T {
+  if (xs.length === 0) throw new Error("depth-weighted median of no pools");
+  const sorted = [...xs].sort((a, b) => a.price - b.price || b.depthUsd - a.depthUsd);
+  const total = sorted.reduce((s, x) => s + Math.max(0, x.depthUsd), 0);
+  let cum = 0;
+  for (const x of sorted) {
+    cum += Math.max(0, x.depthUsd);
+    if (cum >= total / 2) return x;
+  }
+  return sorted[sorted.length - 1] as T;
+}
+
+/**
+ * One ticker's pools -> its confirm observation. Available when at least one pool is usable (passed its depth floor,
+ * history, last-swap, token-state and leg checks); the value is the depth-weighted median of the usable ones
+ * (depthWeightedMedian), so divergence is measured against it.
+ */
+export function combineDexPools(results: readonly DexPoolObservation[]): DexObservation {
+  const usable = results.filter((r): r is Extract<DexPoolObservation, { ok: true }> => r.ok);
+  if (usable.length > 0) return { ...depthWeightedMedian(usable), pools: [...results] };
+  if (results.length === 0) return { ok: false, reason: "no DEX confirm pool configured" };
+  if (results.length === 1) return { ...(results[0] as Extract<DexPoolObservation, { ok: false }>), pools: [...results] };
+  const why = results.map((r) => `${r.label}: ${r.ok ? "usable" : r.reason}`).join("; ");
+  return { ok: false, reason: `no usable confirm pool (${results.length} configured): ${why}`, pools: [...results] };
+}
 
 export interface DexTwapOptions {
   /** observation max age (block time vs now) */
   maxAgeMs: number;
   /** Uniswap v3 factory of the chain: every pool must be its getPool(stockToken, quoteToken, fee); null = not checked */
   factory: Address | null;
+  /** The WETH / USD leg; required when any pool is quoted in WETH. */
+  ethUsd?: ResolvedEthUsdLeg | null;
   /** a pass started less than this ago is reused by every ticker (ORACLE_DEX_READ_MS; 0 = a pass per tick) */
   readIntervalMs?: number;
   /** every pass reports its block timestamp here (the oracle's HeadClock) */
@@ -302,36 +388,73 @@ export interface DexTwapOptions {
 }
 
 const errMsg = (e: unknown): string => (e instanceof Error ? (e.message.split("\n")[0] ?? "") : String(e));
+const shortAddr = (a: Address) => `${a.slice(0, 6)}..${a.slice(-4)}`;
+
+/** "NVDA/WETH 500 0x62AB..6b6C" */
+export function dexPoolLabel(ticker: string, p: Pick<ResolvedDexPool, "pool" | "fee" | "quote">): string {
+  return `${ticker}/${p.quote === "eth" ? "WETH" : "USDG"} ${p.fee} ${shortAddr(p.pool)}`;
+}
+
+/** "WETH/USDG 100 0x52e6..71Ca" */
+export function ethLegLabel(l: Pick<ResolvedEthUsdLeg, "pool" | "fee">): string {
+  return `WETH/USDG ${l.fee} ${shortAddr(l.pool)}`;
+}
+
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+
+/** The leg at one TWAP window: WETH in USD over it, or why not. */
+type LegQuote = { ok: true; price: number; spot: number } | { ok: false; reason: string; spot?: number };
+
+interface PoolCheck {
+  /** the pool's base (Stock Token, or WETH for the leg) is token0 */
+  baseIsToken0: boolean;
+}
 
 export class DexTwapSource implements PriceSource {
   readonly name = DEX_SOURCE_NAME;
   readonly kind = "dex" as const;
   readonly maxAgeMs: number;
   private readonly now: () => number;
-  private readonly poolCheckCache = new Map<Address, Promise<{ tokenIsToken0: boolean } | { problem: string }>>();
+  private readonly pools: Readonly<Record<string, readonly ResolvedDexPool[]>>;
+  private readonly leg: ResolvedEthUsdLeg | null;
+  private readonly poolCheckCache = new Map<Address, Promise<PoolCheck | { problem: string }>>();
   private readonly decimalsCache = new Map<Address, Promise<number>>();
   /** oldest / newest observation timestamps per (pool, observationIndex, cardinality): they move only with the index */
   private readonly ringCache = new Map<Address, { key: string; oldest: number; newest: number }>();
   /** the current pass (every ticker's observation), shared while in flight or younger than readIntervalMs */
   private pass: { startedAt: number; promise: Promise<Map<string, DexObservation>>; done: boolean; failed: boolean } | null = null;
+  /** latest observation per ticker (confirmNote) and the leg as seen by the latest pass */
+  private readonly latest = new Map<string, DexObservation>();
+  private lastLeg: DexLegObservation | null = null;
   /** completed passes (tests) */
   passes = 0;
 
-  constructor(
-    private readonly pools: Readonly<Record<string, ResolvedDexPool>>,
-    private readonly reader: DexReader,
-    private readonly opts: DexTwapOptions,
-  ) {
+  constructor(pools: Readonly<Record<string, ResolvedDexPool | readonly ResolvedDexPool[]>>, private readonly reader: DexReader, private readonly opts: DexTwapOptions) {
     this.now = opts.now ?? Date.now;
     this.maxAgeMs = opts.maxAgeMs;
+    this.leg = opts.ethUsd ?? null;
+    this.pools = Object.fromEntries(Object.entries(pools).map(([t, p]) => [t, Array.isArray(p) ? [...p] : [p as ResolvedDexPool]]));
+    const needLeg = Object.entries(this.pools).flatMap(([t, ps]) => ps.filter((p) => p.quote === "eth").map((p) => dexPoolLabel(t, p)));
+    if (needLeg.length > 0 && !this.leg) throw new Error(`WETH-quoted confirm pools without an ETH/USD leg (dexConfirm.ethUsd): ${needLeg.join(", ")}`);
   }
 
   tickers(): string[] {
     return Object.keys(this.pools);
   }
 
-  pool(ticker: string): ResolvedDexPool | undefined {
-    return this.pools[ticker];
+  /** The ticker's confirm pools (empty when none). */
+  poolsOf(ticker: string): readonly ResolvedDexPool[] {
+    return this.pools[ticker] ?? [];
+  }
+
+  /** The WETH / USD leg (null when no pool is quoted in WETH). */
+  ethUsdLeg(): ResolvedEthUsdLeg | null {
+    return this.leg;
+  }
+
+  /** The leg as seen by the latest pass (null: no leg, or not read yet). */
+  legObservation(): DexLegObservation | null {
+    return this.lastLeg;
   }
 
   /** Whether pools are checked against the factory (getPool(stockToken, quoteToken, fee) == pool). */
@@ -346,6 +469,22 @@ export class DexTwapSource implements PriceSource {
     return { price: o.price, ts: o.ts, maxAgeMs: this.maxAgeMs };
   }
 
+  /**
+   * Which pools the ticker's latest observation used and which failed, for /health `confirm[].notes` and the
+   * services/alerts confirm messages; null when the ticker has no pool or was not observed yet.
+   */
+  confirmNote(ticker: string): string | null {
+    const o = this.latest.get(ticker);
+    if (!o || !this.pools[ticker]) return null;
+    const pools = o.pools ?? [];
+    if (pools.length === 0) return `${DEX_SOURCE_NAME}: ${o.ok ? "no pool read" : o.reason}`;
+    const used = pools.filter((p) => p.ok);
+    const failed = pools.filter((p): p is Extract<DexPoolObservation, { ok: false }> => !p.ok);
+    const usedText = used.map((p) => `${p.label} $${p.price.toFixed(2)} (2% depth ${fmtUsd(p.depthUsd)}${o.ok && p.pool === o.pool ? ", reference" : ""})`);
+    const failedText = failed.map((p) => `${p.label}: ${p.reason}`);
+    return `${DEX_SOURCE_NAME}: used ${usedText.length > 0 ? usedText.join(", ") : "none"}${failedText.length > 0 ? `; failed ${failedText.join("; ")}` : ""}`;
+  }
+
   private cached<K, V>(m: Map<K, Promise<V>>, k: K, f: () => Promise<V>): Promise<V> {
     let p = m.get(k);
     if (!p) {
@@ -357,14 +496,16 @@ export class DexTwapSource implements PriceSource {
   }
 
   async observe(ticker: string): Promise<DexObservation> {
-    const p = this.pools[ticker];
-    if (!p) return { ok: false, reason: "no DEX confirm pool configured" };
+    if (!this.pools[ticker]) return { ok: false, reason: "no DEX confirm pool configured" };
+    let o: DexObservation;
     try {
       const all = await this.currentPass(this.now());
-      return all.get(ticker) ?? { ok: false, reason: "pool not read" };
+      o = all.get(ticker) ?? { ok: false, reason: "pool not read" };
     } catch (e) {
-      return { ok: false, reason: `pool not readable: ${errMsg(e)}` };
+      o = { ok: false, reason: `pool not readable: ${errMsg(e)}` };
     }
+    this.latest.set(ticker, o);
+    return o;
   }
 
   /** The pass this observation uses: the current one when in flight or fresh, else a new one (every pool at one block). */
@@ -389,87 +530,200 @@ export class DexTwapSource implements PriceSource {
     return entry.promise;
   }
 
-  /** One pass: the block, the per-pool checks (cached), one batched read of every usable pool, the moved rings. */
+  /** One pass: the block, the per-pool checks (cached), one batched read of every usable pool + token + the leg, the moved rings. */
   private async readAll(): Promise<Map<string, DexObservation>> {
-    const tickers = Object.keys(this.pools);
-    const [block, prep] = await Promise.all([
+    const entries = Object.entries(this.pools).flatMap(([t, ps]) => ps.map((p) => ({ t, p, label: dexPoolLabel(t, p) })));
+    const leg = this.leg;
+    const [block, prep, legPrep] = await Promise.all([
       this.reader.block(),
       Promise.all(
-        tickers.map(async (t) => {
-          const p = this.pools[t] as ResolvedDexPool;
+        entries.map(async (x) => {
           try {
-            const [check, quoteDecimals] = await Promise.all([this.checkPool(p), this.cached(this.decimalsCache, p.quoteToken, () => this.reader.decimals(p.quoteToken))]);
-            return { t, p, check, quoteDecimals, error: null };
+            const [check, quoteDecimals] = await Promise.all([this.checkPool(x.p.pool, x.p.token, x.p.quoteToken, x.p.fee, "Stock Token"), this.decimalsOf(x.p.quoteToken)]);
+            return { ...x, check, quoteDecimals, error: null as unknown };
           } catch (e) {
-            return { t, p, check: null, quoteDecimals: 0, error: e };
+            return { ...x, check: null, quoteDecimals: 0, error: e };
           }
         }),
       ),
+      leg
+        ? Promise.all([this.checkPool(leg.pool, leg.weth, leg.quoteToken, leg.fee, "WETH"), this.decimalsOf(leg.weth), this.decimalsOf(leg.quoteToken)]).then(
+            ([check, wethDecimals, usdDecimals]) => ({ check, wethDecimals, usdDecimals, error: null as unknown }),
+            (e: unknown) => ({ check: null, wethDecimals: 0, usdDecimals: 0, error: e }),
+          )
+        : null,
     ]);
     this.opts.onBlockTimestamp?.(block.timestamp);
-    const out = new Map<string, DexObservation>();
-    const usable: Array<{ t: string; p: ResolvedDexPool; tokenIsToken0: boolean; quoteDecimals: number }> = [];
+    const results = new Map<string, DexPoolObservation[]>(Object.keys(this.pools).map((t) => [t, []]));
+    const push = (t: string, o: DexPoolObservation) => results.get(t)?.push(o);
+    const usable: Array<{ t: string; p: ResolvedDexPool; label: string; tokenIsToken0: boolean; quoteDecimals: number }> = [];
     for (const x of prep) {
-      if (x.error !== null || !x.check) out.set(x.t, { ok: false, reason: `pool not readable: ${errMsg(x.error)}` });
-      else if ("problem" in x.check) out.set(x.t, { ok: false, reason: x.check.problem });
-      else usable.push({ t: x.t, p: x.p, tokenIsToken0: x.check.tokenIsToken0, quoteDecimals: x.quoteDecimals });
+      const id: DexPoolId = { pool: x.p.pool, label: x.label, quote: x.p.quote };
+      if (x.error !== null || !x.check) push(x.t, { ...id, ok: false, reason: `pool not readable: ${errMsg(x.error)}` });
+      else if ("problem" in x.check) push(x.t, { ...id, ok: false, reason: x.check.problem });
+      else usable.push({ t: x.t, p: x.p, label: x.label, tokenIsToken0: x.check.baseIsToken0, quoteDecimals: x.quoteDecimals });
     }
-    if (usable.length === 0) return out;
-    const req = usable.map((u) => ({ pool: u.p.pool, token: u.p.token, twapSec: u.p.twapSec }));
-    const reads = this.reader.readPools ? await this.reader.readPools(req, block.number) : await readPoolsPerCall(this.reader, req, block.number);
-    // ring buffer timestamps: one batched read for every pool whose observation index moved since the cached one
-    const moved = usable.flatMap((u) => {
-      const s0 = reads.get(u.p.pool)?.slot0;
-      return s0?.ok && !this.ringHit(u.p.pool, s0.value) ? [{ pool: u.p.pool, slot0: s0.value }] : [];
-    });
-    if (moved.length > 0) await this.readRings(moved, block.number);
-    for (const u of usable) {
-      const r = reads.get(u.p.pool);
-      try {
-        if (!r) throw new Error("pool not read");
-        out.set(u.t, this.evaluate(u.p, u.tokenIsToken0, u.quoteDecimals, block, r));
-      } catch (e) {
-        out.set(u.t, { ok: false, reason: `pool not readable: ${errMsg(e)}` });
+
+    // the leg is read only when a WETH pool is usable, observed at every window those pools use
+    const windows = [...new Set(usable.filter((u) => u.p.quote === "eth").map((u) => u.p.twapSec))].sort((a, b) => a - b);
+    const legLabel = leg ? ethLegLabel(leg) : "";
+    let legReady: { wethIsToken0: boolean; wethDecimals: number; usdDecimals: number } | null = null;
+    let legProblem: string | null = null;
+    if (leg && legPrep) {
+      if (legPrep.error !== null || !legPrep.check) legProblem = `pool not readable: ${errMsg(legPrep.error)}`;
+      else if ("problem" in legPrep.check) legProblem = legPrep.check.problem;
+      else legReady = { wethIsToken0: legPrep.check.baseIsToken0, wethDecimals: legPrep.wethDecimals, usdDecimals: legPrep.usdDecimals };
+    }
+    const readLeg = leg !== null && legReady !== null && windows.length > 0;
+    // replaced by evaluateLeg when the leg is read this pass
+    this.lastLeg = leg ? { ok: false, label: legLabel, reason: legProblem ?? "not read (no usable WETH-quoted pool)" } : null;
+
+    if (usable.length > 0) {
+      const req: DexPoolRequest[] = usable.map((u) => ({ pool: u.p.pool, secondsAgos: [u.p.twapSec, 0] }));
+      if (readLeg && leg) req.push({ pool: leg.pool, secondsAgos: [...windows, 0] });
+      const tokens = [...new Map(usable.map((u) => [lc(u.p.token), u.p.token])).values()];
+      const reads = this.reader.readPass ? await this.reader.readPass(req, tokens, block.number) : await readPassPerCall(this.reader, req, tokens, block.number);
+      // ring buffer timestamps: one batched read for every pool whose observation index moved since the cached one
+      const moved = req.flatMap((q) => {
+        const s0 = reads.pools.get(lc(q.pool))?.slot0;
+        return s0?.ok && !this.ringHit(q.pool, s0.value) ? [{ pool: q.pool, slot0: s0.value }] : [];
+      });
+      if (moved.length > 0) await this.readRings(moved, block.number);
+
+      const legAt = readLeg && leg && legReady ? this.evaluateLeg(leg, legLabel, legReady, windows, block, reads.pools.get(lc(leg.pool))) : null;
+      for (const u of usable) {
+        const id: DexPoolId = { pool: u.p.pool, label: u.label, quote: u.p.quote };
+        const r = reads.pools.get(lc(u.p.pool));
+        const ts = reads.tokens.get(lc(u.p.token));
+        try {
+          if (!r || !ts) throw new Error("pool not read");
+          const usd: LegQuote =
+            u.p.quote === "usd"
+              ? { ok: true, price: 1, spot: 1 }
+              : legAt
+                ? (legAt.get(u.p.twapSec) ?? { ok: false, reason: `${legLabel}: window not read` })
+                : { ok: false, reason: `${legLabel}: ${legProblem ?? "not read"}` };
+          push(u.t, { ...id, ...this.evaluate(u.p, u.tokenIsToken0, u.quoteDecimals, block, r, ts, usd) });
+        } catch (e) {
+          push(u.t, { ...id, ok: false, reason: `pool not readable: ${errMsg(e)}` });
+        }
       }
+    }
+
+    const out = new Map<string, DexObservation>();
+    for (const [t, rs] of results) {
+      // in the configured order (failed checks were collected first)
+      const order = (o: DexPoolObservation) => (this.pools[t] ?? []).findIndex((p) => p.pool === o.pool);
+      out.set(t, combineDexPools([...rs].sort((a, b) => order(a) - order(b))));
     }
     return out;
   }
 
-  /** factory.getPool(token, quote, fee) == pool and the pool's tokens (once per pool; a read error is retried). */
-  private checkPool(p: ResolvedDexPool): Promise<{ tokenIsToken0: boolean } | { problem: string }> {
-    return this.cached(this.poolCheckCache, p.pool, async () => {
+  private decimalsOf(token: Address): Promise<number> {
+    return this.cached(this.decimalsCache, token, () => this.reader.decimals(token));
+  }
+
+  /** factory.getPool(base, quote, fee) == pool and the pool's tokens (once per pool; a read error is retried). */
+  private checkPool(pool: Address, base: Address, quote: Address, fee: number, baseName: string): Promise<PoolCheck | { problem: string }> {
+    return this.cached(this.poolCheckCache, pool, async () => {
       if (this.opts.factory) {
-        const fromFactory = await this.reader.getPool(this.opts.factory, p.token, p.quoteToken, p.fee);
-        if (fromFactory.toLowerCase() !== p.pool.toLowerCase()) {
-          return { problem: `pool ${p.pool} is not the factory's pool for (Stock Token, quote token, fee ${p.fee}): getPool returned ${fromFactory}` };
+        const fromFactory = await this.reader.getPool(this.opts.factory, base, quote, fee);
+        if (fromFactory.toLowerCase() !== pool.toLowerCase()) {
+          return { problem: `pool ${pool} is not the factory's pool for (${baseName}, quote token, fee ${fee}): getPool returned ${fromFactory}` };
         }
       }
-      const t = await this.reader.poolTokens(p.pool);
+      const t = await this.reader.poolTokens(pool);
       const t0 = t.token0.toLowerCase();
       const t1 = t.token1.toLowerCase();
-      const tok = p.token.toLowerCase();
-      const quote = p.quoteToken.toLowerCase();
-      if (!((t0 === tok && t1 === quote) || (t0 === quote && t1 === tok))) {
-        return { problem: `pool tokens ${t.token0} / ${t.token1} are not the Stock Token ${p.token} and the quote token ${p.quoteToken}` };
+      const b = base.toLowerCase();
+      const q = quote.toLowerCase();
+      if (!((t0 === b && t1 === q) || (t0 === q && t1 === b))) {
+        return { problem: `pool tokens ${t.token0} / ${t.token1} are not the ${baseName} ${base} and the quote token ${quote}` };
       }
-      return { tokenIsToken0: t0 === tok };
+      return { baseIsToken0: t0 === b };
     });
   }
 
-  /** One pool's observation from the pass's reads (the checks in their historical order; throws = not readable). */
-  private evaluate(p: ResolvedDexPool, tokenIsToken0: boolean, quoteDecimals: number, block: DexBlock, r: DexPoolRead): DexObservation {
+  /**
+   * The ETH/USD leg at every window of the WETH pools: its 2% depth (USD) against its floor, the history covering the
+   * longest window, a swap inside each window, then WETH in USD from observe([...windows, 0]). Also records lastLeg.
+   */
+  private evaluateLeg(
+    leg: ResolvedEthUsdLeg,
+    label: string,
+    c: { wethIsToken0: boolean; wethDecimals: number; usdDecimals: number },
+    windows: readonly number[],
+    block: DexBlock,
+    r: DexPoolRead | undefined,
+  ): Map<number, LegQuote> {
+    const all = (q: LegQuote) => new Map(windows.map((w) => [w, q]));
+    const fail = (reason: string, diag: Omit<DexDiagnostics, "depthQuote"> = {}, spot?: number): Map<number, LegQuote> => {
+      this.lastLeg = { ok: false, label, reason, ...diag, ...(spot !== undefined ? { spotPrice: spot } : {}) };
+      return all({ ok: false, reason: `${label}: ${reason}`, ...(spot !== undefined ? { spot } : {}) });
+    };
+    if (!r) return fail("pool not read");
+    if (!r.slot0.ok) return fail(`pool not readable: ${errMsg(r.slot0.error)}`);
+    if (!r.liquidity.ok) return fail(`pool not readable: ${errMsg(r.liquidity.error)}`);
+    const slot0 = r.slot0.value;
+    const spot = tokenPriceAtTick(slot0.tick, c.wethIsToken0, c.wethDecimals, c.usdDecimals);
+    const depthUsd = depthQuote(r.liquidity.value, slot0.sqrtPriceX96, !c.wethIsToken0, c.usdDecimals);
+    const diag: Omit<DexDiagnostics, "depthQuote"> = { depthUsd, cardinality: slot0.observationCardinality };
+    if (depthUsd < leg.minDepthUsd) return fail(`insufficient depth: ${fmtUsd(depthUsd)} moves the price ${DEPTH_MOVE_BPS / 100}% (floor ${fmtUsd(leg.minDepthUsd)})`, diag, spot);
+    const ring = this.ringCache.get(leg.pool);
+    if (!ring || !this.ringHit(leg.pool, slot0)) return fail("observation ring not read", diag, spot);
+    diag.historySec = block.timestamp - ring.oldest;
+    diag.lastSwapAgeSec = block.timestamp - ring.newest;
+    const longest = Math.max(...windows);
+    if (diag.historySec < longest) return fail(`observation history ${diag.historySec}s < TWAP window ${longest}s`, diag, spot);
+    if (!r.observe.ok) return fail(`observe([${windows.join(", ")}, 0]) failed: ${errMsg(r.observe.error)}`, diag, spot);
+    const cum = r.observe.value;
+    if (cum.length !== windows.length + 1) return fail(`observe returned ${cum.length} values`, diag, spot);
+    const now = cum[windows.length] as bigint;
+    const out = new Map<number, LegQuote>();
+    windows.forEach((w, i) => {
+      if ((diag.lastSwapAgeSec as number) >= w) {
+        out.set(w, { ok: false, reason: `${label}: no swap in the ${w}s TWAP window (last swap ${diag.lastSwapAgeSec}s ago)`, spot });
+        return;
+      }
+      const price = tokenPriceAtTick(arithmeticMeanTick(cum[i] as bigint, now, w), c.wethIsToken0, c.wethDecimals, c.usdDecimals);
+      out.set(w, Number.isFinite(price) && price > 0 ? { ok: true, price, spot } : { ok: false, reason: `${label}: TWAP price ${price} not usable`, spot });
+    });
+    this.lastLeg = { ok: true, label, spotPrice: spot, depthUsd, cardinality: slot0.observationCardinality, historySec: diag.historySec, lastSwapAgeSec: diag.lastSwapAgeSec };
+    return out;
+  }
+
+  /**
+   * One pool's observation from the pass's reads (the checks in their historical order; throws = not readable).
+   * `usd`: USD per quote token over the pool's window (USDG: 1; WETH: the leg's TWAP, or why not).
+   */
+  private evaluate(
+    p: ResolvedDexPool,
+    tokenIsToken0: boolean,
+    quoteDecimals: number,
+    block: DexBlock,
+    r: DexPoolRead,
+    tokenStateRead: Settled<TokenState>,
+    usd: LegQuote,
+  ): DistributiveOmit<DexPoolObservation, keyof DexPoolId> {
     const value = <T>(s: Settled<T>): T => {
       if (!s.ok) throw s.error;
       return s.value;
     };
     const slot0 = value(r.slot0);
     const liquidity = value(r.liquidity);
-    const tokenState = value(r.tokenState);
+    const tokenState = value(tokenStateRead);
     const cardinality = slot0.observationCardinality;
     const depth = depthQuote(liquidity, slot0.sqrtPriceX96, !tokenIsToken0, quoteDecimals);
     const diag: DexDiagnostics = { depthQuote: depth, cardinality };
-    if (depth < p.minDepthUsd) {
-      return { ok: false, reason: `insufficient depth: ${fmtUsd(depth)} moves the price ${DEPTH_MOVE_BPS / 100}% (floor ${fmtUsd(p.minDepthUsd)})`, ...diag };
+    if (!usd.ok) {
+      if (usd.spot !== undefined) diag.depthUsd = depth * usd.spot;
+      return { ok: false, reason: `ETH/USD leg ${usd.reason}`, ...diag };
+    }
+    const depthUsd = depth * usd.price;
+    diag.depthUsd = depthUsd;
+    if (depthUsd < p.minDepthUsd) {
+      const inWeth = p.quote === "eth" ? `; ${depth.toFixed(1)} WETH at ${fmtUsd(usd.price)}` : "";
+      return { ok: false, reason: `insufficient depth: ${fmtUsd(depthUsd)} moves the price ${DEPTH_MOVE_BPS / 100}% (floor ${fmtUsd(p.minDepthUsd)}${inWeth})`, ...diag };
     }
 
     const ring = this.ringCache.get(p.pool);
@@ -498,18 +752,21 @@ export class DexTwapSource implements PriceSource {
     const cum = r.observe.value;
     if (cum.length !== 2) return { ok: false, reason: `observe returned ${cum.length} values`, ...diag };
     const meanTick = arithmeticMeanTick(cum[0] as bigint, cum[1] as bigint, p.twapSec);
-    const tokenPrice = tokenPriceAtTick(meanTick, tokenIsToken0, p.tokenDecimals, quoteDecimals);
+    // USD per Stock Token: the pool's quote-token TWAP times the quote's USD TWAP over the same window; the
+    // multiplier is then divided out exactly as on the USDG path (per token -> per share)
+    const tokenPrice = tokenPriceAtTick(meanTick, tokenIsToken0, p.tokenDecimals, quoteDecimals) * usd.price;
     if (!Number.isFinite(tokenPrice) || tokenPrice <= 0) return { ok: false, reason: `TWAP price ${tokenPrice} not usable`, ...diag };
     return {
       ok: true,
       price: perSharePrice(tokenPrice, tokenState.uiMultiplier),
       tokenPrice,
-      spotTokenPrice: tokenPriceAtTick(slot0.tick, tokenIsToken0, p.tokenDecimals, quoteDecimals),
+      spotTokenPrice: tokenPriceAtTick(slot0.tick, tokenIsToken0, p.tokenDecimals, quoteDecimals) * usd.spot,
       meanTick,
       twapSec: p.twapSec,
       ts: block.timestamp * 1000,
       uiMultiplier: tokenState.uiMultiplier,
       depthQuote: depth,
+      depthUsd,
       cardinality,
       historySec: diag.historySec,
       lastSwapAgeSec: diag.lastSwapAgeSec,

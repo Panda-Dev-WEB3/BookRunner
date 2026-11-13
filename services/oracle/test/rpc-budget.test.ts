@@ -11,8 +11,8 @@ import { HeadClock } from "../src/head";
 import { MAINNET_RPC_BOUNDS, productionProblems, rpcCadenceProblems } from "../src/production";
 import type { PriceSource } from "../src/domain/types";
 import { type CachedTokenState, ChainlinkSource, type ResolvedFeed, SPLIT_WINDOW_REREAD_MS, aggregatorV3Abi, stockTokenAbi, tokenStateDue, tokenStatePredatesChange, viemAggregatorReader } from "../src/sources/chainlink";
-import { DexTwapSource, uniswapV3OracleAbi, viemDexReader } from "../src/sources/dex-twap";
-import { FACTORY, USDG, dexPool, liquidityForDepth, sqrtPriceX96At, tickFor } from "./dex-fakes";
+import { DexTwapSource, type ResolvedDexPool, uniswapV3OracleAbi, viemDexReader } from "../src/sources/dex-twap";
+import { FACTORY, USDG, WETH, dexPool, liquidityForDepth, sqrtPriceX96At, tickFor } from "./dex-fakes";
 import { FakeRpc } from "./rpc-fakes";
 import { ANSWER_UPDATED_TOPIC, NEW_ROUND_TOPIC, UI_MULTIPLIER_UPDATED_TOPIC, oracleLogFilter, routeOracleLogs } from "../src/subscription";
 
@@ -315,41 +315,42 @@ describe("Chainlink source: Stock Token state caching (audit M-2)", () => {
   });
 });
 
-describe("DEX TWAP source on mainnet: block + one aggregate3 per pass", () => {
-  function dexNode() {
-    const rpc = new FakeRpc(4663);
-    const pools = [
-      { ticker: "NVDA", pool: addr(0xa01), token: tokenOf(0), price: 213.2 },
-      { ticker: "TSLA", pool: addr(0xa02), token: tokenOf(1), price: 349.8 },
-    ];
-    const index = new Map<Address, number>();
-    for (const p of pools) {
-      // token1 = Stock Token, token0 = USDG (so the token is not token0)
-      const tick = tickFor(p.price, false);
-      const sq = sqrtPriceX96At(tick);
-      index.set(p.pool, 10);
-      rpc.on(p.pool, uniswapV3OracleAbi, "token0", () => USDG);
-      rpc.on(p.pool, uniswapV3OracleAbi, "token1", () => p.token);
-      rpc.on(p.pool, uniswapV3OracleAbi, "slot0", () => [sq, tick, index.get(p.pool) as number, 7200, 7200, 0, true]);
-      rpc.on(p.pool, uniswapV3OracleAbi, "liquidity", () => liquidityForDepth(500_000, sq, true));
-      rpc.on(p.pool, uniswapV3OracleAbi, "observations", (args) => {
-        const i = Number(args[0]);
-        const ts = i === index.get(p.pool) ? rpc.blockTs - 30 : rpc.blockTs - 86_400;
-        return [ts, 0n, 0n, true];
-      });
-      rpc.on(p.pool, uniswapV3OracleAbi, "observe", (args) => [(args[0] as readonly number[]).map((ago) => 123_456_789n - BigInt(tick) * BigInt(ago)), [0n, 0n]]);
-      rpc.on(p.token, stockTokenAbi, "uiMultiplier", () => WAD);
-      rpc.on(p.token, stockTokenAbi, "newUIMultiplier", () => WAD);
-      rpc.on(p.token, stockTokenAbi, "effectiveAt", () => 0n);
-      rpc.on(p.token, stockTokenAbi, "oraclePaused", () => false);
-    }
-    rpc.on(USDG, aggregatorV3Abi, "decimals", () => 6);
-    // the factory answers per (token, quote) pair: one handler dispatching on the token argument
-    rpc.on(FACTORY, uniswapV3OracleAbi, "getPool", (args) => pools.find((p) => p.token === args[0] || p.token === args[1])?.pool ?? addr(0));
-    const config = Object.fromEntries(pools.map((p) => [p.ticker, dexPool(p.pool, p.token)]));
-    return { rpc, pools, index, config };
+/** A mainnet node with two Stock-Token / USDG pools (NVDA, TSLA) and their tokens. */
+function dexNode() {
+  const rpc = new FakeRpc(4663);
+  const pools = [
+    { ticker: "NVDA", pool: addr(0xa01), token: tokenOf(0), price: 213.2 },
+    { ticker: "TSLA", pool: addr(0xa02), token: tokenOf(1), price: 349.8 },
+  ];
+  const index = new Map<Address, number>();
+  for (const p of pools) {
+    // token1 = Stock Token, token0 = USDG (so the token is not token0)
+    const tick = tickFor(p.price, false);
+    const sq = sqrtPriceX96At(tick);
+    index.set(p.pool, 10);
+    rpc.on(p.pool, uniswapV3OracleAbi, "token0", () => USDG);
+    rpc.on(p.pool, uniswapV3OracleAbi, "token1", () => p.token);
+    rpc.on(p.pool, uniswapV3OracleAbi, "slot0", () => [sq, tick, index.get(p.pool) as number, 7200, 7200, 0, true]);
+    rpc.on(p.pool, uniswapV3OracleAbi, "liquidity", () => liquidityForDepth(500_000, sq, true));
+    rpc.on(p.pool, uniswapV3OracleAbi, "observations", (args) => {
+      const i = Number(args[0]);
+      const ts = i === index.get(p.pool) ? rpc.blockTs - 30 : rpc.blockTs - 86_400;
+      return [ts, 0n, 0n, true];
+    });
+    rpc.on(p.pool, uniswapV3OracleAbi, "observe", (args) => [(args[0] as readonly number[]).map((ago) => 123_456_789n - BigInt(tick) * BigInt(ago)), [0n, 0n]]);
+    rpc.on(p.token, stockTokenAbi, "uiMultiplier", () => WAD);
+    rpc.on(p.token, stockTokenAbi, "newUIMultiplier", () => WAD);
+    rpc.on(p.token, stockTokenAbi, "effectiveAt", () => 0n);
+    rpc.on(p.token, stockTokenAbi, "oraclePaused", () => false);
   }
+  rpc.on(USDG, aggregatorV3Abi, "decimals", () => 6);
+  // the factory answers per (token, quote) pair: one handler dispatching on the token argument
+  rpc.on(FACTORY, uniswapV3OracleAbi, "getPool", (args) => pools.find((p) => p.token === args[0] || p.token === args[1])?.pool ?? addr(0));
+  const config = Object.fromEntries(pools.map((p) => [p.ticker, dexPool(p.pool, p.token)]));
+  return { rpc, pools, index, config };
+}
 
+describe("DEX TWAP source on mainnet: block + one aggregate3 per pass", () => {
   test("first pass: one-time pool checks, then block + one aggregate3 (pools) + one (rings); later passes: block + one aggregate3", async () => {
     const { rpc, config, index, pools } = dexNode();
     let now = rpc.blockTs * 1000 + 800;
@@ -387,6 +388,83 @@ describe("DEX TWAP source on mainnet: block + one aggregate3 per pass", () => {
     expect(moved.every((o) => o.ok)).toBe(true);
     expect(rpc.count("eth_call")).toBe(2);
     expect(rpc.aggregates[1]).toHaveLength(3);
+  });
+});
+
+describe("DEX second source (WETH pools + ETH/USD leg): same aggregate3, same call count", () => {
+  /** dexNode() plus NVDA / WETH 500 (WETH token0) and the WETH / USDG 100 leg (WETH token0), as on chain 4663 */
+  function wethNode() {
+    const n = dexNode();
+    const { rpc, index } = n;
+    const wethPool = addr(0xa11);
+    const leg = { pool: addr(0xa1e), weth: WETH, quoteToken: USDG, fee: 100, minDepthUsd: 50_000 };
+    const pool = (address: Address, token0: Address, token1: Address, tick: number, depth: number, quoteIsToken0: boolean, quoteDecimals: number) => {
+      const sq = sqrtPriceX96At(tick);
+      index.set(address, 10);
+      rpc.on(address, uniswapV3OracleAbi, "token0", () => token0);
+      rpc.on(address, uniswapV3OracleAbi, "token1", () => token1);
+      rpc.on(address, uniswapV3OracleAbi, "slot0", () => [sq, tick, index.get(address) as number, 7200, 7200, 0, true]);
+      rpc.on(address, uniswapV3OracleAbi, "liquidity", () => liquidityForDepth(depth, sq, quoteIsToken0, quoteDecimals));
+      rpc.on(address, uniswapV3OracleAbi, "observations", (args) => [Number(args[0]) === index.get(address) ? rpc.blockTs - 30 : rpc.blockTs - 86_400, 0n, 0n, true]);
+      rpc.on(address, uniswapV3OracleAbi, "observe", (args) => [(args[0] as readonly number[]).map((ago) => 123_456_789n - BigInt(tick) * BigInt(ago)), (args[0] as readonly number[]).map(() => 0n)]);
+    };
+    // NVDA at 213.2 = 213.2 / 1946 WETH x 1946 USDG
+    pool(wethPool, WETH, tokenOf(0), tickFor(213.2 / 1946, false, 18, 18), 60, true, 18);
+    pool(leg.pool, WETH, USDG, tickFor(1946, true, 18, 6), 264_000, false, 6);
+    rpc.on(WETH, aggregatorV3Abi, "decimals", () => 18);
+    // the factory answers per (token pair, fee)
+    const all = [...n.pools.map((p) => ({ a: p.token, b: USDG, fee: 3000, pool: p.pool })), { a: tokenOf(0), b: WETH, fee: 500, pool: wethPool }, { a: WETH, b: USDG, fee: 100, pool: leg.pool }];
+    const key = (a: string, b: string, fee: unknown) => `${[a.toLowerCase(), b.toLowerCase()].sort().join("|")}|${String(fee)}`;
+    rpc.on(FACTORY, uniswapV3OracleAbi, "getPool", (args) => all.find((p) => key(p.a, p.b, p.fee) === key(String(args[0]), String(args[1]), args[2]))?.pool ?? addr(0));
+    const config: Record<string, ResolvedDexPool[]> = {
+      NVDA: [n.config.NVDA!, dexPool(wethPool, tokenOf(0), { quoteToken: WETH, quote: "eth", fee: 500, minDepthUsd: 25_000 })],
+      TSLA: [n.config.TSLA!],
+    };
+    return { rpc, index, config, leg, wethPool };
+  }
+
+  test("the WETH pool and the leg ride in the pass's one aggregate3 (and the rings' one); token state once per Stock Token", async () => {
+    const before = dexNode();
+    const after = wethNode();
+    let now = after.rpc.blockTs * 1000 + 800;
+    const run = (rpc: FakeRpc, config: Record<string, ResolvedDexPool | ResolvedDexPool[]>, ethUsd: typeof after.leg | null) => {
+      const src = new DexTwapSource(config, viemDexReader(rpc.client(), MULTICALL3_ADDRESS), { maxAgeMs: 120_000, factory: FACTORY, ethUsd, readIntervalMs: 60_000, now: () => now });
+      return () => Promise.all(["NVDA", "TSLA"].map((t) => src.observe(t)));
+    };
+    await run(before.rpc, before.config, null)();
+    const tick = run(after.rpc, after.config, after.leg);
+    const first = await tick();
+    const nvda = first[0]!;
+    if (!nvda.ok) throw new Error(nvda.reason);
+    expect(nvda.pools.map((p) => [p.quote, p.ok])).toEqual([
+      ["usd", true],
+      ["eth", true],
+    ]);
+    const weth = nvda.pools[1]!;
+    expect(weth.ok && Math.abs(weth.price / 213.2 - 1) * 1e4).toBeLessThan(1.1);
+    // one-time checks: getPool + token0 + token1 for each of the 2 extra pools (WETH pool, leg), WETH decimals once
+    expect(after.rpc.count("eth_call") - before.rpc.count("eth_call")).toBe(2 * 3 + 1);
+    // still exactly two aggregate3 on the first pass (pools + tokens, then rings), 3 calls longer per extra pool
+    expect(after.rpc.aggregates).toHaveLength(2);
+    expect(before.rpc.aggregates[0]).toHaveLength(2 * 3 + 2 * 4);
+    expect(after.rpc.aggregates[0]).toHaveLength(4 * 3 + 2 * 4); // 4 pools x (slot0, liquidity, observe) + 2 tokens x 4 views
+    expect(after.rpc.aggregates[1]).toHaveLength(4 * 3);
+    // steady state: block + ONE aggregate3 per pass, exactly as with USDG pools only
+    after.rpc.reset();
+    now += 60_000;
+    await tick();
+    expect([...after.rpc.calls.entries()].sort()).toEqual([
+      ["eth_call", 1],
+      ["eth_getBlockByNumber", 1],
+    ]);
+    // a swap in the WETH pool and in the leg: one ring aggregate3 for both
+    after.rpc.reset();
+    after.index.set(after.wethPool, 11);
+    after.index.set(after.leg.pool, 11);
+    now += 60_000;
+    expect((await tick()).every((o) => o.ok)).toBe(true);
+    expect(after.rpc.count("eth_call")).toBe(2);
+    expect(after.rpc.aggregates[1]).toHaveLength(2 * 3);
   });
 });
 

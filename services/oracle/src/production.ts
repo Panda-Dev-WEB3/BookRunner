@@ -9,8 +9,9 @@
 //     of at most heartbeat + MAINNET_CHAINLINK_MAX_GRACE_MS (1 h): Chainlink alone signs, so a widened bound would
 //     sign an old round as a fresh, non-held price (ORACLE_CHAINLINK_HEARTBEAT_GRACE_MS and ORACLE_CHAINLINK_MAX_AGE_MS
 //     are bounded the same way);
-//   - a DEX confirm pool (Uniswap v3 TWAP, chain config dexConfirm.pools) for every ticker, with a 2% depth floor
-//     of at least MAINNET_DEX_MIN_FLOOR_USD (the depth itself is checked live: source-check, and every tick), a TWAP
+//   - at least one DEX confirm pool (Uniswap v3 TWAP, chain config dexConfirm.pools) for every ticker, each pool and
+//     the ETH/USD leg of the WETH-quoted ones (dexConfirm.ethUsd) with a 2% depth floor of at least
+//     MAINNET_DEX_MIN_FLOOR_USD (the depth itself is checked live: source-check, and every tick), a TWAP
 //     window within MAINNET_DEX_TWAP_SEC (a short window is cheap to push) and ORACLE_DEX_MAX_AGE_MS at most
 //     MAINNET_DEX_MAX_AGE_MS (an RPC stall must not confirm with an old block);
 //   - ORACLE_CONFIRM_BPS at most MAINNET_MAX_CONFIRM_BPS (a wider band would hide a lagging feed), and
@@ -24,6 +25,7 @@
 import { MAINNET_CHAIN_ID } from "@bookrunner/shared";
 import type { OracleConfig, RpcCadence } from "./config";
 import { type OraclePolicy, type PriceSource, PRIMARY_SOURCE, sourceKind } from "./domain/types";
+import type { ResolvedDexPool, ResolvedEthUsdLeg } from "./sources/dex-twap";
 
 /** sourceCount of every primary-confirm price, and the only ORACLE_MIN_SOURCES / on-chain minSources() it accepts. */
 export const PRIMARY_CONFIRM_SOURCE_COUNT = 1;
@@ -93,6 +95,7 @@ export type ProductionConfig = Pick<
       | "ORACLE_CONFIRM_BPS"
       | "ORACLE_DEX_CONFIRM"
       | "dexPools"
+      | "dexEthUsd"
       | "ORACLE_PYTH"
       | "PYTH_API_KEY"
       | "pythFeeds"
@@ -166,16 +169,9 @@ export function productionProblems(cfg: ProductionConfig, sources: readonly Pric
   } else {
     if (!live.some((s) => sourceKind(s) === "dex")) problems.push("no DEX confirm source (config/chains/4663.json dexConfirm.pools)");
     const pools = cfg.dexPools ?? {};
-    const noPool = cfg.tickers.filter((t) => !pools[t]);
+    const noPool = cfg.tickers.filter((t) => !pools[t]?.length);
     if (noPool.length > 0) problems.push(`no DEX confirm pool for ${noPool.join(", ")} (dexConfirm.pools in the chain config)`);
-    for (const [t, p] of Object.entries(pools)) {
-      if (p.minDepthUsd < MAINNET_DEX_MIN_FLOOR_USD) {
-        problems.push(`dexConfirm.pools.${t}.minDepthUsd=${p.minDepthUsd} < ${MAINNET_DEX_MIN_FLOOR_USD} on mainnet (a shallow pool is cheap to move)`);
-      }
-      if (p.twapSec < MAINNET_DEX_TWAP_SEC.min || p.twapSec > MAINNET_DEX_TWAP_SEC.max) {
-        problems.push(`dexConfirm.pools.${t} TWAP window ${p.twapSec}s outside ${MAINNET_DEX_TWAP_SEC.min}-${MAINNET_DEX_TWAP_SEC.max}s on mainnet (twapSec / ORACLE_DEX_TWAP_SEC)`);
-      }
-    }
+    problems.push(...dexPoolProblems(pools, cfg.dexEthUsd ?? null));
     if (cfg.ORACLE_DEX_MAX_AGE_MS !== undefined && cfg.ORACLE_DEX_MAX_AGE_MS > MAINNET_DEX_MAX_AGE_MS) {
       problems.push(`ORACLE_DEX_MAX_AGE_MS=${cfg.ORACLE_DEX_MAX_AGE_MS} > ${MAINNET_DEX_MAX_AGE_MS} on mainnet (an RPC stall would confirm with an old block)`);
     }
@@ -203,6 +199,32 @@ export function productionProblems(cfg: ProductionConfig, sources: readonly Pric
   }
   if (cfg.cadence) problems.push(...rpcCadenceProblems({ tickMs: cfg.ORACLE_TICK_MS ?? 1_000, ...cfg.cadence }));
   return problems;
+}
+
+/**
+ * Mainnet bounds of every DEX confirm pool, each ticker's several pools alike, and of the ETH/USD leg: a 2% depth
+ * floor of at least MAINNET_DEX_MIN_FLOOR_USD (USD; a WETH pool's measured through the leg) and a TWAP window within
+ * MAINNET_DEX_TWAP_SEC (the leg uses its WETH pools' windows). Factory authenticity (getPool == pool) is checked live,
+ * once per pool, before any of its reads counts (sources/dex-twap.ts checkPool; source-check shows it).
+ */
+export function dexPoolProblems(pools: Readonly<Record<string, readonly ResolvedDexPool[]>>, ethUsd: ResolvedEthUsdLeg | null): string[] {
+  const out: string[] = [];
+  for (const [t, ps] of Object.entries(pools)) {
+    ps.forEach((p, i) => {
+      const at = `dexConfirm.pools.${t}[${i}] (${p.pool})`;
+      if (p.minDepthUsd < MAINNET_DEX_MIN_FLOOR_USD) {
+        out.push(`${at} minDepthUsd=${p.minDepthUsd} < ${MAINNET_DEX_MIN_FLOOR_USD} on mainnet (a shallow pool is cheap to move)`);
+      }
+      if (p.twapSec < MAINNET_DEX_TWAP_SEC.min || p.twapSec > MAINNET_DEX_TWAP_SEC.max) {
+        out.push(`${at} TWAP window ${p.twapSec}s outside ${MAINNET_DEX_TWAP_SEC.min}-${MAINNET_DEX_TWAP_SEC.max}s on mainnet (twapSec / ORACLE_DEX_TWAP_SEC)`);
+      }
+      if (p.quote === "eth" && !ethUsd) out.push(`${at} is quoted in WETH but dexConfirm.ethUsd (the WETH / USD leg) is not configured`);
+    });
+  }
+  if (ethUsd && ethUsd.minDepthUsd < MAINNET_DEX_MIN_FLOOR_USD) {
+    out.push(`dexConfirm.ethUsd (${ethUsd.pool}) minDepthUsd=${ethUsd.minDepthUsd} < ${MAINNET_DEX_MIN_FLOOR_USD} on mainnet (every WETH-quoted pool is priced through it)`);
+  }
+  return out;
 }
 
 /**

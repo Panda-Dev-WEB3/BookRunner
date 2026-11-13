@@ -151,6 +151,8 @@ export interface ConfirmView {
   /** start (unix ms) of the run with a confirm gap > primaryLagBps (null = none); see ConfirmRun */
   lagSince: number | null;
   confirmers: Array<{ name: string; price: number; diffBps: number }>;
+  /** what the confirm sources' latest observations were built from (DEX: pools used / failed); absent when none */
+  notes?: string[];
 }
 
 export class OracleService {
@@ -465,6 +467,8 @@ export class OracleService {
       lagSince: run.lagSince,
       confirmers: c.confirmers.map((x) => ({ name: x.name, price: x.price, diffBps: Math.round(x.diffBps * 10) / 10 })),
     };
+    const notes = this.deps.sources.flatMap((src) => (src.name !== PRIMARY_SOURCE && src.confirmNote ? [src.confirmNote(priceId)] : [])).filter((n): n is string => !!n);
+    if (notes.length > 0) view.notes = notes;
     this.confirmState.set(priceId, view);
     this.warnLag(view, nowMs);
     if (prev?.status === "diverged" && status === "ok") {
@@ -481,11 +485,11 @@ export class OracleService {
     this.confirmWarnAt.set(priceId, nowMs);
     if (status === "diverged") {
       this.log.warn(
-        { priceId, chainlink: c.primaryPrice, confirmers: view.confirmers, confirmBps, divergedForMs: nowMs - since },
+        { priceId, chainlink: c.primaryPrice, confirmers: view.confirmers, confirmBps, divergedForMs: nowMs - since, notes: view.notes },
         "confirm divergence: a confirm source is further from Chainlink than ORACLE_CONFIRM_BPS; Chainlink is still published (the DEX never moves the price)",
       );
     } else {
-      this.log.warn({ priceId, chainlink: c.primaryPrice, unavailableForMs: nowMs - since }, "no confirm source for an in-session ticker: Chainlink is published unconfirmed");
+      this.log.warn({ priceId, chainlink: c.primaryPrice, unavailableForMs: nowMs - since, notes: view.notes }, "no confirm source for an in-session ticker: Chainlink is published unconfirmed");
     }
   }
 

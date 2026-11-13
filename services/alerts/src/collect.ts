@@ -529,6 +529,7 @@ function parseConfirm(raw: unknown): OracleConfirmSnap[] {
         primaryTs: num(x.primaryTs),
         lagSince: num(x.lagSince),
         confirmers: confirmers.slice(0, 8),
+        ...(Array.isArray(x.notes) ? { notes: x.notes.filter((n): n is string => typeof n === "string" && n !== "").slice(0, 4).map((n) => n.slice(0, 600)) } : {}),
       },
     ];
   });

@@ -5,6 +5,7 @@ import type { TokenState } from "../src/sources/chainlink";
 import { type DexBlock, type DexReader, type ResolvedDexPool, type Slot0, depthQuote } from "../src/sources/dex-twap";
 
 export const USDG = getAddress("0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168");
+export const WETH = getAddress("0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73");
 export const FACTORY = getAddress("0x1f7d7550b1b028f7571e69a784071f0205fd2efa");
 
 /** sqrtPriceX96 at a tick (float precision; enough for depth tests). */
@@ -40,8 +41,10 @@ export interface FakePool {
   slot0Ts: number;
   /** blockTimestamp of the newest observation (observationIndex): the last block with a swap */
   newestTs: number;
-  /** quote tokens moving the price 2% (sets liquidity) */
+  /** quote tokens moving the price 2% (sets liquidity): USD for a USDG pool, WETH for a WETH pool */
   depthUsd: number;
+  /** the pool's quote token (default USDG; WETH for a Stock-Token / WETH pool, USDG for the ETH/USD leg) */
+  quote: Address;
   /** fee tier the fake factory registers the pool under */
   fee: number;
   observeError: Error | null;
@@ -52,7 +55,11 @@ export class FakeDexReader implements DexReader {
   pools = new Map<string, FakePool>();
   tokens = new Map<string, TokenState>();
   quoteDecimals = 6;
+  /** decimals() per token (lowercase); default: WETH 18, anything else quoteDecimals */
+  decimalsOf = new Map<string, number>([[WETH.toLowerCase(), 18]]);
   calls = { block: 0, observe: 0, observation: 0, poolTokens: 0, getPool: 0 };
+  /** every observe() call: pool (lowercase) and secondsAgos */
+  observed: Array<{ pool: string; secondsAgos: readonly number[] }> = [];
   /** factory.getPool answers: key token|quote|fee (lowercase) -> pool; default the pool whose tokens match */
   factoryPools = new Map<string, Address>();
   /** block numbers every pinned read used */
@@ -70,6 +77,7 @@ export class FakeDexReader implements DexReader {
       depthUsd: 500_000,
       fee: 3000,
       observeError: null,
+      quote: USDG,
       ...p,
     });
   }
@@ -90,8 +98,8 @@ export class FakeDexReader implements DexReader {
     const p = this.pool(a);
     return { token0: p.token0, token1: p.token1 };
   }
-  async decimals() {
-    return this.quoteDecimals;
+  async decimals(token: Address) {
+    return this.decimalsOf.get(token.toLowerCase()) ?? this.quoteDecimals;
   }
   async getPool(_factory: Address, a: Address, b: Address, fee: number) {
     this.calls.getPool++;
@@ -111,7 +119,7 @@ export class FakeDexReader implements DexReader {
   async liquidity(a: Address, b: bigint) {
     this.pinned.add(b);
     const p = this.pool(a);
-    return liquidityForDepth(p.depthUsd, sqrtPriceX96At(p.spotTick), p.token0.toLowerCase() === USDG.toLowerCase(), this.quoteDecimals);
+    return liquidityForDepth(p.depthUsd, sqrtPriceX96At(p.spotTick), p.token0.toLowerCase() === p.quote.toLowerCase(), await this.decimals(p.quote));
   }
   async observation(a: Address, index: number, b: bigint) {
     this.pinned.add(b);
@@ -124,6 +132,7 @@ export class FakeDexReader implements DexReader {
   async observe(a: Address, secondsAgos: readonly number[], b: bigint) {
     this.pinned.add(b);
     this.calls.observe++;
+    this.observed.push({ pool: a.toLowerCase(), secondsAgos });
     const p = this.pool(a);
     if (p.observeError) throw p.observeError;
     const base = 123_456_789n;
@@ -139,5 +148,5 @@ export class FakeDexReader implements DexReader {
 }
 
 export function dexPool(pool: Address, token: Address, over: Partial<ResolvedDexPool> = {}): ResolvedDexPool {
-  return { pool, token, tokenDecimals: 18, quoteToken: USDG, fee: 3000, twapSec: 600, minDepthUsd: 50_000, ...over };
+  return { pool, token, tokenDecimals: 18, quoteToken: USDG, quote: "usd", fee: 3000, twapSec: 600, minDepthUsd: 50_000, ...over };
 }

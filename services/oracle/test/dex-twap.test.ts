@@ -4,9 +4,9 @@
 import { describe, expect, test } from "bun:test";
 import { MULTIPLIER_VECTOR as V, WAD, loadChainPriceConfig } from "@bookrunner/shared";
 import { getAddress } from "viem";
-import { loadOracleConfig, resolveDexPools } from "../src/config";
+import { loadOracleConfig, resolveDexEthUsd, resolveDexPools } from "../src/config";
 import { DexTwapSource, arithmeticMeanTick, depthQuote, perSharePrice, priceToWad, tokenPriceAtTick } from "../src/sources/dex-twap";
-import { FACTORY, FakeDexReader, USDG, dexPool, sqrtPriceX96At, tickFor } from "./dex-fakes";
+import { FACTORY, FakeDexReader, USDG, WETH, dexPool, sqrtPriceX96At, tickFor } from "./dex-fakes";
 
 const NVDA = getAddress("0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC");
 const TSLA = getAddress("0x322F0929c4625eD5bAd873c95208D54E1c003b2d");
@@ -244,28 +244,41 @@ describe("DexTwapSource", () => {
 });
 
 describe("dexConfirm config", () => {
-  test("config/chains/4663.json lists one USDG pool per launch ticker; resolved with the Stock Token", () => {
+  test("config/chains/4663.json: a USDG pool per launch ticker, NVDA also two WETH pools; resolved with the Stock Token and quote", () => {
     const cfg = loadChainPriceConfig(4663)!;
     const pools = resolveDexPools(cfg);
     expect(Object.keys(pools).sort()).toEqual(["AAPL", "AMZN", "MSFT", "NVDA", "TSLA"]);
-    expect(pools.NVDA).toEqual({
+    expect(pools.NVDA![0]).toEqual({
       pool: getAddress("0xd4EB21209C4D6093f80B5b84f5C45cc093EA14a3"),
       token: NVDA,
       tokenDecimals: 18,
       quoteToken: USDG,
+      quote: "usd",
       twapSec: 1_800,
       minDepthUsd: 15_000, // NVDA lowered 2026-11-05 (in-range liquidity ~22-24k at 2%)
       fee: 500,
     });
-    expect(cfg.dexConfirm?.readAt).toBe("2026-10-17");
-    expect(resolveDexPools(cfg, 1_800).TSLA!.twapSec).toBe(1_800);
+    // the second source: NVDA / WETH 500 and 3000 (2026-11-13: ~$120k and ~$79k of 2% depth through the leg)
+    expect(pools.NVDA!.slice(1).map((p) => [p.pool, p.fee, p.quote, p.quoteToken, p.minDepthUsd, p.twapSec])).toEqual([
+      [getAddress("0x62AB521f71431f78ac374CdbadC6cda3c8916b6C"), 500, "eth", WETH, 25_000, 1_800],
+      [getAddress("0xC0Be1cb0f674D9737C72B2A63fC542361185b807"), 3000, "eth", WETH, 25_000, 1_800],
+    ]);
+    // the other tickers: no WETH pool of sane depth (TSLA ~$3.7k, AAPL ~$11.5k, MSFT / AMZN empty)
+    for (const t of ["TSLA", "AAPL", "MSFT", "AMZN"]) expect(pools[t]!.map((p) => p.quote)).toEqual(["usd"]);
+    expect(resolveDexEthUsd(cfg)).toEqual({ pool: getAddress("0x52e65B17fB6E5BA00Ed806f37Afcd2DaA50271Ca"), weth: WETH, quoteToken: USDG, fee: 100, minDepthUsd: 50_000 });
+    expect(cfg.dexConfirm?.readAt).toBe("2026-11-13");
+    expect(resolveDexPools(cfg, 1_800).TSLA![0]!.twapSec).toBe(1_800);
     expect(resolveDexPools(null)).toEqual({});
+    expect(resolveDexEthUsd(null)).toBeNull();
   });
 
   test("oracle config: pools on by default, ORACLE_DEX_CONFIRM=0 drops them, ORACLE_DEX_TWAP_SEC overrides", () => {
     expect(Object.keys(loadOracleConfig({ CHAIN_ID: "4663" }).dexPools)).toHaveLength(5);
+    expect(loadOracleConfig({ CHAIN_ID: "4663" }).dexEthUsd?.fee).toBe(100);
     expect(loadOracleConfig({ CHAIN_ID: "4663", ORACLE_DEX_CONFIRM: "0" }).dexPools).toEqual({});
-    expect(loadOracleConfig({ CHAIN_ID: "4663", ORACLE_DEX_TWAP_SEC: "900" }).dexPools.AAPL!.twapSec).toBe(900);
+    expect(loadOracleConfig({ CHAIN_ID: "4663", ORACLE_DEX_CONFIRM: "0" }).dexEthUsd).toBeNull();
+    // the override applies to every pool of a ticker (the leg follows the WETH pools' window)
+    expect(loadOracleConfig({ CHAIN_ID: "4663", ORACLE_DEX_TWAP_SEC: "900" }).dexPools.NVDA!.map((p) => p.twapSec)).toEqual([900, 900, 900]);
     expect(() => loadOracleConfig({ CHAIN_ID: "4663", ORACLE_DEX_TWAP_SEC: "30" })).toThrow("ORACLE_DEX_TWAP_SEC");
     // no chain config on devnet: no pools
     expect(loadOracleConfig({}).dexPools).toEqual({});

@@ -184,6 +184,11 @@ export interface OracleConfirmSnap {
   /** unix ms: start of the run in which the confirm gap exceeds the oracle's primaryLagBps (null = none) */
   lagSince: number | null;
   confirmers: Array<{ name: string; price: number; diffBps: number }>;
+  /**
+   * What the confirm sources' latest observations were built from (the DEX: which pools were used, which failed and
+   * why), named in the confirm alerts; absent from older oracles.
+   */
+  notes?: string[];
 }
 
 export interface OracleProbe {

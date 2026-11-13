@@ -6,7 +6,7 @@ import type { RuleConfig } from "./config";
 import { HOLD_RULES } from "./rules-holds";
 import { LIQUIDATION_RULES } from "./rules-liquidation";
 import { POOL_RULES } from "./rules-pool";
-import { SECURITY_RULES } from "./rules-security";
+import { SECURITY_RULES, plain } from "./rules-security";
 import type { BookSnap, Condition, OracleConfirmSnap, OracleProbe, OracleSourceSnap, Sample, Snapshot } from "./types";
 
 /** States in which a book is marked every period (Book.sol: Live and Retiring). */
@@ -684,6 +684,12 @@ const bps = (b: number | null) => (b === null ? "?" : `${Math.round(b)} bps`);
  *
  * Both: oracle_health (/health unreachable) and oracle_min_sources (on-chain minSources the sources cannot reach).
  */
+/** The confirm sources' notes (DEX: pools used / failed) as one inert suffix of a confirm alert; "" when none. */
+export function confirmNotes(x: Pick<OracleConfirmSnap, "notes">): string {
+  const notes = (x.notes ?? []).map((n) => plain(n, 400));
+  return notes.length > 0 ? ` [${notes.join(" | ")}]` : "";
+}
+
 export function oracle(s: Snapshot, c: RuleConfig): Condition[] {
   const o = s.oracle;
   if (!c.oracleExpected || !o) return [];
@@ -795,7 +801,7 @@ function oraclePrimaryConfirm(o: OracleProbe, s: Snapshot, c: RuleConfig): Condi
       key: `oracle_confirm_divergence:${x.priceId}`,
       rule: "oracle_confirm_divergence",
       severity: wide || many ? "critical" : "warning",
-      summary: `oracle: ${x.priceId} Chainlink ${px(x.primaryPrice)} vs ${vs}: ${bps(x.diffBps)} apart (limit ${band} bps) for ${dur(runAge(x) ?? 0)} in session${why ? ` (${why})` : ""}; the published price is still Chainlink (the DEX never moves it). Check Chainlink lag (0.5% deviation / 24 h heartbeat update rule), the USDG peg, DEX pool manipulation; docs/RUNBOOK.md "Real prices"`,
+      summary: `oracle: ${x.priceId} Chainlink ${px(x.primaryPrice)} vs ${vs}: ${bps(x.diffBps)} apart (limit ${band} bps) for ${dur(runAge(x) ?? 0)} in session${why ? ` (${why})` : ""}; the published price is still Chainlink (the DEX never moves it). Check Chainlink lag (0.5% deviation / 24 h heartbeat update rule), the USDG peg, the ETH/USD leg, DEX pool manipulation; docs/RUNBOOK.md "Real prices"${confirmNotes(x)}`,
     });
   }
 
@@ -830,7 +836,7 @@ function oraclePrimaryConfirm(o: OracleProbe, s: Snapshot, c: RuleConfig): Condi
       key: `oracle_confirm_unavailable:${x.priceId}`,
       rule: "oracle_confirm_unavailable",
       severity: "warning",
-      summary: `oracle: no confirm source for ${x.priceId} for ${dur(age)} in session: Chainlink is published unconfirmed${why.length ? ` (failing confirm sources: ${why.join("; ")})` : ""}`,
+      summary: `oracle: no confirm source for ${x.priceId} for ${dur(age)} in session: Chainlink is published unconfirmed${why.length ? ` (failing confirm sources: ${why.join("; ")})` : ""}${confirmNotes(x)}`,
     });
   }
   return out;

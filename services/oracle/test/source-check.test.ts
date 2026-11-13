@@ -8,7 +8,7 @@ import type { PriceSource } from "../src/domain/types";
 import { type CheckRow, type RegistryView, type SourceCheckReader, formatTable, runSourceCheck } from "../src/source-check";
 import type { RoundData, TokenState } from "../src/sources/chainlink";
 import { DexTwapSource } from "../src/sources/dex-twap";
-import { FACTORY, FakeDexReader, USDG, dexPool, tickFor } from "./dex-fakes";
+import { FACTORY, FakeDexReader, USDG, WETH, dexPool, tickFor } from "./dex-fakes";
 
 const CONFIG = loadChainPriceConfig(4663)!;
 const FEEDS = resolveFeeds(CONFIG, {}, { defaultMaxAgeMs: 3_600_000, heartbeatGraceMs: 600_000 }).feeds;
@@ -295,6 +295,50 @@ describe("primary-confirm in source-check (mainnet default)", () => {
     reader.chain = 46630;
     rows = await runSourceCheck({ chainId: 46630, config: CONFIG, feeds: { NVDA: FEEDS.NVDA! }, reader, now: () => T0, policy: "primary-confirm", dex: shallow.dex });
     expect(dexRow(rows).status).toBe("WARN");
+  });
+
+  test("several pools: a row per pool, the combined row, the ETH/USD leg row; a failing pool WARNs while another confirms", async () => {
+    const token = getAddress(CONFIG.stockTokens.NVDA!.token);
+    const usdgPool = getAddress("0x0000000000000000000000000000000000007001");
+    const wethPool = getAddress("0x0000000000000000000000000000000000007002");
+    const legPool = getAddress("0x0000000000000000000000000000000000007091");
+    const tokenUsd = V.perSharePrice * (Number(V.uiMultiplierWad) / 1e18);
+    const make = () => {
+      const r = new FakeDexReader();
+      r.addPool(usdgPool, { token0: USDG, token1: token, meanTick: tickFor(tokenUsd * 1.004, false), depthUsd: 200_000, fee: 500 });
+      r.addPool(wethPool, { token0: WETH, token1: token, quote: WETH, fee: 500, meanTick: tickFor(tokenUsd / 1946, false, 18, 18), depthUsd: 60 });
+      r.addPool(legPool, { token0: WETH, token1: USDG, fee: 100, meanTick: tickFor(1946, true, 18, 6), depthUsd: 264_000 });
+      r.setToken(token, { uiMultiplier: V.uiMultiplierWad });
+      const leg = { pool: legPool, weth: WETH, quoteToken: USDG, fee: 100, minDepthUsd: 50_000 };
+      const pools = [dexPool(usdgPool, token, { fee: 500, minDepthUsd: 15_000 }), dexPool(wethPool, token, { fee: 500, quoteToken: WETH, quote: "eth", minDepthUsd: 25_000 })];
+      return { r, dex: new DexTwapSource({ NVDA: pools }, r, { maxAgeMs: 60_000, factory: FACTORY, ethUsd: leg }) };
+    };
+    const ok = make();
+    let rows = await run({ dex: ok.dex });
+    const nvda = rowsFor(rows, "NVDA").filter((x) => x.check.startsWith("dex"));
+    expect(nvda.map((x) => [x.check, x.status])).toEqual([
+      [`dex NVDA/USDG 500 0x0000..7001`, "PASS"],
+      [`dex NVDA/WETH 500 0x0000..7002`, "PASS"],
+      ["dex confirm", "PASS"],
+    ]);
+    expect(nvda[1]!.detail).toMatch(/2% depth 60\.0 WETH = \$116,\d{3} \(floor \$25,000\).*factory getPool verified$/);
+    expect(nvda[2]!.detail).toMatch(/^\$\d+\.\d{4}\/share vs Chainlink \$184\.9801: 40\.\d bps \(threshold 200\); depth-weighted median of 2 of 2 pools \(NVDA\/USDG 500 0x0000..7001, NVDA\/WETH 500 0x0000..7002\), reference NVDA\/USDG 500 0x0000..7001$/);
+    expect(rows.find((x) => x.subject === "ETH/USD")).toMatchObject({ check: "dex leg", status: "PASS" });
+    expect(rows.find((x) => x.subject === "ETH/USD")!.detail).toMatch(/^WETH\/USDG 100 0x0000..7091: WETH \$194\d\.\d\d spot; 2% depth \$26\d,\d{3} \(floor \$50,000\), cardinality 7200/);
+
+    // the USDG pool below its floor: WARN (the WETH pool still confirms), the combined row passes
+    const thin = make();
+    thin.r.pools.get(usdgPool.toLowerCase())!.depthUsd = 10_000;
+    rows = await run({ dex: thin.dex });
+    expect(status(rows, "NVDA", "dex NVDA/USDG 500 0x0000..7001")).toBe("WARN");
+    expect(status(rows, "NVDA", "dex confirm")).toBe("PASS");
+    // both unusable: the depth problem FAILs on mainnet, the combined row too; a leg below its floor FAILs its row
+    thin.r.pools.get(legPool.toLowerCase())!.depthUsd = 20_000;
+    rows = await run({ dex: thin.dex });
+    expect(status(rows, "NVDA", "dex NVDA/USDG 500 0x0000..7001")).toBe("FAIL");
+    expect(rowsFor(rows, "NVDA").find((x) => x.check === "dex NVDA/WETH 500 0x0000..7002")!.detail).toContain("ETH/USD leg WETH/USDG 100 0x0000..7091: insufficient depth");
+    expect(rowsFor(rows, "NVDA").find((x) => x.check === "dex confirm")).toMatchObject({ status: "FAIL", detail: "no usable confirm pool (2 configured; rows above)" });
+    expect(status(rows, "ETH/USD", "dex leg")).toBe("FAIL");
   });
 
   test("optional confirmers (Pyth / HTTP) only WARN; Chainlink not live in session FAILs the primary row", async () => {

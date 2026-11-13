@@ -48,6 +48,11 @@ export interface PriceSource {
   /** Observations older than this are ignored by the aggregator (default ORACLE_MAX_SOURCE_AGE_MS). */
   readonly maxAgeMs?: number;
   fetch(ticker: string): Promise<SourceObservation | null>;
+  /**
+   * primary-confirm: a short account of what the latest observation of `ticker` was built from (the DEX: which pools
+   * were used and which failed), shown in /health `confirm[].notes` and the services/alerts confirm messages.
+   */
+  confirmNote?(ticker: string): string | null;
 }
 
 export const sourceKind = (s: Pick<PriceSource, "kind">): SourceKind => s.kind ?? "http";
