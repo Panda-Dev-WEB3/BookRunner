@@ -1,7 +1,8 @@
 // Order panel: long / short, a size in the settlement token or in units, the slippage limit, a live quote (fill,
 // price impact, fee, the resulting position, its leverage and liquidation prices), then the prepared trade with a
 // "you will sign" summary and the carried price's countdown. The API checks every engine rule again before it
-// prepares the trade; TxRunner verifies the calldata against the chain's PoolEngine (and the entered size).
+// prepares the trade; TxRunner verifies the calldata against the chain's PoolEngine (and the entered size). Trading
+// page v2: a pre-trade warning when the resulting position would sit within 20% of liquidation (riskLogic.ts).
 import { useState } from "react";
 import { useNow } from "../../api/hooks";
 import { trpc } from "../../api/trpc";
@@ -12,6 +13,7 @@ import { WalletButton } from "../../wallet/WalletButton";
 import { cx } from "../cx";
 import { IconArrowRight } from "../icons";
 import { Callout, Card, ErrorState, Field, Hash, KV, Segmented, Spinner } from "../ui";
+import { preTradeRisk } from "./riskLogic";
 import { Prepared } from "./TradeBits";
 import {
   DEFAULT_SLIPPAGE_BPS,
@@ -207,6 +209,12 @@ export function OrderPanel(props: { m: TradeMarket; address: string | null; posi
                 {q.refusal.message}
               </Callout>
             )}
+            {!q.refusal &&
+              preTradeRisk(q.after, m).map((w) => (
+                <Callout key={w.title} tone="risk" compact title={w.title}>
+                  {w.body}
+                </Callout>
+              ))}
             {!q.refusal &&
               q.warnings.map((w) => (
                 <Callout key={w} tone="warn" compact>
