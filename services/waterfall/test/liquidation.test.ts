@@ -58,6 +58,8 @@ class FakeEngine implements LiquidationChain {
   tokens: Address[] = [];
   splitState: SplitTokenState[] = [];
   recorded: Address[] = [];
+  /** null: the registry answered NothingToRecord (someone else was first) */
+  recordHash: Hex | null = "0x5b1";
   positions = new Map<string, EnginePosition>();
   reads = 0;
   configReads = 0;
@@ -115,7 +117,7 @@ class FakeEngine implements LiquidationChain {
   }
   async recordSplit(token: Address) {
     this.recorded.push(token);
-    return { hash: "0x5b1" as Hex, costWei: 0n };
+    return { hash: this.recordHash, costWei: 0n };
   }
 }
 
@@ -305,6 +307,17 @@ describe("liquidation keeper: splits (audit N-1)", () => {
     expect(engine.synced).toEqual([{ marketId: 1, priceData: bundle }]);
     expect(engine.sent).toEqual([]);
     expect(statuses.at(-1)!.markets[0]?.regime).toBe("split_repricing");
+  });
+
+  test("split recorder: NothingToRecord (another sender was first) is no failure (review L-4)", async () => {
+    const T1 = "0x00000000000000000000000000000000000000a1" as Address;
+    const { k, engine, statuses } = keeper({ open: [] });
+    engine.tokens = [T1];
+    engine.splitState = [{ token: T1, syncNeeded: true, unrecordedFrom: 0 }];
+    engine.recordHash = null;
+    await k.tick();
+    expect(statuses.at(-1)!.failures.consecutive).toBe(0);
+    expect(statuses.at(-1)!.splits).toMatchObject({ recorded: 0, error: null });
   });
 
   test("split recorder: recordSplit for a staged split, the unrecorded tokens in the status; every 60 s, positions or not", async () => {

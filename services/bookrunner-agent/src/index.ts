@@ -269,6 +269,10 @@ async function runOnce(
         desk,
         mandate: mandateNow,
         oraclePx: () => price.latest()?.price ?? null,
+        oraclePrint: () => {
+          const p = price.latest();
+          return p ? { price: p.price, publishedAt: p.publishedAt, held: p.held } : null;
+        },
         symbol: ctx.symbol,
         onSent: (p, reason, txHash) =>
           log.info({ spreadBps: p.spreadBps, skewBps: p.skewBps, maxNetExposureUsd: p.maxNetExposureUsd.toString(), reason, txHash }, "engine quote set"),

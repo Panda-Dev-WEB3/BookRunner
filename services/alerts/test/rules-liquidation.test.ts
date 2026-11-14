@@ -3,7 +3,7 @@
 import { describe, expect, test } from "bun:test";
 import { type LiquidationKeeperStatus, parseLiquidationStatus } from "@bookrunner/shared/liquidationKeeper";
 import { evaluate } from "../src/rules";
-import { LIQUIDATION_RULES, engineSplitUnrecorded, keeperLiquidationFailing, liquidationBacklog, liquidationCoverage } from "../src/rules-liquidation";
+import { LIQUIDATION_RULES, engineIndexUnitPending, engineSplitUnrecorded, keeperLiquidationFailing, liquidationBacklog, liquidationCoverage } from "../src/rules-liquidation";
 import type { Condition } from "../src/types";
 import { NOW, book, rules, snap } from "./fixtures";
 
@@ -101,8 +101,17 @@ describe("engine_split_unrecorded (audit N-1)", () => {
     const T = "0x00000000000000000000000000000000000000A1";
     const c = engineSplitUnrecorded(snap({ liquidationKeeper: status({ splits: { checkedAt: NOW, recorded: 0, unrecorded: [{ marketId: 2, token: T, from: 1_790_000_000 }], error: null } }) }), rules());
     expect(ks(c)).toEqual([[`engine_split_unrecorded:2:${T.toLowerCase()}`, "critical"]]);
-    expect(c[0]!.summary).toContain("recordSplitAt");
+    expect(c[0]!.summary).toContain("guardianRecordSplits");
     expect(engineSplitUnrecorded(snap({ liquidationKeeper: null }), rules())).toEqual([]);
+  });
+});
+
+describe("engine_index_unit_pending (audit N-1 review L-2)", () => {
+  test("quiet for 5 min; warning; critical after 30 min", () => {
+    const m = (sinceSec: number) => status({ markets: [{ marketId: 3, bookId: 9, regime: "split_repricing", openPositions: 2, priceAgeSec: 1, regimeSince: NOW - sinceSec * 1000 }] });
+    expect(engineIndexUnitPending(snap({ liquidationKeeper: m(200) }), rules())).toEqual([]);
+    expect(ks(engineIndexUnitPending(snap({ liquidationKeeper: m(400) }), rules()))).toEqual([["engine_index_unit_pending:3", "warning"]]);
+    expect(ks(engineIndexUnitPending(snap({ liquidationKeeper: m(1801) }), rules()))).toEqual([["engine_index_unit_pending:3", "critical"]]);
   });
 });
 
@@ -110,7 +119,7 @@ describe("status parsing", () => {
   test("round trip; malformed entries dropped; garbage is null", () => {
     const s = status({
       backlog: [{ marketId: 1, trader: TRADER, action: "forceClose", since: NOW, reason: "price", detail: null }],
-      markets: [{ marketId: 1, bookId: 7, regime: "split_repricing", openPositions: 3, priceAgeSec: 2 }],
+      markets: [{ marketId: 1, bookId: 7, regime: "split_repricing", openPositions: 3, priceAgeSec: 2, regimeSince: NOW - 1_000 }],
       splits: { checkedAt: NOW, recorded: 2, unrecorded: [{ marketId: 1, token: TRADER, from: 1 }], error: null },
     });
     expect(parseLiquidationStatus(JSON.stringify(s))).toEqual(s);

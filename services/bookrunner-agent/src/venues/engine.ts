@@ -172,8 +172,15 @@ export interface EngineState {
   poolCashUsd: bigint;
   netSize: bigint; // pool net size, 1e18 market units (= -(long + short))
   reduceOnly: boolean;
-  /** audit N-1: shares per market unit (PoolEngine.unitOf; 1e18 until a split); absent = 1e18 */
+  /** audit N-1: shares per market unit at the STORED price's basis (PoolEngine.unitOf; 1e18 until a split) */
   unitWad?: bigint;
+}
+
+/** The oracle print the agent prices with: per share, with its share basis inputs. */
+export interface OraclePrint {
+  price: number;
+  publishedAt: number;
+  held: boolean;
 }
 
 export interface EngineTrade {
@@ -189,6 +196,8 @@ export interface EngineTrade {
 
 export interface EngineChain {
   readState(): Promise<EngineState>;
+  /** audit N-1 review L-4: shares per unit (WAD) for a print of this share basis (lastLiveAt when held); null = unknown */
+  unitFor?(print: { publishedAt: number; held: boolean }): Promise<bigint | null>;
   /** Current on-chain quote params (seed for the change-threshold logic). */
   readQuote(): Promise<EngineQuoteParams | null>;
   /** Trade events of the book's market since the last scan with block time >= sinceMs. */
@@ -222,6 +231,8 @@ export interface EngineVenueDeps {
   desk: DeskExecutor;
   mandate: () => Mandate;
   oraclePx: () => number | null;
+  /** the same print with its basis inputs (review L-4: the account's mark uses the unit of THIS print) */
+  oraclePrint?: () => OraclePrint | null;
   symbol: string;
   now?: () => number;
   onSent?: (p: EngineQuoteParams, reason: string, txHash: Hex) => void;
@@ -307,9 +318,17 @@ export class EngineVenue implements QuotingVenue {
   async account(): Promise<VenueAccount> {
     const st = await this.deps.chain.readState();
     const netQty = Number(st.netSize) / 1e18;
-    // audit N-1: netQty is in market units; the oracle quotes per share: priced per unit (x shares per unit)
-    const oracle = this.deps.oraclePx();
-    const perUnit = oracle && oracle > 0 ? (oracle * Number(st.unitWad ?? 10n ** 18n)) / 1e18 : null;
+    // audit N-1: netQty is in market units; the oracle quotes per share: priced per unit at the shares per unit of
+    // THAT print's basis (review L-4), else the engine's own per-unit valuation (exposure / size)
+    const print = this.deps.oraclePrint?.() ?? null;
+    let perUnit: number | null = null;
+    if (print && print.price > 0 && this.deps.chain.unitFor) {
+      const unit = await this.deps.chain.unitFor(print).catch(() => null);
+      if (unit !== null) perUnit = (print.price * Number(unit)) / 1e18;
+    } else if (!print) {
+      const oracle = this.deps.oraclePx();
+      if (oracle && oracle > 0 && (st.unitWad ?? 10n ** 18n) === 10n ** 18n) perUnit = oracle; // no split: per share = per unit
+    }
     const markPx = perUnit ?? (netQty !== 0 ? Math.abs(Number(st.netExposureUsd) / 1e6 / netQty) : 0);
     return {
       equityUsd: st.marginEquityUsd,

@@ -15,8 +15,12 @@
 // - engine_split_unrecorded:<marketId>:<token> — audit N-1: a live stock split of a token behind an engine market (its
 //   Stock Token, or an index component) has no recorded ratio (the keeper's split recorder could not record it before
 //   effectiveAt). CRITICAL at once: every price-dependent call of the market (trades, margin withdrawals with a
-//   position, liquidations) reverts SplitUnrecorded for prices from that basis on, until governance records it with
-//   StockTokenRegistry.recordSplitAt(token, effectiveAt, old, new) from the token's UIMultiplierUpdated event.
+//   position, liquidations) reverts SplitUnrecorded for prices from that basis on, until the guardian Safe records it
+//   (StockTokenRegistry.guardianRecordSplits, no timelock, bounded on chain) or governance does (recordSplitAt).
+// - engine_index_unit_pending:<marketId> — audit N-1 review L-2: an index market's unit move waits for a complete
+//   signed round (index + every split component, same publishedAt, at most 60 s old) for longer than 5 min: WARNING,
+//   CRITICAL after 30 min (trades and liquidations of that market wait meanwhile). The keeper sends syncUnit with the
+//   oracle's whole bundle each pass; a component the oracle keeps skipping blocks it.
 import type { RuleConfig } from "./config";
 import type { Condition, Snapshot } from "./types";
 
@@ -103,12 +107,31 @@ export function engineSplitUnrecorded(s: Snapshot, _c: RuleConfig): Condition[] 
     key: `engine_split_unrecorded:${u.marketId}:${u.token.toLowerCase()}`,
     rule: "engine_split_unrecorded",
     severity: "critical" as const,
-    summary: `engine market ${u.marketId}: a live stock split of ${short(u.token)} ${u.from > 1 ? `effective ${new Date(u.from * 1000).toISOString()} ` : ""}has no recorded ratio: trades, withdrawals with a position and liquidations revert (SplitUnrecorded) until governance StockTokenRegistry.recordSplitAt(token, effectiveAt, old, new) from the token's UIMultiplierUpdated event (RUNBOOK "Corporate actions")`,
+    summary: `engine market ${u.marketId}: a live stock split of ${short(u.token)} has no recorded ratio (frozen for prices since ${new Date(u.from * 1000).toISOString()}): trades, withdrawals with a position and liquidations revert (SplitUnrecorded). Guardian Safe now: StockTokenRegistry.guardianRecordSplits(token, [effectiveAt...], [new/old...]) from the token's UIMultiplierUpdated events (no timelock, bounded on chain); fallback governance recordSplitAt (RUNBOOK "Corporate actions")`,
   }));
+}
+
+export function engineIndexUnitPending(s: Snapshot, _c: RuleConfig): Condition[] {
+  const st = s.liquidationKeeper;
+  if (!st) return [];
+  return st.markets.flatMap((m) => {
+    if (m.regime !== "split_repricing" || !m.regimeSince) return [];
+    const age = (s.now - m.regimeSince) / 1000;
+    if (age <= 300) return [];
+    return [
+      {
+        key: `engine_index_unit_pending:${m.marketId}`,
+        rule: "engine_index_unit_pending",
+        severity: age > 1800 ? ("critical" as const) : ("warning" as const),
+        summary: `engine market ${m.marketId}: an index component's split has waited ${dur(age)} for a complete signed round (index + every split component, same publishedAt, at most 60 s old): trades and liquidations of the market wait; check which component the oracle skips (/health unpublished)`,
+      },
+    ];
+  });
 }
 
 export const LIQUIDATION_RULES = {
   engine_split_unrecorded: engineSplitUnrecorded,
+  engine_index_unit_pending: engineIndexUnitPending,
   liquidation_coverage: liquidationCoverage,
   liquidation_backlog: liquidationBacklog,
   keeper_liquidation_failing: keeperLiquidationFailing,

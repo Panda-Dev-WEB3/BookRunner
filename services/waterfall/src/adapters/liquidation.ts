@@ -19,6 +19,14 @@ const posKey = (marketId: number, trader: string) => `${marketId}|${trader.toLow
 
 type Read = { address: Address; abi: typeof poolEngineAbi | typeof attestedOracleAbi | typeof bookrunnerConfigAbi | typeof stockTokenRegistryAbi; functionName: string; args?: readonly unknown[] };
 
+/** The registry's custom error a transaction reverted with (NothingToRecord), if any. */
+function registryRevertName(err: unknown): string | undefined {
+  if (!(err instanceof BaseError)) return undefined;
+  const r = err.walk((e) => e instanceof ContractFunctionRevertedError);
+  if (r instanceof ContractFunctionRevertedError && r.data?.errorName) return r.data.errorName;
+  return /NothingToRecord/.test(err.message) ? "NothingToRecord" : undefined;
+}
+
 /** The custom error a read reverted with, decoded with the engine's ABI (it names the split errors, audit N-1). */
 function revertName(err: unknown): string | undefined {
   if (!(err instanceof BaseError)) return undefined;
@@ -162,16 +170,22 @@ export class ViemLiquidationChain implements LiquidationChain {
     );
     return tokens.map((token, i) => {
       const sync = res[i * 2] as boolean | null;
-      const from = res[i * 2 + 1] as bigint | null;
-      return { token, syncNeeded: sync === true, unrecordedFrom: from === null ? null : Number(from) };
+      const u = res[i * 2 + 1] as readonly [bigint, boolean] | null;
+      return { token, syncNeeded: sync === true, unrecordedFrom: u === null ? null : Number(u[0]), latched: u?.[1] === true };
     });
   }
 
   async recordSplit(token: Address) {
     const reg = this.registry;
     if (!reg) throw new Error("no StockTokenRegistry in the deployment");
-    const out = await this.sender.send({ address: reg, abi: stockTokenRegistryAbi as never, functionName: "recordSplit", args: [token], label: `recordSplit(${token})` });
-    return { hash: out.hash, costWei: out.receipt.gasUsed * (out.receipt.effectiveGasPrice ?? 0n) };
+    try {
+      const out = await this.sender.send({ address: reg, abi: stockTokenRegistryAbi as never, functionName: "recordSplit", args: [token], label: `recordSplit(${token})` });
+      return { hash: out.hash as Hex | null, costWei: out.receipt.gasUsed * (out.receipt.effectiveGasPrice ?? 0n) };
+    } catch (err) {
+      // review L-4: someone else recorded (or latched) it first; nothing left to do is no failure
+      if (registryRevertName(err) === "NothingToRecord") return { hash: null, costWei: 0n };
+      throw err;
+    }
   }
 
   private data(call: LiqCall): Hex {

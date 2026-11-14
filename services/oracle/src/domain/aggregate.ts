@@ -67,7 +67,16 @@ export const attestedOf = (a: AggregateResult): SourceQuote[] => a.attested ?? a
 /** Number of independent sources behind an aggregate. */
 export const sourceCountOf = (a: AggregateResult): number => a.sourceCount ?? a.accepted.length;
 
-export type CollectedQuote = SourceQuote & { maxAgeMs?: number };
+export type CollectedQuote = SourceQuote & { maxAgeMs?: number; unitValidBeforeSec?: number };
+
+/**
+ * Audit N-1 review L-1: the quotes a print stamped `publishedAt` may use. A per-token observation divided by the
+ * multiplier active when it was read is in the pre-change share unit; stamped at or after the staged change's
+ * effectiveAt (the chain head can run ahead of the wall clock, and publishedAt follows the head) it would read as
+ * post-change on chain. Such a quote is dropped: the multiplier must be the one in force at the signed publishedAt.
+ */
+export const quotesForStamp = (qs: readonly CollectedQuote[], publishedAt: number): CollectedQuote[] =>
+  qs.filter((q) => q.unitValidBeforeSec === undefined || publishedAt < q.unitValidBeforeSec);
 
 export function median(xs: readonly number[]): number {
   if (xs.length === 0) throw new Error("median of empty set");

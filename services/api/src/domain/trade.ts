@@ -108,7 +108,7 @@ export function sessionOf(i: SessionInput): SessionState {
       session: "split_unrecorded",
       canTrade: false,
       newRisk: false,
-      reasons: ["A stock split took effect that is not recorded on chain: the market is paused, closes and liquidations included, until governance records it. Margin top-ups still work."],
+      reasons: ["A stock split took effect that is not recorded on chain: the market is paused, closes and liquidations included, until the guardian records it. Margin top-ups still work."],
     };
   if (i.unit?.kind === "pending")
     return { session: "split_repricing", canTrade: false, newRisk: false, reasons: ["A stock in the index split: the market's unit is being updated from the oracle's next signed round. Retry in a few seconds."] };

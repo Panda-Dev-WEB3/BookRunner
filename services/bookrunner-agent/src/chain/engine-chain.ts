@@ -1,7 +1,7 @@
 // viem implementation of EngineChain: PoolEngineAdapter / PoolEngine views and Trade-event scanning
 // for the book's market (block cursor, chunked getLogs, cached block timestamps).
 
-import { poolEngineAbi, poolEngineAdapterAbi } from "@bookrunner/shared/abi";
+import { attestedOracleAbi, bookrunnerConfigAbi, poolEngineAbi, poolEngineAdapterAbi } from "@bookrunner/shared/abi";
 import type { Address, PublicClient } from "viem";
 import type { EngineChain, EngineQuoteParams, EngineState, EngineTrade } from "../venues/engine";
 
@@ -47,6 +47,36 @@ export class ViemEngineChain implements EngineChain {
       reduceOnly: st.reduceOnly,
       unitWad,
     };
+  }
+
+  /** Audit N-1 review L-4: PoolEngine.unitAt at the print's share basis (publishedAt, lastLiveAt when held). */
+  async unitFor(print: { publishedAt: number; held: boolean }): Promise<bigint | null> {
+    try {
+      let basis = BigInt(print.publishedAt);
+      if (print.held) {
+        const [oracle, underlying] = await Promise.all([this.oracleAddr(), this.underlying()]);
+        basis = await this.pub.readContract({ address: oracle, abi: attestedOracleAbi, functionName: "lastLiveAt", args: [underlying] });
+      }
+      return await this.pub.readContract({ address: this.engine, abi: poolEngineAbi, functionName: "unitAt", args: [this.marketId, basis] });
+    } catch {
+      return null;
+    }
+  }
+
+  private oracle: `0x${string}` | null = null;
+  private pid: `0x${string}` | null = null;
+
+  private async oracleAddr() {
+    if (!this.oracle) {
+      const cfg = await this.pub.readContract({ address: this.engine, abi: poolEngineAbi, functionName: "protocolConfig" });
+      this.oracle = await this.pub.readContract({ address: cfg, abi: bookrunnerConfigAbi, functionName: "oracle" });
+    }
+    return this.oracle;
+  }
+
+  private async underlying() {
+    this.pid ??= (await this.pub.readContract({ address: this.engine, abi: poolEngineAbi, functionName: "config", args: [this.marketId] })).underlying;
+    return this.pid;
   }
 
   async readQuote(): Promise<EngineQuoteParams | null> {

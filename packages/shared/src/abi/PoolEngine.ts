@@ -2174,6 +2174,22 @@ export const poolEngineAbi = [
   },
   {
     "type": "error",
+    "name": "SplitBasisAmbiguous",
+    "inputs": [
+      {
+        "name": "priceId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "splitAt",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "SplitUnrecorded",
     "inputs": [
       {

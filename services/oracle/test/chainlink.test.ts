@@ -9,7 +9,8 @@ import { loadOracleConfig, resolveFeeds } from "../src/config";
 import { buildUniverse } from "../src/domain/universe";
 import { type AggregatorReader, ChainlinkSource, type ResolvedFeed, type RoundData, type TokenState } from "../src/sources/chainlink";
 import { buildSources } from "../src/sources";
-import { ScriptedSource, makeService, silentLog } from "./fakes";
+import { quotesForStamp } from "../src/domain/aggregate";
+import { FakeChain, ScriptedSource, makeService, silentLog } from "./fakes";
 
 const FEED = "0x00000000000000000000000000000000000000F1" as Address;
 const TOKEN = "0x00000000000000000000000000000000000000D1" as Address;
@@ -84,6 +85,39 @@ describe("ChainlinkSource: per-token feeds are converted to per share (C2)", () 
     // StockTokenRegistry._value with the live uiMultiplier
     const value = (V.qtyRaw * V.uiMultiplierWad * BigInt(msg.priceWad)) / (10n ** 18n * WAD * 10n ** 12n);
     expect(value).toBe(V.valueUsd6);
+  });
+});
+
+describe("audit N-1 review L-1: a print is never stamped at or after effectiveAt with the pre-change multiplier", () => {
+  test("the per-share observation carries the end of its unit; quotesForStamp drops it for a stamp at or after it", async () => {
+    const { reader, src } = setup();
+    reader.token = { uiMultiplier: V.uiMultiplierWad, newUIMultiplier: 10n * V.uiMultiplierWad, effectiveAt: T0S + 2n, oraclePaused: false };
+    const o = await src.fetch("NVDA");
+    expect(o?.unitValidBeforeSec).toBe(Number(T0S + 2n));
+    const q = [{ name: "chainlink", price: o!.price, ts: o!.ts, unitValidBeforeSec: o!.unitValidBeforeSec }, { name: "pyth", price: 1, ts: T0 }];
+    expect(quotesForStamp(q, Number(T0S + 1n)).map((x) => x.name)).toEqual(["chainlink", "pyth"]);
+    expect(quotesForStamp(q, Number(T0S + 2n)).map((x) => x.name)).toEqual(["pyth"]);
+    // nothing staged: no bound
+    reader.token = { uiMultiplier: V.uiMultiplierWad, newUIMultiplier: V.uiMultiplierWad, effectiveAt: 0n, oraclePaused: false };
+    const { src: src2 } = setup();
+    expect((await src2.fetch("NVDA"))?.unitValidBeforeSec).toBeUndefined();
+  });
+
+  test("the chain head 3 s ahead of the wall clock would stamp the pre-split print after effectiveAt: not published", async () => {
+    const run = async (headAhead: number) => {
+      const { reader, src } = setup();
+      reader.token = { uiMultiplier: V.uiMultiplierWad, newUIMultiplier: 10n * V.uiMultiplierWad, effectiveAt: T0S + 2n, oraclePaused: false };
+      const { svc } = makeService({ sources: [src], settings: { minSources: 1 }, now: () => T0 });
+      const chain = new FakeChain();
+      chain.head = Number(T0S) + headAhead;
+      chain.min = 1;
+      await svc.setDeployment({ chainId: 31337, oracle: chain.oracle, chain });
+      await svc.setUniverse(buildUniverse({ equities: [{ priceId: "NVDA", underlying: priceId("NVDA") }], indexes: [], books: [], defaultSessions: encodeSessions(SESSIONS_24X7) }).entries);
+      return svc.tick(T0);
+    };
+    expect((await run(0)).published).toEqual(["NVDA"]); // stamped T0S < effectiveAt: the pre-split unit is right
+    const ahead = await run(3); // publishedAt follows the head: T0S + 3 >= effectiveAt
+    expect(ahead.published).toEqual([]);
   });
 });
 

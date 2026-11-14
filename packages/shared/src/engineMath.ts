@@ -34,7 +34,7 @@ export type EngineUnit = { kind: "ok"; unitWad: bigint } | { kind: "unrecorded" 
 /** The unitAt revert names -> EngineUnit (undefined: another error). */
 export function unitFromRevert(errorName: string | undefined): EngineUnit | undefined {
   if (errorName === "SplitUnrecorded") return { kind: "unrecorded" };
-  if (errorName === "IndexSnapshot" || errorName === "PriceBeforeSplit") return { kind: "pending" };
+  if (errorName === "IndexSnapshot" || errorName === "PriceBeforeSplit" || errorName === "SplitBasisAmbiguous") return { kind: "pending" };
   return undefined;
 }
 

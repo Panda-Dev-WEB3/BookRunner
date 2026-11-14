@@ -31,6 +31,7 @@ export const REVERT_ABI = parseAbi([
   "error SplitUnrecorded(address token, uint256 from)",
   "error IndexSnapshot(bytes32 indexPriceId)",
   "error PriceBeforeSplit(uint64 basisAt, uint64 appliedAt)",
+  "error SplitBasisAmbiguous(bytes32 priceId, uint64 splitAt)",
   "error PriceNotAcceptable(uint256 fillPriceWad, uint256 acceptablePriceWad)",
   "error ExposureCap(uint256 exposureUsd, uint256 maxNetExposureUsd)",
   "error InsufficientMargin(uint256 requiredUsd, int256 availableUsd)",
@@ -97,7 +98,9 @@ export function revertMessage(name: string, args: readonly unknown[] = []): stri
     case "MarketReduceOnly":
       return "The market is reduce-only: only reductions and closes fill.";
     case "SplitUnrecorded":
-      return "A stock split took effect that is not recorded on chain: the market is paused until governance records it. Margin top-ups still work.";
+      return "A stock split took effect that is not recorded on chain: the market is paused until the guardian records it. Margin top-ups still work.";
+    case "SplitBasisAmbiguous":
+      return "A stock split took effect seconds ago and the price may still be the last pre-split one. Prepare the order again in a few seconds.";
     case "IndexSnapshot":
     case "PriceBeforeSplit":
       return "A stock in the index split and the market's unit is being updated. Prepare the order again in a few seconds.";

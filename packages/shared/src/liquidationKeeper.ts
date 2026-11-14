@@ -39,6 +39,8 @@ export interface LiquidationMarketStatus {
   openPositions: number;
   /** age (s) of the price the pass used */
   priceAgeSec: number | null;
+  /** unix ms since when the market has been in its split regime (split_unrecorded / split_repricing; absent otherwise) */
+  regimeSince?: number | null;
 }
 
 export interface LiquidationKeeperStatus {
@@ -103,6 +105,7 @@ export function parseLiquidationStatus(raw: string | null | undefined): Liquidat
           regime: (REGIMES.has(String(m.regime)) ? m.regime : "no_price") as LiquidationMarketStatus["regime"],
           openPositions: num(m.openPositions) ?? 0,
           priceAgeSec: num(m.priceAgeSec),
+          ...(num(m.regimeSince) !== null ? { regimeSince: num(m.regimeSince) } : {}),
         })),
       backlog: arr(o.backlog)
         .filter((b) => num(b.marketId) !== null && typeof b.trader === "string" && num(b.since) !== null)

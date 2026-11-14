@@ -62,8 +62,10 @@ export interface SplitTokenState {
   token: Address;
   /** StockTokenRegistry.splitSyncNeeded: recordSplit would change its record */
   syncNeeded: boolean;
-  /** StockTokenRegistry.splitUnrecorded: 0 = none, else the basis from which the market is frozen (1 = any); null = unreadable */
+  /** StockTokenRegistry.splitUnrecorded: 0 = none, else the basis from which the market is frozen; null = unreadable */
   unrecordedFrom: number | null;
+  /** the unrecorded change is latched (the freeze no longer depends on the token) */
+  latched?: boolean;
 }
 
 export interface TraderRef {
@@ -93,8 +95,8 @@ export interface LiquidationChain {
   /** StockTokenRegistry.splitTokens(underlying). */
   splitTokens(underlying: Hex): Promise<Address[]>;
   splitStates(tokens: Address[]): Promise<SplitTokenState[]>;
-  /** StockTokenRegistry.recordSplit(token) through the sender. */
-  recordSplit(token: Address): Promise<{ hash: Hex; costWei: bigint }>;
+  /** StockTokenRegistry.recordSplit(token) through the sender (hash null: NothingToRecord, someone else was first). */
+  recordSplit(token: Address): Promise<{ hash: Hex | null; costWei: bigint }>;
 }
 
 export interface PositionStore {
@@ -159,6 +161,8 @@ export class LiquidationKeeper {
   private totals = { liquidations: 0, forceCloses: 0, raced: 0, rewardsUsd: 0n, gasWei: 0n };
   private splits: LiquidationKeeperStatus["splits"] = { checkedAt: null, recorded: 0, unrecorded: [], error: null };
   private splitTokensOf = new Map<string, { at: number; tokens: Address[] }>();
+  /** marketId -> unix ms since when the market's unit cannot be read (alert engine_index_unit_pending) */
+  private splitRegimeSince = new Map<number, number>();
 
   constructor(private readonly d: LiquidationDeps) {}
 
@@ -329,9 +333,14 @@ export class LiquidationKeeper {
         if (st.syncNeeded) {
           try {
             const sent = await this.d.chain.recordSplit(st.token);
-            recorded++;
             this.totals.gasWei += sent.costWei;
-            this.d.log.warn({ token: st.token, tx: sent.hash, marketIds }, "stock split staged on the token: ratio recorded on chain (StockTokenRegistry.recordSplit)");
+            if (sent.hash === null) this.d.log.info({ token: st.token, marketIds }, "recordSplit: nothing left to record (another sender was first)");
+            else if (st.unrecordedFrom !== null && st.unrecordedFrom > 0)
+              this.d.log.error({ token: st.token, tx: sent.hash, marketIds }, "unrecorded stock split LATCHED on chain: the market stays frozen until the guardian records it (RUNBOOK)");
+            else {
+              recorded++;
+              this.d.log.warn({ token: st.token, tx: sent.hash, marketIds }, "stock split staged on the token: ratio recorded on chain (StockTokenRegistry.recordSplit)");
+            }
           } catch (err) {
             this.fail(`recordSplit(${st.token}): ${errText(err)}`);
             this.d.log.warn({ token: st.token, err: errText(err) }, "recordSplit failed; retrying next check");
@@ -339,7 +348,8 @@ export class LiquidationKeeper {
         }
         if (st.unrecordedFrom !== null && st.unrecordedFrom > 0) for (const marketId of marketIds) unrecorded.push({ marketId, token: st.token.toLowerCase(), from: st.unrecordedFrom });
       }
-      if (unrecorded.length > 0) this.d.log.error({ unrecorded }, "a live stock split has no recorded ratio: the engine market is frozen until governance recordSplitAt (RUNBOOK)");
+      if (unrecorded.length > 0)
+        this.d.log.error({ unrecorded }, "a live stock split has no recorded ratio: the engine market is frozen until the guardian's guardianRecordSplits (or governance recordSplitAt) records it (RUNBOOK)");
       this.splits = { checkedAt: at, recorded, unrecorded, error: null };
     } catch (err) {
       this.splits = { ...this.splits, checkedAt: at, error: errText(err) };
@@ -400,13 +410,16 @@ export class LiquidationKeeper {
         const openHere = open.filter((o) => o.marketId === marketId).length;
         pass.checked += openHere;
         const regime = unit?.kind === "unrecorded" ? "split_unrecorded" : unit?.kind === "pending" ? "split_repricing" : "no_price";
-        markets.push({ marketId, bookId: (await this.d.bookOf?.(marketId).catch(() => null)) ?? null, regime, openPositions: openHere, priceAgeSec: Math.max(0, nowSec - shareP.publishedAt) });
+        const since = this.splitRegimeSince.get(marketId) ?? this.now();
+        this.splitRegimeSince.set(marketId, since);
+        markets.push({ marketId, bookId: (await this.d.bookOf?.(marketId).catch(() => null)) ?? null, regime, openPositions: openHere, priceAgeSec: Math.max(0, nowSec - shareP.publishedAt), regimeSince: since });
         if (unit?.kind === "pending") {
           busy = true;
           await this.syncIndexUnit(marketId);
         }
         continue;
       }
+      this.splitRegimeSince.delete(marketId);
       const px = shareP && unit?.kind === "ok" ? atUnit(m, shareP, unit.unitWad) : shareP;
       const positions = open
         .filter((o) => o.marketId === marketId)

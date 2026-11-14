@@ -520,7 +520,9 @@ export class ChainlinkSource implements PriceSource {
 
   async fetch(ticker: string): Promise<SourceObservation | null> {
     const o = await this.observe(ticker);
-    return o.ok ? { price: o.price, ts: o.ts, maxAgeMs: o.maxAgeMs } : null;
+    if (!o.ok) return null;
+    // audit N-1 review L-1: the unit of this per-share price ends at a staged change's effectiveAt
+    return o.pendingMultiplier ? { price: o.price, ts: o.ts, maxAgeMs: o.maxAgeMs, unitValidBeforeSec: o.pendingMultiplier.effectiveAt } : { price: o.price, ts: o.ts, maxAgeMs: o.maxAgeMs };
   }
 
   /** Full observation with the reason when unusable (fetch, and the source-check CLI). */

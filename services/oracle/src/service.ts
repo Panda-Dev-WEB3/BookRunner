@@ -9,7 +9,7 @@ import type { OracleChain } from "./adapters/chain";
 import type { PriceStore } from "./adapters/db";
 import type { PricePublisher } from "./adapters/redis";
 import type { BuilderPriceClient } from "./adapters/venue";
-import { type AggregateResult, type CollectedQuote, type ConfirmResult, type ConfirmStatus, aggregate } from "./domain/aggregate";
+import { type AggregateResult, type CollectedQuote, type ConfirmResult, type ConfirmStatus, aggregate, quotesForStamp } from "./domain/aggregate";
 import { type ConfirmRun, nextConfirmRun, primaryConfirm } from "./domain/confirm";
 import { type Decision, type LastOpen, decide, marketOpen } from "./domain/hold";
 import { type ComponentPrice, indexAsAggregate, indexLevel } from "./domain/index-level";
@@ -366,8 +366,8 @@ export class OracleService {
         e.kind === "index"
           ? indexAsAggregate(indexLevel(e.components, componentPrices), minSources)
           : this.policy() === "primary-confirm"
-            ? this.confirmed(e.priceId, quotes.get(e.priceId) ?? [], open, nowMs)
-            : aggregate(quotes.get(e.priceId) ?? [], { nowMs, outlierBps: s.outlierBps, minSources, maxAgeMs: s.maxSourceAgeMs, ...(s.pairMaxAgeMs ? { pairMaxAgeMs: s.pairMaxAgeMs } : {}) });
+            ? this.confirmed(e.priceId, quotesForStamp(quotes.get(e.priceId) ?? [], publishedAt), open, nowMs)
+            : aggregate(quotesForStamp(quotes.get(e.priceId) ?? [], publishedAt), { nowMs, outlierBps: s.outlierBps, minSources, maxAgeMs: s.maxSourceAgeMs, ...(s.pairMaxAgeMs ? { pairMaxAgeMs: s.pairMaxAgeMs } : {}) });
       let d = decide({ open, agg, lastOpen: this.lastOpen.get(e.priceId) ?? null, nowMs, minSeedSources: s.production ? minSources : 1 });
       if (d.kind === "publish" && s.production && d.sourceCount < minSources) {
         // never sign below the minimum on mainnet (a held price restored from fewer sources included)
@@ -529,6 +529,7 @@ export class OracleService {
           const q: CollectedQuote = { name: src.name, price: Number.isFinite(r.price) && r.price > 0 ? roundPrice(r.price) : r.price, ts: r.ts };
           const maxAge = r.maxAgeMs ?? src.maxAgeMs;
           if (maxAge !== undefined) q.maxAgeMs = maxAge;
+          if (r.unitValidBeforeSec !== undefined) q.unitValidBeforeSec = r.unitValidBeforeSec;
           const usable = Number.isFinite(r.price) && r.price > 0 && Number.isFinite(r.ts);
           const fresh = nowMs - r.ts <= (maxAge ?? this.deps.settings.maxSourceAgeMs);
           outcomes.set(src.name, usable && fresh ? { ok: true } : { ok: false, error: usable ? "stale observation" : "invalid observation" });

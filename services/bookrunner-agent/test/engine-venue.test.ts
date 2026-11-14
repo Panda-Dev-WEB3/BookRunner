@@ -191,6 +191,7 @@ class FakeEngineChain implements EngineChain {
   async tradesSince() {
     return this.trades;
   }
+  unitFor?: (p: { publishedAt: number; held: boolean }) => Promise<bigint | null>;
 }
 
 describe("EngineVenue", () => {
@@ -265,12 +266,20 @@ describe("EngineVenue", () => {
     expect(desk.actions.length).toBe(2);
   });
 
-  test("account() after a 10:1 split (audit N-1): the per-share oracle is priced per market unit", async () => {
-    const { chain, venue } = setup();
-    chain.state = { ...chain.state, netExposureUsd: usd(-1_000), netSize: -(10n ** 19n), unitWad: 10n * 10n ** 18n };
-    const acct = await venue.account();
-    expect(acct.position?.netQty).toBe(-10);
-    expect(acct.position?.markPx).toBe(1_000); // oracle 100 per share x 10 shares per unit
+  test("account() after a 10:1 split (audit N-1): the print is priced per unit at ITS basis' unit (review L-4)", async () => {
+    const chain = new FakeEngineChain();
+    const bases: number[] = [];
+    chain.unitFor = async (p) => {
+      bases.push(p.publishedAt);
+      return p.publishedAt >= 500 ? 10n * 10n ** 18n : 10n ** 18n; // the split at 500
+    };
+    chain.state = { ...chain.state, netExposureUsd: usd(-1_000), netSize: -(10n ** 19n), unitWad: 10n ** 18n }; // stored: pre-split
+    let print = { price: 10, publishedAt: 600, held: false }; // post-split print, 10 per share
+    const venue = new EngineVenue({ chain, desk: new FakeDesk(), mandate: () => m, oraclePx: () => print.price, oraclePrint: () => print, symbol: "RHX5-PERP" });
+    expect((await venue.account()).position?.markPx).toBe(100); // 10 per share x 10 shares per unit
+    print = { price: 100, publishedAt: 400, held: false }; // pre-split print
+    expect((await venue.account()).position?.markPx).toBe(100);
+    expect(bases).toEqual([600, 400]);
   });
 
   test("account() maps PoolEngineAdapter views; fills are from the book's perspective", async () => {

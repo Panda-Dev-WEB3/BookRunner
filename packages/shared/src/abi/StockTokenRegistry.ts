@@ -70,6 +70,19 @@ export const stockTokenRegistryAbi = [
   },
   {
     "type": "function",
+    "name": "SPLIT_BASIS_DRIFT",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "admin",
     "inputs": [],
     "outputs": [
@@ -217,6 +230,29 @@ export const stockTokenRegistryAbi = [
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "guardianRecordSplits",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "ats",
+        "type": "uint64[]",
+        "internalType": "uint64[]"
+      },
+      {
+        "name": "ratiosWad",
+        "type": "uint256[]",
+        "internalType": "uint256[]"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -398,6 +434,24 @@ export const stockTokenRegistryAbi = [
   },
   {
     "type": "function",
+    "name": "reanchorDrift",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "multiplierWad",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "recordSplit",
     "inputs": [
       {
@@ -424,18 +478,32 @@ export const stockTokenRegistryAbi = [
         "internalType": "uint64"
       },
       {
-        "name": "multBefore",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "multAfter",
+        "name": "ratioWad",
         "type": "uint256",
         "internalType": "uint256"
       }
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "recordedMultiplier",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -746,6 +814,40 @@ export const stockTokenRegistryAbi = [
         "name": "from",
         "type": "uint256",
         "internalType": "uint256"
+      },
+      {
+        "name": "latched",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "stagedSplit",
+    "inputs": [
+      {
+        "name": "priceId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "at",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "ratioWad",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "view"
@@ -945,6 +1047,19 @@ export const stockTokenRegistryAbi = [
   },
   {
     "type": "event",
+    "name": "SplitLatchCleared",
+    "inputs": [
+      {
+        "name": "priceId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "SplitRecorded",
     "inputs": [
       {
@@ -976,6 +1091,50 @@ export const stockTokenRegistryAbi = [
         "type": "bool",
         "indexed": false,
         "internalType": "bool"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SplitRemoved",
+    "inputs": [
+      {
+        "name": "priceId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "at",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SplitUnrecordedLatched",
+    "inputs": [
+      {
+        "name": "priceId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "token",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "from",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
       }
     ],
     "anonymous": false
@@ -1239,12 +1398,44 @@ export const stockTokenRegistryAbi = [
   },
   {
     "type": "error",
+    "name": "SplitBasisAmbiguous",
+    "inputs": [
+      {
+        "name": "priceId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "splitAt",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "SplitNotRecorded",
     "inputs": [
       {
         "name": "token",
         "type": "address",
         "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "SplitRatioMismatch",
+    "inputs": [
+      {
+        "name": "productWad",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "targetWad",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ]
   },

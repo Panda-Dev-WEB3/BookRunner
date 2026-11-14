@@ -13,6 +13,12 @@ export interface SourceObservation {
   ts: number;
   /** Per-observation freshness bound (e.g. a Chainlink feed's heartbeat); overrides the source's. */
   maxAgeMs?: number;
+  /**
+   * Audit N-1 review L-1: the share unit this per-share price is in ends at this unix second (a per-token feed divided
+   * by the multiplier active when it was read, while a change is staged for this time). A print signed with
+   * publishedAt >= it would claim the post-change unit: the service drops the observation for such a stamp.
+   */
+  unitValidBeforeSec?: number;
 }
 
 /**
