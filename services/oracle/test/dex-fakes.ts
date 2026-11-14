@@ -29,8 +29,10 @@ export function tickFor(tokenPrice: number, tokenIsToken0: boolean, tokenDecimal
 export interface FakePool {
   token0: Address;
   token1: Address;
-  /** arithmetic-mean tick over any window */
+  /** arithmetic-mean tick over any window (unless meanTickByWindow names it) */
   meanTick: number;
+  /** a different mean tick per window (s) */
+  meanTickByWindow: Record<number, number>;
   spotTick: number;
   observationIndex: number;
   cardinality: number;
@@ -41,8 +43,10 @@ export interface FakePool {
   slot0Ts: number;
   /** blockTimestamp of the newest observation (observationIndex): the last block with a swap */
   newestTs: number;
-  /** quote tokens moving the price 2% (sets liquidity): USD for a USDG pool, WETH for a WETH pool */
+  /** quote tokens moving the price 2% NOW (sets liquidity()): USD for a USDG pool, WETH for a WETH pool */
   depthUsd: number;
+  /** the same over the window (sets the harmonic-mean liquidity through secondsPerLiquidityCumulativeX128); default depthUsd */
+  twapDepthUsd: number | null;
   /** the pool's quote token (default USDG; WETH for a Stock-Token / WETH pool, USDG for the ETH/USD leg) */
   quote: Address;
   /** fee tier the fake factory registers the pool under */
@@ -78,6 +82,8 @@ export class FakeDexReader implements DexReader {
       fee: 3000,
       observeError: null,
       quote: USDG,
+      meanTickByWindow: {},
+      twapDepthUsd: null,
       ...p,
     });
   }
@@ -136,8 +142,17 @@ export class FakeDexReader implements DexReader {
     const p = this.pool(a);
     if (p.observeError) throw p.observeError;
     const base = 123_456_789n;
-    // tickCumulative grows by meanTick per second
-    return secondsAgos.map((ago) => base - BigInt(p.meanTick) * BigInt(ago));
+    const mean = (ago: number) => p.meanTickByWindow[ago] ?? p.meanTick;
+    // the harmonic-mean liquidity whose depth at the mean tick is twapDepthUsd
+    const lAvg = async (ago: number) =>
+      liquidityForDepth(p.twapDepthUsd ?? p.depthUsd, sqrtPriceX96At(mean(ago)), p.token0.toLowerCase() === p.quote.toLowerCase(), await this.decimals(p.quote));
+    const spl: bigint[] = [];
+    for (const ago of secondsAgos) {
+      const l = await lAvg(ago);
+      spl.push(ago === 0 ? 10n ** 40n : 10n ** 40n - (l > 0n ? (BigInt(ago) << 128n) / l : 10n ** 39n));
+    }
+    // tickCumulative grows by the window's mean tick per second
+    return { tickCumulatives: secondsAgos.map((ago) => base - BigInt(mean(ago)) * BigInt(ago)), secondsPerLiquidityCumulativeX128s: spl };
   }
   async tokenState(token: Address, b: bigint) {
     this.pinned.add(b);

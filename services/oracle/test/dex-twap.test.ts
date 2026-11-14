@@ -115,7 +115,7 @@ describe("DexTwapSource", () => {
       r.pools.get(POOL_A.toLowerCase())!.depthUsd = 49_000;
       const o = await src.observe("NVDA");
       expect(o.ok).toBe(false);
-      expect(!o.ok && o.reason).toMatch(/^insufficient depth: \$49,0\d\d moves the price 2% \(floor \$50,000\)$/);
+      expect(!o.ok && o.reason).toMatch(/^insufficient depth: \$49,0\d\d moves the price 2% \(time-averaged over 600s; now \$49,0\d\d; floor \$50,000\)$/);
       await expect(src.fetch("NVDA")).rejects.toThrow("insufficient depth");
       r.pools.get(POOL_A.toLowerCase())!.depthUsd = 51_000;
       expect((await src.observe("NVDA")).ok).toBe(true);

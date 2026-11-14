@@ -13,6 +13,17 @@ export interface SourceObservation {
   ts: number;
   /** Per-observation freshness bound (e.g. a Chainlink feed's heartbeat); overrides the source's. */
   maxAgeMs?: number;
+  /**
+   * The separate values behind `price` (the DEX: every usable pool, per share). primary-confirm flags a divergence
+   * when `price` or ANY part is beyond the band (domain/confirm.ts); only `price` is signed / attested.
+   */
+  parts?: ObservationPart[];
+}
+
+/** One value behind a confirm observation (the DEX: one pool, labelled e.g. "NVDA/WETH 500 0x62AB..6b6C"). */
+export interface ObservationPart {
+  label: string;
+  price: number;
 }
 
 /**

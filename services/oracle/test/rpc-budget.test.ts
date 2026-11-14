@@ -315,6 +315,12 @@ describe("Chainlink source: Stock Token state caching (audit M-2)", () => {
   });
 });
 
+/** observe(secondsAgos) of a pool at a constant tick and in-range liquidity: [tickCumulatives, secondsPerLiquidityCumulativeX128s] */
+const observed = (agos: readonly number[], tick: number, liquidity: bigint) => [
+  agos.map((ago) => 123_456_789n - BigInt(tick) * BigInt(ago)),
+  agos.map((ago) => 10n ** 40n - (BigInt(ago) << 128n) / liquidity),
+];
+
 /** A mainnet node with two Stock-Token / USDG pools (NVDA, TSLA) and their tokens. */
 function dexNode() {
   const rpc = new FakeRpc(4663);
@@ -337,7 +343,7 @@ function dexNode() {
       const ts = i === index.get(p.pool) ? rpc.blockTs - 30 : rpc.blockTs - 86_400;
       return [ts, 0n, 0n, true];
     });
-    rpc.on(p.pool, uniswapV3OracleAbi, "observe", (args) => [(args[0] as readonly number[]).map((ago) => 123_456_789n - BigInt(tick) * BigInt(ago)), [0n, 0n]]);
+    rpc.on(p.pool, uniswapV3OracleAbi, "observe", (args) => observed(args[0] as readonly number[], tick, liquidityForDepth(500_000, sq, true)));
     rpc.on(p.token, stockTokenAbi, "uiMultiplier", () => WAD);
     rpc.on(p.token, stockTokenAbi, "newUIMultiplier", () => WAD);
     rpc.on(p.token, stockTokenAbi, "effectiveAt", () => 0n);
@@ -406,7 +412,7 @@ describe("DEX second source (WETH pools + ETH/USD leg): same aggregate3, same ca
       rpc.on(address, uniswapV3OracleAbi, "slot0", () => [sq, tick, index.get(address) as number, 7200, 7200, 0, true]);
       rpc.on(address, uniswapV3OracleAbi, "liquidity", () => liquidityForDepth(depth, sq, quoteIsToken0, quoteDecimals));
       rpc.on(address, uniswapV3OracleAbi, "observations", (args) => [Number(args[0]) === index.get(address) ? rpc.blockTs - 30 : rpc.blockTs - 86_400, 0n, 0n, true]);
-      rpc.on(address, uniswapV3OracleAbi, "observe", (args) => [(args[0] as readonly number[]).map((ago) => 123_456_789n - BigInt(tick) * BigInt(ago)), (args[0] as readonly number[]).map(() => 0n)]);
+      rpc.on(address, uniswapV3OracleAbi, "observe", (args) => observed(args[0] as readonly number[], tick, liquidityForDepth(depth, sq, quoteIsToken0, quoteDecimals)));
     };
     // NVDA at 213.2 = 213.2 / 1946 WETH x 1946 USDG
     pool(wethPool, WETH, tokenOf(0), tickFor(213.2 / 1946, false, 18, 18), 60, true, 18);

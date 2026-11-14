@@ -266,7 +266,7 @@ describe("primary-confirm in source-check (mainnet default)", () => {
     let rows = await run({ dex: dexAt(1.005).dex });
     expect(dexRow(rows).status).toBe("PASS");
     expect(dexRow(rows).detail).toMatch(/^TWAP 600s \$\d+\.\d{4}\/share vs Chainlink \$184\.9801: 5\d\.\d bps \(threshold 200\)/);
-    expect(dexRow(rows).detail).toMatch(/2% depth \$(499,9\d\d|500,0\d\d) quote \(floor \$50,000\); cardinality 7200, history 86400s, last swap 30s ago; pool 0x\w+ \(fee 3000\), factory getPool verified$/);
+    expect(dexRow(rows).detail).toMatch(/2% depth \$(499,9\d\d|500,0\d\d) quote now, \$(499,9\d\d|500,0\d\d) time-averaged \(floor \$50,000\); cardinality 7200, history 86400s, last swap 30s ago; pool 0x\w+ \(fee 3000\), factory getPool verified$/);
     rows = await run({ dex: dexAt(1.03).dex });
     expect(dexRow(rows).status).toBe("WARN"); // ~300 bps: alerts at runtime, the price stays Chainlink
     rows = await run({ dex: dexAt(1.03).dex, confirmBps: 400 });
@@ -284,7 +284,7 @@ describe("primary-confirm in source-check (mainnet default)", () => {
     for (const pool of shallow.r.pools.values()) pool.depthUsd = 10_000;
     rows = await run({ dex: shallow.dex });
     expect(dexRow(rows).status).toBe("FAIL");
-    expect(dexRow(rows).detail).toMatch(/^insufficient depth: \$(9,9\d\d|10,0\d\d) moves the price 2% \(floor \$50,000\)/);
+    expect(dexRow(rows).detail).toMatch(/^insufficient depth: \$(9,9\d\d|10,0\d\d) moves the price 2% \(time-averaged over 600s; now \$(9,9\d\d|10,0\d\d); floor \$50,000\)/);
     const young = dexAt();
     for (const pool of young.r.pools.values()) pool.oldestTs = young.r.blockNow.timestamp - 100;
     rows = await run({ dex: young.dex });
@@ -321,10 +321,17 @@ describe("primary-confirm in source-check (mainnet default)", () => {
       [`dex NVDA/WETH 500 0x0000..7002`, "PASS"],
       ["dex confirm", "PASS"],
     ]);
-    expect(nvda[1]!.detail).toMatch(/2% depth 60\.0 WETH = \$116,\d{3} \(floor \$25,000\).*factory getPool verified$/);
-    expect(nvda[2]!.detail).toMatch(/^\$\d+\.\d{4}\/share vs Chainlink \$184\.9801: 40\.\d bps \(threshold 200\); depth-weighted median of 2 of 2 pools \(NVDA\/USDG 500 0x0000..7001, NVDA\/WETH 500 0x0000..7002\), reference NVDA\/USDG 500 0x0000..7001$/);
+    expect(nvda[1]!.detail).toMatch(/2% depth 60\.0 WETH = \$116,\d{3} now, \$116,\d{3} time-averaged \(floor \$25,000\).*factory getPool verified$/);
+    expect(nvda[2]!.detail).toMatch(/^\$\d+\.\d{4}\/share vs Chainlink \$184\.9801: 40\.\d bps \(threshold 200\); weighted median of 2 of 2 pools \(NVDA\/USDG 500 0x0000..7001, NVDA\/WETH 500 0x0000..7002\), reference NVDA\/USDG 500 0x0000..7001$/);
     expect(rows.find((x) => x.subject === "ETH/USD")).toMatchObject({ check: "dex leg", status: "PASS" });
-    expect(rows.find((x) => x.subject === "ETH/USD")!.detail).toMatch(/^WETH\/USDG 100 0x0000..7091: WETH \$194\d\.\d\d spot; 2% depth \$26\d,\d{3} \(floor \$50,000\), cardinality 7200/);
+    expect(rows.find((x) => x.subject === "ETH/USD")!.detail).toMatch(/^WETH\/USDG 100 0x0000..7091: WETH \$194\d\.\d\d spot; 2% depth \$26\d,\d{3} now, \$26\d,\d{3} time-averaged \(floor \$50,000\), cardinality 7200/);
+
+    // the thinner WETH pool 5% off: the reported value (USDG) agrees, the combined row still WARNs, naming the pool
+    const off = make();
+    off.r.pools.get(wethPool.toLowerCase())!.meanTick = tickFor((tokenUsd * 1.05) / 1946, false, 18, 18);
+    rows = await run({ dex: off.dex });
+    expect(rowsFor(rows, "NVDA").find((x) => x.check === "dex confirm")).toMatchObject({ status: "WARN" });
+    expect(rowsFor(rows, "NVDA").find((x) => x.check === "dex confirm")!.detail).toEndWith("; beyond the band: NVDA/WETH 500 0x0000..7002");
 
     // the USDG pool below its floor: WARN (the WETH pool still confirms), the combined row passes
     const thin = make();

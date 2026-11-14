@@ -87,8 +87,8 @@ WATERFALL_LIQ_ETH_USD=<USD per ETH, e.g. 3000>         # liquidation keeper gas 
 # the {"proxy","basis","token"} form (a plain address is refused). Chainlink alone signs (sourceCount 1); the DEX
 # confirm pools (Uniswap v3 TWAP over 1800 s, factory-verified, 2% depth floor minDepthUsd $25k: recalibrated from the
 # balance-based $50k; confirm-only, so a thin pool can only cause false alerts) come from the same file's dexConfirm.pools
-# (a list per ticker: the USDG pool, plus Stock Token / WETH pools priced through dexConfirm.ethUsd; several pools
-# combine as their depth-weighted median). Chainlink
+# (a list per ticker: the USDG pool, plus Stock Token / WETH pools priced through dexConfirm.ethUsd; any usable pool
+# beyond ORACLE_CONFIRM_BPS alerts, the weighted median is the reported value). Chainlink
 # read failure / oraclePaused / round older than heartbeat + grace in session: no price for that ticker (StalePrice
 # after maxPriceAge); the DEX never substitutes. A feed that stops updating but keeps answering is signed as fresh for
 # up to heartbeat + grace (24 h 10 min): only the confirm gap shows it. services/alerts: oracle_source_failing:chainlink

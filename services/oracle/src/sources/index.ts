@@ -159,7 +159,7 @@ export function buildSources(cfg: OracleConfig, log: Logger, now: () => number =
         readIntervalMs: cfg.cadence.dexReadMs,
         maxAgeMs: cfg.ORACLE_DEX_MAX_AGE_MS,
       },
-      "DEX TWAP confirm source enabled (Uniswap v3; several pools per ticker combine as a depth-weighted median; USDG assumed = $1: a depeg shows up as confirm divergence)",
+      "DEX TWAP confirm source enabled (Uniswap v3; any usable pool beyond the band alerts, the weighted median is reported; USDG assumed = $1: a depeg shows up as confirm divergence)",
     );
   }
 

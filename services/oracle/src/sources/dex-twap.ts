@@ -6,10 +6,6 @@
 //   - authenticity (once per pool, cached): factory.getPool(stockToken, quoteToken, fee) == pool (Uniswap's v3
 //     factory for the chain, packages/shared uniswap.ts), and token0 / token1 are the Stock Token and the quote token;
 //     the ETH/USD leg the same way (getPool(WETH, USDG, fee), its tokens WETH and USDG);
-//   - depth floor: the quote amount that moves the pool price 2% (DEPTH_MOVE_BPS) up or down within the active range,
-//     from in-range liquidity() and sqrtPriceX96 (depthQuote; the smaller direction), in USD (USDG assumed = $1; a WETH
-//     amount valued at the leg's TWAP) >= minDepthUsd. Not balanceOf(pool): out-of-range positions, uncollected fees
-//     and donations would count there;
 //   - observation history: the oldest observation (slot0 observationIndex + 1 mod cardinality, else index 0) must
 //     be at least twapSec old, i.e. the ring buffer covers the window (otherwise observe() would revert "OLD");
 //   - activity: the newest observation (written by the first swap of a block) must lie inside the window: a pool
@@ -18,17 +14,26 @@
 //     price of one whole Stock Token in whole quote tokens (orientation from token0, decimals: token config, quote
 //     decimals() read on-chain and cached); a WETH quote times the leg's WETH / USD TWAP over the SAME window (both
 //     geometric means, so the product is the TWAP of the stock / USD cross); the leg must pass its own depth floor,
-//     history and last-swap checks;
+//     history and last-swap checks, per window;
+//   - depth: the quote amount that moves the pool price 2% (DEPTH_MOVE_BPS) within the active range (depthQuote; the
+//     smaller direction), in USD (USDG assumed = $1; a WETH amount valued at the leg's TWAP). The FLOOR (minDepthUsd)
+//     uses the time-averaged depth: the harmonic-mean in-range liquidity over the window (the same observe() call's
+//     secondsPerLiquidityCumulativeX128, OracleLibrary.consult) at the mean tick, so one manipulated block (spot
+//     pushed into a sparse range) cannot knock a pool out. The combining WEIGHT is min(current, time-averaged) depth,
+//     so a narrow position added for the read block cannot buy the weight either. Not balanceOf(pool): out-of-range
+//     positions, uncollected fees and donations would count there;
 //   - per share: divided by the token's uiMultiplier (read at the same block) exactly like the Chainlink per-token
 //     feeds (tokenStateProblem, perSharePriceWad), whatever the quote; no observation while oraclePaused() or when the
 //     multiplier changed inside the window;
 //   - ts = the block's timestamp (never the receive time).
-// Several pools per ticker (combineDexPools): the confirm value is the depth-weighted median of the USABLE pools
-// (every check above passed), so a pool holding less than half the usable depth can neither raise nor suppress a
-// divergence while deeper pools say otherwise; the confirm is available while at least one pool is usable.
+// Several pools per ticker (combineDexPools): the confirm is available while at least one pool is usable (every
+// check above passed). Its reported value is the weighted median of the usable pools; every usable pool's price goes
+// along (SourceObservation.parts) and domain/confirm.ts flags a divergence when ANY of them is beyond the band, so
+// "confirmed" means every usable pool agrees, and hiding a divergence takes manipulating every pool. The WETH pools
+// share the one ETH/USD leg: their combined weight is capped at the leg's own weight.
 // RPC budget (deploy/server/MAINNET.md "RPC budget"): one pass reads every pool of the tick: the block, then ONE
-// Multicall3 aggregate3 at that block (slot0, liquidity, observe per pool and the leg; the four token views once per
-// Stock Token; allowFailure), and a second one only for the pools whose observation index moved (ring buffer
+// Multicall3 aggregate3 at that block (slot0, liquidity, observe per pool and per leg window; the four token views
+// once per Stock Token; allowFailure), and a second one only for the pools whose observation index moved (ring buffer
 // timestamps). `readIntervalMs` (ORACLE_DEX_READ_MS) reuses a pass that recent; its observations keep their block
 // timestamp, so maxAgeMs (ORACLE_DEX_MAX_AGE_MS) must exceed it.
 import { perSharePriceWad, tickToPrice } from "@bookrunner/shared";
@@ -54,7 +59,7 @@ export interface ResolvedDexPool {
   quote: DexQuote;
   fee: number;
   twapSec: number;
-  /** depth floor: USD moving the price DEPTH_MOVE_BPS (USDG = $1; WETH at the ETH/USD leg's TWAP) */
+  /** depth floor: USD moving the price DEPTH_MOVE_BPS over the window (USDG = $1; WETH at the ETH/USD leg's TWAP) */
   minDepthUsd: number;
 }
 
@@ -65,7 +70,7 @@ export interface ResolvedEthUsdLeg {
   /** USD quote token (USDG, assumed $1) */
   quoteToken: Address;
   fee: number;
-  /** 2% depth floor of the leg (USD) */
+  /** 2% depth floor of the leg (USD, time-averaged over each window) */
   minDepthUsd: number;
 }
 
@@ -82,6 +87,12 @@ export interface Slot0 {
   observationCardinality: number;
 }
 
+/** observe(secondsAgos): Uniswap's two cumulative arrays, one entry per secondsAgo. */
+export interface ObserveResult {
+  tickCumulatives: readonly bigint[];
+  secondsPerLiquidityCumulativeX128s: readonly bigint[];
+}
+
 export interface DexReader {
   block(): Promise<DexBlock>;
   poolTokens(pool: Address): Promise<{ token0: Address; token1: Address }>;
@@ -92,8 +103,8 @@ export interface DexReader {
   /** in-range liquidity */
   liquidity(pool: Address, blockNumber: bigint): Promise<bigint>;
   observation(pool: Address, index: number, blockNumber: bigint): Promise<{ blockTimestamp: number; initialized: boolean }>;
-  /** tickCumulatives for `secondsAgos` (reverts "OLD" when the history does not reach that far) */
-  observe(pool: Address, secondsAgos: readonly number[], blockNumber: bigint): Promise<readonly bigint[]>;
+  /** cumulatives for `secondsAgos` (reverts "OLD" when the history does not reach that far) */
+  observe(pool: Address, secondsAgos: readonly number[], blockNumber: bigint): Promise<ObserveResult>;
   tokenState(token: Address, blockNumber: bigint): Promise<TokenState>;
   /** Every pool and token read of a pass in one batched call at `blockNumber`. Absent: per-call reads (readPassPerCall). */
   readPass?(pools: readonly DexPoolRequest[], tokens: readonly Address[], blockNumber: bigint): Promise<DexPassReads>;
@@ -103,15 +114,15 @@ export interface DexReader {
 
 export interface DexPoolRequest {
   pool: Address;
-  /** observe(secondsAgos): [twapSec, 0] for a Stock Token pool, [every window of the WETH pools..., 0] for the leg */
-  secondsAgos: readonly number[];
+  /** one observe([w, 0]) per window: [twapSec] for a Stock Token pool, every window of its WETH pools for the leg */
+  windows: readonly number[];
 }
 
 export interface DexPoolRead {
   slot0: Settled<Slot0>;
   liquidity: Settled<bigint>;
-  /** observe(secondsAgos) tickCumulatives */
-  observe: Settled<readonly bigint[]>;
+  /** per window: observe([window, 0]) */
+  observe: Map<number, Settled<ObserveResult>>;
 }
 
 /** One pass's reads: per pool (lowercase address) and per Stock Token (lowercase address; once per token). */
@@ -128,8 +139,13 @@ export async function readPassPerCall(r: DexReader, pools: readonly DexPoolReque
   const [poolRows, tokenRows] = await Promise.all([
     Promise.all(
       pools.map(async (p) => {
-        const [slot0, liquidity, observe] = await Promise.all([settle(r.slot0(p.pool, blockNumber)), settle(r.liquidity(p.pool, blockNumber)), settle(r.observe(p.pool, p.secondsAgos, blockNumber))]);
-        return [lc(p.pool), { slot0, liquidity, observe }] as const;
+        const [slot0, liquidity, ...obs] = await Promise.all([
+          settle(r.slot0(p.pool, blockNumber)),
+          settle(r.liquidity(p.pool, blockNumber)),
+          ...p.windows.map((w) => settle(r.observe(p.pool, [w, 0], blockNumber))),
+        ]);
+        const observe = new Map(p.windows.map((w, i) => [w, obs[i] as Settled<ObserveResult>]));
+        return [lc(p.pool), { slot0: slot0 as Settled<Slot0>, liquidity: liquidity as Settled<bigint>, observe }] as const;
       }),
     ),
     Promise.all(tokens.map(async (t) => [lc(t), await settle(r.tokenState(t, blockNumber))] as const)),
@@ -160,6 +176,10 @@ export function viemDexReader(pub: PublicClient, multicall: Address | null = nul
     const res = await pub.multicall({ contracts, allowFailure: true, blockNumber, multicallAddress: multicall as Address, batchSize: 0 });
     return res.map((r) => (r.status === "success" ? settledOk(r.result as unknown) : settledErr(r.error)));
   };
+  const observeResult = (v: unknown): ObserveResult => {
+    const [tickCumulatives, secondsPerLiquidityCumulativeX128s] = v as readonly [readonly bigint[], readonly bigint[]];
+    return { tickCumulatives, secondsPerLiquidityCumulativeX128s };
+  };
   const multicalled: Pick<DexReader, "readPass" | "readObservations"> = multicall
     ? {
         async readPass(pools, toks, blockNumber) {
@@ -168,7 +188,7 @@ export function viemDexReader(pub: PublicClient, multicall: Address | null = nul
               ...pools.flatMap((p) => [
                 { address: p.pool, abi: uniswapV3OracleAbi, functionName: "slot0" },
                 { address: p.pool, abi: uniswapV3OracleAbi, functionName: "liquidity" },
-                { address: p.pool, abi: uniswapV3OracleAbi, functionName: "observe", args: [p.secondsAgos.map(Number)] },
+                ...p.windows.map((w) => ({ address: p.pool, abi: uniswapV3OracleAbi, functionName: "observe", args: [[w, 0]] })),
               ]),
               ...toks.flatMap((t) => TOKEN_STATE_VIEWS.map((functionName) => ({ address: t, abi: stockTokenAbi, functionName }))),
             ],
@@ -180,18 +200,18 @@ export function viemDexReader(pub: PublicClient, multicall: Address | null = nul
           for (const p of pools) {
             const s0 = next();
             const liq = next();
-            const obs = next();
+            const observe = new Map<number, Settled<ObserveResult>>();
+            for (const w of p.windows) {
+              const o = next();
+              observe.set(w, o.ok ? settledOk(observeResult(o.value)) : (o as Settled<never>));
+            }
             const slot0: Settled<Slot0> = s0.ok
               ? (() => {
                   const s = s0.value as readonly [bigint, number, number, number];
                   return settledOk({ sqrtPriceX96: s[0], tick: Number(s[1]), observationIndex: Number(s[2]), observationCardinality: Number(s[3]) });
                 })()
               : s0;
-            out.pools.set(lc(p.pool), {
-              slot0,
-              liquidity: liq.ok ? settledOk(liq.value as bigint) : liq,
-              observe: obs.ok ? settledOk((obs.value as readonly [readonly bigint[], unknown])[0]) : obs,
-            });
+            out.pools.set(lc(p.pool), { slot0, liquidity: liq.ok ? settledOk(liq.value as bigint) : liq, observe });
           }
           for (const t of toks) out.tokens.set(lc(t), tokenStateFromViews(TOKEN_STATE_VIEWS.map(() => next())));
           return out;
@@ -240,8 +260,7 @@ export function viemDexReader(pub: PublicClient, multicall: Address | null = nul
       return { blockTimestamp: Number(o[0]), initialized: o[3] };
     },
     async observe(pool, secondsAgos, blockNumber) {
-      const [cum] = await pub.readContract({ address: pool, abi: uniswapV3OracleAbi, functionName: "observe", args: [secondsAgos.map(Number)], blockNumber });
-      return cum;
+      return observeResult(await pub.readContract({ address: pool, abi: uniswapV3OracleAbi, functionName: "observe", args: [secondsAgos.map(Number)], blockNumber }));
     },
     tokenState: (token, blockNumber) => tokens.tokenState(token, blockNumber),
   };
@@ -255,6 +274,25 @@ export function arithmeticMeanTick(tickCumulativeAgo: bigint, tickCumulativeNow:
   let t = delta / s;
   if (delta < 0n && delta % s !== 0n) t -= 1n;
   return Number(t);
+}
+
+const MAX_UINT160 = (1n << 160n) - 1n;
+
+/**
+ * Uniswap OracleLibrary.consult: the harmonic-mean in-range liquidity over `secs` from two
+ * secondsPerLiquidityCumulativeX128 values (secs x (2^160 - 1) / (delta << 32)). A window without in-range liquidity
+ * accumulates seconds / 1 there, so it drives the mean towards 0; a non-increasing delta gives 0 (never usable).
+ */
+export function harmonicMeanLiquidity(secondsPerLiquidityAgoX128: bigint, secondsPerLiquidityNowX128: bigint, secs: number): bigint {
+  if (!Number.isInteger(secs) || secs <= 0) throw new Error(`TWAP window must be a positive integer (s), got ${secs}`);
+  const delta = secondsPerLiquidityNowX128 - secondsPerLiquidityAgoX128;
+  if (delta <= 0n) return 0n;
+  return (BigInt(secs) * MAX_UINT160) / (delta << 32n);
+}
+
+/** sqrtPriceX96 at a tick (float precision: enough for a depth figure). */
+export function sqrtPriceX96AtTick(tick: number): bigint {
+  return BigInt(Math.round(Math.sqrt(1.0001 ** tick) * 2 ** 96));
 }
 
 /**
@@ -292,10 +330,14 @@ export function perSharePrice(tokenPrice: number, uiMultiplier: bigint): number 
 
 /** Diagnostics carried by every observation, usable or not (source-check, /health errors). */
 export interface DexDiagnostics {
-  /** quote tokens moving the price DEPTH_MOVE_BPS within the active range (WETH for a WETH-quoted pool) */
+  /** quote tokens moving the price DEPTH_MOVE_BPS within the active range NOW (WETH for a WETH-quoted pool) */
   depthQuote?: number;
   /** the same in USD (USDG = $1; WETH at the ETH/USD leg's TWAP, or its spot when the leg is unusable) */
   depthUsd?: number;
+  /** USD moving the price DEPTH_MOVE_BPS at the window's harmonic-mean liquidity and mean tick: the FLOOR's measure */
+  twapDepthUsd?: number;
+  /** combining weight: min(depthUsd, twapDepthUsd), the WETH pools' total capped at the ETH/USD leg's own weight */
+  weightUsd?: number;
   cardinality?: number;
   /** age of the oldest observation (s): how far back observe() can reach */
   historySec?: number;
@@ -328,8 +370,9 @@ export type DexPoolObservation =
   | (DexPoolId & { ok: false; reason: string } & DexDiagnostics);
 
 /**
- * A ticker's confirm observation: usable = the reference pool's observation (combineDexPools) plus every pool's;
- * not usable = why (one pool: its reason and diagnostics; several: every pool's reason).
+ * A ticker's confirm observation: usable = the reference pool's observation with `price` the weighted median of the
+ * usable pools (combineDexPools), plus every pool's; not usable = why (one pool: its reason and diagnostics; several:
+ * every pool's reason).
  */
 export type DexObservation =
   | (Extract<DexPoolObservation, { ok: true }> & { pools: DexPoolObservation[] })
@@ -341,36 +384,65 @@ export type DexLegObservation =
   | ({ ok: false; label: string; reason: string; spotPrice?: number } & Omit<DexDiagnostics, "depthQuote">);
 
 /**
- * The value a ticker's usable pools confirm with: the depth-weighted (lower) median of their per-share prices. Sorted
- * by price, the first pool at which the cumulative USD depth reaches half the total. It is always one of the pools,
- * so when every usable pool diverges it diverges too, and a pool holding less than half the usable depth decides
- * nothing while the deeper pools agree among themselves: it can neither raise a false divergence nor hide a real one
- * (with two pools the deeper one decides). Empty input throws.
+ * The value a ticker's usable pools report: the weighted median of their per-share prices (weights: weightUsd).
+ * Sorted by price, the value at which the cumulative weight reaches half the total; when it reaches exactly half at a
+ * pool, the mean of that pool's and the next pool's prices (a 50/50 split favours neither side). `reference` is the
+ * pool at (or just below) the median. A pool holding less than half the weight never moves the value outside the
+ * range of the others. Empty input throws. Divergence is NOT decided on this value alone (combineDexPools: parts).
  */
-export function depthWeightedMedian<T extends { price: number; depthUsd: number }>(xs: readonly T[]): T {
-  if (xs.length === 0) throw new Error("depth-weighted median of no pools");
-  const sorted = [...xs].sort((a, b) => a.price - b.price || b.depthUsd - a.depthUsd);
-  const total = sorted.reduce((s, x) => s + Math.max(0, x.depthUsd), 0);
-  let cum = 0;
-  for (const x of sorted) {
-    cum += Math.max(0, x.depthUsd);
-    if (cum >= total / 2) return x;
+export function weightedMedian<T extends { price: number; weightUsd: number }>(xs: readonly T[]): { value: number; reference: T } {
+  if (xs.length === 0) throw new Error("weighted median of no pools");
+  const sorted = [...xs].sort((a, b) => a.price - b.price || b.weightUsd - a.weightUsd);
+  const w = (x: T) => Math.max(0, x.weightUsd);
+  const total = sorted.reduce((s, x) => s + w(x), 0);
+  if (total <= 0) {
+    // no weight at all: the plain median
+    const mid = sorted.length >> 1;
+    const ref = sorted[sorted.length % 2 === 1 ? mid : mid - 1] as T;
+    return { value: sorted.length % 2 === 1 ? ref.price : (ref.price + (sorted[mid] as T).price) / 2, reference: ref };
   }
-  return sorted[sorted.length - 1] as T;
+  let cum = 0;
+  for (let i = 0; i < sorted.length; i++) {
+    const x = sorted[i] as T;
+    cum += w(x);
+    if (cum >= total / 2 - total * 1e-12) {
+      const next = sorted[i + 1];
+      const tie = next !== undefined && Math.abs(cum - total / 2) <= total * 1e-12;
+      return { value: tie ? (x.price + next.price) / 2 : x.price, reference: x };
+    }
+  }
+  const last = sorted[sorted.length - 1] as T;
+  return { value: last.price, reference: last };
 }
 
 /**
- * One ticker's pools -> its confirm observation. Available when at least one pool is usable (passed its depth floor,
- * history, last-swap, token-state and leg checks); the value is the depth-weighted median of the usable ones
- * (depthWeightedMedian), so divergence is measured against it.
+ * One ticker's pools -> its confirm observation. Available when at least one pool is usable (passed its history,
+ * last-swap, token-state, leg and time-averaged depth checks); `price` = the weighted median of the usable ones
+ * (weightedMedian), the other fields the reference pool's. The caller passes every usable pool's price on as `parts`
+ * (fetch), so a divergence of any one of them is flagged (domain/confirm.ts).
  */
 export function combineDexPools(results: readonly DexPoolObservation[]): DexObservation {
   const usable = results.filter((r): r is Extract<DexPoolObservation, { ok: true }> => r.ok);
-  if (usable.length > 0) return { ...depthWeightedMedian(usable), pools: [...results] };
+  if (usable.length > 0) {
+    const m = weightedMedian(usable);
+    return { ...m.reference, price: m.value, pools: [...results] };
+  }
   if (results.length === 0) return { ok: false, reason: "no DEX confirm pool configured" };
   if (results.length === 1) return { ...(results[0] as Extract<DexPoolObservation, { ok: false }>), pools: [...results] };
   const why = results.map((r) => `${r.label}: ${r.ok ? "usable" : r.reason}`).join("; ");
   return { ok: false, reason: `no usable confirm pool (${results.length} configured): ${why}`, pools: [...results] };
+}
+
+/**
+ * The WETH-quoted pools all price through the one ETH/USD leg: scales their weights so that together they weigh at
+ * most `legWeightUsd` (one shared leg is not several independent sources). Returns new observations, same order.
+ */
+export function capSharedLeg(results: readonly DexPoolObservation[], legWeightUsd: number): DexPoolObservation[] {
+  const eth = results.filter((r) => r.ok && r.quote === "eth");
+  const total = eth.reduce((s, r) => s + (r.ok ? r.weightUsd : 0), 0);
+  if (total <= legWeightUsd || total <= 0) return [...results];
+  const k = Math.max(0, legWeightUsd) / total;
+  return results.map((r) => (r.ok && r.quote === "eth" ? { ...r, weightUsd: r.weightUsd * k } : r));
 }
 
 export interface DexTwapOptions {
@@ -402,8 +474,8 @@ export function ethLegLabel(l: Pick<ResolvedEthUsdLeg, "pool" | "fee">): string 
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
-/** The leg at one TWAP window: WETH in USD over it, or why not. */
-type LegQuote = { ok: true; price: number; spot: number } | { ok: false; reason: string; spot?: number };
+/** The leg at one TWAP window: WETH in USD over it and the leg's weight, or why not. */
+type LegQuote = { ok: true; price: number; spot: number; weightUsd: number } | { ok: false; reason: string; spot?: number };
 
 interface PoolCheck {
   /** the pool's base (Stock Token, or WETH for the leg) is token0 */
@@ -462,11 +534,15 @@ export class DexTwapSource implements PriceSource {
     return this.opts.factory !== null;
   }
 
-  /** Throws with the reason when there is no usable observation (per-source health shows it). */
+  /**
+   * Throws with the reason when there is no usable observation (per-source health shows it). `price` is the weighted
+   * median; `parts` every usable pool's own price (a divergence of any one is flagged by domain/confirm.ts).
+   */
   async fetch(ticker: string): Promise<SourceObservation | null> {
     const o = await this.observe(ticker);
     if (!o.ok) throw new Error(o.reason);
-    return { price: o.price, ts: o.ts, maxAgeMs: this.maxAgeMs };
+    const parts = o.pools.flatMap((p) => (p.ok ? [{ label: p.label, price: p.price }] : []));
+    return { price: o.price, ts: o.ts, maxAgeMs: this.maxAgeMs, ...(o.pools.length > 1 ? { parts } : {}) };
   }
 
   /**
@@ -480,9 +556,10 @@ export class DexTwapSource implements PriceSource {
     if (pools.length === 0) return `${DEX_SOURCE_NAME}: ${o.ok ? "no pool read" : o.reason}`;
     const used = pools.filter((p) => p.ok);
     const failed = pools.filter((p): p is Extract<DexPoolObservation, { ok: false }> => !p.ok);
-    const usedText = used.map((p) => `${p.label} $${p.price.toFixed(2)} (2% depth ${fmtUsd(p.depthUsd)}${o.ok && p.pool === o.pool ? ", reference" : ""})`);
+    const usedText = used.map((p) => `${p.label} $${p.price.toFixed(2)} (2% depth ${fmtUsd(p.twapDepthUsd)} avg / ${fmtUsd(p.depthUsd)} now, weight ${fmtUsd(p.weightUsd)}${o.ok && p.pool === o.pool ? ", reference" : ""})`);
     const failedText = failed.map((p) => `${p.label}: ${p.reason}`);
-    return `${DEX_SOURCE_NAME}: used ${usedText.length > 0 ? usedText.join(", ") : "none"}${failedText.length > 0 ? `; failed ${failedText.join("; ")}` : ""}`;
+    const value = o.ok && used.length > 1 ? ` (weighted median $${o.price.toFixed(2)})` : "";
+    return `${DEX_SOURCE_NAME}: used ${usedText.length > 0 ? usedText.join(", ") : "none"}${value}${failedText.length > 0 ? `; failed ${failedText.join("; ")}` : ""}`;
   }
 
   private cached<K, V>(m: Map<K, Promise<V>>, k: K, f: () => Promise<V>): Promise<V> {
@@ -564,7 +641,7 @@ export class DexTwapSource implements PriceSource {
       else usable.push({ t: x.t, p: x.p, label: x.label, tokenIsToken0: x.check.baseIsToken0, quoteDecimals: x.quoteDecimals });
     }
 
-    // the leg is read only when a WETH pool is usable, observed at every window those pools use
+    // the leg is read only when a WETH pool is usable, observed at every window those pools use (one observe each)
     const windows = [...new Set(usable.filter((u) => u.p.quote === "eth").map((u) => u.p.twapSec))].sort((a, b) => a - b);
     const legLabel = leg ? ethLegLabel(leg) : "";
     let legReady: { wethIsToken0: boolean; wethDecimals: number; usdDecimals: number } | null = null;
@@ -578,9 +655,10 @@ export class DexTwapSource implements PriceSource {
     // replaced by evaluateLeg when the leg is read this pass
     this.lastLeg = leg ? { ok: false, label: legLabel, reason: legProblem ?? "not read (no usable WETH-quoted pool)" } : null;
 
+    let legAt: Map<number, LegQuote> | null = null;
     if (usable.length > 0) {
-      const req: DexPoolRequest[] = usable.map((u) => ({ pool: u.p.pool, secondsAgos: [u.p.twapSec, 0] }));
-      if (readLeg && leg) req.push({ pool: leg.pool, secondsAgos: [...windows, 0] });
+      const req: DexPoolRequest[] = usable.map((u) => ({ pool: u.p.pool, windows: [u.p.twapSec] }));
+      if (readLeg && leg) req.push({ pool: leg.pool, windows });
       const tokens = [...new Map(usable.map((u) => [lc(u.p.token), u.p.token])).values()];
       const reads = this.reader.readPass ? await this.reader.readPass(req, tokens, block.number) : await readPassPerCall(this.reader, req, tokens, block.number);
       // ring buffer timestamps: one batched read for every pool whose observation index moved since the cached one
@@ -590,7 +668,7 @@ export class DexTwapSource implements PriceSource {
       });
       if (moved.length > 0) await this.readRings(moved, block.number);
 
-      const legAt = readLeg && leg && legReady ? this.evaluateLeg(leg, legLabel, legReady, windows, block, reads.pools.get(lc(leg.pool))) : null;
+      legAt = readLeg && leg && legReady ? this.evaluateLeg(leg, legLabel, legReady, windows, block, reads.pools.get(lc(leg.pool))) : null;
       for (const u of usable) {
         const id: DexPoolId = { pool: u.p.pool, label: u.label, quote: u.p.quote };
         const r = reads.pools.get(lc(u.p.pool));
@@ -599,7 +677,7 @@ export class DexTwapSource implements PriceSource {
           if (!r || !ts) throw new Error("pool not read");
           const usd: LegQuote =
             u.p.quote === "usd"
-              ? { ok: true, price: 1, spot: 1 }
+              ? { ok: true, price: 1, spot: 1, weightUsd: Number.POSITIVE_INFINITY }
               : legAt
                 ? (legAt.get(u.p.twapSec) ?? { ok: false, reason: `${legLabel}: window not read` })
                 : { ok: false, reason: `${legLabel}: ${legProblem ?? "not read"}` };
@@ -614,7 +692,13 @@ export class DexTwapSource implements PriceSource {
     for (const [t, rs] of results) {
       // in the configured order (failed checks were collected first)
       const order = (o: DexPoolObservation) => (this.pools[t] ?? []).findIndex((p) => p.pool === o.pool);
-      out.set(t, combineDexPools([...rs].sort((a, b) => order(a) - order(b))));
+      const sorted = [...rs].sort((a, b) => order(a) - order(b));
+      // one shared leg: the WETH pools together weigh at most its weight at their (smallest) window weight
+      const legWeights = sorted.flatMap((r) => {
+        const q = r.ok && r.quote === "eth" ? legAt?.get(r.twapSec) : undefined;
+        return q?.ok ? [q.weightUsd] : [];
+      });
+      out.set(t, combineDexPools(legWeights.length > 0 ? capSharedLeg(sorted, Math.min(...legWeights)) : sorted));
     }
     return out;
   }
@@ -645,8 +729,10 @@ export class DexTwapSource implements PriceSource {
   }
 
   /**
-   * The ETH/USD leg at every window of the WETH pools: its 2% depth (USD) against its floor, the history covering the
-   * longest window, a swap inside each window, then WETH in USD from observe([...windows, 0]). Also records lastLeg.
+   * The ETH/USD leg at every window of the WETH pools, each window on its own: history covering it, a swap inside
+   * it, observe([w, 0]), the time-averaged 2% depth (harmonic-mean liquidity at the mean tick, USD) against the leg's
+   * floor; WETH in USD over it and the leg's weight min(current, time-averaged depth). Records lastLeg: ok when at
+   * least one window is usable, else the first window's reason.
    */
   private evaluateLeg(
     leg: ResolvedEthUsdLeg,
@@ -666,29 +752,58 @@ export class DexTwapSource implements PriceSource {
     if (!r.liquidity.ok) return fail(`pool not readable: ${errMsg(r.liquidity.error)}`);
     const slot0 = r.slot0.value;
     const spot = tokenPriceAtTick(slot0.tick, c.wethIsToken0, c.wethDecimals, c.usdDecimals);
-    const depthUsd = depthQuote(r.liquidity.value, slot0.sqrtPriceX96, !c.wethIsToken0, c.usdDecimals);
-    const diag: Omit<DexDiagnostics, "depthQuote"> = { depthUsd, cardinality: slot0.observationCardinality };
-    if (depthUsd < leg.minDepthUsd) return fail(`insufficient depth: ${fmtUsd(depthUsd)} moves the price ${DEPTH_MOVE_BPS / 100}% (floor ${fmtUsd(leg.minDepthUsd)})`, diag, spot);
+    const depthNow = depthQuote(r.liquidity.value, slot0.sqrtPriceX96, !c.wethIsToken0, c.usdDecimals);
+    const diag: Omit<DexDiagnostics, "depthQuote"> = { depthUsd: depthNow, cardinality: slot0.observationCardinality };
     const ring = this.ringCache.get(leg.pool);
     if (!ring || !this.ringHit(leg.pool, slot0)) return fail("observation ring not read", diag, spot);
-    diag.historySec = block.timestamp - ring.oldest;
-    diag.lastSwapAgeSec = block.timestamp - ring.newest;
-    const longest = Math.max(...windows);
-    if (diag.historySec < longest) return fail(`observation history ${diag.historySec}s < TWAP window ${longest}s`, diag, spot);
-    if (!r.observe.ok) return fail(`observe([${windows.join(", ")}, 0]) failed: ${errMsg(r.observe.error)}`, diag, spot);
-    const cum = r.observe.value;
-    if (cum.length !== windows.length + 1) return fail(`observe returned ${cum.length} values`, diag, spot);
-    const now = cum[windows.length] as bigint;
+    const historySec = block.timestamp - ring.oldest;
+    const lastSwapAgeSec = block.timestamp - ring.newest;
+    diag.historySec = historySec;
+    diag.lastSwapAgeSec = lastSwapAgeSec;
     const out = new Map<number, LegQuote>();
-    windows.forEach((w, i) => {
-      if ((diag.lastSwapAgeSec as number) >= w) {
-        out.set(w, { ok: false, reason: `${label}: no swap in the ${w}s TWAP window (last swap ${diag.lastSwapAgeSec}s ago)`, spot });
-        return;
+    const failed: string[] = [];
+    let best: { twapDepthUsd: number; weightUsd: number } | null = null;
+    const no = (w: number, reason: string) => {
+      failed.push(reason);
+      out.set(w, { ok: false, reason: `${label}: ${reason}`, spot });
+    };
+    for (const w of windows) {
+      if (historySec < w) {
+        no(w, `observation history ${historySec}s < TWAP window ${w}s`);
+        continue;
       }
-      const price = tokenPriceAtTick(arithmeticMeanTick(cum[i] as bigint, now, w), c.wethIsToken0, c.wethDecimals, c.usdDecimals);
-      out.set(w, Number.isFinite(price) && price > 0 ? { ok: true, price, spot } : { ok: false, reason: `${label}: TWAP price ${price} not usable`, spot });
-    });
-    this.lastLeg = { ok: true, label, spotPrice: spot, depthUsd, cardinality: slot0.observationCardinality, historySec: diag.historySec, lastSwapAgeSec: diag.lastSwapAgeSec };
+      if (lastSwapAgeSec >= w) {
+        no(w, `no swap in the ${w}s TWAP window (last swap ${lastSwapAgeSec}s ago)`);
+        continue;
+      }
+      const o = r.observe.get(w);
+      if (!o?.ok) {
+        no(w, `observe([${w}, 0]) failed: ${o ? errMsg(o.error) : "not read"}`);
+        continue;
+      }
+      const { tickCumulatives: tc, secondsPerLiquidityCumulativeX128s: spl } = o.value;
+      if (tc.length !== 2 || spl.length !== 2) {
+        no(w, `observe returned ${tc.length} values`);
+        continue;
+      }
+      const meanTick = arithmeticMeanTick(tc[0] as bigint, tc[1] as bigint, w);
+      const price = tokenPriceAtTick(meanTick, c.wethIsToken0, c.wethDecimals, c.usdDecimals);
+      if (!Number.isFinite(price) || price <= 0) {
+        no(w, `TWAP price ${price} not usable`);
+        continue;
+      }
+      const twapDepthUsd = depthQuote(harmonicMeanLiquidity(spl[0] as bigint, spl[1] as bigint, w), sqrtPriceX96AtTick(meanTick), !c.wethIsToken0, c.usdDecimals);
+      if (twapDepthUsd < leg.minDepthUsd) {
+        no(w, `insufficient depth: ${fmtUsd(twapDepthUsd)} moves the price ${DEPTH_MOVE_BPS / 100}% (time-averaged over ${w}s; now ${fmtUsd(depthNow)}; floor ${fmtUsd(leg.minDepthUsd)})`);
+        continue;
+      }
+      const weightUsd = Math.min(depthNow, twapDepthUsd);
+      out.set(w, { ok: true, price, spot, weightUsd });
+      if (!best || weightUsd < best.weightUsd) best = { twapDepthUsd, weightUsd };
+    }
+    this.lastLeg = best
+      ? { ok: true, label, spotPrice: spot, depthUsd: depthNow, twapDepthUsd: best.twapDepthUsd, weightUsd: best.weightUsd, cardinality: slot0.observationCardinality, historySec, lastSwapAgeSec }
+      : { ok: false, label, reason: failed[0] ?? "no window", spotPrice: spot, ...diag };
     return out;
   }
 
@@ -721,10 +836,6 @@ export class DexTwapSource implements PriceSource {
     }
     const depthUsd = depth * usd.price;
     diag.depthUsd = depthUsd;
-    if (depthUsd < p.minDepthUsd) {
-      const inWeth = p.quote === "eth" ? `; ${depth.toFixed(1)} WETH at ${fmtUsd(usd.price)}` : "";
-      return { ok: false, reason: `insufficient depth: ${fmtUsd(depthUsd)} moves the price ${DEPTH_MOVE_BPS / 100}% (floor ${fmtUsd(p.minDepthUsd)}${inWeth})`, ...diag };
-    }
 
     const ring = this.ringCache.get(p.pool);
     if (!ring || !this.ringHit(p.pool, slot0)) throw new Error("observation ring not read");
@@ -748,10 +859,22 @@ export class DexTwapSource implements PriceSource {
       return { ok: false, reason: `uiMultiplier changed at ${eff}, inside the ${p.twapSec}s TWAP window`, ...diag };
     }
 
-    if (!r.observe.ok) return { ok: false, reason: `observe([${p.twapSec}, 0]) failed: ${errMsg(r.observe.error)}`, ...diag };
-    const cum = r.observe.value;
-    if (cum.length !== 2) return { ok: false, reason: `observe returned ${cum.length} values`, ...diag };
+    const obs = r.observe.get(p.twapSec);
+    if (!obs?.ok) return { ok: false, reason: `observe([${p.twapSec}, 0]) failed: ${obs ? errMsg(obs.error) : "not read"}`, ...diag };
+    const { tickCumulatives: cum, secondsPerLiquidityCumulativeX128s: spl } = obs.value;
+    if (cum.length !== 2 || spl.length !== 2) return { ok: false, reason: `observe returned ${cum.length} values`, ...diag };
     const meanTick = arithmeticMeanTick(cum[0] as bigint, cum[1] as bigint, p.twapSec);
+    // the floor's measure: the window's harmonic-mean liquidity at the mean tick (one pushed block cannot move it)
+    const twapDepthUsd = depthQuote(harmonicMeanLiquidity(spl[0] as bigint, spl[1] as bigint, p.twapSec), sqrtPriceX96AtTick(meanTick), !tokenIsToken0, quoteDecimals) * usd.price;
+    diag.twapDepthUsd = twapDepthUsd;
+    if (twapDepthUsd < p.minDepthUsd) {
+      const inWeth = p.quote === "eth" ? `; ${(twapDepthUsd / usd.price).toFixed(1)} WETH at ${fmtUsd(usd.price)}` : "";
+      return {
+        ok: false,
+        reason: `insufficient depth: ${fmtUsd(twapDepthUsd)} moves the price ${DEPTH_MOVE_BPS / 100}% (time-averaged over ${p.twapSec}s; now ${fmtUsd(depthUsd)}; floor ${fmtUsd(p.minDepthUsd)}${inWeth})`,
+        ...diag,
+      };
+    }
     // USD per Stock Token: the pool's quote-token TWAP times the quote's USD TWAP over the same window; the
     // multiplier is then divided out exactly as on the USDG path (per token -> per share)
     const tokenPrice = tokenPriceAtTick(meanTick, tokenIsToken0, p.tokenDecimals, quoteDecimals) * usd.price;
@@ -767,6 +890,9 @@ export class DexTwapSource implements PriceSource {
       uiMultiplier: tokenState.uiMultiplier,
       depthQuote: depth,
       depthUsd,
+      twapDepthUsd,
+      // a narrow position added for the read block raises depthUsd, not the window's average: it buys no weight
+      weightUsd: Math.min(depthUsd, twapDepthUsd),
       cardinality,
       historySec: diag.historySec,
       lastSwapAgeSec: diag.lastSwapAgeSec,

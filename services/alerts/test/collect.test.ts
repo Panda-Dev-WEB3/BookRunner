@@ -214,7 +214,7 @@ describe("collect", () => {
         { name: "odd", kind: "x", role: "boss", lastOkAt: null, failingSince: null, failingTickers: [], lastError: null },
       ],
       confirm: [
-        { priceId: "NVDA", status: "diverged", diffBps: 260.4, since: NOW - 180_000, checkedAt: NOW - 1000, primaryPrice: 180, primaryTs: NOW - 900_000, lagSince: NOW - 600_000, confirmers: [{ name: "dex-twap", price: 184.7, diffBps: 260.4 }, { name: 5 }, { name: "pyth", price: "x", diffBps: 1 }] },
+        { priceId: "NVDA", status: "diverged", diffBps: 260.4, since: NOW - 180_000, checkedAt: NOW - 1000, primaryPrice: 180, primaryTs: NOW - 900_000, lagSince: NOW - 600_000, confirmers: [{ name: "dex-twap", price: 184.7, diffBps: 260.4, diverged: [{ label: "NVDA/WETH 3000 0xC0Be..b807", price: 190, diffBps: 555.6 }, { label: 3 }] }, { name: 5 }, { name: "pyth", price: "x", diffBps: 1 }] },
         { priceId: "TSLA", status: "unavailable", diffBps: null, since: NOW - 700_000, checkedAt: NOW - 1000, primaryPrice: 250, confirmers: [], notes: ["dex-twap: used none; failed TSLA/USDG 3000 0xf4AC..89E3: no swap", 7, "", "y".repeat(700)] },
         { priceId: "AAPL", status: "closed", diffBps: null, since: null, checkedAt: NOW - 1000, primaryPrice: null },
         { priceId: "AMZN", status: "no-primary", diffBps: null, since: NOW - 60_000, checkedAt: NOW - 1000, primaryPrice: null, confirmers: [] },
@@ -234,7 +234,7 @@ describe("collect", () => {
       ["odd", "median"], // unknown role -> median
     ]);
     expect(p.confirm).toEqual([
-      { priceId: "NVDA", status: "diverged", diffBps: 260.4, since: NOW - 180_000, checkedAt: NOW - 1000, primaryPrice: 180, primaryTs: NOW - 900_000, lagSince: NOW - 600_000, confirmers: [{ name: "dex-twap", price: 184.7, diffBps: 260.4 }] },
+      { priceId: "NVDA", status: "diverged", diffBps: 260.4, since: NOW - 180_000, checkedAt: NOW - 1000, primaryPrice: 180, primaryTs: NOW - 900_000, lagSince: NOW - 600_000, confirmers: [{ name: "dex-twap", price: 184.7, diffBps: 260.4, diverged: [{ label: "NVDA/WETH 3000 0xC0Be..b807", price: 190, diffBps: 555.6 }] }] },
       { priceId: "TSLA", status: "unavailable", diffBps: null, since: NOW - 700_000, checkedAt: NOW - 1000, primaryPrice: 250, primaryTs: null, lagSince: null, confirmers: [], notes: ["dex-twap: used none; failed TSLA/USDG 3000 0xf4AC..89E3: no swap", "y".repeat(600)] },
       { priceId: "AAPL", status: "closed", diffBps: null, since: null, checkedAt: NOW - 1000, primaryPrice: null, primaryTs: null, lagSince: null, confirmers: [] },
       { priceId: "AMZN", status: "no-primary", diffBps: null, since: NOW - 60_000, checkedAt: NOW - 1000, primaryPrice: null, primaryTs: null, lagSince: null, confirmers: [] },

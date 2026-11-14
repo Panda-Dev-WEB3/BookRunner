@@ -676,7 +676,8 @@ const bps = (b: number | null) => (b === null ? "?" : `${Math.round(b)} bps`);
  *   (the primary alert's); prices
  *   continue from Chainlink. No "two sources failing on one ticker" escalation.
  * - oracle_price_missing as above, but explained (suppressed) only by an alerting primary failure on that ticker.
- * - oracle_confirm_divergence:<priceId>: "diverged" for oracleConfirmDivergenceSec; critical above 2x confirmBps or
+ * - oracle_confirm_divergence:<priceId>: "diverged" for oracleConfirmDivergenceSec (a confirmer, or ANY DEX pool behind
+ *   it, beyond the band; the pools beyond it are named); critical above 2x confirmBps (the reported value's gap) or
  *   when oracleConfirmCriticalTickers tickers are diverged that long at once. The price stays Chainlink.
  * - oracle_confirm_unavailable:<priceId>: "unavailable" (no fresh confirm source) for oracleConfirmUnavailableSec:
  *   Chainlink is published unconfirmed. "closed" (off-hours) and "no-primary" (Chainlink itself has no fresh
@@ -796,7 +797,14 @@ function oraclePrimaryConfirm(o: OracleProbe, s: Snapshot, c: RuleConfig): Condi
   for (const x of diverged) {
     const wide = x.diffBps !== null && x.diffBps > 2 * band;
     const vs = x.confirmers.length ? x.confirmers.map((k) => `${k.name} ${px(k.price)} (${bps(k.diffBps)})`).join(", ") : "?";
-    const why = [wide ? `above 2x the ${band} bps limit` : null, many ? `${diverged.length} tickers diverged at once` : null].filter(Boolean).join("; ");
+    const pools = x.confirmers.flatMap((k) => (k.diverged ?? []).map((p) => `${plain(p.label, 64)} ${px(p.price)} (${bps(p.diffBps)})`));
+    const why = [
+      wide ? `above 2x the ${band} bps limit` : null,
+      many ? `${diverged.length} tickers diverged at once` : null,
+      pools.length > 0 ? `beyond the limit: ${pools.join(", ")}` : null,
+    ]
+      .filter(Boolean)
+      .join("; ");
     out.push({
       key: `oracle_confirm_divergence:${x.priceId}`,
       rule: "oracle_confirm_divergence",

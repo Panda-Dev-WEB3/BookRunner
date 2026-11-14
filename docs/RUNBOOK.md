@@ -306,10 +306,15 @@ Mainnet runs the **primary + confirm** policy (`ORACLE_POLICY=primary-confirm`, 
   (since 2026-11-13: NVDA / WETH 500 and 3000). A WETH pool's per-token USD TWAP = TWAP(stock / WETH) x
   TWAP(WETH / USDG) over the same window, through the `dexConfirm.ethUsd` leg (USDG / WETH 100
   `0x52e65B17fB6E5BA00Ed806f37Afcd2DaA50271Ca`, its own 2% depth floor $50,000, history and last-swap checks); its
-  depth floor is counted in USD through that leg. **Several pools combine** as the depth-weighted median of the
-  usable ones (every check passed): the confirm is available while one pool is usable, divergence is measured
-  against that median, so a pool holding less than half the usable depth can neither raise nor hide a divergence
-  (with two pools the deeper one decides; every usable pool diverging always alerts). Pyth Pro
+  depth floor is counted in USD through that leg. **Depth is time-averaged**: the floor uses the harmonic-mean
+  in-range liquidity over the TWAP window (one block pushed into a sparse range cannot knock a pool out); the
+  combining weight is min(current, time-averaged) depth (a narrow position added for the read block buys no
+  weight); the WETH pools together weigh at most the leg (one shared leg). **Several pools**: the confirm is
+  available while one pool is usable; it counts as confirmed only when EVERY usable pool is within the band, and
+  any usable pool beyond it raises `oracle_confirm_divergence`, naming it ("beyond the limit: <pool> ..."); the
+  reported value (`/health` confirmers, the signed `sourcesHash`) is the weighted median of the usable pools (a 50/50
+  split averages the two). Hiding a divergence takes manipulating every pool; a manipulated thin pool can only page
+  (nothing automated acts on `diverged`). Pyth Pro
   (`ORACLE_PYTH=1` + `PYTH_API_KEY`) and `ORACLE_HTTP_SOURCES` are optional extra confirmers; none of them ever
   counts for signing. `sourcesHash` commits to Chainlink and every fresh confirmer.
 - **Depth today** (read 2026-10-18): NVDA ~$314k, TSLA ~$45.5k, AAPL ~$61.8k, MSFT ~$43.7k, AMZN ~$83.2k: all above
@@ -385,8 +390,10 @@ Alerts (`services/alerts`) and what to do:
   The alert ends with the oracle's note in brackets: which pools were used (price, 2% depth, the reference one)
   and which failed and why, e.g. `[dex-twap: used NVDA/USDG 500 0xd4EB..14a3 $162.40 (2% depth $227,000,
   reference), NVDA/WETH 500 0x62AB..6b6C $162.70 (2% depth $120,000); failed NVDA/WETH 3000 0xC0Be..b807: no swap
-  in the 1800s TWAP window ...]` (also in `/health` `confirm[].notes`). Several pools that disagree with each other
-  point at the thinner one (or, for the WETH pools only, at the ETH/USD leg).
+  in the 1800s TWAP window ...]` (also in `/health` `confirm[].notes`). A divergence raised by one pool only (the
+  reported value inside the band, "beyond the limit: <pool>") while the others agree points at that pool (thin or
+  manipulated), or, for the WETH pools only, at the ETH/USD leg; it stays a warning unless the reported value itself
+  is beyond 2x the band.
   DEX manipulated or thin: nothing to do for prices (the DEX never moves them); if a pool is easy to move, raise
   its `minDepthUsd`, choose a deeper pool / fee tier or drop it from the ticker's list in `config/chains/4663.json`,
   then restart. USDG depeg:

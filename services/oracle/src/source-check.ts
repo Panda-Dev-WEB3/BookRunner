@@ -330,10 +330,11 @@ const TRANSIENT_DEX = /^(no swap in the|token oraclePaused|uiMultiplier changed)
 /** Reasons that mean the configuration itself is wrong (not the factory's pool, wrong tokens, unreadable). */
 const CONFIG_DEX = /^(pool 0x[0-9a-fA-F]{40} is not the factory's pool|pool tokens |pool not readable)/;
 
-function dexDepthText(o: { depthQuote?: number; depthUsd?: number }, pool: ResolvedDexPool): string | null {
+function dexDepthText(o: { depthQuote?: number; depthUsd?: number; twapDepthUsd?: number }, pool: ResolvedDexPool): string | null {
   if (o.depthQuote === undefined) return null;
   const amount = pool.quote === "eth" ? `${o.depthQuote.toFixed(1)} WETH${o.depthUsd !== undefined ? ` = ${usd0(o.depthUsd)}` : ""}` : usd0(o.depthQuote);
-  return `2% depth ${amount} (floor ${usd0(pool.minDepthUsd)})`;
+  const avg = o.twapDepthUsd !== undefined ? `, ${usd0(o.twapDepthUsd)} time-averaged` : "";
+  return `2% depth ${amount} now${avg} (floor ${usd0(pool.minDepthUsd)})`;
 }
 
 function dexFailDetail(o: Extract<DexPoolObservation, { ok: false }> | Extract<DexObservation, { ok: false }>, pool: ResolvedDexPool): string {
@@ -348,14 +349,15 @@ function dexFailDetail(o: Extract<DexPoolObservation, { ok: false }> | Extract<D
 
 function dexOkDetail(o: Extract<DexPoolObservation, { ok: true }>, pool: ResolvedDexPool, chainlinkPerShare: number, confirmBps: number, offHours: boolean, factoryChecked: boolean): string {
   const bps = deviationBps(o.price, chainlinkPerShare);
-  const depth = pool.quote === "eth" ? `${o.depthQuote.toFixed(1)} WETH = ${usd0(o.depthUsd)}` : `${usd0(o.depthQuote)} quote`;
+  const depth = `${pool.quote === "eth" ? `${o.depthQuote.toFixed(1)} WETH = ${usd0(o.depthUsd)}` : `${usd0(o.depthQuote)} quote`} now, ${usd0(o.twapDepthUsd)} time-averaged`;
   return `TWAP ${o.twapSec}s ${usd(o.price)}/share vs Chainlink ${usd(chainlinkPerShare)}: ${bps.toFixed(1)} bps (threshold ${confirmBps}${offHours ? "; off-hours Chainlink holds" : ""}); token ${usd(o.tokenPrice)} TWAP / ${usd(o.spotTokenPrice)} spot${pool.quote === "eth" ? " (x WETH/USD leg)" : ""}; 2% depth ${depth} (floor ${usd0(pool.minDepthUsd)}); cardinality ${o.cardinality}, history ${o.historySec}s, last swap ${o.lastSwapAgeSec}s ago; pool ${pool.pool} (fee ${pool.fee})${factoryChecked ? ", factory getPool verified" : ""}`;
 }
 
 /**
  * primary-confirm: the DEX TWAP vs the Chainlink per-share price for one ticker. One pool: a single `dex confirm`
- * row (as before). Several: a `dex <pool label>` row per pool, then the combined `dex confirm` row (the depth-weighted
- * median of the usable pools, sources/dex-twap.ts combineDexPools). Configuration problems (no pool, a pool that is
+ * row (as before). Several: a `dex <pool label>` row per pool, then the combined `dex confirm` row (the weighted
+ * median of the usable pools, sources/dex-twap.ts combineDexPools; WARN when ANY usable pool is beyond the band, as
+ * the runtime alerts). Configuration problems (no pool, a pool that is
  * not the factory's getPool(token, quote, fee), wrong tokens, unreadable) FAIL on mainnet (the DEX confirm is required
  * there) and WARN elsewhere; a pool below its depth floor or too young FAILs the same way unless another pool of the
  * ticker confirms (then WARN); transient causes (no swap in the window, token paused, multiplier change in the window)
@@ -403,13 +405,16 @@ async function checkDex(
     add(id, "dex confirm", anyBad ? bad : "WARN", `no usable confirm pool (${pools.length} configured; rows above)${o.pools ? "" : `: ${o.reason}`}`);
     return false;
   }
-  const usable = o.pools.filter((r) => r.ok).map((r) => r.label);
+  const usable = o.pools.filter((r) => r.ok);
+  // the runtime flags a divergence when ANY usable pool is beyond the band (domain/confirm.ts parts)
+  const off = usable.filter((r) => diverges(r.price)).map((r) => r.label);
   const bps = deviationBps(o.price, chainlinkPerShare);
+  const anyOff = off.length > 0 || diverges(o.price);
   add(
     id,
     "dex confirm",
-    diverges(o.price) ? "WARN" : "PASS",
-    `${usd(o.price)}/share vs Chainlink ${usd(chainlinkPerShare)}: ${bps.toFixed(1)} bps (threshold ${confirmBps}${offHours(o.price) ? "; off-hours Chainlink holds" : ""}); depth-weighted median of ${usable.length} of ${pools.length} pools (${usable.join(", ")}), reference ${o.label}`,
+    anyOff ? "WARN" : "PASS",
+    `${usd(o.price)}/share vs Chainlink ${usd(chainlinkPerShare)}: ${bps.toFixed(1)} bps (threshold ${confirmBps}${anyOff && !marketOpen ? "; off-hours Chainlink holds" : ""}); weighted median of ${usable.length} of ${pools.length} pools (${usable.map((r) => r.label).join(", ")}), reference ${o.label}${off.length > 0 ? `; beyond the band: ${off.join(", ")}` : ""}`,
   );
   return true;
 }
@@ -425,7 +430,7 @@ function checkDexLeg(dex: DexTwapSource | null, mainnet: boolean, add: (s: strin
     return;
   }
   const diag = [
-    o.depthUsd !== undefined ? `2% depth ${usd0(o.depthUsd)} (floor ${usd0(leg.minDepthUsd)})` : null,
+    o.depthUsd !== undefined ? `2% depth ${usd0(o.depthUsd)} now${o.twapDepthUsd !== undefined ? `, ${usd0(o.twapDepthUsd)} time-averaged` : ""} (floor ${usd0(leg.minDepthUsd)})` : null,
     o.cardinality !== undefined ? `cardinality ${o.cardinality}` : null,
     o.historySec !== undefined ? `history ${o.historySec}s` : null,
     o.lastSwapAgeSec !== undefined ? `last swap ${o.lastSwapAgeSec}s ago` : null,

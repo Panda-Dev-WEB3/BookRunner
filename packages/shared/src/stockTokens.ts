@@ -134,7 +134,7 @@ export const dexConfirmSchema = z.object({
   note: z.string().optional(),
   /**
    * ticker -> its confirm pools (Stock-Token / USDG, and Stock-Token / WETH through `ethUsd`), combined by the oracle
-   * (depth-weighted median of the usable ones). A single pool object is accepted and read as a one-pool list.
+   * (confirmed only while every usable pool agrees; the weighted median is the reported value). A single pool object is accepted and read as a one-pool list.
    */
   pools: z.record(z.string(), z.preprocess((v) => (Array.isArray(v) ? v : [v]), z.array(dexConfirmPoolSchema).min(1))).default({}),
   /** The WETH / USD leg; required when any pool is quoted in WETH. */

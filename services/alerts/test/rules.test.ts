@@ -692,6 +692,16 @@ describe("oracle primary-confirm (mainnet: Chainlink signs, DEX TWAP / Pyth conf
     expect(confirmNotes({})).toBe("");
   });
 
+  test("divergence of one DEX pool while the reported value agrees: a warning naming the pool (never critical on a thin pool alone)", () => {
+    const one = cf("NVDA", "diverged", 120_000, {
+      diffBps: 12,
+      confirmers: [{ name: "dex-twap", price: 180.2, diffBps: 12, diverged: [{ label: "NVDA/WETH 3000 0xC0Be..b807", price: 270, diffBps: 5000 }] }],
+    });
+    const c = oracle(pc({ confirm: [one] }), rules());
+    expect(c.map((x) => [x.key, x.severity])).toEqual([["oracle_confirm_divergence:NVDA", "warning"]]);
+    expect(c[0]!.summary).toContain("NVDA Chainlink 180 vs dex-twap 180.2 (12 bps): 12 bps apart (limit 200 bps) for 2m in session (beyond the limit: NVDA/WETH 3000 0xC0Be..b807 270 (5000 bps));");
+  });
+
   test("two confirm sources failing on one ticker is NOT critical (no median 2-source logic)", () => {
     const sources = [src("chainlink", null, []), src("dex-twap", 700_000, ["NVDA"]), src("pyth", 700_000, ["NVDA"])];
     const c = oracle(pc({ sources, confirm: [cf("NVDA", "unavailable", 700_000)] }), rules());

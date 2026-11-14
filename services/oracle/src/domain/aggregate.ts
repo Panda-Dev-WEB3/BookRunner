@@ -1,7 +1,7 @@
 // Multi-source aggregation: median of fresh observations, outliers beyond `outlierBps` of that
 // median rejected, final price = median of the accepted set, ok iff >= minSources accepted and, with exactly two
 // accepted, they are within pairMaxBps of each other and neither is older than its pairMaxAgeMs.
-import type { SourceQuote } from "./types";
+import type { ObservationPart, SourceQuote } from "./types";
 
 export interface AggregateOptions {
   nowMs: number;
@@ -48,7 +48,10 @@ export interface AggregateResult {
   confirm?: ConfirmResult;
 }
 
-/** primary-confirm: ok = every fresh confirmer within the band; no fresh confirmer = unavailable; no primary = no-primary. */
+/**
+ * primary-confirm: ok = every fresh confirmer (and every part behind it: each DEX pool) within the band; no fresh
+ * confirmer = unavailable; no primary = no-primary.
+ */
 export type ConfirmStatus = "ok" | "diverged" | "unavailable" | "no-primary";
 
 export interface ConfirmResult {
@@ -58,7 +61,11 @@ export interface ConfirmResult {
   primaryPrice: number | null;
   /** the primary observation's own timestamp (Chainlink: the round's updatedAt), unix ms */
   primaryTs: number | null;
-  confirmers: Array<{ name: string; price: number; ts: number; diffBps: number }>;
+  /**
+   * per fresh confirmer: its (reference) price and diff; `diverged` = the parts behind it (the DEX: pools) beyond the
+   * band, named, when the confirmer reports parts
+   */
+  confirmers: Array<{ name: string; price: number; ts: number; diffBps: number; diverged?: Array<ObservationPart & { diffBps: number }> }>;
 }
 
 /** Observations behind a signed price (what sourcesHash commits to). */
@@ -67,7 +74,7 @@ export const attestedOf = (a: AggregateResult): SourceQuote[] => a.attested ?? a
 /** Number of independent sources behind an aggregate. */
 export const sourceCountOf = (a: AggregateResult): number => a.sourceCount ?? a.accepted.length;
 
-export type CollectedQuote = SourceQuote & { maxAgeMs?: number };
+export type CollectedQuote = SourceQuote & { maxAgeMs?: number; parts?: ObservationPart[] };
 
 export function median(xs: readonly number[]): number {
   if (xs.length === 0) throw new Error("median of empty set");
