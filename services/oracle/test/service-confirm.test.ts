@@ -127,6 +127,46 @@ describe("OracleService primary-confirm", () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
+  test("a confirm source's note (DEX: pools used / failed) is served in /health confirm[].notes and logged with the divergence", async () => {
+    const note = "dex-twap: used NVDA/WETH 500 0x62AB..6b6C $171.00 (2% depth $120,000, reference); failed NVDA/USDG 500 0xd4EB..14a3: insufficient depth";
+    Object.assign(h.dex, { confirmNote: (t: string) => (t === "NVDA" ? note : null) });
+    h.chainlink.set("NVDA", { price: 190 });
+    h.chainlink.set("TSLA", { price: 440 });
+    h.dex.set("NVDA", { price: 171 });
+    h.dex.set("TSLA", { price: 440 });
+    await h.tick();
+    expect(h.confirm("NVDA")?.notes).toEqual([note]);
+    expect(h.confirm("TSLA")).not.toHaveProperty("notes");
+    expect(warn.mock.calls.find((c: unknown[]) => String(c[1]).startsWith("confirm divergence"))?.[0]).toMatchObject({ priceId: "NVDA", notes: [note] });
+  });
+
+  test("a confirmer whose value agrees but one of its parts (a DEX pool) does not: diverged, the pool named, Chainlink published", async () => {
+    h.chainlink.set("NVDA", { price: 190 });
+    h.chainlink.set("TSLA", { price: 440 });
+    h.dex.set("TSLA", { price: 440 });
+    const fetch = h.dex.fetch.bind(h.dex);
+    Object.assign(h.dex, {
+      fetch: async (t: string) =>
+        t === "NVDA"
+          ? { price: 190.2, ts: h.clock, parts: [{ label: "NVDA/USDG 500 0xd4EB..14a3", price: 190.2 }, { label: "NVDA/WETH 3000 0xC0Be..b807", price: 199 }] }
+          : fetch(t),
+    });
+    await h.tick();
+    expect(h.parts.publisher!.last.get("NVDA")!.price).toBe(190);
+    // only the reported value is signed / attested
+    expect(h.parts.publisher!.last.get("NVDA")!.sources.map((s) => [s.name, s.price])).toEqual([
+      ["chainlink", 190],
+      ["dex-twap", 190.2],
+    ]);
+    expect(h.confirm("NVDA")).toMatchObject({
+      status: "diverged",
+      diffBps: 10.5,
+      confirmers: [{ name: "dex-twap", price: 190.2, diffBps: 10.5, diverged: [{ label: "NVDA/WETH 3000 0xC0Be..b807", price: 199, diffBps: 473.7 }] }],
+    });
+    expect(h.confirm("TSLA")).toMatchObject({ status: "ok", confirmers: [{ name: "dex-twap", price: 440, diffBps: 0 }] });
+    expect(h.confirm("TSLA")!.confirmers[0]).not.toHaveProperty("diverged");
+  });
+
   test("divergence beyond ORACLE_CONFIRM_BPS: Chainlink still published, /health diverged, warning rate-limited", async () => {
     h.chainlink.set("NVDA", { price: 190 });
     h.chainlink.set("TSLA", { price: 440 });

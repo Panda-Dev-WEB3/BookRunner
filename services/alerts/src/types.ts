@@ -183,7 +183,16 @@ export interface OracleConfirmSnap {
   primaryTs: number | null;
   /** unix ms: start of the run in which the confirm gap exceeds the oracle's primaryLagBps (null = none) */
   lagSince: number | null;
-  confirmers: Array<{ name: string; price: number; diffBps: number }>;
+  /**
+   * `diverged`: the parts behind a confirmer beyond the band (the DEX: each usable pool), named: the status is
+   * "diverged" when ANY of them is, even while the confirmer's reported value is inside the band
+   */
+  confirmers: Array<{ name: string; price: number; diffBps: number; diverged?: Array<{ label: string; price: number; diffBps: number }> }>;
+  /**
+   * What the confirm sources' latest observations were built from (the DEX: which pools were used, which failed and
+   * why), named in the confirm alerts; absent from older oracles.
+   */
+  notes?: string[];
 }
 
 export interface OracleProbe {

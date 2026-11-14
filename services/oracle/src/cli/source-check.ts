@@ -151,7 +151,7 @@ async function main(): Promise<number> {
     otherSources: others,
     policy: cfg.ORACLE_POLICY,
     confirmBps: cfg.ORACLE_CONFIRM_BPS,
-    dex: Object.keys(cfg.dexPools).length > 0 ? new DexTwapSource(cfg.dexPools, viemDexReader(pub), { maxAgeMs: cfg.ORACLE_DEX_MAX_AGE_MS, factory: uniswapV3For(args.chain)?.factory ?? null }) : null,
+    dex: Object.keys(cfg.dexPools).length > 0 ? new DexTwapSource(cfg.dexPools, viemDexReader(pub), { maxAgeMs: cfg.ORACLE_DEX_MAX_AGE_MS, factory: uniswapV3For(args.chain)?.factory ?? null, ethUsd: cfg.dexEthUsd }) : null,
     pythKey: !!cfg.PYTH_API_KEY,
     ...(pythCalendar ? { pythCalendar } : {}),
     minSources: cfg.ORACLE_MIN_SOURCES,

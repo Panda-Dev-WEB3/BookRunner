@@ -515,7 +515,16 @@ function parseConfirm(raw: unknown): OracleConfirmSnap[] {
           if (!isObj(c) || typeof c.name !== "string") return [];
           const price = num(c.price);
           const diffBps = num(c.diffBps);
-          return price === null || diffBps === null ? [] : [{ name: c.name.slice(0, 64), price, diffBps }];
+          if (price === null || diffBps === null) return [];
+          const parts = Array.isArray(c.diverged)
+            ? c.diverged.flatMap((p) => {
+                if (!isObj(p) || typeof p.label !== "string") return [];
+                const pp = num(p.price);
+                const pd = num(p.diffBps);
+                return pp === null || pd === null ? [] : [{ label: p.label.slice(0, 64), price: pp, diffBps: pd }];
+              })
+            : [];
+          return [{ name: c.name.slice(0, 64), price, diffBps, ...(parts.length > 0 ? { diverged: parts.slice(0, 8) } : {}) }];
         })
       : [];
     return [
@@ -529,6 +538,7 @@ function parseConfirm(raw: unknown): OracleConfirmSnap[] {
         primaryTs: num(x.primaryTs),
         lagSince: num(x.lagSince),
         confirmers: confirmers.slice(0, 8),
+        ...(Array.isArray(x.notes) ? { notes: x.notes.filter((n): n is string => typeof n === "string" && n !== "").slice(0, 4).map((n) => n.slice(0, 600)) } : {}),
       },
     ];
   });

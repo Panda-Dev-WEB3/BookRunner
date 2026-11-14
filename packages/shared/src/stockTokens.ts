@@ -19,6 +19,7 @@ import { REPO_ROOT } from "./deployments";
 // Robinhood Chain mainnet (4663, devkeys.ts — one constant for the key policy and the price rules): synthetic
 // prices are impossible there; the oracle enforces production rules.
 import { MAINNET_CHAIN_ID } from "./devkeys";
+import { RHC_TOKENS } from "./uniswap";
 import { WAD } from "./units";
 
 export const isMainnet = (chainId: number): boolean => chainId === MAINNET_CHAIN_ID;
@@ -110,13 +111,41 @@ export const dexConfirmPoolSchema = z.object({
   minDepthUsd: z.number().positive(),
 });
 
+/**
+ * The ETH/USD leg of the WETH-quoted confirm pools: one Uniswap v3 WETH / USD-quote (USDG) pool. A Stock-Token / WETH
+ * pool's per-token USD TWAP = TWAP(stock / WETH) x TWAP(WETH / USDG) over the same window (both geometric means, so
+ * the product is the TWAP of the stock / USD cross); its depth floor is measured in USD through this leg. The leg has
+ * its own 2% depth floor, history and last-swap checks: when it fails, every WETH-quoted pool confirms nothing.
+ */
+export const dexEthUsdSchema = z.object({
+  pool: address,
+  /** fee tier: factory.getPool(weth, quoteToken, fee) == pool is required */
+  fee: z.number().int().positive().max(1_000_000),
+  weth: address,
+  /** USD quote token (USDG), assumed to be worth $1 */
+  quoteToken: address,
+  /** 2% depth floor of the leg itself (whole quote tokens, ~USD) */
+  minDepthUsd: z.number().positive(),
+});
+
 export const dexConfirmSchema = z.object({
   /** When the pools below were read on-chain (re-check before launch: liquidity moves). */
   readAt: z.string().optional(),
   note: z.string().optional(),
-  /** ticker -> its confirm pool (the deepest Stock-Token / USDG pool). */
-  pools: z.record(z.string(), dexConfirmPoolSchema).default({}),
+  /**
+   * ticker -> its confirm pools (Stock-Token / USDG, and Stock-Token / WETH through `ethUsd`), combined by the oracle
+   * (confirmed only while every usable pool agrees; the weighted median is the reported value). A single pool object is accepted and read as a one-pool list.
+   */
+  pools: z.record(z.string(), z.preprocess((v) => (Array.isArray(v) ? v : [v]), z.array(dexConfirmPoolSchema).min(1))).default({}),
+  /** The WETH / USD leg; required when any pool is quoted in WETH. */
+  ethUsd: dexEthUsdSchema.optional(),
 });
+
+/** Whether a confirm pool is quoted in WETH (priced through dexConfirm.ethUsd) rather than in the USD quote token. */
+export function dexPoolQuotedInEth(d: Pick<DexConfirmConfig, "ethUsd">, p: Pick<DexConfirmPoolConfig, "quoteToken">): boolean {
+  const q = p.quoteToken.toLowerCase();
+  return q === (d.ethUsd?.weth ?? RHC_TOKENS.WETH).toLowerCase();
+}
 
 export const chainPriceConfigSchema = z
   .object({
@@ -133,7 +162,7 @@ export const chainPriceConfigSchema = z
         feeds: z.record(z.string(), feedConfigSchema).default({}),
       })
       .default({ sequencerUptimeFeed: null, feeds: {} }),
-    /** Uniswap v3 TWAP pools confirming the Chainlink price per ticker (mainnet: one per ticker, VERIFY C6). */
+    /** Uniswap v3 TWAP pools confirming the Chainlink price per ticker (mainnet: at least one per ticker, VERIFY C6). */
     dexConfirm: dexConfirmSchema.optional(),
   })
   .superRefine((c, ctx) => {
@@ -142,10 +171,26 @@ export const chainPriceConfigSchema = z
         ctx.addIssue({ code: "custom", path: ["chainlink", "feeds", id], message: "per-token feed needs `token` or a stockTokens entry (its uiMultiplier converts the feed to per share)" });
       }
     }
-    for (const id of Object.keys(c.dexConfirm?.pools ?? {})) {
+    const dex = c.dexConfirm;
+    const eth = dex?.ethUsd;
+    if (eth && eth.weth.toLowerCase() === eth.quoteToken.toLowerCase()) {
+      ctx.addIssue({ code: "custom", path: ["dexConfirm", "ethUsd"], message: "ethUsd.weth and ethUsd.quoteToken must differ" });
+    }
+    const seen = new Set<string>(eth ? [eth.pool.toLowerCase()] : []);
+    for (const [id, pools] of Object.entries(dex?.pools ?? {})) {
       if (!c.stockTokens[id]) {
         ctx.addIssue({ code: "custom", path: ["dexConfirm", "pools", id], message: "DEX confirm pool needs a stockTokens entry (the pool's other token, divided by its uiMultiplier)" });
       }
+      pools.forEach((p, i) => {
+        const path = ["dexConfirm", "pools", id, i];
+        if (seen.has(p.pool.toLowerCase())) ctx.addIssue({ code: "custom", path, message: `pool ${p.pool} is listed twice (or is the ethUsd leg)` });
+        seen.add(p.pool.toLowerCase());
+        const inEth = dexPoolQuotedInEth({ ethUsd: eth }, p);
+        if (inEth && !eth) ctx.addIssue({ code: "custom", path, message: "WETH-quoted confirm pool needs dexConfirm.ethUsd (its WETH / USD leg)" });
+        if (eth && !inEth && p.quoteToken.toLowerCase() !== eth.quoteToken.toLowerCase()) {
+          ctx.addIssue({ code: "custom", path, message: `quoteToken must be ethUsd.quoteToken (USD) or ethUsd.weth (WETH), got ${p.quoteToken}` });
+        }
+      });
     }
   });
 
@@ -154,6 +199,7 @@ export type FeedConfig = z.infer<typeof feedConfigSchema>;
 export type StockTokenConfig = z.infer<typeof stockTokenConfigSchema>;
 export type DexConfirmPoolConfig = z.infer<typeof dexConfirmPoolSchema>;
 export type DexConfirmConfig = z.infer<typeof dexConfirmSchema>;
+export type DexEthUsdConfig = z.infer<typeof dexEthUsdSchema>;
 
 /** Default location of a chain's price config: <repo>/config/chains/<chainId>.json. */
 export function chainPriceConfigPath(chainId: number, file?: string): string {

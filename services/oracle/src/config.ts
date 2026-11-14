@@ -1,10 +1,10 @@
 // Oracle service configuration: shared base env (baseEnvSchema) + oracle-specific fields.
-import { type ChainPriceConfig, type FeedConfig, baseEnvSchema, deriveWsUrl, feedConfigSchema, feedToken, isMainnet, loadChainPriceConfig } from "@bookrunner/shared";
+import { type ChainPriceConfig, type FeedConfig, baseEnvSchema, deriveWsUrl, dexPoolQuotedInEth, feedConfigSchema, feedToken, isMainnet, loadChainPriceConfig } from "@bookrunner/shared";
 import { getAddress } from "viem";
 import { z } from "zod";
 import { ORACLE_POLICIES, type OraclePolicy } from "./domain/types";
 import type { ResolvedFeed } from "./sources/chainlink";
-import type { ResolvedDexPool } from "./sources/dex-twap";
+import type { ResolvedDexPool, ResolvedEthUsdLeg } from "./sources/dex-twap";
 
 /** Devnet demo prices (ARCHITECTURE §7) — USD per share, devnet only. */
 export const DEFAULT_DEMO_PRICES: Record<string, number> = { NVDA: 190, TSLA: 440, AAPL: 255, MSFT: 520, AMZN: 230 };
@@ -377,8 +377,10 @@ export function loadOracleConfig(source: Record<string, string | undefined> = pr
       maxConfidenceBps: env.ORACLE_PYTH_MAX_CONF_BPS,
     },
     pythFeeds: { ...DEFAULT_PYTH_FEEDS, ...parseJson("ORACLE_PYTH_FEEDS", env.ORACLE_PYTH_FEEDS, pythFeedMap, {}) },
-    /** ticker -> confirm pool (chain config dexConfirm.pools); empty when ORACLE_DEX_CONFIRM=0 or none configured */
+    /** ticker -> its confirm pools (chain config dexConfirm.pools); empty when ORACLE_DEX_CONFIRM=0 or none configured */
     dexPools: env.ORACLE_DEX_CONFIRM ? resolveDexPools(chainConfig, env.ORACLE_DEX_TWAP_SEC) : {},
+    /** the WETH / USD leg of the WETH-quoted pools (dexConfirm.ethUsd); null when none or ORACLE_DEX_CONFIRM=0 */
+    dexEthUsd: env.ORACLE_DEX_CONFIRM ? resolveDexEthUsd(chainConfig) : null,
     /** WebSocket of the Chainlink RPC for the log subscription (secret: carries the key); null = poll only */
     chainlinkWsUrl: chainlinkWsUrl(env),
   };
@@ -395,24 +397,35 @@ export function chainlinkWsUrl(env: Pick<OracleEnv, "ORACLE_WS" | "RPC_URL" | "R
   return env.RPC_WS_URL?.trim() || null;
 }
 
-/** The chain config's DEX confirm pools with their Stock Token (stockTokens[ticker]) and window resolved. */
-export function resolveDexPools(chainConfig: ChainPriceConfig | null, twapSecOverride?: number): Record<string, ResolvedDexPool> {
-  const out: Record<string, ResolvedDexPool> = {};
-  for (const [id, p] of Object.entries(chainConfig?.dexConfirm?.pools ?? {})) {
+/**
+ * The chain config's DEX confirm pools per ticker (a list each) with their Stock Token (stockTokens[ticker]), quote
+ * (USDG, or WETH through dexConfirm.ethUsd) and window resolved.
+ */
+export function resolveDexPools(chainConfig: ChainPriceConfig | null, twapSecOverride?: number): Record<string, ResolvedDexPool[]> {
+  const out: Record<string, ResolvedDexPool[]> = {};
+  const dex = chainConfig?.dexConfirm;
+  for (const [id, pools] of Object.entries(dex?.pools ?? {})) {
     const st = chainConfig?.stockTokens[id];
     if (!st) throw new Error(`invalid chain config: dexConfirm.pools.${id} has no stockTokens entry`);
-    const r: ResolvedDexPool = {
+    out[id] = pools.map((p) => ({
       pool: getAddress(p.pool),
       token: getAddress(st.token),
       tokenDecimals: st.decimals,
       quoteToken: getAddress(p.quoteToken),
+      quote: dexPoolQuotedInEth(dex ?? {}, p) ? "eth" : "usd",
       twapSec: twapSecOverride ?? p.twapSec,
       minDepthUsd: p.minDepthUsd,
       fee: p.fee,
-    };
-    out[id] = r;
+    }));
   }
   return out;
+}
+
+/** The chain config's WETH / USD leg (dexConfirm.ethUsd), resolved; null when not configured. */
+export function resolveDexEthUsd(chainConfig: ChainPriceConfig | null): ResolvedEthUsdLeg | null {
+  const l = chainConfig?.dexConfirm?.ethUsd;
+  if (!l) return null;
+  return { pool: getAddress(l.pool), weth: getAddress(l.weth), quoteToken: getAddress(l.quoteToken), fee: l.fee, minDepthUsd: l.minDepthUsd };
 }
 
 export type OracleConfig = ReturnType<typeof loadOracleConfig>;
