@@ -574,11 +574,15 @@ price's share basis (its `publishedAt`, or `AttestedOracle.lastLiveAt` for a hel
 `setMultiplier` / source switch), until the oracle signs a live price after the change; the mark service
 values such a position at the multiplier of the price's basis (or 0): it refuses the mark for at most one interval,
 then commits it held. `valueUsdAt` is the pure valuation at a given price. Split records (audit N-1): per share price
-id, `(at, cumulative factor)` from `setMultiplier` beyond the band (stored mode, at its block), permissionless
-`recordSplit(token)` while a split is staged on a live token (`at = effectiveAt`, ratio `newUIMultiplier /
-uiMultiplier`; also from `setNextMultiplierAnchor`), or governance `recordSplitAt` (fallback); `shareFactor(priceId,
-basisAt)` and `splitFactors` (index components) feed the engine and revert `SplitUnrecorded` while a live token's
-out-of-band change is active with no matching record; a live re-anchor beyond the band needs the record first.
+id, `(at, ratio, cumulative factor)` from `setMultiplier` beyond the band (stored mode, at its block, first token of
+the price id only), permissionless `recordSplit(token)` while a split is staged on a live token (`at = effectiveAt`,
+ratio `newUIMultiplier / uiMultiplier`; also from `setNextMultiplierAnchor`; counted once `at` has passed, confirmed by
+the next sync), the guardian's bounded `guardianRecordSplits` (no timelock) or governance `recordSplitAt` (in time order,
+whatever the token did since). The live multiplier must stay within the band of anchor x the product of the recorded
+ratios since it (`recordedMultiplier`); otherwise the change is unrecorded and `recordSplit` LATCHES it (sticky until
+recorded). `shareFactor(priceId, basisAt)` and `splitFactors` (index components) feed the engine and revert
+`SplitUnrecorded` for bases after the last consistent point, `SplitBasisAmbiguous` within 5 s after a split; a live
+re-anchor needs every change recorded (`reanchorDrift` for dividend drift); one live token per price id, alone.
 
 ### 2.8 AttestedOracle, PoolEngine, PoolEngineAdapter [A-engine]
 
@@ -608,8 +612,9 @@ out-of-band change is active with no matching record; a live re-anchor beyond th
     `price x unitWad / 1e18` rounded in the pool's favour, with `unitWad` (shares per unit) at the price's share basis
     (publishedAt; lastLiveAt when held / settled): a share market's `shareFactor(basis) / shareFactor at creation`;
     an index market's stored unit, moved once per component split by `R = (L + sum w_k q_k (r_k - 1) / 1e4) / L`
-    from one signed round (`IndexSnapshot` otherwise; `PriceBeforeSplit` for a basis older than an applied move;
-    `syncUnit(marketId, priceData)`, event `UnitUpdated`). Library `PoolEngineUnit` (external, linked). A split moves
+    from one signed round at most 60 s old (`IndexSnapshot` otherwise; `PriceBeforeSplit` for a basis older than an applied move;
+    `syncUnit(marketId, priceData)`, event `UnitUpdated`). Library `PoolEngineUnit` (external, linked); the registry is
+    bound per market at creation (a config swap never changes a market's units). A split moves
     no value and gates nothing; views `unitOf`, `unitAt`. A live split with no record reverts every price-dependent
     call (`SplitUnrecorded`) until governance records it.
   - taker fee `takerFeeBps` of notional → `feesAccruedUsd` (claimed by the adapter → RevenueRouter).
@@ -923,8 +928,10 @@ counts. ETH/USD is configured (`WATERFALL_LIQ_ETH_USD`, required on mainnet). Po
 across passes beyond `WATERFALL_LIQ_MAX_BATCHES`; every row is reconciled with `positionOf` every 10 min, and an index
 older than the engine watch backfills the engine's history once (`indexer:engine-backfill`). Every 60 s, positions or
 not, the keeper's split recorder reads every engine market's Stock Tokens (`splitTokens`, index components included)
-and sends `recordSplit(token)` for a split staged on a token and not recorded as staged (audit N-1). Its status (`KEYS.liquidationKeeper`: backlog with reasons, failure run) feeds the **alerts**
-(`liquidation_backlog`, `keeper_liquidation_failing`, `liquidation_coverage`, `engine_split_unrecorded`) and the **api**
+and sends `recordSplit(token)` for a split staged on a token and not recorded as staged, to confirm an active one, or to
+latch an unrecorded one (audit N-1; NothingToRecord, someone else first, is no failure). Its status (`KEYS.liquidationKeeper`: backlog with reasons, failure run) feeds the **alerts**
+(`liquidation_backlog`, `keeper_liquidation_failing`, `liquidation_coverage`, `engine_split_unrecorded`,
+`engine_index_unit_pending`) and the **api**
 `/health` `liquidationKeeper`. trader-sim keeps
 liquidating only its own sim positions. The api refuses an order above the leverage a position holds through a session
 close (`TRADE_REFUSE_UNHOLDABLE_LEVERAGE`, auto = on mainnet), and then also caps a margin withdrawal so the position stays

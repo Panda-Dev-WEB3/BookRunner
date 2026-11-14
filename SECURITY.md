@@ -113,13 +113,15 @@ a way to exceed the stated bound is in scope.
   orders) while the engine starts with small caps or off (owner decision); the bound above is the accepted residual.
   Desk keys are held to the same freshness rule for their own swaps (audit lead "old prints"): a key's Hedge or
   Flatten needs the token's price within `min(maxPriceAge, maxTradePriceAge)`.
-- **Engine positions across a stock split** (audit 2026-10 remediation finding N-1, fixed 2026-11-13). PoolEngine
-  positions are in market units fixed for the market's life and every price is converted at the shares per unit of
-  its share basis, from split ratios StockTokenRegistry records (stored `setMultiplier`, live `recordSplit` while
-  staged, sent by the waterfall keeper every 60 s; governance `recordSplitAt` as the fallback): a split moves no value
-  and gates nothing. What remains: a live split that activates with no recorded ratio freezes its engine markets
-  (every price-dependent call reverts `SplitUnrecorded`, liquidations included) until governance records it; alert
-  `engine_split_unrecorded`.
+- **Engine positions across a stock split** (audit 2026-10 remediation finding N-1, fixed 2026-11-13, re-reviewed
+  2026-11-14). PoolEngine positions are in market units fixed for the market's life and every price is converted at the
+  shares per unit of its share basis, from split ratios StockTokenRegistry records (stored `setMultiplier`, live
+  `recordSplit` while staged, sent by the waterfall keeper every 60 s): a split moves no value and gates nothing. A
+  live change with no record is latched and freezes its engine markets (every price-dependent call reverts
+  `SplitUnrecorded`, liquidations included) until the guardian Safe records it (`guardianRecordSplits`, no timelock,
+  bounded on chain by the token's live multiplier) or governance does; alert `engine_split_unrecorded`. What remains:
+  the guardian is trusted for split times and for exact ratios within the band, and on-chain memory of a change needs
+  one sync (keeper pass) before the issuer's next change.
 - **Redis write access** (audit 2026-10 lead, see "Off-chain trust boundaries"). A Redis writer can deny service:
   withhold prices (the agent stops quoting), delete the risk state (the agents go reduce-only after 30 s), drop or
   delay jobs, blank the status keys the alerts read (including the forged-message counts and the agents' status).

@@ -509,22 +509,41 @@ can redo it during the timelock delay from the published quote.
      (`splitSyncNeeded`) and sends `StockTokenRegistry.recordSplit(token)` (log "stock split staged on the token:
      ratio recorded on chain"). Anyone may send it too; it reads the ratio from the token
      (`newUIMultiplier / uiMultiplier`, at `effectiveAt`). Your `setNextMultiplierAnchor(token, newUIMultiplier)` also
-     records it when it executes while the change is staged. Check: `shareFactor(priceId, effectiveAt)` = the old
-     factor x the ratio. If the issuer re-stages, the next keeper pass re-records (a stale record is never used).
+     records it when it executes while the change is staged. Check after `effectiveAt` + 5 s:
+     `shareFactor(priceId, effectiveAt + 5)` = the old factor x the ratio (a staged record counts once its time has
+     passed; the keeper's first pass after it confirms it). If the issuer re-stages, the next keeper pass re-records (a
+     stale record is never used).
   2. **At `effectiveAt`**: prices with a basis from then on are valued at the new unit (the per-share price x the
      shares per unit); the last pre-split print and the held weekend price keep the old unit. `/trade` shows
      "per unit of N shares". Index markets on a component: the first full signed round after the split moves the
      unit once (`UnitUpdated`; the keeper sends `syncUnit` with the oracle's whole round if no trade did; the market
      shows "Updating (index split)" for at most a pass).
-  3. **After the first live post-split print**: the usual cleanup, `setMultiplier(token, new)` (it now requires the
-     split recorded: `SplitNotRecorded` otherwise) and `setNextMultiplierAnchor(token, 0)`.
-  **If the alert `engine_split_unrecorded` fires** (the split activated with no record: the keeper was down, or the
-  issuer staged less than a pass before activation): every price-dependent call of that market reverts
-  `SplitUnrecorded`, liquidations included, from `effectiveAt`; top-ups and flat withdrawals still work, and so do
-  liquidations at the held pre-split price. Fix: read the token's `UIMultiplierUpdated(old, new, effectiveAt)` event
-  and propose `recordSplitAt(token, effectiveAt, old, new)` (timelock on mainnet; the admin on testnet). Positions
-  resume at exactly their pre-split value. The mark and risk services fail their reads for that book until then
-  (expect `mark_overdue`).
+  3. **After the first live post-split print**: the usual cleanup, `setMultiplier(token, new)` (it requires every
+     change recorded and `new` within the band of `recordedMultiplier(token)`: `SplitNotRecorded` otherwise) and
+     `setNextMultiplierAnchor(token, 0)`.
+  **If the alert `engine_split_unrecorded` fires** (a split activated with no record: the keeper was down, or the
+  issuer staged less than a pass before activation; the keeper's next pass LATCHES it on chain): every price-dependent
+  call of that market reverts `SplitUnrecorded` from the last consistent point on (liquidations included, also at the
+  held pre-split price); top-ups and flat withdrawals still work. The latch holds whatever the token does next (another
+  split, a dividend): nothing is valued at a wrong unit. **Guardian procedure (no timelock, do it at once):**
+  1. read the token's `UIMultiplierUpdated(oldMultiplier, newMultiplier, effectiveAtTimestamp)` events since the last
+     recorded split; every OUT-OF-BAND one (new / old beyond the band, i.e. a split) is one entry, in time order:
+     `ats[i]` = its effectiveAt, `ratios[i]` = new x 1e18 / old (in-band dividend updates are not entries);
+  2. check against `StockTokenRegistry.recordedMultiplier(token)`: the product of the ratios must be within the band
+     (5%) of `uiMultiplier() x 1e18 / recordedMultiplier` (the chain refuses it otherwise: `SplitRatioMismatch`; a
+     dividend after the split is inside that band);
+  3. the guardian Safe (2 of 3) sends `guardianRecordSplits(token, ats, ratios)`. Check `splitUnrecorded(token)` =
+     (0, false), the alert clears at the keeper's next pass, `/trade` reopens, positions resume at exactly their
+     pre-split value.
+  Fallback (Safe unavailable): governance `recordSplitAt(token, effectiveAt, ratio)` per entry, in time order (timelock
+  48 h on mainnet; the admin on testnet). The mark and risk services fail their reads for that book until then (expect
+  `mark_overdue`).
+  **Dividend drift**: if the token's multiplier drifts past the band of `recordedMultiplier` without a split (missed
+  re-anchors), it reads as unrecorded and the keeper latches it: re-anchor with governance `reanchorDrift(token,
+  uiMultiplier)` (only within twice the band). Re-anchor dividends before the drift reaches the band.
+  **Index markets**: `engine_index_unit_pending` (5 min warning, 30 min critical) means the unit move after a
+  component's split waits for a complete signed round (the index and every split component with the same publishedAt,
+  at most 60 s old); find the component the oracle skips (`/health` unpublished) and fix its source.
 - If the issuer stages another change before you re-anchor a split, valuations of the token stop until your
   re-anchor plus the next live print, and so does every voluntary engine trade on its markets (closes and margin
   withdrawals too; liquidations still run): re-anchor promptly.
@@ -538,7 +557,7 @@ can redo it during the timelock delay from the published quote.
     a change. Cut a new oracle over in session, and push a live price for every token before relying on the RISK
     flatten.
 - Stored-multiplier mode (devnet / testnet): the `setMultiplier(token, new)` beyond the band IS the split, recorded at
-  its block for the engine. Call it while the session is closed (before the oracle signs the first post-split price),
+  its block for the engine (from the price id's first token only). Call it while the session is closed (before the oracle signs the first post-split price),
   so no live price published after it is still in pre-split shares.
 
 ### Opening the first in-house engine market on mainnet (Plan B2: NVDA on the PoolEngine)
@@ -578,9 +597,10 @@ shows "No market open yet". Guarded launch: small, insured, watched.
          positions, backlog, failing attempts); alerts `liquidation_backlog` (a liquidatable position still open after
          `ALERT_LIQ_BACKLOG_SECONDS` 60 s, critical at 5x; the summary says gas policy / dust / price / failing
          transaction), `keeper_liquidation_failing` (`ALERT_LIQ_FAILURES` 3 failed attempts, or no / a stale status while
-         an engine book is live), `liquidation_coverage` and `engine_split_unrecorded` (audit N-1: the keeper's split recorder,
-         every 60 s, sends `recordSplit` for a split staged on any engine market's token; the alert means one activated
-         unrecorded: Corporate actions, "Engine markets"). On a page: read the waterfall log; if the gas policy holds a
+         an engine book is live), `liquidation_coverage`, `engine_split_unrecorded` (audit N-1: the keeper's split recorder,
+         every 60 s, sends `recordSplit` for a split staged on any engine market's token, confirms it once active, and
+         latches one that activated unrecorded; the alert means the guardian must record it: Corporate actions, "Engine
+         markets") and `engine_index_unit_pending`. On a page: read the waterfall log; if the gas policy holds a
          position back, raise the budget or the override; anyone may also call `liquidate` by hand with the oracle's
          bundle.
 2. [ ] **Charter with venue PoolEngine** (`venue` 1 = `BRTypes.VENUE_POOL_ENGINE`), as step 11 above: underlying the
