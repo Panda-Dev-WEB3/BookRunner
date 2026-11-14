@@ -64,8 +64,26 @@ export function aggregateCandles(rows: readonly Pick<EnginePriceMinuteRow, "buck
 
 // ------------------------------------------------------------------ trade and PnL history
 
-/** At most this many events of one trader are read (oldest first: the entry-price replay needs the start). */
+/**
+ * At most this many events of one trader are read: the newest (the response says `truncated`, and a liquidation whose
+ * entry the cut-short replay cannot establish has an unknown PnL rather than a guessed one).
+ */
 export const MAX_TRADER_EVENTS = 10_000;
+
+/** chain_cursor names of the indexer (services/indexer/src/config.ts CURSORS). */
+export const INDEXER_CURSORS = { protocol: "indexer:protocol", engineEventsBackfill: "indexer:engine-events-backfill" } as const;
+
+/**
+ * True while the indexer's one-time engine-events backfill has not caught up with its protocol cursor: the indexed
+ * history may then miss older events (fills shown as `incomplete`). No protocol cursor yet: nothing indexed, nothing
+ * missing.
+ */
+export function eventsBackfillPending(c: Record<string, number>): boolean {
+  const protocol = c[INDEXER_CURSORS.protocol];
+  if (protocol === undefined) return false;
+  const events = c[INDEXER_CURSORS.engineEventsBackfill];
+  return events === undefined || events < protocol;
+}
 
 export type FillKind = "trade" | "liquidation" | "close_out" | "deposit" | "withdrawal" | "funding";
 
@@ -73,6 +91,7 @@ export interface FillView {
   id: string;
   at: string;
   block: number;
+  logIndex: number;
   txHash: string;
   marketId: number;
   kind: FillKind;
@@ -83,7 +102,11 @@ export interface FillView {
   notionalUsd: string | null;
   /** taker fee of a trade, liquidation fee of a liquidation (paid from margin) */
   feeUsd: string;
-  /** realised PnL of the closed part (null: no position closed, or unknown when the replay lacks the entry) */
+  /**
+   * realised PnL of the closed part (null: no position closed, or unknown when the replay lacks the entry). For a
+   * liquidation or a close-out with bad debt, the loss is what the trader lost: the PnL at the oracle plus the bad debt
+   * (the part beyond the margin, absorbed by the insurance fund then the pool).
+   */
   realisedPnlUsd: string | null;
   /** funding settled (positive: paid by the trader) */
   fundingUsd: string | null;
@@ -129,7 +152,7 @@ export function buildFills(events: readonly EngineTraderEventRow[]): { rows: Fil
   const rows: FillView[] = [];
   for (const e of sorted) {
     const st = state.get(e.marketId) ?? { size: 0n, entry: 0n };
-    const base = { id: `${e.txHash}:${e.logIndex}`, at: e.ts.toISOString(), block: e.block, txHash: e.txHash, marketId: e.marketId };
+    const base = { id: `${e.txHash}:${e.logIndex}`, at: e.ts.toISOString(), block: e.block, logIndex: e.logIndex, txHash: e.txHash, marketId: e.marketId };
     const none = { side: null, size: null, price: null, notionalUsd: null, feeUsd: usdStr(0n), realisedPnlUsd: null, fundingUsd: null, marginUsd: null, badDebtUsd: null, positionAfter: null };
     if (e.kind === "trade") {
       const delta = big(e.sizeRaw);
@@ -141,9 +164,10 @@ export function buildFills(events: readonly EngineTraderEventRow[]): { rows: Fil
       const nextEntry = after === 0n ? 0n : before === 0n || before > 0n !== after > 0n ? fill : entry === null ? null : newEntry(before, after, entry, fill);
       state.set(e.marketId, { size: after, entry: nextEntry });
       const fee = big(e.feeRaw);
-      const pnl = big(e.pnlRaw);
       const co = closeOuts.get(`${e.txHash}:${e.logIndex}`);
       const closedOut = co !== undefined && co.trader === e.trader && after === 0n;
+      // a close-out's shortfall beyond the margin is bad debt the trader did not pay: their loss stops at the margin
+      const pnl = big(e.pnlRaw) + (closedOut ? big(co.badDebtRaw) : 0n);
       t.trades++;
       t.tradeFees += fee;
       t.pnl += pnl;
@@ -164,7 +188,8 @@ export function buildFills(events: readonly EngineTraderEventRow[]): { rows: Fil
       const size = big(e.sizeRaw);
       const px = big(e.priceWad);
       const fee = big(e.feeRaw);
-      const pnl = st.size === size && st.entry !== null ? pnlUsd(size, st.entry, px) : null;
+      // the trader's loss stops at the margin: the bad debt (beyond it) is borne by the insurance fund, then the pool
+      const pnl = st.size === size && st.entry !== null ? pnlUsd(size, st.entry, px) + big(e.badDebtRaw) : null;
       state.set(e.marketId, { size: 0n, entry: 0n });
       t.liquidations++;
       t.liqFees += fee;

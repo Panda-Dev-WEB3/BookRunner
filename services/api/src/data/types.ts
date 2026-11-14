@@ -167,10 +167,15 @@ export interface ReadModel {
   poolFlowDays(from: Date): Promise<PoolFlowDay[]>;
 
   // trading page v2 (2026-11)
-  /** A trader's engine events (one market or all), oldest first by (block, logIndex), at most `limit`. */
+  /**
+   * A trader's engine events (one market or all), oldest first by (block, logIndex): the NEWEST `limit` of them (older
+   * ones are dropped when there are more).
+   */
   engineTraderEvents(trader: string, q: { marketId?: number; limit: number }): Promise<EngineTraderEventRow[]>;
   /** One-minute candles of a market (and its underlying) with bucket >= since, ascending, at most `limit`. */
   enginePriceMinutes(marketId: number, underlying: string, since: Date, limit: number): Promise<EnginePriceMinuteRow[]>;
+  /** The indexer's chain_cursor values of `names` (absent names are left out). */
+  chainCursors(names: string[]): Promise<Record<string, number>>;
 }
 
 /** One signed print sampled by the API's price recorder (raw WAD, its publishedAt in unix seconds). */

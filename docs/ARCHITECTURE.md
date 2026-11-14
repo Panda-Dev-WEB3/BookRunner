@@ -1000,18 +1000,23 @@ API + web over the existing trader surface (`depositMargin`, `withdrawMargin`, `
   `FundingSettled` log written by the indexer next to `engine_positions` (raw values; cursor
   `indexer:engine-events-backfill` backfills an older index once, with block times). Never Redis. The API replays the
   entry price per market with the engine's averaging (`newEntry`) so a liquidation, whose event carries no PnL, gets
-  `pnlUsd(size, entry, price)`; a wind-down close-out (Trade then ClosedOut in one transaction) is one row; a replay cut
-  short leaves that PnL unknown, never guessed. Totals: realised PnL, trading and liquidation fees, net funding, net,
-  margin in / out. At most 10,000 events per wallet are read; the built list is cached 2 s per (wallet, market). The
-  page pages it (25 rows) and exports every page as CSV in the browser.
+  `pnlUsd(size, entry, price)`; a wind-down close-out (Trade then ClosedOut in one transaction) is one row; a liquidation's
+  or close-out's loss stops at the margin (the bad debt beyond it, borne by the IF then the pool, is added back); a replay
+  cut short leaves that PnL unknown, never guessed. Totals: realised PnL, trading and liquidation fees, net funding, net,
+  margin in / out. The newest 10,000 events per wallet are read (`truncated` beyond; the page says the totals cover
+  those only); the built list is cached 2 s per (wallet, market). `incomplete` while the indexer's events backfill
+  cursor is behind its protocol cursor: the page then shows no totals. Pages by offset or by a stable `before`
+  (block, logIndex) cursor; the CSV export, built in the browser, walks the cursor at one page per 600 ms.
 - **Liquidation-risk warnings** (web, `components/trade/riskLogic.ts`): the margin ratio against the requirement that
-  applies (maintenance in session, the off-hours requirement while the price is held): watch below 2x, danger below
+  applies (maintenance in session, the off-hours requirement while the price is held or unknown, i.e. no price): an
+  unreadable ratio is "unknown", never comfortable; watch below 2x, danger below
   1.5x, imminent below 1.2x (within 20 % of liquidation), with the price move that reaches it; in session also "if the
   session closes now" against the off-hours requirement. The order panel warns before a trade whose resulting position
   sits within 20 % of maintenance or (in session) of the off-hours requirement (below it, the API's own unholdable
   message applies). An opt-in browser notification follows a level that gets worse (danger or beyond), sent by the page
   only while it is open: no service worker, no backend push, no email.
-- **Rate limits**: `trade.history` / `trade.fills` travel unbatched (optional procedures) and have their own nginx zone
+- **Rate limits**: `trade.history` / `trade.fills` weigh a full tRPC batch each (`TRPC_HISTORY_READS`: one per request,
+  so the per-request nginx zone counts every call), travel unbatched from the web and have their own nginx zone
   (`bookrunner_history`, 2/s per IP, bursts of 20) on top of `bookrunner_trpc`.
 
 ## 6. Copy rules (Overview §10, enforced by `scripts/check-copy.ts`)

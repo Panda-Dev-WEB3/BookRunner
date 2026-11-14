@@ -599,8 +599,9 @@ Migration `0004_trade_history` (applied by update.sh) adds two tables (ARCHITECT
 - **`engine_trader_events`** (trade and PnL history): written by the **indexer** from the PoolEngine's events, kept
   indefinitely (a row per trade, liquidation, margin change or funding settlement; small). An index older than this
   version backfills it once (cursor `indexer:engine-events-backfill`, engine-only `eth_getLogs` from the deployment's
-  start block plus one block read per block holding engine events; the log says "engine trader events backfill
-  complete"). The positions backfill and the liquidation keeper are unchanged.
+  start block plus one block read per block holding engine events, at most 50 block reads per indexer step; the log says
+  "engine trader events backfill complete"). Until then `/trade` marks the trade history "still being indexed" and
+  shows no totals. The positions backfill and the liquidation keeper are unchanged.
 - nginx: the `bookrunner_history` zone (2/s per IP, bursts of 20) limits `trade.history` / `trade.fills`; it is in
   `deploy/server/nginx-bookrunner-http.conf`, installed with the locations snippet by update.sh.
 

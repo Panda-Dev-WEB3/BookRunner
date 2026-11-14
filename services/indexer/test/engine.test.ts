@@ -153,4 +153,28 @@ describe("engine trader events (trading page v2)", () => {
     expect(await w2.make().backfillEngineEvents()).toBeNull();
     expect(w2.chain.getLogsCalls.length).toBe(calls);
   });
+
+  test("review M3: a backfill step reads at most backfillBlockReads block times; the rest waits for the next step", async () => {
+    const { chain, store } = world();
+    chain.head = 6n;
+    await store.setCursor(CURSORS.protocol, 6);
+    await store.setCursor(CURSORS.books, 6);
+    let reads = 0;
+    const ts = chain.blockTimestamp.bind(chain);
+    chain.blockTimestamp = async (n: bigint) => {
+      reads++;
+      return ts(n);
+    };
+    const deployment = { ...DEPLOYMENT, contracts: { ...(DEPLOYMENT.contracts as object), poolEngine: ENGINE } as never };
+    const ix = new Indexer({ store, chain, watch: new WatchSet(deployment), deployment, publisher: null, logger, config: { confirmations: 0, batchBlocks: 2000, poisonAttempts: 3, startBlock: 1, backfillBlockReads: 2 } });
+    // engine events sit in blocks 1..6: two block reads per step
+    expect(await ix.backfillEngineEvents()).toMatchObject({ from: 1, to: 2 });
+    expect(reads).toBe(2);
+    expect(await store.getCursor(CURSORS.engineEventsBackfill)).toBe(2);
+    expect(Object.values(store.s.engineEvents).every((r) => r.block <= 2)).toBe(true);
+    for (let i = 0; i < 5; i++) await ix.backfillEngineEvents();
+    expect(await store.getCursor(CURSORS.engineEventsBackfill)).toBe(6);
+    expect(Object.keys(store.s.engineEvents)).toHaveLength(9);
+    expect(reads).toBe(6); // each block read once
+  });
 });

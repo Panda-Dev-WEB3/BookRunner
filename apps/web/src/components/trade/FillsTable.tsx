@@ -1,6 +1,8 @@
 // The connected wallet's trade and PnL history (trade.fills: from the indexed engine events, never Redis): trades,
 // liquidations, wind-down close-outs, margin deposits / withdrawals and funding, newest first, paged; realised PnL,
-// fees, funding and net above; a CSV export built in the browser from every page.
+// fees, funding and net above; a CSV export built in the browser from every page, read by a stable (block, logIndex)
+// cursor and paced under the API's rate limit. While the indexer's one-time backfill runs, the history is marked
+// incomplete and no totals are shown.
 import { useState } from "react";
 import { useOptional } from "../../api/hooks";
 import { untypedClient } from "../../api/trpc";
@@ -9,7 +11,7 @@ import { fmtDateTime, fmtPrice, fmtUsd, toNum } from "../../lib/format";
 import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { cx } from "../cx";
 import { Callout, Card, EmptyState, ErrorState, Hash, KV, Segmented, SkeletonRows, Spinner, Table, Td, Th } from "../ui";
-import { FILLS_EXPORT_PAGE, FILLS_PAGE_SIZE, FILL_KIND_LABEL, fillsCsv, fillsCsvName } from "./historyLogic";
+import { FILLS_EXPORT_PACE_MS, FILLS_EXPORT_PAGE, FILLS_PAGE_SIZE, FILL_KIND_LABEL, fillsCsv, fillsCsvName } from "./historyLogic";
 import { absUnitsText } from "./tradeLogic";
 
 const parseFills = (raw: unknown): TradeFillsOut | null => (raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as TradeFillsOut) : null);
@@ -26,13 +28,17 @@ function amountOf(r: TradeFill, sym: string) {
   return <Signed v={r.realisedPnlUsd} sym={sym} />;
 }
 
+/** Every row, newest first: the first page, then strictly older pages by cursor (a new event cannot repeat or shift a row). */
 async function fetchAll(wallet: string, marketId: number | undefined): Promise<TradeFill[]> {
   const rows: TradeFill[] = [];
-  for (let offset = 0; offset < 100_000; offset += FILLS_EXPORT_PAGE) {
-    const page = parseFills(await untypedClient.query("trade.fills", { wallet, ...(marketId ? { marketId } : {}), offset, limit: FILLS_EXPORT_PAGE }));
+  let before: TradeFillsOut["nextBefore"] = null;
+  for (let i = 0; i < 100; i++) {
+    if (i > 0) await new Promise((r) => setTimeout(r, FILLS_EXPORT_PACE_MS));
+    const page = parseFills(await untypedClient.query("trade.fills", { wallet, ...(marketId ? { marketId } : {}), limit: FILLS_EXPORT_PAGE, ...(before ? { before } : {}) }));
     if (!page) break;
     rows.push(...page.rows);
-    if (rows.length >= page.total || page.rows.length === 0) break;
+    before = page.nextBefore;
+    if (!before || page.rows.length === 0) break;
   }
   return rows;
 }
@@ -101,15 +107,22 @@ export function FillsTable({ m, address, markets }: { m: TradeMarket; address: s
         <EmptyState compact title="No trade yet" body="Your trades, margin and funding show here once they are on chain." />
       ) : (
         <div className="space-y-4">
-          <KV
-            rows={[
-              ["Realised PnL", <Signed key="p" v={d.totals.realisedPnlUsd} sym={sym} />],
-              ["Fees paid", `${fmtUsd(d.totals.feesUsd)} ${sym} (trading ${fmtUsd(d.totals.tradingFeesUsd)}, liquidation ${fmtUsd(d.totals.liquidationFeesUsd)})`],
-              ["Funding", <Signed key="f" v={(-(toNum(d.totals.fundingUsd) ?? 0)).toFixed(6)} sym={sym} dp={4} />],
-              ["Net (PnL - fees + funding)", <Signed key="n" v={d.totals.netUsd} sym={sym} />],
-              ["Margin in / out", `${fmtUsd(d.totals.depositedUsd)} / ${fmtUsd(d.totals.withdrawnUsd)} ${sym}`],
-            ]}
-          />
+          {d.incomplete && (
+            <Callout tone="warn" compact title="History still being indexed">
+              The indexer is still reading older engine events from the chain: rows may be missing, so no totals are shown yet. Check again in a few minutes.
+            </Callout>
+          )}
+          {!d.incomplete && (
+            <KV
+              rows={[
+                [d.truncated ? "Realised PnL (latest 10,000 events)" : "Realised PnL", <Signed key="p" v={d.totals.realisedPnlUsd} sym={sym} />],
+                ["Fees paid", `${fmtUsd(d.totals.feesUsd)} ${sym} (trading ${fmtUsd(d.totals.tradingFeesUsd)}, liquidation ${fmtUsd(d.totals.liquidationFeesUsd)})`],
+                ["Funding", <Signed key="f" v={(-(toNum(d.totals.fundingUsd) ?? 0)).toFixed(6)} sym={sym} dp={4} />],
+                ["Net (PnL - fees + funding)", <Signed key="n" v={d.totals.netUsd} sym={sym} />],
+                ["Margin in / out", `${fmtUsd(d.totals.depositedUsd)} / ${fmtUsd(d.totals.withdrawnUsd)} ${sym}`],
+              ]}
+            />
+          )}
           {d.totals.unknownPnl > 0 && (
             <Callout tone="neutral" compact>
               {d.totals.unknownPnl === 1 ? "One liquidation's" : `${d.totals.unknownPnl} liquidations'`} realised PnL could not be rebuilt from the indexed history (its entry price is missing) and is left out of the totals.
@@ -117,7 +130,7 @@ export function FillsTable({ m, address, markets }: { m: TradeMarket; address: s
           )}
           {d.truncated && (
             <Callout tone="warn" compact>
-              Only the first 10,000 events of this wallet are read: the newest are missing here.
+              This wallet has more than 10,000 events: only the latest 10,000 are read, so the rows, the totals and the export cover those only.
             </Callout>
           )}
           <Table minWidth={860}>

@@ -98,6 +98,8 @@ export class FakeReadModel implements ReadModel {
   priceMinuteRows: EnginePriceMinuteRow[] = [];
   /** Counts the candle reads (cache tests). */
   priceMinuteReads = 0;
+  /** The indexer's chain_cursor rows (name -> block). */
+  cursors: Record<string, number> = {};
   failPing = false;
   /** Makes receiptLinks throw (feeds must still be served, without receipt ids). */
   failReceiptLinks = false;
@@ -268,7 +270,10 @@ export class FakeReadModel implements ReadModel {
     return this.engineEventRows
       .filter((r) => r.trader === trader.toLowerCase() && (q.marketId === undefined || r.marketId === q.marketId))
       .sort((a, b) => a.block - b.block || a.logIndex - b.logIndex)
-      .slice(0, q.limit);
+      .slice(-q.limit);
+  }
+  async chainCursors(names: string[]) {
+    return Object.fromEntries(names.flatMap((n) => (this.cursors[n] !== undefined ? [[n, this.cursors[n]!]] : [])));
   }
   async enginePriceMinutes(marketId: number, underlying: string, since: Date, limit: number) {
     this.priceMinuteReads++;

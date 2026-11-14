@@ -29,7 +29,8 @@ describe("risk levels from the margin ratio", () => {
     expect(riskLevel(599, 500)).toBe("imminent");
     expect(riskLevel(499, 500)).toBe("liquidatable");
     expect(riskLevel(0, 500)).toBe("liquidatable");
-    expect(riskLevel(null, 500)).toBe("ok");
+    expect(riskLevel(null, 500)).toBe("unknown"); // never "comfortable" when it cannot be read
+    expect(riskLevel(1500, 0)).toBe("unknown");
   });
 
   test("in session the maintenance margin applies, and 'if the session closes now' reads the off-hours requirement", () => {
@@ -48,6 +49,24 @@ describe("risk levels from the margin ratio", () => {
     expect(r).toMatchObject({ held: true, requirementBps: 2000, level: "danger", ifClose: null });
     expect(r.moveNow).toBeCloseTo(0.18); // the off-hours liquidation price
     expect(positionRisk(pos(3900), market(true))!.level).toBe("watch");
+  });
+
+  test("fail safe: no price means the session state is unknown and the stricter requirement applies; an unreadable ratio is unknown", () => {
+    const noPrice = { margin: market().margin, price: null };
+    const r = positionRisk(pos(1500), noPrice)!;
+    expect(r).toMatchObject({ sessionUnknown: true, held: false, requirementBps: 2000, level: "liquidatable", ifClose: null });
+    expect(r.moveNow).toBeCloseTo(0.18); // the off-hours liquidation price
+    expect(positionRisk(pos(4500), noPrice)!.level).toBe("ok");
+    const unreadable = positionRisk({ ...pos(1500), marginRatioBps: null, side: "long" }, market())!;
+    expect(unreadable.level).toBe("unknown");
+    expect(unreadable.ifClose).toBe("unknown");
+    const t = riskText("unknown", null, 2000, null, true)!;
+    expect(t.title).toBe("Liquidation risk cannot be read right now");
+    expect(t.body).toContain("20% of notional");
+    expect(ifCloseText(r, 2000)).toBeNull();
+    // an unknown reading never sends a notification, and never counts as an improvement
+    expect(riskNotice({ level: "danger", ifClose: "ok" }, { ...unreadable, ifClose: "unknown" }, "NVDA")).toBeNull();
+    expect(checkCopy([t.title, t.body].join("\n"))).toEqual([]);
   });
 
   test("warning texts name the requirement and the move to liquidation, and pass the copy rules", () => {
@@ -97,7 +116,7 @@ describe("pre-trade warning", () => {
 });
 
 describe("browser notice", () => {
-  const r = (level: PositionRisk["level"], ifClose: PositionRisk["ifClose"] = "ok"): PositionRisk => ({ held: false, requirementBps: 500, level, ifClose, moveNow: 0.03, moveIfClose: 0.1 });
+  const r = (level: PositionRisk["level"], ifClose: PositionRisk["ifClose"] = "ok"): PositionRisk => ({ held: false, sessionUnknown: false, requirementBps: 500, level, ifClose, moveNow: 0.03, moveIfClose: 0.1 });
 
   test("only a level that gets worse and reaches danger; never the first reading, never an improvement", () => {
     expect(riskNotice(null, r("imminent"), "NVDA")).toBeNull();
@@ -140,6 +159,7 @@ describe("price chart and trade history logic", () => {
       id: "0xab:1",
       at: "2026-11-13T10:00:00.000Z",
       block: 12,
+      logIndex: 1,
       txHash: "0xab",
       marketId: 1,
       kind: "liquidation",

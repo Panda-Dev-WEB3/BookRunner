@@ -4,23 +4,24 @@
 // requirement: watch below 2x, danger below 1.5x, imminent below 1.2x (within 20 % of liquidation), liquidatable below
 // 1x. "If the session closes now" reads the same ratio against the off-hours requirement. The order panel warns before
 // a trade that would leave the position within 20 % of either requirement; an opt-in browser notification (only while
-// the page is open) follows a level that gets worse.
+// the page is open) follows a level that gets worse. Fail safe (review M4): a ratio that cannot be read is "unknown",
+// never "comfortable", and with no price (session state unknown) the stricter of the two requirements applies.
 import type { TradeMarket, TradePositionOut, TradeQuoteOut } from "../../lib/api-types";
 import type { Tone } from "../../lib/limits";
 
-export type RiskLevel = "ok" | "watch" | "danger" | "imminent" | "liquidatable";
+export type RiskLevel = "unknown" | "ok" | "watch" | "danger" | "imminent" | "liquidatable";
 
 /** Upper bounds (multiples of the requirement) of each level; at or above WATCH the position is "ok". */
 export const RISK_BANDS = { watch: 2, danger: 1.5, imminent: 1.2, liquidatable: 1 } as const;
 /** The order panel warns when the resulting position sits within this multiple of a requirement (20 % above it). */
 export const PRE_TRADE_BAND = RISK_BANDS.imminent;
 
-const RANK: Record<RiskLevel, number> = { ok: 0, watch: 1, danger: 2, imminent: 3, liquidatable: 4 };
+const RANK: Record<RiskLevel, number> = { unknown: 0, ok: 0, watch: 1, danger: 2, imminent: 3, liquidatable: 4 };
 export const riskRank = (l: RiskLevel) => RANK[l];
 
-/** Level of a margin ratio (bps; null = flat) against a requirement (bps). */
+/** Level of an open position's margin ratio (bps) against a requirement (bps); "unknown" when either cannot be read. */
 export function riskLevel(ratioBps: number | null | undefined, requirementBps: number): RiskLevel {
-  if (ratioBps == null || requirementBps <= 0) return "ok";
+  if (ratioBps == null || !Number.isFinite(ratioBps) || !(requirementBps > 0)) return "unknown";
   const x = ratioBps / requirementBps;
   if (x < RISK_BANDS.liquidatable) return "liquidatable";
   if (x < RISK_BANDS.imminent) return "imminent";
@@ -30,6 +31,7 @@ export function riskLevel(ratioBps: number | null | undefined, requirementBps: n
 }
 
 export const RISK_META: Record<RiskLevel, { label: string; tone: Tone; callout: "info" | "warn" | "risk" }> = {
+  unknown: { label: "Risk unknown", tone: "warn", callout: "warn" },
   ok: { label: "Margin comfortable", tone: "good", callout: "info" },
   watch: { label: "Watch", tone: "warn", callout: "warn" },
   danger: { label: "Danger", tone: "critical", callout: "risk" },
@@ -52,6 +54,8 @@ const movePct = (f: number) => `${(f * 100).toFixed(f < 0.1 ? 1 : 0)}%`;
 export interface PositionRisk {
   /** the stock's session is closed: the off-hours requirement applies now */
   held: boolean;
+  /** no price: the session state is unknown, so the stricter requirement (the off-hours one) is applied */
+  sessionUnknown: boolean;
   requirementBps: number;
   level: RiskLevel;
   /** the level against the off-hours requirement while the session is open (null while held: it is `level`) */
@@ -66,23 +70,32 @@ type PositionIn = Pick<TradePositionOut, "side" | "marginRatioBps" | "markPrice"
 
 export function positionRisk(p: PositionIn, m: MarketRisk): PositionRisk | null {
   if (p.side === "flat") return null;
+  const sessionUnknown = !m.price;
   const held = m.price?.held === true;
   const mm = m.margin.maintenanceMarginBps;
   const oh = m.margin.offHoursMarginBps;
-  const requirementBps = held ? oh : mm;
+  // held, or unknown: the stricter requirement
+  const strict = held || sessionUnknown;
+  const requirementBps = strict ? Math.max(mm, oh) : mm;
   return {
     held,
+    sessionUnknown,
     requirementBps,
     level: riskLevel(p.marginRatioBps, requirementBps),
-    ifClose: held ? null : riskLevel(p.marginRatioBps, oh),
-    moveNow: moveToLiquidation(p.markPrice, held ? p.liquidationPriceOffHours : p.liquidationPrice),
-    moveIfClose: held ? null : moveToLiquidation(p.markPrice, p.liquidationPriceOffHours),
+    ifClose: strict ? null : riskLevel(p.marginRatioBps, oh),
+    moveNow: moveToLiquidation(p.markPrice, strict ? p.liquidationPriceOffHours : p.liquidationPrice),
+    moveIfClose: strict ? null : moveToLiquidation(p.markPrice, p.liquidationPriceOffHours),
   };
 }
 
-/** The warning of a level (null when "ok"); `ratioBps` and the requirement in plain numbers. */
+/** The warning of a level (null when "ok"); `ratioBps` and the requirement in plain numbers. `held`: the off-hours requirement applies. */
 export function riskText(level: RiskLevel, ratioBps: number | null, requirementBps: number, move: number | null, held: boolean): { title: string; body: string } | null {
   if (level === "ok") return null;
+  if (level === "unknown")
+    return {
+      title: "Liquidation risk cannot be read right now",
+      body: `The margin ratio or the price is not available. Until it is, assume the stricter requirement applies (${pct(requirementBps)} of notional, the off-hours one) and keep margin above it.`,
+    };
   const req = held ? `the off-hours requirement (${pct(requirementBps)} of notional while the session is closed)` : `the maintenance margin (${pct(requirementBps)} of notional)`;
   const ratio = ratioBps === null ? "—" : pct(ratioBps);
   const away = move === null ? "" : move === 0 ? " Every price liquidates it." : ` A move of about ${movePct(move)} against you reaches liquidation.`;
@@ -100,7 +113,7 @@ export function riskText(level: RiskLevel, ratioBps: number | null, requirementB
 
 /** "If the session closes now": the off-hours level of a position while the session is open (null when nothing to say). */
 export function ifCloseText(r: PositionRisk, offHoursBps: number): { title: string; body: string } | null {
-  if (r.held || r.ifClose === null || riskRank(r.ifClose) < riskRank("danger")) return null;
+  if (r.held || r.sessionUnknown || r.ifClose === null || riskRank(r.ifClose) < riskRank("danger")) return null;
   const move = r.moveIfClose === null ? "" : r.moveIfClose === 0 ? "" : ` (about ${movePct(r.moveIfClose)} from the price now)`;
   if (r.ifClose === "liquidatable")
     return {
@@ -144,7 +157,7 @@ export function preTradeRisk(after: Pick<TradeQuoteOut["after"], "side" | "margi
  */
 export function riskNotice(prev: { level: RiskLevel; ifClose: RiskLevel | null } | null, next: PositionRisk, label: string): { title: string; body: string } | null {
   if (!prev) return null;
-  const worse = (a: RiskLevel | null, b: RiskLevel | null) => a !== null && b !== null && riskRank(b) > riskRank(a) && riskRank(b) >= riskRank("danger");
+  const worse = (a: RiskLevel | null, b: RiskLevel | null) => a !== null && b !== null && b !== "unknown" && riskRank(b) > riskRank(a) && riskRank(b) >= riskRank("danger");
   if (worse(prev.level, next.level)) {
     const t = next.level === "liquidatable" ? "liquidatable now" : next.level === "imminent" ? "close to liquidation" : "in danger";
     return { title: `${label}: your position is ${t}`, body: next.moveNow === null ? "Open the trading page to add margin or reduce." : `About ${movePct(next.moveNow)} from liquidation. Open the trading page to add margin or reduce.` };

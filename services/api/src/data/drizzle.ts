@@ -404,14 +404,22 @@ export class DrizzleReadModel implements ReadModel {
     return [...rows].map((r) => ({ day: new Date(`${r.day}T00:00:00Z`), premiumUsd: r.premium, lossUsd: r.loss, recoveryUsd: r.recovery }));
   }
 
-  engineTraderEvents(trader: string, q: { marketId?: number; limit: number }) {
+  async engineTraderEvents(trader: string, q: { marketId?: number; limit: number }) {
     const conds = [eq(engineTraderEvents.trader, lower(trader)), q.marketId !== undefined ? eq(engineTraderEvents.marketId, q.marketId) : undefined].filter((c) => c !== undefined);
-    return this.db
+    // the newest `limit`, returned oldest first
+    const rows = await this.db
       .select()
       .from(engineTraderEvents)
       .where(and(...conds))
-      .orderBy(asc(engineTraderEvents.block), asc(engineTraderEvents.logIndex))
+      .orderBy(desc(engineTraderEvents.block), desc(engineTraderEvents.logIndex))
       .limit(q.limit);
+    return rows.reverse();
+  }
+
+  async chainCursors(names: string[]) {
+    if (names.length === 0) return {};
+    const rows = await this.db.select({ name: chainCursor.name, block: chainCursor.blockNumber }).from(chainCursor).where(inArray(chainCursor.name, names));
+    return Object.fromEntries(rows.map((r) => [r.name, r.block]));
   }
 
   enginePriceMinutes(marketId: number, underlying: string, since: Date, limit: number) {

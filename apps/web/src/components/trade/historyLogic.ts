@@ -81,6 +81,11 @@ export const FILL_KIND_LABEL: Record<TradeFill["kind"], string> = {
 /** Rows per page of the history table, and per API read of the CSV export (the API's page bound). */
 export const FILLS_PAGE_SIZE = 25;
 export const FILLS_EXPORT_PAGE = 500;
+/**
+ * Pause between two page reads of the export (nginx zone bookrunner_history: 2/s per IP, bursts of 20): 600 ms keeps a
+ * full export (20 pages) under the rate itself, whatever else the page reads meanwhile.
+ */
+export const FILLS_EXPORT_PACE_MS = 600;
 
 /** A CSV cell: quoted when it holds a comma, quote or line break; a text cell starting with = + - @ is defused. */
 export function csvCell(v: string | number | null | undefined): string {

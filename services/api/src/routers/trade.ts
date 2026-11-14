@@ -36,7 +36,7 @@ import {
   unitsStr,
   withdrawMaxAge,
 } from "../domain/trade";
-import { HISTORY_RANGES, HISTORY_SPEC, MAX_TRADER_EVENTS, aggregateCandles, buildFills, historyFrom, minuteRowsFor } from "../domain/tradeHistory";
+import { HISTORY_RANGES, HISTORY_SPEC, INDEXER_CURSORS, MAX_TRADER_EVENTS, aggregateCandles, buildFills, eventsBackfillPending, historyFrom, minuteRowsFor } from "../domain/tradeHistory";
 import { type PreparedTx, approveUsdcTx, engineDepositMarginTx, engineTradeTx, engineWithdrawMarginTx, oracleUpdateTx } from "../domain/txs";
 import { parseUsd, usdStr, wadStr } from "../format";
 import { cached, parseJson } from "../kv";
@@ -317,16 +317,45 @@ export const tradeRouter = router({
   /**
    * A wallet's trades, liquidations, wind-down close-outs, margin deposits / withdrawals and funding in one market (or
    * all), newest first, with realised PnL, fees and funding totals: from the indexed engine events (engine_trader_events),
-   * never Redis. Paged by offset (at most MAX_FILLS_PAGE rows); totals cover every row.
+   * never Redis. Paged by offset, or by a stable cursor (`before`: rows strictly older than that (block, logIndex), so an
+   * event indexed meanwhile neither repeats nor shifts a row; `nextBefore` continues). At most MAX_FILLS_PAGE rows; the
+   * totals cover every row read. `incomplete`: the indexer's one-time backfill of these events has not caught up (older
+   * events may be missing, totals included); `truncated`: only the newest MAX_TRADER_EVENTS events are read.
    */
   fills: publicProcedure
-    .input(z.object({ wallet: walletInput, marketId: marketIdInput.optional(), offset: intLike(0, MAX_TRADER_EVENTS).default(0), limit: intLike(1, MAX_FILLS_PAGE).default(50) }))
+    .input(
+      z.object({
+        wallet: walletInput,
+        marketId: marketIdInput.optional(),
+        offset: intLike(0, MAX_TRADER_EVENTS).default(0),
+        limit: intLike(1, MAX_FILLS_PAGE).default(50),
+        before: z.object({ block: intLike(0), logIndex: intLike(0) }).optional(),
+      }),
+    )
     .query(async ({ ctx: { deps }, input }) => {
       const all = await cached(deps.kv, `trade:fills:${deps.settings.chainId}:${input.wallet.toLowerCase()}:${input.marketId ?? "all"}`, FILLS_CACHE_SECONDS, async () => {
-        const events = await deps.data.engineTraderEvents(input.wallet, { marketId: input.marketId, limit: MAX_TRADER_EVENTS });
-        return { ...buildFills(events), truncated: events.length >= MAX_TRADER_EVENTS };
+        const [events, cursors] = await Promise.all([
+          deps.data.engineTraderEvents(input.wallet, { marketId: input.marketId, limit: MAX_TRADER_EVENTS }),
+          deps.data.chainCursors([INDEXER_CURSORS.protocol, INDEXER_CURSORS.engineEventsBackfill]),
+        ]);
+        return { ...buildFills(events), truncated: events.length >= MAX_TRADER_EVENTS, incomplete: eventsBackfillPending(cursors) };
       });
-      return { wallet: input.wallet, marketId: input.marketId ?? null, total: all.rows.length, offset: input.offset, rows: all.rows.slice(input.offset, input.offset + input.limit), totals: all.totals, truncated: all.truncated };
+      const b = input.before;
+      const from = b ? all.rows.findIndex((r) => r.block < b.block || (r.block === b.block && r.logIndex < b.logIndex)) : input.offset;
+      const rows = from < 0 ? [] : all.rows.slice(from, from + input.limit);
+      const last = rows[rows.length - 1];
+      const more = from >= 0 && from + rows.length < all.rows.length;
+      return {
+        wallet: input.wallet,
+        marketId: input.marketId ?? null,
+        total: all.rows.length,
+        offset: from < 0 ? all.rows.length : from,
+        rows,
+        nextBefore: more && last ? { block: last.block, logIndex: last.logIndex } : null,
+        totals: all.totals,
+        truncated: all.truncated,
+        incomplete: all.incomplete,
+      };
     }),
 
   /** Prepared [settlement-token approve (if needed), depositMargin]: always allowed, off-hours and reduce-only too. */

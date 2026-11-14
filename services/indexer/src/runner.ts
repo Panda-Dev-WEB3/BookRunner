@@ -24,7 +24,15 @@ export interface IndexerConfig {
   batchBlocks: number;
   poisonAttempts: number;
   startBlock: number;
+  /** Block-time reads (eth_getBlockByNumber) one engine-events backfill step may make; default BACKFILL_BLOCK_READS. */
+  backfillBlockReads?: number;
 }
+
+/**
+ * Review M3: a backfill step reads at most this many block times; the blocks beyond wait for the next step (the cursor
+ * stops at the last block read), so live indexing is never held up and a public RPC is not hammered.
+ */
+export const BACKFILL_BLOCK_READS = 50;
 
 export interface PublishedEvent {
   id: number;
@@ -211,9 +219,9 @@ export class Indexer {
       }
       if (cur >= target) return null;
       const from = cur + 1;
-      const to = Math.min(target, cur + config.batchBlocks);
+      let to = Math.min(target, cur + config.batchBlocks);
       const raws = await chain.getLogs([engine], BigInt(from), BigInt(to));
-      const logs = orderLogs(
+      let logs = orderLogs(
         raws.flatMap((raw) => {
           if (raw.removed) return [];
           const d = decodeLog(raw, "engine", null);
@@ -221,7 +229,16 @@ export class Indexer {
         }),
       );
       const times = new Map<bigint, Date>();
-      if (blockTime) for (const log of logs) if (!times.has(log.blockNumber)) times.set(log.blockNumber, new Date((await chain.blockTimestamp(log.blockNumber)) * 1000));
+      if (blockTime) {
+        const cap = Math.max(1, config.backfillBlockReads ?? BACKFILL_BLOCK_READS);
+        const blocks = [...new Set(logs.map((l) => l.blockNumber))];
+        if (blocks.length > cap) {
+          const last = blocks[cap - 1]!;
+          logs = logs.filter((l) => l.blockNumber <= last);
+          to = Number(last);
+        }
+        for (const b of blocks.slice(0, cap)) times.set(b, new Date((await chain.blockTimestamp(b)) * 1000));
+      }
       await store.transaction(async (tx) => {
         for (const log of logs) {
           const ctx = { log, ts: times.get(log.blockNumber) ?? new Date(0), store: tx, chain, watch, deployment: this.d.deployment, batch: logs, logger, emit: async () => undefined } as unknown as HandlerCtx;

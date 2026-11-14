@@ -9,7 +9,9 @@ import type { Address, Hex } from "viem";
 import type { EngineMarketChainState } from "../src/chain/gateway";
 import type { EnginePriceMinuteRow, EngineTraderEventRow } from "../src/data/types";
 import { pnlUsd } from "../src/domain/engine";
-import { HISTORY_SPEC, MAX_HISTORY_POINTS, aggregateCandles, buildFills, historyFrom, minuteRowsFor } from "../src/domain/tradeHistory";
+import { createApp } from "../src/app";
+import { webOrigins } from "../src/config";
+import { HISTORY_SPEC, INDEXER_CURSORS, MAX_HISTORY_POINTS, MAX_TRADER_EVENTS, aggregateCandles, buildFills, eventsBackfillPending, historyFrom, minuteRowsFor } from "../src/domain/tradeHistory";
 import { PriceRecorder } from "../src/priceRecorder";
 import { A, FakePriceHistoryStore } from "./fakes";
 import { ALICE, NOW, type World, makeWorld } from "./fixtures";
@@ -238,19 +240,21 @@ describe("trade and PnL history from engine events", () => {
     });
   });
 
-  test("a short liquidated with bad debt; a wind-down close-out is one row with its bad debt; a cut-short replay leaves the PnL unknown", () => {
+  test("a short liquidated with bad debt loses its margin, not more; a wind-down close-out is one row; a cut-short replay leaves the PnL unknown", () => {
     li = 0;
     const bob = "0x0000000000000000000000000000000000000b0b";
     const short = [trade(1, -UNITS(4), -UNITS(4), PX(50), U(0.2), 0n, bob), ev(2, "liquidation", { sizeRaw: (-UNITS(4)).toString(), priceWad: PX(70).toString(), feeRaw: "0", badDebtRaw: U(30).toString() }, bob)];
     const s = buildFills(short);
-    expect(s.rows[0]).toMatchObject({ side: "buy", realisedPnlUsd: "-80.000000", badDebtUsd: "30.000000" });
+    // -80 at the oracle, 30 of it beyond the margin (bad debt, borne by the insurance fund): the trader lost 50
+    expect(s.rows[0]).toMatchObject({ side: "buy", realisedPnlUsd: "-50.000000", badDebtUsd: "30.000000" });
+    expect(s.totals.realisedPnlUsd).toBe("-50.000000");
 
     const co = trade(3, -UNITS(2), 0n, PX(60), 0n, U(-1), bob);
     const closed = ev(3, "closed_out", { sizeRaw: UNITS(2).toString(), priceWad: PX(60).toString(), badDebtRaw: U(1).toString(), counterparty: "0xbeef" }, bob);
     expect(closed.logIndex).toBe(co.logIndex + 1);
     const c = buildFills([trade(2, UNITS(2), UNITS(2), PX(61), 0n, 0n, bob), co, closed]);
     expect(c.rows).toHaveLength(2);
-    expect(c.rows[0]).toMatchObject({ kind: "close_out", realisedPnlUsd: "-1.000000", badDebtUsd: "1.000000", positionAfter: "0.0" });
+    expect(c.rows[0]).toMatchObject({ kind: "close_out", realisedPnlUsd: "0.000000", badDebtUsd: "1.000000", positionAfter: "0.0" }); // -1 at the oracle, all of it bad debt
 
     // the opening trade is missing (history cut short): the liquidation's PnL is unknown, not guessed
     const cut = buildFills(aliceHistory().slice(3));
@@ -278,5 +282,63 @@ describe("trade and PnL history from engine events", () => {
     w.now.ms += 3_000;
     expect((await w.caller.trade.fills({ wallet: ALICE, marketId: 1 })).total).toBe(10);
     await expect(w.caller.trade.fills({ wallet: ALICE, limit: 501 })).rejects.toThrow();
+  });
+
+  test("stable cursor: an event indexed during an export neither repeats nor shifts a row", async () => {
+    const w = world();
+    w.data.engineEventRows.push(...aliceHistory());
+    const p1 = await w.caller.trade.fills({ wallet: ALICE, marketId: 1, limit: 4 });
+    expect(p1.nextBefore).toEqual({ block: p1.rows[3]!.block, logIndex: p1.rows[3]!.logIndex });
+    // a new event lands and the cache expires between two pages
+    w.data.engineEventRows.push(ev(20, "margin", { marginDeltaRaw: U(1).toString() }));
+    w.now.ms += 3_000;
+    const p2 = await w.caller.trade.fills({ wallet: ALICE, marketId: 1, limit: 4, before: p1.nextBefore! });
+    const p3 = await w.caller.trade.fills({ wallet: ALICE, marketId: 1, limit: 4, before: p2.nextBefore! });
+    expect(p3.nextBefore).toBeNull();
+    const ids = [...p1.rows, ...p2.rows, ...p3.rows].map((r) => r.id);
+    expect(new Set(ids).size).toBe(9);
+    expect(ids).toEqual(buildFills(aliceHistory()).rows.map((r) => r.id));
+    // offset paging would have shifted: the same second page by offset repeats the fourth row
+    expect((await w.caller.trade.fills({ wallet: ALICE, marketId: 1, limit: 4, offset: 4 })).rows[0]!.id).toBe(p1.rows[3]!.id);
+  });
+
+  test("incomplete while the indexer's engine-events backfill has not caught up", async () => {
+    expect(eventsBackfillPending({})).toBe(false);
+    expect(eventsBackfillPending({ [INDEXER_CURSORS.protocol]: 100 })).toBe(true);
+    expect(eventsBackfillPending({ [INDEXER_CURSORS.protocol]: 100, [INDEXER_CURSORS.engineEventsBackfill]: 60 })).toBe(true);
+    expect(eventsBackfillPending({ [INDEXER_CURSORS.protocol]: 100, [INDEXER_CURSORS.engineEventsBackfill]: 100 })).toBe(false);
+    const w = world();
+    w.data.engineEventRows.push(...aliceHistory());
+    w.data.cursors = { [INDEXER_CURSORS.protocol]: 100, [INDEXER_CURSORS.engineEventsBackfill]: 40 };
+    expect((await w.caller.trade.fills({ wallet: ALICE })).incomplete).toBe(true);
+    w.data.cursors[INDEXER_CURSORS.engineEventsBackfill] = 100;
+    w.now.ms += 3_000;
+    expect((await w.caller.trade.fills({ wallet: ALICE })).incomplete).toBe(false);
+  });
+
+  test("above the cap the NEWEST events are kept (truncated)", async () => {
+    const w = world();
+    li = 0;
+    for (let b = 1; b <= MAX_TRADER_EVENTS + 5; b++) w.data.engineEventRows.push(ev(b, "margin", { marginDeltaRaw: "1" }));
+    const r = await w.caller.trade.fills({ wallet: ALICE, limit: 1 });
+    expect(r).toMatchObject({ total: MAX_TRADER_EVENTS, truncated: true });
+    expect(r.rows[0]!.block).toBe(MAX_TRADER_EVENTS + 5);
+  });
+
+  test("a batch carries one history read at most: N trade.fills / trade.history calls in one request are refused", async () => {
+    const w = world();
+    const app = createApp(w.deps, { origins: webOrigins("http://127.0.0.1:5180") });
+    const batch = (calls: Array<[string, unknown]>) => {
+      const paths = calls.map(([p]) => p).join(",");
+      const input = Object.fromEntries(calls.map(([, v], i) => [String(i), { json: v }]));
+      return app.request(`/trpc/${paths}?batch=1&input=${encodeURIComponent(JSON.stringify(input))}`);
+    };
+    const wallet = (i: number) => `0x${(i + 1).toString(16).padStart(40, "0")}`;
+    expect((await batch(Array.from({ length: 10 }, (_, i) => ["trade.fills", { wallet: wallet(i) }]))).status).toBe(400);
+    expect((await batch([["trade.fills", { wallet: wallet(0) }], ["trade.fills", { wallet: wallet(1) }]])).status).toBe(400);
+    expect((await batch([["trade.history", { marketId: 1 }], ["book.get", { bookId: 7 }]])).status).toBe(400);
+    expect((await batch([["trade.fills", { wallet: wallet(0) }]])).status).toBe(200);
+    const single = await app.request(`/trpc/trade.fills?input=${encodeURIComponent(JSON.stringify({ json: { wallet: wallet(0) } }))}`);
+    expect(single.status).toBe(200);
   });
 });

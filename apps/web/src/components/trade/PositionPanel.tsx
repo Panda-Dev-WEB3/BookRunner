@@ -45,7 +45,7 @@ export function PositionPanel(props: { m: TradeMarket; address: string; position
   }
   const flat = p.side === "flat";
   const pnl = toNum(p.unrealizedPnlUsd) ?? 0;
-  const warnNow = risk ? riskText(risk.level, p.marginRatioBps, risk.requirementBps, risk.moveNow, risk.held) : null;
+  const warnNow = risk ? riskText(risk.level, p.marginRatioBps, risk.requirementBps, risk.moveNow, risk.held || risk.sessionUnknown) : null;
   const warnClose = risk ? ifCloseText(risk, props.m.margin.offHoursMarginBps) : null;
   return (
     <Card
@@ -70,11 +70,15 @@ export function PositionPanel(props: { m: TradeMarket; address: string; position
               ["Funding owed", `${fmtUsd(p.fundingOwedUsd, { signed: true, dp: 4 })} ${sym}`],
               ["Margin", `${fmtUsd(p.marginUsd)} ${sym}`],
               ["Equity", `${fmtUsd(p.equityUsd)} ${sym}`],
-              ["Margin ratio", p.marginRatioBps === null ? "—" : `${fmtBps(p.marginRatioBps)} (${risk?.held ? "off-hours requirement" : "maintenance"} ${fmtBps(risk?.requirementBps ?? props.m.margin.maintenanceMarginBps)})`],
+              ["Margin ratio", p.marginRatioBps === null ? "—" : `${fmtBps(p.marginRatioBps)} (${risk?.held || risk?.sessionUnknown ? "off-hours requirement" : "maintenance"} ${fmtBps(risk?.requirementBps ?? props.m.margin.maintenanceMarginBps)})`],
               ["Leverage", fmtLeverage(p.leverage)],
               ["Liquidation price", liqText(p.liquidationPrice)],
               ["Liquidation price off-hours", liqText(p.liquidationPriceOffHours)],
-              risk && !risk.held && ["If the session closes now", risk.ifClose === "ok" || risk.ifClose === null ? "margin comfortable" : RISK_META[risk.ifClose].label.toLowerCase()],
+              risk &&
+                !risk.held && [
+                  "If the session closes now",
+                  risk.ifClose === null ? "unknown (no price): the off-hours requirement is assumed" : risk.ifClose === "ok" ? "margin comfortable" : RISK_META[risk.ifClose].label.toLowerCase(),
+                ],
             ]}
           />
           {risk && warnNow && (
