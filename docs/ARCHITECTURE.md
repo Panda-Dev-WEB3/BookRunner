@@ -1011,7 +1011,37 @@ API + web over the existing trader surface (`depositMargin`, `withdrawMargin`, `
   engine book's adapter names on chain (`Book.components().adapter` → `engine()`) and the oracle of the
   BookrunnerConfig, never addresses from the API. Engine reverts (`OffHours`, `StalePrice`, `PriceNotAcceptable`,
   `ExposureCap`, `InsufficientMargin`, `SplitUnrecorded`, `IndexSnapshot`, ...) decode to plain reasons.
-- Not built: a price chart (the API serves no oracle price history yet).
+- **Price history and chart** (2026-11, trading page v2; migration `0004_trade_history`): the API's price recorder
+  (`services/api/src/priceRecorder.ts`, every `API_PRICE_HISTORY_SAMPLE_MS` = 5 s, 0 = off) folds the freshest signed
+  print of each open engine market (the same signed source the trades carry, read at most once a second) into a
+  one-minute OHLC row of `engine_price_1m` (raw WAD, keyed by market id and underlying, `held` = the minute's last print
+  was held; commutative upserts, so replicas agree). `trade.history(marketId, range)` (optional procedure, `1D` / `1W` /
+  `1M`) downsamples to 5-minute / 30-minute / 2-hour steps, at most 400 points (`MAX_HISTORY_POINTS`), reading at most
+  the range's minutes; cached per (market, range) 5 s / 30 s / 120 s. The page draws it as inline SVG (no chart
+  library: the CSP allows no external script), held stretches dashed, gaps left open, with a crosshair and a table view.
+- **Trade and PnL history** (`trade.fills(wallet, marketId?, offset, limit ≤ 500)`, optional procedure): from
+  `engine_trader_events`, one row per engine `Trade` / `Liquidation` / `ClosedOut` / `MarginChanged` /
+  `FundingSettled` log written by the indexer next to `engine_positions` (raw values; cursor
+  `indexer:engine-events-backfill` backfills an older index once, with block times). Never Redis. The API replays the
+  entry price per market with the engine's averaging (`newEntry`) so a liquidation, whose event carries no PnL, gets
+  `pnlUsd(size, entry, price)`; a wind-down close-out (Trade then ClosedOut in one transaction) is one row; a liquidation's
+  or close-out's loss stops at the margin (the bad debt beyond it, borne by the IF then the pool, is added back); a replay
+  cut short leaves that PnL unknown, never guessed. Totals: realised PnL, trading and liquidation fees, net funding, net,
+  margin in / out. The newest 10,000 events per wallet are read (`truncated` beyond; the page says the totals cover
+  those only); the built list is cached 2 s per (wallet, market). `incomplete` while the indexer's events backfill
+  cursor is behind its protocol cursor: the page then shows no totals. Pages by offset or by a stable `before`
+  (block, logIndex) cursor; the CSV export, built in the browser, walks the cursor at one page per 600 ms.
+- **Liquidation-risk warnings** (web, `components/trade/riskLogic.ts`): the margin ratio against the requirement that
+  applies (maintenance in session, the off-hours requirement while the price is held or unknown, i.e. no price): an
+  unreadable ratio is "unknown", never comfortable; watch below 2x, danger below
+  1.5x, imminent below 1.2x (within 20 % of liquidation), with the price move that reaches it; in session also "if the
+  session closes now" against the off-hours requirement. The order panel warns before a trade whose resulting position
+  sits within 20 % of maintenance or (in session) of the off-hours requirement (below it, the API's own unholdable
+  message applies). An opt-in browser notification follows a level that gets worse (danger or beyond), sent by the page
+  only while it is open: no service worker, no backend push, no email.
+- **Rate limits**: `trade.history` / `trade.fills` weigh a full tRPC batch each (`TRPC_HISTORY_READS`: one per request,
+  so the per-request nginx zone counts every call), travel unbatched from the web and have their own nginx zone
+  (`bookrunner_history`, 2/s per IP, bursts of 20) on top of `bookrunner_trpc`.
 
 ## 6. Copy rules (Overview §10, enforced by `scripts/check-copy.ts`)
 

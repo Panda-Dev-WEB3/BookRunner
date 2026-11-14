@@ -6,6 +6,8 @@ import {
   chainCursor,
   charters,
   committee,
+  enginePrice1m,
+  engineTraderEvents,
   events,
   fills,
   hedges,
@@ -37,6 +39,8 @@ import type {
   OraclePriceRow,
   Page,
   PoolFlowDay,
+  PriceHistoryStore,
+  PriceSample,
   ReadModel,
   ReceiptLinkField,
   WebhookStore,
@@ -398,6 +402,74 @@ export class DrizzleReadModel implements ReadModel {
        group by 1
        order by 1`);
     return [...rows].map((r) => ({ day: new Date(`${r.day}T00:00:00Z`), premiumUsd: r.premium, lossUsd: r.loss, recoveryUsd: r.recovery }));
+  }
+
+  async engineTraderEvents(trader: string, q: { marketId?: number; limit: number }) {
+    const conds = [eq(engineTraderEvents.trader, lower(trader)), q.marketId !== undefined ? eq(engineTraderEvents.marketId, q.marketId) : undefined].filter((c) => c !== undefined);
+    // the newest `limit`, returned oldest first
+    const rows = await this.db
+      .select()
+      .from(engineTraderEvents)
+      .where(and(...conds))
+      .orderBy(desc(engineTraderEvents.block), desc(engineTraderEvents.logIndex))
+      .limit(q.limit);
+    return rows.reverse();
+  }
+
+  async chainCursors(names: string[]) {
+    if (names.length === 0) return {};
+    const rows = await this.db.select({ name: chainCursor.name, block: chainCursor.blockNumber }).from(chainCursor).where(inArray(chainCursor.name, names));
+    return Object.fromEntries(rows.map((r) => [r.name, r.block]));
+  }
+
+  enginePriceMinutes(marketId: number, underlying: string, since: Date, limit: number) {
+    return this.db
+      .select()
+      .from(enginePrice1m)
+      .where(and(eq(enginePrice1m.marketId, marketId), eq(enginePrice1m.underlying, lower(underlying)), gte(enginePrice1m.bucket, since)))
+      .orderBy(asc(enginePrice1m.bucket))
+      .limit(limit);
+  }
+}
+
+/** engine_price_1m writer of the API's price recorder: commutative upserts (several API processes may record a minute). */
+export class DrizzlePriceHistoryStore implements PriceHistoryStore {
+  constructor(private readonly db: Db) {}
+
+  async recordPrice(s: PriceSample) {
+    const px = s.priceWad.toString();
+    const t = enginePrice1m;
+    await this.db
+      .insert(t)
+      .values({
+        marketId: s.marketId,
+        underlying: lower(s.underlying),
+        bucket: new Date(Math.floor(s.publishedAt / 60) * 60_000),
+        openWad: px,
+        highWad: px,
+        lowWad: px,
+        closeWad: px,
+        firstAt: s.publishedAt,
+        lastAt: s.publishedAt,
+        held: s.held,
+      })
+      .onConflictDoUpdate({
+        target: [t.marketId, t.underlying, t.bucket],
+        set: {
+          openWad: sql`case when excluded.first_at < ${t.firstAt} then excluded.open_wad else ${t.openWad} end`,
+          firstAt: sql`least(${t.firstAt}, excluded.first_at)`,
+          highWad: sql`greatest(${t.highWad}, excluded.high_wad)`,
+          lowWad: sql`least(${t.lowWad}, excluded.low_wad)`,
+          closeWad: sql`case when excluded.last_at >= ${t.lastAt} then excluded.close_wad else ${t.closeWad} end`,
+          held: sql`case when excluded.last_at >= ${t.lastAt} then excluded.held else ${t.held} end`,
+          lastAt: sql`greatest(${t.lastAt}, excluded.last_at)`,
+        },
+      });
+  }
+
+  async prunePrices(before: Date) {
+    const out = await this.db.delete(enginePrice1m).where(lt(enginePrice1m.bucket, before)).returning({ m: enginePrice1m.marketId });
+    return out.length;
   }
 }
 

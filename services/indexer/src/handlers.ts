@@ -3,6 +3,7 @@
 import type { BookComponents, Deployment, DomainEventPayloads, Logger } from "@bookrunner/shared";
 import type { Address } from "viem";
 import type { IndexerChain } from "./chain";
+import { withEngineEvents } from "./engineEvents";
 import { ENGINE_HANDLERS } from "./engineHandlers";
 import { POOL_HANDLERS } from "./poolHandlers";
 import { arg, cidFromDigest, revenueSourceName, symbolStr, usdDb, wadToNumber } from "./convert";
@@ -548,7 +549,7 @@ export const HANDLERS: Record<string, Handler> = {
   "mandate.KeyRevoked": keyRevoked,
   "mandate.Kill": mandateKill,
   ...POOL_HANDLERS,
-  ...ENGINE_HANDLERS,
+  ...withEngineEvents(ENGINE_HANDLERS),
 };
 
 export const handlerFor = (l: DecodedLog): Handler | undefined => HANDLERS[`${l.kind}.${l.eventName}`];

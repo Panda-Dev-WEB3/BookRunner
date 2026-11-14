@@ -534,3 +534,62 @@ export const enginePositions = pgTable(
   },
   (t) => [primaryKey({ columns: [t.marketId, t.trader] })],
 );
+
+// ---------------------------------------------------------------- trading page v2 (2026-11)
+/**
+ * The engine's trader-side events, one row per log (indexer; idempotent per (tx, logIndex)): the source of the trading
+ * page's trade and PnL history (`trade.fills`). Raw on-chain values, never converted: sizes in the engine's 1e18
+ * per-market unit, prices WAD as emitted, USD amounts 6-decimal integers (signed where the event is). The API reads
+ * sizes and prices through the shared engine helpers, so a later per-market factor applies in one place.
+ *   kind trade:        size_raw = sizeDelta, new_size_raw, price_wad = fill, fee_raw = taker fee, pnl_raw = realised PnL
+ *   kind liquidation:  size_raw = the position closed (signed), price_wad, fee_raw = liquidation fee, bad_debt_raw, counterparty = liquidator
+ *   kind closed_out:   size_raw = the position closed, price_wad, bad_debt_raw, counterparty = caller (its Trade row carries the PnL)
+ *   kind margin:       margin_delta_raw (deposit > 0, withdrawal < 0)
+ *   kind funding:      funding_raw (owed by the trader > 0, received < 0)
+ */
+export const engineTraderEvents = pgTable(
+  "engine_trader_events",
+  {
+    txHash: text("tx_hash").notNull(),
+    logIndex: integer("log_index").notNull(),
+    block: bigint("block", { mode: "number" }).notNull(),
+    ts: ts("ts").notNull(),
+    marketId: integer("market_id").notNull(),
+    trader: text("trader").notNull(),
+    kind: text("kind").notNull(), // trade | liquidation | closed_out | margin | funding
+    sizeRaw: raw("size_raw"),
+    newSizeRaw: raw("new_size_raw"),
+    priceWad: raw("price_wad"),
+    feeRaw: raw("fee_raw"),
+    pnlRaw: raw("pnl_raw"),
+    marginDeltaRaw: raw("margin_delta_raw"),
+    fundingRaw: raw("funding_raw"),
+    badDebtRaw: raw("bad_debt_raw"),
+    counterparty: text("counterparty"),
+  },
+  (t) => [primaryKey({ columns: [t.txHash, t.logIndex] }), index("engine_trader_events_trader").on(t.trader, t.marketId, t.block, t.logIndex)],
+);
+
+/**
+ * One-minute OHLC of the oracle's signed price per engine market (API price recorder, from the signed prints it already
+ * reads for trading): the trading page's chart (`trade.history`). Prices are the raw signed WAD (no factor applied).
+ * `held`: the newest print of the minute was a held (session closed) price. Retention: API_PRICE_HISTORY_RETENTION_DAYS
+ * (default 35; the recorder prunes hourly). Upserts commute (first / last by publishedAt, max / min), so several API
+ * processes can record the same minute.
+ */
+export const enginePrice1m = pgTable(
+  "engine_price_1m",
+  {
+    marketId: integer("market_id").notNull(),
+    underlying: text("underlying").notNull(),
+    bucket: ts("bucket").notNull(),
+    openWad: raw("open_wad").notNull(),
+    highWad: raw("high_wad").notNull(),
+    lowWad: raw("low_wad").notNull(),
+    closeWad: raw("close_wad").notNull(),
+    firstAt: bigint("first_at", { mode: "number" }).notNull(),
+    lastAt: bigint("last_at", { mode: "number" }).notNull(),
+    held: boolean("held").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.marketId, t.underlying, t.bucket] }), index("engine_price_1m_bucket").on(t.bucket)],
+);

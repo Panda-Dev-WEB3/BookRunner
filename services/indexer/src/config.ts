@@ -43,4 +43,9 @@ export const CURSORS = {
    * cursor, for an index that existed before the engine was watched (engine-only eth_getLogs, one batch per step).
    */
   engineBackfill: "indexer:engine-backfill",
+  /**
+   * Trading page v2 (2026-11): the same backfill for engine_trader_events (trade and PnL history), with block timestamps,
+   * for an index that existed before those rows were written.
+   */
+  engineEventsBackfill: "indexer:engine-events-backfill",
 } as const;

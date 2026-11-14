@@ -299,13 +299,29 @@ Mainnet runs the **primary + confirm** policy (`ORACLE_POLICY=primary-confirm`, 
 
 - **Chainlink alone sets and signs each price** (`sourceCount` 1, `ORACLE_MIN_SOURCES=1`, on-chain
   `AttestedOracle.minSources() == 1`; the oracle refuses to start otherwise).
-- **A Uniswap v3 TWAP confirms it**: per ticker the deepest Stock Token / USDG pool of `config/chains/4663.json`
-  `dexConfirm.pools` (1800 s window; 2% depth floor `minDepthUsd` $25,000 = USDG needed to move the pool price 2%
-  within the active range; each pool checked against the v3 factory's `getPool(stockToken, USDG, fee)`). Pyth Pro
+- **A Uniswap v3 TWAP confirms it**: per ticker the confirm pools of `config/chains/4663.json` `dexConfirm.pools`
+  (a list per ticker; 1800 s window; 2% depth floor `minDepthUsd` $25,000 = USD needed to move the pool price 2%
+  within the active range; each pool checked against the v3 factory's `getPool(stockToken, quote, fee)`): the
+  deepest Stock Token / USDG pool, and **Stock Token / WETH pools as a second source** where one is deep enough
+  (since 2026-11-13: NVDA / WETH 500 and 3000). A WETH pool's per-token USD TWAP = TWAP(stock / WETH) x
+  TWAP(WETH / USDG) over the same window, through the `dexConfirm.ethUsd` leg (USDG / WETH 100
+  `0x52e65B17fB6E5BA00Ed806f37Afcd2DaA50271Ca`, its own 2% depth floor $50,000, history and last-swap checks); its
+  depth floor is counted in USD through that leg. **Depth is time-averaged**: the floor uses the harmonic-mean
+  in-range liquidity over the TWAP window (one block pushed into a sparse range cannot knock a pool out); the
+  combining weight is min(current, time-averaged) depth (a narrow position added for the read block buys no
+  weight); the WETH pools together weigh at most the leg (one shared leg). **Several pools**: the confirm is
+  available while one pool is usable; it counts as confirmed only when EVERY usable pool is within the band, and
+  any usable pool beyond it raises `oracle_confirm_divergence`, naming it ("beyond the limit: <pool> ..."); the
+  reported value (`/health` confirmers, the signed `sourcesHash`) is the weighted median of the usable pools (a 50/50
+  split averages the two). Hiding a divergence takes manipulating every pool; a manipulated thin pool can only page
+  (nothing automated acts on `diverged`). Pyth Pro
   (`ORACLE_PYTH=1` + `PYTH_API_KEY`) and `ORACLE_HTTP_SOURCES` are optional extra confirmers; none of them ever
   counts for signing. `sourcesHash` commits to Chainlink and every fresh confirmer.
 - **Depth today** (read 2026-10-18): NVDA ~$314k, TSLA ~$45.5k, AAPL ~$61.8k, MSFT ~$43.7k, AMZN ~$83.2k: all above
-  the floor. Why $25k and 1800 s (controller decision 2026-10-18): recalibrated from the earlier balance-based
+  the floor. Re-read 2026-11-13 (USDG pools): NVDA ~$227k, TSLA ~$55.6k, AAPL **~$6.2k (below its floor: AAPL
+  unconfirmed until liquidity returns)**, MSFT ~$55.3k, AMZN ~$49.1k; WETH pools: NVDA / WETH 500 61.6 WETH (~$120k),
+  NVDA / WETH 3000 40.4 WETH (~$79k); not listed: TSLA / WETH (~$3.7k), AAPL / WETH (~$11.5k, would flap at the
+  $10k minimum), MSFT / AMZN WETH pools empty. Why $25k and 1800 s (controller decision 2026-10-18): recalibrated from the earlier balance-based
   $50k (the 2% depth measure is 2–5x stricter than the pool's USDG balance); the DEX only confirms, so a thin pool
   can only cause false or missing alerts, never a price change; 1800 s keeps a swap inside the window in quiet hours.
 - **Quiet hours**: a pool with no swap inside the TWAP window is `unavailable` ("no swap in the 1800s TWAP
@@ -371,8 +387,16 @@ Alerts (`services/alerts`) and what to do:
   window against the pool); stop new risk on the RHX5 book with the existing levers — risk kill on the book
   (reduce-only) or GUARDIAN `setNewBooksPaused(true)` ("Rollback and incidents") — until Chainlink rounds again.
   The oracle itself never switches source. At launch RHX5 is off or on small caps (owner decision, VERIFY C6).
+  The alert ends with the oracle's note in brackets: which pools were used (price, 2% depth, the reference one)
+  and which failed and why, e.g. `[dex-twap: used NVDA/USDG 500 0xd4EB..14a3 $162.40 (2% depth $227,000,
+  reference), NVDA/WETH 500 0x62AB..6b6C $162.70 (2% depth $120,000); failed NVDA/WETH 3000 0xC0Be..b807: no swap
+  in the 1800s TWAP window ...]` (also in `/health` `confirm[].notes`). A divergence raised by one pool only (the
+  reported value inside the band, "beyond the limit: <pool>") while the others agree points at that pool (thin or
+  manipulated), or, for the WETH pools only, at the ETH/USD leg; it stays a warning unless the reported value itself
+  is beyond 2x the band.
   DEX manipulated or thin: nothing to do for prices (the DEX never moves them); if a pool is easy to move, raise
-  its `minDepthUsd` or choose a deeper pool / fee tier in `config/chains/4663.json`, then restart. USDG depeg:
+  its `minDepthUsd`, choose a deeper pool / fee tier or drop it from the ticker's list in `config/chains/4663.json`,
+  then restart. USDG depeg:
   prices are unaffected (Chainlink quotes USD); the alerts last until the peg recovers; assess the USDG exposure of
   the books separately (VERIFY S1).
 - **`oracle_confirm_unavailable:<id>`** (warning, no confirm source for 10 min continuous in session, with the
@@ -381,9 +405,11 @@ Alerts (`services/alerts`) and what to do:
   reason per ticker): 2% depth below `minDepthUsd`, no swap inside the TWAP window (quiet
   hours), observation history shorter than the window, the pool not the factory's `getPool`, token
   `oraclePaused()` or a multiplier change inside the window, the DEX RPC (`ORACLE_DEX_RPC_URL`, default
-  `ORACLE_CHAINLINK_RPC_URL`), a block older than `ORACLE_DEX_MAX_AGE_MS`. A pool that stays below its floor:
-  switch to a deeper pool / tier (`dexConfirm.pools`) if one exists; never lower the floor (and never below
-  10,000). While a ticker has no confirm, `oracle_primary_suspect_stale` cannot fire for it either: watch its
+  `ORACLE_CHAINLINK_RPC_URL`), a block older than `ORACLE_DEX_MAX_AGE_MS`; for a WETH pool also the ETH/USD leg
+  (`ETH/USD leg ...: <reason>`; `source-check` prints it on its own `ETH/USD dex leg` row). With several pools the
+  alert's bracketed note gives every pool's reason (unavailable = none of them usable). A pool that stays below its
+  floor: add or switch to a deeper pool / tier (`dexConfirm.pools`, a Stock Token / WETH pool included) if one
+  exists; never lower the floor (and never below 10,000). While a ticker has no confirm, `oracle_primary_suspect_stale` cannot fire for it either: watch its
   Chainlink round age by hand.
 - **`oracle_source_failing:<confirm source>`** (warning, after 10 min; not for tickers already `unavailable` or
   without Chainlink): one confirmer fails while others still confirm, e.g. Pyth Pro HTTP 401 / 403 → renew the token
@@ -439,7 +465,8 @@ the corporate-actions steps below.
    `PYTH_API_KEY` (https only; licence VERIFY C6), `ORACLE_HTTP_SOURCES` (`tsPath` + `maxAgeMs` ≤ 30 s; Finnhub
    refused). The service (and the preflight `scripts/network-profile.ts`) refuses to start on 4663 when any
    production rule fails (`services/oracle/src/production.ts`: a Chainlink feed per ticker with an in-session max
-   age ≤ heartbeat + 1 h, a DEX confirm pool with `minDepthUsd` ≥ 10,000 for every ticker, the bounds above).
+   age ≤ heartbeat + 1 h, at least one DEX confirm pool for every ticker, every pool and the `ethUsd` leg with
+   `minDepthUsd` ≥ 10,000 and a 300-3600 s window, the bounds above; each pool's factory `getPool` is checked live).
    Synthetic sources cannot be constructed on 4663.
 
 ### Oracle signer attestation (VERIFY E1)
@@ -626,6 +653,25 @@ shows "No market open yet". Guarded launch: small, insured, watched.
        `engine_split_unrecorded` alert routed to a pager.
 5. [ ] Raise `maxInventoryUsd` only through a re-mandate after a period of observed marks, IF stable, no
        `LossBudgetBreached`, and the keeper proven (step 1).
+
+### Trading page history (price chart, trade history)
+
+Migration `0004_trade_history` (applied by update.sh) adds two tables (ARCHITECTURE §5.1):
+
+- **`engine_price_1m`** (price chart): written by the **api** (one row per market and minute, from the oracle's signed
+  prints it already reads). **Retention: `API_PRICE_HISTORY_RETENTION_DAYS` (default 35, minimum 31: the 1M chart),
+  pruned hourly by the api** ("price history pruned" in its log). Size: about 1,440 rows per market per day, ~50,000 per
+  market at 35 days. Set `API_PRICE_HISTORY_SAMPLE_MS=0` on a second api replica (one recorder is enough; two are
+  harmless). Nothing is recorded while the api is down: the chart shows a gap. Check: `select market_id, max(bucket)
+  from engine_price_1m group by 1;` is within the last minute or two while a market is open.
+- **`engine_trader_events`** (trade and PnL history): written by the **indexer** from the PoolEngine's events, kept
+  indefinitely (a row per trade, liquidation, margin change or funding settlement; small). An index older than this
+  version backfills it once (cursor `indexer:engine-events-backfill`, engine-only `eth_getLogs` from the deployment's
+  start block plus one block read per block holding engine events, at most 50 block reads per indexer step; the log says
+  "engine trader events backfill complete"). Until then `/trade` marks the trade history "still being indexed" and
+  shows no totals. The positions backfill and the liquidation keeper are unchanged.
+- nginx: the `bookrunner_history` zone (2/s per IP, bursts of 20) limits `trade.history` / `trade.fills`; it is in
+  `deploy/server/nginx-bookrunner-http.conf`, installed with the locations snippet by update.sh.
 
 ## Operations
 

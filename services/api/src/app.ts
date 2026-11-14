@@ -42,8 +42,25 @@ export const TRPC_HEAVY_WEIGHT = MAX_TRPC_BATCH;
 export const TRPC_WALLET_READS = ["trade.quote", "trade.position"] as const;
 export const TRPC_WALLET_WEIGHT = 5;
 
+/**
+ * Trading page v2 history reads (trade.history: candles per market and range; trade.fills: a wallet's engine events).
+ * nginx limits them per IP in their own zone (bookrunner_history), which counts a request, not the calls in it: each
+ * weighs a full batch, so a request carries exactly one of them and the zone counts every call (the web sends them
+ * unbatched).
+ */
+export const TRPC_HISTORY_READS = ["trade.history", "trade.fills"] as const;
+
 export function trpcBatchWeight(paths: string[]): number {
-  return paths.reduce((w, p) => w + (TRPC_HEAVY_PREFIXES.some((h) => p.startsWith(h)) ? TRPC_HEAVY_WEIGHT : (TRPC_WALLET_READS as readonly string[]).includes(p) ? TRPC_WALLET_WEIGHT : 1), 0);
+  return paths.reduce(
+    (w, p) =>
+      w +
+      (TRPC_HEAVY_PREFIXES.some((h) => p.startsWith(h)) || (TRPC_HISTORY_READS as readonly string[]).includes(p)
+        ? TRPC_HEAVY_WEIGHT
+        : (TRPC_WALLET_READS as readonly string[]).includes(p)
+          ? TRPC_WALLET_WEIGHT
+          : 1),
+    0,
+  );
 }
 
 /**
@@ -68,7 +85,7 @@ export function pathAllowed(pathname: string, route: string | undefined): boolea
  * them this build serves as `capabilities`, so the web never probes one that is absent. The full
  * procedure list (and uptime) is only in `/health?verbose` with the admin bearer token.
  */
-export const OPTIONAL_PROCEDURES = ["book.fills", "book.hedges", "receipts.list", "pool.overview", "trade.markets"] as const;
+export const OPTIONAL_PROCEDURES = ["book.fills", "book.hedges", "receipts.list", "pool.overview", "trade.markets", "trade.history", "trade.fills"] as const;
 
 /** /status is computed at most this often per process (nginx micro-caches it too); public, so cheap. */
 export const STATUS_CACHE_MS = 15_000;
@@ -231,7 +248,7 @@ export function createApp(deps: ApiDeps, opts: AppOptions) {
     }
     if (paths.length > 1 && trpcBatchWeight(paths) > MAX_TRPC_BATCH) {
       return c.json(
-        { error: { json: { message: `Batch too heavy: receipts.* calls must be sent alone, trade.quote / trade.position at most 2 per batch, others at most ${MAX_TRPC_BATCH} per batch`, code: -32600, data: { code: "BAD_REQUEST", httpStatus: 400 } } } },
+        { error: { json: { message: `Batch too heavy: receipts.*, trade.history and trade.fills calls must be sent alone, trade.quote / trade.position at most 2 per batch, others at most ${MAX_TRPC_BATCH} per batch`, code: -32600, data: { code: "BAD_REQUEST", httpStatus: 400 } } } },
         400,
       );
     }

@@ -1,12 +1,16 @@
 // Position panel: the wallet's position valued at the freshest signed price (entry, margin, equity, PnL, funding
 // owed, margin ratio, leverage, liquidation prices in session and off-hours) and a close / partial reduce
-// (trade.close: a trade of -size, allowed while reduce-only, never off-hours).
+// (trade.close: a trade of -size, allowed while reduce-only, never off-hours). Trading page v2: the liquidation-risk
+// level (watch / danger / imminent, against maintenance or, while the price is held, the off-hours requirement), what
+// a session close now would mean, and an opt-in browser notification while the page is open (riskLogic.ts).
 import { useState } from "react";
 import { trpc } from "../../api/trpc";
 import type { TradeMarket, TradePositionOut } from "../../lib/api-types";
 import { fmtBps, fmtPrice, fmtUsd, toNum } from "../../lib/format";
 import { useSettlementSymbol } from "../../wallet/settlementSymbol";
 import { Callout, Card, Chip, ErrorState, KV, Spinner } from "../ui";
+import { RiskNotifyToggle, useRiskNotifications } from "./RiskNotify";
+import { RISK_META, ifCloseText, positionRisk, riskText } from "./riskLogic";
 import { Prepared } from "./TradeBits";
 import { DEFAULT_SLIPPAGE_BPS, absUnitsText, closeDelta, fmtLeverage } from "./tradeLogic";
 
@@ -23,6 +27,8 @@ export function PositionPanel(props: { m: TradeMarket; address: string; position
   const p = props.position;
   const [portion, setPortion] = useState<number | null>(null);
   const close = trpc.trade.close.useMutation();
+  const risk = p ? positionRisk(p, props.m) : null;
+  const notify = useRiskNotifications(risk, props.m.symbol);
   const reset = () => {
     close.reset();
     setPortion(null);
@@ -39,10 +45,19 @@ export function PositionPanel(props: { m: TradeMarket; address: string; position
   }
   const flat = p.side === "flat";
   const pnl = toNum(p.unrealizedPnlUsd) ?? 0;
+  const warnNow = risk ? riskText(risk.level, p.marginRatioBps, risk.requirementBps, risk.moveNow, risk.held || risk.sessionUnknown) : null;
+  const warnClose = risk ? ifCloseText(risk, props.m.margin.offHoursMarginBps) : null;
   return (
     <Card
       title="Your position"
-      actions={flat ? undefined : <Chip tone={p.side === "long" ? "good" : "critical"}>{p.side === "long" ? "Long" : "Short"}</Chip>}
+      actions={
+        flat ? undefined : (
+          <>
+            {risk && risk.level !== "ok" && <Chip tone={RISK_META[risk.level].tone}>{RISK_META[risk.level].label}</Chip>}
+            <Chip tone={p.side === "long" ? "good" : "critical"}>{p.side === "long" ? "Long" : "Short"}</Chip>
+          </>
+        )
+      }
       description={flat ? (toNum(p.marginUsd) ? `No open position. ${fmtUsd(p.marginUsd)} ${sym} of margin in this market.` : "No open position and no margin in this market yet.") : `Valued at ${fmtPrice(toNum(p.markPrice))} (${p.priceSource === "signed" ? "the latest signed price" : "the price on chain"}).`}
     >
       {!flat && (
@@ -55,18 +70,28 @@ export function PositionPanel(props: { m: TradeMarket; address: string; position
               ["Funding owed", `${fmtUsd(p.fundingOwedUsd, { signed: true, dp: 4 })} ${sym}`],
               ["Margin", `${fmtUsd(p.marginUsd)} ${sym}`],
               ["Equity", `${fmtUsd(p.equityUsd)} ${sym}`],
-              ["Margin ratio", p.marginRatioBps === null ? "—" : `${fmtBps(p.marginRatioBps)} (maintenance ${fmtBps(props.m.margin.maintenanceMarginBps)})`],
+              ["Margin ratio", p.marginRatioBps === null ? "—" : `${fmtBps(p.marginRatioBps)} (${risk?.held || risk?.sessionUnknown ? "off-hours requirement" : "maintenance"} ${fmtBps(risk?.requirementBps ?? props.m.margin.maintenanceMarginBps)})`],
               ["Leverage", fmtLeverage(p.leverage)],
               ["Liquidation price", liqText(p.liquidationPrice)],
               ["Liquidation price off-hours", liqText(p.liquidationPriceOffHours)],
+              risk &&
+                !risk.held && [
+                  "If the session closes now",
+                  risk.ifClose === null ? "unknown (no price): the off-hours requirement is assumed" : risk.ifClose === "ok" ? "margin comfortable" : RISK_META[risk.ifClose].label.toLowerCase(),
+                ],
             ]}
           />
-          {p.marginRatioBps !== null && p.marginRatioBps < props.m.margin.offHoursMarginBps && (
-            <Callout tone="warn" compact>
-              Below the off-hours requirement ({fmtBps(props.m.margin.offHoursMarginBps)}): if the stock's session closes now, this position is liquidated at the closing price. Add margin or
-              reduce before the close.
+          {risk && warnNow && (
+            <Callout tone={RISK_META[risk.level].callout} compact title={warnNow.title}>
+              {warnNow.body}
             </Callout>
           )}
+          {risk && warnClose && (
+            <Callout tone={risk.ifClose === "liquidatable" ? "risk" : "warn"} compact title={warnClose.title}>
+              {warnClose.body}
+            </Callout>
+          )}
+          <RiskNotifyToggle n={notify} />
           {close.error && <ErrorState compact error={close.error} />}
           {close.isPending && (
             <span className="inline-flex items-center gap-2 text-[12.5px] text-ink-2">

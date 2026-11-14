@@ -5,6 +5,8 @@ import type {
   books,
   charters,
   committee,
+  enginePrice1m,
+  engineTraderEvents,
   events,
   fills,
   hedges,
@@ -49,6 +51,8 @@ export type PoolWithdrawalRow = typeof poolWithdrawals.$inferSelect;
 export type PoolEpochRow = typeof poolEpochs.$inferSelect;
 export type PoolBookRow = typeof poolBooks.$inferSelect;
 export type PoolSnapshotRow = typeof poolSnapshots.$inferSelect;
+export type EngineTraderEventRow = typeof engineTraderEvents.$inferSelect;
+export type EnginePriceMinuteRow = typeof enginePrice1m.$inferSelect;
 
 /** Pool value flows summed per UTC day (pool_flows). */
 export interface PoolFlowDay {
@@ -161,6 +165,34 @@ export interface ReadModel {
   latestPoolSnapshot(): Promise<PoolSnapshotRow | null>;
   /** Premiums, losses and recoveries per UTC day since `from`, ascending. */
   poolFlowDays(from: Date): Promise<PoolFlowDay[]>;
+
+  // trading page v2 (2026-11)
+  /**
+   * A trader's engine events (one market or all), oldest first by (block, logIndex): the NEWEST `limit` of them (older
+   * ones are dropped when there are more).
+   */
+  engineTraderEvents(trader: string, q: { marketId?: number; limit: number }): Promise<EngineTraderEventRow[]>;
+  /** One-minute candles of a market (and its underlying) with bucket >= since, ascending, at most `limit`. */
+  enginePriceMinutes(marketId: number, underlying: string, since: Date, limit: number): Promise<EnginePriceMinuteRow[]>;
+  /** The indexer's chain_cursor values of `names` (absent names are left out). */
+  chainCursors(names: string[]): Promise<Record<string, number>>;
+}
+
+/** One signed print sampled by the API's price recorder (raw WAD, its publishedAt in unix seconds). */
+export interface PriceSample {
+  marketId: number;
+  underlying: string;
+  priceWad: bigint;
+  publishedAt: number;
+  held: boolean;
+}
+
+/** Write port of the price recorder (engine_price_1m). */
+export interface PriceHistoryStore {
+  /** Folds a sample into its minute (open / close by publishedAt, high / low): order-independent, idempotent. */
+  recordPrice(s: PriceSample): Promise<void>;
+  /** Deletes the minutes before `before`; returns the number of rows removed. */
+  prunePrices(before: Date): Promise<number>;
 }
 
 export interface NewWebhookSubscription {

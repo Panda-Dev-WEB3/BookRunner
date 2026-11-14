@@ -7,6 +7,7 @@ import type { PriceSource } from "../src/domain/types";
 import {
   MAINNET_DEX_MIN_FLOOR_USD,
   chainlinkAgeProblems,
+  dexPoolProblems,
   PRIMARY_CONFIRM_SOURCE_COUNT,
   liveSourceCount,
   onchainMinSourcesProblem,
@@ -72,10 +73,29 @@ describe("productionProblems", () => {
     const cfg = mainnet();
     const { AMZN: _amzn, ...four } = cfg.dexPools;
     expect(productionProblems({ ...cfg, dexPools: four }, BASE)).toEqual(["no DEX confirm pool for AMZN (dexConfirm.pools in the chain config)"]);
-    const shallow = { ...cfg.dexPools, TSLA: { ...cfg.dexPools.TSLA!, minDepthUsd: MAINNET_DEX_MIN_FLOOR_USD - 1 } };
+    expect(productionProblems({ ...cfg, dexPools: { ...cfg.dexPools, AMZN: [] } }, BASE)).toEqual(["no DEX confirm pool for AMZN (dexConfirm.pools in the chain config)"]);
+    const tsla = cfg.dexPools.TSLA![0]!;
+    const shallow = { ...cfg.dexPools, TSLA: [{ ...tsla, minDepthUsd: MAINNET_DEX_MIN_FLOOR_USD - 1 }] };
     expect(productionProblems({ ...cfg, dexPools: shallow }, BASE)).toEqual([
-      `dexConfirm.pools.TSLA.minDepthUsd=${MAINNET_DEX_MIN_FLOOR_USD - 1} < ${MAINNET_DEX_MIN_FLOOR_USD} on mainnet (a shallow pool is cheap to move)`,
+      `dexConfirm.pools.TSLA[0] (${tsla.pool}) minDepthUsd=${MAINNET_DEX_MIN_FLOOR_USD - 1} < ${MAINNET_DEX_MIN_FLOOR_USD} on mainnet (a shallow pool is cheap to move)`,
     ]);
+  });
+
+  test("every pool of a ticker and the ETH/USD leg get the same bounds (floor >= 10k, TWAP 300-3600 s)", () => {
+    const cfg = mainnet();
+    const [usdg, weth500, weth3000] = cfg.dexPools.NVDA!;
+    // the second and third NVDA pools (WETH) are bounded like the first
+    const nvda = [usdg!, { ...weth500!, minDepthUsd: 9_999 }, { ...weth3000!, twapSec: 3_601 }];
+    expect(dexPoolProblems({ NVDA: nvda }, cfg.dexEthUsd)).toEqual([
+      `dexConfirm.pools.NVDA[1] (${weth500!.pool}) minDepthUsd=9999 < 10000 on mainnet (a shallow pool is cheap to move)`,
+      `dexConfirm.pools.NVDA[2] (${weth3000!.pool}) TWAP window 3601s outside 300-3600s on mainnet (twapSec / ORACLE_DEX_TWAP_SEC)`,
+    ]);
+    // the leg's floor, and a WETH pool without a leg
+    expect(productionProblems({ ...cfg, dexEthUsd: { ...cfg.dexEthUsd!, minDepthUsd: 5_000 } }, BASE)).toEqual([
+      `dexConfirm.ethUsd (${cfg.dexEthUsd!.pool}) minDepthUsd=5000 < 10000 on mainnet (every WETH-quoted pool is priced through it)`,
+    ]);
+    expect(dexPoolProblems({ NVDA: [weth500!] }, null)).toEqual([`dexConfirm.pools.NVDA[0] (${weth500!.pool}) is quoted in WETH but dexConfirm.ethUsd (the WETH / USD leg) is not configured`]);
+    expect(dexPoolProblems(cfg.dexPools, cfg.dexEthUsd)).toEqual([]);
   });
 
   test("HTTP confirm sources carry their own quote timestamp and a tight max age; Finnhub is refused", () => {
@@ -122,10 +142,12 @@ describe("productionProblems", () => {
 
   test("DEX knobs: TWAP window 300-3600 s, observation max age <= 120 s, lag threshold below the confirm band", () => {
     expect(productionProblems(mainnet({ ORACLE_DEX_TWAP_SEC: "300" }), BASE)).toEqual([]);
+    const cfg = mainnet();
     expect(productionProblems(mainnet({ ORACLE_DEX_TWAP_SEC: "120" }), BASE)).toEqual(
-      ["NVDA", "TSLA", "AAPL", "MSFT", "AMZN"].map((t) => `dexConfirm.pools.${t} TWAP window 120s outside 300-3600s on mainnet (twapSec / ORACLE_DEX_TWAP_SEC)`),
+      Object.entries(cfg.dexPools).flatMap(([t, ps]) => ps.map((p, i) => `dexConfirm.pools.${t}[${i}] (${p.pool}) TWAP window 120s outside 300-3600s on mainnet (twapSec / ORACLE_DEX_TWAP_SEC)`)),
     );
-    expect(productionProblems(mainnet({ ORACLE_DEX_TWAP_SEC: "7200" }), BASE)).toHaveLength(5);
+    // 7 pools: NVDA x 3 (USDG + 2 WETH), one per other ticker
+    expect(productionProblems(mainnet({ ORACLE_DEX_TWAP_SEC: "7200" }), BASE)).toHaveLength(7);
     expect(productionProblems(mainnet({ ORACLE_DEX_MAX_AGE_MS: "120000" }), BASE)).toEqual([]);
     expect(productionProblems(mainnet({ ORACLE_DEX_MAX_AGE_MS: "120001" }), BASE)).toEqual([
       "ORACLE_DEX_MAX_AGE_MS=120001 > 120000 on mainnet (an RPC stall would confirm with an old block)",

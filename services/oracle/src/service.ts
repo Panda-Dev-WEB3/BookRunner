@@ -150,7 +150,10 @@ export interface ConfirmView {
   primaryTs: number | null;
   /** start (unix ms) of the run with a confirm gap > primaryLagBps (null = none); see ConfirmRun */
   lagSince: number | null;
-  confirmers: Array<{ name: string; price: number; diffBps: number }>;
+  /** `diverged`: the parts behind a confirmer (DEX pools) beyond the band, named (status diverged even when its value is in it) */
+  confirmers: Array<{ name: string; price: number; diffBps: number; diverged?: Array<{ label: string; price: number; diffBps: number }> }>;
+  /** what the confirm sources' latest observations were built from (DEX: pools used / failed); absent when none */
+  notes?: string[];
 }
 
 export class OracleService {
@@ -463,8 +466,15 @@ export class OracleService {
       primaryPrice: c.primaryPrice,
       primaryTs: c.primaryTs,
       lagSince: run.lagSince,
-      confirmers: c.confirmers.map((x) => ({ name: x.name, price: x.price, diffBps: Math.round(x.diffBps * 10) / 10 })),
+      confirmers: c.confirmers.map((x) => ({
+        name: x.name,
+        price: x.price,
+        diffBps: Math.round(x.diffBps * 10) / 10,
+        ...(x.diverged ? { diverged: x.diverged.map((p) => ({ label: p.label, price: p.price, diffBps: Math.round(p.diffBps * 10) / 10 })) } : {}),
+      })),
     };
+    const notes = this.deps.sources.flatMap((src) => (src.name !== PRIMARY_SOURCE && src.confirmNote ? [src.confirmNote(priceId)] : [])).filter((n): n is string => !!n);
+    if (notes.length > 0) view.notes = notes;
     this.confirmState.set(priceId, view);
     this.warnLag(view, nowMs);
     if (prev?.status === "diverged" && status === "ok") {
@@ -481,11 +491,11 @@ export class OracleService {
     this.confirmWarnAt.set(priceId, nowMs);
     if (status === "diverged") {
       this.log.warn(
-        { priceId, chainlink: c.primaryPrice, confirmers: view.confirmers, confirmBps, divergedForMs: nowMs - since },
+        { priceId, chainlink: c.primaryPrice, confirmers: view.confirmers, confirmBps, divergedForMs: nowMs - since, notes: view.notes },
         "confirm divergence: a confirm source is further from Chainlink than ORACLE_CONFIRM_BPS; Chainlink is still published (the DEX never moves the price)",
       );
     } else {
-      this.log.warn({ priceId, chainlink: c.primaryPrice, unavailableForMs: nowMs - since }, "no confirm source for an in-session ticker: Chainlink is published unconfirmed");
+      this.log.warn({ priceId, chainlink: c.primaryPrice, unavailableForMs: nowMs - since, notes: view.notes }, "no confirm source for an in-session ticker: Chainlink is published unconfirmed");
     }
   }
 
@@ -527,6 +537,7 @@ export class OracleService {
             return null;
           }
           const q: CollectedQuote = { name: src.name, price: Number.isFinite(r.price) && r.price > 0 ? roundPrice(r.price) : r.price, ts: r.ts };
+          if (r.parts && r.parts.length > 0) q.parts = r.parts;
           const maxAge = r.maxAgeMs ?? src.maxAgeMs;
           if (maxAge !== undefined) q.maxAgeMs = maxAge;
           if (r.unitValidBeforeSec !== undefined) q.unitValidBeforeSec = r.unitValidBeforeSec;

@@ -30,6 +30,8 @@ describe("tRPC client: receipts.* travel alone", () => {
     for (const p of ["book.get", "book.nav", "settlements.list", "trade.market", "trade.markets"]) expect(isHeavyProcedure(p)).toBe(false);
     // the trading page's wallet reads (API batch weight 5, nginx zone bookrunner_wallet): unbatched too
     for (const p of ["trade.quote", "trade.position"]) expect(isHeavyProcedure(p)).toBe(true);
+    // the history reads (a full batch each, nginx zone bookrunner_history): unbatched
+    for (const p of ["trade.history", "trade.fills"]) expect(isHeavyProcedure(p)).toBe(true);
   });
 
   test("concurrent queries: receipts.* each in its own unbatched request, the rest batched", async () => {

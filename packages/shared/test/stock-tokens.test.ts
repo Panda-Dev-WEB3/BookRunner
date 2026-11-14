@@ -3,7 +3,9 @@ import { getAddress } from "viem";
 import {
   MAINNET_CHAIN_ID,
   MULTIPLIER_VECTOR as V,
+  RHC_TOKENS,
   WAD,
+  dexPoolQuotedInEth,
   feedAnswerToWad,
   feedToken,
   loadChainPriceConfig,
@@ -79,12 +81,47 @@ describe("chain price config", () => {
     const token = { token: "0x00000000000000000000000000000000000000d1" };
     const pool = { pool: "0x00000000000000000000000000000000000000e1", quoteToken: "0x00000000000000000000000000000000000000f1", fee: 3000, minDepthUsd: 50_000 };
     const ok = parseChainPriceConfig({ chainId: 1, stockTokens: { NVDA: token }, dexConfirm: { readAt: "2026-10-17", pools: { NVDA: pool } } });
-    expect(ok.dexConfirm?.pools.NVDA?.twapSec).toBe(1_800);
+    // a single pool object is read as a one-pool list
+    expect(ok.dexConfirm?.pools.NVDA?.[0]?.twapSec).toBe(1_800);
+    expect(ok.dexConfirm?.pools.NVDA).toHaveLength(1);
     expect(() => parseChainPriceConfig({ chainId: 1, dexConfirm: { pools: { NVDA: pool } } })).toThrow("DEX confirm pool needs a stockTokens entry");
     expect(() => parseChainPriceConfig({ chainId: 1, stockTokens: { NVDA: token }, dexConfirm: { pools: { NVDA: { ...pool, minDepthUsd: 0 } } } })).toThrow("minDepthUsd");
     expect(() => parseChainPriceConfig({ chainId: 1, stockTokens: { NVDA: token }, dexConfirm: { pools: { NVDA: { ...pool, twapSec: 30 } } } })).toThrow("twapSec");
     const { fee: _fee, ...noFee } = pool;
     expect(() => parseChainPriceConfig({ chainId: 1, stockTokens: { NVDA: token }, dexConfirm: { pools: { NVDA: noFee } } })).toThrow("fee");
     expect(parseChainPriceConfig({ chainId: 1 }).dexConfirm).toBeUndefined();
+  });
+
+  test("dexConfirm: several pools per ticker; a WETH-quoted pool needs the ethUsd leg; quote tokens USD or WETH only; no pool twice", () => {
+    const token = { token: "0x00000000000000000000000000000000000000d1" };
+    const usd = "0x00000000000000000000000000000000000000f1";
+    const weth = "0x00000000000000000000000000000000000000f2";
+    const usdPool = { pool: "0x00000000000000000000000000000000000000e1", quoteToken: usd, fee: 500, minDepthUsd: 15_000 };
+    const wethPool = { pool: "0x00000000000000000000000000000000000000e2", quoteToken: weth, fee: 500, minDepthUsd: 25_000 };
+    const ethUsd = { pool: "0x00000000000000000000000000000000000000e9", fee: 100, weth, quoteToken: usd, minDepthUsd: 50_000 };
+    const cfg = (dexConfirm: unknown) => parseChainPriceConfig({ chainId: 1, stockTokens: { NVDA: token }, dexConfirm });
+    const ok = cfg({ pools: { NVDA: [usdPool, wethPool] }, ethUsd });
+    expect(ok.dexConfirm?.pools.NVDA?.map((p) => p.pool)).toEqual([usdPool.pool, wethPool.pool]);
+    expect(ok.dexConfirm?.pools.NVDA?.map((p) => dexPoolQuotedInEth(ok.dexConfirm!, p))).toEqual([false, true]);
+    expect(() => cfg({ pools: { NVDA: [] } })).toThrow("dexConfirm.pools.NVDA");
+    // a pool quoted in the leg's WETH, or in the chain's canonical WETH, without a leg
+    expect(() => cfg({ pools: { NVDA: [wethPool] } }).dexConfirm).not.toThrow(); // unknown token without a leg: a USD quote
+    expect(() => cfg({ pools: { NVDA: [{ ...wethPool, quoteToken: RHC_TOKENS.WETH }] } })).toThrow("WETH-quoted confirm pool needs dexConfirm.ethUsd");
+    // with a leg, any other quote token is refused
+    expect(() => cfg({ pools: { NVDA: [{ ...usdPool, quoteToken: "0x00000000000000000000000000000000000000f3" }] }, ethUsd })).toThrow("quoteToken must be ethUsd.quoteToken (USD) or ethUsd.weth (WETH)");
+    expect(() => cfg({ pools: { NVDA: [usdPool, { ...usdPool }] } })).toThrow("is listed twice");
+    expect(() => cfg({ pools: { NVDA: [{ ...usdPool, pool: ethUsd.pool }] }, ethUsd })).toThrow("is listed twice (or is the ethUsd leg)");
+    expect(() => cfg({ pools: { NVDA: [usdPool] }, ethUsd: { ...ethUsd, weth: usd } })).toThrow("ethUsd.weth and ethUsd.quoteToken must differ");
+    expect(() => cfg({ pools: { NVDA: [usdPool] }, ethUsd: { ...ethUsd, minDepthUsd: 0 } })).toThrow("minDepthUsd");
+  });
+
+  test("config/chains/4663.json: every ticker has a USDG pool; WETH pools only with the ethUsd leg (WETH / USDG, canonical tokens)", () => {
+    const d = loadChainPriceConfig(MAINNET_CHAIN_ID)!.dexConfirm!;
+    expect(d.ethUsd).toMatchObject({ weth: RHC_TOKENS.WETH, quoteToken: RHC_TOKENS.USDG, fee: 100 });
+    for (const [t, pools] of Object.entries(d.pools)) {
+      expect(pools[0]!.quoteToken, t).toBe(RHC_TOKENS.USDG);
+      for (const p of pools) expect([RHC_TOKENS.USDG, RHC_TOKENS.WETH]).toContain(getAddress(p.quoteToken));
+    }
+    expect(d.pools.NVDA!.filter((p) => dexPoolQuotedInEth(d, p))).toHaveLength(2);
   });
 });

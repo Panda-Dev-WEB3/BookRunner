@@ -241,6 +241,26 @@ export interface EnginePositionRow {
   lastLogIndex: number;
 }
 
+/** engine_trader_events row (trading page trade and PnL history): raw on-chain values as decimal strings. */
+export interface EngineTraderEventRow {
+  txHash: string;
+  logIndex: number;
+  block: number;
+  ts: Date;
+  marketId: number;
+  trader: string;
+  kind: "trade" | "liquidation" | "closed_out" | "margin" | "funding";
+  sizeRaw?: string | null;
+  newSizeRaw?: string | null;
+  priceWad?: string | null;
+  feeRaw?: string | null;
+  pnlRaw?: string | null;
+  marginDeltaRaw?: string | null;
+  fundingRaw?: string | null;
+  badDebtRaw?: string | null;
+  counterparty?: string | null;
+}
+
 export interface IndexerStore {
   /** Runs fn atomically (DB transaction). */
   transaction<T>(fn: (s: IndexerStore) => Promise<T>): Promise<T>;
@@ -314,6 +334,8 @@ export interface IndexerStore {
    * A row written by a later log (block, logIndex) is never overwritten by an earlier one (re-applied ranges).
    */
   upsertEnginePosition(r: Omit<EnginePositionRow, "sizeRaw"> & { sizeRaw: string | null }): Promise<void>;
+  /** Trading page v2: one row per engine trader event; idempotent per (tx, logIndex); true when inserted. */
+  insertEngineTraderEvent(r: EngineTraderEventRow): Promise<boolean>;
 
   /** Domain-event protocol insert; null when the dedupe key already exists. */
   insertEvent(e: PendingEvent): Promise<{ id: number; createdAt: Date } | null>;

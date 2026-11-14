@@ -4,13 +4,15 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { privateKeyToAccount } from "viem/accounts";
-import { type Env, MAINNET_EXCLUDED, MAINNET_FIXED, MAINNET_REQUIRED_ENV, MAINNET_RPC_BOUNDS, MAINNET_RPC_DEFAULTS, deskKeyEnvFor, mainnetProfile, mainnetRpcCadence, mainnetWsUrl, watchedRoleAddresses } from "./network-profile";
+import { RHC_TOKENS } from "../packages/shared/src/uniswap";
+import { type Env, MAINNET_EXCLUDED, MAINNET_FIXED, MAINNET_REQUIRED_ENV, MAINNET_RPC_BOUNDS, MAINNET_RPC_DEFAULTS, deskKeyEnvFor, mainnetProfile, mainnetRpcCadence, mainnetWsUrl, RHC_WETH, watchedRoleAddresses } from "./network-profile";
 
-/** The repo's mainnet price config: a Chainlink feed and a DEX confirm pool per launch ticker. */
+type DexPool = { pool: string; minDepthUsd: number; twapSec: number; quoteToken: string };
+/** The repo's mainnet price config: a Chainlink feed and DEX confirm pools (a list each) per launch ticker. */
 const GOOD_CFG = JSON.parse(readFileSync(join(import.meta.dir, "../config/chains/4663.json"), "utf8")) as {
   chainId: number;
   chainlink: { feeds: Record<string, unknown> };
-  dexConfirm: { pools: Record<string, { pool: string; minDepthUsd: number; twapSec: number }> };
+  dexConfirm: { pools: Record<string, DexPool[]>; ethUsd: { pool: string; weth: string; minDepthUsd: number } };
 };
 
 const keys = Array.from({ length: 6 }, (_, i) => `0x${(i + 1).toString(16).padStart(64, "0")}`);
@@ -167,8 +169,13 @@ describe("mainnet profile (scripts/dev.ts --network mainnet)", () => {
     const { TSLA: _p, ...fourPools } = GOOD_CFG.dexConfirm.pools;
     const noTslaPool = { ...GOOD_CFG, dexConfirm: { ...GOOD_CFG.dexConfirm, pools: fourPools } };
     expect(mainnetProfile(goodEnv(), hostRoot(GOOD_DEP, noTslaPool)).errors).toEqual(["no DEX confirm pool for TSLA (config/chains/4663.json dexConfirm.pools)"]);
-    const shallow = { ...GOOD_CFG, dexConfirm: { ...GOOD_CFG.dexConfirm, pools: { ...GOOD_CFG.dexConfirm.pools, AAPL: { ...GOOD_CFG.dexConfirm.pools.AAPL!, minDepthUsd: 500 } } } };
-    expect(mainnetProfile(goodEnv(), hostRoot(GOOD_DEP, shallow)).errors).toEqual(["dexConfirm.pools.AAPL.minDepthUsd must be >= 10000 (got 500)"]);
+    const withPools = (t: string, pools: unknown) => ({ ...GOOD_CFG, dexConfirm: { ...GOOD_CFG.dexConfirm, pools: { ...GOOD_CFG.dexConfirm.pools, [t]: pools } } });
+    const aapl = GOOD_CFG.dexConfirm.pools.AAPL![0]!;
+    expect(mainnetProfile(goodEnv(), hostRoot(GOOD_DEP, withPools("AAPL", [{ ...aapl, minDepthUsd: 500 }]))).errors).toEqual(["dexConfirm.pools.AAPL[0].minDepthUsd must be >= 10000 (got 500)"]);
+    // an older config with one pool object per ticker is still read
+    expect(mainnetProfile(goodEnv(), hostRoot(GOOD_DEP, withPools("AAPL", { ...aapl, minDepthUsd: 500 }))).errors).toEqual(["dexConfirm.pools.AAPL.minDepthUsd must be >= 10000 (got 500)"]);
+    expect(mainnetProfile(goodEnv(), hostRoot(GOOD_DEP, withPools("AAPL", aapl))).errors).toEqual([]);
+    expect(mainnetProfile(goodEnv(), hostRoot(GOOD_DEP, withPools("AAPL", []))).errors).toEqual(["no DEX confirm pool for AAPL (config/chains/4663.json dexConfirm.pools)"]);
     // a narrower ticker list only needs its own feeds / pools
     expect(mainnetProfile({ ...goodEnv(), ORACLE_TICKERS: "NVDA,TSLA" }, hostRoot(GOOD_DEP, noAmznFeed)).errors).toEqual([]);
     expect(mainnetProfile({ ...goodEnv(), ORACLE_TICKERS: "NVDA,GME" }, hostRoot(GOOD_DEP)).errors).toEqual([
@@ -181,6 +188,25 @@ describe("mainnet profile (scripts/dev.ts --network mainnet)", () => {
     // feeds state their basis
     const plain = { ...goodEnv(), ORACLE_CHAINLINK_FEEDS: JSON.stringify({ NVDA: "0x0000000000000000000000000000000000000f01" }) };
     expect(mainnetProfile(plain, hostRoot(GOOD_DEP)).errors).toEqual([expect.stringMatching(/plain addresses for NVDA/)]);
+  });
+
+  test("several pools per ticker: every pool bounded (floor, window); WETH pools need the ETH/USD leg with its own floor", () => {
+    const nvda = GOOD_CFG.dexConfirm.pools.NVDA!;
+    // the repo config: NVDA has its USDG pool and two WETH pools, priced through the leg
+    expect(nvda.map((p) => p.quoteToken.toLowerCase() === RHC_WETH.toLowerCase())).toEqual([false, true, true]);
+    expect(RHC_WETH).toBe(RHC_TOKENS.WETH);
+    const cfg = (over: object) => ({ ...GOOD_CFG, dexConfirm: { ...GOOD_CFG.dexConfirm, ...over } });
+    const errs = (c: object) => mainnetProfile(goodEnv(), hostRoot(GOOD_DEP, c)).errors;
+    // the third pool is bounded like the first
+    expect(errs(cfg({ pools: { ...GOOD_CFG.dexConfirm.pools, NVDA: [nvda[0], nvda[1], { ...nvda[2], minDepthUsd: 9_999, twapSec: 4_000 }] } }))).toEqual([
+      "dexConfirm.pools.NVDA[2].minDepthUsd must be >= 10000 (got 9999)",
+      "dexConfirm.pools.NVDA[2].twapSec=4000 outside 300-3600 s on mainnet",
+    ]);
+    const { ethUsd: _leg, ...noLeg } = GOOD_CFG.dexConfirm;
+    expect(errs({ ...GOOD_CFG, dexConfirm: noLeg })).toEqual(["2 WETH-quoted DEX confirm pool(s) but no dexConfirm.ethUsd (the WETH / USD leg) in config/chains/4663.json"]);
+    expect(errs(cfg({ ethUsd: { ...GOOD_CFG.dexConfirm.ethUsd, minDepthUsd: 5_000 } }))).toEqual(["dexConfirm.ethUsd.minDepthUsd must be >= 10000 (got 5000)"]);
+    // a ticker list without NVDA has no WETH pool: the leg is not needed
+    expect(mainnetProfile({ ...goodEnv(), ORACLE_TICKERS: "TSLA,AAPL" }, hostRoot(GOOD_DEP, { ...GOOD_CFG, dexConfirm: noLeg })).errors).toEqual([]);
   });
 
   test("freshness and DEX bounds: Chainlink max age <= heartbeat + 1 h, DEX TWAP 300-3600 s, DEX max age <= 120 s, lag < confirm", () => {
@@ -200,8 +226,8 @@ describe("mainnet profile (scripts/dev.ts --network mainnet)", () => {
     bad({ ORACLE_DEX_TWAP_SEC: "60" }, /ORACLE_DEX_TWAP_SEC=60 outside 300-3600 s/);
     bad({ ORACLE_DEX_MAX_AGE_MS: "600000" }, /ORACLE_DEX_MAX_AGE_MS=600000 must be in \(0, 120000\]/);
     bad({ ORACLE_PRIMARY_LAG_BPS: "250" }, /ORACLE_PRIMARY_LAG_BPS=250 must be positive and below ORACLE_CONFIRM_BPS \(200\)/);
-    const shortTwap = { ...GOOD_CFG, dexConfirm: { ...GOOD_CFG.dexConfirm, pools: { ...GOOD_CFG.dexConfirm.pools, MSFT: { ...GOOD_CFG.dexConfirm.pools.MSFT!, twapSec: 120 } } } };
-    expect(mainnetProfile(goodEnv(), hostRoot(GOOD_DEP, shortTwap)).errors).toEqual(["dexConfirm.pools.MSFT.twapSec=120 outside 300-3600 s on mainnet"]);
+    const shortTwap = { ...GOOD_CFG, dexConfirm: { ...GOOD_CFG.dexConfirm, pools: { ...GOOD_CFG.dexConfirm.pools, MSFT: [{ ...GOOD_CFG.dexConfirm.pools.MSFT![0]!, twapSec: 120 }] } } };
+    expect(mainnetProfile(goodEnv(), hostRoot(GOOD_DEP, shortTwap)).errors).toEqual(["dexConfirm.pools.MSFT[0].twapSec=120 outside 300-3600 s on mainnet"]);
   });
 
   test("ORACLE_POLICY / ORACLE_MIN_SOURCES are pinned; a contradicting value is refused, not silently overridden", () => {

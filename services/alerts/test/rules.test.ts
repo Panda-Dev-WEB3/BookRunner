@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { parseEther } from "viem";
 import {
+  confirmNotes,
   apiHealth,
   backup,
   balances,
@@ -676,6 +677,31 @@ describe("oracle primary-confirm (mainnet: Chainlink signs, DEX TWAP / Pyth conf
     expect(keys(noPrimary)).toEqual([]);
   });
 
+  test("confirm alerts name the DEX pools used and failed (the oracle's confirm notes), as inert text", () => {
+    const used = "dex-twap: used NVDA/WETH 500 0x62AB..6b6C $184.68 (2% depth $120,000, reference); failed NVDA/USDG 500 0xd4EB..14a3: insufficient depth: $9,000 moves the price 2% (floor $15,000)";
+    const d = oracle(pc({ confirm: [cf("NVDA", "diverged", 120_000, { notes: [used] })] }), rules());
+    expect(d[0]!.summary).toEndWith(`docs/RUNBOOK.md "Real prices" [${used}]`);
+    const failed =
+      "dex-twap: used none; failed NVDA/USDG 500 0xd4EB..14a3: no swap in the 1800s TWAP window (last swap 2000s ago): the TWAP would be an old trade; NVDA/WETH 500 0x62AB..6b6C: ETH/USD leg WETH/USDG 100 0x52e6..71Ca: insufficient depth";
+    const sources = [src("chainlink", null, []), src("dex-twap", 700_000, ["NVDA"]), src("pyth", null, [])];
+    const u = oracle(pc({ sources, confirm: [cf("NVDA", "unavailable", 700_000, { notes: [failed] })] }), rules());
+    expect(u.map((x) => x.key)).toEqual(["oracle_confirm_unavailable:NVDA"]);
+    expect(u[0]!.summary).toBe(`oracle: no confirm source for NVDA for 12m in session: Chainlink is published unconfirmed (failing confirm sources: dex-twap: timeout) [${failed}]`);
+    // control characters never reach the channels; long notes are capped
+    expect(confirmNotes({ notes: ["a\nRESOLVED b", "x".repeat(500)] })).toBe(` [a?RESOLVED b | ${"x".repeat(399)}…]`);
+    expect(confirmNotes({})).toBe("");
+  });
+
+  test("divergence of one DEX pool while the reported value agrees: a warning naming the pool (never critical on a thin pool alone)", () => {
+    const one = cf("NVDA", "diverged", 120_000, {
+      diffBps: 12,
+      confirmers: [{ name: "dex-twap", price: 180.2, diffBps: 12, diverged: [{ label: "NVDA/WETH 3000 0xC0Be..b807", price: 270, diffBps: 5000 }] }],
+    });
+    const c = oracle(pc({ confirm: [one] }), rules());
+    expect(c.map((x) => [x.key, x.severity])).toEqual([["oracle_confirm_divergence:NVDA", "warning"]]);
+    expect(c[0]!.summary).toContain("NVDA Chainlink 180 vs dex-twap 180.2 (12 bps): 12 bps apart (limit 200 bps) for 2m in session (beyond the limit: NVDA/WETH 3000 0xC0Be..b807 270 (5000 bps));");
+  });
+
   test("two confirm sources failing on one ticker is NOT critical (no median 2-source logic)", () => {
     const sources = [src("chainlink", null, []), src("dex-twap", 700_000, ["NVDA"]), src("pyth", 700_000, ["NVDA"])];
     const c = oracle(pc({ sources, confirm: [cf("NVDA", "unavailable", 700_000)] }), rules());
@@ -699,7 +725,7 @@ describe("oracle primary-confirm (mainnet: Chainlink signs, DEX TWAP / Pyth conf
     expect(keys(c)).toEqual(["oracle_confirm_divergence:NVDA"]);
     expect(c[0]!.severity).toBe("warning");
     expect(c[0]!.summary).toBe(
-      'oracle: NVDA Chainlink 180 vs dex-twap 184.68 (260 bps): 260 bps apart (limit 200 bps) for 2m in session; the published price is still Chainlink (the DEX never moves it). Check Chainlink lag (0.5% deviation / 24 h heartbeat update rule), the USDG peg, DEX pool manipulation; docs/RUNBOOK.md "Real prices"',
+      'oracle: NVDA Chainlink 180 vs dex-twap 184.68 (260 bps): 260 bps apart (limit 200 bps) for 2m in session; the published price is still Chainlink (the DEX never moves it). Check Chainlink lag (0.5% deviation / 24 h heartbeat update rule), the USDG peg, the ETH/USD leg, DEX pool manipulation; docs/RUNBOOK.md "Real prices"',
     );
     // no `since`: run length unknown, not alerted
     expect(oracle(pc({ confirm: [cf("NVDA", "diverged", null)] }), rules())).toEqual([]);

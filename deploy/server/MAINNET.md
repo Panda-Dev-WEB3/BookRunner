@@ -19,9 +19,10 @@ never on a developer PC. Same layout and hardening as the testnet host ([README.
 | Database / Redis | `bookrunner_testnet`, Redis db 1, bus namespace `testnet` (`bkrn:testnet:…`, queues `bkrn-testnet-…`) | `bookrunner_mainnet`, Redis db 0, passwords required, bus namespace `mainnet` (`bkrn:mainnet:…`, queues `bkrn-mainnet-…`; `NETWORK=mainnet`, packages/shared queues.ts; dev.ts migrates legacy keys at start, a no-op on a fresh host) |
 
 `scripts/dev.ts --network mainnet` refuses to start while any required env var, any role signer, the oracle
-sources (a Chainlink feed and a DEX confirm pool per ticker; `ORACLE_POLICY=primary-confirm` and
+sources (a Chainlink feed and at least one DEX confirm pool per ticker; `ORACLE_POLICY=primary-confirm` and
 `ORACLE_MIN_SOURCES=1` pinned, a contradicting value refused; Chainlink max age ≤ heartbeat + 1 h, DEX TWAP
-300-3600 s, `ORACLE_DEX_MAX_AGE_MS` ≤ 120 s, `minDepthUsd` ≥ 10,000, `ORACLE_PRIMARY_LAG_BPS` < `ORACLE_CONFIRM_BPS`)
+300-3600 s, `ORACLE_DEX_MAX_AGE_MS` ≤ 120 s, `minDepthUsd` ≥ 10,000 for every pool and the `ethUsd` leg (required by
+a WETH-quoted pool), `ORACLE_PRIMARY_LAG_BPS` < `ORACLE_CONFIRM_BPS`)
 or the DeployMainnet
 record is missing, while two roles share a key, or while any `*MNEMONIC*`, the deployer key, the funder key or
 `BKRN_ALLOW_ADMIN_KEY` is in the environment (scripts/network-profile.ts).
@@ -85,7 +86,9 @@ WATERFALL_LIQ_ETH_USD=<USD per ETH, e.g. 3000>         # liquidation keeper gas 
 # the app tree (the DeployMainnet input was checked against it); ORACLE_CHAINLINK_FEEDS only overrides, and only in
 # the {"proxy","basis","token"} form (a plain address is refused). Chainlink alone signs (sourceCount 1); the DEX
 # confirm pools (Uniswap v3 TWAP over 1800 s, factory-verified, 2% depth floor minDepthUsd $25k: recalibrated from the
-# balance-based $50k; confirm-only, so a thin pool can only cause false alerts) come from the same file's dexConfirm.pools. Chainlink
+# balance-based $50k; confirm-only, so a thin pool can only cause false alerts) come from the same file's dexConfirm.pools
+# (a list per ticker: the USDG pool, plus Stock Token / WETH pools priced through dexConfirm.ethUsd; any usable pool
+# beyond ORACLE_CONFIRM_BPS alerts, the weighted median is the reported value). Chainlink
 # read failure / oraclePaused / round older than heartbeat + grace in session: no price for that ticker (StalePrice
 # after maxPriceAge); the DEX never substitutes. A feed that stops updating but keeps answering is signed as fresh for
 # up to heartbeat + grace (24 h 10 min): only the confirm gap shows it. services/alerts: oracle_source_failing:chainlink
@@ -174,7 +177,7 @@ liquidity, observe + the token's 4 views) every 1 s tick as separate calls (~44 
 | After, 0 books, per service | Reads (subscriptions up; polling in brackets) | CU/s |
 |---|---|---|
 | oracle, Chainlink | ONE `aggregate3` per pass (sequencer, every round, decimals once, due token states, block timestamp, aggregators every 10 min). A pass on every `AnswerUpdated` / `NewRound` of a feed's aggregator or `UIMultiplierUpdated` of a token, and every 10 s for the token states (`ORACLE_TOKEN_STATE_READ_MS`, review: a pause has no event; about 2 CU/s); safety re-read `ORACLE_CHAINLINK_EVENT_READ_MS` 5 min. [every `ORACLE_CHAINLINK_READ_MS` 10 s, token states in every pass] | 0.5 [2.6] |
-| oracle, DEX TWAP | block + ONE `aggregate3` (every pool + its token at that block) + one for the rings that moved, every `ORACLE_DEX_READ_MS` 60 s | 0.7-1.1 |
+| oracle, DEX TWAP | block + ONE `aggregate3` (every confirm pool, the WETH / USDG leg, each Stock Token's state once, at that block) + one for the rings that moved, every `ORACLE_DEX_READ_MS` 60 s | ~1.1 |
 | oracle, head / universe | head clock fed by every pass (`ORACLE_HEAD_READ_MS` 60 s); signer + minSources every 60 s; band every 10 min | 0.5 |
 | indexer | a step (`eth_blockNumber` + ONE `eth_getLogs`: protocol + every watched book) after each notification of a watched contract, and every `INDEXER_WS_SAFETY_POLL_MS` 120 s [every `INDEXER_POLL_MS` 12 s] | 0.7 [7.1] |
 | ops-venue | `bookIds()` every `OPS_BOOK_POLL_MS` 60 s; log / report / fee loops idle without an Orderly book | 0.4 |
@@ -184,6 +187,15 @@ liquidity, observe + the token's 4 views) every 1 s tick as separate calls (~44 
 | alerts | head + role balances (Multicall3 `getEthBalance`, one call) + buybackPending every 60 s; markInterval hourly | 1.1 |
 | charter | jury fallback scan every `JURY_POLL_MS` 60 s; committee sync every `COMMITTEE_SYNC_MS` 300 s | 0.6 |
 | **Total** | | **~6 [~15]** |
+
+**DEX second source (2026-11-13).** The Stock Token / WETH confirm pools (NVDA / WETH 500 and 3000) and the WETH /
+USDG leg ride in the same calls: still the block (16 CU) + ONE `aggregate3` (26 CU) per 60 s pass, + ONE ring
+`aggregate3` (26 CU) when an observation index moved. Alchemy bills an `eth_call` flat, whatever its size: the pass
+`aggregate3` grows from 35 to 44 inner calls (8 pools x slot0 / liquidity / observe + 5 Stock Tokens x 4 views, now
+read once per token instead of once per pool) at the same 26 CU. What changes: the leg trades every few seconds, so
+the ring call now comes nearly every pass: the DEX row goes from 0.7-1.1 to ~1.1 CU/s, at most +0.43 CU/s
+(+26 CU per pass, ~1.1 million CU / 30 days). Once per process: `getPool` + `token0` + `token1` for each of the three
+new pools and WETH `decimals()`, 10 `eth_call` (260 CU). The total stays ~6 [~15] CU/s.
 
 **Per book.** A book in Subscription adds ~8 CU/s (ops-venue state + IF binding every 60 s and adapter / mandate logs
 every `OPS_LOG_POLL_MS` 30 s in ONE `eth_getLogs`, ~2.8 of it; mark and waterfall snapshots every 60 s). A **Live**

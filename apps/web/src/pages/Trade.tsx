@@ -2,12 +2,14 @@
 // ARCHITECTURE.md §5 "Trading on the in-house engine"). The list shows the deployment's open engine markets, or "no
 // market open yet"; a market page has the header (price and its age, session), the order, position and margin
 // panels (every step prepared by the API, verified against the chain's PoolEngine and signed in the wallet), the
-// contracts and the risks.
+// contracts and the risks. Trading page v2: the price chart (1D / 1W / 1M) and the wallet's trade and PnL history.
 import { Link, useParams } from "react-router";
 import { useQueryError } from "../api/hooks";
+import { FillsTable } from "../components/trade/FillsTable";
 import { MarginPanel } from "../components/trade/MarginPanel";
 import { OrderPanel } from "../components/trade/OrderPanel";
 import { PositionPanel } from "../components/trade/PositionPanel";
+import { PriceChart } from "../components/trade/PriceChart";
 import { EngineContract, MarketHeader, MarketList, TradeRisks } from "../components/trade/TradeBits";
 import { useTradeMarket, useTradeMarkets, useTradePosition } from "../components/trade/useTrade";
 import { Callout, EmptyState, ErrorState, Section, SkeletonRows, Term } from "../components/ui";
@@ -123,6 +125,7 @@ export function TradeMarketPage() {
       </Section>
       <Section space="sm" bodyClassName="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_380px]" aria-label="Trade">
         <div className="min-w-0 space-y-6">
+          <PriceChart m={m} />
           <OrderPanel m={m} address={address} position={position.data} />
           {address && <PositionPanel m={m} address={address} position={position.data} error={positionError} onRetry={() => void position.refetch()} />}
         </div>
@@ -136,6 +139,11 @@ export function TradeMarketPage() {
           </p>
         </div>
       </Section>
+      {address && (
+        <Section space="sm" aria-label="Trade history">
+          <FillsTable m={m} address={address} markets={markets.data?.markets ?? []} />
+        </Section>
+      )}
       <Section id="risks" tone="muted" space="sm" eyebrow="Risks" title="Read this before you trade">
         <TradeRisks m={m} />
       </Section>

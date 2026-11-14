@@ -8,6 +8,7 @@ import type {
   AgentKeyRow,
   BookPatch,
   EnginePositionRow,
+  EngineTraderEventRow,
   BookRow,
   CharterFiledRow,
   IndexerStore,
@@ -144,6 +145,8 @@ interface MemState {
   poolBooks: Record<number, PoolBookRow & { premiumsUsd: string }>;
   /** key: `marketId|trader` */
   enginePositions: Record<string, EnginePositionRow>;
+  /** key: `tx:logIndex` */
+  engineEvents: Record<string, EngineTraderEventRow>;
   poolFlows: Record<string, PoolFlowRow>;
   poolSnapshots: Record<number, PoolSnapshotRow>;
 }
@@ -167,6 +170,7 @@ const emptyState = (): MemState => ({
   poolEpochs: {},
   poolBooks: {},
   enginePositions: {},
+  engineEvents: {},
   poolFlows: {},
   poolSnapshots: {},
 });
@@ -198,6 +202,12 @@ export class MemoryIndexerStore implements IndexerStore {
     const prev = this.s.enginePositions[k];
     if (prev && (prev.lastBlock > r.lastBlock || (prev.lastBlock === r.lastBlock && prev.lastLogIndex >= r.lastLogIndex))) return;
     this.s.enginePositions[k] = { marketId: r.marketId, trader: r.trader.toLowerCase(), sizeRaw: r.sizeRaw ?? prev?.sizeRaw ?? "0", lastBlock: r.lastBlock, lastLogIndex: r.lastLogIndex };
+  }
+  async insertEngineTraderEvent(r: EngineTraderEventRow) {
+    const k = `${lc(r.txHash)}:${r.logIndex}`;
+    if (this.s.engineEvents[k]) return false;
+    this.s.engineEvents[k] = clone({ ...r, txHash: lc(r.txHash), trader: lc(r.trader) });
+    return true;
   }
   async getCursor(name: string) {
     return this.s.cursors[name] ?? null;

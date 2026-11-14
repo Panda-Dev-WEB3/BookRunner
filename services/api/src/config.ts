@@ -43,6 +43,13 @@ export const apiEnvShape = {
    * Robinhood Chain mainnet (4663), warn elsewhere; true / false force it.
    */
   TRADE_REFUSE_UNHOLDABLE_LEVERAGE: z.enum(["auto", "true", "false", "1", "0"]).default("auto"),
+  /**
+   * Trading page price history (engine_price_1m): how often the API samples the oracle's signed price of each open
+   * engine market into its one-minute candle (0 = no recording, e.g. on a second API replica).
+   */
+  API_PRICE_HISTORY_SAMPLE_MS: z.coerce.number().int().min(0).default(5_000),
+  /** Days of one-minute candles kept (pruned hourly by the recorder); at least the 1M chart range. */
+  API_PRICE_HISTORY_RETENTION_DAYS: z.coerce.number().int().min(31).default(35),
   /** Oracle staleness bound used for display when the chain is not reachable. */
   MAX_PRICE_AGE_SECONDS: z.coerce.number().int().min(1).default(300),
 };

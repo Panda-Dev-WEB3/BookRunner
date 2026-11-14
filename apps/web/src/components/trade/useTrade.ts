@@ -52,5 +52,10 @@ export function useRefreshTrade(): () => void {
 }
 
 async function refreshTrade(utils: ReturnType<typeof trpc.useUtils>, qc: QueryClient): Promise<void> {
-  await Promise.all([utils.trade.invalidate(), qc.invalidateQueries({ queryKey: ["optional", "trade.markets"] }), invalidateWalletBalances(qc)]);
+  await Promise.all([
+    utils.trade.invalidate(),
+    qc.invalidateQueries({ queryKey: ["optional", "trade.markets"] }),
+    qc.invalidateQueries({ queryKey: ["optional", "trade.fills"] }),
+    invalidateWalletBalances(qc),
+  ]);
 }

@@ -68,3 +68,10 @@ export type TradeSession = TradeMarket["session"];
 export type TradePositionOut = Outputs["trade"]["position"];
 export type TradeQuoteOut = Outputs["trade"]["quote"];
 export type TradeOrderOut = Outputs["trade"]["order"];
+// 2026-11 trading page v2 (optional: an older API may not serve them)
+export type TradeHistoryOut = Outputs["trade"]["history"];
+export type TradeHistoryPoint = TradeHistoryOut["points"][number];
+export type TradeHistoryRange = TradeHistoryOut["range"];
+export type TradeFillsOut = Outputs["trade"]["fills"];
+export type TradeFill = TradeFillsOut["rows"][number];
+export type TradeFillTotals = TradeFillsOut["totals"];

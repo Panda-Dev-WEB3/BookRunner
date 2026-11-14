@@ -3,7 +3,10 @@
 //     (ok false; the session hold / skip logic applies, a confirm source NEVER substitutes for it);
 //   - every other fresh observation (the Uniswap v3 TWAP, optionally Pyth / HTTP) is a confirmer: compared with the
 //     primary, |confirmer - primary| / primary > confirmBps = "diverged" (the primary is STILL the price: the caller
-//     warns and /health + services/alerts report it); no fresh confirmer = "unavailable" (published unconfirmed);
+//     warns and /health + services/alerts report it); a confirmer built from several values (the DEX: one per usable
+//     pool, `parts`) is diverged when ANY of them is: "ok" means every pool agrees, and the diverging pools are named
+//     (alerts only: nothing automated acts on "diverged", so a manipulated thin pool can only page). Its diffBps stays
+//     the reported (weighted-median) value's; no fresh confirmer = "unavailable" (published unconfirmed);
 //   - the signed update counts ONE source (sourceCount 1, on-chain AttestedOracle.minSources() = 1), while its
 //     sourcesHash commits to the primary AND every fresh confirmer (`attested`), so anyone holding the message can
 //     see what the price was confirmed against.
@@ -32,8 +35,15 @@ export function primaryConfirm(quotes: readonly CollectedQuote[], o: PrimaryConf
       confirm: { status: "no-primary", diffBps: null, primaryPrice: null, primaryTs: null, confirmers: [] },
     };
   }
-  const confirmers = others.map((q) => ({ name: q.name, price: q.price, ts: q.ts, diffBps: deviationBps(q.price, primary.price) }));
-  const diverged = others.some((q) => exceedsBps(q.price, primary.price, o.confirmBps));
+  // the parts of the fresh (kept) observation of each confirmer
+  const partsOf = (q: SourceQuote) => quotes.find((x) => x.name === q.name && x.ts === q.ts && x.price === q.price)?.parts ?? [];
+  const confirmers: ConfirmResult["confirmers"] = others.map((q) => {
+    const bad = partsOf(q)
+      .filter((p) => exceedsBps(p.price, primary.price, o.confirmBps))
+      .map((p) => ({ label: p.label, price: p.price, diffBps: deviationBps(p.price, primary.price) }));
+    return { name: q.name, price: q.price, ts: q.ts, diffBps: deviationBps(q.price, primary.price), ...(bad.length > 0 ? { diverged: bad } : {}) };
+  });
+  const diverged = confirmers.some((c) => c.diverged !== undefined || exceedsBps(c.price, primary.price, o.confirmBps));
   const confirm: ConfirmResult = {
     status: confirmers.length === 0 ? "unavailable" : diverged ? "diverged" : "ok",
     diffBps: confirmers.length === 0 ? null : Math.max(...confirmers.map((c) => c.diffBps)),

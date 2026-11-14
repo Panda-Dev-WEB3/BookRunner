@@ -29,6 +29,13 @@
       "when": 1792782783166,
       "tag": "0003_engine_positions",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1794598461234,
+      "tag": "0004_trade_history",
+      "breakpoints": true
     }
   ]
 }

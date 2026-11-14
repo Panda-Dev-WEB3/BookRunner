@@ -8,6 +8,7 @@ import {
   charters,
   committee,
   enginePositions,
+  engineTraderEvents,
   events,
   juryVerdicts,
   killEvents,
@@ -31,6 +32,7 @@ import type { Address } from "viem";
 import type {
   AgentKeyRow,
   EnginePositionRow,
+  EngineTraderEventRow,
   BookPatch,
   BookRow,
   CharterFiledRow,
@@ -486,6 +488,15 @@ export class PgIndexerStore implements IndexerStore {
       .insert(enginePositions)
       .values({ marketId: r.marketId, trader, sizeRaw: r.sizeRaw ?? "0", lastBlock: r.lastBlock, lastLogIndex: r.lastLogIndex })
       .onConflictDoUpdate({ target: [enginePositions.marketId, enginePositions.trader], set, where: newer });
+  }
+
+  async insertEngineTraderEvent(r: EngineTraderEventRow): Promise<boolean> {
+    const out = await this.db
+      .insert(engineTraderEvents)
+      .values({ ...r, txHash: lc(r.txHash), trader: lc(r.trader), counterparty: r.counterparty ? lc(r.counterparty) : null })
+      .onConflictDoNothing({ target: [engineTraderEvents.txHash, engineTraderEvents.logIndex] })
+      .returning({ logIndex: engineTraderEvents.logIndex });
+    return out.length > 0;
   }
 
   async upsertPoolBook(r: PoolBookRow): Promise<void> {
