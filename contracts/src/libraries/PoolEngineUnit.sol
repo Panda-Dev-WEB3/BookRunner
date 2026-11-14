@@ -28,7 +28,9 @@ import {IStockTokenRegistry} from "../interfaces/IStockTokenRegistry.sol";
 ///           ONE signed oracle round: the stored price of every split component has the index price's publishedAt,
 ///           held flag and share basis, else IndexSnapshot (fail closed for that transaction). So the first toucher
 ///           only picks which signed round, never mixes rounds, and no choice of round moves value: R is computed
-///           from the same snapshot the index price is in.
+///           from the same snapshot the index price is in. The round must be at most 60 s old (INDEX_ROUND_MAX_AGE):
+///           no older round can be picked in hindsight (review L-2).
+///         The registry is bound per market at creation (review L-3): a later config swap never changes its units.
 ///         Rounding: the unit price and R round in the pool's favour (down while traders are net long, up while net
 ///         short); dust is below one wei of price per unit.
 library PoolEngineUnit {
@@ -37,6 +39,9 @@ library PoolEngineUnit {
 
     /// @dev Per-market split state.
     struct UnitState {
+        // the StockTokenRegistry bound at creation (review L-3: a registry swap never changes a market's units;
+        // 0 = none: no split conversion for the market's life)
+        address registry;
         // share price id: its shareFactor at creation (0 = no registry then: 1e18)
         uint256 baseWad;
         // index level: the applied unit (0 = 1e18)
@@ -55,6 +60,12 @@ library PoolEngineUnit {
     // keccak256(abi.encode(uint256(keccak256("bookrunner.storage.PoolEngineUnit")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 internal constant STORAGE_LOCATION = 0xa315fa28946cdaeded6ff96908ce0c93f0e3592d46023b640db55df40962c100;
 
+    /// @notice The registry bound to a market (internal: inlined in the engine, which skips the library call for a
+    ///         market without one).
+    function registryOf(uint256 marketId) internal view returns (address) {
+        return _unit(marketId).registry;
+    }
+
     /// @dev The calling engine's split state (delegatecall: the engine's storage, in its own ERC-7201 namespace).
     function _unit(uint256 marketId) private view returns (UnitState storage) {
         UnitStorage storage $;
@@ -66,10 +77,18 @@ library PoolEngineUnit {
 
     error BadIndexLevel();
 
+    /// @notice Review L-2: an index unit move uses a signed round at most this old (a mover cannot pick an older
+    ///         round in hindsight).
+    uint256 internal constant INDEX_ROUND_MAX_AGE = 60;
+    /// @notice `basisAt` sentinel: the stored price is held, its basis is AttestedOracle.lastLiveAt (read only when the
+    ///         market has a registry).
+    uint64 internal constant HELD_BASIS = type(uint64).max;
+
     /// @notice At market creation: the split factors the market starts from.
     function init(uint256 marketId, address reg, bytes32 priceId) external {
         if (reg == address(0)) return;
         UnitState storage u = _unit(marketId);
+        u.registry = reg;
         (uint256 f, IStockTokenRegistry.SplitComponent[] memory cs) =
             IStockTokenRegistry(reg).splitFactors(priceId, uint64(block.timestamp));
         if (cs.length == 0) {
@@ -82,24 +101,25 @@ library PoolEngineUnit {
         u.basisAt = uint64(block.timestamp);
     }
 
-    /// @notice Shares per unit (WAD) for a price with share basis `basisAt`, without writing (views).
-    function viewUnit(uint256 marketId, address reg, address oracle, bytes32 priceId, uint64 basisAt, int256 net)
+    /// @notice Shares per unit (WAD) for a price with share basis `basisAt` (HELD_BASIS: the stored held price's,
+    ///         lastLiveAt), without writing (views).
+    function viewUnit(uint256 marketId, address oracle, bytes32 priceId, uint64 basisAt, int256 net)
         external
         view
         returns (uint256 unit)
     {
-        (unit,,) = _compute(_unit(marketId), reg, oracle, priceId, basisAt, net);
+        (unit,,,) = _compute(_unit(marketId), oracle, priceId, basisAt, net);
     }
 
     /// @notice {viewUnit}, storing an index market's move (emits IPoolEngine.UnitUpdated) and first-seen components.
-    function syncUnit(uint256 marketId, address reg, address oracle, bytes32 priceId, uint64 basisAt, int256 net)
+    function syncUnit(uint256 marketId, address oracle, bytes32 priceId, uint64 basisAt, int256 net)
         external
         returns (uint256 unit)
     {
         UnitState storage u = _unit(marketId);
         IStockTokenRegistry.SplitComponent[] memory cs;
         bool moved;
-        (unit, cs, moved) = _compute(u, reg, oracle, priceId, basisAt, net);
+        (unit, cs, moved, basisAt) = _compute(u, oracle, priceId, basisAt, net);
         for (uint256 i; i < cs.length; ++i) {
             if (u.applied[cs[i].priceId] != cs[i].factorWad) u.applied[cs[i].priceId] = cs[i].factorWad;
         }
@@ -111,12 +131,15 @@ library PoolEngineUnit {
     }
 
     /// @dev Unit at `basisAt`; for an index market also its components and whether the unit moves.
-    function _compute(UnitState storage u, address reg, address oracle, bytes32 priceId, uint64 basisAt, int256 net)
+    function _compute(UnitState storage u, address oracle, bytes32 priceId, uint64 basisAt, int256 net)
         private
         view
-        returns (uint256 unit, IStockTokenRegistry.SplitComponent[] memory cs, bool moved)
+        returns (uint256 unit, IStockTokenRegistry.SplitComponent[] memory cs, bool moved, uint64 basis)
     {
-        if (reg == address(0)) return (WAD, cs, false);
+        address reg = u.registry;
+        if (reg == address(0)) return (WAD, cs, false, basisAt);
+        if (basisAt == HELD_BASIS) basisAt = IAttestedOracle(oracle).lastLiveAt(priceId);
+        basis = basisAt;
         uint256 f;
         (f, cs) = IStockTokenRegistry(reg).splitFactors(priceId, basisAt);
         if (cs.length == 0) {
@@ -127,11 +150,25 @@ library PoolEngineUnit {
                 if (fNow != f) revert IPoolEngine.PriceBeforeSplit(0, uint64(block.timestamp));
             }
             uint256 b = u.baseWad;
-            return (b == 0 || b == WAD ? f : Math.mulDiv(f, WAD, b, _rounding(net)), cs, false);
+            return (b == 0 || b == WAD ? f : Math.mulDiv(f, WAD, b, _rounding(net)), cs, false, basis);
         }
         unit = u.unitWad == 0 ? WAD : u.unitWad;
-        int256 delta = 0;
-        uint256 level = 0;
+        (int256 delta, uint256 level) = _indexDelta(u, oracle, priceId, basisAt, cs);
+        if (level == 0) return (unit, cs, false, basis);
+        int256 num = int256(level) + delta;
+        if (num <= 0) revert BadIndexLevel();
+        return (Math.mulDiv(unit, uint256(num), level, _rounding(net)), cs, true, basis);
+    }
+
+    /// @dev sum_k w_k q_k (f_k - a_k) / (a_k 1e4) over the components whose split is not in the unit yet, and the
+    ///      snapshot's index level (0: nothing to apply).
+    function _indexDelta(
+        UnitState storage u,
+        address oracle,
+        bytes32 priceId,
+        uint64 basisAt,
+        IStockTokenRegistry.SplitComponent[] memory cs
+    ) private view returns (int256 delta, uint256 level) {
         for (uint256 i; i < cs.length; ++i) {
             uint256 a = u.applied[cs[i].priceId];
             uint256 fk = cs[i].factorWad;
@@ -141,14 +178,10 @@ library PoolEngineUnit {
             uint256 term = Math.mulDiv(c.priceWad * cs[i].weightBps, fk > a ? fk - a : a - fk, a * BPS);
             delta += fk > a ? int256(term) : -int256(term);
         }
-        if (level == 0) return (unit, cs, false);
-        int256 num = int256(level) + delta;
-        if (num <= 0) revert BadIndexLevel();
-        return (Math.mulDiv(unit, uint256(num), level, _rounding(net)), cs, true);
     }
 
     /// @dev The index price of the snapshot: the stored one, whose share basis must be `basisAt` (no older than the
-    ///      basis the unit last moved at).
+    ///      basis the unit last moved at), published at most INDEX_ROUND_MAX_AGE ago (review L-2).
     function _snapshotLevel(UnitState storage u, address oracle, bytes32 priceId, uint64 basisAt)
         private
         view
@@ -156,7 +189,10 @@ library PoolEngineUnit {
     {
         if (basisAt < u.basisAt) revert IPoolEngine.PriceBeforeSplit(basisAt, u.basisAt);
         IAttestedOracle.PriceData memory d = IAttestedOracle(oracle).latest(priceId);
-        if (d.priceWad == 0 || _basis(oracle, priceId, d) != basisAt) revert IPoolEngine.IndexSnapshot(priceId);
+        if (
+            d.priceWad == 0 || _basis(oracle, priceId, d) != basisAt
+                || uint256(d.publishedAt) + INDEX_ROUND_MAX_AGE < block.timestamp
+        ) revert IPoolEngine.IndexSnapshot(priceId);
         return d.priceWad;
     }
 

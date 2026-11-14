@@ -80,11 +80,28 @@ contract N1EngineSplitTest is EngineBase {
     ///         $100 before a 10:1 split books ~$9,000 (90% of its $10,000 notional) at the reopen print.
     function test_N1_exploit_withoutRegistry_shortTakes90Percent() public {
         nvda.updateMultiplier(10e18, SAT);
-        cfg.setStockRegistry(address(0));
-        _trade(alice, mid, -100e18);
+        cfg.setStockRegistry(address(0)); // a market created now has no registry for its life
+        address ad2 = makeAddr("adapter2");
+        uint256 m2 = _createMarket(ad2, _defaultCfg(PID_B, MAX_NET));
+        _fundPool(ad2, m2, POOL, IF);
+        _setQuote(ad2, m2, 10, 0, MAX_NET);
+        _deposit(alice, m2, 5_000e6);
+        _trade(alice, m2, -100e18);
         vm.warp(SAT + 2 days);
         _price(PID_B, PX / 10);
-        assertGt(engine.traderEquityUsd(mid, alice), int256(5_000e6 + 8_900e6));
+        assertGt(engine.traderEquityUsd(m2, alice), int256(5_000e6 + 8_900e6));
+    }
+
+    /// @notice Review L-3: the registry is bound to a market at creation; a config swap never changes its units.
+    function test_N1_registrySwap_doesNotChangeAMarketsUnits() public {
+        _stage(nvda, 10e18);
+        vm.warp(SAT + 1 days);
+        _price(PID_B, PX / 10);
+        assertEq(engine.unitOf(mid), 10e18);
+        cfg.setStockRegistry(address(new StockTokenRegistry(address(cfg), address(0))));
+        assertEq(engine.unitOf(mid), 10e18);
+        cfg.setStockRegistry(address(0));
+        assertEq(engine.unitOf(mid), 10e18);
     }
 
     /// @dev Equities at the reopen after `sizeDelta` was opened before a split of `ratio` (or the control).
@@ -146,7 +163,7 @@ contract N1EngineSplitTest is EngineBase {
     }
 
     /// @notice The engine's split state sits in its ERC-7201 namespace (and is written there through the library).
-    function test_N1_unitStorage_erc7201() public view {
+    function test_N1_unitStorage_erc7201() public pure {
         bytes32 expected =
             keccak256(abi.encode(uint256(keccak256("bookrunner.storage.PoolEngineUnit")) - 1)) & ~bytes32(uint256(0xff));
         assertEq(PoolEngineUnit.STORAGE_LOCATION, expected);
@@ -174,15 +191,19 @@ contract N1EngineSplitTest is EngineBase {
         vm.prank(timelock);
         registry.setNextMultiplierAnchor(address(nvda), 10e18);
         assertFalse(registry.splitSyncNeeded(address(nvda)));
-        assertEq(registry.shareFactor(PID_B, uint64(SAT)), 10e18);
+        assertEq(registry.shareFactor(PID_B, uint64(SAT)), 1e18); // review L-1: a staged record counts once active
+        vm.warp(SAT + 10);
+        assertEq(registry.shareFactor(PID_B, uint64(SAT + 5)), 10e18);
         assertEq(registry.shareFactor(PID_B, uint64(SAT - 1)), 1e18);
         // stored mode: the change beyond the band is the split, at the change block
         vm.prank(timelock);
         registry.setMultiplierSource(address(tsla), false);
         vm.prank(timelock);
         registry.setMultiplier(address(tsla), 3e18);
-        assertEq(registry.shareFactor(PID_T, uint64(block.timestamp)), 3e18);
-        assertEq(registry.shareFactor(PID_T, uint64(block.timestamp - 1)), 1e18);
+        uint256 x = block.timestamp;
+        vm.warp(x + 10);
+        assertEq(registry.shareFactor(PID_T, uint64(x + 5)), 3e18);
+        assertEq(registry.shareFactor(PID_T, uint64(x - 1)), 1e18);
         // live re-anchor of an unrecorded split reverts
         MockStockToken amd = new MockStockToken("AMD", "AMD", 1e18);
         amd.updateMultiplier(1e18, 0);
@@ -196,15 +217,26 @@ contract N1EngineSplitTest is EngineBase {
         registry.setMultiplier(address(amd), 2e18);
     }
 
-    /// @notice One live token per price id: a second one cannot switch to live mode (its records would be ambiguous).
+    /// @notice One live token per price id, alone (review L-3: a stored token next to it would record the same split a
+    ///         second time): no token is registered next to a live one, and a token with peers cannot go live.
     function test_N1_oneLiveTokenPerPriceId() public {
         MockStockToken nvda2 = new MockStockToken("NVDA bis", "NVDA2", 1e18);
         nvda2.updateMultiplier(1e18, 0);
         vm.startPrank(timelock);
-        registry.register(address(nvda2), PID_B, 1e18, 0);
         vm.expectRevert(abi.encodeWithSelector(StockTokenRegistry.LiveTokenExists.selector, PID_B, address(nvda)));
-        registry.setMultiplierSource(address(nvda2), true);
+        registry.register(address(nvda2), PID_B, 1e18, 0);
+        bytes32 pidX = bytes32("AMD");
+        MockStockToken a1 = new MockStockToken("A1", "A1", 1e18);
+        MockStockToken a2 = new MockStockToken("A2", "A2", 1e18);
+        registry.register(address(a1), pidX, 1e18, 0);
+        registry.register(address(a2), pidX, 1e18, 0); // two stored tokens: allowed, only the first records splits
+        vm.expectRevert(abi.encodeWithSelector(StockTokenRegistry.LiveTokenExists.selector, pidX, address(a2)));
+        registry.setMultiplierSource(address(a1), true);
+        registry.setMultiplier(address(a2), 3e18); // the second token's change records nothing
+        registry.setMultiplier(address(a1), 3e18); // the first's records the split once
         vm.stopPrank();
+        vm.warp(block.timestamp + 10);
+        assertEq(registry.shareFactor(pidX, uint64(block.timestamp)), 3e18);
     }
 
     /// @notice The issuer re-stages after the last sync: the stale record is never used (fail closed from its time),
@@ -212,23 +244,25 @@ contract N1EngineSplitTest is EngineBase {
     function test_N1_restagedAfterRecord_selfHeals() public {
         _stage(nvda, 10e18);
         nvda.updateMultiplier(5e18, SAT + 1 days); // re-staged, not synced
-        vm.warp(SAT + 1);
-        vm.expectRevert(abi.encodeWithSelector(StockTokenRegistry.SplitUnrecorded.selector, address(nvda), SAT));
-        registry.shareFactor(PID_B, uint64(SAT));
+        vm.warp(SAT + 10);
+        vm.expectRevert(abi.encodeWithSelector(StockTokenRegistry.SplitUnrecorded.selector, address(nvda), SAT + 1));
+        registry.shareFactor(PID_B, uint64(SAT + 5));
         assertEq(registry.shareFactor(PID_B, uint64(SAT - 1)), 1e18); // pre-split prices still value
         assertTrue(registry.splitSyncNeeded(address(nvda)));
-        registry.recordSplit(address(nvda));
-        assertEq(registry.shareFactor(PID_B, uint64(SAT + 1)), 1e18);
-        assertEq(registry.shareFactor(PID_B, uint64(SAT + 1 days)), 5e18);
+        registry.recordSplit(address(nvda)); // drops the stale record (the token matches the records without it)
+        assertEq(registry.shareFactor(PID_B, uint64(SAT + 5)), 1e18);
+        vm.warp(SAT + 1 days + 10);
+        assertEq(registry.shareFactor(PID_B, uint64(SAT + 1 days + 5)), 5e18);
     }
 
     // ---------------------------------------------------------------- unrecorded: fail closed, governance fallback
 
-    /// @notice Nobody recorded the staged split: from effectiveAt on every price-dependent action reverts
-    ///         SplitUnrecorded (liquidations too: a wrong unit is the exploit), while pre-split prices (the held weekend
-    ///         price) still liquidate and margin top-ups work. Governance records it from the token's event and the
+    /// @notice Nobody recorded the staged split: from the last consistent point on (the market's creation here),
+    ///         every price-dependent action reverts SplitUnrecorded, liquidations at the held pre-split price included
+    ///         (review M-1: that path was a free option for an underwater trader, who could push a post-split print to
+    ///         end it). The keeper's recordSplit latches it; the guardian records it at once (bounded on chain) and the
     ///         market resumes at exactly the control's values.
-    function test_N1_unrecorded_failsClosed_untilGovernanceRecords() public {
+    function test_N1_unrecorded_failsClosed_untilGuardianRecords() public {
         uint256 snap = vm.snapshotState();
         _trade(alice, mid, -100e18);
         vm.warp(SAT + 2 days);
@@ -239,27 +273,61 @@ contract N1EngineSplitTest is EngineBase {
         nvda.updateMultiplier(10e18, SAT); // staged, never recorded
         _trade(alice, mid, -100e18);
         vm.warp(SAT - 10);
-        _push(PID_B, PX, true); // held over the weekend: basis before the split
+        _push(PID_B, PX, true);
         vm.warp(SAT + 1 hours);
         _push(PID_B, PX, true);
-        assertFalse(engine.isLiquidatable(mid, alice)); // valued at the pre-split basis
-        assertEq(registry.splitUnrecorded(address(nvda)), SAT);
+        (uint256 f, bool latched) = registry.splitUnrecorded(address(nvda));
+        assertFalse(latched);
+        assertGt(f, 0);
+        vm.expectRevert();
+        engine.isLiquidatable(mid, alice);
+        vm.prank(keeper);
+        registry.recordSplit(address(nvda)); // latches, records nothing
+        (f, latched) = registry.splitUnrecorded(address(nvda));
+        assertTrue(latched);
         vm.warp(SAT + 2 days);
         _price(PID_B, PX / 10); // the reopen
-        vm.expectRevert(abi.encodeWithSelector(StockTokenRegistry.SplitUnrecorded.selector, address(nvda), SAT));
-        engine.traderEquityUsd(mid, alice);
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(StockTokenRegistry.SplitUnrecorded.selector, address(nvda), SAT));
+        vm.expectRevert(abi.encodeWithSelector(StockTokenRegistry.SplitUnrecorded.selector, address(nvda), f));
         engine.trade(mid, 100e18, type(uint256).max);
-        vm.expectRevert(abi.encodeWithSelector(StockTokenRegistry.SplitUnrecorded.selector, address(nvda), SAT));
+        vm.expectRevert(abi.encodeWithSelector(StockTokenRegistry.SplitUnrecorded.selector, address(nvda), f));
         engine.liquidate(mid, alice);
         _deposit(alice, mid, 1e6); // top-ups never need a price
-        vm.prank(timelock);
-        registry.recordSplitAt(address(nvda), uint64(SAT), 1e18, 10e18);
-        assertEq(registry.splitUnrecorded(address(nvda)), 0);
+        // not the guardian; then a wrong ratio
+        uint64[] memory ats = new uint64[](1);
+        uint256[] memory rs = new uint256[](1);
+        ats[0] = uint64(SAT);
+        rs[0] = 2e18;
+        vm.expectRevert(abi.encodeWithSelector(StockTokenRegistry.Unauthorized.selector, address(this)));
+        registry.guardianRecordSplits(address(nvda), ats, rs);
+        address guardian = makeAddr("guardian");
+        cfg.grantRole(cfg.GUARDIAN_ROLE(), guardian);
+        vm.prank(guardian);
+        vm.expectRevert(abi.encodeWithSelector(StockTokenRegistry.SplitRatioMismatch.selector, 2e18, 10e18));
+        registry.guardianRecordSplits(address(nvda), ats, rs);
+        rs[0] = 10e18;
+        vm.prank(guardian);
+        registry.guardianRecordSplits(address(nvda), ats, rs);
+        (f, latched) = registry.splitUnrecorded(address(nvda));
+        assertEq(f, 0);
+        assertFalse(latched);
         assertEq(engine.traderEquityUsd(mid, alice), control + 1e6);
         _trade(alice, mid, 100e18);
         assertEq(engine.positionOf(mid, alice).size, 0);
+    }
+
+    /// @notice Governance fallback (timelock): records the change at its own time, the same values result.
+    function test_N1_unrecorded_governanceRecords() public {
+        _trade(alice, mid, -100e18);
+        nvda.updateMultiplier(10e18, SAT);
+        vm.warp(SAT + 2 days);
+        _price(PID_B, PX / 10);
+        vm.expectRevert();
+        engine.traderEquityUsd(mid, alice);
+        vm.prank(timelock);
+        registry.recordSplitAt(address(nvda), uint64(SAT), 10e18);
+        assertEq(engine.unitOf(mid), 10e18);
+        _trade(alice, mid, 100e18);
     }
 
     // ---------------------------------------------------------------- liquidation around the split
@@ -486,7 +554,7 @@ contract N1EngineSplitTest is EngineBase {
         _round(100e18, 90e18, false);
         _trade(alice, idx, -20e18);
         _stage(tsla, 3e18);
-        vm.warp(SAT + 1);
+        vm.warp(SAT + 10);
         _round(100e18, 30e18, false);
         engine.syncUnit(idx, "");
         uint256 u = engine.unitOf(idx);
@@ -494,5 +562,144 @@ contract N1EngineSplitTest is EngineBase {
         vm.expectRevert(abi.encodeWithSelector(IPoolEngine.PriceBeforeSplit.selector, uint64(SAT - 1), uint64(block.timestamp)));
         engine.unitAt(idx, uint64(SAT - 1));
         assertEq(engine.unitAt(idx, uint64(block.timestamp)), u);
+    }
+
+    // ---------------------------------------------------------------- review 2026-11-14 regressions (PoCs ported)
+
+    /// @notice Review H-1 (a), PoC `test_poc_unrecordedThenRecorded_masks`: an unrecorded 10:1 split, then the issuer
+    ///         stages a 2:1 split and the keeper's recordSplit runs. Before the fix it recorded the 2:1 and the market
+    ///         unfroze at factor 2 instead of 20 (a short gained ~$9,000 on $10,000); recordSplitAt(E1) then reverted.
+    ///         Now recordSplit latches and records nothing, the market stays frozen across the second split, and
+    ///         governance records E1 then E2 at their own times: the trader's equity equals the control's.
+    function test_review_H1a_unrecordedThenStagedSplit_staysFrozen_thenRecordedInOrder() public {
+        uint256 e2 = SAT + 1 days;
+        uint256 snap = vm.snapshotState();
+        _trade(alice, mid, -100e18);
+        vm.warp(e2 + 1 hours);
+        _price(PID_B, PX);
+        int256 control = engine.traderEquityUsd(mid, alice);
+        vm.revertToState(snap);
+
+        _trade(alice, mid, -100e18);
+        nvda.updateMultiplier(10e18, SAT);
+        vm.warp(SAT + 1);
+        nvda.updateMultiplier(20e18, e2);
+        vm.prank(keeper);
+        registry.recordSplit(address(nvda)); // latches; the staged 2:1 is NOT recorded
+        (, bool latched) = registry.splitUnrecorded(address(nvda));
+        assertTrue(latched);
+        vm.prank(keeper);
+        vm.expectRevert(abi.encodeWithSelector(StockTokenRegistry.NothingToRecord.selector, address(nvda)));
+        registry.recordSplit(address(nvda));
+        vm.warp(e2 + 1 hours);
+        _price(PID_B, PX / 20);
+        vm.expectRevert();
+        engine.traderEquityUsd(mid, alice);
+        vm.startPrank(timelock);
+        registry.recordSplitAt(address(nvda), uint64(SAT), 10e18);
+        (, latched) = registry.splitUnrecorded(address(nvda));
+        assertTrue(latched); // 10 recorded, the token is at 20: still frozen
+        registry.recordSplitAt(address(nvda), uint64(e2), 2e18);
+        vm.stopPrank();
+        (uint256 f, bool l2) = registry.splitUnrecorded(address(nvda));
+        assertEq(f, 0);
+        assertFalse(l2);
+        assertEq(engine.unitOf(mid), 20e18);
+        assertEq(engine.traderEquityUsd(mid, alice), control);
+    }
+
+    /// @notice Review H-1 (b), PoC `test_poc_unrecordedThenDividend_unfreezes`: an unrecorded 10:1 split, the reopen
+    ///         print, then the issuer's immediate in-band dividend update. Before the fix the frozen range moved to the
+    ///         dividend's time and the stored post-split print was valued at factor 1 (a long liquidated at 1/10). Now
+    ///         the market stays frozen, liquidations included, and the guardian's bound accepts the split ratio with
+    ///         the dividend on top (target 10.01 / 1).
+    function test_review_H1b_unrecordedThenDividend_staysFrozen_guardianBoundToleratesIt() public {
+        _trade(alice, mid, 50e18);
+        nvda.updateMultiplier(10e18, SAT);
+        vm.warp(SAT + 1 hours);
+        _price(PID_B, PX / 10);
+        vm.warp(block.timestamp + 5);
+        nvda.updateMultiplier(10.01e18); // immediate in-band dividend
+        vm.expectRevert();
+        engine.unitOf(mid);
+        vm.expectRevert();
+        engine.liquidate(mid, alice);
+        address guardian = makeAddr("guardian");
+        cfg.grantRole(cfg.GUARDIAN_ROLE(), guardian);
+        uint64[] memory ats = new uint64[](1);
+        uint256[] memory rs = new uint256[](1);
+        ats[0] = uint64(SAT);
+        rs[0] = 10e18;
+        vm.prank(guardian);
+        registry.guardianRecordSplits(address(nvda), ats, rs);
+        assertEq(engine.unitOf(mid), 10e18);
+        assertFalse(engine.isLiquidatable(mid, alice)); // valued at the same underlying value: no loss
+    }
+
+    /// @notice Review M-1: the guardian's bound. Two unrecorded splits (10:1 then 2:1) are recorded in one call at their
+    ///         own times (product 20 = live / recorded); a single 20 at the first time, or ratios in the band of 1,
+    ///         or times before the last consistent point, are refused.
+    function test_review_M1_guardianBound() public {
+        address guardian = makeAddr("guardian");
+        cfg.grantRole(cfg.GUARDIAN_ROLE(), guardian);
+        nvda.updateMultiplier(10e18, SAT);
+        vm.warp(SAT + 1);
+        nvda.updateMultiplier(20e18, SAT + 1 days);
+        vm.warp(SAT + 1 days + 1);
+        uint64[] memory one = new uint64[](1);
+        uint256[] memory r1 = new uint256[](1);
+        one[0] = uint64(SAT);
+        r1[0] = 1.02e18; // in the band of 1: no split
+        vm.prank(guardian);
+        vm.expectRevert(StockTokenRegistry.BadSplit.selector);
+        registry.guardianRecordSplits(address(nvda), one, r1);
+        one[0] = 1; // before the last consistent point
+        r1[0] = 20e18;
+        vm.prank(guardian);
+        vm.expectRevert(StockTokenRegistry.BadSplit.selector);
+        registry.guardianRecordSplits(address(nvda), one, r1);
+        uint64[] memory two = new uint64[](2);
+        uint256[] memory r2 = new uint256[](2);
+        (two[0], two[1], r2[0], r2[1]) = (uint64(SAT), uint64(SAT + 1 days), 10e18, 2e18);
+        vm.prank(guardian);
+        registry.guardianRecordSplits(address(nvda), two, r2);
+        vm.warp(SAT + 2 days);
+        assertEq(registry.shareFactor(PID_B, uint64(SAT + 1 hours)), 10e18);
+        assertEq(registry.shareFactor(PID_B, uint64(SAT + 2 days)), 20e18);
+        // nothing left to record
+        vm.prank(guardian);
+        vm.expectRevert(abi.encodeWithSelector(StockTokenRegistry.NothingToRecord.selector, address(nvda)));
+        registry.guardianRecordSplits(address(nvda), one, r1);
+    }
+
+    /// @notice Review L-1, PoC `test_poc_futureBasis`: a pre-split print stamped 5 s ahead (basis = effectiveAt) landing
+    ///         before effectiveAt. Before the fix it got the post-split unit at once (10x). Now the staged record does
+    ///         not count before its time, and after it the ambiguous basis is refused until the next print.
+    function test_review_L1_futureStampedPrint_neverMeetsThePostSplitUnit() public {
+        _stage(nvda, 10e18);
+        vm.warp(SAT - 4);
+        oracle.update(_priceData(PID_B, PX, uint64(SAT), false));
+        assertEq(engine.unitOf(mid), 1e18);
+        vm.warp(SAT + 1);
+        vm.expectRevert(abi.encodeWithSelector(StockTokenRegistry.SplitBasisAmbiguous.selector, PID_B, uint64(SAT)));
+        engine.unitOf(mid);
+        vm.warp(SAT + 6);
+        _price(PID_B, PX / 10);
+        assertEq(engine.unitOf(mid), 10e18);
+    }
+
+    /// @notice Review L-2: an index unit move needs a signed round at most 60 s old (no older round in hindsight).
+    function test_review_L2_indexMoveNeedsARecentRound() public {
+        uint256 idx = _indexMarket();
+        _round(100e18, 90e18, false);
+        _trade(alice, idx, -20e18);
+        _stage(tsla, 3e18);
+        vm.warp(SAT + 2 days);
+        _round(105e18, 29e18, false);
+        vm.warp(block.timestamp + 61);
+        vm.expectRevert(abi.encodeWithSelector(IPoolEngine.IndexSnapshot.selector, PID_A));
+        engine.syncUnit(idx, "");
+        _round(106e18, 30e18, false);
+        engine.syncUnit(idx, "");
     }
 }

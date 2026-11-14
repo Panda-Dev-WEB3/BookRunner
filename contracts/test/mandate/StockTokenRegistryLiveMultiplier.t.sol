@@ -109,9 +109,18 @@ contract StockTokenRegistryLiveMultiplierTest is Test {
             abi.encodeWithSelector(StockTokenRegistry.MultiplierOutOfBand.selector, address(tok), 1.051e18, 1e18)
         );
         reg.getToken(address(tok));
+        // drift past the band reads as an unrecorded change (audit N-1): a plain re-anchor is refused, reanchorDrift
         vm.prank(timelock);
-        reg.setMultiplier(address(tok), 1.05e18); // re-anchor
+        vm.expectRevert(abi.encodeWithSelector(StockTokenRegistry.SplitNotRecorded.selector, address(tok)));
+        reg.setMultiplier(address(tok), 1.05e18);
+        vm.prank(timelock);
+        reg.reanchorDrift(address(tok), 1.05e18); // re-anchor
         assertEq(reg.valueUsd(address(tok), 10e18), 1996.9e6);
+        // a split-sized change is no drift
+        tok.updateMultiplier(2.1e18);
+        vm.prank(timelock);
+        vm.expectRevert(StockTokenRegistry.BadSplit.selector);
+        reg.reanchorDrift(address(tok), 2.1e18);
     }
 
     function test_scheduledSplit_preApprovedAnchor() public {

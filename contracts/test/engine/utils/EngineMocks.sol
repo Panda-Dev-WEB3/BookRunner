@@ -21,6 +21,7 @@ contract EngineLazyProxy is ERC1967Proxy {
 contract EngineMockConfig {
     bytes32 public constant RISK_ROLE = keccak256("RISK");
     bytes32 public constant KEEPER_ROLE = keccak256("KEEPER");
+    bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN");
 
     address public usdc;
     address public oracle;

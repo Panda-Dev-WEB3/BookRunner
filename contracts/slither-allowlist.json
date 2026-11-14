@@ -445,6 +445,11 @@
       "check": "uninitialized-local",
       "target": "PoolEngineUnit._compute.delta",
       "reason": "intended zero local (an accumulator, a loop bound or a flag starting at 0 / false), set explicitly; slither reports it whatever the initialiser (audit N-1, 2026-11-13)"
+    },
+    {
+      "check": "incorrect-equality",
+      "target": "StockTokenRegistry._insertFinal",
+      "reason": "fs[i].at == at finds a record at the same split time to replace (a timestamp key, not a balance or manipulable amount) (audit N-1 review, 2026-11-14)"
     }
   ]
 }

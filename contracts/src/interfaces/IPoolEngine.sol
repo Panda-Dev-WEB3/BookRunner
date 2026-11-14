@@ -89,7 +89,7 @@ interface IPoolEngine {
     ///         basis of the stored price. Shares = size x unit / 1e18; a per-share price x unit / 1e18 is per unit.
     function unitOf(uint256 marketId) external view returns (uint256 unitWad);
     /// @notice {unitOf} for a price whose share basis is `basisAt` (publishedAt; lastLiveAt when held). An index market
-    ///         whose unit moves at that basis needs the stored prices to be that basis' signed round.
+    ///         whose unit moves at that basis needs the stored prices to be that basis' signed round, at most 60 s old.
     function unitAt(uint256 marketId, uint64 basisAt) external view returns (uint256 unitWad);
     /// @notice Anyone: relays `priceData` and applies an index market's unit move (any other touch does it too).
     function syncUnit(uint256 marketId, bytes calldata priceData) external;
@@ -98,6 +98,9 @@ interface IPoolEngine {
     ///         the price's share basis has no recorded ratio. Every price-dependent call of the market reverts until
     ///         it is recorded (`recordSplit` while staged, governance `recordSplitAt` after).
     error SplitUnrecorded(address token, uint256 from);
+    /// @notice Audit N-1 review L-1 (StockTokenRegistry's, bubbled): a basis within 5 s after a split may still be a
+    ///         pre-split observation (a print may be stamped up to 5 s ahead); the next print resolves it.
+    error SplitBasisAmbiguous(bytes32 priceId, uint64 splitAt);
     /// @notice Audit N-1 (PoolEngineUnit): an index market's unit moves at this basis and the stored component prices
     ///         are not the index price's signed round (carry the round, or `syncUnit` with it).
     error IndexSnapshot(bytes32 indexPriceId);

@@ -934,7 +934,7 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     function unitOf(uint256 marketId) external view returns (uint256) {
         Market storage m = _market(marketId);
         (, bool held, uint64 publishedAt,) = _oracleOrSettle(m);
-        return _viewUnit(marketId, m, _basis(m, held, publishedAt));
+        return _viewUnit(marketId, m, _basis(held, publishedAt));
     }
 
     /// @inheritdoc IPoolEngine
@@ -984,20 +984,18 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     }
 
     /// @dev Audit N-1: {_oracleOrSettle} with the price converted to a price per market unit (positions never move at
-    ///      a split; the unit is taken at the price's share basis, PoolEngineUnit), applying an index market's unit
-    ///      move. No registry: the per-share price. Reverts (StockTokenRegistry.SplitUnrecorded) while a live split at
-    ///      that basis has no recorded ratio: no position can be valued until it is recorded.
+    ///      a split; the unit is taken at the price's share basis, PoolEngineUnit, with the registry bound to the
+    ///      market at creation), applying an index market's unit move. No registry: the per-share price. Reverts
+    ///      (StockTokenRegistry.SplitUnrecorded) while a live split at that basis has no recorded ratio.
     function _price(uint256 marketId, Market storage m)
         internal
         returns (uint256 price, bool held, uint64 publishedAt, bool settled)
     {
         (price, held, publishedAt, settled) = _oracleOrSettle(m);
-        address reg = protocolConfig.stockRegistry();
-        if (reg == address(0)) return (price, held, publishedAt, settled);
+        if (PoolEngineUnit.registryOf(marketId) == address(0)) return (price, held, publishedAt, settled);
         int256 net = _netSize(m);
-        uint256 unit = PoolEngineUnit.syncUnit(
-            marketId, reg, protocolConfig.oracle(), m.cfg.underlying, _basis(m, held, publishedAt), net
-        );
+        uint256 unit =
+            PoolEngineUnit.syncUnit(marketId, protocolConfig.oracle(), m.cfg.underlying, _basis(held, publishedAt), net);
         price = _unitPrice(price, unit, net);
     }
 
@@ -1008,19 +1006,18 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
         returns (uint256 price, bool held, uint64 publishedAt, bool settled)
     {
         (price, held, publishedAt, settled) = _oracleOrSettle(m);
-        if (protocolConfig.stockRegistry() == address(0)) return (price, held, publishedAt, settled);
-        price = _unitPrice(price, _viewUnit(marketId, m, _basis(m, held, publishedAt)), _netSize(m));
+        if (PoolEngineUnit.registryOf(marketId) == address(0)) return (price, held, publishedAt, settled);
+        price = _unitPrice(price, _viewUnit(marketId, m, _basis(held, publishedAt)), _netSize(m));
     }
 
     function _viewUnit(uint256 marketId, Market storage m, uint64 basisAt) internal view returns (uint256) {
-        return PoolEngineUnit.viewUnit(
-            marketId, protocolConfig.stockRegistry(), protocolConfig.oracle(), m.cfg.underlying, basisAt, _netSize(m)
-        );
+        return PoolEngineUnit.viewUnit(marketId, protocolConfig.oracle(), m.cfg.underlying, basisAt, _netSize(m));
     }
 
-    /// @dev Share basis of the stored price (audit M-2): publishedAt, or lastLiveAt when held (a settle price too).
-    function _basis(Market storage m, bool held, uint64 publishedAt) internal view returns (uint64) {
-        return held ? IAttestedOracle(protocolConfig.oracle()).lastLiveAt(m.cfg.underlying) : publishedAt;
+    /// @dev Share basis of the stored price (audit M-2): publishedAt, or (held, a settle price too) lastLiveAt, which
+    ///      the library reads only for a market with a registry.
+    function _basis(bool held, uint64 publishedAt) internal pure returns (uint64) {
+        return held ? type(uint64).max : publishedAt;
     }
 
     /// @dev price x unit / 1e18, in the pool's favour (down while traders are net long, up while net short).
