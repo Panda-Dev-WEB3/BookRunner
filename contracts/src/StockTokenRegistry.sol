@@ -101,10 +101,16 @@ contract StockTokenRegistry is IStockTokenRegistry {
     }
 
     /// @dev An unrecorded out-of-band change of a price id's live token, latched (audit N-1 review H-1): every basis
-    ///      from `from` on stays refused until the change is recorded, whatever the token does next.
+    ///      from `from` on stays refused until the change is recorded, whatever the token does next. Each latched
+    ///      change keeps the token's `effectiveAt` and the multiplier seen after it (verification Medium: the guardian
+    ///      records exactly these times; `at` 0 = unknown, a later change was staged on top: governance only);
+    ///      `baseMult` is the multiplier the records gave at the first latch.
     struct Latch {
         uint64 from;
         bool active;
+        uint256 baseMult;
+        uint64[] ats;
+        uint256[] mults;
     }
 
     /// @custom:storage-location erc7201:bookrunner.storage.StockTokenRegistrySplits
@@ -156,8 +162,13 @@ contract StockTokenRegistry is IStockTokenRegistry {
     error NotLiveMultiplier(address token);
     error NothingToRecord(address token);
     error BadSplit();
-    /// @notice The guardian's ratios do not give the token's live multiplier (within the band).
-    error SplitRatioMismatch(uint256 productWad, uint256 targetWad);
+    /// @notice The guardian's ratio is not the clean split ratio the latched change gives.
+    error SplitRatioMismatch(uint256 ratioWad, uint256 expectedWad);
+    /// @notice No unique clean split ratio p:q (q <= 20, p <= 1000) within the band of the latched change, or its time
+    ///         is unknown: governance records it (recordSplitAt).
+    error SplitNotSnappable(uint256 targetWad);
+    /// @notice A latch holds a split-sized change: it is cleared only by recording it.
+    error SplitLatched(bytes32 priceId);
     /// @notice Audit N-1: a live token is the only token of its price id (its records are checked against it).
     error LiveTokenExists(bytes32 priceId, address token);
 
@@ -165,6 +176,7 @@ contract StockTokenRegistry is IStockTokenRegistry {
     event SplitRemoved(bytes32 indexed priceId, uint64 at);
     event StagedSplitCleared(bytes32 indexed priceId, address indexed token, uint64 at);
     event SplitUnrecordedLatched(bytes32 indexed priceId, address indexed token, uint64 from);
+    event SplitChangeLatched(bytes32 indexed priceId, address indexed token, uint64 at, uint256 multiplierWad);
     event SplitLatchCleared(bytes32 indexed priceId);
 
     event AdminSet(address indexed admin);
@@ -261,6 +273,19 @@ contract StockTokenRegistry is IStockTokenRegistry {
     function reanchorDrift(address token, uint256 multiplierWad) external onlyGov {
         StockToken storage t = _registered(token);
         if (!multiplierFromToken[token]) revert NotLiveMultiplier(token);
+        Latch storage l = _ss().latches[t.priceId];
+        if (l.active) {
+            // only a drift-sized latch (every latched change within twice the band of 1) is no split
+            uint256 prev = l.baseMult;
+            for (uint256 i; i < l.mults.length; ++i) {
+                uint256 r = Math.mulDiv(l.mults[i], WAD, prev);
+                uint256 d = r > WAD ? r - WAD : WAD - r;
+                if (d * BPS > 2 * WAD * multiplierBandBps) revert SplitLatched(t.priceId);
+                prev = l.mults[i];
+            }
+            delete _ss().latches[t.priceId];
+            emit SplitLatchCleared(t.priceId);
+        }
         uint256 live = IScaledUIAmount(token).uiMultiplier();
         uint256 expected = _expected(t);
         uint256 diff = live > expected ? live - expected : expected - live;
@@ -268,10 +293,6 @@ contract StockTokenRegistry is IStockTokenRegistry {
         uint256 old = t.multiplierWad;
         t.multiplierWad = multiplierWad;
         _setAnchor(token, t.priceId);
-        if (_ss().latches[t.priceId].active) {
-            delete _ss().latches[t.priceId];
-            emit SplitLatchCleared(t.priceId);
-        }
         if (!_inBand(multiplierWad, old)) _stamp(token, old);
         emit MultiplierSet(token, multiplierWad);
     }
@@ -323,32 +344,51 @@ contract StockTokenRegistry is IStockTokenRegistry {
         if (!_syncSplit(t)) revert NothingToRecord(token);
     }
 
-    /// @notice Audit N-1 (review M-1), the guardian (no timelock; the 2-of-3 Safe): records the latched or unrecorded
-    ///         change(s) of a live token at their own times, from the token's `UIMultiplierUpdated(old, new,
-    ///         effectiveAt)` events. Bounded on chain: `ats` ascending, after the last consistent point and not ahead,
-    ///         each ratio out of the band of 1 (a split), and the product of `ratiosWad` within the band of the live
-    ///         multiplier / the multiplier the records give before them. An in-band dividend after the split is inside
-    ///         that band (the target includes it), so it does not break the check. Clears the latch.
-    function guardianRecordSplits(address token, uint64[] calldata ats, uint256[] calldata ratiosWad) external {
+    /// @notice Audit N-1 (review M-1), the guardian (no timelock; the 2-of-3 Safe): records the latched change(s) of a
+    ///         live token, at exactly the times the latch saw (the token's effectiveAt when {recordSplit} latched each
+    ///         change; verification Medium: the guardian chooses no time). Each ratio must be the clean split ratio
+    ///         p:q (q <= 20, p <= 1000, at least 6:5 away from 1) that is the unique one within the band of the latched change (the multiplier
+    ///         seen after it / the one before); an in-band dividend between the change and the latch stays inside that
+    ///         band, the recorded value is the exact p/q. Anything else (an unknown time, no unique clean ratio) is
+    ///         governance's ({recordSplitAt}). All or nothing: the records must then match the token; clears the latch.
+    function guardianRecordSplits(address token, uint256[] calldata ratiosWad) external {
         if (!config.hasRole(config.GUARDIAN_ROLE(), msg.sender)) revert Unauthorized(msg.sender);
         StockToken storage t = _registered(token);
-        if (!multiplierFromToken[token]) revert NotLiveMultiplier(token);
-        uint256 from = _unrecordedFrom(t);
-        if (from == type(uint256).max) revert NothingToRecord(token);
-        uint256 n = ats.length;
-        if (n == 0 || n != ratiosWad.length) revert BadSplit();
-        uint256 target = Math.mulDiv(IScaledUIAmount(token).uiMultiplier(), WAD, _expected(t));
-        uint256 product = WAD;
+        Latch storage l = _ss().latches[t.priceId];
+        uint256 n = l.ats.length;
+        if (!l.active || n == 0) revert NothingToRecord(token);
+        if (ratiosWad.length != n) revert BadSplit();
+        uint256 prev = l.baseMult;
         for (uint256 i; i < n; ++i) {
-            if (ats[i] < from || ats[i] > block.timestamp || (i != 0 && ats[i] <= ats[i - 1])) revert BadSplit();
-            if (ratiosWad[i] == 0 || _inBand(ratiosWad[i], WAD)) revert BadSplit();
-            product = Math.mulDiv(product, ratiosWad[i], WAD);
+            uint256 target = Math.mulDiv(l.mults[i], WAD, prev);
+            uint256 snapped = _snap(target);
+            if (l.ats[i] == 0) revert SplitNotSnappable(target);
+            if (ratiosWad[i] != snapped) revert SplitRatioMismatch(ratiosWad[i], snapped);
+            prev = l.mults[i];
         }
-        if (!_inBand(product, target)) revert SplitRatioMismatch(product, target);
+        uint64[] memory ats = l.ats;
         for (uint256 i; i < n; ++i) {
             _insertFinal(t.priceId, token, ats[i], ratiosWad[i]);
         }
         _clearLatchIfConsistent(t);
+        if (_ss().latches[t.priceId].active) revert SplitRatioMismatch(0, 0);
+    }
+
+    /// @dev The unique clean split ratio p/q (smallest q <= 20 with a candidate, p <= 1000, no other p for that q) within
+    ///      the band of `target`, at least 6:5 away from 1 either way (drift is not a split); reverts SplitNotSnappable
+    ///      otherwise.
+    function _snap(uint256 target) internal view returns (uint256) {
+        for (uint256 q = 1; q <= 20; ++q) {
+            uint256 p = (target * q + WAD / 2) / WAD;
+            if (p == 0 || p > 1000 || !_inBand(p * WAD / q, target)) continue;
+            if (_inBand((p + 1) * WAD / q, target) || (p > 1 && _inBand((p - 1) * WAD / q, target))) break;
+            uint256 r = p * WAD / q;
+            // a split moves the unit by at least 6:5 either way (a smaller step is drift or an odd fraction the band
+            // happens to reach: governance's)
+            if (r * 5 < WAD * 6 && r * 6 > WAD * 5) break;
+            return r;
+        }
+        revert SplitNotSnappable(target);
     }
 
     /// @notice Audit N-1 fallback, governance (timelock): records (or replaces) a split of a token's price id at `at`
@@ -559,7 +599,7 @@ contract StockTokenRegistry is IStockTokenRegistry {
         bytes32 pid = t.priceId;
         Split storage st = _ss().staged[pid];
         if (_stagedDroppable(t, st)) return true;
-        if (_unrecordedFrom(t) != type(uint256).max) return !_ss().latches[pid].active;
+        if (_unrecordedFrom(t) != type(uint256).max) return _latchable(t);
         if (st.at != 0 && st.at <= block.timestamp) return true; // active: confirm it
         (bool onToken, uint64 at, uint256 ratio) = _tokenStaged(token);
         if (onToken) return st.at != at || st.token != token || st.ratioWad != ratio;
@@ -827,14 +867,7 @@ contract StockTokenRegistry is IStockTokenRegistry {
             delete _ss().staged[pid];
             changed = true;
         }
-        if (_unrecordedFrom(t) != type(uint256).max) {
-            Latch storage l = _ss().latches[pid];
-            if (l.active) return changed;
-            uint64 from = _lastGood(t) + 1;
-            _ss().latches[pid] = Latch({from: from, active: true});
-            emit SplitUnrecordedLatched(pid, token, from);
-            return true;
-        }
+        if (_unrecordedFrom(t) != type(uint256).max) return _latch(t) || changed;
         if (st.at != 0 && st.at <= block.timestamp) {
             // the token followed the staged record (consistent above): confirm it, it can no longer be dropped
             _finalizeStaged(pid);
@@ -851,6 +884,40 @@ contract StockTokenRegistry is IStockTokenRegistry {
         emit StagedSplitCleared(pid, token, st.at);
         delete _ss().staged[pid];
         return true;
+    }
+
+    /// @dev Latches the unrecorded state: first the range (from the last consistent point), then each out-of-band change
+    ///      since the last one latched, with the token's effectiveAt (0 when a later change is already staged on top:
+    ///      its time is hidden) and the multiplier seen. True when it changed.
+    function _latch(StockToken storage t) internal returns (bool changed) {
+        bytes32 pid = t.priceId;
+        Latch storage l = _ss().latches[pid];
+        if (!l.active) {
+            uint64 from = _lastGood(t) + 1;
+            l.from = from;
+            l.active = true;
+            l.baseMult = _expected(t);
+            emit SplitUnrecordedLatched(pid, t.token, from);
+            changed = true;
+        }
+        uint256 n = l.mults.length;
+        uint256 live = IScaledUIAmount(t.token).uiMultiplier();
+        if (_inBand(live, n == 0 ? l.baseMult : l.mults[n - 1])) return changed;
+        uint256 eff = IScaledUIAmountPending(t.token).effectiveAt();
+        uint64 at = eff <= block.timestamp ? uint64(eff) : 0;
+        if (n != 0 && at <= l.ats[n - 1]) at = 0;
+        l.ats.push(at);
+        l.mults.push(live);
+        emit SplitChangeLatched(pid, t.token, at, live);
+        return true;
+    }
+
+    /// @dev True when {_latch} would add something (an unrecorded state not latched, or a new out-of-band change).
+    function _latchable(StockToken storage t) internal view returns (bool) {
+        Latch storage l = _ss().latches[t.priceId];
+        if (!l.active) return true;
+        uint256 n = l.mults.length;
+        return !_inBand(IScaledUIAmount(t.token).uiMultiplier(), n == 0 ? l.baseMult : l.mults[n - 1]);
     }
 
     /// @dev A staged record in force, never confirmed, that the token did not follow (re-staged after the last sync):

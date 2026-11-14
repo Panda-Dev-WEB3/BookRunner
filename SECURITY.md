@@ -118,10 +118,10 @@ a way to exceed the stated bound is in scope.
   shares per unit of its share basis, from split ratios StockTokenRegistry records (stored `setMultiplier`, live
   `recordSplit` while staged, sent by the waterfall keeper every 60 s): a split moves no value and gates nothing. A
   live change with no record is latched and freezes its engine markets (every price-dependent call reverts
-  `SplitUnrecorded`, liquidations included) until the guardian Safe records it (`guardianRecordSplits`, no timelock,
-  bounded on chain by the token's live multiplier) or governance does; alert `engine_split_unrecorded`. What remains:
-  the guardian is trusted for split times and for exact ratios within the band, and on-chain memory of a change needs
-  one sync (keeper pass) before the issuer's next change.
+  `SplitUnrecorded`, liquidations included) until the guardian Safe records it (`guardianRecordSplits`, no timelock:
+  the times the latch saw and the unique clean split ratios, nothing chosen) or governance does; alert
+  `engine_split_unrecorded`. What remains: on-chain memory of a change needs one sync (keeper pass, 60 s) before the
+  issuer's next change.
 - **Redis write access** (audit 2026-10 lead, see "Off-chain trust boundaries"). A Redis writer can deny service:
   withhold prices (the agent stops quoting), delete the risk state (the agents go reduce-only after 30 s), drop or
   delay jobs, blank the status keys the alerts read (including the forged-message counts and the agents' status).

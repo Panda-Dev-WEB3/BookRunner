@@ -526,21 +526,23 @@ can redo it during the timelock delay from the published quote.
   call of that market reverts `SplitUnrecorded` from the last consistent point on (liquidations included, also at the
   held pre-split price); top-ups and flat withdrawals still work. The latch holds whatever the token does next (another
   split, a dividend): nothing is valued at a wrong unit. **Guardian procedure (no timelock, do it at once):**
-  1. read the token's `UIMultiplierUpdated(oldMultiplier, newMultiplier, effectiveAtTimestamp)` events since the last
-     recorded split; every OUT-OF-BAND one (new / old beyond the band, i.e. a split) is one entry, in time order:
-     `ats[i]` = its effectiveAt, `ratios[i]` = new x 1e18 / old (in-band dividend updates are not entries);
-  2. check against `StockTokenRegistry.recordedMultiplier(token)`: the product of the ratios must be within the band
-     (5%) of `uiMultiplier() x 1e18 / recordedMultiplier` (the chain refuses it otherwise: `SplitRatioMismatch`; a
-     dividend after the split is inside that band);
-  3. the guardian Safe (2 of 3) sends `guardianRecordSplits(token, ats, ratios)`. Check `splitUnrecorded(token)` =
-     (0, false), the alert clears at the keeper's next pass, `/trade` reopens, positions resume at exactly their
-     pre-split value.
+  1. the chain already holds the times: the keeper's sync latched each out-of-band change with the token's
+     effectiveAt (event `SplitChangeLatched(priceId, token, at, multiplier)`); check each `at` against the token's
+     `UIMultiplierUpdated(old, new, effectiveAtTimestamp)` event. An `at` of 0 (a later change was staged before the
+     latch) or a mismatch: use governance (fallback below), not the guardian;
+  2. per latched change, the clean split ratio p:q (2:1 = 2e18, 1:10 = 1e17, 3:2 = 1.5e18, 1:3 = 333333333333333333):
+     the chain accepts only the unique clean ratio within the band of the latched change and records exactly it
+     (`SplitRatioMismatch` names the expected value; `SplitNotSnappable`: no unique clean ratio, governance);
+  3. the guardian Safe (2 of 3) sends `guardianRecordSplits(token, [ratios in latch order])`. Check
+     `splitUnrecorded(token)` = (0, false), the alert clears at the keeper's next pass, `/trade` reopens, positions
+     resume at exactly their pre-split value.
   Fallback (Safe unavailable): governance `recordSplitAt(token, effectiveAt, ratio)` per entry, in time order (timelock
   48 h on mainnet; the admin on testnet). The mark and risk services fail their reads for that book until then (expect
   `mark_overdue`).
   **Dividend drift**: if the token's multiplier drifts past the band of `recordedMultiplier` without a split (missed
   re-anchors), it reads as unrecorded and the keeper latches it: re-anchor with governance `reanchorDrift(token,
-  uiMultiplier)` (only within twice the band). Re-anchor dividends before the drift reaches the band.
+  uiMultiplier)` (only within twice the band, and never over a latch that holds a split). Re-anchor dividends before
+  the drift reaches the band.
   **Index markets**: `engine_index_unit_pending` (5 min warning, 30 min critical) means the unit move after a
   component's split waits for a complete signed round (the index and every split component with the same publishedAt,
   at most 60 s old); find the component the oracle skips (`/health` unpublished) and fix its source.

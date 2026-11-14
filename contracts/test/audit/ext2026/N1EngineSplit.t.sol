@@ -293,21 +293,19 @@ contract N1EngineSplitTest is EngineBase {
         vm.expectRevert(abi.encodeWithSelector(StockTokenRegistry.SplitUnrecorded.selector, address(nvda), f));
         engine.liquidate(mid, alice);
         _deposit(alice, mid, 1e6); // top-ups never need a price
-        // not the guardian; then a wrong ratio
-        uint64[] memory ats = new uint64[](1);
+        // not the guardian; then a wrong ratio (the time is the latched effectiveAt, never the guardian's)
         uint256[] memory rs = new uint256[](1);
-        ats[0] = uint64(SAT);
         rs[0] = 2e18;
         vm.expectRevert(abi.encodeWithSelector(StockTokenRegistry.Unauthorized.selector, address(this)));
-        registry.guardianRecordSplits(address(nvda), ats, rs);
+        registry.guardianRecordSplits(address(nvda), rs);
         address guardian = makeAddr("guardian");
         cfg.grantRole(cfg.GUARDIAN_ROLE(), guardian);
         vm.prank(guardian);
         vm.expectRevert(abi.encodeWithSelector(StockTokenRegistry.SplitRatioMismatch.selector, 2e18, 10e18));
-        registry.guardianRecordSplits(address(nvda), ats, rs);
+        registry.guardianRecordSplits(address(nvda), rs);
         rs[0] = 10e18;
         vm.prank(guardian);
-        registry.guardianRecordSplits(address(nvda), ats, rs);
+        registry.guardianRecordSplits(address(nvda), rs);
         (f, latched) = registry.splitUnrecorded(address(nvda));
         assertEq(f, 0);
         assertFalse(latched);
@@ -616,6 +614,9 @@ contract N1EngineSplitTest is EngineBase {
     function test_review_H1b_unrecordedThenDividend_staysFrozen_guardianBoundToleratesIt() public {
         _trade(alice, mid, 50e18);
         nvda.updateMultiplier(10e18, SAT);
+        vm.warp(SAT + 30);
+        vm.prank(keeper);
+        registry.recordSplit(address(nvda)); // the keeper's pass latches the change at its effectiveAt
         vm.warp(SAT + 1 hours);
         _price(PID_B, PX / 10);
         vm.warp(block.timestamp + 5);
@@ -626,50 +627,130 @@ contract N1EngineSplitTest is EngineBase {
         engine.liquidate(mid, alice);
         address guardian = makeAddr("guardian");
         cfg.grantRole(cfg.GUARDIAN_ROLE(), guardian);
-        uint64[] memory ats = new uint64[](1);
         uint256[] memory rs = new uint256[](1);
-        ats[0] = uint64(SAT);
-        rs[0] = 10e18;
+        rs[0] = 10.01e18; // the dividend-tainted target is no clean split: refused
         vm.prank(guardian);
-        registry.guardianRecordSplits(address(nvda), ats, rs);
+        vm.expectRevert(abi.encodeWithSelector(StockTokenRegistry.SplitRatioMismatch.selector, 10.01e18, 10e18));
+        registry.guardianRecordSplits(address(nvda), rs);
+        rs[0] = 10e18; // the exact 10:1 within the band of 10.01
+        vm.prank(guardian);
+        registry.guardianRecordSplits(address(nvda), rs);
         assertEq(engine.unitOf(mid), 10e18);
         assertFalse(engine.isLiquidatable(mid, alice)); // valued at the same underlying value: no loss
     }
 
-    /// @notice Review M-1: the guardian's bound. Two unrecorded splits (10:1 then 2:1) are recorded in one call at their
-    ///         own times (product 20 = live / recorded); a single 20 at the first time, or ratios in the band of 1,
-    ///         or times before the last consistent point, are refused.
+    /// @notice Review M-1: the guardian's bound. Two unrecorded splits (10:1, then 2:1), each latched by the keeper at
+    ///         its effectiveAt, are recorded in one call at exactly those times; ratios that are not the unique clean
+    ///         split of each latched change are refused.
     function test_review_M1_guardianBound() public {
         address guardian = makeAddr("guardian");
         cfg.grantRole(cfg.GUARDIAN_ROLE(), guardian);
         nvda.updateMultiplier(10e18, SAT);
         vm.warp(SAT + 1);
+        registry.recordSplit(address(nvda)); // the keeper's pass latches the first (SAT)
         nvda.updateMultiplier(20e18, SAT + 1 days);
         vm.warp(SAT + 1 days + 1);
-        uint64[] memory one = new uint64[](1);
+        registry.recordSplit(address(nvda)); // latches the second (SAT + 1 day)
         uint256[] memory r1 = new uint256[](1);
-        one[0] = uint64(SAT);
-        r1[0] = 1.02e18; // in the band of 1: no split
-        vm.prank(guardian);
-        vm.expectRevert(StockTokenRegistry.BadSplit.selector);
-        registry.guardianRecordSplits(address(nvda), one, r1);
-        one[0] = 1; // before the last consistent point
         r1[0] = 20e18;
         vm.prank(guardian);
-        vm.expectRevert(StockTokenRegistry.BadSplit.selector);
-        registry.guardianRecordSplits(address(nvda), one, r1);
-        uint64[] memory two = new uint64[](2);
+        vm.expectRevert(StockTokenRegistry.BadSplit.selector); // two latched changes, one ratio
+        registry.guardianRecordSplits(address(nvda), r1);
         uint256[] memory r2 = new uint256[](2);
-        (two[0], two[1], r2[0], r2[1]) = (uint64(SAT), uint64(SAT + 1 days), 10e18, 2e18);
+        (r2[0], r2[1]) = (10.4e18, 2e18); // within the band, not the clean split
         vm.prank(guardian);
-        registry.guardianRecordSplits(address(nvda), two, r2);
+        vm.expectRevert(abi.encodeWithSelector(StockTokenRegistry.SplitRatioMismatch.selector, 10.4e18, 10e18));
+        registry.guardianRecordSplits(address(nvda), r2);
+        (r2[0], r2[1]) = (10e18, 2e18);
+        vm.prank(guardian);
+        registry.guardianRecordSplits(address(nvda), r2);
         vm.warp(SAT + 2 days);
         assertEq(registry.shareFactor(PID_B, uint64(SAT + 1 hours)), 10e18);
         assertEq(registry.shareFactor(PID_B, uint64(SAT + 2 days)), 20e18);
-        // nothing left to record
         vm.prank(guardian);
         vm.expectRevert(abi.encodeWithSelector(StockTokenRegistry.NothingToRecord.selector, address(nvda)));
-        registry.guardianRecordSplits(address(nvda), one, r1);
+        registry.guardianRecordSplits(address(nvda), r2);
+    }
+
+    /// @notice Verification Medium, PoC `test_poc_guardianLateTime`: the guardian used to choose the split time; the
+    ///         right ratio recorded 10 s after the stored reopen print valued that print at the pre-split unit (a $5,000
+    ///         long at ~$492). Now the time is the latched effectiveAt: the stored print is post-split and the long keeps
+    ///         its value. The guardian cannot pass a time at all.
+    function test_review_V1_guardianCannotChooseTheTime() public {
+        uint256 snap = vm.snapshotState();
+        _trade(alice, mid, 50e18);
+        vm.warp(SAT + 2 days + 30);
+        _price(PID_B, PX);
+        int256 control = engine.traderEquityUsd(mid, alice);
+        vm.revertToState(snap);
+
+        _trade(alice, mid, 50e18);
+        nvda.updateMultiplier(10e18, SAT); // the keeper misses the staging, latches at activation
+        vm.warp(SAT + 40);
+        vm.prank(keeper);
+        registry.recordSplit(address(nvda));
+        vm.warp(SAT + 2 days);
+        _price(PID_B, PX / 10); // the reopen print
+        vm.warp(block.timestamp + 30);
+        _price(PID_B, PX / 10);
+        address guardian = makeAddr("guardian");
+        cfg.grantRole(cfg.GUARDIAN_ROLE(), guardian);
+        uint256[] memory rs = new uint256[](1);
+        rs[0] = 10e18;
+        vm.prank(guardian);
+        registry.guardianRecordSplits(address(nvda), rs);
+        assertEq(engine.unitOf(mid), 10e18);
+        assertEq(engine.traderEquityUsd(mid, alice), control);
+        assertFalse(engine.isLiquidatable(mid, alice));
+    }
+
+    /// @notice Verification Lows: no unique clean ratio (a 1:1.05 change, or an unknown time) goes to governance; a
+    ///         latch holding a split is never cleared by reanchorDrift, a drift-sized one is.
+    function test_review_V2_noCleanRatio_unknownTime_driftLatch() public {
+        address guardian = makeAddr("guardian");
+        cfg.grantRole(cfg.GUARDIAN_ROLE(), guardian);
+        nvda.updateMultiplier(10e18, SAT);
+        vm.warp(SAT + 1);
+        registry.recordSplit(address(nvda));
+        vm.prank(timelock);
+        vm.expectRevert(abi.encodeWithSelector(StockTokenRegistry.SplitLatched.selector, PID_B));
+        registry.reanchorDrift(address(nvda), 10e18);
+        // a split hidden by a later staged change: its time is unknown, the guardian refuses
+        MockStockToken amd = new MockStockToken("AMD", "AMD", 1e18);
+        amd.updateMultiplier(1e18, 0);
+        bytes32 pidX = bytes32("AMD");
+        vm.startPrank(timelock);
+        registry.register(address(amd), pidX, 1e18, 0);
+        registry.setMultiplierSource(address(amd), true);
+        vm.stopPrank();
+        amd.updateMultiplier(3e18); // active now
+        vm.warp(block.timestamp + 1);
+        amd.updateMultiplier(3.01e18, block.timestamp + 1 days); // a later change staged on top hides the time
+        registry.recordSplit(address(amd));
+        uint256[] memory rs = new uint256[](1);
+        rs[0] = 3e18;
+        vm.prank(guardian);
+        vm.expectRevert(abi.encodeWithSelector(StockTokenRegistry.SplitNotSnappable.selector, 3e18));
+        registry.guardianRecordSplits(address(amd), rs);
+        // dividend drift past the band: latched, then reanchorDrift clears it (no split)
+        MockStockToken ibm = new MockStockToken("IBM", "IBM", 1e18);
+        ibm.updateMultiplier(1e18, 0);
+        bytes32 pidY = bytes32("IBM");
+        vm.startPrank(timelock);
+        registry.register(address(ibm), pidY, 1e18, 0);
+        registry.setMultiplierSource(address(ibm), true);
+        vm.stopPrank();
+        ibm.updateMultiplier(1.06e18);
+        registry.recordSplit(address(ibm));
+        rs[0] = 1.06e18;
+        vm.prank(guardian);
+        vm.expectRevert(abi.encodeWithSelector(StockTokenRegistry.SplitNotSnappable.selector, 1.06e18));
+        registry.guardianRecordSplits(address(ibm), rs);
+        vm.prank(timelock);
+        registry.reanchorDrift(address(ibm), 1.06e18);
+        (uint256 f, bool l) = registry.splitUnrecorded(address(ibm));
+        assertEq(f, 0);
+        assertFalse(l);
     }
 
     /// @notice Review L-1, PoC `test_poc_futureBasis`: a pre-split print stamped 5 s ahead (basis = effectiveAt) landing

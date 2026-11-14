@@ -450,6 +450,11 @@
       "check": "incorrect-equality",
       "target": "StockTokenRegistry._insertFinal",
       "reason": "fs[i].at == at finds a record at the same split time to replace (a timestamp key, not a balance or manipulable amount) (audit N-1 review, 2026-11-14)"
+    },
+    {
+      "check": "divide-before-multiply",
+      "target": "StockTokenRegistry._snap",
+      "reason": "intentional: p = round(target x q) is an integer numerator, then the clean ratio p/q is rebuilt and compared with the band (audit N-1 verification, 2026-11-14)"
     }
   ]
 }

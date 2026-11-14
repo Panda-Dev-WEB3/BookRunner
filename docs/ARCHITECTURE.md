@@ -577,7 +577,8 @@ then commits it held. `valueUsdAt` is the pure valuation at a given price. Split
 id, `(at, ratio, cumulative factor)` from `setMultiplier` beyond the band (stored mode, at its block, first token of
 the price id only), permissionless `recordSplit(token)` while a split is staged on a live token (`at = effectiveAt`,
 ratio `newUIMultiplier / uiMultiplier`; also from `setNextMultiplierAnchor`; counted once `at` has passed, confirmed by
-the next sync), the guardian's bounded `guardianRecordSplits` (no timelock) or governance `recordSplitAt` (in time order,
+the next sync), the guardian's `guardianRecordSplits` (no timelock: the latched times, the unique clean p:q ratios) or
+governance `recordSplitAt` (in time order,
 whatever the token did since). The live multiplier must stay within the band of anchor x the product of the recorded
 ratios since it (`recordedMultiplier`); otherwise the change is unrecorded and `recordSplit` LATCHES it (sticky until
 recorded). `shareFactor(priceId, basisAt)` and `splitFactors` (index components) feed the engine and revert

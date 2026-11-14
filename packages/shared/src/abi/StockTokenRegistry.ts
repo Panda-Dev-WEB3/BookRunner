@@ -241,11 +241,6 @@ export const stockTokenRegistryAbi = [
         "internalType": "address"
       },
       {
-        "name": "ats",
-        "type": "uint64[]",
-        "internalType": "uint64[]"
-      },
-      {
         "name": "ratiosWad",
         "type": "uint256[]",
         "internalType": "uint256[]"
@@ -1047,6 +1042,37 @@ export const stockTokenRegistryAbi = [
   },
   {
     "type": "event",
+    "name": "SplitChangeLatched",
+    "inputs": [
+      {
+        "name": "priceId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "token",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "at",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "multiplierWad",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "SplitLatchCleared",
     "inputs": [
       {
@@ -1414,6 +1440,17 @@ export const stockTokenRegistryAbi = [
   },
   {
     "type": "error",
+    "name": "SplitLatched",
+    "inputs": [
+      {
+        "name": "priceId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "SplitNotRecorded",
     "inputs": [
       {
@@ -1425,15 +1462,26 @@ export const stockTokenRegistryAbi = [
   },
   {
     "type": "error",
+    "name": "SplitNotSnappable",
+    "inputs": [
+      {
+        "name": "targetWad",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "SplitRatioMismatch",
     "inputs": [
       {
-        "name": "productWad",
+        "name": "ratioWad",
         "type": "uint256",
         "internalType": "uint256"
       },
       {
-        "name": "targetWad",
+        "name": "expectedWad",
         "type": "uint256",
         "internalType": "uint256"
       }

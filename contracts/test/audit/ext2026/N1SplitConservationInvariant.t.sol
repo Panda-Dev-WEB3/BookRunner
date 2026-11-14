@@ -50,10 +50,24 @@ contract SplitTruthHandler is Test {
     uint256 internal liveB;
     uint256 internal liveT;
     uint256 internal liveCumB = 1e18;
+    uint256 internal liveCumT = 1e18;
+    uint256 internal liveVB = 100e18;
+    uint256 internal liveVT = 90e18;
+    /// @dev the true values per ORIGINAL share behind the stored index round, and the index market's model basket:
+    ///      original shares of each component per market unit (WAD), and the unit it was derived from
+    uint256 internal roundVB = 100e18;
+    uint256 internal roundVT = 90e18;
+    uint256 internal roundCumT = 1e18;
+    uint256 public basketB = 0.6e18;
+    uint256 public basketT = 0.4e18;
+    uint256 public idxUnit = 1e18;
+    uint256 public guardianWrongAccepted;
+    uint256 public governanceUnresolved;
 
     struct Pending {
         uint64 at;
-        uint256 ratio;
+        uint256 ratio; // as the registry reads it from the token (floored)
+        uint256 nominal; // the clean split ratio (what the guardian / governance record)
         bool recorded; // the registry's staged record matches it
     }
 
@@ -116,11 +130,12 @@ contract SplitTruthHandler is Test {
         uint64 at = _nextTs();
         uint256 pb = held ? liveB : vB * 1e18 / cumB;
         uint256 pt = held ? liveT : vT * 1e18 / cumT;
-        if (!held) (liveB, liveT, liveCumB) = (pb, pt, cumB);
+        if (!held) (liveB, liveT, liveCumB, liveVB, liveVT, liveCumT) = (pb, pt, cumB, vB, vT, cumT);
         _sign(PB, pb, at, held);
         _sign(PT, pt, at, held);
         _sign(PA, (pb * 6000 + pt * 4000) / 10_000, at, held);
         storedCumB = liveCumB;
+        (roundVB, roundVT, roundCumT) = (liveVB, liveVT, liveCumT);
     }
 
     // ------------------------------------------------------------------ the issuer's tokens (truth)
@@ -173,7 +188,7 @@ contract SplitTruthHandler is Test {
         delete pending[address(tok)];
         if (!p.recorded) {
             unrecAt[address(tok)].push(p.at);
-            unrecRatio[address(tok)].push(p.ratio);
+            unrecRatio[address(tok)].push(p.nominal);
             ++unrecordedSplits;
         }
         // the keeper's pass (every 60 s) runs before the issuer's next action: it confirms (finalizes) a recorded split
@@ -204,8 +219,9 @@ contract SplitTruthHandler is Test {
         if (pending[address(tok)].at != 0) return;
         _activate();
         uint64 at = uint64(block.timestamp + 1 hours);
-        uint256 r = _stageOnToken(tok, _ratio(c, which % 2 == 0 ? cumB : cumT), at);
-        pending[address(tok)] = Pending({at: at, ratio: r, recorded: false});
+        uint256 nominal = _ratio(c, which % 2 == 0 ? cumB : cumT);
+        uint256 r = _stageOnToken(tok, nominal, at);
+        pending[address(tok)] = Pending({at: at, ratio: r, nominal: nominal, recorded: false});
         if (keeperRecords) _keeper(tok);
         _check();
     }
@@ -216,11 +232,11 @@ contract SplitTruthHandler is Test {
         Pending storage p = pending[address(tok)];
         if (p.at == 0 || p.at <= block.timestamp) return;
         uint256 r0 = _ratio(c + 1, which % 2 == 0 ? cumB : cumT);
-        if (r0 == p.ratio) return;
+        if (r0 == p.nominal) return;
         if (p.recorded) staleAt[address(tok)] = p.at;
         uint64 at = p.at + 30 minutes;
         uint256 r = _stageOnToken(tok, r0, at); // the active multiplier is unchanged until `at`
-        (p.at, p.ratio, p.recorded) = (at, r, false);
+        (p.at, p.ratio, p.nominal, p.recorded) = (at, r, r0, false);
         _check();
     }
 
@@ -275,7 +291,8 @@ contract SplitTruthHandler is Test {
         if (oracle.latest(PB).publishedAt >= at || oracle.latest(PT).publishedAt >= at || oracle.latest(PA).publishedAt >= at) return;
         uint256 pb = vB * 1e18 / cumB;
         uint256 pt = vT * 1e18 / cumT;
-        (liveB, liveT, liveCumB) = (pb, pt, cumB);
+        (liveB, liveT, liveCumB, liveVB, liveVT, liveCumT) = (pb, pt, cumB, vB, vT, cumT);
+        (roundVB, roundVT, roundCumT) = (vB, vT, cumT);
         _sign(PB, pb, at, false);
         _sign(PT, pt, at, false);
         _sign(PA, (pb * 6000 + pt * 4000) / 10_000, at, false);
@@ -322,14 +339,23 @@ contract SplitTruthHandler is Test {
         _check();
     }
 
-    /// @dev The guardian records every activated unrecorded change at its own time (after the keeper latched it).
-    function guardian(uint256 which) external {
+    /// @dev The guardian: first adversarial ratios (3% off, inside the band) that must be refused, then the clean
+    ///      ratios of the latched changes (the times are the latch's, the guardian passes none).
+    function guardian(uint256 which, uint256 skew) external {
         MockStockToken tok = which % 2 == 0 ? tokB : tokT;
         _activate();
-        uint64[] storage ats = unrecAt[address(tok)];
-        if (ats.length == 0 || staleAt[address(tok)] != 0) return;
+        uint256[] storage rs = unrecRatio[address(tok)];
+        if (rs.length == 0 || staleAt[address(tok)] != 0) return;
         try registry.recordSplit(address(tok)) {} catch {}
-        try registry.guardianRecordSplits(address(tok), ats, unrecRatio[address(tok)]) {
+        uint256[] memory bad = new uint256[](rs.length);
+        for (uint256 k; k < rs.length; ++k) {
+            bad[k] = rs[k] * (skew % 2 == 0 ? 103 : 97) / 100;
+        }
+        try registry.guardianRecordSplits(address(tok), bad) {
+            ++guardianWrongAccepted;
+            _bad("the guardian recorded a wrong ratio");
+        } catch {}
+        try registry.guardianRecordSplits(address(tok), rs) {
             ++guardianRecords;
             delete unrecAt[address(tok)];
             delete unrecRatio[address(tok)];
@@ -356,6 +382,9 @@ contract SplitTruthHandler is Test {
         ++governanceRecords;
         delete unrecAt[address(tok)];
         delete unrecRatio[address(tok)];
+        // governance recorded the truth: the token is consistent again and the latch is gone
+        (uint256 from, bool latched) = registry.splitUnrecorded(address(tok));
+        if (from != 0 || latched) ++governanceUnresolved;
         _check();
     }
 
@@ -416,10 +445,53 @@ contract SplitTruthHandler is Test {
     /// @dev The engine prices the stored NVDA print at its TRUE unit, or refuses.
     function _check() internal {
         try engine.unitOf(mid) returns (uint256 u) {
-            if (u != storedCumB) _bad("unit is not the stored print's true unit");
+            uint256 d = u > storedCumB ? u - storedCumB : storedCumB - u;
+            if (d * 1e12 > storedCumB) _bad("unit is not the stored print's true unit");
         } catch {
             ++refusals;
         }
+        _checkIndex();
+    }
+
+    /// @dev The index market's value per unit (stored index price x unit) equals the model basket valued at the true
+    ///      values behind that round; when the engine's unit moves (a component split applied), the new basket must
+    ///      be worth what the old one was at that round: a move never shifts value between traders and the pool.
+    function _checkIndex() internal {
+        uint256 u;
+        try engine.unitOf(idx) returns (uint256 v) {
+            u = v;
+        } catch {
+            return;
+        }
+        uint256 old = (basketB * roundVB + basketT * roundVT) / 1e18;
+        bool synced;
+        if (u != idxUnit) {
+            // the first touch stores the move at this round (until then the view prices the old basket)
+            try engine.syncUnit(idx, "") {
+                synced = true;
+            } catch {}
+            try engine.unitOf(idx) returns (uint256 v) {
+                u = v;
+            } catch {
+                return;
+            }
+        }
+        if (u != idxUnit && synced) {
+            uint256 nb = u * 6000 * 1e18 / (10_000 * storedCumB);
+            uint256 nt = u * 4000 * 1e18 / (10_000 * roundCumT);
+            uint256 neu = (nb * roundVB + nt * roundVT) / 1e18;
+            if (_rel(neu, old) > 1e9) _bad("an index unit move shifted value");
+            (basketB, basketT, idxUnit) = (nb, nt, u);
+            old = neu;
+        }
+        uint256 engineValue = oracle.latest(PA).priceWad * u / 1e18;
+        if (_rel(engineValue, old) > 1e9) _bad("the index unit prices the basket wrongly");
+    }
+
+    /// @dev |a - b| / b in 1e-18 units
+    function _rel(uint256 a, uint256 b) internal pure returns (uint256) {
+        if (b == 0) return a == 0 ? 0 : type(uint256).max;
+        return (a > b ? a - b : b - a) * 1e18 / b;
     }
 
     function actor(uint256 k) external view returns (address) {
@@ -502,6 +574,16 @@ contract N1SplitConservationInvariantTest is EngineBase {
 
     /// @notice The engine prices every print at its true share unit or refuses; no split moves an equity; no index unit
     ///         move uses a round older than 60 s or mixed rounds.
+    /// @notice Verification: the guardian never records a ratio other than the clean split of a latched change.
+    function invariant_guardianNeverAcceptsAWrongRecord() public view {
+        assertEq(h.guardianWrongAccepted(), 0);
+    }
+
+    /// @notice Governance recording the true changes at their own times always resolves the freeze.
+    function invariant_governanceTruthResolves() public view {
+        assertEq(h.governanceUnresolved(), 0);
+    }
+
     function invariant_unitIsTheTruthOrRefused() public view {
         assertEq(h.violations(), 0, h.why());
     }
@@ -534,7 +616,7 @@ contract N1SplitConservationInvariantTest is EngineBase {
         h.passTime(2 hours);
         h.dividend(0);
         h.keeperSync(0);
-        h.guardian(0); // product 0.5 x 1.002 within the band
+        h.guardian(0, 1); // a 3% skew refused, then the clean 1:2 (the dividend after it inside the band)
         h.stage(1, 2, true); // TSLA 3:1 recorded
         h.futurePrint(1);
         h.passTime(1 minutes);

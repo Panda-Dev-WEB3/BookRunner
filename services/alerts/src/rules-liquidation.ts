@@ -107,7 +107,7 @@ export function engineSplitUnrecorded(s: Snapshot, _c: RuleConfig): Condition[] 
     key: `engine_split_unrecorded:${u.marketId}:${u.token.toLowerCase()}`,
     rule: "engine_split_unrecorded",
     severity: "critical" as const,
-    summary: `engine market ${u.marketId}: a live stock split of ${short(u.token)} has no recorded ratio (frozen for prices since ${new Date(u.from * 1000).toISOString()}): trades, withdrawals with a position and liquidations revert (SplitUnrecorded). Guardian Safe now: StockTokenRegistry.guardianRecordSplits(token, [effectiveAt...], [new/old...]) from the token's UIMultiplierUpdated events (no timelock, bounded on chain); fallback governance recordSplitAt (RUNBOOK "Corporate actions")`,
+    summary: `engine market ${u.marketId}: a live stock split of ${short(u.token)} has no recorded ratio (frozen for prices since ${new Date(u.from * 1000).toISOString()}): trades, withdrawals with a position and liquidations revert (SplitUnrecorded). Guardian Safe now: StockTokenRegistry.guardianRecordSplits(token, [clean split ratio per latched change]) (no timelock; the times are the latched effectiveAt, the ratios the exact p:q splits); fallback governance recordSplitAt (RUNBOOK "Corporate actions")`,
   }));
 }
 
