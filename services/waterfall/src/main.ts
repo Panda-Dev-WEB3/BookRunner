@@ -28,7 +28,7 @@ import { GasMeter, expensesRequested } from "./domain/expenses";
 import { Cooldowns, distributes } from "./domain/keeper";
 import { KeeperRunner } from "./keeper";
 import { LiquidationKeeper } from "./liquidationKeeper";
-import { BookDirectory } from "./kit/books";
+import { BookDirectory, factoryWake } from "./kit/books";
 import { waitForDeployment } from "./kit/deployment";
 import { PgRedisEventSink } from "./kit/events";
 import { onShutdown, sleep, startLoop } from "./kit/loop";
@@ -84,7 +84,7 @@ export async function main() {
   }
 
   const events = new PgRedisEventSink(db, redis, log);
-  const books = new BookDirectory(pc, deployment, log, cfg.BOOKS_REFRESH_SECONDS * 1000);
+  const books = new BookDirectory(pc, deployment, log, cfg.BOOKS_REFRESH_SECONDS * 1000, Date.now, factoryWake({ wsUrl: cfg.RPC_WS_URL, safetySeconds: cfg.BOOKS_WS_SAFETY_SECONDS, refreshSeconds: cfg.BOOKS_REFRESH_SECONDS, deployment, label: "waterfall books", log }));
   const candidates = new UnionCandidates([new RedeemLogIndex(pc, BigInt(deployment.startBlock ?? 0), cfg.WATERFALL_LOG_CHUNK_BLOCKS, log), new DbRedeemCandidates(db)], log);
   const univ3Quoter = cfg.WATERFALL_UNIV3_QUOTER ? (cfg.WATERFALL_UNIV3_QUOTER as Address) : (uniswapV3For(cfg.CHAIN_ID)?.quoterV2 ?? null);
   const chain = new WaterfallChainAdapter({ pc, sender, deployment, candidates, logChunk: cfg.WATERFALL_LOG_CHUNK_BLOCKS, logLookback: cfg.WATERFALL_LOG_LOOKBACK_BLOCKS, univ3Quoter });

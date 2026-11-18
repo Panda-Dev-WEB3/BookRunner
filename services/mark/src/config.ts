@@ -17,6 +17,11 @@ export const markEnvShape = {
   MARK_TICK_SECONDS: z.coerce.number().positive().default(5),
   /** RPC budget: BookFactory.bookIds() re-read at most this often (waterfall kit BookDirectory); 0 = every tick. */
   BOOKS_REFRESH_SECONDS: z.coerce.number().min(0).max(3_600).default(0),
+  /**
+   * RPC budget: with a WebSocket endpoint (RPC_WS_URL) BookFactory.bookIds() is read when the factory emits a log and at
+   * least every this many seconds, instead of every BOOKS_REFRESH_SECONDS (kit/books.ts factoryWake). 0 = polling only.
+   */
+  BOOKS_WS_SAFETY_SECONDS: z.coerce.number().min(0).max(3_600).default(0),
   /** Recompute + recommit attempts when flowNonce moves under the mark. */
   MARK_MAX_RETRIES: z.coerce.number().int().positive().default(3),
   /** Snapshot block = head - confirmations (0 on devnet). */

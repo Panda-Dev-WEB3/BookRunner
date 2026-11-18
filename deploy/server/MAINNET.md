@@ -105,7 +105,8 @@ WATERFALL_LIQ_ETH_USD=<USD per ETH, e.g. 3000>         # liquidation keeper gas 
 # ORACLE_DEX_CONFIRM=1                                  # default; cannot be 0 on mainnet
 # ORACLE_DEX_TWAP_SEC=600                               # overrides every pool's twapSec; 300-3600 on mainnet
 # ORACLE_DEX_MAX_AGE_MS=120000                          # mainnet default; at most 120000, at least 2 x ORACLE_DEX_READ_MS
-# RPC cadence (section 5 "RPC budget"; mainnet defaults, bounded at startup):
+# RPC cadence (section 5 "RPC budget"; mainnet defaults, bounded at startup; with a WebSocket endpoint the book discovery / log scans run on
+# notifications and at least every OPS_WS_SAFETY_POLL_MS=300000 / RISK_WS_SAFETY_POLL_MS=300000 / BOOKS_WS_SAFETY_SECONDS=600):
 # ORACLE_CHAINLINK_READ_MS=10000 ORACLE_CHAINLINK_EVENT_READ_MS=300000 ORACLE_TOKEN_STATE_READ_MS=60000 ORACLE_DEX_READ_MS=60000 ORACLE_HEAD_READ_MS=60000
 # RHC_RPC_FALLBACK_URL=https://<rpc>                  # secondary HTTP RPC, used only while RHC_RPC_URL fails; default the public https://rpc.mainnet.chain.robinhood.com; off = none
 # RHC_WS_URL=wss://<rpc>/<key>                        # log subscriptions; default derived from an Alchemy RHC_RPC_URL; off = polling
@@ -170,6 +171,10 @@ eth_call, log subscriptions replace polling where an event says when to read, an
 | After, 0 books, log subscriptions up | ~0.2 | ~6 | ~16 million |
 | After, + 1 book in Subscription (subscriptions up) | | ~14 | ~36 million |
 | After, + 1 Live book (subscriptions up) | | ~55 | ~140 million |
+| **Tech update #4 (2026-11-19), 0 books, subscriptions up** (estimate, not yet measured) | | **~4** | **~10.5 million** |
+| Tech update #4, + 1 book in Subscription (subscriptions up) | | ~8 | ~21 million |
+| Tech update #4, + 1 Live book (subscriptions up) | | ~51 | ~132 million |
+| Tech update #4, any of these on the fallback RPC / without a WebSocket | | unchanged (polling cadences) | the fallback is not billed to the primary plan |
 
 Before: the oracle read each ticker's Chainlink round and Stock Token state (4 views) and each DEX pool (slot0,
 liquidity, observe + the token's 4 views) every 1 s tick as separate calls (~44 calls/s, ~1,140 CU/s), plus a head
@@ -181,13 +186,47 @@ liquidity, observe + the token's 4 views) every 1 s tick as separate calls (~44 
 | oracle, DEX TWAP | block + ONE `aggregate3` (every confirm pool, the WETH / USDG leg, each Stock Token's state once, at that block) + one for the rings that moved, every `ORACLE_DEX_READ_MS` 60 s | ~1.1 |
 | oracle, head / universe | head clock fed by every pass (`ORACLE_HEAD_READ_MS` 60 s); signer + minSources every 60 s; band every 10 min | 0.5 |
 | indexer | a step (`eth_blockNumber` + ONE `eth_getLogs`: protocol + every watched book) after each notification of a watched contract, and every `INDEXER_WS_SAFETY_POLL_MS` 120 s [every `INDEXER_POLL_MS` 12 s] | 0.7 [7.1] |
-| ops-venue | `bookIds()` every `OPS_BOOK_POLL_MS` 60 s; log / report / fee loops idle without an Orderly book | 0.4 |
-| risk | `bookIds()` every `RISK_BOOKS_REFRESH_MS` 60 s | 0.4 |
-| mark, waterfall | `bookIds()` every `BOOKS_REFRESH_SECONDS` 60 s each; no head read without a book; buyback / pool epoch every `WATERFALL_PROTOCOL_DUTY_SECONDS` 300 s | 1.0 |
+| ops-venue | `bookIds()` (+ each book's state) when the factory or a tracked book emits a log, and every `OPS_WS_SAFETY_POLL_MS` 300 s [every `OPS_BOOK_POLL_MS` 60 s]; log / report / fee loops idle without an Orderly book | 0.1 [0.4] |
+| risk | `bookIds()` when the factory or a known book emits a log, and every `RISK_WS_SAFETY_POLL_MS` 300 s [every `RISK_BOOKS_REFRESH_MS` 60 s] | 0.1 [0.4] |
+| mark, waterfall | `bookIds()` when the factory emits a log (`BookCreated`), and every `BOOKS_WS_SAFETY_SECONDS` 600 s each [every `BOOKS_REFRESH_SECONDS` 60 s]; no head read without a book; buyback / pool epoch every `WATERFALL_PROTOCOL_DUTY_SECONDS` 300 s | 0.3 [1.0] |
 | waterfall, liquidation keeper | no open engine position: one DB query per `WATERFALL_LIQ_IDLE_INTERVAL_SECONDS` 60 s, no RPC; with open positions ONE `aggregate3` (every market + position) per pass every `WATERFALL_LIQ_INTERVAL_SECONDS` 10 s while a market trades (60 s off-hours), configs every 10 min; `eth_estimateGas` + `eth_gasPrice` + the transaction only for a liquidatable position | 0 [~2.6 per traded market] |
-| alerts | head + role balances (Multicall3 `getEthBalance`, one call) + buybackPending every 60 s; markInterval hourly | 1.1 |
-| charter | jury fallback scan every `JURY_POLL_MS` 60 s; committee sync every `COMMITTEE_SYNC_MS` 300 s | 0.6 |
-| **Total** | | **~6 [~15]** |
+| alerts | head every 60 s; role balances (Multicall3 `getEthBalance`, one call) + buybackPending every 5 min (cached, `SLOW_READ_TTL_MS`); markInterval hourly | 0.45 [1.1] |
+| charter | jury fallback scan every `JURY_POLL_MS` 300 s (the jury is triggered by the `charter.filed` event); committee sync every `COMMITTEE_SYNC_MS` 300 s | 0.3 [0.6] |
+| **Total** | | **~4 [~15]** (was ~6 [~15] before tech update #4) |
+
+**Tech update #4 (2026-11-19): event-driven book discovery and log scans.** `packages/shared/src/chainWake.ts` pairs a
+log subscription with a slow safety poll: the chain reads of a poll loop are due on a notification of a contract it
+watches (never sooner than 5 s after its previous read) or at the safety poll, and every poll interval otherwise (no
+WebSocket URL, subscription down, or the primary RPC failing: the subscriptions follow the primary, see "Automatic RPC
+backup"). A notification is a trigger only: the loop's own canonical read (`bookIds()`, `eth_getLogs` from its cursor)
+decides what happened, so a missed notification costs latency (at most the safety poll), never data. Used by
+ops-venue (book discovery + state: the factory and every tracked book; adapter / mandate log scans: the tracked
+adapters and mandates; `OPS_WS_SAFETY_POLL_MS`), risk (the factory listing and the state of books that are not
+monitored yet: the factory and every known book; `RISK_WS_SAFETY_POLL_MS`) and mark / waterfall (the factory;
+`BOOKS_WS_SAFETY_SECONDS`). All three are bounded in `MAINNET_RPC_BOUNDS` (30-600 s, 60-1800 s) and set by the
+mainnet profile defaults; `0` (the service default off the mainnet profile) = polling only. Also cut: `JURY_POLL_MS`
+60 s -> 300 s (a fallback scan next to the domain event) and the alerts' gas balances / `buybackPending` read every
+5 min instead of every pass. **Not touched, on purpose:** the oracle price cadence (`ORACLE_TICK_MS`, Chainlink /
+token-state / DEX reads), the liquidation keeper, risk's 2 s monitor tick (kill checks), the agents' mandate read and the
+signed venue report. Risk's monitors do read the state of a monitored book every tick, so skipping the discovery re-read
+of that state loses nothing; a book going Live is found by the same 60 s check as before.
+
+**The factor 2 that the estimate missed (2026-11-15).** The estimate was ~28 million CU a month at zero books (the
+table's 5-ticker, subscriptions-up rows sum to only ~16 million, polling-only ~38 million); the real use was about twice
+that, so roughly half of it was not in the table. What the table does not count, in the order I would look: (1) the
+**API**: every tRPC / REST / MCP request that touches the chain (trade page, book pages, wallets, bots) reads through
+`ViemChainGateway` with only a short Redis cache, and nothing here counted traffic-driven reads; (2) **retries**: viem
+retries a 429 / 5xx three times on its own, and `rpcTransport` retries lagging-node errors, each attempt billed; (3)
+**restarts and catch-ups**: every `update.sh` restart re-reads once-per-process data (pools, decimals, deployments) and
+the indexer / ops-venue / mark scans catch up from their cursors in `eth_getLogs` chunks; (4) **WebSocket bytes**:
+0.04 CU per byte of every delivered log (the indexer watches every protocol contract) plus 10 CU per subscribe and every
+re-subscribe, which the table treats as ~0; (5) per-method prices: the plan's `eth_getLogs` / `eth_getBlockByNumber`
+differ from the public table, and a heavy `eth_call` (the TWAP `observe`, the 44-call `aggregate3`) may be weighed
+above the flat 26; (6) anything else on the same Alchemy account (another app, the operator's scripts, a testnet stack).
+Which of these it was is not known: the usage meter above exists to answer it (per method and per service, hourly).
+Read it after a day on mainnet and correct this table with measured numbers.
+
+(The per-service rows above are estimates from the code and the published prices, not measurements.)
 
 **DEX second source (2026-11-13).** The Stock Token / WETH confirm pools (NVDA / WETH 500 and 3000) and the WETH /
 USDG leg ride in the same calls: still the block (16 CU) + ONE `aggregate3` (26 CU) per 60 s pass, + ONE ring

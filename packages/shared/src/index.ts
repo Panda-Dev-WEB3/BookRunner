@@ -21,6 +21,7 @@ export * from "./clients";
 export * from "./logSubscription";
 export * from "./rpcMeter";
 export * from "./rpcRoute";
+export * from "./chainWake";
 export * from "./orderly";
 export * from "./venueSymbol";
 export * from "./venueMarket";

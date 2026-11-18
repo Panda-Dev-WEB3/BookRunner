@@ -58,6 +58,12 @@ export const MAINNET_RPC_DEFAULTS: Readonly<Record<string, string>> = {
   // RISK-signed kill reaches ops-venue over Redis at once); idle with no Orderly book
   OPS_LOG_POLL_MS: "30000",
   RISK_BOOKS_REFRESH_MS: "60000",
+  // with a WebSocket endpoint (RPC_WS_URL; polling at the cadences above without one, or while the primary RPC fails): the
+  // book discovery / log scans of ops-venue and the factory listing of risk, mark and waterfall run on log notifications
+  // and at least this often. The risk monitors' 2 s kill-path tick is not part of it
+  OPS_WS_SAFETY_POLL_MS: "300000",
+  RISK_WS_SAFETY_POLL_MS: "300000",
+  BOOKS_WS_SAFETY_SECONDS: "600",
   // the scheduler enqueues a daily mark at most 60 s later
   MARK_TICK_SECONDS: "60",
   // keep WATERFALL_TICK + sweep wait + fee-forward wait (60 + 30 + 45) below it, so the mark still waits for the distribution
@@ -72,7 +78,7 @@ export const MAINNET_RPC_DEFAULTS: Readonly<Record<string, string>> = {
   // BookFactory.bookIds() in mark + waterfall
   BOOKS_REFRESH_SECONDS: "60",
   // the jury is triggered by the charter.filed domain event; this is the fallback scan
-  JURY_POLL_MS: "60000",
+  JURY_POLL_MS: "300000",
   // committee seats + finalisation of filed charters (deadline warnings 12 h ahead): two aggregate3 per sync
   COMMITTEE_SYNC_MS: "300000",
 };
@@ -87,6 +93,9 @@ export const MAINNET_RPC_BOUNDS: Readonly<Record<string, { min: number; max: num
   OPS_TX_POLL_MS: { min: 250, max: 5_000, why: "receipt polling while a transaction is pending" },
   RISK_INTERVAL_MS: { min: 1_000, max: 5_000, why: "kill-path latency (RISK_BREACH_CONFIRM_TICKS ticks)" },
   RISK_BOOKS_REFRESH_MS: { min: 15_000, max: 300_000, why: "a book going Live is monitored within this" },
+  OPS_WS_SAFETY_POLL_MS: { min: 30_000, max: 600_000, why: "subscription up: ops-venue's book discovery and log scans at least this often (a missed notification costs at most this; withdrawal requests, the on-chain Kill backup path)" },
+  RISK_WS_SAFETY_POLL_MS: { min: 30_000, max: 600_000, why: "subscription up: risk re-lists the factory at least this often (a new book sits in Subscription for days; monitors and the kill path are unaffected)" },
+  BOOKS_WS_SAFETY_SECONDS: { min: 60, max: 1_800, why: "subscription up: mark / waterfall re-list the factory at least this often (a chartered book is picked up within this if a notification is missed)" },
   MARK_TICK_SECONDS: { min: 5, max: 120, why: "mark scheduling delay" },
   MARK_WAIT_SECONDS: { min: 90, max: 1_800, why: "the mark waits this long for the period's distribution" },
   WATERFALL_TICK_SECONDS: { min: 5, max: 120, why: "settlement scheduling and keeper duties" },

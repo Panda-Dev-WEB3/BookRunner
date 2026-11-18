@@ -78,17 +78,41 @@ const getEthBalanceAbi = parseAbi(["function getEthBalance(address addr) view re
 /** config.markInterval() is timelock-set: re-read hourly, not every pass */
 const MARK_INTERVAL_TTL_MS = 3_600_000;
 let markIntervalRead: { value: number | null; at: number } | null = null;
+/**
+ * RPC budget: gas balances and buybackPending move slowly (a role's gas lasts days, buyback samples are kept every 10 min), so
+ * they are read at most every SLOW_READ_TTL_MS (5 min) although a pass runs every ALERT_INTERVAL_SECONDS. The head read (the
+ * rpc health probe the rpc rule counts) stays in every pass. A failed read is not cached.
+ */
+const SLOW_READ_TTL_MS = 300_000;
+function slow<K, V>(read: (k: K) => Promise<V>, key: (k: K) => string): (k: K) => Promise<V> {
+  const cache = new Map<string, { at: number; v: V }>();
+  return async (k) => {
+    const id = key(k);
+    const hit = cache.get(id);
+    if (hit && Date.now() - hit.at < SLOW_READ_TTL_MS) return hit.v;
+    const v = await read(k);
+    cache.set(id, { at: Date.now(), v });
+    return v;
+  };
+}
+const readBalance = slow(
+  (address: `0x${string}`) => (multicall ? client.readContract({ address: multicall, abi: getEthBalanceAbi, functionName: "getEthBalance", args: [address] }) : client.getBalance({ address })),
+  (a) => a.toLowerCase(),
+);
 const chain: ChainPort = {
   head: async () => {
     const b = await client.getBlock({ blockTag: "latest" });
     return { number: Number(b.number), timestamp: Number(b.timestamp) };
   },
-  balance: (address) => (multicall ? client.readContract({ address: multicall, abi: getEthBalanceAbi, functionName: "getEthBalance", args: [address] }) : client.getBalance({ address })),
-  buybackPending: async () => {
-    const dep = tryLoadDeployment(cfg.deploymentFile);
-    if (!dep?.contracts.feeRouter) return null;
-    return client.readContract({ address: dep.contracts.feeRouter, abi: bkrnFeeRouterAbi, functionName: "buybackPending" });
-  },
+  balance: (address) => readBalance(address),
+  buybackPending: slow(
+    async (_: null) => {
+      const dep = tryLoadDeployment(cfg.deploymentFile);
+      if (!dep?.contracts.feeRouter) return null;
+      return client.readContract({ address: dep.contracts.feeRouter, abi: bkrnFeeRouterAbi, functionName: "buybackPending" });
+    },
+    () => "buybackPending",
+  ).bind(null, null),
   buybackV4BlockedHop: async () => {
     const dep = tryLoadDeployment(cfg.deploymentFile);
     if (!dep?.contracts.feeRouter) return null;

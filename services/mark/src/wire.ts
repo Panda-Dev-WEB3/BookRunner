@@ -5,6 +5,7 @@ import { type Deployment, type Logger, roleSigner, walletClientFor } from "@book
 import { bookrunnerConfigAbi } from "@bookrunner/shared/abi";
 import {
   BookDirectory,
+  factoryWake,
   DbRedeemCandidates,
   PgRedisEventSink,
   type Publisher,
@@ -45,7 +46,7 @@ export async function wireMark(cfg: MarkConfig, log: Logger, deployment: Deploym
   const markInterval = await markChain.markInterval(); // may throw (RPC): nothing allocated yet
   if (markInterval !== cfg.MARK_INTERVAL_SECONDS) log.warn({ onchain: markInterval, env: cfg.MARK_INTERVAL_SECONDS }, "config.markInterval() differs from MARK_INTERVAL_SECONDS; using the on-chain value");
   const { db, close } = createDb(cfg.DATABASE_URL, 5);
-  const books = new BookDirectory(pc, deployment, log, cfg.BOOKS_REFRESH_SECONDS * 1000);
+  const books = new BookDirectory(pc, deployment, log, cfg.BOOKS_REFRESH_SECONDS * 1000, Date.now, factoryWake({ wsUrl: cfg.RPC_WS_URL, safetySeconds: cfg.BOOKS_WS_SAFETY_SECONDS, refreshSeconds: cfg.BOOKS_REFRESH_SECONDS, deployment, label: "mark books", log }));
   const candidates = new UnionCandidates([new RedeemLogIndex(pc, BigInt(deployment.startBlock ?? 0), cfg.MARK_LOG_CHUNK_BLOCKS, log), new DbRedeemCandidates(db)], log);
   // read-only use (state, idle, in-transit, Distributed logs, pending redemptions); never sends from here
   const readChain = new WaterfallChainAdapter({ pc, sender, deployment, candidates, logChunk: cfg.MARK_LOG_CHUNK_BLOCKS, logLookback: cfg.MARK_LOG_LOOKBACK_BLOCKS });

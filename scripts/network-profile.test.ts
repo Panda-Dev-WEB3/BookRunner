@@ -375,3 +375,18 @@ describe("mainnet RPC fallback: RPC_FALLBACK_URL from RHC_RPC_FALLBACK_URL", () 
     expect(env({ RHC_RPC_URL: "https://rpc.mainnet.chain.robinhood.com" }).env.RPC_FALLBACK_URL).toBeUndefined();
   });
 });
+
+describe("mainnet WebSocket safety polls (event-driven risk / venue / book discovery)", () => {
+  const env = (e: Env) => mainnetProfile({ ...goodEnv(), ...e }, hostRoot(GOOD_DEP));
+  test("defaults are set, and bounded like INDEXER_WS_SAFETY_POLL_MS", () => {
+    const r = env({});
+    expect(r.errors).toEqual([]);
+    expect(r.env.OPS_WS_SAFETY_POLL_MS).toBe("300000");
+    expect(r.env.RISK_WS_SAFETY_POLL_MS).toBe("300000");
+    expect(r.env.BOOKS_WS_SAFETY_SECONDS).toBe("600");
+    expect(env({ OPS_WS_SAFETY_POLL_MS: "5000" }).errors).toEqual([expect.stringMatching(/^OPS_WS_SAFETY_POLL_MS=5000 must be within 30000-600000/)]);
+    expect(env({ RISK_WS_SAFETY_POLL_MS: "3600000" }).errors).toEqual([expect.stringMatching(/^RISK_WS_SAFETY_POLL_MS=3600000 must be within 30000-600000/)]);
+    expect(env({ BOOKS_WS_SAFETY_SECONDS: "10" }).errors).toEqual([expect.stringMatching(/^BOOKS_WS_SAFETY_SECONDS=10 must be within 60-1800/)]);
+    expect(env({ OPS_WS_SAFETY_POLL_MS: "120000" }).errors).toEqual([]);
+  });
+});
