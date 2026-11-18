@@ -4,7 +4,7 @@
 //   bun src/main.ts --test     # send one test message through every configured channel, then exit
 // Reads only: Postgres, Redis, the chain (no key, no transaction), the API's and the oracle's /health. Holds no
 // signing key.
-import { bkrnFeeRouterAbi, bookrunnerConfigAbi, insurancePoolAbi } from "@bookrunner/shared/abi";
+import { bkrnFeeRouterAbi, bookrunnerConfigAbi, gasTankAbi, insurancePoolAbi } from "@bookrunner/shared/abi";
 import { chainFor, multicall3For } from "@bookrunner/shared/chains";
 import { tryLoadDeployment } from "@bookrunner/shared/deployments";
 import { createLogger } from "@bookrunner/shared/logger";
@@ -12,7 +12,7 @@ import { redactUrl } from "@bookrunner/shared/redact";
 import { Redis } from "ioredis";
 import postgres from "postgres";
 import { http, createPublicClient, parseAbi } from "viem";
-import { type ChainPort, type DbPort, collect, readPool } from "./collect";
+import { type ChainPort, type DbPort, collect, readGasTank, readPool } from "./collect";
 import { loadConfig } from "./config";
 import { createDeliverer, pingHeartbeat } from "./deliver";
 import { renderBatch } from "./format";
@@ -108,6 +108,15 @@ const chain: ChainPort = {
     const read = (functionName: string, args?: readonly unknown[]) =>
       client.readContract({ address, abi: insurancePoolAbi, functionName, ...(args ? { args } : {}) } as unknown as Parameters<typeof client.readContract>[0]);
     return readPool(read, address, bookIds);
+  },
+  gasTank: async () => {
+    const dep = tryLoadDeployment(cfg.deploymentFile);
+    const address = dep?.contracts.gasTank;
+    if (!address) return null; // older deployments / no tank
+    const read = (functionName: string, args?: readonly unknown[]) =>
+      client.readContract({ address, abi: gasTankAbi, functionName, ...(args ? { args } : {}) } as unknown as Parameters<typeof client.readContract>[0]);
+    const names = new Map(cfg.roles.map((r) => [r.address.toLowerCase(), r.role]));
+    return readGasTank(read, (a) => chain.balance(a), address, (a) => names.get(a.toLowerCase()) ?? null);
   },
 };
 

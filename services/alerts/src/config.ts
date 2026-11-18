@@ -170,6 +170,8 @@ const shape = {
   ALERT_ROLE_ADDRESSES: z.string().default(""),
   ALERT_BALANCE_MIN_ETH: z.string().default(""),
   ALERT_FUNDER_MIN_ETH: z.string().optional(),
+  /** gas_tank_low (2026-11 GasTank): the tank holds less than this ETH (warning; critical below a quarter, or empty) */
+  ALERT_GAS_TANK_MIN_ETH: z.string().default("0.05"),
   ALERT_RPC_ERROR_RATE: num(0.5),
   ALERT_RPC_MIN_SAMPLES: int(4),
   ALERT_RPC_WINDOW_SECONDS: int(900),
@@ -284,6 +286,8 @@ export interface RuleConfig {
   /** role -> min balance (wei); "*" = default */
   roleMinWei: Record<string, bigint>;
   funderMinWei: bigint;
+  /** gas_tank_low: the GasTank balance below which the tank is "running low" (wei) */
+  gasTankMinWei: bigint;
   rpcErrorRate: number;
   rpcMinSamples: number;
   headLagSec: number;
@@ -444,6 +448,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       exitWindowSec: e.ALERT_EXIT_WINDOW_SECONDS,
       roleMinWei: roleMin,
       funderMinWei: ethToWei(e.ALERT_FUNDER_MIN_ETH ?? nd.funderMinEth),
+      gasTankMinWei: ethToWei(e.ALERT_GAS_TANK_MIN_ETH),
       rpcErrorRate: e.ALERT_RPC_ERROR_RATE,
       rpcMinSamples: e.ALERT_RPC_MIN_SAMPLES,
       headLagSec: e.ALERT_HEAD_LAG_SECONDS ?? nd.headLagSec,

@@ -22,6 +22,7 @@ import { RedeemLogIndex, UnionCandidates } from "./adapters/redemptions";
 import { DbRedeemCandidates, PgSettlementStore } from "./adapters/store";
 import { BullVenueOps } from "./adapters/venue-ops";
 import { BuybackRunner } from "./buyback";
+import { GasTankRunner } from "./gasTankKeeper";
 import { PoolKeeperRunner } from "./poolKeeper";
 import { liquidationEthUsd, loadWaterfallConfig } from "./config";
 import { GasMeter, expensesRequested } from "./domain/expenses";
@@ -149,6 +150,9 @@ export async function main() {
 
   const poolKeeper = new PoolKeeperRunner({ chain, cooldowns: new Cooldowns(), cooldownMs: cfg.WATERFALL_ACTION_COOLDOWN_SECONDS * 1000, log });
 
+  const gasTank = new GasTankRunner({ chain, cooldowns: new Cooldowns(), cooldownMs: cfg.WATERFALL_ACTION_COOLDOWN_SECONDS * 1000, log });
+  let gasTankAt = Number.NEGATIVE_INFINITY;
+
   const enqueued = new Map<number, number>();
   let intervalWarned = false;
   let dutiesAt = Number.NEGATIVE_INFINITY;
@@ -163,6 +167,11 @@ export async function main() {
       // protocol-level keeper duties (never throw: failures are logged and retried after the cooldown), at most every
       // WATERFALL_PROTOCOL_DUTY_SECONDS
       const nowMs = Date.now();
+      // 2026-11 GasTank: its own cadence (a few minutes), independent of the protocol-duty interval
+      if (cfg.WATERFALL_KEEPER_ENABLED && cfg.WATERFALL_GAS_TANK_ENABLED && !signal.aborted && nowMs - gasTankAt >= cfg.WATERFALL_GAS_TANK_INTERVAL_SECONDS * 1000) {
+        gasTankAt = nowMs;
+        await gasTank.tick();
+      }
       if (signal.aborted || nowMs - dutiesAt < cfg.WATERFALL_PROTOCOL_DUTY_SECONDS * 1000) return;
       dutiesAt = nowMs;
       if (cfg.WATERFALL_KEEPER_ENABLED && cfg.WATERFALL_BUYBACK_ENABLED && !signal.aborted) await buyback.tick();

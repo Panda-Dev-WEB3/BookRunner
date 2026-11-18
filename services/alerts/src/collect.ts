@@ -14,6 +14,7 @@ import type {
   BookSnap,
   BuilderFeedSnap,
   CspSnap,
+  GasTankSnap,
   SiteFilesSnap,
   VenueOpsSnap,
   IndexerCursorSnap,
@@ -79,10 +80,31 @@ export interface ChainPort {
    * no insurancePool. Absent port = no pool.
    */
   pool?(bookIds: number[]): Promise<PoolSnap | null>;
+  /** The GasTank with every allow-listed wallet's balance and quote; null when the deployment has no tank. Absent port = no tank. */
+  gasTank?(): Promise<GasTankSnap | null>;
 }
 
 /** One InsurancePool view call (main.ts: viem readContract with insurancePoolAbi). */
 export type PoolRead = (functionName: string, args?: readonly unknown[]) => Promise<unknown>;
+
+/**
+ * Reads the GasTank: its balance, pause flag and caps, and for every allow-listed wallet its balance, floor, usage and
+ * topUpQuote. `read` = a GasTank view (viem readContract with gasTankAbi), `balance` = the ETH balance of an address
+ * (Multicall3 getEthBalance on mainnet). The core reads must succeed or this throws (collect: gasTank = undefined).
+ */
+export async function readGasTank(read: PoolRead, balance: (a: `0x${string}`) => Promise<bigint>, address: `0x${string}`, roleOf: (a: string) => string | null): Promise<GasTankSnap> {
+  const [services, paused, cap, sent, bal] = await Promise.all([read("services"), read("paused"), read("globalDailyCap"), read("globalSentToday"), balance(address)]);
+  const list = services as readonly `0x${string}`[];
+  const rows = await Promise.all(
+    list.map(async (a) => {
+      const [info, quote, b] = await Promise.all([read("serviceInfo", [a]), read("topUpQuote", [a]), balance(a)]);
+      const i = info as readonly [boolean, bigint, bigint, bigint, bigint];
+      const q = quote as readonly [bigint, number];
+      return { address: a as string, role: roleOf(a), balanceWei: b, floorWei: i[1], dailyCapWei: i[3], sentTodayWei: i[4], reason: Number(q[1]) };
+    }),
+  );
+  return { address, balanceWei: bal, paused: paused as boolean, globalDailyCapWei: cap as bigint, globalSentTodayWei: sent as bigint, services: rows };
+}
 
 /** settlement-token units (6dp) -> dollars; Number is exact below 2^53 units (~9e9 USD) */
 const usd6 = (v: unknown) => Number(BigInt(v as bigint)) / 1e6;
@@ -799,6 +821,15 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
       pool = undefined;
     }
   }
+  // GasTank (2026-11): null = none in the deployment; undefined = a read failed (rpc problems are the rpc rule's business)
+  let gasTank: Snapshot["gasTank"] = null;
+  if (d.chain.gasTank) {
+    try {
+      gasTank = await d.chain.gasTank();
+    } catch {
+      gasTank = undefined;
+    }
+  }
 
   // ---- API
   let api: Snapshot["api"];
@@ -848,6 +879,7 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
     venueOps,
     busForged,
     pool,
+    gasTank,
     liquidationKeeper,
     ...(csp ? { csp } : {}),
     ...(siteFiles ? { siteFiles } : {}),

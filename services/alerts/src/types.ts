@@ -307,6 +307,26 @@ export interface PoolSnap {
   books: PoolBookSnap[];
 }
 
+/** The GasTank (contracts/src/GasTank.sol): the ETH reserve that tops up the service wallets, read once per pass. */
+export interface GasTankSnap {
+  address: string;
+  balanceWei: bigint;
+  paused: boolean;
+  globalDailyCapWei: bigint;
+  globalSentTodayWei: bigint;
+  services: Array<{
+    address: string;
+    /** the wallet's role when ALERT_ROLE_ADDRESSES names it, else null */
+    role: string | null;
+    balanceWei: bigint;
+    floorWei: bigint;
+    dailyCapWei: bigint;
+    sentTodayWei: bigint;
+    /** topUpQuote reason: 0 sendable, 1 paused / empty / unlisted, 2 at or above the floor, 3 own cap used, 4 global cap used */
+    reason: number;
+  }>;
+}
+
 export interface Snapshot {
   now: number; // unix ms
   network: string;
@@ -346,6 +366,8 @@ export interface Snapshot {
    * core read failed this pass (the rpc rule reports RPC trouble). Either way the pool rules raise nothing.
    */
   pool?: PoolSnap | null;
+  /** the GasTank: null = the deployment has none (older deployments) or no port; undefined = a read failed this pass (the rpc rule covers RPC trouble) */
+  gasTank?: GasTankSnap | null;
   /** the waterfall liquidation keeper (KEYS.liquidationKeeper): null = no status, undefined = the Redis read failed */
   liquidationKeeper?: LiquidationKeeperStatus | null;
   /** CSP violation reports counted by the API (KEYS.cspReports buckets of the alert window); undefined = not read (Redis failed / no port) */

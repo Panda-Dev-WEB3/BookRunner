@@ -4,6 +4,7 @@
 import { formatEther } from "viem";
 import type { RuleConfig } from "./config";
 import { HOLD_RULES } from "./rules-holds";
+import { GAS_TANK_RULES } from "./rules-gas";
 import { LIQUIDATION_RULES } from "./rules-liquidation";
 import { POOL_RULES } from "./rules-pool";
 import { SECURITY_RULES, plain } from "./rules-security";
@@ -880,6 +881,7 @@ export const RULES = {
   indexer_lag: indexerLag,
   buyback,
   ...POOL_RULES,
+  ...GAS_TANK_RULES,
   ...LIQUIDATION_RULES,
   api_health: apiHealth,
   oracle,

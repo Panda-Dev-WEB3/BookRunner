@@ -4,6 +4,7 @@ import {
   bkrnFeeRouterAbi,
   bookAbi,
   bookrunnerConfigAbi,
+  gasTankAbi,
   insurancePoolAbi,
   markRegistryAbi,
   mockSwapRouterAbi,
@@ -22,6 +23,8 @@ import { scanEvents } from "../kit/logs";
 import { type TxSender, describeRevert } from "../kit/tx";
 import type { PoolQueueSnapshot } from "../domain/pool";
 import type { PoolKeeperChain } from "../poolKeeper";
+import type { TankSnapshot, TopUpReason } from "../domain/gasTank";
+import type { GasTankChain } from "../gasTankKeeper";
 import type { BuybackChain, DistributedLog, FeeForwarding, KeeperChain, KeeperSnapshot, SettlementChain, SettlementReceivedLog, SplitParams } from "../ports";
 import { type CandidateSource, pendingShares } from "./redemptions";
 
@@ -51,7 +54,7 @@ export function premiumIn(ref: BookRef, logs: TransactionReceipt["logs"]): bigin
   return p.reduce((a, l) => a + l.args.amount, 0n);
 }
 
-export class WaterfallChainAdapter implements SettlementChain, KeeperChain, BuybackChain, PoolKeeperChain {
+export class WaterfallChainAdapter implements SettlementChain, KeeperChain, BuybackChain, PoolKeeperChain, GasTankChain {
   private markInterval: number | null = null;
   private buybackTokens: { usdc: Address; bkrn: Address } | null = null;
   /** Last buybackV4State().venue read this pass (0 = v3). */
@@ -430,6 +433,32 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain, Buyb
     const address = this.insurancePool;
     if (!address) throw new Error("no InsurancePool in the deployment");
     const out = await this.o.sender.send({ address, abi: insurancePoolAbi, functionName: "processEpoch", args: [], label: "pool.processEpoch" });
+    return out.hash;
+  }
+
+  // ---------------------------------------------------------------- GasTankChain (2026-11 GasTank)
+  private get gasTank(): `0x${string}` | null {
+    const t = this.o.deployment.contracts.gasTank;
+    return t && !isAddressEqual(t, zeroAddress) ? t : null;
+  }
+
+  /** The tank and its quote for every allow-listed wallet: services() + ONE batched read (quotes) + the tank balance. */
+  async gasTankState(): Promise<TankSnapshot | null> {
+    const tank = this.gasTank;
+    if (!tank) return null;
+    const [services, paused, balanceWei] = await Promise.all([
+      this.pc.readContract({ address: tank, abi: gasTankAbi, functionName: "services" }),
+      this.pc.readContract({ address: tank, abi: gasTankAbi, functionName: "paused" }),
+      this.pc.getBalance({ address: tank }),
+    ]);
+    const quotes = await Promise.all(services.map((service) => this.pc.readContract({ address: tank, abi: gasTankAbi, functionName: "topUpQuote", args: [service] })));
+    return { tank, paused, balanceWei, services: services.map((service, i) => ({ service, amountWei: quotes[i]![0], reason: Number(quotes[i]![1]) as TopUpReason })) };
+  }
+
+  async topUp(service: `0x${string}`): Promise<Hex> {
+    const address = this.gasTank;
+    if (!address) throw new Error("no GasTank in the deployment");
+    const out = await this.o.sender.send({ address, abi: gasTankAbi, functionName: "topUp", args: [service], label: `gasTank.topUp(${service})` });
     return out.hash;
   }
 
