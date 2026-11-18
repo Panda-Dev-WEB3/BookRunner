@@ -151,6 +151,15 @@ Paths are relative to `contracts/test/`.
 | POOL-14 | Redemptions never wait for a pool-funded book's capital (fix round 2 Info 4): when they take its own capital (Senior + Junior - Backstop cover) below `minOwnCapitalBps` of its pool debt, `Book.capitalShort()` reads true and risk and the agent hold the book reduce-only (`POOL_CAPITAL_SHORT`), the `pool_book_capital_short` alert fires, until the capital is back above the minimum. | — | `pool/PoolBook.t.sol` `test_capitalShort_*`; `services/risk/test/classify.test.ts`, `services/bookrunner-agent/test/sides-mode.test.ts`, `services/alerts/test/rules-pool.test.ts` |
 | POOL-10 | Entry and exit are priced only after every active pool-funded book reported a non-held mark past the epoch end (B-L4), or the grace period passed. A stale processing never prices at a stale value (fix round 2 NEW-1, replacing the A-L1 valuation at 0): exits fill, at the normal price, only the share backed by fresh-marked books (`(D - exposure) / D`, exposure = stale claims beyond the slice), the rest stays queued and exposed until a fresh processing; deposits are not minted but deferred to the next fresh processing; past `STALE_BOUND` (30 days after the epoch end) the rest fills at the last values with a 50% haircut on that exposure and deferred deposits are refunded, so no exit waits for good (accepted residual R-1: within the bound an exiter can escape at most its own fair share of a loss the stale book reveals later, ARCHITECTURE §2.10); an exit cannot dodge a loss marked after its epoch's end, a known recovery cannot be bought cheaply; an epoch processed while deposits are paused mints nothing and refunds its deposits (A-L5); the pool's value moves only through book marks, repayments, retirements and premiums (no live venue read). | `pool/InsurancePoolInvariant.t.sol` `invariant_processingWaitsForMarks` | `pool/InsurancePool.t.sol` `test_process_waitsForEveryActiveBookMark_thenGrace`, `test_exitCannotDodgeALossMarkedAfterTheEpochEnd`, `test_knownRecoveryCannotBeBoughtCheaply`, `test_staleProcessing_fillsOnlyTheFreshPart_restAfterTheMark`, `test_staleProcessing_pastTheBound_haircutFill_depositRefunded`, `audit/pool2026/PoolAuditAVerify.t.sol` `test_verify_NEW1_*`, `test_heldMark_movesTheClaim_notFreshForTheGate`, `test_pausedProcessing_refundsQueuedDeposits_exitsNot`; `pool/PoolBook.t.sol` `test_venueReportLag_noFakePoolLossOrRecovery`, `test_ifMoveBetweenValuationAndApply_noPhantomNav`, `test_heldMark_doesNotSatisfyThePoolEpochGate` |
 
+## Gas tank (2026-11)
+
+| ID | Invariant | Invariant suite | Key fuzz / unit tests |
+|---|---|---|---|
+| GAS-1 | The tank never sends beyond its caps: per allow-listed wallet and UTC day at most that wallet's daily cap, per UTC day at most the global daily cap, and a wallet is never filled above its target. | `gas/GasTankInvariant.t.sol` `invariant_neverBeyondCaps`, `invariant_countersMatchLedger` | `gas/GasTank.t.sol` `testFuzz_dailyCapsHold`, `testFuzz_neverAboveTarget`, `test_topUp_serviceCap`, `test_topUp_globalCap`, `test_topUp_partialWhenCapIsTight` |
+| GAS-2 | ETH conservation: the tank's balance is what was received minus what top-ups and the timelock's withdrawals sent; the only outgoing transfers are `topUp` (plain ETH, bounded gas, to an allow-listed wallet below its floor) and `withdraw` (timelock). No arbitrary call exists. | `gas/GasTankInvariant.t.sol` `invariant_ethConserved` | `gas/GasTank.t.sol` `test_withdraw`, `test_topUp_emptyTankAndPartialTank`, `testFuzz_quoteMatchesTopUp` |
+| GAS-3 | `topUp` is reentrancy-safe: counters are updated before the transfer, the transfer is last, and a recipient that re-enters or rejects the ETH cannot draw twice (a rejection reverts the whole call, counters included). | — | `gas/GasTank.t.sol` `test_topUp_reentrancyBlocked`, `test_topUp_rejectingRecipientRevertsWholly` |
+| GAS-4 | Only the timelock edits the allow-list, the caps and withdraws; the GUARDIAN (or the timelock) pauses, only the timelock lifts the pause; the settings stay inside hard ceilings (target <= 1 ETH, wallet cap <= 2 ETH, global cap <= 5 ETH, <= 32 wallets). The deploy lists every role wallet and oracle signer from the input and VerifyHandover checks them. | — | `gas/GasTank.t.sol` `test_governance_onlyTimelock`, `test_setService_bounds`, `test_maxServices`; `deploy/DeployMainnet.t.sol` `test_gasTank_*` |
+
 ## Cross-contract
 
 | ID | Invariant | Tests |
@@ -185,6 +194,8 @@ Every test file under `contracts/test`, with the invariants above it covers. Hel
 
 | Suite | Kind | Covers |
 |---|---|---|
+| `gas/GasTank.t.sol` | unit + fuzz | GAS-1, GAS-2, GAS-3, GAS-4 |
+| `gas/GasTankInvariant.t.sol` | invariant | GAS-1, GAS-2 |
 | `audit/area1/CapitalCoreAudit.t.sol` | audit PoCs (fail on the audited code) | CAP-4, CAP-8, CAP-10 |
 | `audit/area2/Area2EngineAudit.t.sol` | audit PoCs | ENG-8 |
 | `audit/area2/Area2MarkAudit.t.sol` | audit PoC | MRK-2 |

@@ -9,6 +9,7 @@ import {DeployMainnet} from "../../script/DeployMainnet.s.sol";
 import {VerifyHandover} from "../../script/VerifyHandover.s.sol";
 import {BookrunnerConfig} from "../../src/BookrunnerConfig.sol";
 import {InsurancePool} from "../../src/InsurancePool.sol";
+import {GasTank} from "../../src/GasTank.sol";
 import {BookFactory} from "../../src/BookFactory.sol";
 import {StockTokenRegistry} from "../../src/StockTokenRegistry.sol";
 import {BkrnToken} from "../../src/BkrnToken.sol";
@@ -118,6 +119,7 @@ contract DeployMainnetTest is Test {
         uint256 bkrnPerEthWad;
         bool noAllocations; // bkrn.community / studio / liquidity / contributors left zero
         uint256 v4HookFeeBps;
+        string gasTank; // raw JSON of the `gasTank` input object ("" = none: no tank is deployed)
     }
 
     string internal constant CHAIN_CFG = "../config/chains/4663.json";
@@ -499,6 +501,76 @@ contract DeployMainnetTest is Test {
         DeployMainnet.Deployed memory wrong = d;
         wrong.insurancePoolImpl = makeAddr("not the implementation");
         assertEq(_verify(_mainnetOpts(), wrong), 3, "and the recorded implementation");
+    }
+
+    // ------------------------------------------------------------------------------------------- GasTank (2026-11)
+
+    string internal constant TANK_JSON =
+        "{\"floorWei\":\"2000000000000000\",\"targetWei\":\"10000000000000000\",\"perAddressDailyCapWei\":\"20000000000000000\",\"globalDailyCapWei\":\"100000000000000000\"}";
+
+    function test_gasTank_deployed_wired_and_verified() public {
+        Opts memory o = _mainnetOpts();
+        o.gasTank = TANK_JSON;
+        (DeployMainnet.Deployed memory d, uint256 failures) = _deployAndVerify(o, "tank");
+        assertEq(failures, 0, "VerifyHandover must pass with the tank");
+        GasTank t = GasTank(payable(d.gasTank));
+        assertEq(address(t.config()), d.config);
+        // the 5 role wallets (markSigner, risk, opsVenue, jury, keeper) and the oracle signer; the deployer is none
+        address[] memory svc = t.services();
+        assertEq(svc.length, 6);
+        for (uint256 i; i < svc.length; ++i) {
+            assertTrue(svc[i] != deployer);
+            (bool listed, uint256 floor, uint256 target, uint256 cap,) = t.serviceInfo(svc[i]);
+            assertTrue(listed);
+            assertEq(floor, 0.002 ether);
+            assertEq(target, 0.01 ether);
+            assertEq(cap, 0.02 ether);
+        }
+        assertEq(t.globalDailyCap(), 0.1 ether);
+        // governed by the timelock only: the deployer has no power over it after the handover
+        vm.prank(deployer);
+        vm.expectRevert(abi.encodeWithSelector(GasTank.NotAdmin.selector, deployer));
+        t.setGlobalDailyCap(5 ether);
+        vm.prank(d.timelock);
+        t.setGlobalDailyCap(0.2 ether);
+        // verify flags drift and a pause
+        o.gasTank = TANK_JSON;
+        assertEq(_verify(o, d), 1, "global cap drift");
+        vm.prank(guardian);
+        t.pause();
+        assertEq(_verify(o, d), 2, "and paused");
+    }
+
+    function test_gasTank_topsUpAServiceFromTheTreasuryFunding() public {
+        Opts memory o = _mainnetOpts();
+        o.gasTank = TANK_JSON;
+        (DeployMainnet.Deployed memory d,) = _deployAndVerify(o, "tank-topup");
+        vm.deal(treasury, 1 ether);
+        vm.prank(treasury);
+        (bool ok,) = d.gasTank.call{value: 0.5 ether}("");
+        assertTrue(ok);
+        vm.deal(markSigner, 0.0001 ether);
+        uint256 sent = GasTank(payable(d.gasTank)).topUp(markSigner);
+        assertEq(sent, 0.01 ether - 0.0001 ether);
+        assertEq(markSigner.balance, 0.01 ether);
+    }
+
+    function test_gasTank_absent_means_no_tank() public {
+        (DeployMainnet.Deployed memory d, uint256 failures) = _deployAndVerify(_mainnetOpts(), "no-tank");
+        assertEq(failures, 0);
+        assertEq(d.gasTank, address(0));
+    }
+
+    function test_refuses_gasTank_beyond_the_ceilings_or_inverted() public {
+        Opts memory o = _mainnetOpts();
+        o.gasTank = "{\"floorWei\":\"10000000000000000\",\"targetWei\":\"10000000000000000\",\"perAddressDailyCapWei\":\"20000000000000000\",\"globalDailyCapWei\":\"100000000000000000\"}";
+        _expectValidateRevert(o, "input: gasTank floor must be > 0 and < target");
+        o.gasTank = "{\"floorWei\":\"2000000000000000\",\"targetWei\":\"2000000000000000000\",\"perAddressDailyCapWei\":\"2000000000000000000\",\"globalDailyCapWei\":\"100000000000000000\"}";
+        _expectValidateRevert(o, "input: gasTank.targetWei > 1 ether");
+        o.gasTank = "{\"floorWei\":\"2000000000000000\",\"targetWei\":\"10000000000000000\",\"perAddressDailyCapWei\":\"5000000000000000\",\"globalDailyCapWei\":\"100000000000000000\"}";
+        _expectValidateRevert(o, "input: gasTank.perAddressDailyCapWei must be in [target, 2 ether]");
+        o.gasTank = "{\"floorWei\":\"2000000000000000\",\"targetWei\":\"10000000000000000\",\"perAddressDailyCapWei\":\"20000000000000000\",\"globalDailyCapWei\":\"6000000000000000000\"}";
+        _expectValidateRevert(o, "input: gasTank.globalDailyCapWei must be in (0, 5 ether]");
     }
 
     function test_verify_flags_a_missing_service_role() public {
@@ -1057,6 +1129,8 @@ contract DeployMainnetTest is Test {
                 vm.toString(d.insurancePool),
                 "\",\"insurancePoolImplementation\":\"",
                 vm.toString(d.insurancePoolImpl),
+                "\",\"gasTank\":\"",
+                vm.toString(d.gasTank),
                 "\"}}"
             )
         );
@@ -1089,7 +1163,8 @@ contract DeployMainnetTest is Test {
     function _json(Opts memory o) internal view returns (string memory) {
         string memory a = string.concat("{", _jsonHead(o), _jsonRoles(o), _jsonOracle(o), _jsonExternals(o));
         string memory b = string.concat(_jsonBkrn(o), _jsonMarkets(o), _jsonRoutes(o));
-        return string.concat(a, b, _jsonParams(o), _jsonBuyback(o), "}");
+        string memory tank = bytes(o.gasTank).length == 0 ? "" : string.concat(",\"gasTank\":", o.gasTank);
+        return string.concat(a, b, _jsonParams(o), _jsonBuyback(o), tank, "}");
     }
 
     function _jsonHead(Opts memory o) internal view returns (string memory) {

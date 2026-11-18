@@ -832,6 +832,36 @@ Plus A10 invariants: redemption never permission-gated; waterfall conservation (
 NAV + backstop cover after every applyMark, modulo credited flows); mandate bounds (engine pool
 |net exposure| ≤ maxInventoryUsd always).
 
+### 2.12 GasTank [A-core] (2026-11, NEW)
+
+An ETH reserve the treasury funds and that tops up the protocol's service wallets (mark signer, risk, ops-venue, jury,
+keeper, oracle signer) when one runs low, so a wallet never goes dry unnoticed on mainnet (there is no gas keeper there:
+`scripts/gas-keeper.ts` is a test-chain tool). Not upgradeable, owner-less: roles come from `BookrunnerConfig`.
+
+- **Allow-list (timelock):** `setService(wallet, floor, target, dailyCap)` / `removeService`, `setGlobalDailyCap`. Hard
+  ceilings inside the contract: target <= 1 ETH, wallet cap <= 2 ETH, global cap <= 5 ETH, at most 32 wallets.
+- **`topUp(wallet)` (anyone; the waterfall keeper runs it):** only while `wallet.balance < floor`; sends
+  `min(target - balance, wallet cap left today, global cap left today, tank balance)`; reverts `AboveFloor`,
+  `CapReached(wallet, global)`, `TankEmpty`, `IsPaused`. Days are fixed UTC buckets (a caller timing both sides of
+  midnight can draw at most 2x a cap). Effects (counters, event) come before the transfer, which is the last statement
+  and gets a bounded gas stipend; `nonReentrant` (transient); a recipient that rejects the ETH reverts the whole call.
+- **Pause and money:** the GUARDIAN or the timelock pauses; only the timelock lifts the pause, and only the timelock
+  `withdraw`s. There are no arbitrary calls and no token handling (`receive()` is the only way in).
+- **Views for the keeper and alerts:** `services()`, `serviceInfo(wallet)`, `topUpQuote(wallet)` = (amount, reason: 0
+  sendable, 1 paused / empty / unlisted, 2 at or above the floor, 3 own cap used, 4 global cap used), `globalSentToday()`.
+- **Off-chain:** `services/waterfall/src/gasTankKeeper.ts` (every `WATERFALL_GAS_TANK_INTERVAL_SECONDS`, default 300:
+  `services()` + one batched `topUpQuote` read, `topUp` for each wallet the tank would pay, per-wallet cooldown on a
+  failure) and `services/alerts/src/rules-gas.ts` (`gas_tank_low`, `gas_tank_cap_hit`, `gas_tank_paused`).
+- **Deploy:** optional `gasTank` object of the deploy input (floor / target / per-wallet cap / global cap, the mainnet
+  first values 0.002 / 0.01 / 0.02 / 0.1 ETH, owner-adjustable afterwards); `DeployMainnet` lists every `roles.*` wallet
+  and `oracle.signers[]` signer while the deployer is still the timelock, records `contracts.gasTank`; `VerifyHandover`
+  checks the wallets, the caps and that the tank is not paused. The deployer is not listed (it holds nothing after the
+  handover). The tank starts empty: the treasury sends the ETH (RUNBOOK "Gas tank").
+- **Limits (accepted):** the keeper wallet is itself a listed wallet and also the sender of `topUp`; if it ever has no
+  ETH at all, anyone else can call `topUp` for it (permissionless), and `gas_tank_*` / `role_balance_low` page first.
+  The tank does not bound what a wallet spends, only what it gets per day; a wallet that is compromised and drains
+  itself is refilled at most up to its daily cap (the timelock removes it, the GUARDIAN pauses the tank).
+
 ---
 
 ## 3. Flows (end to end)

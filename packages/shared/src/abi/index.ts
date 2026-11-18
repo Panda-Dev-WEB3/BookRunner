@@ -9,6 +9,7 @@ export { markRegistryAbi } from "./MarkRegistry";
 export { revenueRouterAbi } from "./RevenueRouter";
 export { bookAbi } from "./Book";
 export { insurancePoolAbi } from "./InsurancePool";
+export { gasTankAbi } from "./GasTank";
 export { trancheAbi } from "./Tranche";
 export { underwritingVaultAbi } from "./UnderwritingVault";
 export { marketCharterAbi } from "./MarketCharter";

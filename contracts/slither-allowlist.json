@@ -373,6 +373,16 @@
     },
     {
       "check": "arbitrary-send-eth",
+      "target": "GasTank.topUp",
+      "reason": "the recipient is not caller-chosen: topUp pays only a wallet the timelock allow-listed (NotListed otherwise), only while it is below its floor, never above its target / daily cap / the global cap, with counters updated before the transfer (nonReentrant, bounded gas)"
+    },
+    {
+      "check": "arbitrary-send-eth",
+      "target": "GasTank.withdraw",
+      "reason": "config admin (timelock) only: moves the tank's ETH to the governance-chosen treasury address"
+    },
+    {
+      "check": "arbitrary-send-eth",
       "target": "BkrnV4Swapper.sweepNative",
       "reason": "config admin (timelock) only: sends ETH that was forced into the swapper (selfdestruct / coinbase) to a governance-chosen address; a swap never leaves ETH"
     },

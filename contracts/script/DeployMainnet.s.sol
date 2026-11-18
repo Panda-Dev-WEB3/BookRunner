@@ -28,6 +28,7 @@ import {PoolEngine} from "../src/PoolEngine.sol";
 import {PoolEngineAdapter} from "../src/PoolEngineAdapter.sol";
 import {OrderlyAdapter} from "../src/OrderlyAdapter.sol";
 import {InsurancePool} from "../src/InsurancePool.sol";
+import {GasTank} from "../src/GasTank.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {BRTypes} from "../src/interfaces/BRTypes.sol";
 import {IStockTokenRegistry} from "../src/interfaces/IStockTokenRegistry.sol";
@@ -75,6 +76,7 @@ contract DeployMainnet is MainnetInput {
         address factory;
         address insurancePool; // ERC1967 proxy (2026-10)
         address insurancePoolImpl;
+        address gasTank; // 2026-11 (0 = the input has no `gasTank`)
         bool bkrnDeployed;
         uint256 startBlock;
     }
@@ -105,6 +107,7 @@ contract DeployMainnet is MainnetInput {
         _deployCore();
         _setHedgeRoutes();
         _deployVenuesAndGovernance();
+        _deployGasTank();
         _setParams();
         _registerImplementations();
         _registerOracleSigners();
@@ -248,6 +251,20 @@ contract DeployMainnet is MainnetInput {
         p.setParam(p.PARAM_MIN_OWN_CAPITAL_BPS(), poolIn.minOwnCapitalBps);
         // a new length is pending until the (empty) queue next rolls; only set it when it differs
         if (poolIn.epochLength != 7 days) p.setParam(p.PARAM_EPOCH_LENGTH(), poolIn.epochLength);
+    }
+
+    /// @dev GasTank (2026-11): holds ETH the treasury sends it after the deployment (RUNBOOK) and tops up the service
+    ///      wallets within the caps of the input. It has no owner: roles come from the config, so the handover also
+    ///      hands it over. The allow-list and caps are set here while the deployer is still the timelock.
+    function _deployGasTank() internal {
+        if (!tankIn.set) return;
+        GasTank t = new GasTank(d.config);
+        d.gasTank = address(t);
+        address[] memory svc = _gasTankServices();
+        for (uint256 i; i < svc.length; ++i) {
+            t.setService(svc[i], tankIn.floorWei, tankIn.targetWei, tankIn.perAddressDailyCapWei);
+        }
+        t.setGlobalDailyCap(tankIn.globalDailyCapWei);
     }
 
     function _setParams() internal {
@@ -416,6 +433,7 @@ contract DeployMainnet is MainnetInput {
         vm.serializeAddress(c, "hedgeExecutor", d.hedgeExecutor);
         vm.serializeAddress(c, "insurancePool", d.insurancePool);
         vm.serializeAddress(c, "insurancePoolImplementation", d.insurancePoolImpl);
+        if (d.gasTank != address(0)) vm.serializeAddress(c, "gasTank", d.gasTank);
         vm.serializeAddress(c, "bookImplementation", d.bookImpl);
         vm.serializeAddress(c, "bookLogic", d.bookLogic);
         vm.serializeAddress(c, "uniswapV3Factory", ext.univ3Factory);

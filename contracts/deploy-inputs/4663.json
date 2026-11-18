@@ -223,6 +223,14 @@
     "stakingRewardsDuration": 604800,
     "oracleMinSources": 1
   },
+  "gasTank": {
+    "ownerAdjustable": true,
+    "note": "OWNER-ADJUSTABLE: conservative first values. After the deploy the timelock changes any of them (GasTank.setService per wallet, setGlobalDailyCap); the deploy lists every roles.* wallet and oracle.signers[].signer (the deployer holds nothing after the handover and is not listed). The treasury funds the tank with ETH after the deploy (RUNBOOK).",
+    "floorWei": "2000000000000000",
+    "targetWei": "10000000000000000",
+    "perAddressDailyCapWei": "20000000000000000",
+    "globalDailyCapWei": "100000000000000000"
+  },
   "buyback": {
     "poolFee": 3000,
     "refBkrnPerUsdcWad": "20000000000000000000",

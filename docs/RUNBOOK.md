@@ -799,6 +799,31 @@ Migration `0004_trade_history` (applied by update.sh) adds two tables (ARCHITECT
   `ALERT_FORGED_MESSAGES_WINDOW_SECONDS`: nothing acted on them, but something can write to Redis), `agent_no_desk_key`
   and `risk_state_unverified` (above).
 
+### Gas tank (2026-11)
+
+The service wallets (`roles.markSigner`, `risk`, `opsVenue`, `jury`, `keeper` and the oracle signer) are topped up from
+the on-chain GasTank (`contracts.gasTank` of the deployment record); there is no gas keeper on mainnet and the operator
+no longer tops wallets up by hand.
+
+1. **Fund it (treasury, once after the deploy and whenever `gas_tank_low` fires):** send ETH to the tank address from
+   the treasury multisig (a plain transfer, `receive()` accepts it). A sensible first balance is 0.2-0.5 ETH: the
+   global cap is 0.1 ETH a day and the six wallets burn far less than that in normal operation.
+2. **Check:** `cast call <tank> "services()(address[])"`, `cast call <tank> "serviceInfo(address)" <wallet>` (floor, target,
+   cap, sent today), `cast call <tank> "topUpQuote(address)(uint256,uint8)" <wallet>` (what a top-up would send and why
+   not), `cast balance <tank>`. The waterfall logs `gas tank topped up a service wallet` per top-up.
+3. **Alerts (services/alerts):** `gas_tank_low` (balance below `ALERT_GAS_TANK_MIN_ETH`, 0.05: send ETH; critical below a
+   quarter or empty), `gas_tank_cap_hit:<wallet>` (a wallet is below its floor and a daily cap is used up: it resumes at
+   00:00 UTC; raise the cap through the timelock if the burn is real, investigate if it is not), `gas_tank_paused`
+   (critical while a wallet is below its floor), next to `role_balance_low` (set `ALERT_BALANCE_MIN_ETH` at the floor).
+4. **Change the numbers (timelock, 48 h):** `setService(wallet, floor, target, dailyCap)` per wallet (adds a new wallet
+   too: a rotated key must be added, the old one removed with `removeService`), `setGlobalDailyCap(cap)`. Bounds:
+   floor > 0, floor < target <= 1 ETH, target <= wallet cap <= 2 ETH, global cap <= 5 ETH, at most 32 wallets. The deploy
+   input values are conservative first values (0.002 / 0.01 / 0.02 / 0.1 ETH) and OWNER-ADJUSTABLE.
+5. **Incident (a wallet is draining, or the tank is misbehaving):** the GUARDIAN `pause()`s the tank at once (stops all
+   top-ups); the timelock `removeService`s the wallet, `withdraw`s to the treasury, and only the timelock `unpause`s.
+6. **Services:** `WATERFALL_GAS_TANK_ENABLED` (default on) and `WATERFALL_GAS_TANK_INTERVAL_SECONDS` (default 300) of
+   the waterfall service; the job needs `contracts.gasTank` in the deployment record and does nothing without it.
+
 ## Rollback and incidents (mainnet)
 
 Fast levers (no delay): the GUARDIAN's `config.setNewBooksPaused(true)` (new charters / books / deposits stop;

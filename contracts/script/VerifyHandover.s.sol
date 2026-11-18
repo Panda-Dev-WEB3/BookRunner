@@ -18,6 +18,7 @@ import {RiskCommittee} from "../src/RiskCommittee.sol";
 import {OrderlyAdapter} from "../src/OrderlyAdapter.sol";
 import {PoolEngineAdapter} from "../src/PoolEngineAdapter.sol";
 import {InsurancePool} from "../src/InsurancePool.sol";
+import {GasTank} from "../src/GasTank.sol";
 import {BRTypes} from "../src/interfaces/BRTypes.sol";
 import {IStockTokenRegistry} from "../src/interfaces/IStockTokenRegistry.sol";
 import {IBkrnV4Swapper} from "../src/interfaces/IBkrnV4Swapper.sol";
@@ -93,6 +94,7 @@ contract VerifyHandover is MainnetInput {
         _checkImplementations();
         _checkParams();
         _checkInsurancePool(deploymentJson);
+        _checkGasTank(deploymentJson);
         _checkEconomics();
         _checkBuybackV4();
         _checkOracleAndMarkets();
@@ -429,6 +431,27 @@ contract VerifyHandover is MainnetInput {
         );
         (bool dp, bool ap) = ip.paused();
         _row(!dp && !ap, "insurance pool not paused (launch-ready)");
+    }
+
+    /// @dev 2026-11 GasTank (only when the input has a `gasTank` object): deployed, bound to this config (its roles are
+    ///      the config's, so the handover also hands it over), every service wallet of the input listed with the input
+    ///      floor / target / cap, the global cap as input, not paused. Funding is a post-deploy treasury action.
+    function _checkGasTank(string memory j) internal {
+        if (!tankIn.set) return;
+        address t = j.readAddressOr(".contracts.gasTank", address(0));
+        _row(t.code.length > 0, "gas tank deployed (deployment record, with code)");
+        if (t.code.length == 0) return;
+        GasTank g = GasTank(payable(t));
+        _row(address(g.config()) == address(cfg), "gas tank reads this config");
+        address[] memory svc = _gasTankServices();
+        bool ok = g.services().length == svc.length;
+        for (uint256 i; ok && i < svc.length; ++i) {
+            (bool listed, uint256 floor, uint256 target, uint256 cap,) = g.serviceInfo(svc[i]);
+            ok = listed && floor == tankIn.floorWei && target == tankIn.targetWei && cap == tankIn.perAddressDailyCapWei;
+        }
+        _row(ok, "gas tank: every service wallet listed with the input floor / target / daily cap");
+        _row(g.globalDailyCap() == tankIn.globalDailyCapWei, "gas tank global daily cap == input");
+        _row(!g.paused(), "gas tank not paused");
     }
 
     function _checkEconomics() internal {

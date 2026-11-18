@@ -65,8 +65,9 @@ cd /opt/bookrunner/app && sudo -u bookrunner HOME=/opt/bookrunner sh -c 'AWS_REG
 ```
 
 (repeat per role; the addresses go into `roles.*` / `oracle.signers[].signer` of the deploy input). Fund each
-address with a small amount of ETH for gas: there is no gas keeper on mainnet; the operator tops up from the
-treasury (alert on balance, RUNBOOK "Operations").
+address with a small amount of ETH for gas, once. From then on the on-chain GasTank tops every listed wallet up from
+the treasury-funded reserve (the waterfall's gas-tank duty, `WATERFALL_GAS_TANK_*`; RUNBOOK "Gas tank"); there is
+still no gas keeper process on mainnet. Alerts: `role_balance_low`, `gas_tank_low`, `gas_tank_cap_hit`.
 
 A role may instead use `<ROLE>_PRIVATE_KEY` (local key in the env file) — allowed, not recommended; never two
 roles with one key, never both a key and a KMS id for one role.

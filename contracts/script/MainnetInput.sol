@@ -127,6 +127,18 @@ abstract contract MainnetInput is Script {
         uint256 minOwnCapitalBps; // pool audit 2026-10-23 B-M2 (default 5000: the tranches raise at least half the IF)
     }
 
+    /// @notice GasTank (2026-11, optional `gasTank` input object; absent = no tank is deployed). Every service wallet of
+    ///         `roles.*` and `oracle.signers[]` is allow-listed with the same floor / target / daily cap; the deployer
+    ///         (a one-shot key that holds nothing after the handover) is not a service wallet. All values are
+    ///         owner-adjustable after the deploy through the timelock (GasTank.setService / setGlobalDailyCap).
+    struct GasTankIn {
+        bool set;
+        uint256 floorWei; // top-up when a wallet is below this
+        uint256 targetWei; // a top-up fills the wallet to this
+        uint256 perAddressDailyCapWei; // most ETH one wallet may draw per UTC day
+        uint256 globalDailyCapWei; // most ETH the tank may send per UTC day, all wallets
+    }
+
     struct Buyback {
         uint256 poolFee;
         uint256 refBkrnPerUsdcWad;
@@ -209,6 +221,7 @@ abstract contract MainnetInput is Script {
     Params internal prm;
     Buyback internal bb;
     PoolIn internal poolIn;
+    GasTankIn internal tankIn;
     address[3] internal committeeMembers;
     address[] internal markSigners;
     address[] internal riskHolders;
@@ -283,6 +296,7 @@ abstract contract MainnetInput is Script {
         _loadParams(json);
         _loadBuyback(json);
         _loadPool(json);
+        _loadGasTank(json);
         _loadRoles(json);
         _loadOracle(json);
         _loadStocks(json);
@@ -354,6 +368,15 @@ abstract contract MainnetInput is Script {
         poolIn.epochLength = json.readUintOr(".insurancePool.epochLength", 7 days);
         poolIn.processGrace = json.readUintOr(".insurancePool.processGrace", 1 days);
         poolIn.minOwnCapitalBps = json.readUintOr(".insurancePool.minOwnCapitalBps", 5000);
+    }
+
+    function _loadGasTank(string memory json) private {
+        if (!vm.keyExistsJson(json, ".gasTank")) return;
+        tankIn.set = true;
+        tankIn.floorWei = json.readUint(".gasTank.floorWei");
+        tankIn.targetWei = json.readUint(".gasTank.targetWei");
+        tankIn.perAddressDailyCapWei = json.readUint(".gasTank.perAddressDailyCapWei");
+        tankIn.globalDailyCapWei = json.readUint(".gasTank.globalDailyCapWei");
     }
 
     function _loadBuyback(string memory json) private {
@@ -530,6 +553,7 @@ abstract contract MainnetInput is Script {
         _validateRoles();
         _validateOracle(mainnet);
         _validateParams(mainnet);
+        _validateGasTank();
         _validateBuybackReference();
         _validateBuybackV4();
         _validateMarkets(mainnet);
@@ -647,6 +671,47 @@ abstract contract MainnetInput is Script {
         require(poolIn.epochLength >= 1 days && poolIn.epochLength <= 30 days, "input: insurancePool.epochLength");
         require(poolIn.processGrace >= 1 hours && poolIn.processGrace <= 7 days, "input: insurancePool.processGrace");
         require(poolIn.minOwnCapitalBps <= 20_000, "input: insurancePool.minOwnCapitalBps > 20000");
+    }
+
+    /// @dev GasTank.setService / setGlobalDailyCap bounds (GasTank.MAX_TARGET 1 ether, MAX_SERVICE_DAILY 2 ether,
+    ///      MAX_GLOBAL_DAILY 5 ether); the deploy sets them while the deployer is still the timelock.
+    function _validateGasTank() private view {
+        if (!tankIn.set) return;
+        require(tankIn.floorWei > 0 && tankIn.floorWei < tankIn.targetWei, "input: gasTank floor must be > 0 and < target");
+        require(tankIn.targetWei <= 1 ether, "input: gasTank.targetWei > 1 ether");
+        require(
+            tankIn.perAddressDailyCapWei >= tankIn.targetWei && tankIn.perAddressDailyCapWei <= 2 ether,
+            "input: gasTank.perAddressDailyCapWei must be in [target, 2 ether]"
+        );
+        require(tankIn.globalDailyCapWei > 0 && tankIn.globalDailyCapWei <= 5 ether, "input: gasTank.globalDailyCapWei must be in (0, 5 ether]");
+        require(_gasTankServices().length <= 32, "input: gasTank: more than 32 service wallets");
+    }
+
+    /// @dev The distinct service wallets the tank tops up: every role holder (mark signer, risk, ops-venue, jury,
+    ///      keeper) and every oracle signer.
+    function _gasTankServices() internal view returns (address[] memory out) {
+        uint256 n = markSigners.length + riskHolders.length + opsVenueHolders.length + juryHolders.length
+            + keeperHolders.length + oracleSigners.length;
+        address[] memory all = new address[](n);
+        uint256 k;
+        for (uint256 i; i < markSigners.length; ++i) all[k++] = markSigners[i];
+        for (uint256 i; i < riskHolders.length; ++i) all[k++] = riskHolders[i];
+        for (uint256 i; i < opsVenueHolders.length; ++i) all[k++] = opsVenueHolders[i];
+        for (uint256 i; i < juryHolders.length; ++i) all[k++] = juryHolders[i];
+        for (uint256 i; i < keeperHolders.length; ++i) all[k++] = keeperHolders[i];
+        for (uint256 i; i < oracleSigners.length; ++i) all[k++] = oracleSigners[i].signer;
+        out = new address[](n);
+        uint256 m;
+        for (uint256 i; i < n; ++i) {
+            bool dup;
+            for (uint256 j; j < m; ++j) {
+                if (out[j] == all[i]) dup = true;
+            }
+            if (!dup) out[m++] = all[i];
+        }
+        assembly {
+            mstore(out, m)
+        }
     }
 
     /// @dev BkrnFeeRouter reference source (VERIFY U5). TWAP needs a pool of the pre-existing BKRN (a BKRN the
