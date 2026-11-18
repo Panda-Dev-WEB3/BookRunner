@@ -22,6 +22,7 @@ import { RedeemLogIndex, UnionCandidates } from "./adapters/redemptions";
 import { DbRedeemCandidates, PgSettlementStore } from "./adapters/store";
 import { BullVenueOps } from "./adapters/venue-ops";
 import { BuybackRunner } from "./buyback";
+import { EthReferenceRunner } from "./ethReferenceKeeper";
 import { GasTankRunner } from "./gasTankKeeper";
 import { PoolKeeperRunner } from "./poolKeeper";
 import { liquidationEthUsd, loadWaterfallConfig } from "./config";
@@ -43,8 +44,6 @@ export const settleJobId = (bookId: number, period: number) => `settle-${bookId}
 
 export async function main() {
   const cfg = loadWaterfallConfig();
-  // review I-4: refuse to start on mainnet without an ETH/USD price for the liquidation gas policy
-  const liqEthUsd = liquidationEthUsd(cfg);
   const log = createLogger("waterfall", cfg.LOG_LEVEL);
   const ac = new AbortController();
   const cleanups: Array<() => Promise<unknown>> = [];
@@ -57,6 +56,10 @@ export async function main() {
   log.info({ chainId: cfg.CHAIN_ID, rpc: redactUrl(cfg.RPC_URL) }, "waterfall service starting");
   const deployment = await waitForDeployment({ file: cfg.DEPLOYMENT_FILE, log, signal: ac.signal, publicClient: pc });
   if (!deployment) return;
+  // review I-4: refuse to start on mainnet without an ETH/USD price for the liquidation gas policy, unless the deployment
+  // has a BuybackGuard (tech update #9): its on-chain WETH / USDG TWAP then supplies it
+  const hasGuard = !!deployment.contracts.buybackGuard && !/^0x0{40}$/i.test(deployment.contracts.buybackGuard);
+  const liqEthUsd = liquidationEthUsd(cfg, hasGuard);
 
   const keeperAccount = await roleSigner("keeper"); // local key or KMS (shared/signer.ts)
   const wallet = walletClientFor(cfg.CHAIN_ID, cfg.RPC_URL, keeperAccount);
@@ -145,8 +148,21 @@ export async function main() {
     },
     cooldowns: new Cooldowns(),
     cooldownMs: cfg.WATERFALL_ACTION_COOLDOWN_SECONDS * 1000,
+    chunkSpacingMs: cfg.WATERFALL_BUYBACK_CHUNK_SECONDS * 1000,
     log,
   });
+
+  // tech update #9: the on-chain ETH reference (BuybackGuard): poked every few minutes; also the liquidation gas policy ETH/USD
+  const ethRef = new EthReferenceRunner({ chain, cooldowns: new Cooldowns(), cooldownMs: cfg.WATERFALL_ACTION_COOLDOWN_SECONDS * 1000, everySec: cfg.WATERFALL_ETH_REF_INTERVAL_SECONDS, log });
+  let ethRefAt = Number.NEGATIVE_INFINITY;
+  /** the liquidation keeper's gas policy (mutable: its ETH/USD follows the on-chain reference when the guard has one) */
+  const liqGas = {
+    ethUsdWad: liqEthUsd,
+    marginUsd: cfg.WATERFALL_LIQ_GAS_MARGIN_USD,
+    maxTxWei: cfg.WATERFALL_LIQ_MAX_TX_COST_ETH,
+    hourlyWei: cfg.WATERFALL_LIQ_HOURLY_GAS_ETH,
+    badDebtOverrideUsd: cfg.WATERFALL_LIQ_BAD_DEBT_OVERRIDE_USD,
+  };
 
   const poolKeeper = new PoolKeeperRunner({ chain, cooldowns: new Cooldowns(), cooldownMs: cfg.WATERFALL_ACTION_COOLDOWN_SECONDS * 1000, log });
 
@@ -167,6 +183,14 @@ export async function main() {
       // protocol-level keeper duties (never throw: failures are logged and retried after the cooldown), at most every
       // WATERFALL_PROTOCOL_DUTY_SECONDS
       const nowMs = Date.now();
+      // tech update #9: the on-chain ETH reference, its own cadence, before the buyback that may price with it
+      if (cfg.WATERFALL_KEEPER_ENABLED && cfg.WATERFALL_ETH_REF_ENABLED && hasGuard && !signal.aborted && nowMs - ethRefAt >= cfg.WATERFALL_ETH_REF_INTERVAL_SECONDS * 1000) {
+        ethRefAt = nowMs;
+        await ethRef.tick();
+        const onChain = ethRef.valueWad;
+        // 100..100,000 USD per ETH is the guard's own sane range: anything else would be a broken read, never used
+        if (onChain !== null && onChain >= 100n * 10n ** 18n && onChain <= 100_000n * 10n ** 18n) liqGas.ethUsdWad = onChain;
+      }
       // 2026-11 GasTank: its own cadence (a few minutes), independent of the protocol-duty interval
       if (cfg.WATERFALL_KEEPER_ENABLED && cfg.WATERFALL_GAS_TANK_ENABLED && !signal.aborted && nowMs - gasTankAt >= cfg.WATERFALL_GAS_TANK_INTERVAL_SECONDS * 1000) {
         gasTankAt = nowMs;
@@ -229,13 +253,7 @@ export async function main() {
         }
         return marketBook.get(marketId) ?? null;
       },
-      gas: {
-        ethUsdWad: liqEthUsd,
-        marginUsd: cfg.WATERFALL_LIQ_GAS_MARGIN_USD,
-        maxTxWei: cfg.WATERFALL_LIQ_MAX_TX_COST_ETH,
-        hourlyWei: cfg.WATERFALL_LIQ_HOURLY_GAS_ETH,
-        badDebtOverrideUsd: cfg.WATERFALL_LIQ_BAD_DEBT_OVERRIDE_USD,
-      },
+      gas: liqGas,
       keeper: keeperAccount.address,
       log: log.child({ duty: "liquidation" }),
       intervalMs: cfg.WATERFALL_LIQ_INTERVAL_SECONDS * 1000,

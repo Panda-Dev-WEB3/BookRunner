@@ -81,6 +81,17 @@ export const waterfallEnvShape = {
   WATERFALL_LIQ_MAX_BATCHES: z.coerce.number().int().positive().max(50).default(10),
   /** On-chain reconciliation of every engine_positions row (size 0 included) this often; 0 = off. */
   WATERFALL_LIQ_RECONCILE_SECONDS: z.coerce.number().int().min(0).max(86_400).default(600),
+  /**
+   * Tech update #9: after a buyback chunk that left more pending (the BuybackGuard depth cap bounds ONE swap's price impact),
+   * the next chunk waits this long so arbitrage can restore the BKRN price. 0 = no spacing.
+   */
+  WATERFALL_BUYBACK_CHUNK_SECONDS: z.coerce.number().min(0).max(86_400).default(300),
+  /**
+   * Tech update #9 BuybackGuard: poke the on-chain ETH reference (the WETH / USDG pool TWAP; replaces the ETH/USD env value) at
+   * most this often. The contract refuses an update sooner than 300 s after the last one.
+   */
+  WATERFALL_ETH_REF_ENABLED: zBool(true),
+  WATERFALL_ETH_REF_INTERVAL_SECONDS: z.coerce.number().min(60).max(86_400).default(300),
   /** Slippage tolerance below the buyback router's quote for minBkrnOut. */
   WATERFALL_BUYBACK_SLIPPAGE_BPS: z.coerce.number().int().min(0).max(9_999).default(100),
   /** Uniswap v3 fee tier passed ONLY to a legacy (pre-A5-02) BkrnFeeRouter; the current router pins it on-chain. */
@@ -111,16 +122,19 @@ const MAINNET_CHAIN_ID = 4663;
 
 /**
  * Review I-4: ETH/USD (WAD) of the liquidation gas policy: WATERFALL_LIQ_ETH_USD, else WATERFALL_ETH_USD. On mainnet with
- * the keeper on, neither set = refusal to start: the policy could not tell a liquidation that pays from one that does
- * not (docs/RUNBOOK.md). The stack reads no ETH/USD feed today (the oracle signs stock prices; its DEX confirm pools are
- * Stock Token / USDG), so the price is configured, not derived; outside 100..100,000 USD it is refused as a typo.
- * Elsewhere 0 = caps only.
+ * the keeper on, neither set = refusal to start, unless the deployment has a BuybackGuard (`onChainReference`, tech update
+ * #9): its on-chain WETH / USDG TWAP then supplies the price (the env value is only the starting value and the fallback
+ * while the guard has none), so the operator no longer sets or refreshes a price by hand. Outside 100..100,000 USD an
+ * env value is refused as a typo. Elsewhere 0 = caps only.
  */
-export function liquidationEthUsd(cfg: Pick<WaterfallConfig, "CHAIN_ID" | "WATERFALL_LIQ_ETH_USD" | "WATERFALL_ETH_USD" | "WATERFALL_KEEPER_ENABLED" | "WATERFALL_LIQ_ENABLED">): bigint {
+export function liquidationEthUsd(
+  cfg: Pick<WaterfallConfig, "CHAIN_ID" | "WATERFALL_LIQ_ETH_USD" | "WATERFALL_ETH_USD" | "WATERFALL_KEEPER_ENABLED" | "WATERFALL_LIQ_ENABLED">,
+  onChainReference = false,
+): bigint {
   const v = cfg.WATERFALL_LIQ_ETH_USD > 0n ? cfg.WATERFALL_LIQ_ETH_USD : cfg.WATERFALL_ETH_USD;
   if (!(cfg.WATERFALL_KEEPER_ENABLED && cfg.WATERFALL_LIQ_ENABLED)) return v;
-  if (v === 0n && cfg.CHAIN_ID === MAINNET_CHAIN_ID)
-    throw new Error("WATERFALL_LIQ_ETH_USD is required on mainnet (USD per ETH, e.g. 3000): the liquidation keeper's gas policy compares cost and reward with it (or set WATERFALL_LIQ_ENABLED=false)");
+  if (v === 0n && cfg.CHAIN_ID === MAINNET_CHAIN_ID && !onChainReference)
+    throw new Error("WATERFALL_LIQ_ETH_USD is required on mainnet without a BuybackGuard (USD per ETH, e.g. 3000): the liquidation keeper's gas policy compares cost and reward with it (or set WATERFALL_LIQ_ENABLED=false)");
   const WAD = 10n ** 18n;
   if (v !== 0n && (v < 100n * WAD || v > 100_000n * WAD)) throw new Error("WATERFALL_LIQ_ETH_USD / WATERFALL_ETH_USD out of range (100..100000 USD per ETH)");
   return v;

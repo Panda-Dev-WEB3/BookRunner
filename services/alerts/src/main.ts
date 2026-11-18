@@ -4,7 +4,7 @@
 //   bun src/main.ts --test     # send one test message through every configured channel, then exit
 // Reads only: Postgres, Redis, the chain (no key, no transaction), the API's and the oracle's /health. Holds no
 // signing key.
-import { bkrnFeeRouterAbi, bookrunnerConfigAbi, gasTankAbi, insurancePoolAbi } from "@bookrunner/shared/abi";
+import { bkrnFeeRouterAbi, bookrunnerConfigAbi, buybackGuardAbi, gasTankAbi, insurancePoolAbi } from "@bookrunner/shared/abi";
 import { chainFor, multicall3For } from "@bookrunner/shared/chains";
 import { tryLoadDeployment } from "@bookrunner/shared/deployments";
 import { createLogger } from "@bookrunner/shared/logger";
@@ -91,6 +91,26 @@ const chain: ChainPort = {
     const dep = tryLoadDeployment(cfg.deploymentFile);
     if (!dep?.contracts.feeRouter) return null;
     return Number(await client.readContract({ address: dep.contracts.feeRouter, abi: bkrnFeeRouterAbi, functionName: "v4BlockedHop" }));
+  },
+  buybackDepthCap: async () => {
+    const dep = tryLoadDeployment(cfg.deploymentFile);
+    const guard = dep?.contracts.buybackGuard;
+    if (!guard) return null;
+    return client.readContract({ address: guard, abi: buybackGuardAbi, functionName: "maxBuyback" });
+  },
+  ethReference: async () => {
+    const dep = tryLoadDeployment(cfg.deploymentFile);
+    const address = dep?.contracts.buybackGuard;
+    if (!address) return null;
+    const q = { address, abi: buybackGuardAbi } as const;
+    const [pool, ref, storedAt, fallbackExpiry, maxAge] = await Promise.all([
+      client.readContract({ ...q, functionName: "ethPool" }),
+      client.readContract({ ...q, functionName: "ethReference" }),
+      client.readContract({ ...q, functionName: "ethRefAt" }),
+      client.readContract({ ...q, functionName: "fallbackExpiry" }),
+      client.readContract({ ...q, functionName: "ethMaxAge" }),
+    ]);
+    return { address, configured: !/^0x0{40}$/i.test(pool), source: Number(ref[1]), valueWad: ref[0], storedAt: Number(storedAt), fallbackExpiry: Number(fallbackExpiry), maxAgeSec: Number(maxAge) };
   },
   markInterval: async () => {
     if (markIntervalRead && Date.now() - markIntervalRead.at < MARK_INTERVAL_TTL_MS) return markIntervalRead.value;

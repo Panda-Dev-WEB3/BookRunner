@@ -4,6 +4,7 @@ import {
   bkrnFeeRouterAbi,
   bookAbi,
   bookrunnerConfigAbi,
+  buybackGuardAbi,
   gasTankAbi,
   insurancePoolAbi,
   markRegistryAbi,
@@ -23,7 +24,9 @@ import { scanEvents } from "../kit/logs";
 import { type TxSender, describeRevert } from "../kit/tx";
 import type { PoolQueueSnapshot } from "../domain/pool";
 import type { PoolKeeperChain } from "../poolKeeper";
+import type { EthRefSource, EthRefState } from "../domain/ethReference";
 import type { TankSnapshot, TopUpReason } from "../domain/gasTank";
+import type { EthReferenceChain } from "../ethReferenceKeeper";
 import type { GasTankChain } from "../gasTankKeeper";
 import type { BuybackChain, DistributedLog, FeeForwarding, KeeperChain, KeeperSnapshot, SettlementChain, SettlementReceivedLog, SplitParams } from "../ports";
 import { type CandidateSource, pendingShares } from "./redemptions";
@@ -54,7 +57,7 @@ export function premiumIn(ref: BookRef, logs: TransactionReceipt["logs"]): bigin
   return p.reduce((a, l) => a + l.args.amount, 0n);
 }
 
-export class WaterfallChainAdapter implements SettlementChain, KeeperChain, BuybackChain, PoolKeeperChain, GasTankChain {
+export class WaterfallChainAdapter implements SettlementChain, KeeperChain, BuybackChain, PoolKeeperChain, GasTankChain, EthReferenceChain {
   private markInterval: number | null = null;
   private buybackTokens: { usdc: Address; bkrn: Address } | null = null;
   /** Last buybackV4State().venue read this pass (0 = v3). */
@@ -462,6 +465,41 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain, Buyb
     return out.hash;
   }
 
+  // ---------------------------------------------------------------- EthReferenceChain (tech update #9 BuybackGuard)
+  private get buybackGuard(): `0x${string}` | null {
+    const g = this.o.deployment.contracts.buybackGuard;
+    return g && !isAddressEqual(g, zeroAddress) ? g : null;
+  }
+
+  async ethReferenceState(): Promise<EthRefState | null> {
+    const guard = this.buybackGuard;
+    if (!guard) return null;
+    const q = { address: guard, abi: buybackGuardAbi } as const;
+    const [pool, ref, storedAt, fallbackExpiry, block] = await Promise.all([
+      this.pc.readContract({ ...q, functionName: "ethPool" }),
+      this.pc.readContract({ ...q, functionName: "ethReference" }),
+      this.pc.readContract({ ...q, functionName: "ethRefAt" }),
+      this.pc.readContract({ ...q, functionName: "fallbackExpiry" }),
+      this.pc.getBlock(),
+    ]);
+    return {
+      guard,
+      configured: !isAddressEqual(pool, zeroAddress),
+      valueWad: ref[0],
+      source: Number(ref[1]) as EthRefSource,
+      storedAt: Number(storedAt),
+      nowSec: Number(block.timestamp),
+      fallbackExpiry: Number(fallbackExpiry),
+    };
+  }
+
+  async pokeEthReference(): Promise<Hex> {
+    const address = this.buybackGuard;
+    if (!address) throw new Error("no BuybackGuard in the deployment");
+    const out = await this.o.sender.send({ address, abi: buybackGuardAbi, functionName: "pokeEthReference", args: [], label: "buybackGuard.pokeEthReference" });
+    return out.hash;
+  }
+
   // ---------------------------------------------------------------- BuybackChain
   private get feeRouter() {
     return this.o.deployment.contracts.feeRouter;
@@ -544,11 +582,22 @@ export class WaterfallChainAdapter implements SettlementChain, KeeperChain, Buyb
     return referenceSourceName(Number(s));
   }
 
-  async buybackBounds(): Promise<{ legacy: boolean; maxPerCall: bigint }> {
+  async buybackBounds(): Promise<{ legacy: boolean; maxPerCall: bigint; depthCap?: bigint | null }> {
     try {
       const maxPerCall = await this.pc.readContract({ address: this.feeRouter, abi: bkrnFeeRouterAbi, functionName: "maxBuybackPerCall" });
       this.legacyFeeRouter = false;
-      return { legacy: false, maxPerCall };
+      // tech update #9: the guard's depth cap (a router without the guard getter, or none set: no cap). A guard read that
+      // reverts (e.g. the ETH reference is unavailable on a via-ETH route) throws: the executeBuyback would revert too
+      let depthCap: bigint | null = null;
+      const guard = await this.pc.readContract({ address: this.feeRouter, abi: bkrnFeeRouterAbi, functionName: "buybackGuard" }).catch((err) => {
+        if (!isOnChainRevert(err)) throw err;
+        return zeroAddress;
+      });
+      if (!isAddressEqual(guard, zeroAddress)) {
+        const cap = await this.pc.readContract({ address: guard, abi: buybackGuardAbi, functionName: "maxBuyback" });
+        depthCap = cap === 2n ** 256n - 1n ? null : cap;
+      }
+      return { legacy: false, maxPerCall, depthCap };
     } catch (err) {
       // a router deployed before the on-chain price bound has no maxBuybackPerCall(): legacy keeper call
       if (!isOnChainRevert(err)) throw err;

@@ -4,6 +4,7 @@
 import { formatEther } from "viem";
 import type { RuleConfig } from "./config";
 import { HOLD_RULES } from "./rules-holds";
+import { BUYBACK_GUARD_RULES } from "./rules-guard";
 import { GAS_TANK_RULES } from "./rules-gas";
 import { LIQUIDATION_RULES } from "./rules-liquidation";
 import { POOL_RULES } from "./rules-pool";
@@ -608,7 +609,7 @@ export function buyback(s: Snapshot, c: RuleConfig): Condition[] {
   if (hop > 0 && last.value >= c.buybackMinUsd) {
     const which =
       hop === 1
-        ? "the first hop sits past its limit (the direct BKRN pool vs the BKRN reference, or ETH/USDG beyond the ETH reference tolerance: refresh setEthReference)"
+        ? "the first hop sits past its limit (the direct BKRN pool vs the BKRN reference, or ETH/USDG beyond the ETH reference tolerance: with a BuybackGuard the ETH reference follows the pool TWAP, see eth_reference_stale; else refresh setEthReference)"
         : "the ETH -> BKRN pool cannot meet the USDG floor (the BKRN reference is stale or BKRN fell: refresh setBuybackParams / setEthReference)";
     out.push({
       key: "buyback_v4_reference_stale",
@@ -882,6 +883,7 @@ export const RULES = {
   buyback,
   ...POOL_RULES,
   ...GAS_TANK_RULES,
+  ...BUYBACK_GUARD_RULES,
   ...LIQUIDATION_RULES,
   api_health: apiHealth,
   oracle,

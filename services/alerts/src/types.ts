@@ -327,6 +327,22 @@ export interface GasTankSnap {
   }>;
 }
 
+/** The BuybackGuard's ETH reference (tech update #9: the WETH / USDG pool TWAP, else an expiring governance fallback). */
+export interface EthRefSnap {
+  address: string;
+  /** the TWAP pool is configured (ethPool != 0) */
+  configured: boolean;
+  /** BuybackGuard.ethReference(): 0 none in force, 1 the on-chain TWAP (fresh), 2 the unexpired governance fallback */
+  source: number;
+  valueWad: bigint;
+  /** unix s of the last stored TWAP value (0 = never) */
+  storedAt: number;
+  /** unix s the governance fallback expires (0 = none) */
+  fallbackExpiry: number;
+  /** BuybackGuard.ethMaxAge (s) */
+  maxAgeSec: number;
+}
+
 export interface Snapshot {
   now: number; // unix ms
   network: string;
@@ -350,6 +366,13 @@ export interface Snapshot {
    * 2 the ETH -> BKRN hop), 0 none / venue v3; null = not read (no fee router, an old router, a read failure).
    */
   buybackV4BlockedHop?: number | null;
+  /**
+   * BuybackGuard.maxBuyback() in USD (tech update #9: the most one buyback may spend within the price-impact bound); null = no
+   * guard / no depth source / not read. 0 = the BKRN pool has no usable liquidity: buybacks cannot be sent.
+   */
+  buybackDepthCapUsd?: number | null;
+  /** the BuybackGuard ETH reference; null = the deployment has no guard (or no port); undefined = a read failed */
+  ethReference?: EthRefSnap | null;
   api: ApiProbe;
   /** the oracle's /health (per-source health); null = not probed (no oracle URL) */
   oracle: OracleProbe | null;

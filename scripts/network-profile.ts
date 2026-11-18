@@ -179,7 +179,9 @@ export const MAINNET_REQUIRED_ENV = [
   "ORDERLY_BROKER_ID", // builder broker id (VERIFY O7) — must match the input's externals.orderlyBrokerId
   "ORDERLY_BUILDER_KEY_SECRET", // builder ed25519 key (never generated onto disk on mainnet)
   "ANTHROPIC_API_KEY", // charter jury
-  "WATERFALL_LIQ_ETH_USD", // liquidation keeper gas policy (USD per ETH; review I-4, services/waterfall config.ts liquidationEthUsd)
+  // WATERFALL_LIQ_ETH_USD (liquidation keeper gas policy, USD per ETH) is no longer required here (tech update #9): the
+  // BuybackGuard's on-chain WETH / USDG TWAP supplies it; the waterfall itself refuses to start on mainnet without it only
+  // when the deployment record has no BuybackGuard (services/waterfall config.ts liquidationEthUsd)
 ] as const;
 
 export interface ProfileResult {

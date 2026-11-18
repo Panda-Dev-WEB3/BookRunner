@@ -82,7 +82,9 @@ ORDERLY_BASE_URL=https://api.orderly.org               # VERIFY: RHC endpoint
 ORDERLY_BROKER_ID=<builder broker id>                  # == deploy input externals.orderlyBrokerId
 ORDERLY_BUILDER_KEY_SECRET=<base58 ed25519 seed>
 ANTHROPIC_API_KEY=<key>                                # charter jury
-WATERFALL_LIQ_ETH_USD=<USD per ETH, e.g. 3000>         # liquidation keeper gas policy (required: the preflight and the waterfall refuse to start without it); refresh when ETH moves 2x
+# WATERFALL_LIQ_ETH_USD=<USD per ETH>                  # liquidation keeper gas policy: NOT needed with a BuybackGuard in the deployment record (the on-chain WETH / USDG TWAP, poked by the waterfall, supplies it; tech update #9); only a starting value / fallback. Without a guard the waterfall refuses to start on mainnet without it
+# WATERFALL_ETH_REF_ENABLED=1 WATERFALL_ETH_REF_INTERVAL_SECONDS=300   # defaults: poke BuybackGuard.pokeEthReference every 5 min
+# WATERFALL_BUYBACK_CHUNK_SECONDS=300                    # default: gap between buyback chunks (each at most the pool depth cap)
 # gas tank (2026-11; RUNBOOK "Gas tank"): the waterfall tops the service wallets up from the on-chain GasTank (deployment record contracts.gasTank)
 # WATERFALL_GAS_TANK_ENABLED=1 WATERFALL_GAS_TANK_INTERVAL_SECONDS=300   # defaults; ALERT_GAS_TANK_MIN_ETH=0.05 (services/alerts gas_tank_low)
 # oracle (RUNBOOK "Real prices", VERIFY C6): primary + confirm. Chainlink feeds come from config/chains/4663.json in

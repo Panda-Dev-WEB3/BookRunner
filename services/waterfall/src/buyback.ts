@@ -7,6 +7,7 @@
 import type { Logger } from "@bookrunner/shared";
 import { bkrnFeeRouterAbi } from "@bookrunner/shared/abi";
 import { type BuybackPlan, type BuybackPolicy, type BuybackReferenceSource, V4_SIZE_DEPENDENT, backoffMs, buybackAmount, buybackDue, halveSize, planBuyback, v4MinOut } from "./domain/buyback";
+import { chunkHoldMs, sizeBound } from "./domain/ethReference";
 import type { Cooldowns } from "./domain/keeper";
 import { usd6, wad18 } from "./kit/fmt";
 import { describeRevert } from "./kit/tx";
@@ -18,6 +19,8 @@ export interface BuybackDeps {
   cooldowns: Cooldowns;
   /** Hold after a failed read or tx. */
   cooldownMs: number;
+  /** Tech update #9: hold after a chunk that left more pending (0 / absent = none). */
+  chunkSpacingMs?: number;
   log: Logger;
 }
 
@@ -44,10 +47,12 @@ export class BuybackRunner {
     if (!this.d.cooldowns.ready(KEY)) return { status: "skipped", reason: "cooldown" };
     const log = this.d.log.child({ duty: "buyback" });
     let plan: BuybackPlan;
+    let pendingBefore = 0n;
     let legacy = false;
     let reference: BuybackReferenceSource = "unknown";
     try {
       const pending = await this.d.chain.buybackPending();
+      pendingBefore = pending;
       if (!buybackDue(pending, this.d.policy.thresholdUsd)) return { status: "skipped", reason: "below threshold" };
       const v4 = this.d.chain.buybackV4State ? await this.d.chain.buybackV4State() : { venue: 0, ready: false };
       if (v4.venue === 1 && !v4.ready) {
@@ -58,8 +63,15 @@ export class BuybackRunner {
       }
       const b = await this.d.chain.buybackBounds();
       legacy = b.legacy;
-      if (v4.venue === 1 && this.d.chain.previewBuyback) return await this.tickV4(log, pending, b.maxPerCall);
-      const amountIn = buybackAmount(pending, b.maxPerCall);
+      // tech update #9: one swap never moves the BKRN price beyond the governance bound: min(maxPerCall, the guard depth cap)
+      const size = sizeBound(b.maxPerCall, b.depthCap);
+      if (size.blocked) {
+        this.d.cooldowns.hold(KEY, this.d.cooldownMs);
+        log.warn({ pending: usd6(pending) }, "buyback due but the BKRN pool has no usable depth (BuybackGuard.maxBuyback is 0); retrying after the cooldown");
+        return { status: "skipped", reason: "BKRN pool has no depth" };
+      }
+      if (v4.venue === 1 && this.d.chain.previewBuyback) return await this.tickV4(log, pending, size.max);
+      const amountIn = buybackAmount(pending, size.max);
       let quote: bigint | null = null;
       try {
         quote = await this.d.chain.quoteBuyback(amountIn);
@@ -70,7 +82,7 @@ export class BuybackRunner {
       // (TWAP source) the pool's spot tick deviates from the mean / its history is shorter than the window
       const floor = legacy ? 0n : await this.d.chain.buybackFloor(amountIn);
       reference = legacy ? "legacy" : await this.referenceSource();
-      plan = planBuyback(pending, quote, this.d.policy, { maxPerCall: b.maxPerCall, floor });
+      plan = planBuyback(pending, quote, this.d.policy, { maxPerCall: size.max, floor });
     } catch (err) {
       return this.fail(log, err, "buyback check failed; retrying after the cooldown");
     }
@@ -89,8 +101,10 @@ export class BuybackRunner {
         log.warn({ tx: r.hash, outcome: r.v4Outcome, reason: r.v4Reason ?? null, amountIn: usd6(plan.amountIn) }, "v4 buyback did not swap; retrying after the cooldown");
         return { status: "failed", error: r.v4Outcome === "failed" ? `v4 swap failed${r.v4Reason ? ` (${r.v4Reason})` : ""}` : "v4 buyback deferred" };
       }
+      const hold = chunkHoldMs(plan.amountIn, pendingBefore, this.d.chunkSpacingMs ?? 0);
+      if (hold > 0) this.d.cooldowns.hold(KEY, hold);
       log.info(
-        { tx: r.hash, usdcIn: usd6(r.usdcIn ?? plan.amountIn), bkrnOut: r.bkrnOut === null ? null : wad18(r.bkrnOut), minBkrnOut: wad18(plan.minOut), floor: wad18(plan.floor), priceSource: plan.priceSource, reference, legacy },
+        { tx: r.hash, usdcIn: usd6(r.usdcIn ?? plan.amountIn), bkrnOut: r.bkrnOut === null ? null : wad18(r.bkrnOut), minBkrnOut: wad18(plan.minOut), floor: wad18(plan.floor), priceSource: plan.priceSource, reference, legacy, ...(hold > 0 ? { chunk: true, remainingUsd: usd6(pendingBefore - plan.amountIn), nextChunkInMs: hold } : {}) },
         "BKRN buyback executed; streamed to stakers",
       );
       return { status: "bought", tx: r.hash, plan, usdcIn: r.usdcIn, bkrnOut: r.bkrnOut, reference };
@@ -132,6 +146,8 @@ export class BuybackRunner {
       }
       this.v4Cap = null;
       this.v4Failures = 0;
+      const hold = chunkHoldMs(amountIn, pending, this.d.chunkSpacingMs ?? 0);
+      if (hold > 0) this.d.cooldowns.hold(KEY, hold);
       log.info({ tx: r.hash, usdcIn: usd6(r.usdcIn ?? 0n), bkrnOut: wad18(r.bkrnOut), simulated: wad18(sim.bkrnOut), minBkrnOut: wad18(minOut), floor: wad18(floor), reference }, "BKRN buyback executed (v4); streamed to stakers");
       return { status: "bought", tx: r.hash, plan, usdcIn: r.usdcIn, bkrnOut: r.bkrnOut, reference };
     } catch (err) {

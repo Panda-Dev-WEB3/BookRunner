@@ -135,8 +135,11 @@ export interface BuybackChain {
   /**
    * BkrnFeeRouter's on-chain bound: maxBuybackPerCall (USDC 6dp). `legacy` = a pre-A5-02 router (no
    * pinned fee / floor / cap, executeBuyback takes the pool fee): maxPerCall is then 0 (uncapped).
+   * `depthCap` (tech update #9): BuybackGuard.maxBuyback(), the most USDC one swap may spend so that its price impact on the
+   * BKRN pool stays within the governance bound (null / absent: no guard or no depth source; 0: the pool has no usable
+   * liquidity). The keeper sizes each call to min(pending, maxPerCall, depthCap) and spaces the chunks.
    */
-  buybackBounds(): Promise<{ legacy: boolean; maxPerCall: bigint }>;
+  buybackBounds(): Promise<{ legacy: boolean; maxPerCall: bigint; depthCap?: bigint | null }>;
   /** BkrnFeeRouter.buybackFloor(amountIn) (BKRN 18dp); reverts when the reference price is unset / stale. */
   buybackFloor(amountIn: bigint): Promise<bigint>;
   /** BkrnFeeRouter.referenceSource (fixed / twap / attested); optional, for logs and receipts. */

@@ -24,6 +24,8 @@ export * from "./buyback";
 export * from "./domain/pool";
 export * from "./poolKeeper";
 export * from "./domain/gasTank";
+export * from "./domain/ethReference";
+export * from "./ethReferenceKeeper";
 export * from "./gasTankKeeper";
 export { DISTRIBUTION_SOURCE, DbRedeemCandidates, PgSettlementStore, SOURCE_LABEL, distributionRow } from "./adapters/store";
 export { type CandidateSource, type RedeemCandidate, RedeemLogIndex, UnionCandidates, pendingShares } from "./adapters/redemptions";

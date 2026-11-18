@@ -14,6 +14,7 @@ import type {
   BookSnap,
   BuilderFeedSnap,
   CspSnap,
+  EthRefSnap,
   GasTankSnap,
   SiteFilesSnap,
   VenueOpsSnap,
@@ -73,6 +74,10 @@ export interface ChainPort {
   buybackPending(): Promise<bigint | null>;
   /** BkrnFeeRouter.v4BlockedHop (0 none, 1 / 2 the blocked hop); null when unknown. Absent port = not read. */
   buybackV4BlockedHop?(): Promise<number | null>;
+  /** BuybackGuard.maxBuyback (USDC 6dp; max uint256 = no depth source); null when there is no guard. Absent port = not read. */
+  buybackDepthCap?(): Promise<bigint | null>;
+  /** The BuybackGuard ETH reference; null when the deployment has no guard. Absent port = not read. */
+  ethReference?(): Promise<EthRefSnap | null>;
   /** BookrunnerConfig.markInterval; null when unknown */
   markInterval(): Promise<number | null>;
   /**
@@ -795,6 +800,21 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
   } catch {
     buybackV4BlockedHop = null; // an old router without the read, or a stale reference (the keeper logs that)
   }
+  let buybackDepthCapUsd: number | null = null;
+  try {
+    const cap = d.chain.buybackDepthCap ? await d.chain.buybackDepthCap() : null;
+    buybackDepthCapUsd = cap === null || cap >= 2n ** 255n ? null : Number(cap) / 1e6;
+  } catch {
+    buybackDepthCapUsd = null; // e.g. no usable ETH reference on a via-ETH route: eth_reference_stale says so
+  }
+  let ethReference: Snapshot["ethReference"] = null;
+  if (d.chain.ethReference) {
+    try {
+      ethReference = await d.chain.ethReference();
+    } catch {
+      ethReference = undefined;
+    }
+  }
   let markIntervalSec = mem.markIntervalSec;
   try {
     markIntervalSec = (await d.chain.markInterval()) ?? markIntervalSec;
@@ -872,6 +892,8 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
     indexer,
     buybackSamples,
     buybackV4BlockedHop,
+    buybackDepthCapUsd,
+    ethReference,
     api,
     oracle,
     backup,

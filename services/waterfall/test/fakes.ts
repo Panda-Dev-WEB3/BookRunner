@@ -173,6 +173,8 @@ export class FakeBuybackChain implements BuybackChain {
   legacy = false;
   /** maxBuybackPerCall (0 = uncapped). */
   maxPerCall = 0n;
+  /** BuybackGuard.maxBuyback (tech update #9): null = no guard / no depth source, 0n = the BKRN pool is empty. */
+  depthCap: bigint | null = null;
   /** On-chain reference price behind buybackFloor (whole BKRN per whole USDC, WAD), and its slippage (bps). */
   refWad = 20n * 10n ** 18n;
   refSlippageBps = 500n;
@@ -189,7 +191,7 @@ export class FakeBuybackChain implements BuybackChain {
     return this.pending;
   }
   async buybackBounds() {
-    return { legacy: this.legacy, maxPerCall: this.legacy ? 0n : this.maxPerCall };
+    return { legacy: this.legacy, maxPerCall: this.legacy ? 0n : this.maxPerCall, depthCap: this.legacy ? null : this.depthCap };
   }
   async buybackFloor(amountIn: bigint) {
     if (this.failFloor) throw new Error("execution reverted: StalePrice");
