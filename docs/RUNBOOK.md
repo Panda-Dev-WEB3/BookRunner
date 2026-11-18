@@ -799,6 +799,14 @@ Migration `0004_trade_history` (applied by update.sh) adds two tables (ARCHITECT
   `ALERT_FORGED_MESSAGES_WINDOW_SECONDS`: nothing acted on them, but something can write to Redis), `agent_no_desk_key`
   and `risk_state_unverified` (above).
 
+### Upkeep inside user transactions (tech update #8)
+
+A margin withdrawal with an open position is now ONE transaction: `PoolEngine.withdrawMargin(marketId, amount,
+priceData)` carries the oracle's latest signed print (the API prepares it; the web verifies the call like every
+other step). Nothing to operate: the oracle service stays in `ORACLE_PUSH_MODE=pull` (no timer pushes), the mark
+service still sends one `commitAndApply` per book per day, and the keepers' fallbacks (`syncUnit`, liquidations)
+keep their cadence. Which upkeep is carried by users and which is deliberately not: ARCHITECTURE 2.8.1.
+
 ### Gas tank (2026-11)
 
 The service wallets (`roles.markSigner`, `risk`, `opsVenue`, `jury`, `keeper` and the oracle signer) are topped up from

@@ -91,7 +91,8 @@ export function useFlowTargets(): { data: FlowTargets | null; error: unknown } {
     // 2026-10 insurance pool: requestDeposit / cancelDeposit / claimDeposit / requestWithdraw / claim (no decimals entry:
     // its share amounts have 12 decimals and its deposit amounts 6, the verifier formats each call itself)
     if (pool.data) add(pool.data, "Insurance pool");
-    // trading page: the oracle relay before a margin withdrawal with an open position (AttestedOracle.update)
+    // trading page: the permissionless AttestedOracle.update relay stays a recognised step (a margin withdrawal now carries its
+    // signed price itself: PoolEngine.withdrawMargin(..., priceData))
     add(p.oracle, "AttestedOracle");
     const engines = new Set<string>();
     for (const b of parts.data) {

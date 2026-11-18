@@ -178,7 +178,7 @@
     },
     {
       "check": "uninitialized-local",
-      "target": "PoolEngine.withdrawMargin.price",
+      "target": "PoolEngine._withdrawMargin.price",
       "reason": "the local is meant to start at zero / false / address(0) and is assigned on the paths that use it (accumulators, optional out-values) (audit 2026-10 triage: intended zero locals)"
     },
     {

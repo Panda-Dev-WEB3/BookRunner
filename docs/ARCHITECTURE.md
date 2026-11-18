@@ -654,6 +654,26 @@ re-anchor needs every change recorded (`reanchorDrift` for dividend drift); one 
   (`notifySettlement(SRC_ENGINE_FEES, amount)`); `setQuote` only desk; `setReduceOnly` desk/RISK/
   mandate. `netExposureUsd` = engine pool exposure; `deployedValueUsd = insurance + max(poolEquity,0)`.
 
+#### 2.8.1 Upkeep paid inside user transactions (tech update #8, 2026-11)
+
+Goal: the services pay gas only for upkeep no user transaction can carry; everything a user transaction can carry
+rides in it. Every item below was checked against what the services send today.
+
+| Upkeep (who paid) | Decision | Why |
+|---|---|---|
+| Oracle prices: `AttestedOracle.update(priceData)` (permissionless, signed) | Already carried: `trade`, `liquidate`, `forceClose`, `syncUnit`, `BookrunnerDesk.executeWithPrices`, `MarkRegistry.commitAndApply`, and now `PoolEngine.withdrawMargin(marketId, amount, priceData)`. The oracle service sends no timer pushes (`ORACLE_PUSH_MODE=pull`, the mainnet default); the API bundles the latest signed payload into the user's prepared transaction. | The signature, `publishedAt` monotonicity, staleness-on-arrival and `maxTradePriceAge` checks stay inside `update` and the engine, untouched. |
+| Margin withdrawal with an open position (user; used to need a separate oracle-relay transaction inside the 60 s window) | NEW: the `priceData` overload; the API prepares one step; the 20 s headroom between two transactions drops to 10 s. | One transaction, same checks (ENG-15). |
+| Venue reports (`reportSigned`) | Already carried by `commitAndApply` (the daily mark) and by desk legs (`executeWithPrices`); no timer loop. | Signed by OPS_VENUE, monotonic, relayable by anyone. |
+| Index market unit sync at a component split (`PoolEngine.syncUnit(marketId, priceData)`, the keeper) | Kept as the fallback only: every price-reading engine call (`trade`, `liquidate`, `withdrawMargin`, ...) syncs the unit itself in the user's transaction; the keeper sends `syncUnit` only while a unit move is still pending (nobody traded since) and carries the oracle's whole signed round; a user transaction that synced first makes it a no-op. | Existing cadence is the fallback, as asked. |
+| Liquidations / close-outs (`liquidate`, `forceClose`, keeper) | Not moved to users: they already carry `priceData`, are permissionless, and pay their own reward; the keeper's gas policy bounds the loss. | A liquidator is already "a user"; nothing to bundle. |
+| Daily mark (`commitAndApply`, mark service) | NOT relayed in user transactions. | A mark changes the NAV every depositor and redeemer is priced at: attaching it to someone's deposit would make that user's share price depend on a payload they did not ask for (and front-runnable timing), and `Book` is at its size limit. One transaction per book per day (~3 a day) is not worth the risk. Already permissionless: anyone can relay it. |
+| Fee distribution (`RevenueRouter.distribute`), buyback (`executeBuyback`), `Book.fundClaims` / `recall` / `closeWindow` (waterfall keeper) | NOT relayed. | KEEPER-role calls (they choose sizes and prices within on-chain bounds); making them permissionless would change who can steer them. |
+| `InsurancePool.processEpoch` (keeper) | NOT piggybacked on user transactions (it stays permissionless). | It prices shares for every depositor once a week; tying it to an arbitrary user call would add gas and revert risk to unrelated users, for about one transaction a week. |
+| `StockTokenRegistry` recordings, risk kills, venue-key revocations | NOT relayable. | Role-gated by design (guardian / RISK / governance). |
+
+No signature, freshness or replay check was weakened or bypassed by this update: the only new code is a wrapper that
+calls the unchanged `AttestedOracle.update` first.
+
 ### 2.9 OrderlyAdapter, MockOrderlyVault [A-orderly]
 
 - `OrderlyAdapter` (UUPS): holds the book's two Orderly accounts. Orderly allows one account per (address,

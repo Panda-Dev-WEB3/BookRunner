@@ -10,7 +10,8 @@
 //   - PoolEngine (2026-10 trading page): depositMargin / withdrawMargin move exactly the entered amount (they
 //     credit / pay the signer, no receiver argument); trade (the priceData overload only) carries the entered
 //     signed size and a real price limit (never "any price": max uint for a buy, 0 for a sell); the only oracle
-//     call is the permissionless AttestedOracle.update(priceData) relay (the oracle verifies every signature)
+//     call is the permissionless AttestedOracle.update(priceData) relay (the oracle verifies every signature);
+//     withdrawMargin with an open position carries its signed price too (the priceData overload, tech update #8)
 // The decoded summary (verifyPreparedTxs -> DecodedStep.summary) is what the review UI shows.
 import { type Abi, type AbiFunction, type Hex, decodeAbiParameters, decodeFunctionData, erc20Abi, getAddress, isAddress, maxUint256 } from "viem";
 import { attestedOracleAbi } from "./abi/AttestedOracle";
@@ -78,8 +79,8 @@ const ALLOWED: Array<[Abi, readonly string[]]> = [
   [bookAbi as Abi, ["openTopUp"]],
   // 2026-10 insurance pool: queued entry / exit (no ERC-4626 deposit / withdraw / redeem: they revert anyway)
   [insurancePoolAbi as Abi, ["requestDeposit", "cancelDeposit", "claimDeposit", "requestWithdraw", "claim"]],
-  // 2026-10 trading page (in-house engine): margin in / out and the priceData trade, plus the oracle relay a margin
-  // withdrawal with an open position needs (withdrawMargin has no priceData overload)
+  // 2026-10 trading page (in-house engine): margin in / out and the priceData trade, plus the oracle relay (older
+  // clients). Tech update #8: withdrawMargin(marketId, amount, priceData) carries the signed price in the same transaction
   [ENGINE_TRADE_ABI, ["trade"]],
   [poolEngineAbi as Abi, ["depositMargin", "withdrawMargin"]],
   [attestedOracleAbi as Abi, ["update"]],
@@ -91,8 +92,10 @@ const KNOWN_ABI: Abi = (() => {
   const out: AbiFunction[] = [];
   for (const [abi, names] of ALLOWED) {
     for (const item of abi) {
-      if (item.type !== "function" || !names.includes(item.name) || seen.has(item.name)) continue;
-      seen.add(item.name);
+      if (item.type !== "function" || !names.includes(item.name)) continue;
+      const key = `${item.name}/${item.inputs.length}`; // overloads (withdrawMargin 2 / 3 arguments) are distinct entries
+      if (seen.has(key)) continue;
+      seen.add(key);
       out.push(item);
     }
   }
@@ -240,9 +243,13 @@ export function verifyPreparedTxs(txs: readonly PreparedTxInput[], check: Prepar
       case "depositMargin":
       case "withdrawMargin": {
         // the engine credits / pays msg.sender (the signer): no receiver argument to redirect
-        const [marketId, amount] = args as [bigint, bigint];
+        const [marketId, amount, carried] = args as [bigint, bigint, string | undefined];
         if (check.amount !== undefined && amount !== check.amount) throw new PreparedTxError(`Step ${n} moves ${amount} of margin, not the ${check.amount} you entered.`);
-        summary = `${name(to)}.${fn}(market #${marketId}, ${fmtAmount(amount, 6)} ${fn === "depositMargin" ? "from your wallet into your margin" : "from your margin back to your wallet"})`;
+        // withdrawMargin(marketId, amount, priceData): the signed price rides in the same transaction
+        const prices = carried === undefined ? null : priceCount(carried);
+        if (carried !== undefined && prices === null) throw new PreparedTxError(`Step ${n} carries malformed price data.`);
+        const withPrice = prices === null ? "" : `, ${prices} signed price${prices === 1 ? "" : "s"}`;
+        summary = `${name(to)}.${fn}(market #${marketId}, ${fmtAmount(amount, 6)} ${fn === "depositMargin" ? "from your wallet into your margin" : "from your margin back to your wallet"}${withPrice})`;
         break;
       }
       case "trade": {

@@ -238,13 +238,18 @@ export function engineDepositMarginTx(chainId: number, engine: Address, marketId
   );
 }
 
-export function engineWithdrawMarginTx(chainId: number, engine: Address, marketId: number, amountUsd: bigint, label: string): PreparedTx {
-  return tx(
-    chainId,
-    engine,
-    encodeFunctionData({ abi: poolEngineAbi, functionName: "withdrawMargin", args: [BigInt(marketId), amountUsd] }),
-    `Withdraw ${trimUsd(amountUsd)} USDC of margin from the ${label} market to your wallet`,
-  );
+/**
+ * PoolEngine.withdrawMargin. With a non-empty `priceData` (tech update #8) the call is the overload
+ * withdrawMargin(marketId, amount, priceData): the signed price rides in the same transaction (AttestedOracle.update
+ * first, every oracle check unchanged), so a wallet with an open position sends ONE transaction instead of an oracle
+ * relay plus the withdrawal. Empty / absent: the plain call (flat wallet: no price needed).
+ */
+export function engineWithdrawMarginTx(chainId: number, engine: Address, marketId: number, amountUsd: bigint, label: string, priceData: Hex = "0x"): PreparedTx {
+  const data =
+    priceData === "0x"
+      ? encodeFunctionData({ abi: poolEngineAbi, functionName: "withdrawMargin", args: [BigInt(marketId), amountUsd] })
+      : encodeFunctionData({ abi: poolEngineAbi, functionName: "withdrawMargin", args: [BigInt(marketId), amountUsd, priceData] });
+  return tx(chainId, engine, data, `Withdraw ${trimUsd(amountUsd)} USDC of margin from the ${label} market to your wallet`);
 }
 
 /** PoolEngine.trade(marketId, sizeDelta, acceptablePriceWad, priceData): the trade carries its signed price (pull oracle). */

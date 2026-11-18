@@ -485,7 +485,7 @@ describe("trade router: prepared transactions (verified like the web does)", () 
     expect((await w.caller.trade.deposit({ marketId: 1, wallet: ALICE, amountUsd: "10" })).txs).toHaveLength(1);
   });
 
-  test("withdraw: flat [withdrawMargin]; with a position [oracle.update(signed price), withdrawMargin]", async () => {
+  test("withdraw: flat [withdrawMargin]; with a position ONE step, withdrawMargin(..., priceData) carrying the signed price (tech update #8)", async () => {
     const w = await world();
     setTrader(w, flat(U(80)));
     const flatR = await w.caller.trade.withdraw({ marketId: 1, wallet: ALICE, amountUsd: "80" });
@@ -496,13 +496,43 @@ describe("trade router: prepared transactions (verified like the web does)", () 
     const max = maxWithdrawableUsd(MATH, p, PX);
     const pos = await w.caller.trade.withdraw({ marketId: 1, wallet: ALICE, amountUsd: (Number(max) / 1e6).toFixed(6) });
     const steps = verifyPreparedTxs(pos.txs, check({ amount: max }));
-    expect(steps.map((s) => s.functionName)).toEqual(["update", "withdrawMargin"]);
-    expect(pos.txs[0]!.to.toLowerCase()).toBe(ORACLE.toLowerCase());
-    const relayed = decodeFunctionData({ abi: attestedOracleAbi, data: pos.txs[0]!.data }).args as unknown as [Hex];
-    expect(decodePriceData(relayed[0]).updates[0]!.publishedAt).toBe(BigInt(sec - 2));
+    // one transaction: the oracle relay is no longer a separate step
+    expect(steps.map((s) => s.functionName)).toEqual(["withdrawMargin"]);
+    expect(pos.txs).toHaveLength(1);
+    expect(pos.txs[0]!.to.toLowerCase()).toBe(ENGINE.toLowerCase());
+    expect(steps[0]!.summary).toContain("1 signed price");
+    const call = decodeFunctionData({ abi: poolEngineAbi, data: pos.txs[0]!.data });
+    expect(call.functionName).toBe("withdrawMargin");
+    const [mid, amt, priceData] = call.args as unknown as [bigint, bigint, Hex];
+    expect([mid, amt]).toEqual([1n, max]);
+    expect(decodePriceData(priceData).updates[0]!.publishedAt).toBe(BigInt(sec - 2));
     expect(pos.warnings[0]).toContain("must be mined before");
-    // the oracle is not a destination of this flow: refused
-    expect(() => verifyPreparedTxs(pos.txs, { ...check(), targets: [ENGINE] })).toThrow(/not a contract of this flow/);
+    // the destination must still be a contract of the flow; a standalone oracle relay is no longer prepared
+    expect(() => verifyPreparedTxs(pos.txs, { ...check(), targets: [ORACLE] })).toThrow(/not a contract of this flow/);
+    // tampering a compromised API could do: a different amount, malformed price data
+    const tamper = (args: readonly [bigint, bigint, Hex]) => [{ ...pos.txs[0]!, data: encodeFunctionData({ abi: poolEngineAbi, functionName: "withdrawMargin", args }) }];
+    expect(() => verifyPreparedTxs(tamper([1n, max * 2n, priceData]), check({ amount: max }))).toThrow(/you entered/);
+    expect(() => verifyPreparedTxs(tamper([1n, max, "0x1234"]), check({ amount: max }))).toThrow(/malformed price data/);
+  });
+
+  // Parity (tech update #8): the API bundles the oracle's latest signed payload byte for byte, and the call it prepares is
+  // exactly the contract's overload (selector pinned against contracts/test/engine/PoolEngineWithdrawPull.t.sol).
+  test("withdraw parity: the carried priceData is the oracle's signed bundle; the selector is the contract's", async () => {
+    const w = await world();
+    const p = opened(U(500), UNITS(10));
+    setTrader(w, p);
+    const max = maxWithdrawableUsd(MATH, p, PX);
+    const pos = await w.caller.trade.withdraw({ marketId: 1, wallet: ALICE, amountUsd: (Number(max) / 1e6).toFixed(6) });
+    expect(pos.txs[0]!.data.slice(0, 10)).toBe("0xd263fc50"); // withdrawMargin(uint256,uint256,bytes)
+    const priceData = (decodeFunctionData({ abi: poolEngineAbi, data: pos.txs[0]!.data }).args as unknown as [bigint, bigint, Hex])[2];
+    const trade = await w.caller.trade.order({ marketId: 1, wallet: ALICE, sizeDelta: UNITS(1).toString() });
+    const tradePd = (decodeFunctionData({ abi: poolEngineAbi, data: trade.txs[0]!.data }).args as unknown as [bigint, bigint, bigint, Hex])[3];
+    // the same signed print (one oracle bundle feeds every consumer)
+    expect(priceData).toBe(tradePd);
+    // a flat wallet needs no price: the plain overload
+    setTrader(w, flat(U(80)));
+    const flatR = await w.caller.trade.withdraw({ marketId: 1, wallet: ALICE, amountUsd: "80" });
+    expect(flatR.txs[0]!.data.slice(0, 10)).toBe("0x3bad4bbb"); // withdrawMargin(uint256,uint256)
   });
 });
 

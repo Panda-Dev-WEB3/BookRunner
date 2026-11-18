@@ -1071,7 +1071,7 @@ contract PoolEngineTest is EngineBase {
         vm.prank(alice);
         e2.depositMargin(id, 50e6);
         // on the outgoing transfer, the token re-enters withdrawMargin
-        tok.setHook(address(e2), abi.encodeCall(PoolEngine.withdrawMargin, (id, 1e6)));
+        tok.setHook(address(e2), abi.encodeWithSelector(bytes4(keccak256("withdrawMargin(uint256,uint256)")), id, 1e6));
         vm.prank(alice);
         vm.expectRevert(ReentrancyGuardTransient.ReentrancyGuardReentrantCall.selector);
         e2.withdrawMargin(id, 1e6);

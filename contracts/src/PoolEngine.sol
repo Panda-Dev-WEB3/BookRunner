@@ -522,6 +522,20 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
     /// @dev Flat traders withdraw freely. With an open position the withdrawal is new risk: blocked
     ///      off-hours / stale, settles funding first, then requires equity >= initial margin.
     function withdrawMargin(uint256 marketId, uint256 amount) external nonReentrant {
+        _withdrawMargin(marketId, amount);
+    }
+
+    /// @notice {withdrawMargin} carrying the transaction's signed price bundle (pull oracle, docs/LOW_GAS.md §1, tech update
+    ///         #8): `AttestedOracle.update(priceData)` first (every signature / freshness / replay rule of the oracle
+    ///         unchanged; entries not newer than the stored price are skipped, a bad signature reverts the whole call),
+    ///         then exactly {withdrawMargin}. With an open position the wallet no longer needs a separate oracle
+    ///         relay transaction (two transactions inside the price-age window); empty `priceData` is the plain call.
+    function withdrawMargin(uint256 marketId, uint256 amount, bytes calldata priceData) external nonReentrant {
+        _pull(priceData);
+        _withdrawMargin(marketId, amount);
+    }
+
+    function _withdrawMargin(uint256 marketId, uint256 amount) private {
         if (amount == 0) revert ZeroAmount();
         Market storage m = _market(marketId);
         Position storage p = _positions[marketId][msg.sender];

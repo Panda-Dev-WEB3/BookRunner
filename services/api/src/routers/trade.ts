@@ -10,7 +10,7 @@
 import { bytes32ToStr } from "@bookrunner/shared/bytes32";
 import { KEYS } from "@bookrunner/shared/queues";
 import { VENUE } from "@bookrunner/shared/types";
-import type { Address } from "viem";
+import type { Address, Hex } from "viem";
 import { z } from "zod";
 import type { EngineMarketChainState, EngineTraderChainState } from "../chain/gateway";
 import type { BookRow } from "../data/types";
@@ -39,15 +39,15 @@ import {
   withdrawMaxAge,
 } from "../domain/trade";
 import { HISTORY_RANGES, HISTORY_SPEC, INDEXER_CURSORS, MAX_TRADER_EVENTS, aggregateCandles, buildFills, eventsBackfillPending, historyFrom, minuteRowsFor } from "../domain/tradeHistory";
-import { type PreparedTx, approveUsdcTx, engineDepositMarginTx, engineTradeTx, engineWithdrawMarginTx, oracleUpdateTx } from "../domain/txs";
+import { type PreparedTx, approveUsdcTx, engineDepositMarginTx, engineTradeTx, engineWithdrawMarginTx } from "../domain/txs";
 import { parseUsd, usdStr, wadStr } from "../format";
 import { cached, parseJson } from "../kv";
 import { fail, hardChain, publicProcedure, requireChain, router } from "../trpc";
 import { intLike, walletInput } from "./common";
 
 const LIVE_STATES = new Set(["Live", "Retiring"]);
-/** Two transactions (oracle relay, then withdrawMargin) must land within the 60 s bound: keep this much of it. */
-const WITHDRAW_PRICE_HEADROOM_SEC = 20;
+/** The withdrawal carries its signed price (one transaction): keep this much of the 60 s bound for inclusion. */
+const WITHDRAW_PRICE_HEADROOM_SEC = 10;
 
 const marketIdInput = intLike(1);
 const slippageInput = intLike(1, MAX_SLIPPAGE_BPS).default(DEFAULT_SLIPPAGE_BPS);
@@ -401,6 +401,7 @@ export const tradeRouter = router({
     if (amount > p.marginUsd) fail("PRECONDITION_FAILED", `This wallet has ${usdStr(p.marginUsd)} of margin in this market`);
     const txs: PreparedTx[] = [];
     const warnings: string[] = [];
+    let carried: Hex = "0x";
     if (p.size !== 0n) {
       // PoolEngine.withdrawMargin with a position: a live price at most min(maxPriceAge, 60 s) old, valued at the
       // shares per unit of its basis (audit N-1), funding settled first, then equity >= initial margin
@@ -413,13 +414,14 @@ export const tradeRouter = router({
       if (amount > max)
         fail("PRECONDITION_FAILED", `At most ${usdStr(max)} can be withdrawn with this position open: the rest must stay as margin (${deps.settings.tradeRefuseUnholdable ? `the off-hours requirement: the position stays at or below the leverage an order may reach here` : "initial margin"}, with room for a 1% move). Reduce the position to free more.`);
       if (px.source === "signed") {
-        txs.push(oracleUpdateTx(gw.chainId, gw.deployment.contracts.oracle, px.priceData, m.label));
         warnings.push(
-          `With a position open the engine values it at the price on chain, which must be at most ${withdrawMaxAge(m.chain)} s old: step 1 brings the signed price of ${isoSec(px.publishedAt)} on chain, step 2 must be mined before ${isoSec(px.publishedAt + withdrawMaxAge(m.chain))}.`,
+          `With a position open the engine values it at a price at most ${withdrawMaxAge(m.chain)} s old: this transaction carries the signed price of ${isoSec(px.publishedAt)}, so it must be mined before ${isoSec(px.publishedAt + withdrawMaxAge(m.chain))}.`,
         );
       }
+      // tech update #8: the signed print rides in the withdrawal itself (priceData overload), no separate relay transaction
+      if (px.source === "signed") carried = px.priceData;
     }
-    txs.push(engineWithdrawMarginTx(gw.chainId, m.chain.engine, input.marketId, amount, m.label));
+    txs.push(engineWithdrawMarginTx(gw.chainId, m.chain.engine, input.marketId, amount, m.label, carried));
     return { txs, warnings, maxWithdrawUsd: usdStr(p.size === 0n ? p.marginUsd : pr.price ? safeMaxWithdraw(m.chain, t, pr.price.priceWad, !!deps.settings.tradeRefuseUnholdable) : 0n) };
   }),
 

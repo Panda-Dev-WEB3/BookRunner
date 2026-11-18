@@ -32,8 +32,9 @@ function priceOf(bytes32 underlying) external view returns (uint256 priceWad, bo
   argument and calls `oracle.update(priceData)` first when it is non-empty:
   - `PoolEngine.trade(marketId, sizeDelta, acceptablePriceWad, priceData)`
   - `PoolEngine.liquidate(marketId, trader, priceData)`
-  - `PoolEngine.withdrawLiquidity(...)`/`withdrawMargin(...)` keep their signatures but read the stored
-    price; callers that need a fresh one call `oracle.update` in a multicall or beforehand.
+  - `PoolEngine.withdrawMargin(marketId, amount, priceData)` (tech update #8, 2026-11): the same wrapper, so a wallet with
+    an open position withdraws in ONE transaction (the plain 2-argument call stays). `withdrawLiquidity(...)` keeps its
+    signature (adapter-only; the desk carries prices through `executeWithPrices`).
   - `BookrunnerDesk.execute(Action)` — `Action` gains no field: the desk reads `priceData` from a new
     action kind-independent wrapper `executeWithPrices(Action action, bytes priceData)`; `execute` stays.
 - Staleness semantics move from "stored price is old" to "the price used by this tx is old": the
