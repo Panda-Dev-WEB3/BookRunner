@@ -193,6 +193,12 @@ venueMinIf[PoolEngine] 10,000 USDC, tiers: entry 50k USD → 0, ≥50k → 25k B
   the USDG waits. REF_TWAP and VENUE_UNIV4 refuse each other (v4 has no oracle). The route is chosen off-chain
   (`scripts/buyback-route.ts`), never on-chain. Hooks are allow-listed (`setV4HookAllowed`); disallowing one, or
   changing the PoolManager, clears the route.
+  **BuybackGuard (tech update #9, 2026-11).** The router optionally has a `buybackGuard` (timelock-set; `0` = none, the
+  behaviour above is unchanged) that supplies two things, both read-only for the router (its price floor and
+  `maxBuybackPerCall` stay the hard bounds): (1) the ETH reference of a via-ETH route and of REF_FIXED_ETH, `ethUsdcPerEth()`,
+  which replaces the timelock-set `refUsdcPerEthWad`; (2) the depth bound of every call, `maxBuyback()`: `executeBuyback`
+  and `previewBuyback` refuse a larger `amountIn` (`BuybackTooLarge(amountIn, cap)`).
+  See §2.2.1.
   **Staking rewards come only from buybacks**: `BkrnStaking.notifyReward` is callable only by
   `config.feeRouter()`, whose only call is in `executeBuyback` with the BKRN it just bought and transferred; BKRN
   sent to staking any other way is never distributed (it is not in `rewardReserve`), and a pre-existing (Pons)
@@ -200,6 +206,45 @@ venueMinIf[PoolEngine] 10,000 USDC, tiers: entry 50k USD → 0, ≥50k → 25k B
 - `Backstop`: holds USDC. `cover(bookId, shortfall)` only by `factory.bookOf(bookId) == msg.sender`;
   pays `min(shortfall, balance)` to the book's vault; emits `Covered`. Optional per-cover cap param
   (`maxCoverBps` of balance, default 10000).
+
+#### 2.2.1 BuybackGuard [A-core] (tech update #9, 2026-11, NEW)
+
+`BuybackGuard(config, feeRouter)`: not upgradeable, no funds, everything set by the timelock (DEFAULT_ADMIN of the config).
+
+- **ETH reference from the chain, not from an env value.** `pokeEthReference()` (anyone; the waterfall keeper every 5 min)
+  stores the mean tick of the last `ethWindow` seconds of the Uniswap v3 WETH / USDG pool (the pool of
+  `config/chains/4663.json` `dexConfirm.ethUsd`, `observe`, 1.0001^tick maths of `UniswapV3Twap`) as USDG per ETH. Bounds,
+  all in the contract: the pool's in-range liquidity must be at least `ethMinLiquidity` (`EthPoolThin`); the spot tick must be
+  within `ethMaxTickDeviation` ticks of the mean (`TwapDeviation`: a spot push in progress is refused); the pool history
+  must cover the window ("OLD"); the value must be 100..100,000 USDG per ETH (`ReferenceOutOfRange`); updates are at least
+  5 min apart (`TooSoon`); and each update moves the stored value by at most `ethMaxMoveBps` (default 500) from the previous
+  one (a CLAMP, so a bad window drags the reference slowly instead of jumping it or blocking it: a real 20% move is
+  followed in 5% steps every 5 min).
+- **Fallback with an expiry.** `ethUsdcPerEth()` returns the stored value while it is at most `ethMaxAge` old (source 1), else
+  the governance fallback `setEthFallback(value, expiry)` while it has not expired (source 2, expiry at most 30 days ahead),
+  else reverts `EthReferenceUnavailable`: via-ETH buybacks then wait (fail-safe, nothing is guessed). `ethReference()` returns
+  (value, source, storedAt) without reverting (alerts, keeper).
+- **Manipulation.** A one-block spot push (even one that is reverted in the next block) cannot move the reference enough to
+  matter: a push of `j` ticks for `t` seconds adds `j x t / window` ticks to the mean (3,000 ticks for 12 s over a 30 min
+  window = 20 ticks = 0.2%), a push in place at the poke is refused by the deviation bound, and one poke never moves the
+  value more than the clamp. Moving it materially costs holding the pool away from the market for most of the window,
+  against arbitrage, with the liquidity floor refusing a drained pool.
+- **Size.** `maxBuyback()` = the USDG one swap may spend so that its price impact on the BKRN pool is at most `maxImpactBps`
+  (governance, default 100 = 1%, 1..1000): the in-range liquidity `L` and sqrt price of the pool the router buys from
+  (v3 venue: `twapPool`, configured for depth even with a fixed reference; v4: the route's BKRN pool via `extsload`),
+  `L x sqrtP x bps / 20000` (quote token 1) or `L / sqrtP x bps / 20000` (quote token 0), grossed up for the static LP fee,
+  and for a via-ETH route (the BKRN pool is quoted in ETH) converted at the ETH reference. No depth source yet (no pool /
+  route not live) = no cap (the buyback defers anyway). The estimate is the constant-liquidity one inside the active tick
+  range: a swap crossing a tick can move the price a little more; the price floor still bounds the loss.
+- **Splitting.** The keeper sends `min(pending, maxBuybackPerCall, maxBuyback())` per call and waits
+  `WATERFALL_BUYBACK_CHUNK_SECONDS` (300) after a chunk that left more pending, so arbitrage can restore the price. A cap of 0
+  (empty pool) sends nothing (`buyback_depth_zero`).
+- **Deploy.** Optional `buyback.guard` of the deploy input (ethTwap, required ethFallback, maxImpactBps), checked on chain at
+  deploy (pool code, tokens = {settlement, an 18-decimal token}); `DeployMainnet` deploys it, sets it up and wires
+  `setBuybackGuard` BEFORE the v4 route (a via-ETH route needs the reference), records `contracts.buybackGuard`;
+  `VerifyHandover` checks the wiring and the parameters. Alerts: `eth_reference_stale`, `eth_reference_fallback_expiring`,
+  `buyback_depth_zero`. The liquidation keeper's gas policy takes its ETH/USD from the same reference (the env value is only a
+  starting value; without a guard the waterfall still refuses to start on mainnet without it).
 
 ### 2.3 MarkRegistry [A-core]
 
@@ -975,7 +1020,7 @@ wind-down close-out. Races (`NotLiquidatable` / `NoPosition` at the estimate) ar
 candidates by what is at stake (max of reward, half the nominal fee, and bad debt); one that pays for itself always
 goes; dust above water is skipped; under water it goes when its cost stays below the bad debt at stake, whatever the
 hourly budget of loss-making gas when the bad debt is at least `WATERFALL_LIQ_BAD_DEBT_OVERRIDE_USD`; reverted gas
-counts. ETH/USD is configured (`WATERFALL_LIQ_ETH_USD`, required on mainnet). Positions are read in batches and paged
+counts. ETH/USD comes from the BuybackGuard's on-chain WETH / USDG TWAP (tech update #9; `WATERFALL_LIQ_ETH_USD` is only a starting value, required on mainnet only without a guard). Positions are read in batches and paged
 across passes beyond `WATERFALL_LIQ_MAX_BATCHES`; every row is reconciled with `positionOf` every 10 min, and an index
 older than the engine watch backfills the engine's history once (`indexer:engine-backfill`). Every 60 s, positions or
 not, the keeper's split recorder reads every engine market's Stock Tokens (`splitTokens`, index components included)

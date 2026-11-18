@@ -237,6 +237,23 @@
     "maxSlippageBps": 500,
     "maxPerCall": "250000000000",
     "bkrnPriceId": "",
-    "referenceSource": "fixed"
+    "referenceSource": "fixed",
+    "guard": {
+      "ownerAdjustable": true,
+      "note": "OWNER-ADJUSTABLE through the timelock (BuybackGuard.setEthTwap / setEthFallback / setMaxImpactBps). ethTwap.pool = config/chains/4663.json dexConfirm.ethUsd.pool (WETH / USDG 0.01%); minLiquidity 1e17 = about $44k of 2% depth at ETH 1,946 (the raw liquidity scales with sqrt(price): re-read the pool and recalibrate right before the deploy); the fallback value must be set near the market at deploy time (it is used only while the TWAP value is missing or older than maxAgeSeconds, and expires ttlSeconds after the deploy).",
+      "maxImpactBps": 100,
+      "ethTwap": {
+        "pool": "0x52e65B17fB6E5BA00Ed806f37Afcd2DaA50271Ca",
+        "window": 1800,
+        "maxTickDeviation": 200,
+        "minLiquidity": "100000000000000000",
+        "maxMoveBps": 500,
+        "maxAgeSeconds": 3600
+      },
+      "ethFallback": {
+        "usdcPerEthWad": "2000000000000000000000",
+        "ttlSeconds": 2592000
+      }
+    }
   }
 }

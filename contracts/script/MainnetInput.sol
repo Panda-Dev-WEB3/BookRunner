@@ -139,6 +139,24 @@ abstract contract MainnetInput is Script {
         uint256 globalDailyCapWei; // most ETH the tank may send per UTC day, all wallets
     }
 
+    /// @notice BuybackGuard (tech update #9, optional `buyback.guard` object; absent = no guard: the ETH reference stays the
+    ///         timelock-set `buyback.ethReference` and a buyback is bounded by `maxPerCall` alone). The ETH reference is read
+    ///         on chain from the Uniswap v3 WETH / settlement-token pool's TWAP, bounded (liquidity floor, spot-vs-mean
+    ///         deviation, per-update move), with a governance fallback that expires; each buyback is sized to the BKRN pool's
+    ///         depth (`maxImpactBps`, default 100). All values are owner-adjustable through the timelock afterwards.
+    struct GuardIn {
+        bool set;
+        uint256 maxImpactBps; // 1..1000 (default 100)
+        address ethPool; // v3 {WETH, settlement token}: config/chains/<chainId>.json dexConfirm.ethUsd.pool
+        uint256 window; // TWAP seconds, [600, 86400]
+        uint256 maxTickDeviation; // spot vs mean, [1, 2000] ticks
+        uint256 minLiquidity; // raw v3 in-range liquidity the pool must hold for an update
+        uint256 maxMoveBps; // per-update move bound, [10, 2000]
+        uint256 maxAge; // seconds the stored value is trusted, [600, 86400]
+        uint256 fallbackUsdcPerEthWad; // governance fallback, USDG per ETH, [100e18, 100000e18]
+        uint256 fallbackTtl; // seconds from the deploy until it expires, (0, 30 days]
+    }
+
     struct Buyback {
         uint256 poolFee;
         uint256 refBkrnPerUsdcWad;
@@ -222,6 +240,7 @@ abstract contract MainnetInput is Script {
     Buyback internal bb;
     PoolIn internal poolIn;
     GasTankIn internal tankIn;
+    GuardIn internal guardIn;
     address[3] internal committeeMembers;
     address[] internal markSigners;
     address[] internal riskHolders;
@@ -295,6 +314,7 @@ abstract contract MainnetInput is Script {
         _loadBkrn(json);
         _loadParams(json);
         _loadBuyback(json);
+        _loadGuard(json);
         _loadPool(json);
         _loadGasTank(json);
         _loadRoles(json);
@@ -368,6 +388,20 @@ abstract contract MainnetInput is Script {
         poolIn.epochLength = json.readUintOr(".insurancePool.epochLength", 7 days);
         poolIn.processGrace = json.readUintOr(".insurancePool.processGrace", 1 days);
         poolIn.minOwnCapitalBps = json.readUintOr(".insurancePool.minOwnCapitalBps", 5000);
+    }
+
+    function _loadGuard(string memory json) private {
+        if (!vm.keyExistsJson(json, ".buyback.guard")) return;
+        guardIn.set = true;
+        guardIn.maxImpactBps = json.readUintOr(".buyback.guard.maxImpactBps", 100);
+        guardIn.ethPool = json.readAddress(".buyback.guard.ethTwap.pool");
+        guardIn.window = json.readUint(".buyback.guard.ethTwap.window");
+        guardIn.maxTickDeviation = json.readUint(".buyback.guard.ethTwap.maxTickDeviation");
+        guardIn.minLiquidity = json.readUint(".buyback.guard.ethTwap.minLiquidity");
+        guardIn.maxMoveBps = json.readUint(".buyback.guard.ethTwap.maxMoveBps");
+        guardIn.maxAge = json.readUint(".buyback.guard.ethTwap.maxAgeSeconds");
+        guardIn.fallbackUsdcPerEthWad = json.readUint(".buyback.guard.ethFallback.usdcPerEthWad");
+        guardIn.fallbackTtl = json.readUint(".buyback.guard.ethFallback.ttlSeconds");
     }
 
     function _loadGasTank(string memory json) private {
@@ -554,6 +588,7 @@ abstract contract MainnetInput is Script {
         _validateOracle(mainnet);
         _validateParams(mainnet);
         _validateGasTank();
+        _validateGuard();
         _validateBuybackReference();
         _validateBuybackV4();
         _validateMarkets(mainnet);
@@ -671,6 +706,27 @@ abstract contract MainnetInput is Script {
         require(poolIn.epochLength >= 1 days && poolIn.epochLength <= 30 days, "input: insurancePool.epochLength");
         require(poolIn.processGrace >= 1 hours && poolIn.processGrace <= 7 days, "input: insurancePool.processGrace");
         require(poolIn.minOwnCapitalBps <= 20_000, "input: insurancePool.minOwnCapitalBps > 20000");
+    }
+
+    /// @dev BuybackGuard bounds (BuybackGuard.setEthTwap / setEthFallback / setMaxImpactBps; the deploy sets them while the
+    ///      deployer is still the timelock). The fallback is required: the ETH reference must exist before the first poke.
+    function _validateGuard() private view {
+        if (!guardIn.set) return;
+        _req(guardIn.ethPool, "buyback.guard.ethTwap.pool");
+        require(guardIn.maxImpactBps >= 1 && guardIn.maxImpactBps <= 1000, "input: buyback.guard.maxImpactBps must be in [1, 1000]");
+        require(guardIn.window >= 10 minutes && guardIn.window <= 1 days, "input: buyback.guard.ethTwap.window must be in [600, 86400]");
+        require(guardIn.maxTickDeviation >= 1 && guardIn.maxTickDeviation <= 2000, "input: buyback.guard.ethTwap.maxTickDeviation must be in [1, 2000]");
+        require(guardIn.minLiquidity > 0 && guardIn.minLiquidity <= type(uint128).max, "input: buyback.guard.ethTwap.minLiquidity");
+        require(guardIn.maxMoveBps >= 10 && guardIn.maxMoveBps <= 2000, "input: buyback.guard.ethTwap.maxMoveBps must be in [10, 2000]");
+        require(
+            guardIn.maxAge >= 10 minutes && guardIn.maxAge <= 1 days,
+            "input: buyback.guard.ethTwap.maxAgeSeconds must be in [600, 86400]"
+        );
+        require(
+            guardIn.fallbackUsdcPerEthWad >= 100e18 && guardIn.fallbackUsdcPerEthWad <= 100_000e18,
+            "input: buyback.guard.ethFallback.usdcPerEthWad must be in [100e18, 100000e18]"
+        );
+        require(guardIn.fallbackTtl > 0 && guardIn.fallbackTtl <= 30 days, "input: buyback.guard.ethFallback.ttlSeconds must be in (0, 30 days]");
     }
 
     /// @dev GasTank.setService / setGlobalDailyCap bounds (GasTank.MAX_TARGET 1 ether, MAX_SERVICE_DAILY 2 ether,
@@ -857,6 +913,7 @@ abstract contract MainnetInput is Script {
         _code(ext.swapRouter02, "uniswapV3SwapRouter02");
         _code(ext.entryPoint, "entryPoint");
         _code(gov.multisig, "governance.multisig (a Safe)");
+        if (guardIn.set) _checkGuardPool();
         if (ext.univ4Router != address(0)) _code(ext.univ4Router, "uniswapV4Router");
         if (bkrnIn.token != address(0)) _checkBkrnToken();
         require(_decimals(ext.settlementToken) == SETTLEMENT_DECIMALS, "externals: settlement token decimals != 6");
@@ -887,6 +944,19 @@ abstract contract MainnetInput is Script {
 
     /// @dev A pre-existing BKRN (Pons launch): code and 18 decimals are required; a supply other than 1e9 x 1e18 is
     ///      only warned. Fee-on-transfer cannot be ruled out read-only (no test transfer): RUNBOOK manual check.
+    /// @dev The guard ETH pool is a Uniswap v3 pool of exactly {settlement token, an 18-decimal token (WETH)}.
+    function _checkGuardPool() internal view {
+        _code(guardIn.ethPool, "buyback.guard.ethTwap.pool");
+        (bool ok0, bytes memory r0) = guardIn.ethPool.staticcall(abi.encodeWithSignature("token0()"));
+        (bool ok1, bytes memory r1) = guardIn.ethPool.staticcall(abi.encodeWithSignature("token1()"));
+        require(ok0 && ok1 && r0.length >= 32 && r1.length >= 32, "externals: buyback.guard.ethTwap.pool is not a v3 pool");
+        address t0 = abi.decode(r0, (address));
+        address t1 = abi.decode(r1, (address));
+        address other = t0 == ext.settlementToken ? t1 : t1 == ext.settlementToken ? t0 : address(0);
+        require(other != address(0), "externals: buyback.guard.ethTwap.pool does not hold the settlement token");
+        require(_decimals(other) == 18, "externals: buyback.guard.ethTwap.pool other token must have 18 decimals (WETH)");
+    }
+
     function _checkBkrnToken() internal view {
         _code(bkrnIn.token, "bkrn.token");
         require(_decimals(bkrnIn.token) == 18, "externals: bkrn.token decimals != 18");

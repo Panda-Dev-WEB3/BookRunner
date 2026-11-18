@@ -147,6 +147,7 @@ export interface Deployment {
     swapRouter?: Address; // MockSwapRouter on devnet; VERIFY on RHC
     insurancePool?: Address; // 2026-10 InsurancePool proxy (absent in older records)
     gasTank?: Address; // 2026-11 GasTank: ETH reserve that tops up the service wallets (absent in older records / when not deployed)
+    buybackGuard?: Address; // 2026-11 BuybackGuard: the buyback ETH reference (on-chain TWAP) and depth-bounded size (absent when not deployed)
   };
   stockTokens: Record<string, { token: Address; priceId: Hex; multiplierWad: string }>;
   books: Array<{ bookId: number; name: string; symbol: string; venue: VenueId; components: BookComponents }>;

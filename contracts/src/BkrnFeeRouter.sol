@@ -8,6 +8,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IAttestedOracle} from "./interfaces/IAttestedOracle.sol";
 import {IBkrnFeeRouter, IBackstop} from "./interfaces/IBkrnFeeRouter.sol";
 import {IBkrnStaking} from "./interfaces/IBkrnStaking.sol";
+import {IBuybackGuard} from "./interfaces/IBuybackGuard.sol";
 import {IBookFactory} from "./interfaces/IBookFactory.sol";
 import {IBookrunnerConfig} from "./interfaces/IBookrunnerConfig.sol";
 import {ISwapRouter02} from "./interfaces/external/ISwapRouter02.sol";
@@ -36,7 +37,9 @@ import {UniswapV4Lib} from "./libraries/UniswapV4Lib.sol";
 ///             progress); window and deviation are bounded by the MIN/MAX constants;
 ///           - REF_ATTESTED: the AttestedOracle price of `bkrnPriceId` (USD per BKRN; the settlement token
 ///             is valued at $1);
-///           - REF_FIXED_ETH: BKRN/ETH x ETH/USD from the timelock-set `refBkrnPerEthWad` / `refUsdcPerEthWad`
+///           - REF_FIXED_ETH: BKRN/ETH x ETH/USD from the timelock-set `refBkrnPerEthWad` and the ETH reference (the
+///             BuybackGuard's on-chain WETH / USDG TWAP with a governance fallback when a guard is set, else the
+///             timelock-set `refUsdcPerEthWad`)
 ///             (a BKRN quoted in ETH; no ETH/USD feed is wired on Robinhood Chain, none verified).
 ///         Each call is capped at `maxBuybackPerCall`, which bounds the loss if the reference is
 ///         stale/manipulated in the keeper's favour. A reference off in the other direction (BKRN up) only
@@ -147,6 +150,10 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
     uint256 public refUsdcPerEthWad;
     /// @notice Fixed BKRN/ETH reference: whole BKRN per whole ETH (WAD), read by REF_FIXED_ETH.
     uint256 public refBkrnPerEthWad;
+    /// @notice BuybackGuard (tech update #9; 0 = none): supplies the ETH reference (an on-chain WETH / USDG TWAP with a
+    ///         governance fallback, replacing `refUsdcPerEthWad`) and bounds each buyback by the BKRN pool's depth
+    ///         (`maxBuyback()`). Timelock-set.
+    address public buybackGuard;
     /// @notice Hook fee allowance (bps) priced into the price limit of every hop through a hooked pool, so a swap
     ///         stopped at its limit still clears the floor net of the hook's take (review M-1). Timelock-set,
     ///         <= MAX_V4_HOOK_FEE_BPS and below `maxSlippageBps`. A dynamic-fee pool's LP fee belongs in it too.
@@ -240,6 +247,8 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
     event V4RouteCleared();
     /// @notice Fixed ETH references changed.
     event EthReferenceSet(uint256 usdcPerEthWad, uint256 bkrnPerEthWad);
+    /// @notice The BuybackGuard changed (0 = none).
+    event BuybackGuardSet(address guard);
     /// @notice VENUE_UNIV4 buyback with no initialized pool set (before graduation): nothing swapped.
     event BuybackDeferred(uint256 amountIn);
     /// @notice A v4 swap ran but spent nothing (no liquidity between the price and the limit): nothing bought.
@@ -337,7 +346,7 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
         if (router == address(0)) revert NotConfigured("buybackRouter");
         uint24 poolFee = buybackPoolFee;
         if (poolFee == 0) revert NotConfigured("buybackParams");
-        if (amountIn > maxBuybackPerCall) revert BuybackTooLarge(amountIn, maxBuybackPerCall);
+        _sizeCheck(amountIn, maxBuybackPerCall);
         address staking = config.staking();
         if (staking == address(0)) revert NotConfigured("staking");
         uint256 floor = buybackFloor(amountIn);
@@ -384,7 +393,7 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
     function referenceBkrnPerUsdc() public view returns (uint256) {
         uint8 src = referenceSource;
         if (src == REF_TWAP) return twapBkrnPerUsdc();
-        if (src == REF_FIXED_ETH) return Math.mulDiv(refBkrnPerEthWad, WAD, refUsdcPerEthWad);
+        if (src == REF_FIXED_ETH) return Math.mulDiv(refBkrnPerEthWad, WAD, _ethRef());
         if (src == REF_ATTESTED) {
             address oracle = config.oracle();
             if (oracle == address(0)) revert NotConfigured("oracle");
@@ -457,11 +466,29 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
         IBkrnStaking(staking).notifyReward(bkrnOut);
     }
 
+    /// @dev The ETH reference (settlement token per ETH, WAD): the BuybackGuard's (on-chain TWAP, else its unexpired
+    ///      governance fallback, else a revert) when one is set, otherwise the timelock-set `refUsdcPerEthWad`.
+    function _ethRef() private view returns (uint256) {
+        address g = buybackGuard;
+        return g == address(0) ? refUsdcPerEthWad : IBuybackGuard(g).ethUsdcPerEth();
+    }
+
+    /// @dev A call spends at most `maxPerCall` and, with a BuybackGuard, at most what keeps its price impact on the BKRN
+    ///      pool within the governance bound (the keeper splits a larger pending amount over several calls).
+    function _sizeCheck(uint256 amountIn, uint256 maxPerCall) private view {
+        if (amountIn > maxPerCall) revert BuybackTooLarge(amountIn, maxPerCall);
+        address g = buybackGuard;
+        if (g != address(0)) {
+            uint256 cap = IBuybackGuard(g).maxBuyback();
+            if (amountIn > cap) revert BuybackTooLarge(amountIn, cap);
+        }
+    }
+
     /// @dev Size and wiring checks shared by executeBuyback (v4) and previewBuyback; returns staking.
     function _v4Checks(uint256 amountIn) private view returns (address staking) {
         uint256 maxPerCall = maxBuybackPerCall;
         if (maxPerCall == 0) revert NotConfigured("buybackParams");
-        if (amountIn > maxPerCall) revert BuybackTooLarge(amountIn, maxPerCall);
+        _sizeCheck(amountIn, maxPerCall);
         staking = config.staking();
         if (staking == address(0)) revert NotConfigured("staking");
     }
@@ -549,7 +576,7 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
         // swapper from the ETH hop 0 really delivered, against this floor price
         job.minBkrnPerUsdcWad = floorPrice;
         job.bkrnNetPpm = _netPpm(job.route.bkrnPool);
-        uint256 ethRef = refUsdcPerEthWad;
+        uint256 ethRef = _ethRef();
         if (ethRef == 0) revert NotConfigured("ethReference");
         uint256 tol = v4EthToleranceBps == 0 ? DEFAULT_V4_ETH_TOLERANCE_BPS : v4EthToleranceBps;
         uint256 minEthPerUsdc = Math.mulDiv(WAD * WAD, BPS - tol, ethRef * BPS); // net
@@ -700,6 +727,14 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
         emit EthReferenceSet(usdcPerEthWad, bkrnPerEthWad);
     }
 
+    /// @notice Sets (or clears, 0) the BuybackGuard: the ETH reference and the depth bound of every buyback. Config admin
+    ///         (timelock) only.
+    function setBuybackGuard(address guard) external {
+        _onlyAdmin();
+        buybackGuard = guard;
+        emit BuybackGuardSet(guard);
+    }
+
     /// @notice Sets the v4 buyback route (discovery is off-chain: scripts/buyback-route.ts; an on-chain choice could
     ///         be steered). Pools must be initialized on `v4PoolManager`, their hooks 0 or allow-listed, and:
     ///           - ROUTE_DIRECT: `bkrnPool` = {settlement token, BKRN} (v4 order); `ethPool`, `v3Fee`, `weth` zero;
@@ -715,7 +750,7 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
         (address u, address b) = (address(usdc), address(bkrn));
         bool viaEth = r.kind != ROUTE_DIRECT;
         if (r.kind > ROUTE_V3_WETH) revert BadV4Pool();
-        if (viaEth && refUsdcPerEthWad == 0) revert NotConfigured("ethReference");
+        if (viaEth && _ethRef() == 0) revert NotConfigured("ethReference");
         if (viaEth ? !_pair(r.bkrnPool, NATIVE, b) : !_pair(r.bkrnPool, u, b)) revert BadV4Pool();
         _checkPool(m, r.bkrnPool);
         if (r.kind == ROUTE_V4_ETH) {
@@ -828,7 +863,7 @@ contract BkrnFeeRouter is IBkrnFeeRouter, ReentrancyGuardTransient {
                 ? twapPool != address(0) && buybackVenue != VENUE_UNIV4
                 : source == REF_ATTESTED
                     ? bkrnPriceId != bytes32(0)
-                    : source == REF_FIXED_ETH && refBkrnPerEthWad != 0 && refUsdcPerEthWad != 0;
+                    : source == REF_FIXED_ETH && refBkrnPerEthWad != 0 && (refUsdcPerEthWad != 0 || buybackGuard != address(0));
         if (!ok) revert BadReferenceSource(source);
         _setReferenceSource(source);
     }

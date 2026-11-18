@@ -10,6 +10,7 @@ import {VerifyHandover} from "../../script/VerifyHandover.s.sol";
 import {BookrunnerConfig} from "../../src/BookrunnerConfig.sol";
 import {InsurancePool} from "../../src/InsurancePool.sol";
 import {GasTank} from "../../src/GasTank.sol";
+import {BuybackGuard} from "../../src/BuybackGuard.sol";
 import {BookFactory} from "../../src/BookFactory.sol";
 import {StockTokenRegistry} from "../../src/StockTokenRegistry.sol";
 import {BkrnToken} from "../../src/BkrnToken.sol";
@@ -120,6 +121,7 @@ contract DeployMainnetTest is Test {
         bool noAllocations; // bkrn.community / studio / liquidity / contributors left zero
         uint256 v4HookFeeBps;
         string gasTank; // raw JSON of the `gasTank` input object ("" = none: no tank is deployed)
+        string guard; // raw JSON of the `buyback.guard` input object ("" = none: no BuybackGuard is deployed)
     }
 
     string internal constant CHAIN_CFG = "../config/chains/4663.json";
@@ -553,6 +555,73 @@ contract DeployMainnetTest is Test {
         uint256 sent = GasTank(payable(d.gasTank)).topUp(markSigner);
         assertEq(sent, 0.01 ether - 0.0001 ether);
         assertEq(markSigner.balance, 0.01 ether);
+    }
+
+    // ------------------------------------------------------------------------------------------- BuybackGuard (#9)
+
+    function _guardJson(address pool, string memory extra) internal pure returns (string memory) {
+        return string.concat(
+            "{\"maxImpactBps\":80,\"ethTwap\":{\"pool\":\"", vm.toString(pool),
+            "\",\"window\":1800,\"maxTickDeviation\":200,\"minLiquidity\":\"100000000000000000\",\"maxMoveBps\":500,\"maxAgeSeconds\":3600},",
+            "\"ethFallback\":{\"usdcPerEthWad\":\"2000000000000000000000\",\"ttlSeconds\":", extra, "}}"
+        );
+    }
+
+    function test_buybackGuard_deployed_wired_and_verified() public {
+        Opts memory o = _mainnetOpts();
+        address pool = factory.getPool(address(usdg), address(weth), 500);
+        o.guard = _guardJson(pool, "2592000");
+        (DeployMainnet.Deployed memory d, uint256 failures) = _deployAndVerify(o, "guard");
+        assertEq(failures, 0, "VerifyHandover must pass with the guard");
+        BuybackGuard g = BuybackGuard(d.buybackGuard);
+        BkrnFeeRouter fr = BkrnFeeRouter(d.feeRouter);
+        assertEq(fr.buybackGuard(), d.buybackGuard);
+        assertEq(address(g.router()), d.feeRouter);
+        assertEq(g.ethPool(), pool);
+        assertEq(g.weth(), address(weth));
+        assertEq(g.ethWindow(), 1800);
+        assertEq(g.ethMaxTickDeviation(), 200);
+        assertEq(g.ethMinLiquidity(), 1e17);
+        assertEq(g.ethMaxMoveBps(), 500);
+        assertEq(g.ethMaxAge(), 3600);
+        assertEq(g.maxImpactBps(), 80);
+        // the fallback is the ETH reference until the first poke, and expires after the ttl
+        assertEq(g.ethUsdcPerEth(), 2000e18);
+        assertEq(g.fallbackExpiry(), block.timestamp + 30 days);
+        // the deployer is not an admin after the handover: only the timelock sets it
+        vm.prank(deployer);
+        vm.expectRevert(abi.encodeWithSelector(BuybackGuard.NotAdmin.selector, deployer));
+        g.setMaxImpactBps(10);
+        vm.prank(d.timelock);
+        g.setMaxImpactBps(70);
+        assertEq(_verify(o, d), 1, "impact drift");
+    }
+
+    function test_refuses_buybackGuard_out_of_range_or_wrong_pool() public {
+        Opts memory o = _mainnetOpts();
+        address pool = factory.getPool(address(usdg), address(weth), 500);
+        o.guard = _guardJson(pool, "2592001"); // ttl beyond 30 days
+        _expectValidateRevert(o, "input: buyback.guard.ethFallback.ttlSeconds must be in (0, 30 days]");
+        o.guard = string.concat("{\"maxImpactBps\":1001,", _slice(_guardJson(pool, "86400")));
+        _expectValidateRevert(o, "input: buyback.guard.maxImpactBps must be in [1, 1000]");
+        // a pool of the settlement token and a 6-decimal token is not a WETH pool
+        MockERC20 six = new MockERC20("Six", "SIX", 6);
+        address wrong = address(factory.createPool(address(usdg), address(six), 500, 0));
+        o.guard = _guardJson(wrong, "86400");
+        DeployMainnet s = new DeployMainnet();
+        s.loadInput(_json(o));
+        s.validateInput();
+        vm.expectRevert(bytes("externals: buyback.guard.ethTwap.pool other token must have 18 decimals (WETH)"));
+        s.checkExternals();
+    }
+
+    /// @dev `{"maxImpactBps":80,` + rest of a guard JSON -> the rest (drops the leading `{"maxImpactBps":80,`).
+    function _slice(string memory json) internal pure returns (string memory) {
+        bytes memory b = bytes(json);
+        uint256 skip = bytes("{\"maxImpactBps\":80,").length;
+        bytes memory out = new bytes(b.length - skip);
+        for (uint256 i; i < out.length; ++i) out[i] = b[i + skip];
+        return string(out);
     }
 
     function test_gasTank_absent_means_no_tank() public {
@@ -1131,6 +1200,8 @@ contract DeployMainnetTest is Test {
                 vm.toString(d.insurancePoolImpl),
                 "\",\"gasTank\":\"",
                 vm.toString(d.gasTank),
+                "\",\"buybackGuard\":\"",
+                vm.toString(d.buybackGuard),
                 "\"}}"
             )
         );
@@ -1303,7 +1374,8 @@ contract DeployMainnetTest is Test {
         string memory c = o.twapPool == address(0)
             ? ""
             : string.concat(",\"twap\":{\"pool\":", _a(o.twapPool), ",\"window\":1800,\"maxTickDeviation\":200}");
-        return string.concat(a, b, c, _jsonBuybackV4(o), "}");
+        string memory g = bytes(o.guard).length == 0 ? "" : string.concat(",\"guard\":", o.guard);
+        return string.concat(a, b, c, _jsonBuybackV4(o), g, "}");
     }
 
     function _jsonBuybackV4(Opts memory o) internal pure returns (string memory) {

@@ -29,6 +29,7 @@ import {PoolEngineAdapter} from "../src/PoolEngineAdapter.sol";
 import {OrderlyAdapter} from "../src/OrderlyAdapter.sol";
 import {InsurancePool} from "../src/InsurancePool.sol";
 import {GasTank} from "../src/GasTank.sol";
+import {BuybackGuard} from "../src/BuybackGuard.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {BRTypes} from "../src/interfaces/BRTypes.sol";
 import {IStockTokenRegistry} from "../src/interfaces/IStockTokenRegistry.sol";
@@ -77,6 +78,7 @@ contract DeployMainnet is MainnetInput {
         address insurancePool; // ERC1967 proxy (2026-10)
         address insurancePoolImpl;
         address gasTank; // 2026-11 (0 = the input has no `gasTank`)
+        address buybackGuard; // 2026-11 (0 = the input has no `buyback.guard`)
         bool bkrnDeployed;
         uint256 startBlock;
     }
@@ -212,10 +214,30 @@ contract DeployMainnet is MainnetInput {
             feeRouter.setTwapParams(bb.twapPool, uint32(bb.twapWindow), uint24(bb.twapMaxTickDeviation));
         }
         if (bb.usdcPerEthWad != 0) feeRouter.setEthReference(bb.usdcPerEthWad, bb.bkrnPerEthWad);
+        _deployBuybackGuard(feeRouter); // before the v4 route: a via-ETH route needs the ETH reference the guard provides
         if (feeRouter.referenceSource() != bb.referenceSource) feeRouter.setReferenceSource(bb.referenceSource);
         _wireBuybackV4(feeRouter);
 
         Backstop(d.backstop).setMaxCoverBps(uint16(prm.backstopMaxCoverBps));
+    }
+
+    /// @dev BuybackGuard (tech update #9): the buyback ETH reference (on-chain WETH / USDG TWAP with an expiring governance
+    ///      fallback) and depth-bounded size. Parameters from the input, set while the deployer is still the timelock.
+    function _deployBuybackGuard(BkrnFeeRouter feeRouter) internal {
+        if (!guardIn.set) return;
+        BuybackGuard g = new BuybackGuard(d.config, d.feeRouter);
+        d.buybackGuard = address(g);
+        g.setEthTwap(
+            guardIn.ethPool,
+            uint32(guardIn.window),
+            uint24(guardIn.maxTickDeviation),
+            uint128(guardIn.minLiquidity),
+            uint16(guardIn.maxMoveBps),
+            uint32(guardIn.maxAge)
+        );
+        g.setEthFallback(guardIn.fallbackUsdcPerEthWad, uint64(block.timestamp + guardIn.fallbackTtl));
+        if (guardIn.maxImpactBps != g.DEFAULT_IMPACT_BPS()) g.setMaxImpactBps(uint16(guardIn.maxImpactBps));
+        feeRouter.setBuybackGuard(d.buybackGuard);
     }
 
     /// @dev Uniswap v4 venue (BKRN launched on Pons): PoolManager, allow-listed hooks, the route when the pool
@@ -434,6 +456,7 @@ contract DeployMainnet is MainnetInput {
         vm.serializeAddress(c, "insurancePool", d.insurancePool);
         vm.serializeAddress(c, "insurancePoolImplementation", d.insurancePoolImpl);
         if (d.gasTank != address(0)) vm.serializeAddress(c, "gasTank", d.gasTank);
+        if (d.buybackGuard != address(0)) vm.serializeAddress(c, "buybackGuard", d.buybackGuard);
         vm.serializeAddress(c, "bookImplementation", d.bookImpl);
         vm.serializeAddress(c, "bookLogic", d.bookLogic);
         vm.serializeAddress(c, "uniswapV3Factory", ext.univ3Factory);

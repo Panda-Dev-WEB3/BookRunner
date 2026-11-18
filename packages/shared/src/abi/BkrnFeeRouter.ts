@@ -305,6 +305,19 @@ export const bkrnFeeRouterAbi = [
   },
   {
     "type": "function",
+    "name": "buybackGuard",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "buybackPending",
     "inputs": [],
     "outputs": [
@@ -559,6 +572,19 @@ export const bkrnFeeRouterAbi = [
         "name": "priceId",
         "type": "bytes32",
         "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setBuybackGuard",
+    "inputs": [
+      {
+        "name": "guard",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "outputs": [],
@@ -1190,6 +1216,19 @@ export const bkrnFeeRouterAbi = [
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "BuybackGuardSet",
+    "inputs": [
+      {
+        "name": "guard",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
       }
     ],
     "anonymous": false

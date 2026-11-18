@@ -19,6 +19,7 @@ import {OrderlyAdapter} from "../src/OrderlyAdapter.sol";
 import {PoolEngineAdapter} from "../src/PoolEngineAdapter.sol";
 import {InsurancePool} from "../src/InsurancePool.sol";
 import {GasTank} from "../src/GasTank.sol";
+import {BuybackGuard} from "../src/BuybackGuard.sol";
 import {BRTypes} from "../src/interfaces/BRTypes.sol";
 import {IStockTokenRegistry} from "../src/interfaces/IStockTokenRegistry.sol";
 import {IBkrnV4Swapper} from "../src/interfaces/IBkrnV4Swapper.sol";
@@ -95,6 +96,7 @@ contract VerifyHandover is MainnetInput {
         _checkParams();
         _checkInsurancePool(deploymentJson);
         _checkGasTank(deploymentJson);
+        _checkBuybackGuard(deploymentJson);
         _checkEconomics();
         _checkBuybackV4();
         _checkOracleAndMarkets();
@@ -452,6 +454,34 @@ contract VerifyHandover is MainnetInput {
         _row(ok, "gas tank: every service wallet listed with the input floor / target / daily cap");
         _row(g.globalDailyCap() == tankIn.globalDailyCapWei, "gas tank global daily cap == input");
         _row(!g.paused(), "gas tank not paused");
+    }
+
+    /// @dev Tech update #9 BuybackGuard (only when the input has `buyback.guard`): deployed, serving this fee router, wired
+    ///      into it, the ETH TWAP and fallback and the impact bound as input. The fallback expiry is not compared (it
+    ///      runs out by design); its value and a ttl within the 30-day cap are.
+    function _checkBuybackGuard(string memory j) internal {
+        if (!guardIn.set) return;
+        address g = j.readAddressOr(".contracts.buybackGuard", address(0));
+        _row(g.code.length > 0, "buyback guard deployed (deployment record, with code)");
+        if (g.code.length == 0) return;
+        BuybackGuard bg = BuybackGuard(g);
+        BkrnFeeRouter fr = BkrnFeeRouter(cfg.feeRouter());
+        _row(fr.buybackGuard() == g, "fee router buybackGuard == the recorded guard");
+        _row(
+            address(bg.router()) == address(fr) && address(bg.config()) == address(cfg) && bg.usdc() == ext.settlementToken,
+            "buyback guard bound to this fee router, config and settlement token"
+        );
+        _row(
+            bg.ethPool() == guardIn.ethPool && bg.ethWindow() == guardIn.window
+                && bg.ethMaxTickDeviation() == guardIn.maxTickDeviation && bg.ethMinLiquidity() == guardIn.minLiquidity
+                && bg.ethMaxMoveBps() == guardIn.maxMoveBps && bg.ethMaxAge() == guardIn.maxAge,
+            "buyback guard ETH TWAP params == input"
+        );
+        _row(
+            bg.fallbackWad() == guardIn.fallbackUsdcPerEthWad && bg.fallbackExpiry() <= block.timestamp + 30 days,
+            "buyback guard ETH fallback == input (expiry within the 30-day cap)"
+        );
+        _row(bg.maxImpactBps() == guardIn.maxImpactBps, "buyback guard maxImpactBps == input");
     }
 
     function _checkEconomics() internal {

@@ -21,6 +21,7 @@ const CONTRACTS: Record<string, string[]> = {
   Book: ["Book", "IBook"],
   InsurancePool: ["InsurancePool", "IInsurancePool"],
   GasTank: ["GasTank"],
+  BuybackGuard: ["BuybackGuard", "IBuybackGuard"],
   Tranche: ["Tranche", "SeniorTranche", "ITranche"],
   UnderwritingVault: ["UnderwritingVault", "IUnderwritingVault"],
   MarketCharter: ["MarketCharter", "IMarketCharter"],

@@ -78,6 +78,14 @@ contract MockV4PoolManager is IV4PoolManager {
         if (pools[id].sqrtPriceX96 != 0) revert PoolAlreadyInitialized();
         pools[id] = Pool(sqrtPriceX96, liquidity);
         _writeSlot0(id, sqrtPriceX96);
+        _writeLiquidity(id, liquidity);
+    }
+
+    /// @dev Changes the pool's in-range liquidity (an LP adds / removes), also at the v4-core StateLibrary slot.
+    function setLiquidity(PoolKey memory key, uint128 liquidity) external {
+        bytes32 id = UniswapV4Lib.poolId(key);
+        pools[id].liquidity = liquidity;
+        _writeLiquidity(id, liquidity);
     }
 
     /// @dev Moves the pool (a trade by someone else).
@@ -263,6 +271,10 @@ contract MockV4PoolManager is IV4PoolManager {
 
     function _writeSlot0(bytes32 id, uint160 sqrtPriceX96) private {
         _ext[keccak256(abi.encodePacked(id, UniswapV4Lib.POOLS_SLOT))] = bytes32(uint256(sqrtPriceX96));
+    }
+
+    function _writeLiquidity(bytes32 id, uint128 liquidity) private {
+        _ext[bytes32(uint256(keccak256(abi.encodePacked(id, UniswapV4Lib.POOLS_SLOT))) + 3)] = bytes32(uint256(liquidity));
     }
 
     function _pack(int128 a0, int128 a1) private pure returns (int256) {

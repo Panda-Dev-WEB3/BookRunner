@@ -28,6 +28,13 @@ library UniswapV4Lib {
         return uint160(uint256(IV4PoolManager(manager).extsload(slot)));
     }
 
+    /// @notice In-range liquidity of the pool (v4-core StateLibrary.getLiquidity: the pool state's fourth word,
+    ///         `LIQUIDITY_OFFSET` = 3 after slot0 and the two fee growth words).
+    function liquidity(address manager, IV4PoolManager.PoolKey memory key) internal view returns (uint128) {
+        bytes32 slot = bytes32(uint256(keccak256(abi.encodePacked(poolId(key), POOLS_SLOT))) + 3);
+        return uint128(uint256(IV4PoolManager(manager).extsload(slot)));
+    }
+
     /// @notice Transient slot of `target`'s open delta in `currency` (v4-core CurrencyDelta._computeSlot).
     function deltaSlot(address target, address currency) internal pure returns (bytes32) {
         return keccak256(abi.encode(target, currency));

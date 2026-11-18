@@ -338,6 +338,11 @@
     },
     {
       "check": "unused-return",
+      "target": "BuybackGuard.maxBuyback",
+      "reason": "slot0() returns seven fields; the depth estimate needs only sqrtPriceX96 (the other fields are the tick, the observation indices, the protocol fee and the lock flag)"
+    },
+    {
+      "check": "unused-return",
       "target": "UniswapV3Twap.spotTick",
       "reason": "the ignored value is deliberately unused: tuple fields not needed, EnumerableSet add / remove idempotence, swap outputs measured by balance difference, ECDSA tryRecover error handled through the recovered address, or a probe call that only has to not revert"
     },

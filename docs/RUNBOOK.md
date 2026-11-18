@@ -228,7 +228,8 @@ the same wiring against the VERIFY-ed external addresses of the input and keeps 
 - **refreshing the fixed references (via-ETH routes)**: since review 2 M-A, ETH moves no longer stall buybacks
   with REF_FIXED / REF_ATTESTED: the floor is in USDG, the BKRN hop follows the real ETH fill, and
   `refUsdcPerEthWad` only gates the USDG -> ETH hop within `v4EthToleranceBps` (20%): refresh it (`setEthReference`,
-  48 h timelock) when ETH/USD has moved ~10% from it, at least monthly. REF_FIXED_ETH (BKRN/ETH x ETH/USD) still
+  48 h timelock) when ETH/USD has moved ~10% from it, at least monthly (with a BuybackGuard the ETH reference is the pool TWAP
+  and nothing is refreshed by hand: tech update #9, "Buyback automation"). REF_FIXED_ETH (BKRN/ETH x ETH/USD) still
   derives the BKRN floor from it: with that source refresh both values whenever ETH or BKRN/ETH moves ~half of
   `maxSlippageBps`. The BKRN reference itself (REF_FIXED `refBkrnPerUsdcWad`) must track BKRN/USDG within the
   slippage: refresh from `bun scripts/buyback-route.ts` (ETH = v3 30-min TWAP, BKRN/ETH = median over recent blocks
@@ -619,9 +620,10 @@ shows "No market open yet". Guarded launch: small, insured, watched.
          budget when its bad debt is at least `WATERFALL_LIQ_BAD_DEBT_OVERRIDE_USD` (50), else within the hourly budget
          `WATERFALL_LIQ_HOURLY_GAS_ETH` (0.01) of loss-making gas (the cost above the reward; reverted transactions
          count in full). Bound: the budget can only hold back under-water positions below 50 USD of bad debt each, for
-         the rest of the hour; the IF covers them. **`WATERFALL_LIQ_ETH_USD` is required** (USD per ETH): the mainnet
-         preflight and the waterfall refuse to start without it (the stack reads no ETH/USD feed; refresh it when ETH
-         moves by 2x). Keep the keeper address funded.
+         the rest of the hour; the IF covers them. ETH/USD comes from the BuybackGuard's on-chain WETH / USDG TWAP
+         (tech update #9: nothing to set or refresh); `WATERFALL_LIQ_ETH_USD` (USD per ETH) is only a starting value and is
+         required (the waterfall refuses to start without it on mainnet) only when the deployment has no BuybackGuard.
+         Keep the keeper address funded (the GasTank tops it up).
        - **Check.** The waterfall log shows "liquidation keeper running"; `/health` `liquidationKeeper` (age, open
          positions, backlog, failing attempts); alerts `liquidation_backlog` (a liquidatable position still open after
          `ALERT_LIQ_BACKLOG_SECONDS` 60 s, critical at 5x; the summary says gas policy / dust / price / failing
@@ -798,6 +800,33 @@ Migration `0004_trade_history` (applied by update.sh) adds two tables (ARCHITECT
   `bus_forged_message` (a service refused `ALERT_FORGED_MESSAGES_MAX` forged kills / quotes / risk states within
   `ALERT_FORGED_MESSAGES_WINDOW_SECONDS`: nothing acted on them, but something can write to Redis), `agent_no_desk_key`
   and `risk_state_unverified` (above).
+
+### Buyback automation (tech update #9)
+
+The buyback no longer depends on a hand-set ETH price or a hand-sized call.
+
+1. **ETH reference.** `contracts.buybackGuard` (deploy input `buyback.guard`) reads USDG per ETH from the on-chain TWAP of the
+   WETH / USDG v3 pool (`config/chains/4663.json` `dexConfirm.ethUsd.pool`). The waterfall pokes it every
+   `WATERFALL_ETH_REF_INTERVAL_SECONDS` (300). `WATERFALL_LIQ_ETH_USD` is no longer required (the liquidation gas policy
+   reads the same reference); the buyback and the policy fall back to the governance value only while the TWAP is stale.
+   Check: `cast call <guard> "ethReference()(uint256,uint8,uint64)"` (value, source 1 TWAP / 2 fallback / 0 none, stored-at),
+   the waterfall log "ETH reference updated from the pool TWAP", alerts `eth_reference_stale` (the TWAP is stale for 15 min:
+   keeper not poking, pool too thin, spot deviation, history shorter than the window) and
+   `eth_reference_fallback_expiring` (the fallback in force runs out in under 3 days).
+2. **Fallback and bounds (timelock, 48 h).** `setEthFallback(valueWad, expiry)` (expiry at most 30 days ahead; renewing is a
+   deliberate act: the deploy sets one for 30 days), `setEthTwap(pool, window, maxTickDeviation, minLiquidity, maxMoveBps,
+   maxAge)` (the deploy input values are owner-adjustable; `minLiquidity` is raw v3 liquidity, about $44k of 2% depth at ETH
+   1,946: it scales with sqrt(price), recalibrate it from the pool's `liquidity()` right before the deploy and after big moves).
+3. **Sizing.** Each buyback is at most `maxBuyback()`: the USDG that moves the BKRN pool's price by `maxImpactBps` (default
+   100 = 1%; `setMaxImpactBps`, timelock, 1..1000). The waterfall sends `min(pending, maxBuybackPerCall, cap)` per call and
+   waits `WATERFALL_BUYBACK_CHUNK_SECONDS` (300) between chunks. Check: `cast call <guard> "maxBuyback()(uint256)"`; alert
+   `buyback_depth_zero` (the pool has no liquidity: no buyback can be sent). `buyback_growing` still means the keeper is not
+   landing buybacks. `BuybackTooLarge(amountIn, cap)` in a revert = a call above the cap (a stale keeper binary).
+4. **Wiring.** `BkrnFeeRouter.setBuybackGuard(guard)` (timelock; `0` removes it: the router reverts to its fixed ETH reference
+   and `maxBuybackPerCall` alone). A v3-venue router needs `setTwapParams(pool, ...)` for the BKRN / USDG pool to give the guard
+   a depth source (it does not have to be the selected reference); on the v4 venue the route's BKRN pool is used.
+5. **Services.** `WATERFALL_ETH_REF_ENABLED` / `WATERFALL_ETH_REF_INTERVAL_SECONDS` (60..86400, at least 300 is effective: the
+   contract refuses sooner), `WATERFALL_BUYBACK_CHUNK_SECONDS`. Deploy input fields: deploy-inputs/README.md `buyback.guard`.
 
 ### Upkeep inside user transactions (tech update #8)
 
