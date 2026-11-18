@@ -105,6 +105,14 @@ commit.gpgsign true`, ssh format), or be named in a trusted-signed `Security-Rev
 `scripts/approve-commits.sh` after a security review of that commit. Anything else (a collaborator's push, a commit made on
 GitHub's web UI) refuses the deploy and lists the commits. `BOOKRUNNER_GATE_BASELINE=1` records the current commit without
 checking (first install only).
+   **Scheduled releases** (`release-robot.py`, installed by `install-release-robot.sh`; `bookrunner-release`):
+   a queue of pre-signed commits, staged from the owner's machine with `scripts/release-queue.sh <branch> [pdf]`
+   (one release per commit carrying a `Release-Title:` trailer), is released one per interval from an armed T0
+   (`sudo bookrunner-release arm <T0 UTC>`). Each release is re-verified against `allowed_signers`, pushed to GitHub
+   main as a fast-forward only (a moved main pauses the queue), deployed by `update.sh` (gate included) and announced
+   in the Telegram alert group (the tech update PDF once, at T0). Any failure pauses the queue and posts why;
+   `bookrunner-release status | pause | resume | skip`. Its GitHub deploy key (`/root/.ssh/bookrunner_release`,
+   write) is root-only on this host; remove it in GitHub once the queue is done.
 
 ## Notes and residual risk
 
