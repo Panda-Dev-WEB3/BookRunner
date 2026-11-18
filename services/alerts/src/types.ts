@@ -195,8 +195,24 @@ export interface OracleConfirmSnap {
   notes?: string[];
 }
 
+/** The primary RPC failing and a service running on its fallback (shared rpcRoute.ts RpcFallbackStatus; never a URL). */
+export interface RpcFallbackSnap {
+  /** which process reported it: "oracle", "alerts" */
+  service: string;
+  /** the failing provider's name ("Alchemy") */
+  provider: string;
+  /** capacity | rate_limited | server_error | timeout | network */
+  reason: string;
+  /** unix ms the primary first failed */
+  since: number;
+  /** operator sentence, e.g. "Alchemy monthly capacity limit reached: switch plan or key" */
+  message: string;
+}
+
 export interface OracleProbe {
   ok: boolean;
+  /** GET /health `rpc.fallback`: the oracle is on its fallback RPC (absent / null = on the primary, or an older oracle) */
+  rpcFallback?: RpcFallbackSnap | null;
   error: string | null;
   /** "median" when the oracle does not report one (older oracles) */
   policy: OraclePolicy;
@@ -331,6 +347,8 @@ export interface Snapshot {
    */
   buybackV4BlockedHop?: number | null;
   api: ApiProbe;
+  /** services on their fallback RPC right now (the oracle's /health `rpc.fallback`, this process's own state); [] / absent = none */
+  rpcFallback?: RpcFallbackSnap[];
   /** the oracle's /health (per-source health); null = not probed (no oracle URL) */
   oracle: OracleProbe | null;
   /** null: no backup recorded, undefined: Redis read failed */

@@ -14,6 +14,12 @@ export const baseEnvSchema = z.object({
    * RHC_RPC_URL (Alchemy: wss:// on the same path). Carries the provider key: never logged (redactUrl).
    */
   RPC_WS_URL: z.string().optional(),
+  /**
+   * Secondary HTTP RPC (clients.ts rpcTransport reads it from the environment): used only while RPC_URL fails with
+   * HTTP 429 / 5xx / timeouts, never otherwise. The mainnet profile sets it (RHC_RPC_FALLBACK_URL, default the public
+   * Robinhood RPC); unset on devnet / testnet. While it is in use the log subscriptions stay down (polling).
+   */
+  RPC_FALLBACK_URL: z.string().optional(),
   DEPLOYMENT_FILE: z.string().default("contracts/deployments/31337.json"),
   DEV_MNEMONIC: z.string().optional(),
   MARK_INTERVAL_SECONDS: z.coerce.number().default(300),

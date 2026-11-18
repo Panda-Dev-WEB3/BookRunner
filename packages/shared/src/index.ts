@@ -19,6 +19,8 @@ export * from "./logger";
 export * from "./deployments";
 export * from "./clients";
 export * from "./logSubscription";
+export * from "./rpcMeter";
+export * from "./rpcRoute";
 export * from "./orderly";
 export * from "./venueSymbol";
 export * from "./venueMarket";

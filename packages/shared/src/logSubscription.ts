@@ -7,6 +7,8 @@
 // poll at their normal cadence. Never `newHeads`: Robinhood Chain makes several blocks per second, each one billed.
 // The URL carries the provider key: it is never logged (the `label` is).
 import type { Address, Hex } from "viem";
+import { rpcMeter } from "./rpcMeter";
+import { rpcRoutes } from "./rpcRoute";
 
 export interface SubscriptionLog {
   address: Address;
@@ -94,6 +96,9 @@ export class LogSubscription {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private lastSeen = 0;
   private upState = false;
+  /** the HTTP primary is failing (rpcRoute.ts): the subscription follows it and stays down; the consumer polls */
+  private paused = false;
+  private unfollow: (() => void) | null = null;
   private filter: LogFilter;
   /** eth_subscribe requests sent (tests, /health) */
   subscribes = 0;
@@ -110,11 +115,33 @@ export class LogSubscription {
   start(): void {
     if (!this.stopped) return;
     this.stopped = false;
+    this.paused = rpcRoutes.onFallback();
+    this.unfollow = rpcRoutes.subscribe((onFallback) => (onFallback ? this.pause() : this.resume()));
+    if (this.paused) this.o.log?.info({ subscription: this.label() }, "RPC fallback active: log subscription stays down (polling) until the primary is back");
+    else this.connect();
+  }
+
+  private pause(): void {
+    if (this.stopped || this.paused) return;
+    this.paused = true;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.dropSocket();
+    this.setUp(false);
+    this.o.log?.info({ subscription: this.label() }, "RPC fallback active: log subscription down (polling) until the primary is back");
+  }
+
+  private resume(): void {
+    if (this.stopped || !this.paused) return;
+    this.paused = false;
+    this.failures = 0;
     this.connect();
   }
 
   stop(): void {
     this.stopped = true;
+    this.unfollow?.();
+    this.unfollow = null;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     this.dropSocket();
@@ -154,11 +181,12 @@ export class LogSubscription {
     const f: Record<string, unknown> = { address: [...this.filter.address] };
     if (this.filter.topics) f.topics = this.filter.topics;
     this.subscribes++;
+    rpcMeter.count("eth_subscribe");
     this.subscribeReq = this.send(ws, "eth_subscribe", ["logs", f]);
   }
 
   private connect(): void {
-    if (this.stopped) return;
+    if (this.stopped || this.paused) return;
     let ws: WsLike;
     try {
       ws = (this.o.ws ?? ((u: string) => new WebSocket(u) as unknown as WsLike))(this.o.url);
@@ -224,6 +252,7 @@ export class LogSubscription {
       return;
     }
     if (m.method === "eth_subscription" && m.params?.subscription === this.subId && this.subId !== null) {
+      rpcMeter.count("eth_subscription");
       const l = parseSubscriptionLog(m.params.result);
       if (l) this.o.onLogs([l]);
     }
@@ -250,7 +279,7 @@ export class LogSubscription {
   }
 
   private retry(err: unknown): void {
-    if (this.stopped || this.reconnectTimer) return;
+    if (this.stopped || this.paused || this.reconnectTimer) return;
     this.failures++;
     const wait = Math.min((this.o.reconnectMs ?? 1_000) * 2 ** Math.min(this.failures - 1, 16), this.o.maxReconnectMs ?? 60_000);
     if (this.failures === 1 || this.failures % 10 === 0) {

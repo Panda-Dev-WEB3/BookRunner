@@ -123,6 +123,21 @@ export function mainnetWsUrl(inherited: Env): string | null {
   return deriveWsUrl(inherited.RHC_RPC_URL, o);
 }
 
+/** The public Robinhood Chain RPC: the default fallback of the services' HTTP transport on mainnet (free, no key, rate limited). */
+export const MAINNET_RPC_FALLBACK_DEFAULT = "https://rpc.mainnet.chain.robinhood.com";
+
+/**
+ * The secondary HTTP RPC the services switch to while RHC_RPC_URL fails (HTTP 429 / 5xx / timeouts; shared rpcRoute.ts):
+ * RHC_RPC_FALLBACK_URL, else the public Robinhood RPC; "off" / "none" / "0" / "false" = none. null when off, or when it
+ * would be the primary itself. https only and never local (checked by mainnetProfile).
+ */
+export function mainnetRpcFallbackUrl(inherited: Env): string | null {
+  const o = inherited.RHC_RPC_FALLBACK_URL?.trim();
+  if (o && WS_OFF.has(o.toLowerCase())) return null;
+  const url = o || MAINNET_RPC_FALLBACK_DEFAULT;
+  return url === inherited.RHC_RPC_URL?.trim() ? null : url;
+}
+
 /** services/waterfall config defaults the MARK_WAIT_SECONDS relation uses when they are not set */
 const WATERFALL_WAIT_DEFAULTS = { WATERFALL_SWEEP_WAIT_SECONDS: 30, WATERFALL_FEE_FORWARD_WAIT_SECONDS: 45 } as const;
 
@@ -422,6 +437,10 @@ export function mainnetProfile(inherited: Env, root: string, only: readonly stri
   if (ws && !/^wss:\/\//.test(ws)) errors.push("RHC_WS_URL must be a wss:// URL (the provider key travels in it)");
   if (ws && isLocal(ws)) errors.push("RHC_WS_URL points at a local node");
 
+  const fallback = mainnetRpcFallbackUrl(inherited);
+  if (fallback && !/^https:\/\//.test(fallback)) errors.push("RHC_RPC_FALLBACK_URL must be an https:// URL");
+  if (fallback && isLocal(fallback)) errors.push("RHC_RPC_FALLBACK_URL points at a local node");
+
   const merged: Env = { ...inherited, ...MAINNET_FIXED };
   for (const role of SERVICE_ROLES) {
     try {
@@ -468,6 +487,7 @@ export function mainnetProfile(inherited: Env, root: string, only: readonly stri
     ...MAINNET_FIXED,
     RPC_URL: rpc,
     ...(ws ? { RPC_WS_URL: ws } : {}),
+    ...(fallback ? { RPC_FALLBACK_URL: fallback } : {}),
     DATABASE_URL: `postgres://bookrunner:${pg}@127.0.0.1:54400/bookrunner_mainnet`,
     REDIS_URL: `redis://:${redis}@127.0.0.1:63790/0`,
   };

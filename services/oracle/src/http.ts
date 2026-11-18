@@ -4,6 +4,7 @@
 // close). /prices/signed is the pull-oracle bundle (docs/LOW_GAS.md §1): abi.encode(PriceUpdate[], bytes[])
 // of every live price id, the `priceData` consumers carry in their own transaction — public by design, the
 // latency arbitrage is bounded on-chain by PoolEngine's maxTradePriceAge.
+import { rpcHealth } from "@bookrunner/shared";
 import { Hono } from "hono";
 import { type AttestationDocument, checkAttestation, reportDataFor } from "./attestation";
 import type { OracleService } from "./service";
@@ -25,7 +26,7 @@ export function createApp(svc: OracleView, attestation: AttestationDocument | nu
 
   app.get("/health", (c) => {
     const h = svc.health();
-    return c.json({ ok: true, service: "oracle", ...h });
+    return c.json({ ok: true, service: "oracle", ...h, rpc: rpcHealth() }); // rpc: failing primary (alerts rpc_fallback_active) + usage meter
   });
 
   app.get("/prices", (c) => c.json({ prices: svc.publicPrices() }));

@@ -107,6 +107,7 @@ WATERFALL_LIQ_ETH_USD=<USD per ETH, e.g. 3000>         # liquidation keeper gas 
 # ORACLE_DEX_MAX_AGE_MS=120000                          # mainnet default; at most 120000, at least 2 x ORACLE_DEX_READ_MS
 # RPC cadence (section 5 "RPC budget"; mainnet defaults, bounded at startup):
 # ORACLE_CHAINLINK_READ_MS=10000 ORACLE_CHAINLINK_EVENT_READ_MS=300000 ORACLE_TOKEN_STATE_READ_MS=60000 ORACLE_DEX_READ_MS=60000 ORACLE_HEAD_READ_MS=60000
+# RHC_RPC_FALLBACK_URL=https://<rpc>                  # secondary HTTP RPC, used only while RHC_RPC_URL fails; default the public https://rpc.mainnet.chain.robinhood.com; off = none
 # RHC_WS_URL=wss://<rpc>/<key>                        # log subscriptions; default derived from an Alchemy RHC_RPC_URL; off = polling
 # ALERT_ORACLE_PRIMARY_LAG_SECONDS=600                  # services/alerts: suspect-stale gap duration in session
 # ORACLE_DEX_RPC_URL=https://<rpc>                      # default ORACLE_CHAINLINK_RPC_URL, else RPC_URL
@@ -203,6 +204,33 @@ book adds ~40 CU/s more, deliberately not slowed down: risk ticks every `RISK_IN
 views share one `aggregate3` per round, 2-3 rounds per tick), the agent reads its mandate every
 `AGENT_STATE_REFRESH_MS` 5 s, and ops-venue signs a venue report every `OPS_REPORT_INTERVAL_MS` 15 s (risk values
 Orderly exposure with it). Lengthening any of these is an owner decision.
+
+**Automatic RPC backup (2026-11-18).** On 2026-11-15 the Alchemy free tier (30M CU a month) ran out about halfway
+through the month: every read failed, the oracle signed no price, `oracle_source_failing` and `oracle_price_missing`
+fired. Every service's HTTP transport (`packages/shared/src/clients.ts` `rpcTransport`: `publicClientFor`,
+`walletClientFor`, the oracle's source clients, alerts) now has a secondary endpoint, `RPC_FALLBACK_URL`: the mainnet
+profile sets it from `RHC_RPC_FALLBACK_URL` (https only, never local), default the public Robinhood RPC
+(`https://rpc.mainnet.chain.robinhood.com`; `off` = none). Devnet and testnet have none. It is used only while the
+primary (`RHC_RPC_URL`) fails because of the provider: HTTP 429, 5xx, timeouts, no connection. The failed request is
+answered by the fallback at once, and the primary is tried again after 15 s (doubling to 5 min while it keeps failing).
+A 429 whose body says "Monthly capacity" is a plan cap that does not clear within the hour: the fallback then serves for
+30 minutes before the primary is tried. A revert or a bad request is never a failover; a transaction broadcast fails over
+only when the primary refused it outright (429 / capacity), not after a timeout (it may be in the primary's mempool).
+The log subscriptions follow the primary: while any route is on the fallback they stay down and the services poll at the
+bracketed cadences above, exactly as without a WebSocket URL, and they come back when the primary answers. The public
+RPC is rate limited and slower: it is a bridge, not a plan. Alert `rpc_fallback_active` (warning, critical after 6 h,
+`ALERT_RPC_FALLBACK_CRITICAL_SECONDS`) names the failing provider and why, never a URL or key (RUNBOOK "RPC fallback
+active").
+
+**Usage meter.** Every process counts the JSON-RPC requests it sends to the primary per method (each call inside a batch
+too, which is how Alchemy bills; `rpcMeter.ts`) and estimates CU from a hard-coded table of Alchemy's published costs:
+eth_call 26, eth_getLogs 75, eth_blockNumber 10, eth_getBlockByNumber 16, eth_chainId 0, eth_getTransactionReceipt 15,
+eth_sendRawTransaction 40, eth_subscribe and each notification ~10, anything else 20. It is an **estimate** (the owner's
+plan prices some methods differently, notifications are billed by bytes; the invoice is the truth). Requests answered
+by the fallback are counted apart. Read it from the log line `rpc usage (estimate)` (once an hour, every service,
+`journalctl -u bookrunner@mainnet | grep "rpc usage"`; the JSON field `rpcUsage.methods` lists calls and CU per method,
+biggest first) and from `rpc.usage` / `rpc.fallback` of the oracle's and the charter's `/health` (the API's only with the
+admin token: `/health?verbose`).
 
 **Log subscriptions are triggers, never a data source.** The indexer still indexes with its canonical `eth_getLogs`
 range up to `head - INDEXER_CONFIRMATIONS` (2); a notification only makes that step run within ~1 s (retried until the

@@ -1,6 +1,6 @@
 // Hono app: /health (+ ops-venue's Orderly listing status), tRPC at /trpc, REST mirror at /v1, read-only MCP at /mcp, CSP
 // violation reports at /csp-report, CORS for apps/web.
-import { KEYS, parseVenueMarkets, type VenueMarketMsg, venueMarketGate } from "@bookrunner/shared";
+import { KEYS, parseVenueMarkets, rpcHealth, type VenueMarketMsg, venueMarketGate } from "@bookrunner/shared";
 import { parseLiquidationStatus } from "@bookrunner/shared/liquidationKeeper";
 import { trpcServer } from "@hono/trpc-server";
 import { Hono } from "hono";
@@ -198,7 +198,8 @@ export function createApp(deps: ApiDeps, opts: AppOptions) {
       chainId: deps.settings.chainId,
       deployment: deps.chain() !== null,
       capabilities,
-      ...(verbose ? { uptimeSec: Math.floor((deps.now() - started) / 1000), procedures } : {}),
+      // verbose (admin token) only: /health is public, the usage meter and the fallback state are operator data
+      ...(verbose ? { uptimeSec: Math.floor((deps.now() - started) / 1000), procedures, rpc: rpcHealth() } : {}),
       ...(orderlyListing ? { orderlyListing } : {}),
       ...(liquidationKeeper ? { liquidationKeeper } : {}),
       ...extra,

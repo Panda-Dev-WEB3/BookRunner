@@ -5,13 +5,15 @@
 // Reads only: Postgres, Redis, the chain (no key, no transaction), the API's and the oracle's /health. Holds no
 // signing key.
 import { bkrnFeeRouterAbi, bookrunnerConfigAbi, insurancePoolAbi } from "@bookrunner/shared/abi";
+import { rpcTransport } from "@bookrunner/shared/clients";
+import { rpcRoutes } from "@bookrunner/shared/rpcRoute";
 import { chainFor, multicall3For } from "@bookrunner/shared/chains";
 import { tryLoadDeployment } from "@bookrunner/shared/deployments";
 import { createLogger } from "@bookrunner/shared/logger";
 import { redactUrl } from "@bookrunner/shared/redact";
 import { Redis } from "ioredis";
 import postgres from "postgres";
-import { http, createPublicClient, parseAbi } from "viem";
+import { createPublicClient, parseAbi } from "viem";
 import { type ChainPort, type DbPort, collect, readPool } from "./collect";
 import { loadConfig } from "./config";
 import { createDeliverer, pingHeartbeat } from "./deliver";
@@ -70,7 +72,7 @@ redis.on("error", (err) => {
 const multicall = multicall3For(cfg.chainId);
 const client = createPublicClient({
   ...(multicall ? { chain: chainFor(cfg.chainId, cfg.rpcUrl), batch: { multicall: true } } : {}),
-  transport: http(cfg.rpcUrl, { timeout: 10_000, retryCount: 0 }),
+  transport: rpcTransport(cfg.rpcUrl, { http: { timeout: 10_000, retryCount: 0 } }),
 });
 const getEthBalanceAbi = parseAbi(["function getEthBalance(address addr) view returns (uint256 balance)"]);
 /** config.markInterval() is timelock-set: re-read hourly, not every pass */
@@ -122,6 +124,7 @@ const collectFn = (mem: Parameters<typeof collect>[2]) =>
       chain,
       fetch,
       now: Date.now,
+      rpcFallback: () => rpcRoutes.primaryStatus(),
       ...(siteChecker ? { siteFiles: () => siteChecker.check() } : {}),
     },
     {
