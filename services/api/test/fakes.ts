@@ -12,6 +12,7 @@ import type {
   EngineTraderChainState,
   MandateChainState,
   PoolChainState,
+  ProtocolTotals,
   PoolWalletState,
   ProtocolParams,
   TrancheWalletState,
@@ -271,6 +272,14 @@ export class FakeReadModel implements ReadModel {
       .filter((r) => r.trader === trader.toLowerCase() && (q.marketId === undefined || r.marketId === q.marketId))
       .sort((a, b) => a.block - b.block || a.logIndex - b.logIndex)
       .slice(-q.limit);
+  }
+  revenueRows: Array<{ source: string; totalUsd: string }> = [];
+  openPositionCount = 0;
+  async revenueTotals() {
+    return this.revenueRows;
+  }
+  async openEnginePositions() {
+    return this.openPositionCount;
   }
   async chainCursors(names: string[]) {
     return Object.fromEntries(names.flatMap((n) => (this.cursors[n] !== undefined ? [[n, this.cursors[n]!]] : [])));
@@ -585,6 +594,11 @@ export class FakeChain implements ChainGateway {
     return (
       this.engineTraders.get(`${marketId}|${wallet.toLowerCase()}`) ?? { position: { size: 0n, entryPriceWad: 0n, marginUsd: 0n, fundingIndexAtEntry: 0n }, usdcBalance: 0n, usdcAllowance: 0n }
     );
+  }
+  totals: ProtocolTotals = { backstopUsd: null, buybackSpentUsd: null, buybackPendingUsd: null };
+  async protocolTotals() {
+    this.guard();
+    return this.totals;
   }
   async splitGate(priceId: Hex, basisAt: number) {
     this.guard();

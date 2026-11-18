@@ -1,11 +1,11 @@
 // apps/site: the BookRunner public site (static pages vendored in public/, served as-is) plus the
-// live book desk at /dashboard/ and the public status page at /status/, whose scripts are the only
-// bundled code (src/dashboard/main.ts -> dist/dashboard/app.js, src/status/main.ts -> dist/status/app.js).
+// live book desk at /dashboard/, the public status page at /status/ and the public metrics page at /metrics/, whose scripts are the only
+// bundled code (src/dashboard/main.ts -> dist/dashboard/app.js, src/status/main.ts -> dist/status/app.js, src/metrics/main.ts -> dist/metrics/app.js).
 // `vite build` copies public/ verbatim into dist/ and adds the bundles, so dist/ is a plain static tree:
 // index.html, research/, jobs/, documents/, dashboard/, status/, official-links/, assets/... The official-links page's
 // contract tables are generated from the mainnet deployment record at build time (scripts/official-links.ts).
 //
-// Dev: `bun run dev` serves the same tree and proxies /trpc, /health and /status.json to SITE_API_ORIGIN
+// Dev: `bun run dev` serves the same tree and proxies /trpc, /health, /status.json and /metrics.json to SITE_API_ORIGIN
 // (default https://bookrunner.tech, the live testnet API; read-only queries are safe).
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -21,8 +21,8 @@ const apiOrigin = process.env.SITE_API_ORIGIN ?? "https://bookrunner.tech";
 const port = Number(process.env.SITE_PORT ?? 5191);
 
 /** Bundled pages: the page directory, its TS entry, the built script (dist/<dir>/app.js). */
-const BUNDLES = { app: "dashboard", status: "status" } as const;
-const ENTRIES: Record<string, string> = { app: "src/dashboard/main.ts", status: "src/status/main.ts" };
+const BUNDLES = { app: "dashboard", status: "status", metrics: "metrics" } as const;
+const ENTRIES: Record<string, string> = { app: "src/dashboard/main.ts", status: "src/status/main.ts", metrics: "src/metrics/main.ts" };
 
 /** Dev only: directory URLs serve their index.html; each bundle URL maps to its TS entry. */
 function staticTree(): Plugin {
@@ -102,6 +102,7 @@ export default defineConfig({
       "/trpc": { target: apiOrigin, changeOrigin: true, secure: true },
       "/health": { target: apiOrigin, changeOrigin: true, secure: true },
       "/status.json": { target: apiOrigin, changeOrigin: true, secure: true },
+      "/metrics.json": { target: apiOrigin, changeOrigin: true, secure: true },
     },
   },
   build: {

@@ -8,6 +8,7 @@ import { cors } from "hono/cors";
 import type { ApiDeps } from "./deps";
 import type { Kv } from "./kv";
 import { handleCspReport } from "./cspReport";
+import { METRICS_CACHE_CONTROL, METRICS_CACHE_MS, type MetricsView, loadMetrics } from "./domain/metrics";
 import { type StatusView, buildStatus } from "./domain/status";
 import { handleMcpRequest } from "./mcp";
 import { restRoutes } from "./rest";
@@ -64,7 +65,7 @@ export function trpcBatchWeight(paths: string[]): number {
 }
 
 /**
- * Path confusion (audit L-3). nginx exposes only /health, /status.json, /csp-report and /trpc/ of this API; a request
+ * Path confusion (audit L-3). nginx exposes only /health, /status.json, /metrics.json, /csp-report and /trpc/ of this API; a request
  * like `/trpc/..\v1\books` used to reach the REST mirror, /v1/webhooks and /mcp because Bun resolves
  * backslashes and dot-segments before the app sees the URL. nginx now forwards a normalized path and
  * stamps each proxied location in ROUTE_HEADER; the API refuses a request whose path is outside the
@@ -232,6 +233,27 @@ export function createApp(deps: ApiDeps, opts: AppOptions) {
     }
     c.header("Cache-Control", STATUS_CACHE_CONTROL);
     return c.json(statusCache.body);
+  });
+
+  // public metrics (apps/site /metrics/, nginx /metrics.json): protocol totals, no per-wallet data; one computation per 30 s
+  let metricsCache: { at: number; body: MetricsView } | null = null;
+  let metricsInflight: Promise<MetricsView> | null = null;
+  app.get("/metrics", async (c) => {
+    const now = deps.now();
+    if (!metricsCache || now - metricsCache.at >= METRICS_CACHE_MS) {
+      metricsInflight ??= loadMetrics(deps).finally(() => {
+        metricsInflight = null;
+      });
+      try {
+        metricsCache = { at: now, body: await metricsInflight };
+      } catch (err) {
+        deps.log.warn({ err }, "metrics unavailable");
+        c.header("Cache-Control", "no-store");
+        return c.json({ error: { code: "UNAVAILABLE", message: "metrics temporarily unavailable" } }, 503);
+      }
+    }
+    c.header("Cache-Control", METRICS_CACHE_CONTROL);
+    return c.json(metricsCache.body);
   });
 
   // CSP violation reports (nginx /csp-report: own rate-limit zone, 16 KB body cap). Outside /v1 on purpose: the REST

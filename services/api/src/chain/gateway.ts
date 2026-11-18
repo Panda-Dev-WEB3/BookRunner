@@ -158,6 +158,16 @@ export interface EngineTraderChainState {
   usdcAllowance: bigint;
 }
 
+/** Protocol-wide totals for the public metrics page (USDC 6dp); a field is null when its contract is absent or its read failed. */
+export interface ProtocolTotals {
+  /** Backstop.balance() */
+  backstopUsd: bigint | null;
+  /** BkrnFeeRouter.totalBuybackUsdc: settlement token spent on BKRN buybacks so far */
+  buybackSpentUsd: bigint | null;
+  /** BkrnFeeRouter.buybackPending: waiting for the next buyback */
+  buybackPendingUsd: bigint | null;
+}
+
 export interface ChainGateway {
   readonly chainId: number;
   readonly deployment: Deployment;
@@ -190,6 +200,8 @@ export interface ChainGateway {
   engineMarket(adapter: Address): Promise<EngineMarketChainState | null>;
   /** A wallet in a market (uncached: read right after the wallet's own transactions). */
   engineTrader(marketId: number, wallet: Address): Promise<EngineTraderChainState>;
+  /** Backstop balance and BKRN buyback totals (cached at least 30 s: the public metrics page). */
+  protocolTotals(): Promise<ProtocolTotals>;
   /** StockTokenRegistry.splitGate(priceId, basisAt) (audit N-1); no registry: no gate. */
   splitGate(priceId: Hex, basisAt: number): Promise<{ pending: boolean; window: boolean }>;
 }

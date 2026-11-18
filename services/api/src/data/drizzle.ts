@@ -29,6 +29,7 @@ import {
   webhookSubscriptions,
 } from "@bookrunner/db";
 import { and, asc, desc, eq, gt, gte, inArray, lt, lte, sql } from "drizzle-orm";
+import { dbUsdStr } from "../format";
 import type {
   DeliveryUpdate,
   EventRow,
@@ -414,6 +415,18 @@ export class DrizzleReadModel implements ReadModel {
       .orderBy(desc(engineTraderEvents.block), desc(engineTraderEvents.logIndex))
       .limit(q.limit);
     return rows.reverse();
+  }
+
+  async revenueTotals() {
+    const rows = await this.db.execute<{ source: string; total: string }>(
+      sql`select source, coalesce(sum(gross_usd), 0)::text as total from settlements where source <> 'distribution' group by source order by source`,
+    );
+    return [...rows].map((r) => ({ source: r.source, totalUsd: dbUsdStr(r.total) ?? "0.000000" }));
+  }
+
+  async openEnginePositions() {
+    const rows = await this.db.execute<{ n: string }>(sql`select count(*)::text as n from engine_positions where size_raw <> 0`);
+    return Number([...rows][0]?.n ?? 0);
   }
 
   async chainCursors(names: string[]) {

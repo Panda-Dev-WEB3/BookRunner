@@ -135,6 +135,7 @@ expect "/trpc//book.get" 200 "upstream path=/trpc/book.get route=/trpc/"
 expect "/health" 200 "upstream path=/health route=/health"
 expect "/health?verbose" 200 "upstream path=/health?verbose route=/health"
 expect "/status.json" 200 "upstream path=/status route=/status"
+expect "/metrics.json" 200 "upstream path=/metrics route=/metrics"
 echo "-- receipts zone (M-4): 2 r/s burst 10 per IP; other calls unaffected"
 codes=""; for i in $(seq 1 16); do out="$(raw "/trpc/receipts.proof?input=%7B%7D")"; codes="$codes ${out%% *}"; done
 echo "receipts.proof x16:$codes"
