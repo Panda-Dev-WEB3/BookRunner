@@ -78,17 +78,18 @@ contract PoolEngineWithdrawPullTest is EngineBase {
         assertEq(engine.positionOf(mA, alice).marginUsd, 198_999_500);
     }
 
-    /// @dev Freshness is unchanged: a signed print older than the new-risk bound (60 s) is stored (it is newer than the
-    ///      stored one) but does not satisfy the position-open withdrawal, which reverts StalePrice.
+    /// @dev Security review L4: a withdrawal that leaves a position open is new risk and uses the TRADE freshness bound
+    ///      (maxTradePriceAge, 15 s), not the 60 s new-risk bound: a print older than that is stored (it is newer than the
+    ///      stored one) but does not satisfy the withdrawal, which reverts StalePrice.
     function test_withdraw_oldPrintDoesNotSatisfyTheFreshnessBound() public {
         vm.warp(block.timestamp + 1 hours);
-        uint64 old = _now() - 61;
+        uint64 old = _now() - 16;
         bytes memory pd = _priceData(PID_A, PX, old, false);
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(PoolEngine.StalePrice.selector, PID_A, old));
         engine.withdrawMargin(mA, 1e6, pd);
         assertEq(oracle.latest(PID_A).publishedAt, t0, "the reverted tx stored nothing");
-        _withdraw(alice, 1e6, _priceData(PID_A, PX, _now() - 60, false)); // exactly at the bound: allowed
+        _withdraw(alice, 1e6, _priceData(PID_A, PX, _now() - 15, false)); // exactly at the trade bound: allowed
     }
 
     /// @dev Replay: re-sending an older bundle is skipped (not newer than the stored price), so it can neither
@@ -132,6 +133,26 @@ contract PoolEngineWithdrawPullTest is EngineBase {
         vm.expectRevert(abi.encodeWithSelector(PoolEngine.OffHours.selector, mA));
         engine.withdrawMargin(mA, 1e6, held);
         assertEq(oracle.latest(PID_A).publishedAt, t0, "the reverted tx stored nothing");
+    }
+
+    /// @dev The plain call (stored price) follows the same bound with a position open: a 20 s old stored price is refused.
+    function test_withdraw_plainCallWithAPositionUsesTheTradeBound() public {
+        vm.warp(block.timestamp + 20);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(PoolEngine.StalePrice.selector, PID_A, t0));
+        engine.withdrawMargin(mA, 1e6);
+        vm.warp(t0 + 15);
+        vm.prank(alice);
+        engine.withdrawMargin(mA, 1e6);
+    }
+
+    /// @dev A flat wallet with no position needs no price at all: an hour-old stored price does not matter.
+    function test_withdraw_flatWalletNeedsNoPrice() public {
+        _deposit(bob, mA, 50e6);
+        vm.warp(block.timestamp + 1 hours);
+        vm.prank(bob);
+        engine.withdrawMargin(mA, 50e6);
+        assertEq(usdc.balanceOf(bob), 50e6);
     }
 
     /// @dev A flat wallet withdraws freely, carrying a bundle or not.

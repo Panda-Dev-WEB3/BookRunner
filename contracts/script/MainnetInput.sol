@@ -137,6 +137,7 @@ abstract contract MainnetInput is Script {
         uint256 targetWei; // a top-up fills the wallet to this
         uint256 perAddressDailyCapWei; // most ETH one wallet may draw per UTC day
         uint256 globalDailyCapWei; // most ETH the tank may send per UTC day, all wallets
+        uint256 minIntervalSeconds; // least time between two top-ups of one wallet (default 3600)
     }
 
     /// @notice BuybackGuard (tech update #9, optional `buyback.guard` object; absent = no guard: the ETH reference stays the
@@ -155,6 +156,7 @@ abstract contract MainnetInput is Script {
         uint256 maxAge; // seconds the stored value is trusted, [600, 86400]
         uint256 fallbackUsdcPerEthWad; // governance fallback, USDG per ETH, [100e18, 100000e18]
         uint256 fallbackTtl; // seconds from the deploy until it expires, (0, 30 days]
+        uint256 maxNoDepth; // cap (settlement token, 6dp) while the BKRN depth pool is unset / not the swap pool (default 2000e6)
     }
 
     struct Buyback {
@@ -402,6 +404,7 @@ abstract contract MainnetInput is Script {
         guardIn.maxAge = json.readUint(".buyback.guard.ethTwap.maxAgeSeconds");
         guardIn.fallbackUsdcPerEthWad = json.readUint(".buyback.guard.ethFallback.usdcPerEthWad");
         guardIn.fallbackTtl = json.readUint(".buyback.guard.ethFallback.ttlSeconds");
+        guardIn.maxNoDepth = json.readUintOr(".buyback.guard.maxBuybackNoDepthUsd", 2_000e6);
     }
 
     function _loadGasTank(string memory json) private {
@@ -411,6 +414,7 @@ abstract contract MainnetInput is Script {
         tankIn.targetWei = json.readUint(".gasTank.targetWei");
         tankIn.perAddressDailyCapWei = json.readUint(".gasTank.perAddressDailyCapWei");
         tankIn.globalDailyCapWei = json.readUint(".gasTank.globalDailyCapWei");
+        tankIn.minIntervalSeconds = json.readUintOr(".gasTank.minIntervalSeconds", 3600);
     }
 
     function _loadBuyback(string memory json) private {
@@ -727,6 +731,10 @@ abstract contract MainnetInput is Script {
             "input: buyback.guard.ethFallback.usdcPerEthWad must be in [100e18, 100000e18]"
         );
         require(guardIn.fallbackTtl > 0 && guardIn.fallbackTtl <= 30 days, "input: buyback.guard.ethFallback.ttlSeconds must be in (0, 30 days]");
+        require(
+            guardIn.maxNoDepth > 0 && guardIn.maxNoDepth <= 1_000_000e6 && guardIn.maxNoDepth <= bb.maxPerCall,
+            "input: buyback.guard.maxBuybackNoDepthUsd must be in (0, min(1,000,000 USDG, buyback.maxPerCall)]"
+        );
     }
 
     /// @dev GasTank.setService / setGlobalDailyCap bounds (GasTank.MAX_TARGET 1 ether, MAX_SERVICE_DAILY 2 ether,
@@ -741,6 +749,7 @@ abstract contract MainnetInput is Script {
         );
         require(tankIn.globalDailyCapWei > 0 && tankIn.globalDailyCapWei <= 5 ether, "input: gasTank.globalDailyCapWei must be in (0, 5 ether]");
         require(_gasTankServices().length <= 32, "input: gasTank: more than 32 service wallets");
+        require(tankIn.minIntervalSeconds >= 1 && tankIn.minIntervalSeconds <= 1 days, "input: gasTank.minIntervalSeconds must be in [1, 86400]");
     }
 
     /// @dev The distinct service wallets the tank tops up: every role holder (mark signer, risk, ops-venue, jury,

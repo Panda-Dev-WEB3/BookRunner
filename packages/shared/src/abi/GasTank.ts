@@ -30,6 +30,19 @@ export const gasTankAbi = [
   },
   {
     "type": "function",
+    "name": "MAX_MIN_INTERVAL",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "MAX_SERVICES",
     "inputs": [],
     "outputs": [
@@ -109,6 +122,19 @@ export const gasTankAbi = [
   {
     "type": "function",
     "name": "globalSentToday",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "minInterval",
     "inputs": [],
     "outputs": [
       {
@@ -210,6 +236,19 @@ export const gasTankAbi = [
     "inputs": [
       {
         "name": "cap",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setMinInterval",
+    "inputs": [
+      {
+        "name": "seconds_",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -338,6 +377,19 @@ export const gasTankAbi = [
     "inputs": [
       {
         "name": "cap",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "MinIntervalSet",
+    "inputs": [
+      {
+        "name": "seconds_",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
@@ -563,6 +615,22 @@ export const gasTankAbi = [
     "type": "error",
     "name": "TooManyServices",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "TooSoon",
+    "inputs": [
+      {
+        "name": "service",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "nextAt",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
   },
   {
     "type": "error",

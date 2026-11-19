@@ -4,8 +4,8 @@
 // the contract's: this mirrors its reason codes and never second-guesses them.
 import type { Address } from "viem";
 
-/** GasTank.topUpQuote reason: 0 sendable, 1 not listed / paused / empty tank, 2 at or above the floor, 3 the wallet's daily cap is used, 4 the global daily cap is used. */
-export type TopUpReason = 0 | 1 | 2 | 3 | 4;
+/** GasTank.topUpQuote reason: 0 sendable, 1 not listed / paused / empty tank, 2 at or above the floor, 3 the wallet's daily cap is used, 4 the global daily cap is used, 5 the wallet was topped up less than the minimum interval ago (nothing to do: it waits). */
+export type TopUpReason = 0 | 1 | 2 | 3 | 4 | 5;
 
 export interface TankServiceQuote {
   service: Address;

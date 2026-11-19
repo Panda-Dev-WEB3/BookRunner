@@ -379,6 +379,19 @@ export const buybackGuardAbi = [
   },
   {
     "type": "function",
+    "name": "maxBuybackNoDepth",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "maxImpactBps",
     "inputs": [],
     "outputs": [
@@ -467,6 +480,19 @@ export const buybackGuardAbi = [
         "name": "maxAge",
         "type": "uint32",
         "internalType": "uint32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setMaxBuybackNoDepth",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "outputs": [],
@@ -588,6 +614,19 @@ export const buybackGuardAbi = [
         "type": "uint32",
         "indexed": false,
         "internalType": "uint32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "MaxBuybackNoDepthSet",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
       }
     ],
     "anonymous": false

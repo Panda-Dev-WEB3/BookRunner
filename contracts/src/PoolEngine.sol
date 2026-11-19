@@ -545,7 +545,9 @@ contract PoolEngine is IPoolEngine, ReentrancyGuardTransient {
             uint64 publishedAt;
             (price, held, publishedAt,) = _price(marketId, m);
             if (held) revert OffHours(marketId);
-            if (_newRiskStale(publishedAt)) revert StalePrice(m.cfg.underlying, publishedAt);
+            // a withdrawal that leaves an open position is new risk: the trade freshness bound (maxTradePriceAge), so the
+            // wallet cannot pick the best print of the last minute
+            if (_tradeStale(publishedAt)) revert StalePrice(m.cfg.underlying, publishedAt);
             _accrue(marketId, m, price);
             _settleFunding(marketId, m, p);
         }

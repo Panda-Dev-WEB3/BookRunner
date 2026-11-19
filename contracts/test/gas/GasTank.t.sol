@@ -58,6 +58,7 @@ contract GasTankTest is Test {
         tank.setService(svcA, FLOOR, TARGET, SVC_CAP);
         tank.setService(svcB, FLOOR, TARGET, SVC_CAP);
         tank.setGlobalDailyCap(GLOBAL_CAP);
+        tank.setMinInterval(1); // the interval itself is tested below; the cap tests only need distinct seconds
         vm.stopPrank();
         vm.deal(address(this), 10 ether);
         (bool ok,) = address(tank).call{value: 1 ether}("");
@@ -104,8 +105,10 @@ contract GasTankTest is Test {
         // each top-up sends TARGET (0.01); the 0.02 cap allows two, the third has no room
         vm.deal(svcA, 0);
         tank.topUp(svcA);
+        vm.warp(block.timestamp + 1);
         vm.deal(svcA, 0);
         tank.topUp(svcA);
+        vm.warp(block.timestamp + 1);
         vm.deal(svcA, 0);
         (uint256 q, uint8 why) = tank.topUpQuote(svcA);
         assertEq(q, 0);
@@ -122,6 +125,7 @@ contract GasTankTest is Test {
         tank.setService(svcA, FLOOR, TARGET, 0.012 ether);
         vm.deal(svcA, 0);
         tank.topUp(svcA); // 0.01
+        vm.warp(block.timestamp + 1);
         vm.deal(svcA, 0);
         // 0.002 of the cap is left: a partial top-up
         assertEq(tank.topUp(svcA), 0.002 ether);
@@ -134,6 +138,7 @@ contract GasTankTest is Test {
         vm.deal(svcB, 0);
         tank.topUp(svcA); // 0.01
         assertEq(tank.topUp(svcB), 0.005 ether); // only 0.005 of the global cap is left
+        vm.warp(block.timestamp + 1);
         vm.deal(svcA, 0);
         (uint256 q, uint8 why) = tank.topUpQuote(svcA);
         assertEq(q, 0);
@@ -147,6 +152,7 @@ contract GasTankTest is Test {
         tank.withdraw(payable(treasury), address(tank).balance - 0.004 ether);
         vm.deal(svcA, 0);
         assertEq(tank.topUp(svcA), 0.004 ether); // limited by the tank
+        vm.warp(block.timestamp + 1);
         vm.deal(svcA, 0);
         vm.expectRevert(abi.encodeWithSelector(GasTank.TankEmpty.selector, 0));
         tank.topUp(svcA);
@@ -294,6 +300,7 @@ contract GasTankTest is Test {
         for (uint256 i; i < n; ++i) {
             seed = uint256(keccak256(abi.encode(seed, i)));
             address who = seed % 2 == 0 ? svcA : svcB;
+            vm.warp(block.timestamp + 1);
             vm.deal(who, (seed >> 8) % FLOOR); // always below the floor
             try tank.topUp(who) returns (uint256 sent) {
                 if (who == svcA) sentA += sent;
@@ -323,5 +330,78 @@ contract GasTankTest is Test {
         (uint256 q,) = tank.topUpQuote(svcA);
         assertGt(q, 0);
         assertEq(tank.topUp(svcA), q);
+    }
+}
+
+/// @dev A wallet that forwards what it receives (a contract wallet): in one transaction, with no minimum interval, a loop of
+///      topUp calls drew the wallet's whole daily cap, and again right after midnight (security review L3).
+contract Forwarder {
+    address payable public sink;
+
+    constructor(address payable s) {
+        sink = s;
+    }
+
+    receive() external payable {
+        (bool ok,) = sink.call{value: msg.value}("");
+        require(ok);
+    }
+}
+
+contract GasTankIntervalTest is GasTankTest {
+    /// @dev Ported PoC (PocGasTank): the forwarder can no longer top itself up twice in a transaction or across midnight.
+    function test_regression_forwarderCannotDrawTwiceInOneTxOrAcrossMidnight() public {
+        vm.prank(admin);
+        tank.setMinInterval(1 hours);
+        address payable sink = payable(makeAddr("sink"));
+        Forwarder f = new Forwarder(sink);
+        vm.prank(admin);
+        tank.setService(address(f), FLOOR, TARGET, SVC_CAP);
+        uint256 mid = (block.timestamp / 1 days + 1) * 1 days;
+        vm.warp(mid - 1);
+        tank.topUp(address(f));
+        vm.expectRevert(abi.encodeWithSelector(GasTank.TooSoon.selector, address(f), mid - 1 + 1 hours));
+        tank.topUp(address(f)); // same transaction / block
+        vm.warp(mid); // the next UTC day, one second later
+        vm.expectRevert(abi.encodeWithSelector(GasTank.TooSoon.selector, address(f), mid - 1 + 1 hours));
+        tank.topUp(address(f));
+        assertEq(sink.balance, TARGET);
+        (uint256 q, uint8 why) = tank.topUpQuote(address(f));
+        assertEq(q, 0);
+        assertEq(why, 5);
+        vm.warp(mid - 1 + 1 hours);
+        assertEq(tank.topUp(address(f)), TARGET);
+    }
+
+    function test_minInterval_governanceOnlyAndBounded() public {
+        assertEq(tank.minInterval(), 1);
+        vm.prank(keeper);
+        vm.expectRevert(abi.encodeWithSelector(GasTank.NotAdmin.selector, keeper));
+        tank.setMinInterval(3600);
+        vm.startPrank(admin);
+        vm.expectRevert(GasTank.BadParams.selector);
+        tank.setMinInterval(0);
+        vm.expectRevert(GasTank.BadParams.selector);
+        tank.setMinInterval(1 days + 1);
+        tank.setMinInterval(1 days);
+        vm.stopPrank();
+        assertEq(tank.minInterval(), 1 days);
+    }
+
+    /// @dev Every transfer of a wallet is at least minInterval after its previous one, whatever the sequence.
+    function testFuzz_perWalletSpacing(uint256 seed, uint8 n) public {
+        vm.prank(admin);
+        tank.setMinInterval(1 hours);
+        n = uint8(bound(n, 2, 30));
+        uint256 last;
+        for (uint256 i; i < n; ++i) {
+            seed = uint256(keccak256(abi.encode(seed, i)));
+            vm.warp(block.timestamp + (seed % 3 hours));
+            vm.deal(svcA, 0);
+            try tank.topUp(svcA) {
+                if (last != 0) assertGe(block.timestamp, last + 1 hours);
+                last = block.timestamp;
+            } catch {}
+        }
     }
 }

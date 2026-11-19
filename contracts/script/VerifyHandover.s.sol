@@ -454,6 +454,7 @@ contract VerifyHandover is MainnetInput {
         _row(ok, "gas tank: every service wallet listed with the input floor / target / daily cap");
         _row(g.globalDailyCap() == tankIn.globalDailyCapWei, "gas tank global daily cap == input");
         _row(!g.paused(), "gas tank not paused");
+        _row(g.minInterval() == tankIn.minIntervalSeconds, "gas tank minimum interval == input");
     }
 
     /// @dev Tech update #9 BuybackGuard (only when the input has `buyback.guard`): deployed, serving this fee router, wired
@@ -482,6 +483,23 @@ contract VerifyHandover is MainnetInput {
             "buyback guard ETH fallback == input (expiry within the 30-day cap)"
         );
         _row(bg.maxImpactBps() == guardIn.maxImpactBps, "buyback guard maxImpactBps == input");
+        _row(bg.maxBuybackNoDepth() == guardIn.maxNoDepth, "buyback guard maxBuybackNoDepth == input");
+        // a depth pool set on the router must be the swap pool: {settlement token, BKRN} at the pinned fee tier (else the guard
+        // keeps sizing with the no-depth cap); before the BKRN pool exists none is set (RUNBOOK "Buyback automation")
+        address dp = fr.twapPool();
+        if (dp != address(0)) {
+            (bool a0, bytes memory r0) = dp.staticcall(abi.encodeWithSignature("token0()"));
+            (bool a1, bytes memory r1) = dp.staticcall(abi.encodeWithSignature("token1()"));
+            (bool a2, bytes memory r2) = dp.staticcall(abi.encodeWithSignature("fee()"));
+            bool ok = a0 && a1 && a2 && r0.length >= 32 && r1.length >= 32 && r2.length >= 32;
+            if (ok) {
+                address t0 = abi.decode(r0, (address));
+                address t1 = abi.decode(r1, (address));
+                ok = ((t0 == ext.settlementToken && t1 == cfg.bkrn()) || (t1 == ext.settlementToken && t0 == cfg.bkrn()))
+                    && abi.decode(r2, (uint24)) == fr.buybackPoolFee();
+            }
+            _row(ok, "router depth pool (twapPool) is the swap pool: {settlement token, BKRN} at buybackPoolFee");
+        }
     }
 
     function _checkEconomics() internal {

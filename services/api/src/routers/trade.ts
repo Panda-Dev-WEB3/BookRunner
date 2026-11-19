@@ -36,7 +36,6 @@ import {
   tradeMaxAge,
   tradePrice,
   unitsStr,
-  withdrawMaxAge,
 } from "../domain/trade";
 import { HISTORY_RANGES, HISTORY_SPEC, INDEXER_CURSORS, MAX_TRADER_EVENTS, aggregateCandles, buildFills, eventsBackfillPending, historyFrom, minuteRowsFor } from "../domain/tradeHistory";
 import { type PreparedTx, approveUsdcTx, engineDepositMarginTx, engineTradeTx, engineWithdrawMarginTx } from "../domain/txs";
@@ -47,7 +46,7 @@ import { intLike, walletInput } from "./common";
 
 const LIVE_STATES = new Set(["Live", "Retiring"]);
 /** The withdrawal carries its signed price (one transaction): keep this much of the 60 s bound for inclusion. */
-const WITHDRAW_PRICE_HEADROOM_SEC = 10;
+const WITHDRAW_PRICE_HEADROOM_SEC = 5;
 
 const marketIdInput = intLike(1);
 const slippageInput = intLike(1, MAX_SLIPPAGE_BPS).default(DEFAULT_SLIPPAGE_BPS);
@@ -408,14 +407,14 @@ export const tradeRouter = router({
       const px = pr.price;
       if (!px) fail("PRECONDITION_FAILED", "The market has no price yet");
       if (px.held) fail("PRECONDITION_FAILED", "The stock's session is closed: with an open position, margin cannot be withdrawn until it reopens (close the position first, after the reopen)");
-      if (pr.nowSec - px.publishedAt > withdrawMaxAge(m.chain) - WITHDRAW_PRICE_HEADROOM_SEC) fail("PRECONDITION_FAILED", "No signed price fresh enough to withdraw with an open position; retry in a few seconds");
+      if (pr.nowSec - px.publishedAt > tradeMaxAge(m.chain) - WITHDRAW_PRICE_HEADROOM_SEC) fail("PRECONDITION_FAILED", "No signed price fresh enough to withdraw with an open position; retry in a few seconds");
       if (!pr.session.canTrade && (pr.session.session === "split_unrecorded" || pr.session.session === "split_repricing")) fail("PRECONDITION_FAILED", pr.session.reasons[0] ?? "A stock split is being applied");
       const max = safeMaxWithdraw(m.chain, t, px.priceWad, !!deps.settings.tradeRefuseUnholdable);
       if (amount > max)
         fail("PRECONDITION_FAILED", `At most ${usdStr(max)} can be withdrawn with this position open: the rest must stay as margin (${deps.settings.tradeRefuseUnholdable ? `the off-hours requirement: the position stays at or below the leverage an order may reach here` : "initial margin"}, with room for a 1% move). Reduce the position to free more.`);
       if (px.source === "signed") {
         warnings.push(
-          `With a position open the engine values it at a price at most ${withdrawMaxAge(m.chain)} s old: this transaction carries the signed price of ${isoSec(px.publishedAt)}, so it must be mined before ${isoSec(px.publishedAt + withdrawMaxAge(m.chain))}.`,
+          `With a position open the engine values it at a price at most ${tradeMaxAge(m.chain)} s old (the trade bound): this transaction carries the signed price of ${isoSec(px.publishedAt)}, so it must be mined before ${isoSec(px.publishedAt + tradeMaxAge(m.chain))}.`,
         );
       }
       // tech update #8: the signed print rides in the withdrawal itself (priceData overload), no separate relay transaction

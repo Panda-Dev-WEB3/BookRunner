@@ -18,7 +18,14 @@ contract StubRouter {
     uint8 public buybackVenue;
     address public twapPool;
     address public v4PoolManager;
+    address public bkrn;
+    uint24 public buybackPoolFee = 3000;
     IBkrnV4Swapper.V4Route internal _route;
+
+    function setTokens(address b, uint24 fee) external {
+        bkrn = b;
+        buybackPoolFee = fee;
+    }
 
     function setV3(address pool) external {
         buybackVenue = 0;
@@ -63,6 +70,7 @@ contract BuybackGuardTest is CoreFixture {
         ethPool.setLiquidity(1e18);
         guard = new BuybackGuard(address(config), address(feeRouter));
         stub = new StubRouter();
+        stub.setTokens(address(bkrn), 3000);
         sizeGuard = new BuybackGuard(address(config), address(stub));
         vm.warp(block.timestamp + 2 hours); // observation history longer than the window
         vm.startPrank(admin);
@@ -183,7 +191,7 @@ contract BuybackGuardTest is CoreFixture {
     function test_clamp_aRealMoveIsFollowedAFiveHundredBpsStepAtATime() public {
         uint256 v0 = guard.pokeEthReference();
         ethPool.setTick(_ethTick(1900)); // ETH +21%, and it stays
-        vm.warp(block.timestamp + 2 hours);
+        vm.warp(block.timestamp + 50 minutes); // the window is all at the new tick; the stored value is still trusted
         uint256 v1 = guard.pokeEthReference();
         assertEq(v1, Math.mulDiv(v0, 10_500, 10_000), "first step: +5% of the previous value");
         vm.warp(block.timestamp + 5 minutes);
@@ -201,15 +209,79 @@ contract BuybackGuardTest is CoreFixture {
     function test_clamp_downwardsToo() public {
         uint256 v0 = guard.pokeEthReference();
         ethPool.setTick(_ethTick(-1900));
-        vm.warp(block.timestamp + 2 hours);
+        vm.warp(block.timestamp + 50 minutes);
         assertEq(guard.pokeEthReference(), Math.mulDiv(v0, 9500, 10_000));
     }
 
-    function test_firstPokeIsAnchoredOnTheLiveFallback() public {
+    /// @dev A never-stored value is no anchor: the first accepted TWAP is stored as it is (every other check passed).
+    function test_firstPokeStoresTheTwapUnclamped() public {
         vm.prank(admin);
         guard.setEthFallback(1000e18, uint64(block.timestamp + 7 days));
-        // the pool says ~2,000, far from the 1,000 fallback: the first stored value is the fallback +5%
-        assertEq(guard.pokeEthReference(), 1050e18);
+        assertApproxEqRel(guard.pokeEthReference(), ETH_USD, 0.0005e18);
+    }
+
+    /// @dev Ported PoC (PocGuardAnchor, security review L1): after an outage longer than ethMaxAge the first accepted poke was
+    ///      clamped to the STALE anchor yet reported as a fresh TWAP. Now the stale value is no anchor: the real TWAP is stored.
+    function test_regression_staleAnchorIsNotUsedNorReportedFresh() public {
+        guard.pokeEthReference(); // ~2000
+        ethPool.setTick(_ethTick(-3567)); // ETH falls ~30% and stays; nobody pokes for 3 hours
+        vm.warp(block.timestamp + 3 hours);
+        (, uint8 srcBefore,) = guard.ethReference();
+        assertEq(srcBefore, 0); // stale, no fallback
+        uint256 v = guard.pokeEthReference();
+        assertApproxEqRel(v, 1400e18, 0.01e18); // the pool's own average, not stale 2000 - 5% = 1900
+        (uint256 val, uint8 src,) = guard.ethReference();
+        assertEq(src, 1);
+        assertEq(val, v);
+    }
+
+    /// @dev With a live fallback during the outage the reference in force is the fallback (source 2) until a poke lands.
+    function test_staleAnchorWithFallbackReportsTheFallbackThenTheTwap() public {
+        guard.pokeEthReference();
+        vm.prank(admin);
+        guard.setEthFallback(1900e18, uint64(block.timestamp + 7 days));
+        ethPool.setTick(_ethTick(-3567));
+        vm.warp(block.timestamp + 3 hours);
+        (uint256 v0, uint8 s0,) = guard.ethReference();
+        assertEq(s0, 2);
+        assertEq(v0, 1900e18);
+        uint256 v = guard.pokeEthReference();
+        (, uint8 s1,) = guard.ethReference();
+        assertEq(s1, 1);
+        assertApproxEqRel(v, 1400e18, 0.01e18);
+    }
+
+    function test_regression_noDepthPoolFallsBackToTheNoDepthCap() public {
+        // the shipped config: no twapPool on the router -> a conservative cap, never unlimited (security review M1)
+        stub.setV3(address(0));
+        assertEq(sizeGuard.maxBuyback(), 2_000e6);
+        // a pool that is not the swap pool says nothing about the swap's impact: wrong fee tier, wrong tokens
+        UniV3MockPool good = _bkrnPool(1e18);
+        stub.setV3(address(good));
+        assertGt(sizeGuard.maxBuyback(), 0);
+        assertTrue(sizeGuard.maxBuyback() != 2_000e6);
+        stub.setTokens(address(bkrn), 500); // the router swaps at 0.05%, the pool is 0.3%
+        assertEq(sizeGuard.maxBuyback(), 2_000e6);
+        stub.setTokens(address(bkrn), 3000);
+        UniV3MockPool wrongTokens = v3.createPool(address(usdc), address(weth), 3000, _bkrnTick());
+        wrongTokens.setLiquidity(1e30);
+        stub.setV3(address(wrongTokens));
+        assertEq(sizeGuard.maxBuyback(), 2_000e6);
+    }
+
+    function test_maxBuybackNoDepth_governanceBounded() public {
+        assertEq(sizeGuard.maxBuybackNoDepth(), 2_000e6);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(BuybackGuard.NotAdmin.selector, alice));
+        sizeGuard.setMaxBuybackNoDepth(1);
+        vm.startPrank(admin);
+        vm.expectRevert(BuybackGuard.BadParams.selector);
+        sizeGuard.setMaxBuybackNoDepth(0);
+        vm.expectRevert(BuybackGuard.BadParams.selector);
+        sizeGuard.setMaxBuybackNoDepth(1_000_000e6 + 1);
+        sizeGuard.setMaxBuybackNoDepth(500e6);
+        vm.stopPrank();
+        assertEq(sizeGuard.maxBuyback(), 500e6);
     }
 
     // ------------------------------------------------------------------------------------------- fallback and expiry
@@ -330,9 +402,12 @@ contract BuybackGuardTest is CoreFixture {
         for (uint256 i; i < steps; ++i) {
             ethPool.setTick(_ethTick(off));
             vm.warp(block.timestamp + 5 minutes + (uint256(wait) % 3 hours));
+            bool fresh = block.timestamp <= uint256(guard.ethRefAt()) + guard.ethMaxAge(); // a stale value is no anchor
             try guard.pokeEthReference() returns (uint256 v) {
-                assertLe(v, Math.mulDiv(prev, 10_500, 10_000));
-                assertGe(v, Math.mulDiv(prev, 9500, 10_000));
+                if (fresh) {
+                    assertLe(v, Math.mulDiv(prev, 10_500, 10_000));
+                    assertGe(v, Math.mulDiv(prev, 9500, 10_000));
+                }
                 assertGe(v, 100e18);
                 assertLe(v, 100_000e18);
                 prev = v;
@@ -392,7 +467,7 @@ contract BuybackGuardTest is CoreFixture {
     }
 
     function test_size_noPoolMeansNoDepthCap_emptyPoolMeansZero() public {
-        assertEq(sizeGuard.maxBuyback(), type(uint256).max);
+        assertEq(sizeGuard.maxBuyback(), 2_000e6); // never unlimited: the conservative no-depth cap
         UniV3MockPool p = _bkrnPool(0);
         stub.setV3(address(p));
         assertEq(sizeGuard.maxBuyback(), 0);
@@ -440,7 +515,7 @@ contract BuybackGuardTest is CoreFixture {
     function test_router_guardWithoutADepthSourceDoesNotBlock() public {
         vm.prank(admin);
         feeRouter.setBuybackGuard(address(guard)); // no twapPool configured on the router
-        assertEq(guard.maxBuyback(), type(uint256).max);
+        assertEq(guard.maxBuyback(), 2_000e6);
         _pending(1_000e6);
         vm.prank(keeper);
         feeRouter.executeBuyback(1_000e6, 0);
@@ -503,6 +578,7 @@ contract BuybackGuardV4Test is CoreFixture {
         pm = new MockV4PoolManager();
         guard = new BuybackGuard(address(config), address(feeRouter));
         stub = new StubRouter();
+        stub.setTokens(address(bkrn), 3000);
         sizeGuard = new BuybackGuard(address(config), address(stub));
         directKey = _key(address(usdc), address(bkrn), 3000);
         ethBkrnKey = _key(address(0), address(bkrn), 0);
@@ -559,10 +635,10 @@ contract BuybackGuardV4Test is CoreFixture {
 
     function test_size_noRouteOrUninitializedPoolMeansNoCap() public {
         stub.setV4(address(pm), _route(0, directKey)); // pool never initialized
-        assertEq(sizeGuard.maxBuyback(), type(uint256).max);
+        assertEq(sizeGuard.maxBuyback(), 2_000e6);
         IBkrnV4Swapper.V4Route memory none;
         stub.setV4(address(pm), none);
-        assertEq(sizeGuard.maxBuyback(), type(uint256).max);
+        assertEq(sizeGuard.maxBuyback(), 2_000e6);
     }
 
     /// @dev The legacy timelock-set ETH reference is wildly off; with the guard the via-ETH buyback prices with the TWAP and

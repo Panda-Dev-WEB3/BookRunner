@@ -237,6 +237,7 @@ contract DeployMainnet is MainnetInput {
         );
         g.setEthFallback(guardIn.fallbackUsdcPerEthWad, uint64(block.timestamp + guardIn.fallbackTtl));
         if (guardIn.maxImpactBps != g.DEFAULT_IMPACT_BPS()) g.setMaxImpactBps(uint16(guardIn.maxImpactBps));
+        if (guardIn.maxNoDepth != g.maxBuybackNoDepth()) g.setMaxBuybackNoDepth(guardIn.maxNoDepth);
         feeRouter.setBuybackGuard(d.buybackGuard);
     }
 
@@ -287,6 +288,7 @@ contract DeployMainnet is MainnetInput {
             t.setService(svc[i], tankIn.floorWei, tankIn.targetWei, tankIn.perAddressDailyCapWei);
         }
         t.setGlobalDailyCap(tankIn.globalDailyCapWei);
+        if (tankIn.minIntervalSeconds != t.minInterval()) t.setMinInterval(tankIn.minIntervalSeconds);
     }
 
     function _setParams() internal {

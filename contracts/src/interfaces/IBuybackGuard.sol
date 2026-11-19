@@ -9,6 +9,6 @@ interface IBuybackGuard {
     function ethUsdcPerEth() external view returns (uint256);
 
     /// @notice The most settlement token (USDG, 6dp) one buyback may swap now so that its price impact on the BKRN pool stays
-    ///         within `maxImpactBps` (type(uint256).max: no depth source yet, the router's own cap applies alone).
+    ///         within `maxImpactBps` (`maxBuybackNoDepth` while there is no usable BKRN depth pool: never unlimited).
     function maxBuyback() external view returns (uint256);
 }

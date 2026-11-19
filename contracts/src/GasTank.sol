@@ -42,6 +42,7 @@ contract GasTank is ReentrancyGuardTransient {
         uint128 dailyCap; // most ETH one UTC day may send to this service
         uint64 day; // UTC day of `sentToday`
         uint128 sentToday;
+        uint64 lastAt; // time of the last top-up (the minimum interval is measured from it)
     }
 
     mapping(address service => Service) private _svc;
@@ -49,6 +50,10 @@ contract GasTank is ReentrancyGuardTransient {
 
     /// @notice Most ETH one UTC day may send in total (timelock-set).
     uint256 public globalDailyCap;
+    /// @notice Minimum time between two top-ups of the same wallet (timelock-set, MIN..MAX_MIN_INTERVAL): one transaction or
+    ///         block can never top the same wallet up twice, whatever the wallet does with the ETH it receives.
+    uint256 public minInterval = 1 hours;
+    uint256 public constant MAX_MIN_INTERVAL = 1 days;
     uint64 private _globalDay;
     uint256 private _globalSent;
 
@@ -63,6 +68,7 @@ contract GasTank is ReentrancyGuardTransient {
     error NotListed(address service);
     error AboveFloor(address service, uint256 balance, uint256 floor);
     error CapReached(address service, bool global);
+    error TooSoon(address service, uint256 nextAt);
     error TankEmpty(uint256 balance);
     error TopUpFailed(address service);
     error WithdrawFailed();
@@ -72,6 +78,7 @@ contract GasTank is ReentrancyGuardTransient {
     event ServiceSet(address indexed service, uint256 floor, uint256 target, uint256 dailyCap);
     event ServiceRemoved(address indexed service);
     event GlobalDailyCapSet(uint256 cap);
+    event MinIntervalSet(uint256 seconds_);
     /// @notice `amount` was sent to `service`; `wanted` is what its target asked for (amount < wanted: limited by a
     ///         cap or by the tank's balance; services/alerts reads the shortfall).
     event ToppedUp(address indexed service, uint256 amount, uint256 wanted, address indexed caller);
@@ -99,6 +106,7 @@ contract GasTank is ReentrancyGuardTransient {
         if (!s.listed) revert NotListed(service);
         uint256 bal = service.balance;
         if (bal >= s.floor) revert AboveFloor(service, bal, s.floor);
+        if (s.lastAt != 0 && block.timestamp < uint256(s.lastAt) + minInterval) revert TooSoon(service, uint256(s.lastAt) + minInterval);
 
         uint256 wanted = uint256(s.target) - bal;
         uint64 today = uint64(block.timestamp / 1 days);
@@ -118,6 +126,7 @@ contract GasTank is ReentrancyGuardTransient {
 
         // effects before the interaction
         s.day = today;
+        s.lastAt = uint64(block.timestamp);
         s.sentToday = uint128(usedService + sent);
         _globalDay = today;
         _globalSent = usedGlobal + sent;
@@ -173,6 +182,14 @@ contract GasTank is ReentrancyGuardTransient {
         emit GlobalDailyCapSet(cap);
     }
 
+    /// @notice Timelock: the minimum time between two top-ups of one wallet (1 s .. MAX_MIN_INTERVAL).
+    function setMinInterval(uint256 seconds_) external {
+        _onlyAdmin();
+        if (seconds_ == 0 || seconds_ > MAX_MIN_INTERVAL) revert BadParams();
+        minInterval = seconds_;
+        emit MinIntervalSet(seconds_);
+    }
+
     /// @notice GUARDIAN or timelock: pauses top-ups.
     function pause() external {
         if (!config.hasRole(DEFAULT_ADMIN_ROLE, msg.sender) && !config.hasRole(GUARDIAN_ROLE, msg.sender)) {
@@ -224,12 +241,13 @@ contract GasTank is ReentrancyGuardTransient {
     }
 
     /// @notice What `topUp(service)` would send now (0 = it would revert), and why not: reason 0 sendable, 1 not listed
-    ///         / paused / empty tank, 2 at or above the floor, 3 service cap reached, 4 global cap reached.
+    ///         / paused / empty tank, 2 at or above the floor, 3 service cap reached, 4 global cap reached, 5 minimum interval not over.
     function topUpQuote(address service) external view returns (uint256 amount, uint8 reason) {
         Service storage s = _svc[service];
         if (!s.listed || paused || address(this).balance < 1) return (0, 1);
         uint256 bal = service.balance;
         if (bal >= s.floor) return (0, 2);
+        if (s.lastAt != 0 && block.timestamp < uint256(s.lastAt) + minInterval) return (0, 5);
         uint64 today = uint64(block.timestamp / 1 days);
         uint256 usedService = s.day >= today ? s.sentToday : 0;
         uint256 usedGlobal = _globalDay >= today ? _globalSent : 0;

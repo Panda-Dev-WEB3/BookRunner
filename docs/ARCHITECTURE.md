@@ -233,8 +233,8 @@ venueMinIf[PoolEngine] 10,000 USDC, tiers: entry 50k USD → 0, ≥50k → 25k B
   (governance, default 100 = 1%, 1..1000): the in-range liquidity `L` and sqrt price of the pool the router buys from
   (v3 venue: `twapPool`, configured for depth even with a fixed reference; v4: the route's BKRN pool via `extsload`),
   `L x sqrtP x bps / 20000` (quote token 1) or `L / sqrtP x bps / 20000` (quote token 0), grossed up for the static LP fee,
-  and for a via-ETH route (the BKRN pool is quoted in ETH) converted at the ETH reference. No depth source yet (no pool /
-  route not live) = no cap (the buyback defers anyway). The estimate is the constant-liquidity one inside the active tick
+  and for a via-ETH route (the BKRN pool is quoted in ETH) converted at the ETH reference. No depth source (no pool on the
+  router, a pool that is not the swap pool, no live route) = the governance `maxBuybackNoDepth` (2,000 USDG), never unlimited. The estimate is the constant-liquidity one inside the active tick
   range: a swap crossing a tick can move the price a little more; the price floor still bounds the loss.
 - **Splitting.** The keeper sends `min(pending, maxBuybackPerCall, maxBuyback())` per call and waits
   `WATERFALL_BUYBACK_CHUNK_SECONDS` (300) after a chunk that left more pending, so arbitrage can restore the price. A cap of 0
@@ -707,7 +707,7 @@ rides in it. Every item below was checked against what the services send today.
 | Upkeep (who paid) | Decision | Why |
 |---|---|---|
 | Oracle prices: `AttestedOracle.update(priceData)` (permissionless, signed) | Already carried: `trade`, `liquidate`, `forceClose`, `syncUnit`, `BookrunnerDesk.executeWithPrices`, `MarkRegistry.commitAndApply`, and now `PoolEngine.withdrawMargin(marketId, amount, priceData)`. The oracle service sends no timer pushes (`ORACLE_PUSH_MODE=pull`, the mainnet default); the API bundles the latest signed payload into the user's prepared transaction. | The signature, `publishedAt` monotonicity, staleness-on-arrival and `maxTradePriceAge` checks stay inside `update` and the engine, untouched. |
-| Margin withdrawal with an open position (user; used to need a separate oracle-relay transaction inside the 60 s window) | NEW: the `priceData` overload; the API prepares one step; the 20 s headroom between two transactions drops to 10 s. | One transaction, same checks (ENG-15). |
+| Margin withdrawal with an open position (user; used to need a separate oracle-relay transaction inside the 60 s window) | NEW: the `priceData` overload; the API prepares one step. A withdrawal that leaves a position open uses the trade bound (`maxTradePriceAge`, 15 s), not the 60 s new-risk bound, plain or carried. | One transaction, same checks (ENG-15). |
 | Venue reports (`reportSigned`) | Already carried by `commitAndApply` (the daily mark) and by desk legs (`executeWithPrices`); no timer loop. | Signed by OPS_VENUE, monotonic, relayable by anyone. |
 | Index market unit sync at a component split (`PoolEngine.syncUnit(marketId, priceData)`, the keeper) | Kept as the fallback only: every price-reading engine call (`trade`, `liquidate`, `withdrawMargin`, ...) syncs the unit itself in the user's transaction; the keeper sends `syncUnit` only while a unit move is still pending (nobody traded since) and carries the oracle's whole signed round; a user transaction that synced first makes it a no-op. | Existing cadence is the fallback, as asked. |
 | Liquidations / close-outs (`liquidate`, `forceClose`, keeper) | Not moved to users: they already carry `priceData`, are permissionless, and pay their own reward; the keeper's gas policy bounds the loss. | A liquidator is already "a user"; nothing to bundle. |
@@ -910,6 +910,8 @@ keeper, oracle signer) when one runs low, so a wallet never goes dry unnoticed o
   `CapReached(wallet, global)`, `TankEmpty`, `IsPaused`. Days are fixed UTC buckets (a caller timing both sides of
   midnight can draw at most 2x a cap). Effects (counters, event) come before the transfer, which is the last statement
   and gets a bounded gas stipend; `nonReentrant` (transient); a recipient that rejects the ETH reverts the whole call.
+- **Spacing:** a wallet is topped up at most once per `minInterval` (default 1 h, timelock-set): one transaction or block can
+  never top the same wallet up twice, even through a contract wallet that forwards what it receives.
 - **Pause and money:** the GUARDIAN or the timelock pauses; only the timelock lifts the pause, and only the timelock
   `withdraw`s. There are no arbitrary calls and no token handling (`receive()` is the only way in).
 - **Views for the keeper and alerts:** `services()`, `serviceInfo(wallet)`, `topUpQuote(wallet)` = (amount, reason: 0

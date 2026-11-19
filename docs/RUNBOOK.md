@@ -822,10 +822,23 @@ The buyback no longer depends on a hand-set ETH price or a hand-sized call.
    waits `WATERFALL_BUYBACK_CHUNK_SECONDS` (300) between chunks. Check: `cast call <guard> "maxBuyback()(uint256)"`; alert
    `buyback_depth_zero` (the pool has no liquidity: no buyback can be sent). `buyback_growing` still means the keeper is not
    landing buybacks. `BuybackTooLarge(amountIn, cap)` in a revert = a call above the cap (a stale keeper binary).
+3b. **No depth pool = a small cap, never unlimited (security review M1).** Until the BKRN pool is set as the router's depth pool,
+   `maxBuyback()` returns `maxBuybackNoDepth` (deploy input `buyback.guard.maxBuybackNoDepthUsd`, 2,000 USDG; owner-adjustable:
+   `setMaxBuybackNoDepth`), and `buyback.maxPerCall` is 5,000 USDG in `4663.json` (the old 250,000 was far above a new token's
+   depth). A pool that is not the swap pool (tokens not {USDG, BKRN}, or a fee tier other than `buybackPoolFee`) is ignored the
+   same way. **Post-graduation step (timelock):** read the BKRN / USDG v3 pool, then `BkrnFeeRouter.setTwapParams(pool, window,
+   maxTickDeviation)` (it only configures the depth source; the reference stays fixed unless chosen), check
+   `cast call <guard> "maxBuyback()(uint256)"` now reflects the pool's depth (not the no-depth value), then raise
+   `setBuybackParams(..., maxPerCall)` to the depth you accept. On the v4 venue `setV4Route` is the equivalent step.
+   `VerifyHandover` checks that a router depth pool is the swap pool.
 4. **Wiring.** `BkrnFeeRouter.setBuybackGuard(guard)` (timelock; `0` removes it: the router reverts to its fixed ETH reference
    and `maxBuybackPerCall` alone). A v3-venue router needs `setTwapParams(pool, ...)` for the BKRN / USDG pool to give the guard
    a depth source (it does not have to be the selected reference); on the v4 venue the route's BKRN pool is used.
-5. **Services.** `WATERFALL_ETH_REF_ENABLED` / `WATERFALL_ETH_REF_INTERVAL_SECONDS` (60..86400, at least 300 is effective: the
+5. **Stale reference after an outage.** A stored TWAP older than `ethMaxAge` is no anchor: the next accepted poke stores the pool's
+   current average unclamped (liquidity floor, deviation bound and history still apply) and `ethReference()` reports source 1
+   only for a value stored by an accepted poke; while it is stale the unexpired fallback (source 2) or nothing (source 0) is
+   reported.
+6. **Services.** `WATERFALL_ETH_REF_ENABLED` / `WATERFALL_ETH_REF_INTERVAL_SECONDS` (60..86400, at least 300 is effective: the
    contract refuses sooner), `WATERFALL_BUYBACK_CHUNK_SECONDS`. Deploy input fields: deploy-inputs/README.md `buyback.guard`.
 
 ### Upkeep inside user transactions (tech update #8)
@@ -855,7 +868,9 @@ no longer tops wallets up by hand.
 4. **Change the numbers (timelock, 48 h):** `setService(wallet, floor, target, dailyCap)` per wallet (adds a new wallet
    too: a rotated key must be added, the old one removed with `removeService`), `setGlobalDailyCap(cap)`. Bounds:
    floor > 0, floor < target <= 1 ETH, target <= wallet cap <= 2 ETH, global cap <= 5 ETH, at most 32 wallets. The deploy
-   input values are conservative first values (0.002 / 0.01 / 0.02 / 0.1 ETH) and OWNER-ADJUSTABLE.
+   input values are conservative first values (0.002 / 0.01 / 0.02 / 0.1 ETH) and OWNER-ADJUSTABLE. A wallet is topped up at
+   most once per `minInterval` (default 1 h, `setMinInterval`, deploy input `gasTank.minIntervalSeconds`): a contract wallet
+   cannot be topped up twice in one transaction or across midnight (`TooSoon`, `topUpQuote` reason 5).
 5. **Incident (a wallet is draining, or the tank is misbehaving):** the GUARDIAN `pause()`s the tank at once (stops all
    top-ups); the timelock `removeService`s the wallet, `withdraw`s to the treasury, and only the timelock `unpause`s.
 6. **Services:** `WATERFALL_GAS_TANK_ENABLED` (default on) and `WATERFALL_GAS_TANK_INTERVAL_SECONDS` (default 300) of

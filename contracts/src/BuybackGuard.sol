@@ -13,6 +13,8 @@ import {UniswapV4Lib} from "./libraries/UniswapV4Lib.sol";
 interface IBuybackRouterView {
     function buybackVenue() external view returns (uint8);
     function twapPool() external view returns (address);
+    function buybackPoolFee() external view returns (uint24);
+    function bkrn() external view returns (address);
     function v4PoolManager() external view returns (address);
     function v4Route() external view returns (IBkrnV4Swapper.V4Route memory);
 }
@@ -101,6 +103,9 @@ contract BuybackGuard is IBuybackGuard {
     // ---- size
     /// @notice Max price impact of one buyback on the BKRN pool (bps), governance.
     uint16 public maxImpactBps = DEFAULT_IMPACT_BPS;
+    /// @notice The cap (settlement token, 6dp) while there is no usable depth source: no BKRN pool set on the router, a pool that is
+    ///         not the swap pool, or no live v4 route. Never "unlimited": a new token's pool may hold little. Timelock-set.
+    uint256 public maxBuybackNoDepth = 2_000e6;
 
     error ZeroAddress();
     error NotAdmin(address caller);
@@ -116,6 +121,7 @@ contract BuybackGuard is IBuybackGuard {
     event EthTwapSet(address pool, uint32 window, uint24 maxTickDeviation, uint128 minLiquidity, uint16 maxMoveBps, uint32 maxAge);
     event EthFallbackSet(uint256 valueWad, uint64 expiry);
     event MaxImpactSet(uint16 bps);
+    event MaxBuybackNoDepthSet(uint256 amount);
 
     constructor(address config_, address router_) {
         if (config_ == address(0) || router_ == address(0)) revert ZeroAddress();
@@ -144,9 +150,10 @@ contract BuybackGuard is IBuybackGuard {
         uint256 twap = UniswapV3Twap.quoteAtTick(mean, 1e18, weth, usdc) * 1e12;
         if (twap < MIN_ETH_USD_WAD || twap > MAX_ETH_USD_WAD) revert ReferenceOutOfRange(twap);
         stored = twap;
-        // the anchor of the move bound: the previous stored value, else the live fallback
-        uint256 anchor = ethRefWad;
-        if (anchor == 0 && fallbackWad != 0 && block.timestamp <= fallbackExpiry) anchor = fallbackWad;
+        // the anchor of the move bound is the previous stored value while it is still trusted (<= ethMaxAge old). A stale or
+        // never-stored value is no anchor: the TWAP is then stored as it is (liquidity floor, deviation bound and history all
+        // passed), so a stale number is never clamped, and never reported as fresh, after an outage
+        uint256 anchor = (at != 0 && block.timestamp <= uint256(at) + ethMaxAge) ? ethRefWad : 0;
         if (anchor != 0) {
             uint256 lo = Math.mulDiv(anchor, BPS - ethMaxMoveBps, BPS);
             uint256 hi = Math.mulDiv(anchor, BPS + ethMaxMoveBps, BPS);
@@ -182,20 +189,29 @@ contract BuybackGuard is IBuybackGuard {
             // Uniswap v3 venue: the BKRN / settlement pool the router already knows (twapPool, configured for the TWAP source
             // or for depth alone)
             address pool = router.twapPool();
-            if (pool == address(0)) return type(uint256).max;
+            if (pool == address(0) || !_isSwapPool(pool)) return maxBuybackNoDepth;
             (uint160 sp,,,,,,) = IUniswapV3PoolView(pool).slot0();
             return _spend(IUniswapV3PoolView(pool).liquidity(), sp, IUniswapV3PoolView(pool).token1() == usdc, IUniswapV3PoolView(pool).fee(), false, bps);
         }
         IBkrnV4Swapper.V4Route memory r = router.v4Route();
         address m = router.v4PoolManager();
-        if (m == address(0) || r.bkrnPool.currency1 == address(0)) return type(uint256).max; // no route yet: the buyback defers
+        if (m == address(0) || r.bkrnPool.currency1 == address(0)) return maxBuybackNoDepth; // no route yet (the buyback defers)
         uint160 p = UniswapV4Lib.sqrtPriceX96(m, r.bkrnPool);
-        if (p == 0) return type(uint256).max; // not initialized: the buyback defers
+        if (p == 0) return maxBuybackNoDepth; // not initialized (the buyback defers)
         // direct: the quote currency is the settlement token; via ETH: native ETH (currency0 of {ETH, BKRN})
         bool viaEth = r.kind != 0;
         bool quoteIsToken1 = viaEth ? false : r.bkrnPool.currency1 == usdc;
         uint256 fee = (r.bkrnPool.fee & 0x800000) != 0 ? 0 : r.bkrnPool.fee;
         return _spend(UniswapV4Lib.liquidity(m, r.bkrnPool), p, quoteIsToken1, fee, viaEth, bps);
+    }
+
+    /// @dev The depth pool is the pool the router swaps in: tokens {settlement token, BKRN} and the fee tier the router pins
+    ///      (`buybackPoolFee`); any other pool says nothing about the swap's price impact.
+    function _isSwapPool(address pool) private view returns (bool) {
+        address t0 = IUniswapV3PoolView(pool).token0();
+        address t1 = IUniswapV3PoolView(pool).token1();
+        address b = router.bkrn();
+        return ((t0 == usdc && t1 == b) || (t0 == b && t1 == usdc)) && IUniswapV3PoolView(pool).fee() == router.buybackPoolFee();
     }
 
     /// @dev Quote-token amount (raw) that moves the price of a constant-liquidity position by `bps`, grossed up for the LP
@@ -277,6 +293,14 @@ contract BuybackGuard is IBuybackGuard {
         if (bps == 0 || bps > MAX_IMPACT_BPS) revert BadParams();
         maxImpactBps = bps;
         emit MaxImpactSet(bps);
+    }
+
+    /// @notice Timelock: the cap used while there is no usable depth pool (> 0, at most 1,000,000 USDG).
+    function setMaxBuybackNoDepth(uint256 amount) external {
+        _onlyAdmin();
+        if (amount == 0 || amount > 1_000_000e6) revert BadParams();
+        maxBuybackNoDepth = amount;
+        emit MaxBuybackNoDepthSet(amount);
     }
 
     function _onlyAdmin() private view {
