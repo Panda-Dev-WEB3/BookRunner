@@ -498,7 +498,14 @@ contract VerifyHandover is MainnetInput {
                 ok = ((t0 == ext.settlementToken && t1 == cfg.bkrn()) || (t1 == ext.settlementToken && t0 == cfg.bkrn()))
                     && abi.decode(r2, (uint24)) == fr.buybackPoolFee();
             }
-            _row(ok, "router depth pool (twapPool) is the swap pool: {settlement token, BKRN} at buybackPoolFee");
+            // review 7dd4c04: and created by the canonical v3 factory (a look-alike pool could report inflated depth)
+            if (ok) {
+                (bool a3, bytes memory r3) = ext.univ3Factory.staticcall(
+                    abi.encodeWithSignature("getPool(address,address,uint24)", ext.settlementToken, cfg.bkrn(), fr.buybackPoolFee())
+                );
+                ok = a3 && r3.length >= 32 && abi.decode(r3, (address)) == dp;
+            }
+            _row(ok, "router depth pool (twapPool) is the swap pool: {settlement token, BKRN} at buybackPoolFee, from the v3 factory");
         }
     }
 
