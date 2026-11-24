@@ -1,14 +1,14 @@
 // Book discovery + monitor lifecycle. Idles (log + retry) while the deployment file is missing,
 // rebuilds everything when the deployment changes, runs one independent loop per Live/Retiring book
 // (a kill on one book never delays monitoring of the others).
-import { type BookComponents, ChainWake, type Deployment, type Logger, type WsFactory } from "@bookrunner/shared";
+import type { BookComponents, Deployment, Logger } from "@bookrunner/shared";
 import type { Address, Hex } from "viem";
 import type { RiskSettings } from "./config";
 import { runMonitorLoop } from "./loop";
 import { BookMonitor } from "./monitor";
 import type { BusPort, ChainPort, Clock, DbBookRow, DiscoveryPort, QueuePort, RiskBusAuth, SignedFeedsPort, StorePort, VenueProvider } from "./ports";
 import type { BookRef } from "./types";
-import { type Sleep, errMsg, sleepOrWake } from "./util/async";
+import { type Sleep, abortableSleep, errMsg } from "./util/async";
 
 export type ChainGateway = ChainPort &
   DiscoveryPort & {
@@ -36,13 +36,6 @@ export interface SupervisorDeps {
   makeFeeds?(dep: Deployment): SignedFeedsPort;
   /** Authenticated bus messages for this deployment (agent quote signatures, RISK-signed kill orders). */
   makeAuth?(dep: Deployment): RiskBusAuth;
-  /**
-   * RPC budget: with a WebSocket endpoint, BookFactory.bookIds() is re-read when the factory or a known book emits a log and at
-   * least every safetyMs (not every refreshMs), and the state of a book that is already monitored is not re-read at all:
-   * its monitor reads the state every tick anyway. Books that are not monitored yet are still checked every refreshMs, so a
-   * book going Live is found as fast as before. The monitors' own ticks (the kill path) are untouched.
-   */
-  wake?: { wsUrl: string; safetyMs: number; /** tests */ ws?: WsFactory };
 }
 
 interface Handle {
@@ -61,8 +54,6 @@ export class RiskSupervisor {
   private feeds: SignedFeedsPort | null = null;
   private auth: RiskBusAuth | null = null;
   private depKey: string | null = null;
-  private wake: ChainWake | null = null;
-  private ids: number[] | null = null;
   private missingSince: number | null = null;
   private readonly lastWarn = new Map<string, { msg: string; at: number }>();
 
@@ -90,7 +81,7 @@ export class RiskSupervisor {
       } catch (err) {
         this.warnThrottled("refresh", { err: errMsg(err) }, "book refresh failed; retrying");
       }
-      await sleepOrWake(this.d.refreshMs, signal, this.wake);
+      await abortableSleep(this.d.refreshMs, signal);
     }
     await this.stopAll();
   }
@@ -114,20 +105,7 @@ export class RiskSupervisor {
       if (this.depKey) this.d.log.warn({ factory: dep.contracts.factory }, "deployment changed; restarting monitors");
       await this.stopAll();
       this.refs.clear();
-      this.ids = null;
       this.gateway = this.d.makeChain(dep);
-      this.wake = this.d.wake
-        ? new ChainWake({
-            url: this.d.wake.wsUrl,
-            label: "risk books",
-            filter: () => ({ address: [dep.contracts.factory, ...[...this.refs.values()].map((r) => r.components.book)] }),
-            pollMs: this.d.refreshMs,
-            safetyMs: this.d.wake.safetyMs,
-            log: this.d.log,
-            ...(this.d.wake.ws ? { ws: this.d.wake.ws } : {}),
-          })
-        : null;
-      this.wake?.start();
       this.venues = this.d.makeVenues(this.gateway);
       this.feeds = this.d.makeFeeds?.(dep) ?? null;
       this.auth = this.d.makeAuth?.(dep) ?? null;
@@ -148,16 +126,10 @@ export class RiskSupervisor {
   private async discover(gw: ChainGateway): Promise<{ live: BookRef[]; keep: Set<number> }> {
     let ids: number[] | null = null;
     let dbRows: DbBookRow[] | null = null;
-    // wake: the factory listing and the state of monitored books are read when due (a notification, the safety poll, or
-    // every refreshMs while polling); otherwise only the books that are not monitored yet are checked
-    const full = !this.wake || this.ids === null || this.wake.due(this.d.clock.nowMs());
-    if (this.wake && full) this.wake.begin(this.d.clock.nowMs());
     if (this.d.bookSource !== "db") {
       try {
-        ids = full ? await gw.listBookIds() : this.ids;
-        if (full && ids) this.ids = ids;
+        ids = await gw.listBookIds();
       } catch (err) {
-        this.wake?.failed();
         if (this.d.bookSource === "chain") throw err;
         this.warnThrottled("bookIds", { err: errMsg(err) }, "BookFactory.bookIds failed; falling back to the books table");
       }
@@ -176,10 +148,6 @@ export class RiskSupervisor {
           const row = dbRows?.find((r) => r.id === id);
           ref = await gw.loadRef(id, row ? componentsFromRow(row) : undefined);
           this.refs.set(id, ref);
-        }
-        if (!full && this.monitors.has(id)) {
-          live.push(ref);
-          continue;
         }
         const state = await gw.bookState(ref);
         if (LIVE_STATES.has(state)) live.push(ref);
@@ -222,8 +190,6 @@ export class RiskSupervisor {
   }
 
   async stopAll(): Promise<void> {
-    this.wake?.stop();
-    this.wake = null;
     await Promise.all([...this.monitors.keys()].map((id) => this.stop(id, "shutdown")));
   }
 }

@@ -11,11 +11,6 @@ export const waterfallEnvShape = {
   WATERFALL_PROTOCOL_DUTY_SECONDS: z.coerce.number().min(0).max(86_400).default(0),
   /** RPC budget: BookFactory.bookIds() re-read at most this often (kit/books.ts BookDirectory); 0 = every tick. */
   BOOKS_REFRESH_SECONDS: z.coerce.number().min(0).max(3_600).default(0),
-  /**
-   * RPC budget: with a WebSocket endpoint (RPC_WS_URL) BookFactory.bookIds() is read when the factory emits a log and at
-   * least every this many seconds, instead of every BOOKS_REFRESH_SECONDS (kit/books.ts factoryWake). 0 = polling only.
-   */
-  BOOKS_WS_SAFETY_SECONDS: z.coerce.number().min(0).max(3_600).default(0),
   WATERFALL_EXPENSE_MODE: z.enum(["fixed", "metered"]).default("fixed"),
   /** fixed mode: expenses requested per period per book (on-chain cap applies). */
   WATERFALL_EXPENSES_USD: zUsd("1.00"),

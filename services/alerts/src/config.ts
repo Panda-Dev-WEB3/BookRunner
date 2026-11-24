@@ -104,8 +104,6 @@ const shape = {
   ALERT_ORACLE_SOURCE_FAIL_SECONDS: int(60),
   /** an in-session price id with no publishable price this long alerts (critical) */
   ALERT_ORACLE_PRICE_MISSING_SECONDS: int(120),
-  /** rpc_fallback_active (a service runs on the fallback RPC because the primary fails): warning, critical after this long (6 h) */
-  ALERT_RPC_FALLBACK_CRITICAL_SECONDS: int(21_600),
   /** primary-confirm: a ticker whose confirm sources disagree with the primary beyond ORACLE_CONFIRM_BPS this long alerts */
   ALERT_ORACLE_CONFIRM_DIVERGENCE_SECONDS: int(120),
   /** primary-confirm: an in-session ticker with no fresh confirm source this long alerts (published unconfirmed) */
@@ -298,8 +296,6 @@ export interface RuleConfig {
   oracleExpected: boolean;
   oracleSourceFailSec: number;
   oraclePriceMissingSec: number;
-  /** rpc_fallback_active turns critical after this long */
-  rpcFallbackCriticalSec: number;
   /** primary-confirm: "diverged" this long alerts */
   oracleConfirmDivergenceSec: number;
   /** primary-confirm: "unavailable" this long alerts */
@@ -461,7 +457,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
         e.ALERT_ORACLE_EXPECTED === undefined || e.ALERT_ORACLE_EXPECTED === "" ? network !== "devnet" : e.ALERT_ORACLE_EXPECTED === "1" || e.ALERT_ORACLE_EXPECTED.toLowerCase() === "true",
       oracleSourceFailSec: e.ALERT_ORACLE_SOURCE_FAIL_SECONDS,
       oraclePriceMissingSec: e.ALERT_ORACLE_PRICE_MISSING_SECONDS,
-      rpcFallbackCriticalSec: e.ALERT_RPC_FALLBACK_CRITICAL_SECONDS,
       oracleConfirmDivergenceSec: e.ALERT_ORACLE_CONFIRM_DIVERGENCE_SECONDS,
       oracleConfirmUnavailableSec: e.ALERT_ORACLE_CONFIRM_UNAVAILABLE_SECONDS,
       oracleConfirmTickers: e.ALERT_ORACLE_CONFIRM_TICKERS.split(",").map((t) => t.trim().toUpperCase()).filter(Boolean),

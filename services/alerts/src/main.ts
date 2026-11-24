@@ -5,15 +5,13 @@
 // Reads only: Postgres, Redis, the chain (no key, no transaction), the API's and the oracle's /health. Holds no
 // signing key.
 import { bkrnFeeRouterAbi, bookrunnerConfigAbi, insurancePoolAbi } from "@bookrunner/shared/abi";
-import { rpcTransport } from "@bookrunner/shared/clients";
-import { rpcRoutes } from "@bookrunner/shared/rpcRoute";
 import { chainFor, multicall3For } from "@bookrunner/shared/chains";
 import { tryLoadDeployment } from "@bookrunner/shared/deployments";
 import { createLogger } from "@bookrunner/shared/logger";
 import { redactUrl } from "@bookrunner/shared/redact";
 import { Redis } from "ioredis";
 import postgres from "postgres";
-import { createPublicClient, parseAbi } from "viem";
+import { http, createPublicClient, parseAbi } from "viem";
 import { type ChainPort, type DbPort, collect, readPool } from "./collect";
 import { loadConfig } from "./config";
 import { createDeliverer, pingHeartbeat } from "./deliver";
@@ -72,47 +70,23 @@ redis.on("error", (err) => {
 const multicall = multicall3For(cfg.chainId);
 const client = createPublicClient({
   ...(multicall ? { chain: chainFor(cfg.chainId, cfg.rpcUrl), batch: { multicall: true } } : {}),
-  transport: rpcTransport(cfg.rpcUrl, { http: { timeout: 10_000, retryCount: 0 } }),
+  transport: http(cfg.rpcUrl, { timeout: 10_000, retryCount: 0 }),
 });
 const getEthBalanceAbi = parseAbi(["function getEthBalance(address addr) view returns (uint256 balance)"]);
 /** config.markInterval() is timelock-set: re-read hourly, not every pass */
 const MARK_INTERVAL_TTL_MS = 3_600_000;
 let markIntervalRead: { value: number | null; at: number } | null = null;
-/**
- * RPC budget: gas balances and buybackPending move slowly (a role's gas lasts days, buyback samples are kept every 10 min), so
- * they are read at most every SLOW_READ_TTL_MS (5 min) although a pass runs every ALERT_INTERVAL_SECONDS. The head read (the
- * rpc health probe the rpc rule counts) stays in every pass. A failed read is not cached.
- */
-const SLOW_READ_TTL_MS = 300_000;
-function slow<K, V>(read: (k: K) => Promise<V>, key: (k: K) => string): (k: K) => Promise<V> {
-  const cache = new Map<string, { at: number; v: V }>();
-  return async (k) => {
-    const id = key(k);
-    const hit = cache.get(id);
-    if (hit && Date.now() - hit.at < SLOW_READ_TTL_MS) return hit.v;
-    const v = await read(k);
-    cache.set(id, { at: Date.now(), v });
-    return v;
-  };
-}
-const readBalance = slow(
-  (address: `0x${string}`) => (multicall ? client.readContract({ address: multicall, abi: getEthBalanceAbi, functionName: "getEthBalance", args: [address] }) : client.getBalance({ address })),
-  (a) => a.toLowerCase(),
-);
 const chain: ChainPort = {
   head: async () => {
     const b = await client.getBlock({ blockTag: "latest" });
     return { number: Number(b.number), timestamp: Number(b.timestamp) };
   },
-  balance: (address) => readBalance(address),
-  buybackPending: slow(
-    async (_: null) => {
-      const dep = tryLoadDeployment(cfg.deploymentFile);
-      if (!dep?.contracts.feeRouter) return null;
-      return client.readContract({ address: dep.contracts.feeRouter, abi: bkrnFeeRouterAbi, functionName: "buybackPending" });
-    },
-    () => "buybackPending",
-  ).bind(null, null),
+  balance: (address) => (multicall ? client.readContract({ address: multicall, abi: getEthBalanceAbi, functionName: "getEthBalance", args: [address] }) : client.getBalance({ address })),
+  buybackPending: async () => {
+    const dep = tryLoadDeployment(cfg.deploymentFile);
+    if (!dep?.contracts.feeRouter) return null;
+    return client.readContract({ address: dep.contracts.feeRouter, abi: bkrnFeeRouterAbi, functionName: "buybackPending" });
+  },
   buybackV4BlockedHop: async () => {
     const dep = tryLoadDeployment(cfg.deploymentFile);
     if (!dep?.contracts.feeRouter) return null;
@@ -148,7 +122,6 @@ const collectFn = (mem: Parameters<typeof collect>[2]) =>
       chain,
       fetch,
       now: Date.now,
-      rpcFallback: () => rpcRoutes.primaryStatus(),
       ...(siteChecker ? { siteFiles: () => siteChecker.check() } : {}),
     },
     {

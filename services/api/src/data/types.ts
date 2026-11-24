@@ -175,10 +175,6 @@ export interface ReadModel {
   /** One-minute candles of a market (and its underlying) with bucket >= since, ascending, at most `limit`. */
   enginePriceMinutes(marketId: number, underlying: string, since: Date, limit: number): Promise<EnginePriceMinuteRow[]>;
   /** The indexer's chain_cursor values of `names` (absent names are left out). */
-  /** Lifetime revenue received by the books' revenue routers per source (every settlement row except the distributions: no double count). */
-  revenueTotals(): Promise<Array<{ source: string; totalUsd: string }>>;
-  /** Engine (market, trader) pairs whose position is not flat (indexer-derived). */
-  openEnginePositions(): Promise<number>;
   chainCursors(names: string[]): Promise<Record<string, number>>;
 }
 

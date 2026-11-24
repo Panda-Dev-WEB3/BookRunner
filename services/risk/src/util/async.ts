@@ -18,25 +18,6 @@ export function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-/** abortableSleep that a notification of `wake` ends early (coalesced over 1 s: a busy contract does not spin the loop). */
-export async function sleepOrWake(ms: number, signal: AbortSignal, wake: { onWake(fn: () => void): () => void } | null): Promise<void> {
-  if (!wake) return abortableSleep(ms, signal);
-  const inner = new AbortController();
-  const end = () => inner.abort();
-  let debounce: ReturnType<typeof setTimeout> | null = null;
-  const off = wake.onWake(() => {
-    debounce ??= setTimeout(end, 1_000);
-  });
-  signal.addEventListener("abort", end, { once: true });
-  try {
-    await abortableSleep(ms, inner.signal);
-  } finally {
-    off();
-    if (debounce) clearTimeout(debounce);
-    signal.removeEventListener("abort", end);
-  }
-}
-
 export class TimeoutError extends Error {
   constructor(label: string, ms: number) {
     super(`${label} timed out after ${ms}ms`);

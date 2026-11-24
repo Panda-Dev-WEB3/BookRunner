@@ -23,11 +23,6 @@ export const opsEnvSchema = baseEnvSchema.extend({
   OPS_REPORT_SETTLE_S: z.coerce.number().default(30),
   OPS_BOOK_POLL_MS: z.coerce.number().default(5_000),
   OPS_LOG_POLL_MS: z.coerce.number().default(3_000),
-  /**
-   * RPC budget: with a WebSocket endpoint (RPC_WS_URL) the book discovery and log scans run on log notifications and at
-   * least every this many ms (worker/service.ts OpsWakes), instead of every OPS_BOOK_POLL_MS / OPS_LOG_POLL_MS. 0 = polling only.
-   */
-  OPS_WS_SAFETY_POLL_MS: z.coerce.number().min(0).default(0),
   OPS_FEE_POLL_MS: z.coerce.number().default(10_000),
   OPS_FEE_SETTLE_GRACE_S: z.coerce.number().default(20),
   OPS_FEE_SWEEP_AUTO: bool(true),

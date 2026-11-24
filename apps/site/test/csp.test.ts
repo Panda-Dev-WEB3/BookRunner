@@ -115,7 +115,7 @@ describe("nginx Content-Security-Policy", () => {
 
 describe("nginx rate limits", () => {
   test("/trpc/, /health and /csp-report use zones defined in the http-level conf", () => {
-    for (const zone of ["bookrunner_trpc", "bookrunner_health", "bookrunner_csp", "bookrunner_metrics"]) {
+    for (const zone of ["bookrunner_trpc", "bookrunner_health", "bookrunner_csp"]) {
       expect(locations).toContain(`limit_req zone=${zone} `);
       expect(httpConf).toMatch(new RegExp(`limit_req_zone \\$binary_remote_addr zone=${zone}:\\d+m rate=\\d+r/s;`));
     }

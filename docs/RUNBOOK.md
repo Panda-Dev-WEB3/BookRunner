@@ -354,17 +354,6 @@ Mainnet runs the **primary + confirm** policy (`ORACLE_POLICY=primary-confirm`, 
 
 Alerts (`services/alerts`) and what to do:
 
-- **`rpc_fallback_active`** (warning, critical after 6 h, `ALERT_RPC_FALLBACK_CRITICAL_SECONDS`): the primary RPC
-  (`RHC_RPC_URL`) is failing and the services answer from the fallback (the public Robinhood RPC by default), so prices
-  keep being signed. The text says which provider and why. "Alchemy monthly capacity limit reached: switch plan or
-  key": the plan's monthly CU is used up; upgrade the plan, or put a new key / provider into `RHC_RPC_URL` (and
-  `RHC_WS_URL` if it is not an Alchemy URL) in `/etc/bookrunner/mainnet.env` and `sudo systemctl restart
-  bookrunner@mainnet`. "rate limiting (HTTP 429)": too many requests per second for the plan; see the usage meter
-  (`journalctl -u bookrunner@mainnet | grep "rpc usage"`). "server errors / timing out / unreachable": the provider is
-  down; nothing to do but wait, or switch the URL. While it lasts the log subscriptions are off (the services poll; more
-  requests, all on the fallback, which is rate limited: expect `rpc_fallback_active` plus possibly slower indexing) and
-  the primary is tried again by itself (15 s to 5 min, 30 min after a monthly cap). The alert resolves when the primary
-  answers again. Never paste the URL into a ticket: it carries the key.
 - **`oracle_source_failing:chainlink`** (critical, > 60 s in session, `ALERT_ORACLE_SOURCE_FAIL_SECONDS`): no price
   for the listed tickers. `sources[].lastError` gives the cause: RPC errors → check `ORACLE_CHAINLINK_RPC_URL`
   (or point it at another RHC RPC), restart `bookrunner@mainnet`; `oraclePaused()` → corporate action (below); a

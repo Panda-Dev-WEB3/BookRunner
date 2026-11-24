@@ -2,9 +2,9 @@
 // (BOOKS_REFRESH_SECONDS; mainnet profile 60 s), 0 = every call (devnet / testnet, unchanged); an unknown id is
 // always looked up.
 import { describe, expect, test } from "bun:test";
-import { ChainWake, createLogger } from "@bookrunner/shared";
+import { createLogger } from "@bookrunner/shared";
 import { type Address, getAddress } from "viem";
-import { BookDirectory, factoryWake } from "../src/kit/books";
+import { BookDirectory } from "../src/kit/books";
 
 const FACTORY = getAddress("0x00000000000000000000000000000000000f0001");
 const a = (n: number) => getAddress(`0x${n.toString(16).padStart(40, "0")}`);
@@ -73,71 +73,5 @@ describe("BookDirectory refresh", () => {
     fail = false;
     expect((await d.list()).map((b) => b.bookId)).toEqual([1]);
     expect(calls).toEqual(["bookIds!", "bookIds", "componentsOf", "venueKind"]);
-  });
-});
-
-describe("BookDirectory with a log subscription (RPC budget)", () => {
-  class FakeWs {
-    readyState = 1;
-    private fns: Record<string, Array<(ev: { data?: unknown }) => void>> = {};
-    send() {}
-    close() {
-      this.readyState = 3;
-    }
-    addEventListener(t: string, fn: (ev: { data?: unknown }) => void) {
-      (this.fns[t] ??= []).push(fn);
-    }
-    emit(t: string, data?: unknown) {
-      for (const f of this.fns[t] ?? []) f({ data });
-    }
-  }
-
-  test("factoryWake: off without a WebSocket URL or with safetySeconds 0", () => {
-    expect(factoryWake({ wsUrl: undefined, safetySeconds: 600, refreshSeconds: 60, deployment: dep, label: "t", log })).toBeUndefined();
-    expect(factoryWake({ wsUrl: "wss://x/ws", safetySeconds: 0, refreshSeconds: 60, deployment: dep, label: "t", log })).toBeUndefined();
-    expect(factoryWake({ wsUrl: "wss://x/ws", safetySeconds: 600, refreshSeconds: 0, deployment: dep, label: "t", log })).toBeUndefined();
-  });
-
-  test("subscribed: bookIds() is read on a factory log and at the safety poll, not every refreshMs; down: every refreshMs", async () => {
-    const ids = [1n];
-    const { pc, calls } = fakeChain(ids);
-    let now = 1_000_000;
-    const sockets: FakeWs[] = [];
-    const wake = new ChainWake({
-      url: "wss://x/ws",
-      label: "t",
-      filter: () => ({ address: [FACTORY] }),
-      pollMs: 60_000,
-      safetyMs: 600_000,
-      now: () => now,
-      ws: () => {
-        const s = new FakeWs();
-        sockets.push(s);
-        return s as never;
-      },
-    });
-    wake.start();
-    const d = new BookDirectory(pc as never, dep, log, 60_000, () => now, wake);
-    const reads = () => calls.filter((c) => c === "bookIds").length;
-    expect((await d.list()).map((b) => b.bookId)).toEqual([1]); // first call: read
-    now += 10_000;
-    await d.list(); // not subscribed yet: polling cadence, 10 s < 60 s
-    expect(reads()).toBe(1);
-    sockets[0]!.emit("open");
-    sockets[0]!.emit("message", JSON.stringify({ id: 1, result: "0xsub" }));
-    now += 10_000;
-    await d.list(); // catch-up read on coming up
-    expect(reads()).toBe(2);
-    now += 120_000;
-    await d.list(); // subscribed: idle although refreshMs passed twice
-    expect(reads()).toBe(2);
-    ids.push(2n);
-    sockets[0]!.emit("message", JSON.stringify({ method: "eth_subscription", params: { subscription: "0xsub", result: { address: FACTORY, topics: ["0x01"], data: "0x", blockNumber: "0x10", logIndex: "0x0", transactionHash: "0x02" } } }));
-    expect((await d.list()).map((b) => b.bookId)).toEqual([1, 2]); // BookCreated: read at once
-    expect(reads()).toBe(3);
-    now += 600_000;
-    await d.list(); // safety poll
-    expect(reads()).toBe(4);
-    wake.stop();
   });
 });

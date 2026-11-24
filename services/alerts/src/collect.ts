@@ -26,7 +26,6 @@ import type {
   PoolBookSnap,
   PoolSnap,
   RiskSnap,
-  RpcFallbackSnap,
   Sample,
   Snapshot,
 } from "./types";
@@ -162,8 +161,6 @@ export interface CollectDeps {
   now: () => number;
   /** the published-file check (siteFiles.ts SiteFilesChecker.check); absent = not configured on this host */
   siteFiles?: () => SiteFilesSnap;
-  /** this process's own RPC route (shared rpcRoutes.primaryStatus); absent = not tracked */
-  rpcFallback?: () => { provider: string; reason: string; since: number; message: string } | null;
 }
 
 export interface CollectSettings {
@@ -547,15 +544,6 @@ function parseConfirm(raw: unknown): OracleConfirmSnap[] {
   });
 }
 
-/** A reported fallback (shared RpcFallbackStatus) as a snapshot entry; null when malformed. Free text is cut, never a URL. */
-export function parseRpcFallback(service: string, x: object): RpcFallbackSnap | null {
-  const o = x as { provider?: unknown; reason?: unknown; since?: unknown; message?: unknown };
-  const since = num(o.since);
-  if (since === null) return null;
-  const plain = (v: unknown, max: number) => (typeof v === "string" ? v.replace(/https?:\/\/\S+/gi, "<url>").slice(0, max) : "?");
-  return { service, provider: plain(o.provider, 40), reason: plain(o.reason, 20), since, message: plain(o.message, 200) };
-}
-
 /** The oracle's GET /health body -> policy + per-source health + confirm status (unknown shapes -> not ok). */
 export function parseOracleHealth(body: unknown): OracleProbe {
   if (!body || typeof body !== "object") return oracleDown("unexpected body");
@@ -584,12 +572,9 @@ export function parseOracleHealth(body: unknown): OracleProbe {
           return since === null ? [] : [{ priceId: String(x.priceId), since, reason: typeof x.reason === "string" ? x.reason.slice(0, 200) : "?", lastSeenAt: num(x.lastSeenAt) }];
         })
     : [];
-  const fb = (o as { rpc?: { fallback?: unknown } }).rpc?.fallback;
-  const rpcFallback = fb && typeof fb === "object" ? parseRpcFallback("oracle", fb) : null;
   return {
     ok: true,
     error: null,
-    ...(rpcFallback ? { rpcFallback } : {}),
     policy,
     confirmBps: num(o.confirmBps),
     primaryLagBps: num(o.primaryLagBps),
@@ -842,15 +827,8 @@ export async function collect(d: CollectDeps, st: CollectSettings, mem: Memory, 
     }
   }
 
-  const local = d.rpcFallback?.() ?? null;
-  const rpcFallback: RpcFallbackSnap[] = [
-    ...(local ? [parseRpcFallback("alerts", local)].filter((x): x is RpcFallbackSnap => x !== null) : []),
-    ...(oracle?.ok && oracle.rpcFallback ? [oracle.rpcFallback] : []),
-  ];
-
   const snapshot: Snapshot = {
     now,
-    ...(rpcFallback ? { rpcFallback } : {}),
     network: st.network,
     chainId: st.chainId,
     markIntervalSec: markIntervalSec ?? st.markIntervalSec,

@@ -70,7 +70,6 @@ async function main(): Promise<void> {
     queue,
     clock: systemClock,
     refreshMs: env.RISK_BOOKS_REFRESH_MS,
-    ...(env.RPC_WS_URL && env.RISK_WS_SAFETY_POLL_MS > 0 ? { wake: { wsUrl: env.RPC_WS_URL, safetyMs: env.RISK_WS_SAFETY_POLL_MS } } : {}),
     bookSource: env.RISK_BOOK_SOURCE,
     bookIds: parseBookIds(env.RISK_BOOK_IDS),
     chainId: env.CHAIN_ID,

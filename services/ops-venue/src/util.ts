@@ -1,4 +1,4 @@
-import type { ChainWake, Logger } from "@bookrunner/shared";
+import type { Logger } from "@bookrunner/shared";
 
 export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -11,26 +11,6 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     }
     signal?.addEventListener("abort", done, { once: true });
   });
-}
-
-/** A notification of `wake` ends the sleep early (coalesced over WAKE_DEBOUNE_MS: a busy contract does not spin the loop). */
-const WAKE_DEBOUNCE_MS = 1_000;
-export async function sleepOrWake(ms: number, signal: AbortSignal | undefined, wake: ChainWake | undefined): Promise<void> {
-  if (!wake) return sleep(ms, signal);
-  const inner = new AbortController();
-  const end = () => inner.abort();
-  let debounce: ReturnType<typeof setTimeout> | null = null;
-  const off = wake.onWake(() => {
-    debounce ??= setTimeout(end, WAKE_DEBOUNCE_MS);
-  });
-  signal?.addEventListener("abort", end, { once: true });
-  try {
-    await sleep(ms, inner.signal);
-  } finally {
-    off();
-    if (debounce) clearTimeout(debounce);
-    signal?.removeEventListener("abort", end);
-  }
 }
 
 /** Serialises async sections (global, or per key). */
@@ -60,7 +40,7 @@ export class KeyedMutex {
  * Periodic loop that never crashes: errors are logged and the next run is delayed with exponential
  * backoff (capped), reset after a success. Resolves when `signal` aborts.
  */
-export async function runLoop(name: string, intervalMs: number, fn: () => Promise<void>, signal: AbortSignal, log: Logger, maxBackoffMs = 60_000, wake?: ChainWake): Promise<void> {
+export async function runLoop(name: string, intervalMs: number, fn: () => Promise<void>, signal: AbortSignal, log: Logger, maxBackoffMs = 60_000): Promise<void> {
   let failures = 0;
   while (!signal.aborted) {
     try {
@@ -71,7 +51,7 @@ export async function runLoop(name: string, intervalMs: number, fn: () => Promis
       log.warn({ loop: name, failures, err: errMsg(err) }, "loop iteration failed");
     }
     const wait = failures === 0 ? intervalMs : Math.min(maxBackoffMs, intervalMs * 2 ** Math.min(failures, 6));
-    await sleepOrWake(wait, signal, wake);
+    await sleep(wait, signal);
   }
 }
 

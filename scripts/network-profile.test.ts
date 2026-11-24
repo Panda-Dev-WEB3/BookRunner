@@ -359,34 +359,3 @@ describe("mainnet log subscriptions: RPC_WS_URL from RHC_RPC_URL / RHC_WS_URL", 
     expect(env({ ORACLE_CHAINLINK_EVENT_READ_MS: "3600000" }).errors).toEqual([expect.stringMatching(/^ORACLE_CHAINLINK_EVENT_READ_MS=3600000 must be within 60000-600000/)]);
   });
 });
-
-describe("mainnet RPC fallback: RPC_FALLBACK_URL from RHC_RPC_FALLBACK_URL", () => {
-  const env = (e: Env) => mainnetProfile({ ...goodEnv(), ...e }, hostRoot(GOOD_DEP));
-  test("defaults to the public Robinhood RPC; an override wins; off / none disables it", () => {
-    expect(env({}).env.RPC_FALLBACK_URL).toBe("https://rpc.mainnet.chain.robinhood.com");
-    expect(env({}).errors).toEqual([]);
-    expect(env({ RHC_RPC_FALLBACK_URL: "https://rpc2.example.org/v1" }).env.RPC_FALLBACK_URL).toBe("https://rpc2.example.org/v1");
-    expect(env({ RHC_RPC_FALLBACK_URL: "off" }).env.RPC_FALLBACK_URL).toBeUndefined();
-    expect(env({ RHC_RPC_FALLBACK_URL: " none " }).env.RPC_FALLBACK_URL).toBeUndefined();
-  });
-  test("https only, never local; the primary itself is not its own fallback", () => {
-    expect(env({ RHC_RPC_FALLBACK_URL: "http://rpc2.example.org" }).errors).toEqual(["RHC_RPC_FALLBACK_URL must be an https:// URL"]);
-    expect(env({ RHC_RPC_FALLBACK_URL: "https://127.0.0.1:8545" }).errors).toEqual(["RHC_RPC_FALLBACK_URL points at a local node"]);
-    expect(env({ RHC_RPC_URL: "https://rpc.mainnet.chain.robinhood.com" }).env.RPC_FALLBACK_URL).toBeUndefined();
-  });
-});
-
-describe("mainnet WebSocket safety polls (event-driven risk / venue / book discovery)", () => {
-  const env = (e: Env) => mainnetProfile({ ...goodEnv(), ...e }, hostRoot(GOOD_DEP));
-  test("defaults are set, and bounded like INDEXER_WS_SAFETY_POLL_MS", () => {
-    const r = env({});
-    expect(r.errors).toEqual([]);
-    expect(r.env.OPS_WS_SAFETY_POLL_MS).toBe("300000");
-    expect(r.env.RISK_WS_SAFETY_POLL_MS).toBe("300000");
-    expect(r.env.BOOKS_WS_SAFETY_SECONDS).toBe("600");
-    expect(env({ OPS_WS_SAFETY_POLL_MS: "5000" }).errors).toEqual([expect.stringMatching(/^OPS_WS_SAFETY_POLL_MS=5000 must be within 30000-600000/)]);
-    expect(env({ RISK_WS_SAFETY_POLL_MS: "3600000" }).errors).toEqual([expect.stringMatching(/^RISK_WS_SAFETY_POLL_MS=3600000 must be within 30000-600000/)]);
-    expect(env({ BOOKS_WS_SAFETY_SECONDS: "10" }).errors).toEqual([expect.stringMatching(/^BOOKS_WS_SAFETY_SECONDS=10 must be within 60-1800/)]);
-    expect(env({ OPS_WS_SAFETY_POLL_MS: "120000" }).errors).toEqual([]);
-  });
-});

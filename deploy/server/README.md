@@ -33,7 +33,7 @@ mnemonic, record, database, Redis db, state and loopback ports; nginx routes no 
 | `/app/…` | `/var/www/bookrunner/app/` (`apps/web/dist`, single-page app: unknown paths → `/app/index.html`) | `cd apps/web && WEB_BASE=/app/ bun run build:testnet` (vite `base`, react-router `basename` `/app`) | HTML `no-cache`; `/app/assets/` (hashed) immutable, 1 year |
 | `/official-links/` | `apps/site/public/official-links/`; its contract tables are generated at build time from `contracts/deployments/4663.json` (host-local; placeholders without it) and `contracts/deploy-inputs/4663.json` (`apps/site/scripts/official-links.ts`) | `cd apps/site && bun run build` | HTML `no-cache` |
 | `POST /csp-report` | proxy → API `POST /csp-report` (CSP `report-uri` / `report-to`; POST only, 16 KB, zone `bookrunner_csp` 1 r/s burst 10, no `X-Forwarded-For`); the API keeps only the blocked origin, the directive and the page path, counted in Redis `bkrn:<ns>:csp:reports:<bucket>` | — | — |
-| `/trpc/<procedures>`, `/health`, `/status.json`, `/metrics.json` (zone `bookrunner_metrics` 1 r/s burst 10) | proxy → API `127.0.0.1:4400` (normalized path, `X-Bookrunner-Route` stamp; `/trpc/` paths with a backslash, `%2F` / `%5C` / `%2E` or a dot-segment → 400, audit L-3; check: `bash deploy/server/nginx-path-check.sh`, Docker) | — | — |
+| `/trpc/<procedures>`, `/health`, `/status.json` | proxy → API `127.0.0.1:4400` (normalized path, `X-Bookrunner-Route` stamp; `/trpc/` paths with a backslash, `%2F` / `%5C` / `%2E` or a dot-segment → 400, audit L-3; check: `bash deploy/server/nginx-path-check.sh`, Docker) | — | — |
 | (rule) any nginx location that proxies to `127.0.0.1:4400` | must `proxy_pass` a fixed URI and `proxy_set_header X-Bookrunner-Route <upstream path>`: the API's route check fails open (a request without the header is treated as loopback tooling and may reach `/v1` and `/mcp`); `apps/site/test/audit-nginx-paths.test.ts` lists the allowed proxies | — | — |
 | `*.webm`, `*.mp4` | either tree, explicit `video/*` types, byte ranges | — | 1 day |
 | `/invest`, `/books/…`, `/learn`, … (the app's old root URLs) | 301 → `/app/…` | — | — |
@@ -196,9 +196,6 @@ curl -sI http://leveret.bookrunner.tech/ | head -1                              
   manifest does and does not cover: HARDENING.md "Notes and residual risk".
 - **Backups**: `bookrunner-backup.timer` (daily, root, `backup.sh` from the root-owned copy) — see
   [RESTORE.md](RESTORE.md) for contents, the restore drill (`backup.sh --verify`) and the restore procedure.
-- **Metrics**: `/metrics/` (site page) reads `/metrics.json` (nginx -> API `GET /metrics`, public and read-only, cached 30 s: book
-  TVL, insurance pool, backstop, revenue, engine open interest and open positions, BKRN buybacks, oracle price ages; no
-  per-wallet data). With no book open it says so.
 - **Status**: `/status/` (site page) reads `/status.json` (nginx -> API `GET /status`: per book the latest mark
   age, risk ok / warn / breach, last distribution; no addresses or secrets; computed at most every 15 s).
 

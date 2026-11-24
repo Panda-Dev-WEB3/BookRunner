@@ -4,7 +4,7 @@
 //   GET  /charters            ?status=Filed&limit=50
 //   GET  /charters/:id
 //   GET  /verdicts/:cid       content-addressed verdict JSON (hash verified on read)
-import { type Logger, bigintReplacer, rpcHealth } from "@bookrunner/shared";
+import { type Logger, bigintReplacer } from "@bookrunner/shared";
 import { Hono } from "hono";
 import { DraftError } from "../domain/draft";
 import type { DraftResponse } from "./draftService";
@@ -38,7 +38,7 @@ export function createApp(deps: AppDeps): Hono {
 
   app.get("/health", async () => {
     const h = await deps.health();
-    return json({ service: "charter", ...h, rpc: rpcHealth() }, h.ok ? 200 : 503);
+    return json({ service: "charter", ...h }, h.ok ? 200 : 503);
   });
 
   app.post("/charters/draft", async (c) => {

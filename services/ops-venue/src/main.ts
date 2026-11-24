@@ -13,7 +13,7 @@
 //           (src/builderOracle), state -> KEYS.builderFeedStatus for alerts
 // Idles (log + retry) until contracts/deployments/<chainId>.json exists.
 import { createDb } from "@bookrunner/db";
-import { assertVenueSymbolConfig, busJson, cachedAddressCheck, ChainWake, CHANNELS, createLogger, FORGED_WINDOW_SEC, ForgedLog, KEYS, KillVerifier, QUEUES, roleSigner, tryLoadDeployment, type VenueOpsJob } from "@bookrunner/shared";
+import { assertVenueSymbolConfig, busJson, cachedAddressCheck, CHANNELS, createLogger, FORGED_WINDOW_SEC, ForgedLog, KEYS, KillVerifier, QUEUES, roleSigner, tryLoadDeployment, type VenueOpsJob } from "@bookrunner/shared";
 import { Worker } from "bullmq";
 import { Redis } from "ioredis";
 import type { Address } from "viem";
@@ -31,7 +31,7 @@ import { errMsg, KeyedMutex, sleep } from "./util";
 import type { OpsContext } from "./worker/context";
 import { loadOrCreateBuilderKey, Provisioner } from "./worker/provision";
 import { accountReportSigner, RedisEverListedStore, RedisReportPublisher, RedisStatusPublisher } from "./worker/reportSink";
-import { OpsService, type OpsWakes } from "./worker/service";
+import { OpsService } from "./worker/service";
 
 const env = loadOpsEnv();
 const log = createLogger("ops-venue");
@@ -140,18 +140,7 @@ async function main() {
     })(),
   };
   if (env.ORDERLY_IF_MODE === "builder") log.warn({ books: [...parseIfBuilderAccounts(env.ORDERLY_IF_BUILDER_ACCOUNTS).keys()] }, "ORDERLY_IF_MODE=builder (FALLBACK): IF accounts are operator-EOA accounts (adapter.setIfAccountOwner), i.e. IF custody with one operator key; the operator registers ops-venue's IF keys and performs IF withdrawals (VERIFY O10)");
-  // RPC budget: book discovery and log scans on log notifications (a slow safety poll), polling without a WebSocket
-  const wsUrl = env.OPS_WS_SAFETY_POLL_MS > 0 ? env.RPC_WS_URL : undefined;
-  const tracked = () => service.registry.list();
-  const wakes: OpsWakes = wsUrl
-    ? {
-        books: new ChainWake({ url: wsUrl, label: "ops-venue books", filter: () => ({ address: [dep.contracts.factory, ...tracked().map((b) => b.book)] }), pollMs: env.OPS_BOOK_POLL_MS, safetyMs: env.OPS_WS_SAFETY_POLL_MS, log }),
-        logs: new ChainWake({ url: wsUrl, label: "ops-venue logs", filter: () => ({ address: tracked().flatMap((b) => [b.adapter, b.mandate]) }), pollMs: env.OPS_LOG_POLL_MS, safetyMs: env.OPS_WS_SAFETY_POLL_MS, log }),
-      }
-    : {};
-  const service: OpsService = new OpsService(ctx, new Provisioner(ctx, builderKey), wakes);
-  wakes.books?.start();
-  wakes.logs?.start();
+  const service = new OpsService(ctx, new Provisioner(ctx, builderKey));
   log.info({ ops: ops.address, builderAccountId, books: dep.books.length, reportMode: env.OPS_REPORT_MODE }, "deployment loaded");
 
   const worker = new Worker<VenueOpsJob>(
@@ -192,8 +181,6 @@ async function main() {
 
   await service.run(abort.signal, { bookPollMs: env.OPS_BOOK_POLL_MS, logPollMs: env.OPS_LOG_POLL_MS, reportMs: env.OPS_REPORT_INTERVAL_MS, feePollMs: env.OPS_FEE_POLL_MS });
   await builderFeed?.stop();
-  wakes.books?.stop();
-  wakes.logs?.stop();
   await cleanup([() => worker.close(), () => sub.quit()], redis, pg.close);
 }
 

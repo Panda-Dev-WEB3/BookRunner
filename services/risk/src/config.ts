@@ -15,11 +15,6 @@ export const riskEnvShape = {
   RISK_INTERVAL_MS: z.coerce.number().int().positive().default(2000),
   /** How often the book list (BookFactory.bookIds / DB books) is refreshed. */
   RISK_BOOKS_REFRESH_MS: z.coerce.number().int().positive().default(15_000),
-  /**
-   * RPC budget: with a WebSocket endpoint (RPC_WS_URL) the factory listing is re-read on a log of the factory or a known book and
-   * at least every this many ms, instead of every RISK_BOOKS_REFRESH_MS (supervisor.ts). 0 = polling only. Monitors are not affected.
-   */
-  RISK_WS_SAFETY_POLL_MS: z.coerce.number().int().min(0).default(0),
   /** Where to discover books: chain (BookFactory), db (books table) or auto (chain, fallback db). */
   RISK_BOOK_SOURCE: z.enum(["auto", "chain", "db"]).default("auto"),
   /** Optional comma-separated allow-list of book ids (empty = every Live/Retiring book). */

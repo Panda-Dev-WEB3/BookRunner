@@ -652,30 +652,6 @@ export function apiHealth(s: Snapshot, c: RuleConfig): Condition[] {
   return [{ key: "api_health", rule: "api_health", severity: "critical", forSec: c.apiForSec, summary: `API /health failing: ${detail}` }];
 }
 
-// ------------------------------------------------------------------ RPC fallback
-/**
- * rpc_fallback_active: the primary RPC (RHC_RPC_URL) is failing and the services answer from the fallback (public Robinhood
- * RPC; shared rpcRoute.ts). Warning, critical after rpcFallbackCriticalSec (6 h). The text names the failing provider and
- * why (e.g. "Alchemy monthly capacity limit reached: switch plan or key"); it never carries a URL or a key (the reporters
- * send a provider name and a classified reason only; collect.ts cuts anything URL-shaped).
- */
-export function rpcFallbackActive(s: Snapshot, c: RuleConfig): Condition[] {
-  const all = s.rpcFallback ?? [];
-  if (all.length === 0) return [];
-  const f = all.reduce((a, b) => (a.since <= b.since ? a : b));
-  const hours = Math.floor((s.now - f.since) / 3_600_000);
-  const critical = (s.now - f.since) / 1000 >= c.rpcFallbackCriticalSec;
-  return [
-    {
-      key: "rpc_fallback_active",
-      rule: "rpc_fallback_active",
-      severity: critical ? "critical" : "warning",
-      forSec: 60,
-      summary: `RPC fallback active since ${new Date(f.since).toISOString()}${hours >= 1 ? ` (${hours} h)` : ""}: ${f.message} (seen by ${[...new Set(all.map((x) => x.service))].join(", ")}; log subscriptions are off while it lasts)`,
-    },
-  ];
-}
-
 // ------------------------------------------------------------------ oracle sources
 const lastOkText = (src: OracleSourceSnap) => (src.lastOkAt == null ? "never ok since start" : `last ok ${new Date(src.lastOkAt).toISOString()}`);
 /** a price for a message: 6 significant digits, no trailing zeros */
@@ -906,7 +882,6 @@ export const RULES = {
   ...POOL_RULES,
   ...LIQUIDATION_RULES,
   api_health: apiHealth,
-  rpc_fallback_active: rpcFallbackActive,
   oracle,
   backup,
   ...SECURITY_RULES,

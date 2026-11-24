@@ -1,5 +1,4 @@
 import pino from "pino";
-import { rpcMeter } from "./rpcMeter";
 
 /**
  * Provider API keys inside URLs anywhere in a log line (viem errors quote the request URL, e.g. Alchemy
@@ -13,7 +12,7 @@ export function maskSecrets(line: string): string {
 }
 
 export function createLogger(service: string, level = process.env.LOG_LEVEL ?? "info") {
-  const log = pino({
+  return pino({
     name: service,
     level,
     base: { service },
@@ -21,8 +20,6 @@ export function createLogger(service: string, level = process.env.LOG_LEVEL ?? "
     formatters: { level: (label) => ({ level: label }) },
     hooks: { streamWrite: maskSecrets },
   });
-  rpcMeter.attach(service, log); // the hourly "rpc usage" line (rpcMeter.ts)
-  return log;
 }
 
 export type Logger = ReturnType<typeof createLogger>;

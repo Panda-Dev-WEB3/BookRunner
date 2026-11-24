@@ -6,8 +6,6 @@ import type { Charter, Deployment, Mandate } from "@bookrunner/shared";
 import { charterArg, isTokenUnderlying, underlyingToToken } from "@bookrunner/shared";
 import {
   attestedOracleAbi,
-  backstopAbi,
-  bkrnFeeRouterAbi,
   bkrnStakingAbi,
   bookAbi,
   bookrunnerConfigAbi,
@@ -34,7 +32,6 @@ import type {
   PoolChainState,
   PoolWalletState,
   ProtocolParams,
-  ProtocolTotals,
   TrancheWalletState,
 } from "./gateway";
 
@@ -456,19 +453,6 @@ export class ViemChainGateway implements ChainGateway {
       r.readContract({ address: this.c.usdc, abi: erc20Abi, functionName: "allowance", args: [wallet, engine] }),
     ]);
     return { position: { size: p.size, entryPriceWad: p.entryPriceWad, marginUsd: p.marginUsd, fundingIndexAtEntry: p.fundingIndexAtEntry }, usdcBalance, usdcAllowance };
-  }
-
-  protocolTotals(): Promise<ProtocolTotals> {
-    return cached(this.kv, this.key("protocol-totals"), Math.max(this.ttlSeconds, 30), async () => {
-      const r = this.client;
-      const pick = async <T>(address: Address | undefined, read: () => Promise<T>): Promise<T | null> => (address && address !== zeroAddress ? (await orDefault(read(), null)).v : null);
-      const [backstopUsd, buybackSpentUsd, buybackPendingUsd] = await Promise.all([
-        pick(this.c.backstop, () => r.readContract({ address: this.c.backstop, abi: backstopAbi, functionName: "balance" })),
-        pick(this.c.feeRouter, () => r.readContract({ address: this.c.feeRouter, abi: bkrnFeeRouterAbi, functionName: "totalBuybackUsdc" })),
-        pick(this.c.feeRouter, () => r.readContract({ address: this.c.feeRouter, abi: bkrnFeeRouterAbi, functionName: "buybackPending" })),
-      ]);
-      return { backstopUsd, buybackSpentUsd, buybackPendingUsd };
-    });
   }
 
   async splitGate(priceId: Hex, basisAt: number): Promise<{ pending: boolean; window: boolean }> {

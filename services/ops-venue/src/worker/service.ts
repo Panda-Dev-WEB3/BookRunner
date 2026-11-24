@@ -1,9 +1,9 @@
 // Wires the ops-venue workers together and runs the periodic loops.
-import { busDropper, bytes32ToStr, CHANNELS, type ChainWake, type KillMsg, type VenueOpsJob } from "@bookrunner/shared";
+import { busDropper, bytes32ToStr, CHANNELS, type KillMsg, type VenueOpsJob } from "@bookrunner/shared";
 import type { AdapterLog, MandateLog } from "../chain";
 import { pruneSagas } from "../store";
 import { errMsg, runLoop } from "../util";
-import { BookRegistry, type RegistryDelta } from "./books";
+import { BookRegistry } from "./books";
 import { prefixOf, toKey } from "../keys";
 import { type OpsContext, type TrackedBook, tradable } from "./context";
 import { FeeSweeper } from "./fees";
@@ -22,16 +22,6 @@ export interface LoopIntervals {
   feePollMs: number;
 }
 
-/**
- * RPC budget (MAINNET.md "RPC budget"): chain reads of the books and logs loops are due on a log notification (the
- * factory / a tracked book for `books`, the tracked adapters and mandates for `logs`) or the safety poll while the
- * subscription is up, and every poll interval otherwise (no WebSocket, subscription down, primary RPC failing).
- */
-export interface OpsWakes {
-  books?: ChainWake;
-  logs?: ChainWake;
-}
-
 export class OpsService {
   readonly registry: BookRegistry;
   readonly reporter: Reporter;
@@ -46,7 +36,6 @@ export class OpsService {
   constructor(
     readonly ctx: OpsContext,
     readonly provisioner: Provisioner,
-    readonly wakes: OpsWakes = {},
   ) {
     this.registry = new BookRegistry(ctx);
     this.reporter = new Reporter(ctx);
@@ -91,18 +80,7 @@ export class OpsService {
    * own backoff, worker/listing.ts), then the status for alerts. Every book is isolated: one failing never stops another.
    */
   async syncBooks(): Promise<void> {
-    const w = this.wakes.books;
-    let delta: RegistryDelta = { added: [], changed: [], rebound: [] };
-    if (!w || w.due()) {
-      w?.begin();
-      try {
-        delta = await this.registry.refresh({ publish: false });
-      } catch (err) {
-        w?.failed();
-        throw err;
-      }
-      this.refreshWakes();
-    }
+    const delta = await this.registry.refresh({ publish: false });
     for (const b of [...delta.added, ...delta.changed.map((c) => c.book)]) {
       try {
         await this.provisioner.ensure(b);
@@ -156,27 +134,6 @@ export class OpsService {
     await this.registry.publishStatus();
   }
 
-  /** The tracked books changed: the wakes watch the new set (a new book's logs are scanned at once). */
-  private refreshWakes(): void {
-    this.wakes.books?.refreshFilter();
-    this.wakes.logs?.refreshFilter();
-  }
-
-  /** Logs + withdrawals loop body: the eth_getLogs scan only when due (notification, safety poll or polling). */
-  async pollLogs(): Promise<void> {
-    const w = this.wakes.logs;
-    if (!w || w.due()) {
-      w?.begin();
-      try {
-        await this.logs.poll();
-      } catch (err) {
-        w?.failed();
-        throw err;
-      }
-    }
-    await this.withdrawals.processAll();
-  }
-
   async reportAll(): Promise<void> {
     for (const b of this.registry.list()) {
       try {
@@ -218,17 +175,16 @@ export class OpsService {
         },
         signal,
         log,
-        undefined,
-        this.wakes.books,
       ),
       runLoop(
         "logs+withdrawals",
         iv.logPollMs,
-        () => this.pollLogs(),
+        async () => {
+          await this.logs.poll();
+          await this.withdrawals.processAll();
+        },
         signal,
         log,
-        undefined,
-        this.wakes.logs,
       ),
       runLoop("report", iv.reportMs, () => this.reportAll(), signal, log),
       runLoop(

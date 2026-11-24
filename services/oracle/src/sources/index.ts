@@ -1,8 +1,8 @@
 // Source assembly from config: synthetic GBM (devnet; testnet with a secret seed; never on mainnet),
 // HTTP sources, Pyth Pro (ORACLE_PYTH + PYTH_API_KEY), Chainlink feeds (config/chains/<chainId>.json +
 // ORACLE_CHAINLINK_FEEDS) and the Uniswap v3 TWAP confirm source (chain config dexConfirm.pools, ORACLE_DEX_CONFIRM).
-import { type Logger, chainFor, isMainnet, multicall3For, rpcTransport, uniswapV3For } from "@bookrunner/shared";
-import { createPublicClient, type PublicClient } from "viem";
+import { type Logger, chainFor, isMainnet, multicall3For, uniswapV3For } from "@bookrunner/shared";
+import { createPublicClient, http, type PublicClient } from "viem";
 import { type OracleConfig, syntheticSeedProblem } from "../config";
 import type { HeadClock } from "../head";
 import { csprngNormal } from "../domain/rng";
@@ -101,7 +101,7 @@ export function buildSources(cfg: OracleConfig, log: Logger, now: () => number =
   const client = (url: string): PublicClient => {
     let c = clients.get(url);
     if (!c) {
-      c = createPublicClient({ ...(multicall ? { chain: chainFor(cfg.CHAIN_ID, url) } : {}), transport: rpcTransport(url, { http: { batch: true } }) }) as PublicClient;
+      c = createPublicClient({ ...(multicall ? { chain: chainFor(cfg.CHAIN_ID, url) } : {}), transport: http(url, { batch: true }) }) as PublicClient;
       clients.set(url, c);
     }
     return c;
