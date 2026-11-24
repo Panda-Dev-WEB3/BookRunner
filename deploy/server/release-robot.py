@@ -102,8 +102,9 @@ def ensure_repo() -> None:
     if not os.path.isdir(f"{REPO}/.git"):
         os.makedirs(HOME, exist_ok=True)
         subprocess.run(["git", "clone", "-q", REMOTE, REPO], env={**os.environ, "GIT_SSH_COMMAND": GIT_SSH}, check=True)
+    git("fetch", "-q", "origin", "main")  # first: the queue bundle's prerequisite is the current main
     git("fetch", "-q", BUNDLE, "+refs/heads/*:refs/queue/*")
-    git("fetch", "-q", "origin", "main")
+    git("fetch", "-q", "origin", "main")  # FETCH_HEAD = main again: tick() checks main is an ancestor of the release
 
 
 def pause(state, why: str) -> None:
