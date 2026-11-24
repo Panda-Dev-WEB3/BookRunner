@@ -10,7 +10,10 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 LIB=/usr/local/lib/bookrunner-deploy
 install -d -o root -g root -m 0755 "$LIB"
 install -o root -g root -m 0700 "$HERE/release-robot.py" "$LIB/release-robot.py"
-ln -sf "$LIB/release-robot.py" /usr/local/sbin/bookrunner-release
+# a wrapper, not a symlink: update.sh's rsync keeps the repo's file mode, so nothing depends on the exec bit
+rm -f /usr/local/sbin/bookrunner-release
+printf '#!/bin/sh\nexec /usr/bin/python3 %s/release-robot.py "$@"\n' "$LIB" > /usr/local/sbin/bookrunner-release
+chmod 0700 /usr/local/sbin/bookrunner-release
 install -d -o root -g root -m 0700 /var/lib/bookrunner-release /root/.ssh
 
 KEY=/root/.ssh/bookrunner_release
@@ -29,7 +32,7 @@ Description=BookRunner scheduled release robot (one tick)
 After=network-online.target
 [Service]
 Type=oneshot
-ExecStart=/usr/local/lib/bookrunner-deploy/release-robot.py tick
+ExecStart=/usr/bin/python3 /usr/local/lib/bookrunner-deploy/release-robot.py tick
 TimeoutStartSec=1800
 EOF
 cat > /etc/systemd/system/bookrunner-release.timer <<'EOF'
