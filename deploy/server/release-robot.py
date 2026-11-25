@@ -7,6 +7,7 @@ Releases a queue of PRE-SIGNED commits one at a time, at T0, T0 + 1 h, T0 + 2 h,
   2. pushes it to GitHub main as a fast-forward only (if main moved, the queue pauses: nothing is overwritten);
   3. deploys it with the installed update.sh (which runs the deploy gate again);
   4. posts the release note to the Telegram alert group (at T0 also the tech update document, once).
+A plan item with "kind": "post" (no commit) is a spotlight: it only announces (image, caption, details) in its slot.
 Any failure pauses the queue and posts why; `bookrunner-release resume` continues after a fix.
 
   bookrunner-release status | arm <T0 ISO-8601 UTC> [interval-minutes] | pause | resume | skip | tick
@@ -135,16 +136,27 @@ def tick() -> int:
 
     if not state.get("docSent"):
         intro = plan.get("intro") or {}
-        lines = [f"{i + 1}. {it['title']}" for i, it in enumerate(items)]
+        rels = [it for it in items if it.get("kind") != "post"]
+        lines = [f"{i + 1}. {it['title']}" for i, it in enumerate(rels)]
         if intro.get("caption"):
             post(intro, header="")
         if os.path.exists(DOC):
             telegram(document=DOC, filename="BookRunner-technical-updates-report.pdf",
-                     caption="BookRunner technical updates report (PDF, illustrated). Releases start now, one per hour:\n" + "\n".join(lines))
+                     caption=f"BookRunner technical updates report (PDF, illustrated). {len(rels)} releases"
+                             + (f" and {len(items) - len(rels)} spotlights" if len(items) > len(rels) else "")
+                             + ", one post per hour, starting now. The releases:\n" + "\n".join(lines))
         state["docSent"] = True
         save(STATE, state)
 
     it = items[n]
+    if it.get("kind") == "post":  # a spotlight: nothing to push or deploy, only the announcement
+        state.update(next=n + 1, lastAt=now)
+        save(STATE, state)
+        left = len(items) - n - 1
+        post(it, header=f"[BookRunner spotlight] {it['title']}",
+             footer=f"next post in {interval // 60} min" if left else "all scheduled posts are out")
+        log(f"posted spotlight #{n + 1} {it['title']}")
+        return 0
     sha = it["sha"]
     try:
         ensure_repo()
@@ -171,8 +183,9 @@ def tick() -> int:
     state.update(next=n + 1, lastAt=now)
     save(STATE, state)
     left = len(items) - n - 1
-    footer = f"commit {sha[:12]} · " + (f"next update in {interval // 60} min" if left else "all scheduled updates are live")
-    header = f"[BookRunner update {n + 1}/{len(items)}] {it['title']}"
+    footer = f"commit {sha[:12]} · " + (f"next post in {interval // 60} min" if left else "all scheduled updates are live")
+    k = sum(1 for x in items[:n + 1] if x.get("kind") != "post")
+    header = f"[BookRunner release {k}/{sum(1 for x in items if x.get('kind') != 'post')}] {it['title']}"
     if it.get("caption"):
         post(it, header=header, footer=footer)
     else:
@@ -228,7 +241,7 @@ def main(argv) -> int:
             return 1
         save(STATE, state) if cmd != "status" else None
         print(json.dumps({"t0": plan.get("t0"), "intervalSec": plan.get("intervalSec", 3600), "state": state,
-                          "items": [f"{'x' if i < state['next'] else ' '} {i + 1}. {it['sha'][:12]} {it['title']}" for i, it in enumerate(plan["items"])]}, indent=2))
+                          "items": [f"{'x' if i < state['next'] else ' '} {i + 1}. {it.get('sha', 'post')[:12]} {it['title']}" for i, it in enumerate(plan["items"])]}, indent=2))
         return 0
 
 
