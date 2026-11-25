@@ -3,10 +3,12 @@
 # Stage a queue of pre-signed releases on the server for the release robot (deploy/server/release-robot.py).
 # Every first-parent commit of main..<branch> that carries a "Release-Title:" trailer is one release (it ships with
 # the commits before it); "Release-Note:" is the Telegram note, "Release-Web-Only: yes" deploys with --web-only.
-#   bash scripts/release-queue.sh <branch> [tech-updates.pdf]
+#   bash scripts/release-queue.sh <branch> [tech-updates.pdf] [media-dir]
+# media-dir (optional): notes.json {"intro":{caption,details},"items":[{n,caption,details}]} + intro.png, 01.png ... :
+# each release is then announced with its image, a short caption and a detailed follow-up message.
 # Then on the server: sudo bookrunner-release arm 2026-11-20T14:00:00Z   (T0, UTC; optional interval in minutes)
 set -euo pipefail
-BR="${1:?usage: release-queue.sh <branch> [pdf]}"; PDF="${2:-}"
+BR="${1:?usage: release-queue.sh <branch> [pdf] [media-dir]}"; PDF="${2:-}"; MEDIA="${3:-}"
 HOST="${RELEASE_HOST:-usecert-ubuntu}"
 git fetch -q origin main
 git merge-base --is-ancestor origin/main "$BR" || { echo "!! $BR does not start from origin/main: rebase it first"; exit 1; }
@@ -28,11 +30,23 @@ last="$(tail -1 "$TMP/items.tsv" | cut -f1)"
 node -e '
 const fs=require("fs");const rows=fs.readFileSync(process.argv[1],"utf8").trim().split("\n").map(l=>l.split("\t"));
 fs.writeFileSync(process.argv[2],JSON.stringify({t0:null,intervalSec:3600,items:rows.map(([sha,title,note,web])=>({sha,title,note,webOnly:/^yes$/i.test(web||"")}))},null,2));
-' "$TMP/items.tsv" "$TMP/release-plan.json"
+const media=process.argv[3];if(media){const p=require("path");const notes=JSON.parse(fs.readFileSync(p.join(media,"notes.json"),"utf8"));
+const plan=JSON.parse(fs.readFileSync(process.argv[2],"utf8"));const img=(f)=>fs.existsSync(p.join(media,f))?f:undefined;
+if(notes.intro)plan.intro={...notes.intro,image:img("intro.png")};
+for(const n of notes.items){const it=plan.items[n.n-1];if(!it)throw new Error("notes item "+n.n+" has no release");if(n.title&&n.title!==it.title)console.error("note: #"+n.n+" title differs: "+n.title);
+Object.assign(it,{caption:n.caption,details:n.details,image:img(String(n.n).padStart(2,"0")+".png")});}
+for(const it of plan.items)if(it.caption&&it.caption.length>900)throw new Error("caption too long: "+it.title);
+fs.writeFileSync(process.argv[2],JSON.stringify(plan,null,2));}
+' "$TMP/items.tsv" "$TMP/release-plan.json" "$MEDIA"
 git bundle create -q "$TMP/queue.bundle" "origin/main..$BR" "$BR"
 cut -f1,2 "$TMP/items.tsv" | nl
 files=("$TMP/release-plan.json" "$TMP/queue.bundle"); [ -n "$PDF" ] && files+=("$PDF")
 scp -q "${files[@]}" "$HOST:/tmp/"
+if [ -n "$MEDIA" ]; then
+  ssh "$HOST" 'rm -rf /tmp/release-media && mkdir -p /tmp/release-media'
+  scp -q "$MEDIA"/*.png "$HOST:/tmp/release-media/"
+  ssh "$HOST" "sudo bash -c 'install -d -o root -g root -m 0700 /var/lib/bookrunner-release/media && rm -f /var/lib/bookrunner-release/media/*.png && install -o root -g root -m 0600 /tmp/release-media/*.png /var/lib/bookrunner-release/media/ && rm -rf /tmp/release-media'"
+fi
 ssh "$HOST" "sudo bash -c 'set -e; install -o root -g root -m 0600 /tmp/release-plan.json /etc/bookrunner/release-plan.json; \
   install -o root -g root -m 0600 /tmp/queue.bundle /var/lib/bookrunner-release/queue.bundle; \
   if [ -f /tmp/$(basename "${PDF:-none}") ] && [ -n \"$PDF\" ]; then install -o root -g root -m 0600 /tmp/$(basename "${PDF:-none}") /var/lib/bookrunner-release/tech-updates.pdf; fi; \

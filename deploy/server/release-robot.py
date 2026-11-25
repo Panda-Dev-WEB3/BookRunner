@@ -31,6 +31,7 @@ REPO = f"{HOME}/repo"
 BUNDLE = f"{HOME}/queue.bundle"
 STATE = f"{HOME}/state.json"
 DOC = f"{HOME}/tech-updates.pdf"
+MEDIA = f"{HOME}/media"  # release images (plan items' "image"), staged by scripts/release-queue.sh --media
 LOG = "/var/log/bookrunner-release.log"
 UPDATE = "/usr/local/lib/bookrunner-deploy/update.sh"
 GIT_SSH = "ssh -i /root/.ssh/bookrunner_release -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
@@ -68,19 +69,22 @@ def env_value(key: str):
     return None
 
 
-def telegram(text: str = "", document: str = None, caption: str = "") -> None:
+def telegram(text: str = "", document: str = None, caption: str = "", photo: str = None, filename: str = None) -> None:
+    """A text message, or a file with a caption (photo: an image shown inline; document: a file, e.g. the PDF report)."""
     url, chat = env_value("ALERT_WEBHOOK_URL"), env_value("ALERT_TELEGRAM_CHAT_ID")
     if not url or not chat or "api.telegram.org/bot" not in url:
         log("telegram: not configured, message not sent")
         return
     base = url.rsplit("/", 1)[0]
     try:
-        if document:
+        if document or photo:
             # curl builds the multipart body; the token never reaches the command line (config on stdin)
             q = lambda s: s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-            cfg = (f'url = "{q(base)}/sendDocument"\nform = "chat_id={q(chat)}"\nform = "document=@{q(document)}"\n'
-                   f'form-string = "caption={q(caption[:1000])}"\n')
-            subprocess.run(["curl", "-sS", "-m", "60", "-o", "/dev/null", "-K", "-"], input=cfg.encode(), check=True)
+            method, field, path = ("sendPhoto", "photo", photo) if photo else ("sendDocument", "document", document)
+            name = f";filename={q(filename)}" if filename else ""
+            cfg = (f'url = "{q(base)}/{method}"\nform = "chat_id={q(chat)}"\nform = "{field}=@{q(path)}{name}"\n'
+                   f'form-string = "caption={q(caption[:1020])}"\n')
+            subprocess.run(["curl", "-fsS", "-m", "120", "-o", "/dev/null", "-K", "-"], input=cfg.encode(), check=True, capture_output=True)
         else:
             body = urllib.parse.urlencode({"chat_id": chat, "text": text[:4000], "disable_web_page_preview": "true"}).encode()
             urllib.request.urlopen(urllib.request.Request(f"{base}/sendMessage", data=body), timeout=30).read()
@@ -130,9 +134,13 @@ def tick() -> int:
         return 0
 
     if not state.get("docSent"):
+        intro = plan.get("intro") or {}
+        lines = [f"{i + 1}. {it['title']}" for i, it in enumerate(items)]
+        if intro.get("caption"):
+            post(intro, header="")
         if os.path.exists(DOC):
-            lines = [f"{i + 1}. {it['title']}" for i, it in enumerate(items)]
-            telegram(document=DOC, caption="BookRunner technical update schedule: releases start now, one per hour.\n" + "\n".join(lines))
+            telegram(document=DOC, filename="BookRunner-technical-updates-report.pdf",
+                     caption="BookRunner technical updates report (PDF, illustrated). Releases start now, one per hour:\n" + "\n".join(lines))
         state["docSent"] = True
         save(STATE, state)
 
@@ -163,10 +171,26 @@ def tick() -> int:
     state.update(next=n + 1, lastAt=now)
     save(STATE, state)
     left = len(items) - n - 1
-    telegram(f"[BookRunner release] #{n + 1}/{len(items)} live: {it['title']}\n{it.get('note', '')}\ncommit {sha[:12]}"
-             + (f"\nNext in {interval // 60} min." if left else "\nAll scheduled updates are live."))
+    footer = f"commit {sha[:12]} · " + (f"next update in {interval // 60} min" if left else "all scheduled updates are live")
+    header = f"[BookRunner update {n + 1}/{len(items)}] {it['title']}"
+    if it.get("caption"):
+        post(it, header=header, footer=footer)
+    else:
+        telegram(f"{header}\n{it.get('note', '')}\n{footer}")
     log(f"released #{n + 1} {sha[:12]}")
     return 0
+
+
+def post(entry: dict, header: str, footer: str = "") -> None:
+    """One announcement: the image with its short caption, then the detailed explanation as a text message."""
+    caption = "\n\n".join(s for s in (header, entry.get("caption", ""), footer) if s)
+    image = os.path.join(MEDIA, os.path.basename(entry["image"])) if entry.get("image") else None
+    if image and os.path.exists(image):
+        telegram(photo=image, caption=caption)
+    else:
+        telegram(caption)
+    if entry.get("details"):
+        telegram(entry["details"])
 
 
 def main(argv) -> int:
